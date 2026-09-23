@@ -100258,3 +100258,119 @@ deleted at session end -- the repro shapes and all findings are fully described 
 5. No scratch left in `/tmp` from this session -- all `l155_*` logs/qpa
    files deleted; nothing in them was referenced by anything committed
    (the numbers that mattered are already in `VulkanCTSReport.md`).
+
+# Session: L175 `vertex_fragment` root-caused as a miscompile in last session's own L174 fix
+
+**Start here next session**: pick up `multiple_descriptor_sets` root-cause
+(item 1 below) -- it's the only thing still fully open from this session.
+
+## What got done (in order)
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo` (mandatory check).
+2. Reproduced `L175`'s `vertex_fragment` sub-shape:
+   `storage_image.vertex_fragment.single_descriptor.2d`, `Fail (Image
+   verification failed)`.
+3. Decoded the QPA log's embedded PNGs (Python/PIL script) -- found only
+   one quadrant was wrong, not all four. That asymmetry was the first
+   real clue.
+4. Dumped the actual IR (`FEME_DUMP_IR=1`, plus two temporary debug
+   hooks in `Pipeline.cpp`, both reverted after use) and ran it through
+   `opt -passes=verify` -- **found invalid IR**. A `PHINode` had 5
+   incoming blocks but only 1 real CFG predecessor.
+5. **The big find**: this invalid IR was being produced by
+   `SPIRVUnmergeResourceLoadsPass` -- the pass *last session* added for
+   `L174`. It assumed a `load` reading through its target phi always
+   lives in the phi's own block. `vertex_fragment` mode's fragment
+   shader breaks that assumption (an extra `if` diamond downstream of
+   the switch sinks the load elsewhere). Silent miscompile, not a crash
+   -- exactly the dangerous kind.
+6. Fixed it: one-line safety check
+   (`LI->getParent() == PN.getParent()`), decline-to-rewrite instead of
+   corrupt. Added a negative-case lit test.
+7. `ninja check-feme`: 3311/3311, 0 regressions.
+8. CTS-verified: `vertex_fragment.*` (147 cases, `storage_image` alone)
+   now fails *loudly* (diagnosed `vkCreateGraphicsPipelines` rejection)
+   instead of silently mis-rendering. Broader `storage_image.*` sweep
+   (1,176 cases) confirms no other regressions.
+9. Committed the fix (own commit) and doc updates (own commit):
+   `Roadmap.md` (`L175` narrowed to just `multiple_descriptor_sets`,
+   new `L176` for fully generalizing the sunk-load handling),
+   `FeMeCPUDesign.md` (documented the limitation), `VulkanCTSReport.md`
+   (dated section).
+10. Started investigating `multiple_descriptor_sets` (the other `L175`
+    sub-shape, confirmed genuinely separate) -- got partway, see below.
+
+## Why this mattered (the actual headline)
+
+Last session's `L174` fix looked done and tested (3311/3311, CTS
+20/20 on its own repro) but had a real miscompile bug hiding in a shape
+its own tests never exercised. It would have shipped silently-wrong
+pixels on real hardware. **This is worth remembering going forward**:
+any new IR-rewriting pass needs its own explicit "did I actually
+preserve CFG-predecessor-matches-incoming-blocks" sanity check, not just
+"does the transformed shape look right by eye," especially when the
+pass's own positive test case is simpler than the real-world shapes it
+will encounter (`L174`'s tests were all single-stage; the bug needed a
+combined vertex+fragment pipeline to surface).
+
+## `multiple_descriptor_sets` -- still open, partially triaged
+
+**~15 min to re-orient**: re-read this section, then jump straight to
+step 2 below.
+
+1. Confirmed (again) it's unaffected by this session's fix -- still
+   fails identically. Confirmed via QPA image decode: **all four**
+   quadrants are `(0,0,0,0)`, not just one. Much more total a failure
+   than `vertex_fragment`'s single-quadrant miss.
+2. Dumped the pre-linearize IR for
+   `storage_image.fragment.multiple_descriptor_sets.single_descriptor.2d`.
+   **The shader IR itself looks completely correct** -- it loads from
+   both descriptor sets (heap indices `0` and `1`, correctly distinct),
+   sums them, divides by 2, stores. No LLVM-level bug visible.
+3. That points away from codegen entirely and toward the **Vulkan-layer
+   descriptor-set/resource-heap population** -- likely heap slot `1`
+   (the second descriptor set's image) not actually getting populated,
+   or the whole heap coming up empty for some reason specific to a
+   *second* `VkDescriptorSet` object. **Next step: read
+   `feme/lib/Vulkan/Descriptor*.cpp` and whatever populates
+   `image_heap` at draw time, side by side with a working
+   single-descriptor-set case, to find where the second set's binding
+   gets lost.**
+4. Hit an unexplained `deqp-vk` **segfault** trying to
+   `FEME_DUMP_IR=1` this case's full, late-pipeline dump (crashed
+   mid-`M.print()`, after both stage modules had already been dumped).
+   Re-tried with an earlier, smaller (pre-SIMDize) dump point and it
+   worked fine -- so this looks like a print-path issue with a very
+   large widened module, not a real pipeline bug, but **not confirmed**.
+   Don't spend more than 10 minutes on this unless it recurs elsewhere;
+   it's a debugging-convenience issue, not a CTS-blocking one.
+
+## Suggested next steps
+
+1. **(highest value, ~1-2 hrs)** Root-cause `multiple_descriptor_sets`:
+   start by reading `feme/lib/Vulkan/Descriptor*.cpp`'s
+   `vkUpdateDescriptorSets`/`image_heap`-population path, comparing a
+   single-descriptor-set case against a two-descriptor-set case to find
+   where the second set's binding gets lost before it ever reaches the
+   shader. The shader IR is confirmed correct (see above), so this is a
+   Vulkan-layer bug, not an LLVM-pass bug -- don't waste time back in
+   `SPIRVResourceLoweringPass`/`Linearize.cpp` for this one.
+2. **(~1-2 hrs, once above is fixed or as a standalone task)** `L176`:
+   generalize `SPIRVUnmergeResourceLoadsPass` to correctly re-thread the
+   merge through a sunk load instead of just declining to rewrite it.
+   This would restore `vertex_fragment.*` support (121 `storage_image`
+   cases alone, likely several hundred once other binding types are
+   counted). More invasive than this session's fix -- needs a real
+   design for how to reconstruct the merge at the phi's own block and
+   propagate it through whatever extra blocks the load was sunk across.
+3. **`binding_model_shader_access`/`descriptorset_random`
+   (198 fails)/`inline_uniform_blocks` (9 fails)** -- still not triaged
+   at all, mentioned by prior sessions, still waiting.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session.
+5. **(~5 min)** Clean up `/tmp/l175_*` scratch (PNG dumps, `.ll` dumps,
+   `.log` files) -- everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file. Also delete
+   `/tmp/Pipeline.cpp.presession_bak` (no longer needed, both reverts
+   already `diff`-verified clean).
