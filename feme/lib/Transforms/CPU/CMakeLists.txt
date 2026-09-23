@@ -31,6 +31,7 @@ add_feme_library(FeMeTransformsCPU
   SPIRVPushConstantLowering.cpp
   SPIRVResourceLowering.cpp
   SPIRVSubpassLowering.cpp
+  SPIRVUnmergeResourceLoads.cpp
   TaskPayloadWrapper.cpp
   UnifyDivergentExitNodes.cpp
   UnsupportedOps.cpp
