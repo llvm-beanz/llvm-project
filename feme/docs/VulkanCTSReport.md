@@ -10900,3 +10900,92 @@ dynamically-uniform) index expression. Not yet investigated at all this
 session; needs its own single-case repro and actual-vs-expected dump
 before scoping a fix, following the same pattern this row and `L148`
 both used.
+
+## L152: fixed -- `Broadcast`'s `WideMask` never narrowed to its divergent region
+
+Built a minimal, hand-written GLSL repro (`glslangValidator --target-env
+vulkan1.3` + direct `feme-run --wave-size=4 --groups=1,1,1` dispatch,
+bypassing `deqp-vk` for fast iteration) mirroring `subgroupbroadcast_
+nonconst_*`'s own "lane id that is only uniform across active lanes"
+shape from the CTS shader source: a divergent
+`if (sgInvocation >= sgSize/2) { id = sgInvocation & ~((sgSize/2)-1);
+op = subgroupBroadcast(data[sgInvocation], id); }`. Confirmed it
+reproduces: lanes 2/3 (which enter the `if`) got `0` instead of the
+expected `30` (`data[2]`).
+
+First hypothesis -- `lowerBroadcast` (`WaveLowering.cpp`) reads the
+widened lane-index vector's element 0 unconditionally, on the theory
+every lane already holds the identical, spec-guaranteed-uniform index --
+was insufficient alone: switching that hardcoded lane 0 to
+`getClampedFirstActiveLaneIndex(WideMask, ...)` (the same "any active
+lane will do" helper `lowerAllEqual` already uses) did not fix the
+repro, still producing `0 0`.
+
+Added temporary, env-var-gated `M.print(errs(), nullptr)` dumps in
+`feme/lib/Target/CPU/Pipeline.cpp` after `LinearizePass` and after
+`SIMDizePass` (mirroring `L151`'s own convention), rebuilt `feme-run`,
+and found the real, deeper root cause: the unwidened
+`llvm.spv.wave.broadcast.i32` call carried no mask operand or divergence
+bundle at all, unlike e.g. `feme.cpu.resource.load.raw.i32` in the same
+function, which correctly received the region's own live mask.
+Tracing `FunctionWidener::widenWaveCall` in `SIMDize.cpp` confirmed why:
+it seeds every wave call's `WideMask` from the wave's whole, original
+`Env.EntryMask`, narrowing it further only when a call's own operand
+supports it directly (`Ballot`'s predicate, a reduce's value operand) or,
+via the `"feme.divergence.mask"` operand bundle mechanism `H149` added,
+for `IsFirstLane`. `Broadcast` had none of these three narrowing paths,
+so its `WideMask` was always the whole wave's entry mask -- meaning even
+the corrected `getClampedFirstActiveLaneIndex`-based lookup still picked
+from the wrong, too-broad mask and selected a lane genuinely inactive for
+this specific call.
+
+**Fix**, generalizing `H149`'s own `IsFirstLane`-only precedent:
+- `Linearize.cpp`: attach the same `"feme.divergence.mask"` operand
+  bundle `IsFirstLane` already gets to a `spv.wave.broadcast` call
+  whenever its live mask is not known-constant-true -- preserving the
+  call's existing operands on the replacement, since (unlike
+  `IsFirstLane`) `Broadcast` is not zero-arity.
+- `SIMDize.cpp`: extend the existing `IsFirstLane`-only `WideMask`
+  narrowing check to also cover `Broadcast`, AND-ing in the bundle's mask
+  when present.
+- `WaveLowering.cpp`: keep the `getClampedFirstActiveLaneIndex`-based fix
+  to `lowerBroadcast` from the first hypothesis -- necessary, but only
+  correct once `WideMask` itself is properly narrowed by the two changes
+  above.
+
+Verified against the live driver: the wave-size-4 repro now correctly
+produces `30 30` for lanes 2/3 (previously `0 0`). A second, wave-size-8
+repro with the same shape correctly produces `50 50 50 50` for lanes 4-7
+(broadcasting `data[4]`), confirming the fix generalizes beyond a single
+wave size.
+
+Added a reduced Linearize+SIMDize+WaveLowering lit test
+(`wave-lowering-broadcast-narrowed-in-divergent-region.ll`) covering a
+`Broadcast` call inside a divergent `if` narrower than the whole wave,
+confirmed to fail (reading a hardcoded, possibly-inactive lane 0)
+without this fix. Updated the pre-existing `wave-lowering-broadcast.ll`
+test's `CHECK` lines for the now-always-computed (rather than hardcoded)
+active-lane lookup; that test's own always-lane-0 case still resolves to
+lane 0 unchanged, since it has no enclosing divergent region (no bundle
+attached) and the wave's own entry mask is never partial there.
+`ninja check-feme`: 3308/3308 non-unsupported tests passing.
+
+Full CTS re-run against the live FeMe CPU Vulkan driver
+(`FeMe CPU Vulkan Device`, confirmed via `vulkaninfo --summary`):
+- `dEQP-VK.subgroups.ballot_broadcast.compute.subgroupbroadcast_
+  nonconst_*`: 112/112 passing (0 fails, down from 105/112 failing).
+- A full `dEQP-VK.subgroups.*` sweep (48,705 cases, no aborts this time)
+  shows **zero regressions** anywhere else -- 0 fails total, confirming
+  no regression in `IsFirstLane`/`subgroupElect` (sharing the extended
+  `SIMDize.cpp` conditional) or the vector-operand `Broadcast` path
+  (`bvec2`-`4`/`ivec2`-`4`/`uvec2`-`4`/`vec2`-`4`, sharing the same
+  `WideMask` computed once per call in `widenWaveCall`), and that `L148`'s
+  own already-fixed constant-index cluster and `L151`'s own fix both
+  remain passing.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change (a
+pure divergence-masking correctness fix touches no feature/extension
+surface).
+
+This closes out the `ballot_broadcast.*` cluster entirely: as of this
+fix, the full `dEQP-VK.subgroups.*` sweep has zero known failures.
