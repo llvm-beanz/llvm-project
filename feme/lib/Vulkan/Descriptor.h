@@ -184,6 +184,19 @@ struct DescriptorSetLayoutBinding {
   /// (`ResourceHeap.cpp`'s `materializeHeap`, which the same
   /// `min(RangeSize, real array size)` clamp already serves unmodified).
   bool VariableCount = false;
+  /// (roadmap L153) Captured from `VkDescriptorSetLayoutBinding::
+  /// pImmutableSamplers` at `vkCreateDescriptorSetLayout` time -- one
+  /// `Sampler *` per array element -- or empty if this binding declared
+  /// none (the common case, and the only legal one for a descriptor type
+  /// other than `SAMPLER`/`COMBINED_IMAGE_SAMPLER`). Per spec, an
+  /// immutable-sampler binding's sampler half is fixed for the whole
+  /// layout's lifetime: never supplied again via `vkUpdateDescriptorSets`
+  /// (whose own `VkDescriptorImageInfo::sampler` field is simply ignored
+  /// for such a binding, not applied), so `DescriptorSet`'s own
+  /// constructor seeds each array element's `DescriptorImageBinding::Samp`
+  /// from this list up front, and `DescriptorSet::write` preserves it
+  /// rather than overwriting it from an incoming write.
+  std::vector<Sampler *> ImmutableSamplers;
 };
 
 /// A `VkDescriptorSetLayout`: an ordered (ascending by binding number) list

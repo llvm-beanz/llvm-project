@@ -576,6 +576,137 @@ TEST_F(DescriptorTest, CombinedImageSamplerWriteAndReadBack) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// (roadmap L153) A `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` binding
+/// created with `pImmutableSamplers` set gets its sampler half seeded from
+/// the layout at `vkAllocateDescriptorSets` time -- before any
+/// `vkUpdateDescriptorSets` write ever touches this set, unlike the
+/// mutable-sampler case (`CombinedImageSamplerWriteAndReadBack` above),
+/// where the array starts out null until a write populates it.
+TEST_F(DescriptorTest, ImmutableSamplerSeedsDescriptorAtAllocationTime) {
+  VkSamplerCreateInfo SamplerInfo{};
+  VkSampler ImmutableSamp = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &ImmutableSamp),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Binding.descriptorCount = 1;
+  Binding.pImmutableSamplers = &ImmutableSamp;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  // The sampler half is already populated, before any
+  // `vkUpdateDescriptorSets` call at all.
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(ImmutableSamp));
+  EXPECT_EQ(Array[0].View, nullptr);
+
+  // Per spec, an application updating an immutable-sampler binding's
+  // `COMBINED_IMAGE_SAMPLER` descriptor still applies the image half, but
+  // the write's own (typically `VK_NULL_HANDLE`, mirroring real
+  // applications and this exact shape in
+  // `dEQP-VK.binding_model.shader_access.*.combined_image_sampler_
+  // immutable.*`) sampler field must not clobber the immutable one.
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.sampler = VK_NULL_HANDLE;
+  ImageInfo.imageView = reinterpret_cast<VkImageView>(0x1234);
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  Array = S->imageBindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfo.imageView));
+  EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(ImmutableSamp));
+  EXPECT_EQ(Array[0].Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+  vkDestroySampler(Device, ImmutableSamp, nullptr);
+}
+
+/// (roadmap L153) `pImmutableSamplers` supplies one sampler handle per
+/// array element -- a two-element `COMBINED_IMAGE_SAMPLER` array binding
+/// gets each element seeded independently, not all from the same handle.
+TEST_F(DescriptorTest, ImmutableSamplerArraySeedsEachElementIndependently) {
+  VkSamplerCreateInfo SamplerInfo{};
+  VkSampler ImmutableSamps[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &ImmutableSamps[0]),
+            VK_SUCCESS);
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &ImmutableSamps[1]),
+            VK_SUCCESS);
+  ASSERT_NE(ImmutableSamps[0], ImmutableSamps[1]);
+
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Binding.descriptorCount = 2;
+  Binding.pImmutableSamplers = ImmutableSamps;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  ASSERT_EQ(Array.size(), 2u);
+  EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(ImmutableSamps[0]));
+  EXPECT_EQ(Array[1].Samp, fromHandle<Sampler>(ImmutableSamps[1]));
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+  vkDestroySampler(Device, ImmutableSamps[0], nullptr);
+  vkDestroySampler(Device, ImmutableSamps[1], nullptr);
+}
+
 /// Roadmap E14 (`VK_EXT_inline_uniform_block`): a layout binding's
 /// `descriptorCount` for this type is a byte size, not an array element
 /// count -- creating the layout, allocating a set from it, and reading

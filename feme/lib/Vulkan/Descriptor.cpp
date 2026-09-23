@@ -102,14 +102,24 @@ DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout,
     // (at most one, and always the highest-numbered one -- enforced by
     // `vkCreateDescriptorSetLayout`) is ever sized to anything other than
     // its own declared `Count`.
-    uint32_t RealCount =
-        (B.VariableCount && VariableDescriptorCount) ? *VariableDescriptorCount
-                                                     : B.Count;
+    uint32_t RealCount = (B.VariableCount && VariableDescriptorCount)
+                             ? *VariableDescriptorCount
+                             : B.Count;
     if (isInlineUniformBlockDescriptorType(B.Type))
       InlineUniformBlockBindings[B.Binding].resize(RealCount);
-    else if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type))
-      ImageBindings[B.Binding].resize(RealCount);
-    else
+    else if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type)) {
+      std::vector<DescriptorImageBinding> &Array = ImageBindings[B.Binding];
+      Array.resize(RealCount);
+      // (roadmap L153) Seed each array element's sampler half from the
+      // layout's own immutable-sampler list up front -- the only way an
+      // immutable-sampler binding's sampler half is ever populated, since
+      // `vkUpdateDescriptorSets` never applies one (see `write`'s own
+      // comment below).
+      for (uint32_t I = 0, E = std::min<uint32_t>(RealCount,
+                                                  B.ImmutableSamplers.size());
+           I != E; ++I)
+        Array[I].Samp = B.ImmutableSamplers[I];
+    } else
       Bindings[B.Binding].resize(RealCount);
   }
 }
@@ -138,7 +148,18 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
   auto It = ImageBindings.find(Binding);
   if (It == ImageBindings.end() || ArrayElement >= It->second.size())
     return;
-  It->second[ArrayElement] = DescriptorImageBinding{View, Samp, Layout};
+  // (roadmap L153) An immutable-sampler binding's sampler half is fixed at
+  // layout-creation time; per spec, `vkUpdateDescriptorSets` still applies
+  // the rest of a `COMBINED_IMAGE_SAMPLER` write (the image half) to such a
+  // binding, but its own `VkDescriptorImageInfo::sampler` field is
+  // ignored, not applied -- so the incoming `Samp` here must not clobber
+  // the one this set's constructor already seeded from the layout.
+  const DescriptorSetLayoutBinding *LayoutBinding = this->Layout->find(Binding);
+  bool HasImmutableSampler =
+      LayoutBinding && !LayoutBinding->ImmutableSamplers.empty();
+  Sampler *ResolvedSamp =
+      HasImmutableSampler ? It->second[ArrayElement].Samp : Samp;
+  It->second[ArrayElement] = DescriptorImageBinding{View, ResolvedSamp, Layout};
 }
 
 void DescriptorSet::writeInlineUniformBlock(uint32_t Binding,
@@ -183,8 +204,7 @@ DescriptorPool::allocate(const DescriptorSetLayout &Layout,
                          std::optional<uint32_t> VariableDescriptorCount) {
   if (RemainingSets == 0)
     return nullptr;
-  auto Set =
-      std::make_unique<DescriptorSet>(Layout, VariableDescriptorCount);
+  auto Set = std::make_unique<DescriptorSet>(Layout, VariableDescriptorCount);
   DescriptorSet *Result = Set.get();
   Sets.push_back(std::move(Set));
   --RemainingSets;
@@ -236,7 +256,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
 
   uint32_t HighestBinding = 0;
   for (uint32_t I = 0; I != pCreateInfo->bindingCount; ++I)
-    HighestBinding = std::max(HighestBinding, pCreateInfo->pBindings[I].binding);
+    HighestBinding =
+        std::max(HighestBinding, pCreateInfo->pBindings[I].binding);
 
   std::vector<DescriptorSetLayoutBinding> Bindings;
   Bindings.reserve(pCreateInfo->bindingCount);
@@ -245,13 +266,28 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     if (!isSupportedDescriptorType(Binding.descriptorType))
       return VK_ERROR_INITIALIZATION_FAILED;
     bool VariableCount =
-        BindingFlags && (BindingFlags[I] &
-                        VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT);
+        BindingFlags &&
+        (BindingFlags[I] & VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT);
     if (VariableCount && Binding.binding != HighestBinding)
       return VK_ERROR_INITIALIZATION_FAILED;
-    Bindings.push_back(DescriptorSetLayoutBinding{
-        Binding.binding, Binding.descriptorType, Binding.descriptorCount,
-        VariableCount});
+    DescriptorSetLayoutBinding NewBinding{/*Binding=*/Binding.binding,
+                                          /*Type=*/Binding.descriptorType,
+                                          /*Count=*/Binding.descriptorCount,
+                                          /*VariableCount=*/VariableCount,
+                                          /*ImmutableSamplers=*/{}};
+    // (roadmap L153) `pImmutableSamplers`, when non-null, supplies exactly
+    // `descriptorCount` sampler handles baked into this binding for its
+    // whole lifetime -- only legal for `SAMPLER`/`COMBINED_IMAGE_SAMPLER`
+    // per spec, but guard on `isSamplerDescriptorType` anyway rather than
+    // trusting the application not to set it elsewhere.
+    if (Binding.pImmutableSamplers &&
+        isSamplerDescriptorType(Binding.descriptorType)) {
+      NewBinding.ImmutableSamplers.reserve(Binding.descriptorCount);
+      for (uint32_t J = 0; J != Binding.descriptorCount; ++J)
+        NewBinding.ImmutableSamplers.push_back(
+            fromHandle<Sampler>(Binding.pImmutableSamplers[J]));
+    }
+    Bindings.push_back(std::move(NewBinding));
   }
 
   Allocator Alloc(pAllocator);
