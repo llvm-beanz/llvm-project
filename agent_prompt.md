@@ -61,17 +61,27 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **`binding_model.shader_access`** (11,834 cases, `L147`'s last big untriaged cluster) --
-   still wants its own dedicated session given the scale. With `ballot_broadcast.*` now fully
-   closed, this is the single largest remaining known-failing CTS cluster.
-2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) -- still the largest
-   not-yet-started cross-repo item, for a session wanting a change of pace from CTS triage.
-3. **(~15 min)** Worth a quick sanity pass next session: re-run the full `subgroups.*` sweep
-   once more from a clean build to confirm the "zero fails" result is stable (this session's
-   sweep completed without the prior session's unrelated `.amber`-file-not-found harness abort,
-   so it's the first time the *entire* cluster has been swept end-to-end in one run -- worth one
-   more confirmation before treating "0 known fails in `subgroups.*`" as fully settled).
-4. With `subgroups.*` fully green, consider broadening the next CTS sweep beyond
-   `subgroups.*`/`ubo.*`/`binding_model.*` to find the next-largest untriaged cluster overall --
-   no specific candidate identified yet this session, but worth a `deqp-vk --deqp-case='dEQP-VK.*'`
-   totals-only pass (no full log) to rank remaining clusters by failure count before picking one.
+1. **(~1-2 hrs, highest value)** Pick up `L155` first: `storage_image.
+   fragment.single_descriptor` is the smallest repro (non-array, so rules out
+   an array-indexing-specific gap). Read `UnsupportedOps.cpp`'s normalization
+   logic side-by-side with whatever the working `compute`-stage path does to
+   find where they diverge, before scoping a fix. 1,479 cases is a lot of
+   ground to cover once found -- confirm the fix generalizes across all the
+   affected binding types, not just `storage_image`.
+2. **(~30-45 min)** `L154` next: fix `Descriptor.cpp`'s
+   `vkUpdateDescriptorSets` copy loop to walk into subsequent binding numbers
+   once the current one's array is exhausted (mirror the write-side
+   per-element bounds-check shape). Small, isolated, good session-starter if
+   `L155` feels too big to start cold.
+3. Two other `binding_model.*` clusters surfaced but **not yet triaged at
+   all** this session (found only as raw fail-counts during the regression
+   sweep, no root-cause investigation done): `descriptorset_random` (198
+   fails) and `inline_uniform_blocks` (9 fails). Worth a look once `L154`/
+   `L155` are done.
+4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing) --
+   still the largest not-yet-started cross-repo item, for a session wanting
+   a change of pace from CTS triage.
+5. No scratch left in `/tmp` from this session -- all `binding_model_*`/
+   `full_sweep`/`isolated*` logs and QPA files deleted; nothing in them was
+   referenced by anything committed (the numbers that mattered are already
+   in `VulkanCTSReport.md`).
