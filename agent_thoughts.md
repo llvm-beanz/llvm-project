@@ -101375,3 +101375,86 @@ Each is its own commit with its own unit test(s). Full list:
    sessions back (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
    `L126(a)`, `L147`, `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows)
    are still individually unvetted.
+
+# Session: L185 fixed -- aggregate-typed phi at a uniform-branch merge point now widens; corrects prior session's LinearizePass hypothesis
+
+## What's done, verified right now
+
+`dEQP-VK.spirv_assembly.instruction.compute.float16.opcompositeinsert.struct16arr3`
+now **Pass**s. Confirm:
+
+```
+export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+echo dEQP-VK.spirv_assembly.instruction.compute.float16.opcompositeinsert.struct16arr3 > /tmp/c.txt
+./deqp-vk --deqp-caselist-file=/tmp/c.txt
+```
+
+`ninja check-feme`: 3334/3337 passed (3 pre-existing Unsupported, 0 Failed).
+
+## The bug (and why the prior session's hypothesis was wrong)
+
+Prior session's next-step said: fix in `Linearize.cpp`, because
+`SIMDize.cpp`'s own comment claims "an aggregate-typed phi never itself
+reaches this pass." That comment was only true for a *divergent* branch's
+merge point. At a *uniform* branch, `Linearize.cpp`'s `DiamondFlattener`
+deliberately keeps the real branch (so the untaken arm's side effects
+never run) and leaves ordinary value phis untouched -- by design, same as
+it already does for scalar/vector merges. The real gap: `SIMDize.cpp`
+never taught its aggregate-value check (`checkAggregateValueSupported`)
+to accept `phi` as a producer or consumer, and never had an aggregate
+counterpart to its existing vector-phi widening
+(`createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming`).
+
+## The fix (1 commit + 1 test commit + 1 docs commit + this one)
+
+1. `1376b8b33119` -- new `FEME_DUMP_IR_PRESIMD` debug hook in
+   `Pipeline.cpp`/`.instructions.md` (neither pre-existing dump hook
+   pinpoints the exact pre-SIMDize shape).
+2. `a9483b29e0c8` -- the actual fix: `PHINode` added to both the producer
+   and consumer checks in `checkAggregateValueSupported`; new
+   `createWidenedAggregatePHIStub`/`fillWidenedAggregatePHIIncoming`
+   mirroring the vector-typed pair; corrected the file's own stale
+   comment.
+3. `bded0cb63dd0` -- new unit test `DecomposesAggregatePHIAcrossUniformDiamond`.
+4. `11f1eb187aa9` -- `Roadmap.md` (`L185` struck through) +
+   `VulkanCTSReport.md` entry.
+
+## Verification
+
+- `ninja check-feme`: 3334/3337 (up from 3333/3336 pre-session; +1 new test).
+- Real CTS case: confirmed **Pass** via direct `deqp-vk` re-run (see above).
+- `verifyModule` clean on the new unit test's widened IR; no illegal
+  nested-vector/aggregate types survive.
+
+## How I found it (in case this pattern recurs)
+
+`FEME_DUMP_IR_PRESIMD` + running `deqp-vk` directly against the real case
+(not through `offloader`, since this CTS case never touches
+`offload-test-suite`) captured the real pre-SIMDize IR with zero
+hand-reconstruction risk. A temporary `llvm::errs()` print at
+`checkAggregateValueSupported`'s own diagnostic site (removed once done)
+named the exact producer/consumer pair in one run. Worth remembering:
+`feme-translate --import-spirv`/`--spirv-to-llvmdialect` (the `L183`/
+`L184`-era pipe) hit a second-stage signedness parse error on this real,
+multi-function CTS shape that never got resolved -- the `FEME_DUMP_IR_*`
+family sidesteps that whole problem by dumping the module the real
+pipeline actually builds, not a re-imported/re-parsed one. Prefer it over
+`feme-translate` for any future SIMDize/Linearize-specific triage on a
+real (not hand-authored) CTS case.
+
+## Suggested next steps
+
+1. **(2-4 hrs, one-time setup, deferred across many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` has no build directory at
+   `/home/dev/dev/offload-test-suite/build`. Still not started.
+2. **Scan `Roadmap.md` for the next open, well-scoped item.** `L184`/`L185`
+   are both closed now -- no queued item left from recent history. The
+   last full-scan candidates from several sessions back (`L90`-`L95`,
+   `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`, `L98(b)`, plus
+   assorted `R`/`V`/`W`-prefixed rows) are still individually unvetted --
+   a future session should do a fresh full-table pass rather than keep
+   deferring to this same stale list.
+3. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l185/`, `/tmp/l185_test.ll`, `/tmp/final_check.*` all
+   removed already.
