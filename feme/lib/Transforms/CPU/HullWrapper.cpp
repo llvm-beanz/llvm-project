@@ -217,6 +217,36 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
   return V;
 }
 
+/// (Roadmap L98(a)) `StageStorage` only ever holds a genuine `float32` bit
+/// pattern for a `Float`-`ComponentType` element -- a 16-bit `half` leaf is
+/// widened to `float` immediately before every store here, and narrowed
+/// back immediately after every load, so the storage layer itself (and,
+/// downstream, `Executor.cpp`'s `lerpVertex`, which interpolates any
+/// `Float`-typed varying as a real `float32` value) never observes a
+/// genuine 16-bit value. Returns \p ScalarTy unchanged for anything else.
+Type *stageStorageLoadType(Type *ScalarTy) {
+  return ScalarTy->isHalfTy() ? Type::getFloatTy(ScalarTy->getContext())
+                              : ScalarTy;
+}
+
+/// The load-side mirror of `stageStorageLoadType`: narrows a `float` value
+/// just loaded from `StageStorage` back to \p ScalarTy if it is `half`
+/// (the load itself already used `stageStorageLoadType(ScalarTy)`, so
+/// \p Loaded is `float`-typed exactly when this narrowing is needed).
+Value *narrowStageStorageLoad(IRBuilder<> &Builder, Value *Loaded,
+                              Type *ScalarTy) {
+  return ScalarTy->isHalfTy() ? Builder.CreateFPTrunc(Loaded, ScalarTy)
+                              : Loaded;
+}
+
+/// The store-side mirror: widens \p Val to `float` if it is `half`-typed,
+/// so every write to `StageStorage` is a genuine `float32` value.
+Value *widenForStageStorageStore(IRBuilder<> &Builder, Value *Val) {
+  return Val->getType()->isHalfTy()
+             ? Builder.CreateFPExt(Val, Type::getFloatTy(Builder.getContext()))
+             : Val;
+}
+
 Value *getFlatInvocationIndex(IRBuilder<> &Builder, const WaveBodyEnv &WEnv,
                               unsigned WaveSize, unsigned Lane) {
   Value *Base = Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(WaveSize),
@@ -445,7 +475,9 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
     Value *Addr = computeStageStorageAddress(Builder, HEnv.InputLayout,
                                              HEnv.Inputs, Elt.ElementID, Elt,
                                              Row, Component, InvocationIndex);
-    Value *LaneResult = Builder.CreateLoad(ScalarTy, Addr);
+    Value *LaneResult =
+        Builder.CreateLoad(stageStorageLoadType(ScalarTy), Addr);
+    LaneResult = narrowStageStorageLoad(Builder, LaneResult, ScalarTy);
     // (roadmap L78) Only null out an inactive (padding) lane's result when
     // this is a self-index read: `InvocationIndex` there is *this* lane's
     // own flat index, which is only guaranteed in-bounds for an active
@@ -498,6 +530,7 @@ void lowerHullOutputStore(CallInst &CI, const SignatureElement &Elt,
                                              HEnv.Outputs, Elt.ElementID, Elt,
                                              Row, Component, InvocationIndex);
     Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    LaneVal = widenForStageStorageStore(Builder, LaneVal);
     if (!(MaskConst && MaskConst->isOne())) {
       Value *OldVal = Builder.CreateLoad(LaneVal->getType(), Addr);
       LaneVal = Builder.CreateSelect(Mask, LaneVal, OldVal);
