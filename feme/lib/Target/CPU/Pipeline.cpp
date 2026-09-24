@@ -487,6 +487,16 @@ Expected<PipelineResult> runPipeline(Module &M,
       return std::move(E);
     if (Error E = runAndCheck("linearizing", LinearizePass()))
       return std::move(E);
+    // Debug aid: with `FEME_DUMP_IR_PRESIMD` set in the environment, print
+    // the module immediately after `feme::cpu::LinearizePass` finishes but
+    // before `feme::cpu::SIMDizePass` runs -- the exact shape `SIMDizePass`
+    // itself inspects, and the one that matters when triaging a
+    // `feme-cpu-simdize` diagnostic specifically (as opposed to
+    // `FEME_DUMP_IR_PRENORM`'s much earlier snapshot, which predates
+    // `LinearizePass`'s own control-flow rewriting entirely, or
+    // `FEME_DUMP_IR`'s much later one, which postdates SIMDization).
+    if (::getenv("FEME_DUMP_IR_PRESIMD"))
+      M.print(errs(), nullptr);
     if (Error E = runAndCheck("widening", SIMDizePass(Opts.WaveSize)))
       return std::move(E);
     if (Error E = runAndCheck("lowering waves for", WaveLoweringPass()))
