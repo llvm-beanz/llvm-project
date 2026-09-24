@@ -61,28 +61,19 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 days, dedicated session)** Fix the two diagnosed-but-not-landed
-   upstream bugs properly, as their own standalone contributions: (a)
-   `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcoded `i32`
-   result type for `ConstantArray`/`ConstantStruct`/`ConstantDataArray` (should
-   use `COp->getType()`, matching the `ConstantVector` branch); (b)
-   `IRTranslator.cpp`'s generic intrinsic-call lowering path needs
-   aggregate-operand splitting support (a much bigger lift -- would need its own
-   design, likely mirroring `CallLowering`'s existing per-argument splitting
-   machinery). Neither blocks anything currently, so this is
-   optional/lower-priority, but both are real bugs that will bite the next
-   person who tries to pass an array/struct value to any SPIR-V target
-   intrinsic.
-2. **`L125(n)`** is still the standing next real-Vulkan-correctness item per the
-   last several sessions' logs (fix `isSupportedOffset` in
-   `SPIRVResourceLowering.cpp` to reject rather than silently truncate a
-   `4N`-wide flattened offset, then add the real `femeCpuImageGather*Offsets`
-   runtime entry points) -- this session's `L125(p)` work is independent of it
-   (different compile direction: `L125(p)` is LLVM-IR-to-SPIR-V for `dxc`,
-   `L125(n)` is SPIR-V-to-CPU-runtime for feme's own import path) and does not
-   unblock or change its scope.
-3. **(~5 min)** `/tmp` scratch from this session (`l125p_repro.ll`,
-   `l125p_repro2.ll`, `SPIRVEmitIntrinsics.cpp.bak`) already deleted. Two
-   unrelated leftover files from earlier sessions (`check_feme_l125g.log`,
-   `l125p_struct_repro.ll`, dated Sep 20/24) were left alone since they predate
-   this session and aren't mine to judge as safe to delete.
+1. **(~5 min, do this first)** None of `L181`'s scope should be attempted
+   piecemeal again -- if a future session is tempted to "just fix the i32
+   hardcoding," re-read this section first. It looks like an easy 3-line fix and
+   isn't; the real fix is the IRTranslator aggregate-operand gap, which is
+   upstream-RFC-scale.
+2. Scan `Roadmap.md`'s remaining not-yet-struck rows for a genuinely open,
+   well-scoped item (candidates spotted but not yet individually inspected:
+   `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
+   `L126(a)`, `L130`, `L131`, `L147`, `L154`, plus assorted `R`/`V`/`W`-prefixed
+   rows) -- this session didn't get to individually vet any of these since both
+   prompted items turned out to be already-resolved-or-unsafe, and correcting
+   the record on them was the actual substantive work this session did.
+3. **(~1-2 days, dedicated session, not urgent)** If `L181` is ever picked up:
+   needs its own repro corpus built from scratch (none exists today), and should
+   probably start as an upstream LLVM RFC/discussion before any patch, given the
+   cross-target blast radius.
