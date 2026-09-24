@@ -484,7 +484,14 @@ bool isVectorToScalarIntBitCast(const Instruction &I) {
 /// an equally-wide vector (`bitcast i128 %m to <4 x i32>`) -- the exact
 /// inverse of `isVectorToScalarIntBitCast`, and the shape a subgroup mask
 /// builtin takes when its computed 128-bit value is repackaged into the
-/// `uvec4` the SPIR-V ballot ABI spells it as (roadmap L89g).
+/// `uvec4` the SPIR-V ballot ABI spells it as (roadmap L89g). Also covers
+/// a scalar-integer-to-vector-of-*float* bitcast (`bitcast i32 %m to
+/// <2 x half>`, roadmap L184) -- the shape a packed-`f16x2` value arrives
+/// in once SPIR-V-to-LLVM conversion widens a scalar-typed intermediate
+/// (e.g. a `VectorInsertDynamic` chain's own final bitcast back to its
+/// real vector type) back to its true element type; `widenScalarToVector
+/// BitCast`'s own truncate-then-bitcast recomposition handles either
+/// destination element kind identically once the bit-width split is done.
 ///
 /// This is the one vector-*producing* `CastInst` whose operand is not a
 /// vector, so `widenVectorElementwise`'s component-for-component rule
@@ -495,7 +502,7 @@ bool isScalarToVectorIntBitCast(const Instruction &I) {
   if (!BC)
     return false;
   auto *DestTy = dyn_cast<FixedVectorType>(BC->getDestTy());
-  if (!DestTy || !DestTy->getElementType()->isIntegerTy())
+  if (!DestTy)
     return false;
   return BC->getSrcTy()->isIntegerTy();
 }
@@ -4238,7 +4245,15 @@ void FunctionWidener::widenScalarToVectorBitCast(BitCastInst &BC,
   unsigned ElemBits = DestTy->getScalarSizeInBits();
   unsigned SrcBits = BC.getSrcTy()->getIntegerBitWidth();
   auto *WideSrcTy = cast<VectorType>(Wide->getType());
-  auto *WideElemTy = FixedVectorType::get(DestTy->getElementType(), WaveSize);
+  Type *DestElemTy = DestTy->getElementType();
+  // (Roadmap L184) A non-integer destination element (e.g. `half`/
+  // `float`) can't be the direct target of a `trunc`, so always truncate
+  // to an equally-wide integer first, then `bitcast` that integer
+  // component to the real element type -- a no-op cast when it already
+  // was one.
+  auto *WideIntElemTy =
+      FixedVectorType::get(Builder.getIntNTy(ElemBits), WaveSize);
+  auto *WideElemTy = FixedVectorType::get(DestElemTy, WaveSize);
   bool IsLittleEndian = NewF->getDataLayout().isLittleEndian();
 
   SmallVector<Value *, 4> Components;
@@ -4248,8 +4263,11 @@ void FunctionWidener::widenScalarToVectorBitCast(BitCastInst &BC,
     if (Shift != 0)
       Bits = Builder.CreateLShr(
           Bits, ConstantInt::get(WideSrcTy, APInt(SrcBits, Shift)));
-    Components.push_back(Builder.CreateTrunc(
-        Bits, WideElemTy, BC.getName() + ".wide" + Twine(C)));
+    Value *Component = Builder.CreateTrunc(
+        Bits, WideIntElemTy, BC.getName() + ".wide" + Twine(C));
+    if (!DestElemTy->isIntegerTy())
+      Component = Builder.CreateBitCast(Component, WideElemTy);
+    Components.push_back(Component);
   }
 
   WidenedVectorComponents[&BC] = std::move(Components);

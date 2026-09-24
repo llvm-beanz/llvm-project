@@ -1100,6 +1100,46 @@ TEST(SIMDizeTest, WidensNonConstantIndexInsertElementIntoSelectChain) {
   EXPECT_EQ(WideSelectCount, 4u);
 }
 
+TEST(SIMDizeTest, WidensScalarToVectorOfFloatBitCast) {
+  // (Roadmap L184) `bitcast i32 %v to <2 x half>` -- the shape a packed
+  // `f16x2` value takes once `spirv.VectorInsertDynamic`'s own lowering
+  // (see `SPIRVToLLVMPatterns.cpp`) reassembles it back into its real
+  // vector type -- previously diagnosed as unsupported because
+  // `isScalarToVectorIntBitCast`/`widenScalarToVectorBitCast` only ever
+  // handled an *integer* destination element type (a plain `trunc` can't
+  // target a non-integer type directly). `widenScalarToVectorBitCast` now
+  // truncates to an equally-wide integer first and `bitcast`s that
+  // integer to the real (non-integer) element type.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %bc = bitcast i32 %tid to <2 x half>
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned HalfBitCastCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *BC = dyn_cast<BitCastInst>(&I))
+      if (BC->getDestTy() ==
+          FixedVectorType::get(Type::getHalfTy(Ctx), 4))
+        ++HalfBitCastCount;
+  }
+  // One `<W x half>`-reinterpreting bitcast per destination component (2).
+  EXPECT_EQ(HalfBitCastCount, 2u);
+}
+
 TEST(SIMDizeTest, DecomposesVectorPHIAcrossUniformDiamond) {
   // Roadmap step C3: a divergent `phi` of vector type -- the shape
   // `feme::cpu::LinearizePass` leaves at a uniform diamond's merge block
