@@ -101089,3 +101089,39 @@ No FeMe code changed (the only code edit was to upstream `SPIRVEmitIntrinsics.cp
 1. **(~5 min, do this first)** None of `L181`'s scope should be attempted piecemeal again -- if a future session is tempted to "just fix the i32 hardcoding," re-read this section first. It looks like an easy 3-line fix and isn't; the real fix is the IRTranslator aggregate-operand gap, which is upstream-RFC-scale.
 2. Scan `Roadmap.md`'s remaining not-yet-struck rows for a genuinely open, well-scoped item (candidates spotted but not yet individually inspected: `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L130`, `L131`, `L147`, `L154`, plus assorted `R`/`V`/`W`-prefixed rows) -- this session didn't get to individually vet any of these since both prompted items turned out to be already-resolved-or-unsafe, and correcting the record on them was the actual substantive work this session did.
 3. **(~1-2 days, dedicated session, not urgent)** If `L181` is ever picked up: needs its own repro corpus built from scratch (none exists today), and should probably start as an upstream LLVM RFC/discussion before any patch, given the cross-target blast radius.
+
+# Session: L154 fixed -- `VkCopyDescriptorSet` now spans consecutive bindings
+
+**Done: `L154` landed and CTS-verified.** `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at session start. This was the well-scoped item the last session's next-steps pointed at ("small, self-contained, good starting point"), and it panned out exactly as advertised -- no surprises, no rescoping needed.
+
+## The bug
+
+`vkUpdateDescriptorSets`' `VkCopyDescriptorSet` handling in `Descriptor.cpp` had 3 per-descriptor-kind copy loops (plain buffer, image/sampler, inline-uniform-block byte range). All 3 only ever consulted the single named `Copy.srcBinding`/`Copy.dstBinding`'s own array, never spanning into a subsequent binding number. Per spec, a copy whose `descriptorCount` exceeds one binding's remaining elements must continue into the next consecutively-numbered binding(s) -- on both the source and destination side independently. `dEQP-VK.binding_model.descriptor_copy.misc.copy_immutable_sampler_*` hits this directly: it declares one single-element `COMBINED_IMAGE_SAMPLER` binding per sampler, then copies all of them with one `VkCopyDescriptorSet` call.
+
+## The fix
+
+New `BindingCursor` helper: an `(Binding, Element)` pair with `normalize()` that walks forward across binding numbers as each one's declared size (read via a caller-supplied accessor closure) is exhausted. Used independently for the source and destination side of all 3 existing loops. Bonus find while doing this: the inline-uniform-block loop's old bulk `writeInlineUniformBlock` call silently dropped an entire overflowing destination write rather than partially applying it -- fixed as a natural side effect of switching to bounded contiguous-run copies.
+
+## Tests
+
+3 new `DescriptorTest.cpp` cases: buffer-binding spanning, image-binding spanning (mirrors the actual CTS shape), and inline-uniform-block spanning (no current CTS case exercises this one -- added purely to confirm the fix generalizes uniformly across all 3 loops rather than just patching the 2 kinds the CTS happened to catch). Verified all 3 fail without the fix (temporarily reverted `Descriptor.cpp` alone, reran just these 3) and pass with it -- not just written-and-assumed-correct.
+
+## Verification
+
+- `ninja check-feme`: 3317/3320, 0 regressions (up from 3314/3317 baseline; 3 net new tests).
+- CTS: both originally-failing cases (`copy_immutable_sampler_4_images{,_buffer_first}`) now **Pass**.
+- Full `dEQP-VK.binding_model.descriptor_copy.*` sweep: 143/289 Pass, **0 Fail**, 146 NotSupported (all `VK_EXT_descriptor_indexing`-gated, expected/unrelated) -- confirmed 0 regressions in the rest of the group this file's fix touches.
+
+## What got committed (3 commits, in order)
+
+1. `ab7ba3a871eb` -- the `Descriptor.cpp` fix + its 3 new unit tests (one logical change).
+2. `452a10f945a9` -- `Roadmap.md` (struck `L154`) + `VulkanCTSReport.md` (new section with the CTS numbers above).
+3. This `agent_thoughts.md` entry (its own commit, next).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates needed: this is a correctness fix to already-advertised `vkUpdateDescriptorSets`/`VkCopyDescriptorSet` behavior, not a change to what's advertised. Stating this explicitly rather than silently skipping it.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, well-scoped, recommend starting here)** `L131`: **Fix residual graphics push-constant range/indexing cases.** 6 failures in `pipeline.monolithic.push_constant`, all dynamic-index/range-size variants (53 pass, 6 NotSupported already; the original crash this row used to also cover, `count_1_shader_vert_frag_command2`, is already fixed by `L96`, so this is narrowed to exactly the 6 ordinary mismatches). Files already pinpointed by a prior session's scoping: `feme/lib/Transforms/CPU/SPIRVPushConstantLowering.cpp`, `feme/lib/Vulkan/GraphicsPipeline.cpp`. Small, concrete, self-contained -- a good next pickup, same shape as `L154` was.
+2. If `L131` gets picked up and its own investigation turns up something bigger than expected (as several `L1xx` rows have), scope the remainder as a new top-level row rather than nesting a letter under `L131` -- keep following the one-lowercase-letter-deep rule.
+3. **(~5 min)** `/tmp/ctsrun_l154/` (this session's own scratch: `caselist.txt`, `results.qpa`, `results_full.qpa`) can be deleted -- both runs' findings are already fully quoted in `VulkanCTSReport.md`'s new section above; nothing in it is referenced from anywhere else.
