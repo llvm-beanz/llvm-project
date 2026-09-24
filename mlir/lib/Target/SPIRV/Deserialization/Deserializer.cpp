@@ -1427,6 +1427,26 @@ spirv::Deserializer::resolveConstantArrayLength(uint32_t id) {
     return specOp->enclodesOpcode == spirv::Opcode::OpIAdd ? (*lhs + *rhs)
                                                             : (*lhs - *rhs);
   }
+  case spirv::Opcode::OpUDiv:
+  case spirv::Opcode::OpSDiv: {
+    // Operand encoding: Operand 1 <id>, Operand 2 <id>. Same shape as
+    // OpIMul/OpIAdd/OpISub above -- e.g. a GLSL `shared T arr[(sc0 + 12) /
+    // 16];` declaration's own compiled shape, which glslang emits as a
+    // top-level `OpSpecConstantOp %uint UDiv %lhs %uint_16` wrapping an
+    // inner `OpIAdd` operand. Decline (rather than trap) a zero divisor,
+    // matching this function's own "malformed input yields std::nullopt"
+    // contract instead of relying on APInt's own division-by-zero assert.
+    if (specOp->enclosedOpOperands.size() != 2)
+      return std::nullopt;
+    std::optional<llvm::APInt> lhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[0]);
+    std::optional<llvm::APInt> rhs =
+        resolveConstantArrayLength(specOp->enclosedOpOperands[1]);
+    if (!lhs || !rhs || rhs->isZero())
+      return std::nullopt;
+    return specOp->enclodesOpcode == spirv::Opcode::OpUDiv ? lhs->udiv(*rhs)
+                                                            : lhs->sdiv(*rhs);
+  }
   default:
     // Any other enclosed opcode is a real gap in this resolution, not a
     // malformed module -- decline rather than guess, matching this

@@ -2,10 +2,11 @@
 
 ; COM: An `OpTypeArray` length operand naming an `OpSpecConstantOp` built from
 ; COM: an enclosed opcode other than the ones (`OpCompositeExtract`, `OpIMul`,
-; COM: `OpIAdd`, `OpISub`) a real array-length expression is confirmed to need
-; COM: (see array-spec-constant-composite-length.spvasm and
-; COM: array-spec-constant-add-length.spvasm) is correctly declined rather
-; COM: than silently guessed at -- `OpUDiv` below stands in for any such
+; COM: `OpIAdd`, `OpISub`, `OpUDiv`, `OpSDiv`) a real array-length expression
+; COM: is confirmed to need (see array-spec-constant-composite-length.spvasm,
+; COM: array-spec-constant-add-length.spvasm, and
+; COM: array-spec-constant-div-length.spvasm) is correctly declined rather
+; COM: than silently guessed at -- `OpUMod` below stands in for any such
 ; COM: unsupported shape.
 
 ; CHECK: error: OpTypeArray count <id> {{[0-9]+}} must come from a constant, specialization constant, or supported specialization constant operation
@@ -22,7 +23,7 @@
        %uint = OpTypeInt 32 0
        %sc_a = OpSpecConstant %uint 16
        %sc_b = OpSpecConstant %uint 4
-     %length = OpSpecConstantOp %uint UDiv %sc_a %sc_b
+     %length = OpSpecConstantOp %uint UMod %sc_a %sc_b
       %arrty = OpTypeArray %uint %length
      %arrptr = OpTypePointer Workgroup %arrty
      %shared = OpVariable %arrptr Workgroup

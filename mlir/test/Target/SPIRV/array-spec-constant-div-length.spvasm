@@ -1,0 +1,38 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpTypeArray`'s own length operand may instead name an `OpSpecConstantOp`
+; COM: expression built from `OpUDiv`/`OpSDiv` combining a nested
+; COM: `OpSpecConstantOp` (itself an `OpIAdd`) with an ordinary constant --
+; COM: exactly the shape glslang compiles a GLSL `layout (constant_id = 0)
+; COM: const uint sc0 = 128; T arr[(sc0 + 12) / 16];` declaration down to
+; COM: (confirmed via a real `spirv-dis` disassembly of
+; COM: `dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+; COM: range_size_max`'s own real compiled vertex shader, roadmap L182).
+; COM: Resolved by recursively folding each spec constant to its own declared
+; COM: default value (128 + 12 = 140, then 140 / 16 = 8 (unsigned, truncating)
+; COM: below).
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 128 : i32
+; CHECK: spirv.GlobalVariable @{{.*}} : !spirv.ptr<!spirv.array<8 x i32>, Workgroup>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc0 SpecId 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %int = OpTypeInt 32 1
+       %int_12 = OpConstant %int 12
+       %int_16 = OpConstant %int 16
+       %sc0 = OpSpecConstant %int 128
+     %sum = OpSpecConstantOp %int IAdd %sc0 %int_12
+     %length = OpSpecConstantOp %int UDiv %sum %int_16
+      %arrty = OpTypeArray %int %length
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

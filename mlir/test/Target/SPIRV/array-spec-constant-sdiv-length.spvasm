@@ -1,0 +1,29 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: Same shape as array-spec-constant-div-length.spvasm, but using the
+; COM: signed `OpSDiv` variant instead of `OpUDiv` -- both share the same
+; COM: `resolveConstantArrayLength` switch case, so this confirms the signed
+; COM: division path (`APInt::sdiv`) is exercised too, not just unsigned.
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 20 : i32
+; CHECK: spirv.GlobalVariable @{{.*}} : !spirv.ptr<!spirv.array<4 x i32>, Workgroup>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc0 SpecId 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %int = OpTypeInt 32 1
+       %int_5 = OpConstant %int 5
+       %sc0 = OpSpecConstant %int 20
+     %length = OpSpecConstantOp %int SDiv %sc0 %int_5
+      %arrty = OpTypeArray %int %length
+     %arrptr = OpTypePointer Workgroup %arrty
+     %shared = OpVariable %arrptr Workgroup
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd
