@@ -61,7 +61,9 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~15 min, floated by 4 sessions now, including this one)** Add an
-   `assert`/`opt -passes=verify` step after `SPIRVUnmergeResourceLoadsPass` in
-   debug builds. This is now the single most-repeated deferred item in this log.
-   If picking this up, just do it -- do not float it again.
+1. **(~1 hr)** Finish the `binding_model.shader_access.*` sweep to completion in
+   one dedicated session (it's large -- budget real time, run it detached/async
+   and check back rather than blocking synchronously). If it stays 100% clean,
+   mark it explicitly confirmed in this file and stop mentioning it as a "next
+   step" (it has been on this list for 4+ sessions now as unstarted/partial
+   busywork).
