@@ -101309,3 +101309,69 @@ whole file.
    (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows) are still
    individually unvetted.
+
+# Session: L184 fully closed (9/9 cases), L185 opened
+
+## What's done, verifiable right now
+
+All 9 originally-scoped `L184` cases pass. Confirm:
+
+```
+export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+echo dEQP-VK.spirv_assembly.instruction.compute.float16.arithmetic_2.frexpe > /tmp/c.txt
+echo dEQP-VK.spirv_assembly.instruction.compute.float16.arithmetic_2.frexps >> /tmp/c.txt
+./deqp-vk --deqp-caselist-file=/tmp/c.txt
+```
+Both `Pass`. (`acosh`/`asinh`/`atanh`/`distance`/`length`/`opdot`/
+`opcompositeextract.struct16arr3` were confirmed passing earlier this
+session the same way.)
+
+`ninja check-feme`: 3333/3336 passed (3 pre-existing Unsupported, 0
+Failed). `ninja check-mlir`: 4039/4673 passed, 0 unexpected failures.
+
+## 4 root causes, in commit order
+
+1. `c65b1d2f9bd8` -- struct-member bare-vector-lane `CompositeExtract`/
+   `CompositeInsert` crash (`struct16arr3`'s own crash).
+2. `09ed8ebd38b7` -- `spirv.VectorInsertDynamic` had no lowering at all
+   (`distance`/`length`/`opdot`, plus needed by `struct16arr3`).
+3. `7d0ade213e36`/`fc55c835e533`/`fc55c835e533`'s next commit -- 3 SIMDize
+   gaps the fix above's own output exposed (non-constant-index
+   `insertelement`, both directions of a float-element `bitcast`).
+4. `5d0e0ef90268`/`e94a2c824705`/`c08218422fcc` -- `frexpe`/`frexps`
+   (upstream MLIR was missing `SPIRV_GLFrexpOp` entirely; added it,
+   its lowering, and FeMe-side test coverage).
+   Plus `09ed8ebd38b7`'s sibling -- `acosh`/`asinh`/`atanh` (no LLVM
+   intrinsic exists; expanded algebraically).
+
+Each is its own commit with its own unit test(s). Full list:
+`git log --oneline fa815297b22f..HEAD`.
+
+## What's still open
+
+1. **(~1 day, well-scoped, next session should start here)** `L185`:
+   `opcompositeinsert.struct16arr3` hits a genuine aggregate-typed `phi`
+   reaching `feme-cpu-simdize`, violating that pass's own documented
+   invariant ("`LinearizePass` always rewrites one into a `select`
+   before this pass ever runs"). Root cause is very likely in
+   `feme/lib/Transforms/CPU/Linearize.cpp`, not `SIMDize.cpp` -- don't
+   hack around it in `SIMDize.cpp`. Get the case's SPIR-V via its QPA
+   log (same `feme-translate --import-spirv`/`--spirv-to-llvmir` pipe
+   `L183`/`L184` both used), find the exact CFG shape not yet rewritten
+   (likely a loop-carried or multi-predecessor aggregate `phi`), fix in
+   `Linearize.cpp`.
+2. **(2-4 hrs, one-time setup, still not done across several sessions)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` has no build directory at
+   `/home/dev/dev/offload-test-suite/build` -- deferred again this
+   session given the size of the L184 work. Needs a from-scratch build
+   before it can run at all.
+3. **(~5 min)** Scratch cleanup: `/tmp/ctsrun_l184/`, `/tmp/l184_*.mlir`,
+   `/tmp/l184_frexp*`, `/tmp/patch_*.diff`, `/tmp/simdize_*.diff`,
+   `/tmp/patterns_full.diff`, `/tmp/frexp_pattern.diff`,
+   `/tmp/final_check.diff` -- none referenced by anything committed.
+4. Scan `Roadmap.md` for the next open, well-scoped item once `L185` is
+   picked up or skipped -- the last full-scan candidates from several
+   sessions back (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
+   `L126(a)`, `L147`, `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows)
+   are still individually unvetted.
