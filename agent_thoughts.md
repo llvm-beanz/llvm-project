@@ -100898,3 +100898,44 @@ done and validated; `L125(n)` stays open, now more concretely scoped.
 4. **(~5 min)** No scratch left in `/tmp` from this session -- the one
    CTS run's QPA/stdout files (`/tmp/ctsrun_l125m/*`) were deleted
    after their findings were quoted above/in `VulkanCTSReport.md`.
+
+# 2026-09-24 (session 4): L125(n) implemented and CTS-verified -- `ConstOffsets` (plural) gather now fully correct, `texture_gather.graphics.offsets.*` 98/98 pass
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`, confirmed.
+
+## Do this first if you're picking up next
+
+1. Nothing blocking -- `L125(n)` is done, CTS-verified, docs updated, 4 commits landed. Pick your own next item from the list below.
+
+## What I did, in order
+
+1. Finished the lowering-side plumbing this session's summary said was in progress: `Gather2DOffsets`/`GatherArray2DOffsets`(+`I32`) `ImageCallKind` entries, their `create*` function bodies in `ImageCalls.cpp`, and `matchImageCall` decode support (new `OffsetX0`..`OffsetY3` fields on `MatchedImageCall`, plus the mandatory `AllKinds` coverage-array entries -- this file has its own comment warning that skipping this step leaves dead code silently unreachable, learned from roadmap H19l).
+2. Wrote the runtime side: `femeRTComputeGatherOffsetsSupport` + the 4 `femeCpuImageGather*OffsetsV4{F,I}32` entry points in `FeMeRuntimeCPU.c`.
+3. Built clean, ran `ninja check-feme`: 3314/3317 (3 unsupported), no regressions.
+4. Ran the real CTS case (`dEQP-VK.glsl.texture_gather.graphics.offsets.*`) -- **0/98 passed**. Every supported case still failed.
+5. Dumped the actual LLVM IR (`FEME_DUMP_IR=1`) for one failing case and confirmed the *lowering* was correct -- 4 genuinely different offset pairs reaching the runtime call, not the old bug. So the bug had moved into my new runtime code.
+6. Cross-checked `VK-GL-CTS`'s own reference model (`fetchGatherArray2DOffsets` in `framework/common/tcuTexture.cpp`) and found my model was wrong: I'd assumed the 4 gather taps are 4 *different* bilinear corners (like an ordinary gather), each additionally offset. The real model: all 4 taps read the **same** base texel, each independently displaced by its own offset -- no per-tap `+1` corner delta at all. Fixed the runtime helper accordingly.
+7. Re-ran: **98/98 pass**. Also ran `.compute.offsets.*` (36/36 pass) and the broader `.texture_gather.*` sweep (443 pass / 340 fail / 2391 not-supported) as a regression check -- inspected all 340 failures, confirmed every one is the pre-existing, unrelated dynamic-`Offset` (non-constant) gap, zero overlap with `ConstOffset`/`ConstOffsets`.
+8. Added `LowersGatherConstOffsetsToImageGatherOffsets` unit test.
+9. Committed in 4 pieces: (a) `ImageCalls.h`/`.cpp` plumbing, (b) `SPIRVResourceLowering.cpp` fix + unit test, (c) `FeMeRuntimeCPU.c` runtime (first, wrong-model version), (d) the runtime corner-model fix as its own commit (kept separate on purpose -- it's a real, distinct bug-in-my-own-fix worth its own history entry, not squashed into (c)).
+10. Updated `Roadmap.md` (struck through `L125(n)`), `VulkanCTSReport.md` (new dated section), `Vulkan14FeatureInventory.md` (`shaderImageGatherExtended` row note).
+
+## Wins, concretely
+
+- `dEQP-VK.glsl.texture_gather.graphics.offsets.*`: 98/98 pass (was 98/98 fail before this session).
+- `dEQP-VK.glsl.texture_gather.compute.offsets.*`: 36/36 pass.
+- `ninja check-feme`: 3314/3317 (3 unsupported), 0 regressions, +1 new test vs. prior session's baseline.
+- Caught my own mid-session bug (wrong per-tap corner model) via a real CTS run rather than shipping it -- the run went from 0/98 to 98/98 after the fix, a clean binary signal something was fundamentally wrong, not a partial/edge-case gap.
+
+## What I did NOT do, and why
+
+- Did not add the "assert/`opt -passes=verify` after `SPIRVUnmergeResourceLoadsPass`" defensive check floated by 3+ prior sessions -- that pass is unrelated to this session's work (`ImageCalls.cpp`/`SPIRVResourceLowering.cpp`/`FeMeRuntimeCPU.c`, not the unmerge pass), and this session already found its own bug the hard way (a real CTS run), which is exactly the kind of gap that defensive check is meant to shrink -- still worth doing, just not by this session, which had its own concrete scope.
+- Did not do `L125(p)` (upstream LLVM SPIR-V backend `ConstOffsets` emission) -- still correctly out of scope, only matters once an HLSL/`offload-test-suite` test exercises `Gather*` with 4 independent offsets, which none does yet.
+- Did not do a full `binding_model.shader_access` broader sweep (mentioned as pending 3 sessions running) -- this session's scope was `L125(n)` specifically; that sweep is unrelated to `texture_gather`.
+
+## Suggested next steps
+
+1. **(~15 min, floated by 4 sessions now, including this one)** Add an `assert`/`opt -passes=verify` step after `SPIRVUnmergeResourceLoadsPass` in debug builds. This is now the single most-repeated deferred item in this log. If picking this up, just do it -- do not float it again.
+2. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission) -- still the largest not-yet-started cross-repo item, good for a change-of-pace session. Only matters once an HLSL/`offload-test-suite` test exercises `Gather*` with 4 independent offsets.
+3. **`binding_model.shader_access` broader sweep** -- still on the list from 3 sessions ago as a low-priority final confirmation pass. Given this session confirmed 0 overlap between its own 340-failure sweep and `ConstOffset`/`ConstOffsets`, this specific sweep is likely fine to defer indefinitely unless a session has spare time and wants a confirmation pass.
+4. **(~5 min)** `/tmp` cleanup: this session's own scratch (`/tmp/ctsrun_l125n/*`) was deleted after its findings were quoted above/in `VulkanCTSReport.md`. `/tmp/check_feme_l125g.log` is pre-existing from an older, unrelated session and not referenced anywhere in this file -- leaving it alone rather than guessing it's safe to delete.
