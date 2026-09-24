@@ -100975,3 +100975,40 @@ done and validated; `L125(n)` stays open, now more concretely scoped.
 2. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission, `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`) -- still the largest not-yet-started cross-repo item, good for a change-of-pace session. Remember: this is an "issue outside FeMe" scenario per standing instructions -- isolated repro, self-contained commit touching only non-FeMe files.
 3. **Before re-floating any "still not done" item from a prior session's summary**: check `git log --oneline --follow <path>` and grep this file for the actual completion first, as this session did. Session 4's stale claim cost this session real time it didn't need to spend. Don't repeat that mistake.
 4. **(~2 min)** No scratch left in `/tmp` -- `/tmp/ctsrun_bm_sweep/` (QPA + shadercache) and `/tmp/bm_caselist.xml` deleted after their findings were quoted above.
+
+# 2026-09-24 (session 6): `binding_model.shader_access.*` broad confirmation sweep finally finished -- fully clean, closing a 5-session-old deferred item
+
+**Do this first**: Nothing blocking. This sweep is now done and confirmed clean -- stop listing it as a "next step" in future sessions.
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`, confirmed.
+
+## What I did, in order
+
+1. Rebuilt, ran `ninja check-feme` first to confirm the baseline before doing anything else: 3314/3317 (3 unsupported), 0 regressions -- matches every prior session's baseline.
+2. Launched the full `dEQP-VK.binding_model.shader_access.*` sweep detached (`nohup ... &` + `disown`), per the previous session's explicit instruction to run it async and check back rather than block synchronously.
+3. Checked back roughly every 8-13 minutes over ~2h15m. Discovered mid-flight, via `--deqp-runmode=stdout-caselist`, that this cluster is **103,771 test cases** -- an order of magnitude larger than any prior session realized (the earlier partial sweeps checked only a few thousand). At the observed steady-state rate (~145 cases/min), a full exhaustive run would take on the order of **12 hours** -- not viable for one session.
+4. Rather than leave it permanently half-finished (as 3+ prior sessions had), switched strategy: stopped the exhaustive run at **19,639/19,639 pass, 0 fail** (the first ~19% of the namespace, alphabetically), then ran a `--deqp-fraction=0,15` deterministic sample -- this project's own established technique for oversized clusters (`L125(c)` used `--deqp-fraction=0,50` the same way). The fraction sampler spreads evenly across the *entire* namespace rather than an alphabetical prefix, so it's a genuinely representative check, not just "more of the same corner."
+5. Fraction sample completed cleanly in ~44 min: **5,709/5,709 pass, 0 fail**, reaching areas the exhaustive run never got to (`secondary_cmd_buf.bind`/`bind2.with_template`, `uniform_texel_buffer`, `tess_ctrl`/`vertex` stages, `offset_zero`/`offset_nonzero` variants).
+6. Combined: 19,639 (exhaustive prefix) + 5,709 (full-namespace sample) = 25,348 cases checked, zero failures either way. Confirmed via `git grep`/`Roadmap.md` that this cluster's actual root-cause fix (`L153`, the `pImmutableSamplers` bug) is already struck through and closed -- this sweep is corroborating an already-closed fix at much larger scale, not chasing new unknown bugs.
+7. Rebuilt `check-feme` again post-sweep to reconfirm baseline unchanged (no code touched): 3314/3317, 0 regressions.
+8. Wrote up the full methodology and numbers in `VulkanCTSReport.md` (new dated section). No `Roadmap.md` edit needed -- `L153`'s row is already struck through/closed; this was pure confirmation, not a fix. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed either (no capability/extension surface changed).
+9. Cleaned up all `/tmp` scratch from this session (`ctsrun_bm_full/`, `ctsrun_bm_fraction/`, caselist dumps).
+
+## Wins, concretely
+
+- **Closed a 5-session-old recurring deferred item.** `binding_model.shader_access.*` had been vaguely "on the list" since the `L180` session, repeatedly restated as a low-priority partial/unstarted confirmation pass. It is now genuinely, numerically confirmed clean at a scale (25,348 cases) that should be trustworthy going forward.
+- Discovered and documented the cluster's true size (103,771 cases) -- previous sessions were almost certainly extrapolating from far smaller partial runs (a few thousand cases) without realizing how much of the space was actually untouched. This explains why it kept getting re-floated instead of finished: nobody had checked the actual denominator before this session.
+- Demonstrated (again) that this project's `--deqp-fraction` sampling technique scales down an intractable full sweep into something a single session can actually finish, while still giving genuine full-namespace coverage rather than a biased prefix.
+- `ninja check-feme`: 3314/3317, 0 regressions, confirmed twice (before and after the sweep) since no code was touched.
+
+## What I did NOT do, and why
+
+- Did not run the full 103,771-case exhaustive sweep to completion -- genuinely impractical (~12 hours) for one session. The combined exhaustive-partial + full-namespace-fraction-sample approach is the accepted substitute per this project's own precedent (`L125(c)`).
+- Did not touch `L125(p)` (upstream LLVM SPIR-V backend `ConstOffsets` emission) -- this session's own scope was entirely the confirmation sweep; no code changes were made at all.
+- Did not update `Roadmap.md` -- there is no dedicated roadmap row for "run the shader_access confirmation sweep"; the actual underlying fix (`L153`) is already closed. This sweep just adds confidence at scale, so no roadmap text needed changing.
+
+## Suggested next steps
+
+1. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission, `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`) -- now the clear next item; largest not-yet-started, cross-repo, "issue outside FeMe" scoped work. Needs its own isolated repro + self-contained commit touching only non-FeMe files per standing instructions, since no current CTS/`offload-test-suite` case exercises 4-independent-offset `Gather*` yet.
+2. **Don't re-float the `binding_model.shader_access.*` sweep again.** It is done: 25,348 cases checked (19,639 exhaustive-prefix + 5,709 full-namespace 1/15 sample), 0 failures, full writeup in `VulkanCTSReport.md`'s 2026-09-24 "broad confirmation sweep completed" section. If a future session wants more assurance, extending the fraction (e.g. `0,30` instead of `0,15`) is cheap; a full exhaustive run is not, and isn't needed unless a future code change specifically touches binding-model/descriptor-access lowering.
+3. **(~2 min)** No scratch left in `/tmp` -- `ctsrun_bm_full/`, `ctsrun_bm_fraction/`, and the caselist-count dump files from this session were all deleted after their findings were quoted above/in `VulkanCTSReport.md`.
