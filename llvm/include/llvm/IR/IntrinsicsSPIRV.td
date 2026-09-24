@@ -401,6 +401,21 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
                                llvm_float_ty, llvm_any_ty],
                               [IntrReadMem]>;
 
+  // Same as int_spv_resource_gather, but for the SPIR-V `ConstOffsets` image
+  // operand (as opposed to `int_spv_resource_gather`'s `ConstOffset`): each of
+  // the 4 texels a Gather instruction reads is displaced by its own,
+  // independent compile-time-constant offset, rather than all 4 sharing one.
+  // The 4 offset operands must each be a compile-time constant vector of the
+  // same type SPIR-V's own `ConstOffset` operand would use for this image's
+  // coordinate space (e.g. <2 x i32> for a 2D image) -- SPIR-V has no dynamic
+  // ("Offsets", plural, non-const) counterpart to this operand.
+  def int_spv_resource_gather_offsets
+      : DefaultAttrsIntrinsic<[llvm_any_ty],
+                              [llvm_any_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_i32_ty, llvm_any_ty, llvm_any_ty,
+                               llvm_any_ty, llvm_any_ty],
+                              [IntrReadMem]>;
+
   def int_spv_resource_getpointer
       : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_any_ty, llvm_any_ty],
                               [IntrNoMem, IntrConvergent]>;

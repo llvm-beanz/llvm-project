@@ -19,6 +19,14 @@
 ; CHECK-DAG: %[[const1:[0-9]+]] = OpConstant %[[int]] 1
 ; CHECK-DAG: %[[compare:[0-9]+]] = OpConstant %[[float]] 0.5
 ; CHECK-DAG: %[[offset:[0-9]+]] = OpConstantComposite %[[v2int]] %[[const1]] %[[const1]]
+; CHECK-DAG: %[[const2:[0-9]+]] = OpConstant %[[int]] 2
+; CHECK-DAG: %[[const3:[0-9]+]] = OpConstant %[[int]] 3
+; CHECK-DAG: %[[const4:[0-9]+]] = OpConstant %[[int]] 4
+; CHECK-DAG: %[[off1:[0-9]+]] = OpConstantComposite %[[v2int]] %[[const2]] %[[const1]]
+; CHECK-DAG: %[[off2:[0-9]+]] = OpConstantComposite %[[v2int]] %[[const1]] %[[const3]]
+; CHECK-DAG: %[[off3:[0-9]+]] = OpConstantComposite %[[v2int]] %[[const4]] %[[const4]]
+; CHECK-DAG: %[[v2int_arr4:[0-9]+]] = OpTypeArray %[[v2int]] %[[const4]]
+; CHECK-DAG: %[[offsets:[0-9]+]] = OpConstantComposite %[[v2int_arr4]] %[[offset]] %[[off1]] %[[off2]] %[[off3]]
 ; CHECK-DAG: %[[image_cube:[0-9]+]] = OpTypeImage %[[float]] Cube 0 0 0 1 Unknown
 ; CHECK-DAG: %[[sampled_image_cube:[0-9]+]] = OpTypeSampledImage %[[image_cube]]
 ; CHECK-DAG: %[[v3float:[0-9]+]] = OpTypeVector %[[float]] 3
@@ -86,6 +94,12 @@ entry:
   %off_dyn = load <2 x i32>, ptr @offset_var
   %res4 = call <4 x float> @llvm.spv.resource.gather.v4f32.tspirv.Image_f32_1_0_0_0_1_0t.tspirv.Samplert.v2f32.i32.v2i32(target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, target("spirv.Sampler") %sampler, <2 x float> zeroinitializer, i32 0, <2 x i32> %off_dyn)
 
+; CHECK: %[[img_val6:[0-9]+]] = OpLoad %[[image]] %[[image_var]]
+; CHECK: %[[sampler_val6:[0-9]+]] = OpLoad %[[sampler]] %[[sampler_var]]
+; CHECK: %[[si6:[0-9]+]] = OpSampledImage %[[sampled_image]] %[[img_val6]] %[[sampler_val6]]
+; CHECK: %[[res5:[0-9]+]] = OpImageGather %[[v4float]] %[[si6]] %[[coord]] %[[component0]] ConstOffsets %[[offsets]]
+  %res5 = call <4 x float> @llvm.spv.resource.gather.offsets.v4f32.tspirv.Image_f32_1_0_0_0_1_0t.tspirv.Samplert.v2f32.i32.v2i32.v2i32.v2i32.v2i32(target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, target("spirv.Sampler") %sampler, <2 x float> zeroinitializer, i32 0, <2 x i32> <i32 1, i32 1>, <2 x i32> <i32 2, i32 1>, <2 x i32> <i32 1, i32 3>, <2 x i32> <i32 4, i32 4>)
+
   ret void
 }
 
@@ -113,6 +127,7 @@ declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0) @llvm.spv.resource.handle
 declare target("spirv.Sampler") @llvm.spv.resource.handlefrombinding.tspirv.Samplert(i32, i32, i32, i32, ptr)
 declare <4 x float> @llvm.spv.resource.gather.v4f32.tspirv.Image_f32_1_0_0_0_1_0t.tspirv.Samplert.v2f32.i32.v2i32(target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler"), <2 x float>, i32, <2 x i32>)
 declare <4 x float> @llvm.spv.resource.gather.cmp.v4f32.tspirv.Image_f32_1_0_0_0_1_0t.tspirv.Samplert.v2f32.f32.v2i32(target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler"), <2 x float>, float, <2 x i32>)
+declare <4 x float> @llvm.spv.resource.gather.offsets.v4f32.tspirv.Image_f32_1_0_0_0_1_0t.tspirv.Samplert.v2f32.i32.v2i32.v2i32.v2i32.v2i32(target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler"), <2 x float>, i32, <2 x i32>, <2 x i32>, <2 x i32>, <2 x i32>)
 
 declare target("spirv.Image", float, 3, 0, 0, 0, 1, 0) @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_3_0_0_0_1_0t(i32, i32, i32, i32, ptr)
 declare <4 x float> @llvm.spv.resource.gather.v4f32.tspirv.Image_f32_3_0_0_0_1_0t.tspirv.Samplert.v3f32.i32.v2i32(target("spirv.Image", float, 3, 0, 0, 0, 1, 0), target("spirv.Sampler"), <3 x float>, i32, <2 x i32>)

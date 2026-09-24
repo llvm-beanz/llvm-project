@@ -458,8 +458,13 @@ private:
   bool selectSampleCmpLevelZeroIntrinsic(Register &ResVReg,
                                          SPIRVTypeInst ResType,
                                          MachineInstr &I) const;
+  Register buildGatherSampledImage(Register ImageReg, Register SamplerReg,
+                                   MachineInstr &I,
+                                   SPIRV::Dim::Dim &OutDim) const;
   bool selectGatherIntrinsic(Register &ResVReg, SPIRVTypeInst ResType,
                              MachineInstr &I) const;
+  bool selectGatherOffsetsIntrinsic(Register &ResVReg, SPIRVTypeInst ResType,
+                                    MachineInstr &I) const;
   bool selectImageWriteIntrinsic(MachineInstr &I) const;
   bool selectResourceGetPointer(Register &ResVReg, SPIRVTypeInst ResType,
                                 MachineInstr &I) const;
@@ -5793,6 +5798,8 @@ bool SPIRVInstructionSelector::selectIntrinsic(Register ResVReg,
   case Intrinsic::spv_resource_gather:
   case Intrinsic::spv_resource_gather_cmp:
     return selectGatherIntrinsic(ResVReg, ResType, I);
+  case Intrinsic::spv_resource_gather_offsets:
+    return selectGatherOffsetsIntrinsic(ResVReg, ResType, I);
   case Intrinsic::spv_resource_getbasepointer:
   case Intrinsic::spv_resource_getpointer: {
     return selectResourceGetPointer(ResVReg, ResType, I);
@@ -6409,42 +6416,36 @@ bool SPIRVInstructionSelector::selectSampleCmpLevelZeroIntrinsic(
                              CoordinateReg, ImOps, I.getDebugLoc(), I);
 }
 
-bool SPIRVInstructionSelector::selectGatherIntrinsic(Register &ResVReg,
-                                                     SPIRVTypeInst ResType,
-                                                     MachineInstr &I) const {
-  Register ImageReg = I.getOperand(2).getReg();
-  Register SamplerReg = I.getOperand(3).getReg();
-  Register CoordinateReg = I.getOperand(4).getReg();
+// Shared setup for OpImageGather/OpImageDrefGather selection: loads the image
+// and sampler handles, validates the image's Dim is Gather-compatible, and
+// builds the OpSampledImage combining them. On failure (after emitting a
+// generic error), returns an invalid Register and leaves *OutDim untouched.
+Register SPIRVInstructionSelector::buildGatherSampledImage(
+    Register ImageReg, Register SamplerReg, MachineInstr &I,
+    SPIRV::Dim::Dim &OutDim) const {
   SPIRVTypeInst ImageType = GR.getSPIRVTypeForVReg(ImageReg);
   assert(ImageType && ImageType->getOpcode() == SPIRV::OpTypeImage &&
          "ImageReg is not an image type.");
 
-  Register ComponentOrCompareReg;
-  Register OffsetReg;
-
-  ComponentOrCompareReg = I.getOperand(5).getReg();
-  OffsetReg = I.getOperand(6).getReg();
   auto *ImageDef = cast<GIntrinsic>(getVRegDef(*MRI, ImageReg));
   Register NewImageReg = MRI->createVirtualRegister(MRI->getRegClass(ImageReg));
-  if (!loadHandleBeforePosition(NewImageReg, ImageType, *ImageDef, I)) {
-    return false;
-  }
+  if (!loadHandleBeforePosition(NewImageReg, ImageType, *ImageDef, I))
+    return Register();
 
-  auto Dim = static_cast<SPIRV::Dim::Dim>(ImageType->getOperand(2).getImm());
-  if (Dim != SPIRV::Dim::DIM_2D && Dim != SPIRV::Dim::DIM_Cube &&
-      Dim != SPIRV::Dim::DIM_Rect) {
+  OutDim = static_cast<SPIRV::Dim::Dim>(ImageType->getOperand(2).getImm());
+  if (OutDim != SPIRV::Dim::DIM_2D && OutDim != SPIRV::Dim::DIM_Cube &&
+      OutDim != SPIRV::Dim::DIM_Rect) {
     I.emitGenericError(
         "Gather operations are only supported for 2D, Cube, and Rect images.");
-    return false;
+    return Register();
   }
 
   auto *SamplerDef = cast<GIntrinsic>(getVRegDef(*MRI, SamplerReg));
   Register NewSamplerReg =
       MRI->createVirtualRegister(MRI->getRegClass(SamplerReg));
   if (!loadHandleBeforePosition(
-          NewSamplerReg, GR.getSPIRVTypeForVReg(SamplerReg), *SamplerDef, I)) {
-    return false;
-  }
+          NewSamplerReg, GR.getSPIRVTypeForVReg(SamplerReg), *SamplerDef, I))
+    return Register();
 
   MachineIRBuilder MIRBuilder(I);
   SPIRVTypeInst SampledImageType =
@@ -6458,6 +6459,23 @@ bool SPIRVInstructionSelector::selectGatherIntrinsic(Register &ResVReg,
       .addUse(NewImageReg)
       .addUse(NewSamplerReg)
       .constrainAllUses(TII, TRI, RBI);
+  return SampledImageReg;
+}
+
+bool SPIRVInstructionSelector::selectGatherIntrinsic(Register &ResVReg,
+                                                     SPIRVTypeInst ResType,
+                                                     MachineInstr &I) const {
+  Register ImageReg = I.getOperand(2).getReg();
+  Register SamplerReg = I.getOperand(3).getReg();
+  Register CoordinateReg = I.getOperand(4).getReg();
+  Register ComponentOrCompareReg = I.getOperand(5).getReg();
+  Register OffsetReg = I.getOperand(6).getReg();
+
+  SPIRV::Dim::Dim Dim;
+  Register SampledImageReg =
+      buildGatherSampledImage(ImageReg, SamplerReg, I, Dim);
+  if (!SampledImageReg.isValid())
+    return false;
 
   auto IntrId = cast<GIntrinsic>(I).getIntrinsicID();
   bool IsGatherCmp = IntrId == Intrinsic::spv_resource_gather_cmp;
@@ -6492,6 +6510,88 @@ bool SPIRVInstructionSelector::selectGatherIntrinsic(Register &ResVReg,
       MIB.addUse(OffsetReg);
   }
 
+  MIB.constrainAllUses(TII, TRI, RBI);
+  return true;
+}
+
+// Handles Intrinsic::spv_resource_gather_offsets: like selectGatherIntrinsic,
+// but each of the 4 texels an OpImageGather reads is displaced by its own
+// independent offset (the `ConstOffsets` image operand), rather than all 4
+// sharing one (`ConstOffset`). SPIR-V requires ConstOffsets' operand to be an
+// OpConstantComposite of an OpTypeArray of 4 vectors -- a structurally
+// different constant shape than ConstOffset's single flat vector constant --
+// so, unlike ConstOffset, there is no dynamic (non-constant) counterpart:
+// all 4 offsets must be compile-time constants.
+bool SPIRVInstructionSelector::selectGatherOffsetsIntrinsic(
+    Register &ResVReg, SPIRVTypeInst ResType, MachineInstr &I) const {
+  Register ImageReg = I.getOperand(2).getReg();
+  Register SamplerReg = I.getOperand(3).getReg();
+  Register CoordinateReg = I.getOperand(4).getReg();
+  Register ComponentReg = I.getOperand(5).getReg();
+  SmallVector<Register, 4> OffsetRegs = {
+      I.getOperand(6).getReg(), I.getOperand(7).getReg(),
+      I.getOperand(8).getReg(), I.getOperand(9).getReg()};
+
+  SPIRV::Dim::Dim Dim;
+  Register SampledImageReg =
+      buildGatherSampledImage(ImageReg, SamplerReg, I, Dim);
+  if (!SampledImageReg.isValid())
+    return false;
+
+  if (Dim == SPIRV::Dim::DIM_Cube) {
+    I.emitGenericError(
+        "Gather operations with offsets are not supported for Cube images.");
+    return false;
+  }
+
+  SPIRVTypeInst OffsetVecType = nullptr;
+  for (Register OffsetReg : OffsetRegs) {
+    if (!isConstReg(MRI, OffsetReg)) {
+      I.emitGenericError("Each of the 4 offsets to a ConstOffsets gather "
+                         "must be a compile-time constant.");
+      return false;
+    }
+    SPIRVTypeInst ThisOffsetType = GR.getSPIRVTypeForVReg(OffsetReg);
+    if (!OffsetVecType)
+      OffsetVecType = ThisOffsetType;
+    else if (ThisOffsetType != OffsetVecType) {
+      I.emitGenericError("All 4 offsets to a ConstOffsets gather must share "
+                         "the same vector type.");
+      return false;
+    }
+  }
+
+  // getOpTypeArray() is a private SPIRVGlobalRegistry helper, so build the
+  // array type through the public LLVM-IR-type-based API instead: look up
+  // the LLVM IR type of one (compile-time-constant) offset vector and wrap
+  // it in an LLVM ArrayType of the same length, which getOrCreateSPIRVType
+  // will lower to an OpTypeArray of the corresponding SPIR-V vector type.
+  const Type *OffsetElemLLVMType = GR.getTypeForSPIRVType(OffsetVecType);
+  const Type *OffsetsArrayLLVMType =
+      ArrayType::get(const_cast<Type *>(OffsetElemLLVMType), OffsetRegs.size());
+  SPIRVTypeInst OffsetsArrayType = GR.getOrCreateSPIRVType(
+      OffsetsArrayLLVMType, I, SPIRV::AccessQualifier::ReadOnly,
+      /*EmitIR=*/false);
+  Register OffsetsReg =
+      MRI->createVirtualRegister(GR.getRegClass(OffsetsArrayType));
+  GR.assignSPIRVTypeToVReg(OffsetsArrayType, OffsetsReg, *I.getMF());
+  auto CompositeMIB = BuildMI(*I.getParent(), I, I.getDebugLoc(),
+                              TII.get(SPIRV::OpConstantComposite))
+                          .addDef(OffsetsReg)
+                          .addUse(GR.getSPIRVTypeID(OffsetsArrayType));
+  for (Register OffsetReg : OffsetRegs)
+    CompositeMIB.addUse(OffsetReg);
+  CompositeMIB.constrainAllUses(TII, TRI, RBI);
+
+  auto MIB =
+      BuildMI(*I.getParent(), I, I.getDebugLoc(), TII.get(SPIRV::OpImageGather))
+          .addDef(ResVReg)
+          .addUse(GR.getSPIRVTypeID(ResType))
+          .addUse(SampledImageReg)
+          .addUse(CoordinateReg)
+          .addUse(ComponentReg)
+          .addImm(SPIRV::ImageOperand::ConstOffsets)
+          .addUse(OffsetsReg);
   MIB.constrainAllUses(TII, TRI, RBI);
   return true;
 }
