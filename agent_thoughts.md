@@ -101458,3 +101458,113 @@ real (not hand-authored) CTS case.
 3. **(~5 min)** No `/tmp` scratch left from this session --
    `/tmp/ctsrun_l185/`, `/tmp/l185_test.ll`, `/tmp/final_check.*` all
    removed already.
+
+## L116(d) closed: aggregate `spirv.Constant`/`spirv.CompositeConstruct` legalization; 3 new gaps found and filed
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+at session start.
+
+### What's done, verified right now
+
+Both `L116(d)` sub-bugs fixed and CTS-verified:
+
+```
+export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+./deqp-vk --deqp-case=dEQP-VK.graphicsfuzz.stable-sampler-index-block-array-const
+```
+
+`ninja check-feme`: 3338/3341 passed (3 pre-existing Unsupported, 0 Failed).
+
+### The two bugs
+
+1. **Struct-containing `spirv.Constant` had no legal LLVM encoding.** A
+   struct (or array-of-struct, any nesting) has no `DenseElementsAttr`
+   shape at all. Fixed with `StructConstantPattern`
+   (`SPIRVToLLVMPatterns.cpp`), decomposing one level at a time into
+   simpler `spirv.Constant`s feeding a `spirv.CompositeConstruct`,
+   recursing via `setHasBoundedRewriteRecursion()` (MLIR's dialect
+   conversion driver otherwise refuses to re-apply the same pattern to
+   an op it just created -- a generic infinite-recursion guard).
+   Also hardened `ArrayConstantPattern` with an early `containsStructType`
+   reject: its flattened-count heuristic could spuriously pass for an
+   array-of-struct shape and crash inside `DenseElementsAttr::get`.
+2. **`spirv.CompositeConstruct` building a stride-padded scalar array
+   from plain scalar operands hard-failed on type mismatch.**
+   `convertArray` now round-trips the mismatched operand through a
+   scratch `llvm.alloca`/`store`/`load` before `insertvalue` (the same
+   idiom `AggregateInitializedVariablePattern` already used elsewhere).
+
+### Verification (full CTS sweep, not a spot-check)
+
+Ran a fresh pre-fix baseline sweep and a post-fix sweep across all 757
+`dEQP-VK.graphicsfuzz.*` cases (per-case-isolated, `timeout 30`-guarded,
+survives any single case's fatal crash):
+
+- Baseline: 645 Pass / 93 Fail / 8 NotSupported / 11 unaccounted.
+- Post-fix: 663 Pass / 78 Fail / 8 NotSupported / 8 unaccounted.
+- **+18 Pass, 0 regressions.**
+
+Of the 18 originally-targeted cases, 15 now Pass. The other 3 hit
+genuinely separate, pre-existing bugs this fix unmasked (previously
+hidden because the same shader hit `L116(d)`'s own bug first):
+
+- `spv-load-from-frag-color`: `spirv.InBoundsAccessChain` of a zero-index
+  `Output` pointer has no legalization -- filed **L186**.
+- `spv-stable-sampler-loop-extra-instructions`: `spirv.UMulExtended` has
+  no conversion pattern at all -- filed **L187**.
+- `stable-binarysearch-tree-false-if-discard-loop`: `feme-cpu-simdize`
+  can't widen a divergent branch in this CFG shape -- filed **L188**
+  (possibly same family as `L116(b)`, not confirmed).
+
+### Commits (5, each independently built/tested before landing)
+
+1. `2ba4c05e1eaa` -- `StructConstantPattern` + `containsStructType` +
+   `ArrayConstantPattern` hardening + 2 unit tests + lit test swap.
+2. `03da09c670af` -- `convertArray`'s alloca-based reinterpret cast fix
+   + 1 unit test + 1 lit test.
+3. `b572e0230a9d` -- `Roadmap.md` (`L116(d)` struck through, `L186`/
+   `L187`/`L188` filed) + `VulkanCTSReport.md` dated section.
+4. `4ace18a783a3` -- `Design.md`'s two affected "known gap" table rows
+   updated to match.
+5. This commit -- `agent_thoughts.md`.
+
+### A gotcha worth remembering
+
+Inserting one line into a long, hand-wrapped `Patterns.add<A, B, C, ...>`
+template-argument list via `clang-format-diff.py` reflows the *entire*
+list (~164 unrelated lines), since the tool treats the whole statement as
+"dirty." If this happens: `git checkout --` the file, re-apply by hand
+with a minimal single-line insertion instead of re-running the
+autoformatter on that region.
+
+### Suggested next steps
+
+1. **(~1-2 hrs)** `L186`: `spirv.InBoundsAccessChain` of a zero-index
+   `Output`-storage pointer. Likely a simple no-op-passthrough pattern
+   (`spirv.ptr<T, Output> -> spirv.ptr<T, Output>`, same pointer back) --
+   check whether upstream's generic `AccessChainPattern` already handles
+   a zero-index case for other storage classes and just needs `Output`
+   added, before writing a new pattern from scratch.
+2. **(~1-2 hrs)** `L187`: `spirv.UMulExtended` has no pattern anywhere
+   (confirmed via grep, neither upstream nor FeMe). Candidate lowering:
+   `llvm.umul.with.overflow` (or wide-multiply-then-shift) plus a
+   `spirv.CompositeConstruct`-style struct-of-two-scalars assembly (the
+   same shape `L116(d)`'s own `StructConstantPattern` neighbor already
+   handles generically for the result). Check `spirv.SMulExtended` for
+   the identical gap while there.
+3. **(~2-4 hrs)** `L188`: get the real SPIR-V via QPA log +
+   `feme-translate --import-spirv`/`--spirv-to-llvmir` (established
+   `L183`/`L184`/`L185` methodology), diff its pre-SIMDize IR shape
+   against `L116(b)`'s own known divergent-branch cases to confirm or
+   rule out a shared root cause before assuming it's the same fix.
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+5. **Scan `Roadmap.md` fresh** if not picking up `L186`/`L187`/`L188` --
+   the long-stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`,
+   `L126(a)`, `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is
+   still individually unvetted; a future session should do a real
+   full-table pass rather than keep deferring to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l116d/` already removed.
