@@ -61,31 +61,25 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs, highest value)** `L180`: root-cause `descriptorset_
-   random`'s remaining 118 image-verification (pixel-mismatch) failures
-   -- confirmed a separate bug class from `L178`/`L179` (these 118 were
-   already failing pre-session, untouched by either fix). Stage-suffix
-   breakdown so far: 30 `.frag.*`, 22 `.vert.*`, 22 `.comp.*` (74 of
-   118; ~44 need their own suffix breakdown, not done this session).
-   Pick the smallest failing case per stage bucket, dump actual-vs-
-   expected pixels first -- `L175`'s own history is a specific warning
-   against assuming one root cause too early across sub-shapes that
-   only share a failure symptom.
-2. **(~15 min)** Still not done, mentioned by the last two sessions:
-   add an `assert`/`opt -passes=verify` step after
-   `SPIRVUnmergeResourceLoadsPass` runs in debug builds --
-   `SPIRVToLLVMPatterns.cpp` just found its own second and third
-   found-by-CTS-not-by-review latent bugs (`L178`/`L179`), suggesting
-   this class of "pass declines silently, only a much later stage
-   fails" gap is worth a general defensive check, not just in the one
-   pass it was originally floated for.
-3. **`inline_uniform_blocks` (9 fails)** -- still never-triaged, smaller
-   than `descriptorset_random`, good if `L180` feels too big to start
-   cold.
-4. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   -- still the largest not-yet-started cross-repo item.
-5. **(~5 min)** `/tmp` cleanup needed: `dsr_*` logs/qpa files,
-   `Pipeline.cpp.bak`, `pipeline_fail_cases*.txt`, `dsr_remaining_fails.
-   txt`, and the large stdout-capture temp files under
-   `/tmp/*-copilot-tool-output-*` this session generated -- everything
-   worth keeping is already quoted in `VulkanCTSReport.md`/this file.
+1. **(~15 min, floated by 3 prior sessions, still not done)** Add an
+   `assert`/`opt -passes=verify` step after
+   `SPIRVUnmergeResourceLoadsPass` in debug builds. Every session that
+   touches that pass keeps finding a new found-by-CTS-not-by-review
+   bug in it (`L176`/`L177`/similar) -- this is now the single most
+   repeated "next step" across the whole log. Next session: just do
+   it, don't float it again.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session. No longer blocked by anything from this
+   session.
+3. Run a broader `binding_model.shader_access.*` sweep (not just
+   `descriptorset_random`/`inline_uniform_blocks`) to check for any
+   other still-hiding inline-uniform-block-adjacent failures this
+   session's narrower sweeps might not have covered -- low priority,
+   both clusters this session touched are now fully green, but worth a
+   final confirmation pass before considering `E14`+`L180` fully
+   closed.
+4. **(~5 min)** No scratch left in `/tmp` from this session -- all
+   `l180_*` logs/qpa files and the stray root-level `TestResults.qpa`
+   deleted; everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file.
