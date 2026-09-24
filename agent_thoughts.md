@@ -100687,3 +100687,83 @@ recognized this as an array shape from having read
    txt`, and the large stdout-capture temp files under
    `/tmp/*-copilot-tool-output-*` this session generated -- everything
    worth keeping is already quoted in `VulkanCTSReport.md`/this file.
+
+# 2026-09-24: L180 fixed -- `descriptorset_random`'s last 118 failures + `inline_uniform_blocks` (9 fails), both root-caused to one missing dispatch branch
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed.
+
+## What's fixed
+
+`CommandBuffer.cpp`'s `buildBoundResources` never checked
+`isInlineUniformBlockDescriptorType` -- it silently skipped building any
+`FemeDescriptor` for these bindings, so a shader reading an inline
+uniform block always read a zeroed heap slot. This was the *exact* gap
+`E14`'s own comment flagged as a known TODO ("even though no dispatch
+consumes one yet") -- not a new bug, a deferred one finally being
+picked up.
+
+Fix: one new branch, ~15 lines, reading
+`DescriptorSet::inlineUniformBlockData(Binding)` and building a
+single-element `Kind::Raw` descriptor from it, same as any other UBO.
+
+**Wins, concretely**:
+- `descriptorset_random`: 910/1028 -> **1028/1028 executable cases
+  pass, 0 fail**.
+- `inline_uniform_blocks` (a separate top-level cluster, never triaged
+  by three prior sessions): 0/9 -> **9/9 pass**. Same fix, no extra
+  code -- confirms this session's hypothesis it shared the same root
+  cause rather than being independent.
+- `ninja check-feme`: 3312/3315 -> 3313/3316, 0 regressions (+1 new
+  unit test).
+
+## How I found it (in case the pattern recurs)
+
+1. Completed the prior session's partial 118-case stage-suffix
+   breakdown (74/118 -> 118/118 categorized).
+2. Cross-checked the *full* sweep, not just the fail list, and found
+   the real signal: every failure has `iublimitlow` in its name, and
+   100% of *executed* `iublimitlow` cases fail (the `iublimithigh`
+   sibling is entirely `NotSupported` here, so it never exercises the
+   path -- easy to miss if you only look at the fail list).
+3. Read the CTS shader generation: confirmed an inline uniform block is
+   an ordinary SPIR-V `Uniform`-storage-class block, no special
+   lowering needed -- ruled out `SPIRVResourceLoweringPass` immediately
+   instead of guessing.
+4. Traced the write side (`Descriptor.cpp`) first, found it already
+   correct -- narrowed the search to the read/consumption side before
+   writing any code.
+5. Found the actual gap by reading `buildBoundResources`'s branch list
+   line by line, not by grepping for the bug.
+
+## Verification method (worth repeating)
+
+Before calling this "fixed," I ran the new unit test *without* the fix
+(via `git stash` on just the one file) to confirm it actually fails
+first, then restored the fix and confirmed it passes. Cheap (~2 min)
+insurance against a test that accidentally passes either way.
+
+## Suggested next steps
+
+1. **(~15 min, floated by 3 prior sessions, still not done)** Add an
+   `assert`/`opt -passes=verify` step after
+   `SPIRVUnmergeResourceLoadsPass` in debug builds. Every session that
+   touches that pass keeps finding a new found-by-CTS-not-by-review
+   bug in it (`L176`/`L177`/similar) -- this is now the single most
+   repeated "next step" across the whole log. Next session: just do
+   it, don't float it again.
+2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
+   -- still the largest not-yet-started cross-repo item, good for a
+   change-of-pace session. No longer blocked by anything from this
+   session.
+3. Run a broader `binding_model.shader_access.*` sweep (not just
+   `descriptorset_random`/`inline_uniform_blocks`) to check for any
+   other still-hiding inline-uniform-block-adjacent failures this
+   session's narrower sweeps might not have covered -- low priority,
+   both clusters this session touched are now fully green, but worth a
+   final confirmation pass before considering `E14`+`L180` fully
+   closed.
+4. **(~5 min)** No scratch left in `/tmp` from this session -- all
+   `l180_*` logs/qpa files and the stray root-level `TestResults.qpa`
+   deleted; everything worth keeping is already quoted in
+   `VulkanCTSReport.md`/this file.
