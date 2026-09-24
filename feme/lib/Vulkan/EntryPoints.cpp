@@ -1428,7 +1428,18 @@ void fillFeatures2Chain(void *pNext) {
       Features->storageBuffer16BitAccess = VK_FALSE;
       Features->uniformAndStorageBuffer16BitAccess = VK_FALSE;
       Features->storagePushConstant16 = VK_FALSE;
-      Features->storageInputOutput16 = VK_FALSE;
+      // (roadmap L98(a)) `storageInputOutput16` is real: a `float16_t`/
+      // `f16vec*` shader-stage-IO varying is widened to a genuine
+      // `float32` at the compiled wrapper's own stage-storage load/store
+      // boundary (`VertexWrapper.cpp` et al.'s `stageStorageLoadType`/
+      // `narrowStageStorageLoad`/`widenForStageStorageStore`), so every
+      // existing stage-storage consumer -- most importantly
+      // `Executor.cpp`'s `lerpVertex`, which interpolates any `Float`-
+      // typed varying as a real `float32` bit pattern -- needs no change
+      // and remains correct. This bit does *not* cover 16-bit *integer*
+      // storage I/O (`storageBuffer16BitAccess` et al. above, unrelated
+      // and still unimplemented).
+      Features->storageInputOutput16 = VK_TRUE;
       Features->multiview = VK_TRUE;
       Features->multiviewGeometryShader = VK_TRUE;
       Features->multiviewTessellationShader = VK_FALSE;
@@ -1454,7 +1465,15 @@ void fillFeatures2Chain(void *pNext) {
       Features->storagePushConstant8 = VK_FALSE;
       Features->shaderBufferInt64Atomics = VK_FALSE;
       Features->shaderSharedInt64Atomics = VK_FALSE;
-      Features->shaderFloat16 = VK_FALSE;
+      // (roadmap L98(a)) See `storageInputOutput16`'s own comment above
+      // for the stage-IO half of this feature; `half`-typed *arithmetic*
+      // (not just stage-IO) needs no dedicated FeMe support either --
+      // SPIR-V-to-LLVM conversion already maps `OpTypeFloat 16` to LLVM's
+      // own `half` type generically, and the CPU JIT's target lowering
+      // already legalizes `half` arithmetic (via software emulation where
+      // the host lacks native `_Float16` support), the same way it does
+      // for any other LLVM-native scalar type.
+      Features->shaderFloat16 = VK_TRUE;
       Features->shaderInt8 = VK_FALSE;
       // (roadmap L12b) `descriptorIndexing` itself, plus every
       // `shader*ArrayNonUniformIndexing` bit below, stay false: the spec's
