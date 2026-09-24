@@ -61,20 +61,28 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission,
-   `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`) -- now the clear next
-   item; largest not-yet-started, cross-repo, "issue outside FeMe" scoped work.
-   Needs its own isolated repro + self-contained commit touching only non-FeMe
-   files per standing instructions, since no current CTS/`offload-test-suite`
-   case exercises 4-independent-offset `Gather*` yet.
-2. **Don't re-float the `binding_model.shader_access.*` sweep again.** It is
-   done: 25,348 cases checked (19,639 exhaustive-prefix + 5,709 full-namespace
-   1/15 sample), 0 failures, full writeup in `VulkanCTSReport.md`'s 2026-09-24
-   "broad confirmation sweep completed" section. If a future session wants more
-   assurance, extending the fraction (e.g. `0,30` instead of `0,15`) is cheap; a
-   full exhaustive run is not, and isn't needed unless a future code change
-   specifically touches binding-model/descriptor-access lowering.
-3. **(~2 min)** No scratch left in `/tmp` -- `ctsrun_bm_full/`,
-   `ctsrun_bm_fraction/`, and the caselist-count dump files from this session
-   were all deleted after their findings were quoted above/in
-   `VulkanCTSReport.md`.
+1. **(~1-2 days, dedicated session)** Fix the two diagnosed-but-not-landed
+   upstream bugs properly, as their own standalone contributions: (a)
+   `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcoded `i32`
+   result type for `ConstantArray`/`ConstantStruct`/`ConstantDataArray` (should
+   use `COp->getType()`, matching the `ConstantVector` branch); (b)
+   `IRTranslator.cpp`'s generic intrinsic-call lowering path needs
+   aggregate-operand splitting support (a much bigger lift -- would need its own
+   design, likely mirroring `CallLowering`'s existing per-argument splitting
+   machinery). Neither blocks anything currently, so this is
+   optional/lower-priority, but both are real bugs that will bite the next
+   person who tries to pass an array/struct value to any SPIR-V target
+   intrinsic.
+2. **`L125(n)`** is still the standing next real-Vulkan-correctness item per the
+   last several sessions' logs (fix `isSupportedOffset` in
+   `SPIRVResourceLowering.cpp` to reject rather than silently truncate a
+   `4N`-wide flattened offset, then add the real `femeCpuImageGather*Offsets`
+   runtime entry points) -- this session's `L125(p)` work is independent of it
+   (different compile direction: `L125(p)` is LLVM-IR-to-SPIR-V for `dxc`,
+   `L125(n)` is SPIR-V-to-CPU-runtime for feme's own import path) and does not
+   unblock or change its scope.
+3. **(~5 min)** `/tmp` scratch from this session (`l125p_repro.ll`,
+   `l125p_repro2.ll`, `SPIRVEmitIntrinsics.cpp.bak`) already deleted. Two
+   unrelated leftover files from earlier sessions (`check_feme_l125g.log`,
+   `l125p_struct_repro.ll`, dated Sep 20/24) were left alone since they predate
+   this session and aren't mine to judge as safe to delete.
