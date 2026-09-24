@@ -1270,4 +1270,20 @@ TEST(SPIRVToLLVMTest, StructMemberVectorLaneCompositeInsertLegalizes) {
   EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
 }
 
+// (Roadmap L184) `spirv.VectorInsertDynamic` had no conversion pattern at
+// all (neither upstream nor in this file) before this session -- the
+// write-side counterpart of `VectorExtractDynamicPattern`, which *was*
+// already handled. Converts directly to `llvm.insertelement`.
+TEST(SPIRVToLLVMTest, VectorInsertDynamicLegalizesToInsertElement) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%v : vector<2xsi32>, %val : si32, %idx : si32) -> "
+      "vector<2xsi32> \"None\" { "
+      "%result = spirv.VectorInsertDynamic %val, %v[%idx] : "
+      "vector<2xsi32>, si32 "
+      "spirv.ReturnValue %result : vector<2xsi32> } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
+}
+
 } // namespace

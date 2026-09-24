@@ -3432,6 +3432,40 @@ public:
   }
 };
 
+/// Converts `spirv.VectorInsertDynamic` (make a copy of a vector with a
+/// single, dynamically selected, component replaced) directly to
+/// `llvm.insertelement` -- roadmap L184, the symmetric write-side
+/// counterpart of `VectorExtractDynamicPattern` above, which was itself
+/// already handled but had no matching insert-side pattern (neither
+/// upstream nor in this file). Surfaced by several real CTS cases
+/// (`dEQP-VK.spirv_assembly.instruction.compute.float16.{distance,length,
+/// opdot,opcompositeextract.struct16arr3}`) that build up a small local
+/// `vector<2xf16>` one dynamically-indexed lane at a time. All three
+/// operands convert 1:1: `spirv.VectorInsertDynamic`'s `vector`/
+/// `component`/`index` operand order and arity exactly match
+/// `llvm.insertelement`'s own `vector`/`value`/`position`, and its result
+/// type is always the (already-converted) vector's own type, so no
+/// further shape adjustment is needed here.
+class VectorInsertDynamicPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::VectorInsertDynamicOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::VectorInsertDynamicOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::VectorInsertDynamicOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertElementOp>(
+        Op, ResultType, Adaptor.getVector(), Adaptor.getComponent(),
+        Adaptor.getIndex());
+    return mlir::success();
+  }
+};
+
 /// Returns the type an `spirv.AccessChain`'s own *last* index applies to
 /// (i.e. the type reached after walking every index but the last one),
 /// re-deriving the same per-index walk `spirv::AccessChainOp`'s own
@@ -14385,7 +14419,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       StageIOGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
-      VectorExtractDynamicPattern, BoolVectorLaneAccessChainPattern,
+      VectorExtractDynamicPattern, VectorInsertDynamicPattern,
+      BoolVectorLaneAccessChainPattern,
       BoolVectorLaneLoadPattern, BoolVectorLaneStorePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
