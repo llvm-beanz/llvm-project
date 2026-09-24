@@ -174,12 +174,19 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // sweep (48,705 cases) before and after the flip confirms it: see
   // VulkanCTSReport.md's "L89f" section.
   //
-  // `SHUFFLE_RELATIVE_BIT` deliberately stays un-advertised: it is a
-  // separate bit gating `OpGroupNonUniformShuffleUp`/`ShuffleDown`
-  // (`subgroupShuffleUp`/`Down`), which have no conversion pattern at all.
+  // (roadmap L90) `SHUFFLE_RELATIVE_BIT` is now also safe to advertise:
+  // `OpGroupNonUniformShuffleUp`/`ShuffleDown` (`subgroupShuffleUp`/`Down`)
+  // -- exactly the two op types this bit gates, see `supportedCheck` in
+  // vktSubgroupsShuffleTests.cpp -- now have conversion patterns
+  // (`ShuffleUpConversionPattern`/`ShuffleDownConversionPattern` in
+  // SPIRVToLLVMPatterns.cpp, sharing `ShuffleXorConversionPattern`'s own
+  // "compute a target id, then `llvm.spv.wave.readlane` shuffle to it"
+  // shape). See VulkanCTSReport.md's "L90" section for the full CTS
+  // sweep confirming this.
   Info.SubgroupSupportedOperations =
       VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
-      VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+      VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+      VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;
 
   // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
   // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than

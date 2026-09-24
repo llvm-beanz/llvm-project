@@ -65,10 +65,11 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
               VK_SUBGROUP_FEATURE_BALLOT_BIT);
   EXPECT_TRUE(Info.SubgroupSupportedOperations &
               VK_SUBGROUP_FEATURE_SHUFFLE_BIT);
-  // `SHUFFLE_RELATIVE_BIT` is a separate bit, gating
-  // `subgroupShuffleUp`/`Down`, which have no conversion pattern yet.
-  EXPECT_FALSE(Info.SubgroupSupportedOperations &
-               VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT);
+  // (roadmap L90) `SHUFFLE_RELATIVE_BIT` -- a separate bit gating
+  // `subgroupShuffleUp`/`Down` -- now joins them too, now that
+  // `ShuffleUpConversionPattern`/`ShuffleDownConversionPattern` exist.
+  EXPECT_TRUE(Info.SubgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT);
 }
 
 TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
