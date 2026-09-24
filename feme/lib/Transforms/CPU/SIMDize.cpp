@@ -867,8 +867,10 @@ private:
                                                  IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
   void createWidenedVectorPHIStub(PHINode &PN);
+  void createWidenedAggregatePHIStub(PHINode &PN);
   void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
   void fillWidenedVectorPHIIncoming(PHINode &PN);
+  void fillWidenedAggregatePHIIncoming(PHINode &PN);
   void widenBuiltin(CallInst &CI, BuiltinCallKind Kind, IRBuilder<> &Builder);
   void widenWaveCall(CallInst &CI, WaveCallKind Kind, IRBuilder<> &Builder);
   void widenStageOp(CallInst &CI, feme::StageOpKind Kind, IRBuilder<> &Builder);
@@ -1063,11 +1065,11 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // confirmed by reducing that real failure down to its exact IR shape --
   // see `isSupportedAggregateLeafType`'s own comment for why a vector leaf
   // flattens to `N` component slots rather than one). An aggregate-typed
-  // `phi` never itself reaches this pass -- `feme::cpu::LinearizePass`
-  // always rewrites one into a `select` before this pass ever runs (see
-  // `Linearize.cpp`'s own per-`phi` merge-block rewrite) -- but that
-  // `select` is not always itself scalarized field-by-field first: when
-  // `mem2reg` promotes a whole locally-declared aggregate variable
+  // `phi` at a *divergent* branch's merge point never itself reaches this
+  // pass -- `feme::cpu::LinearizePass` always rewrites one into a `select`
+  // there (see `Linearize.cpp`'s own per-`phi` merge-block rewrite) -- but
+  // that `select` is not always itself scalarized field-by-field first:
+  // when `mem2reg` promotes a whole locally-declared aggregate variable
   // straight to a single aggregate-typed `phi` (rather than splitting it
   // into one scalar `phi` per field, e.g. because a matrix-typed local is
   // reassigned as one whole value along each arm of a divergent branch,
@@ -1075,7 +1077,23 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // failure down to its exact IR shape), `LinearizePass` produces a single
   // aggregate-typed `select` instead -- `widenAggregateSelect` decomposes
   // it exactly like `widenVectorSelect` does for a vector-typed one, one
-  // per-leaf `select` per flattened component.
+  // per-leaf `select` per flattened component. A *uniform*-branch merge
+  // point (`DiamondFlattener`'s own real-branch-preserving path, kept
+  // specifically so the untaken arm's side effects are never
+  // unconditionally materialized) is different: `LinearizePass`
+  // deliberately leaves every ordinary value `phi` there untouched,
+  // aggregate-typed ones included, and merges only its own live/side-
+  // effect masks -- so an aggregate-typed `phi` genuinely does reach this
+  // pass whenever the value it merges is itself divergent even though the
+  // branch choosing which arm produced it is not (confirmed by reducing a
+  // real `dEQP-VK.spirv_assembly.instruction.compute.float16.
+  // opcompositeinsert.struct16arr3` failure, roadmap `L185`, down to its
+  // exact IR shape: a uniform `switch`-like chain of diamonds building a
+  // `struct16arr3` value, each arm's own `insertvalue` chain itself
+  // depending on the divergent thread ID). `createWidenedAggregatePHIStub`/
+  // `fillWidenedAggregatePHIIncoming` decompose it exactly like
+  // `createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming` do for a
+  // vector-typed one, one per-leaf `phi` per flattened component.
   //
   // Verify every divergent vector or aggregate value matches one of these
   // producer shapes, and every use of one matches one of the consumer
@@ -1582,11 +1600,14 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 /// whole `FixedVectorType`, roadmap L27) and that every use of it is one
 /// of the supported consumer shapes (another `insertvalue`'s aggregate-
 /// base or inserted-value operand, an `extractvalue`'s aggregate operand,
-/// or a `select`'s true/false operand).
+/// a `select`'s true/false operand, or a `phi` -- roadmap L185, the
+/// aggregate analogue of the vector-typed check's own unconditional `phi`
+/// consumer acceptance further down this file, needed for exactly the
+/// same "uniform-branch merge point, divergent merged value" shape).
 bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
   bool IsSupportedProducer = false;
   if (isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I) ||
-      isa<SelectInst>(&I))
+      isa<SelectInst>(&I) || isa<PHINode>(&I))
     IsSupportedProducer = isSupportedAggregateLeafType(I.getType());
   else if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(&I))
     // Only a groupshared-address `cmpxchg` has widening support today
@@ -1606,9 +1627,9 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         "' has a divergent value '" + I.getName() +
         "' of aggregate type; component decomposition is not yet supported "
         "for this producer (only an insertvalue chain, a nested "
-        "sub-aggregate extractvalue, a select, or a cmpxchg, over a "
+        "sub-aggregate extractvalue, a select, a phi, or a cmpxchg, over a "
         "struct/array whose every leaf is a genuine scalar or a whole "
-        "fixed vector, is supported) (roadmap milestone 7/L21/L27 "
+        "fixed vector, is supported) (roadmap milestone 7/L21/L27/L185 "
         "deviation)");
     return false;
   }
@@ -1623,12 +1644,14 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
     if (auto *UserSel = dyn_cast<SelectInst>(U))
       if (UserSel->getTrueValue() == &I || UserSel->getFalseValue() == &I)
         continue;
+    if (isa<PHINode>(U))
+      continue;
     Ctx.emitError(
         "feme-cpu-simdize: function '" + OldF->getName() +
         "' has a divergent aggregate value '" + I.getName() +
-        "' used outside a supported insertvalue/extractvalue/select "
+        "' used outside a supported insertvalue/extractvalue/select/phi "
         "pattern; component decomposition is not yet supported for this "
-        "use (roadmap milestone 7/L21 deviation)");
+        "use (roadmap milestone 7/L21/L185 deviation)");
     return false;
   }
   return true;
@@ -1939,6 +1962,33 @@ void FunctionWidener::createWidenedVectorPHIStub(PHINode &PN) {
   ToErase.push_back(&PN);
 }
 
+void FunctionWidener::createWidenedAggregatePHIStub(PHINode &PN) {
+  // The aggregate analogue of `createWidenedVectorPHIStub` (roadmap
+  // L185): one `<W x leafScalarT>` `phi` stub per flattened leaf,
+  // recorded in `WidenedAggregateComponents` rather than a single
+  // (illegal, nested-aggregate) `Widened` entry -- see
+  // `checkAggregateValueSupported`'s file comment for why a divergent
+  // aggregate `phi` reaching this pass is a genuine, supported shape (a
+  // uniform-branch merge point whose merged value is itself divergent),
+  // not just a theoretical one. `flattenAggregateLeafScalarTypes` already
+  // expands a whole `FixedVectorType` leaf into its own `N` per-element
+  // scalar types (roadmap L27), so this needs no separate vector-leaf
+  // case the way `createWidenedVectorPHIStub` itself does not either.
+  SmallVector<Type *, 8> LeafTypes;
+  flattenAggregateLeafScalarTypes(PN.getType(), LeafTypes);
+  SmallVector<Value *, 8> Components;
+  for (unsigned I = 0, E = LeafTypes.size(); I != E; ++I) {
+    Type *WideElemTy = FixedVectorType::get(LeafTypes[I], WaveSize);
+    PHINode *NewPN = PHINode::Create(
+        WideElemTy, PN.getNumIncomingValues(),
+        PN.getName() + ".wide" + Twine(I));
+    NewPN->insertBefore(PN.getIterator());
+    Components.push_back(NewPN);
+  }
+  WidenedAggregateComponents[&PN] = std::move(Components);
+  ToErase.push_back(&PN);
+}
+
 void FunctionWidener::fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN) {
   // Filling every widened PHI's incoming values is deferred to its own pass
   // over the whole function (see `widen` below), run only after every
@@ -1968,6 +2018,24 @@ void FunctionWidener::fillWidenedVectorPHIIncoming(PHINode &PN) {
     IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
     SmallVector<Value *, 4> IncomingComponents =
         getVectorComponents(PN.getIncomingValue(I), IncomingBuilder);
+    for (unsigned C = 0, CE = Components.size(); C != CE; ++C)
+      cast<PHINode>(Components[C])
+          ->addIncoming(IncomingComponents[C], PN.getIncomingBlock(I));
+  }
+}
+
+void FunctionWidener::fillWidenedAggregatePHIIncoming(PHINode &PN) {
+  // The aggregate analogue of `fillWidenedVectorPHIIncoming` (roadmap
+  // L185), run in the same third pass and for the same reason: fill each
+  // per-leaf stub `phi` from the matching flattened component of the
+  // incoming value's own widened form, whether that incoming value is
+  // itself a decomposed divergent aggregate or a uniform one
+  // `getAggregateComponents` builds (via real `extractvalue`s) on demand.
+  SmallVector<Value *, 8> &Components = WidenedAggregateComponents[&PN];
+  for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
+    IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
+    SmallVector<Value *, 8> IncomingComponents =
+        getAggregateComponents(PN.getIncomingValue(I), IncomingBuilder);
     for (unsigned C = 0, CE = Components.size(); C != CE; ++C)
       cast<PHINode>(Components[C])
           ->addIncoming(IncomingComponents[C], PN.getIncomingBlock(I));
@@ -4857,6 +4925,8 @@ Function *FunctionWidener::widen() {
   for (PHINode *PN : DivergentPHIs) {
     if (PN->getType()->isVectorTy())
       createWidenedVectorPHIStub(*PN);
+    else if (PN->getType()->isAggregateType())
+      createWidenedAggregatePHIStub(*PN);
     else
       createWidenedPHIStub(*PN);
   }
@@ -4887,6 +4957,8 @@ Function *FunctionWidener::widen() {
   for (PHINode *PN : DivergentPHIs) {
     if (PN->getType()->isVectorTy())
       fillWidenedVectorPHIIncoming(*PN);
+    else if (PN->getType()->isAggregateType())
+      fillWidenedAggregatePHIIncoming(*PN);
     else
       fillWidenedPHIIncoming(*PN, *cast<PHINode>(Widened[PN]));
   }
