@@ -12539,3 +12539,88 @@ No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed for this row (internal-lowering/legalization bugfixes across
 already-enabled `shaderFloat16` plumbing, not a feature/extension
 support-status change).
+
+## 2026-09-26: L185 fixed -- aggregate-typed `phi` at a uniform-branch merge point now widens correctly (`opcompositeinsert.struct16arr3` now Pass); corrects the prior session's `LinearizePass` hypothesis
+
+### Root cause (not where the prior session expected)
+
+`opcompositeinsert.struct16arr3` builds a `struct16arr3`-shaped value
+(`{half, [2 x i8], [3 x <2 x half>]}[3]`) through a chain of `insertvalue`s
+inside a *uniform* switch-like diamond chain (`DiamondFlattener`'s
+real-branch-preserving path, kept specifically so an untaken arm's own
+side effects are never unconditionally materialized), then merges the two
+arms' whole aggregate values with a genuine, un-rewritten `phi` at the
+diamond's reconvergence block. `feme::cpu::Linearize.cpp`'s
+`DiamondFlattener` was already behaving correctly and by design: it only
+ever rewrites a merge-point `phi` into a `select` at a *divergent* branch;
+at a *uniform* one it deliberately leaves every ordinary value `phi`
+untouched (only its own live/side-effect masks get a real `phi` merge),
+exactly as it already does for a scalar or vector-typed merged value. The
+prior session's own hypothesis -- that the fix belonged in
+`Linearize.cpp` -- was wrong.
+
+The actual gap was in `feme/lib/Transforms/CPU/SIMDize.cpp`:
+`checkAggregateValueSupported` never accepted a `phi` as either a
+producer or a consumer shape (unlike the pre-existing vector-typed
+decomposition path a few hundred lines below it in the same file, which
+already accepts a `phi` on both sides -- see `DecomposesVectorPHIAcross
+UniformDiamond`'s own precedent), and no `createWidenedAggregatePHIStub`/
+`fillWidenedAggregatePHIIncoming` pair existed at all, unlike the
+already-present `createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming`.
+
+### How the real IR shape was captured
+
+Reproducing this from a hand-authored HLSL/SPIR-V repro was avoided in
+favor of a new debug hook: `FEME_DUMP_IR_PRESIMD`, added to
+`feme/lib/Target/CPU/Pipeline.cpp` alongside the pre-existing
+`FEME_DUMP_IR_PRENORM`/`FEME_DUMP_IR`, prints the module immediately
+after `feme::cpu::LinearizePass` finishes but before `feme::cpu::
+SIMDizePass` runs -- the exact shape `SIMDizePass` itself inspects,
+filling the one gap neither pre-existing dump hook covered. Run directly
+against the real failing `deqp-vk` case (not through `offloader`/
+`OffloadTest`, which this CTS case never goes through), it captured the
+exact pre-widening IR without any hand-reconstruction risk. A temporary
+`llvm::errs()` print at `checkAggregateValueSupported`'s own diagnostic
+emission site (removed once the shape was understood) then named the
+exact producer (`insertvalue`)/consumer (`phi`) pair triggering the
+rejection.
+
+### The fix
+
+- `feme/lib/Transforms/CPU/SIMDize.cpp`: added `PHINode` to
+  `checkAggregateValueSupported`'s producer-shape check (leaf-typed the
+  same way every other producer shape is) and to its consumer-shape
+  check (accepted unconditionally, mirroring the vector-typed path);
+  added `createWidenedAggregatePHIStub`/`fillWidenedAggregatePHIIncoming`,
+  the aggregate analogues of `createWidenedVectorPHIStub`/
+  `fillWidenedVectorPHIIncoming`, dispatched from the same two `widen()`
+  passes that already dispatch on vector-vs-scalar `phi` type; corrected
+  the file's own now-inaccurate "an aggregate-typed `phi` never itself
+  reaches this pass" comment to describe the real (divergent-branch-only)
+  scope of that invariant.
+- `feme/lib/Target/CPU/Pipeline.cpp` / `feme/.instructions.md`: added the
+  `FEME_DUMP_IR_PRESIMD` debug hook and its recipe, for any future
+  `feme-cpu-simdize`-specific triage.
+
+### CTS verification
+
+`dEQP-VK.spirv_assembly.instruction.compute.float16.opcompositeinsert.
+struct16arr3` (no `arithmetic_2` prefix, despite resembling `L184`'s own
+case names -- confirmed via `deqp-vk --deqp-runmode=txt-caselist`) now
+**Pass** (previously `VK_ERROR_INITIALIZATION_FAILED` at
+`vkCreateComputePipelines`, from the `feme-cpu-simdize` diagnostic
+described above).
+
+Full `check-feme`: 3337 tests discovered, **3334 passed, 3 pre-existing
+Unsupported, 0 Failed** (up from the pre-session baseline of 3333/3336,
+confirming the 1 new unit test runs clean with zero regressions).
+
+### New unit test
+
+- `feme/unittests/Transforms/CPU/SIMDizeTest.cpp`:
+  `DecomposesAggregatePHIAcrossUniformDiamond` (the aggregate analogue of
+  the pre-existing `DecomposesVectorPHIAcrossUniformDiamond`).
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed for this row (an internal `feme-cpu-simdize` widening-completeness
+fix, not a feature/extension support-status change).
