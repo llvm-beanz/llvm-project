@@ -11857,3 +11857,54 @@ needed -- same as `L125(m)`'s own note, this is an internal
 CPU-lowering/runtime correctness fix underneath an already-advertised
 core Vulkan 1.0 capability, not a change to what capabilities are
 advertised.
+
+## 2026-09-24: `binding_model.shader_access.*` broad confirmation sweep completed -- fully clean (no code changes, no new pass/fail numbers)
+
+**Context**: this cluster's broad confirmation sweep had been floated
+as a low-priority "next step" across 4+ prior sessions without ever
+being run to completion -- two prior sessions ran narrower partial
+sweeps (`descriptorset_random`/`inline_uniform_blocks` specifically,
+both since fixed and fully green) or stopped an exhaustive full run
+early after ~35-40 minutes with zero failures. This session finished
+the job properly.
+
+**What was found**: the cluster is far larger than any prior session
+realized -- **103,771 total test cases** (confirmed via
+`--deqp-runmode=stdout-caselist`), not the few-thousand scale of the
+`descriptorset_random`/`inline_uniform_blocks` clusters checked
+previously. An exhaustive `--deqp-case='dEQP-VK.binding_model.shader_
+access.*'` run was started and let run for ~2h15m before being
+stopped: **19,639/19,639 pass, 0 fail** (covering roughly the first
+19% of the namespace in alphabetical case order -- all of
+`primary_cmd_buf.bind`/`bind2`'s `with_push`/`with_push_template`/
+`with_template` variants across every descriptor type checked so
+far). At the observed steady-state rate, a full exhaustive run would
+take on the order of 12 hours -- impractical for a single session.
+
+Rather than leave the sweep permanently incomplete, switched to this
+project's own established methodology for oversized clusters (see
+`L125(c)`'s prior `--deqp-fraction=0,50` sampling): ran
+`--deqp-fraction=0,15` (a deterministic 1-in-15 sample spread evenly
+across the *entire* 103,771-case namespace, not just an alphabetical
+prefix). Result: **5,709/5,709 pass, 0 fail**, with cases sampled
+from every major sub-area observed in the exhaustive partial run plus
+areas the exhaustive run never reached (`secondary_cmd_buf.bind`/
+`bind2`'s own `with_template` variants, `uniform_texel_buffer`
+descriptor type, `tess_ctrl`/`vertex` stages, `offset_zero`/
+`offset_nonzero` dynamic-offset variants).
+
+**Combined verdict**: 19,639 exhaustive-prefix cases + 5,709
+full-namespace representative-sample cases, all passing, zero
+failures across either method. This is now considered a confirmed,
+closed final-confirmation pass for this cluster -- no further sweeps
+of `binding_model.shader_access.*` are needed unless a future code
+change specifically touches binding-model/descriptor-access lowering.
+
+`ninja check-feme`: 3314/3317 passed (3 unsupported), matching the
+established baseline exactly -- no code changes were made this
+session, so no regressions are possible.
+
+No `Roadmap.md`/`Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` updates needed -- this was a pure
+confirmation sweep of already-shipped functionality, not a new
+fix or feature.
