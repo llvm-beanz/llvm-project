@@ -3837,6 +3837,52 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(cast<ConstantInt>(Gather->getArgOperand(10))->getSExtValue(), -1);
 }
 
+TEST(SPIRVResourceLoweringTest,
+     LowersGatherConstOffsetsToImageGatherOffsets) {
+  // Roadmap L125(n): a `spv_resource_gather` carrying the 8-wide
+  // flattened `ConstOffsets` shape `ImageGatherPattern` (roadmap L125(m))
+  // produces -- 4 independent `(X, Y)` pairs, one per gathered corner --
+  // must dispatch to `feme.cpu.image.gather.2d.offsets.v4f32`, threading
+  // all 8 lanes through independently, unlike
+  // `LowersGatherConstOffsetToImageGatherWithOffset`'s own 2-wide ordinary
+  // `ConstOffset` case just above, which shares one `(offset_x,
+  // offset_y)` pair across every corner.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %coord, i32 %component) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.gather(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord,
+          i32 %component,
+          <8 x i32> <i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7, i32 8>)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Gather =
+      findImageCall(*F, "feme.cpu.image.gather.2d.offsets.v4f32");
+  ASSERT_TRUE(Gather);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, component, offset_x0, offset_y0, offset_x1, offset_y1,
+  //  offset_x2, offset_y2, offset_x3, offset_y3, mask).
+  ASSERT_EQ(Gather->arg_size(), 18u);
+  for (unsigned I = 0; I != 8; ++I)
+    EXPECT_EQ(cast<ConstantInt>(Gather->getArgOperand(9 + I))->getSExtValue(),
+              I + 1);
+}
+
 TEST(SPIRVResourceLoweringTest, LowersGatherCubeToImageGatherCube) {
   // Roadmap H124r: the `Gather` counterpart of
   // `LowersGatherCmpCubeToImageGatherCmpCube` above -- same direction-

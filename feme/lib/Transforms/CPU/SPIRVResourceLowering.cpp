@@ -1416,7 +1416,38 @@ bool isSupportedOffset(const Value *Offset, ImageShape Shape,
     return Offset->getType()->isIntegerTy(32) || isZeroOffset(Offset);
   const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
   unsigned MinWidth = IsPlain3D ? 3 : 2;
+  // Roadmap L125(n): upper-bounded at 4 (the widest a real, legitimate
+  // caller here ever produces -- a depth-comparison sample's own
+  // `Dref`-widened `Array2D` offset, per this function's own doc above)
+  // so this generic path can never silently accept
+  // `isGatherOffsetsVector`'s own 8-wide `ConstOffsets`-flattened gather
+  // offset as if it were an ordinary shared `ConstOffset`. Before this
+  // bound existed, a real CTS case
+  // (`dEQP-VK.glsl.texture_gather.graphics.offsets.*`) found this exact
+  // gap: every one of a `ConstOffsets` gather's 4 independent per-corner
+  // offsets silently collapsed into whichever one happened to occupy
+  // lanes 0/1, rather than being rejected or handled correctly.
   return VecTy && VecTy->getNumElements() >= MinWidth &&
+         VecTy->getNumElements() <= 4 &&
+         VecTy->getElementType()->isIntegerTy(32);
+}
+
+/// Whether \p Offset is the flattened `ConstOffsets` (plural) per-corner
+/// gather offset vector `ImageGatherPattern` produces (roadmap L125(m)):
+/// a compile-time-constant, 8-wide `<8 x i32>` vector -- 4 independent
+/// 2-component `(X, Y)` texel offsets concatenated, one per gathered
+/// corner (HLSL's `Gather*(sampler, coord, offset0..offset3)` overload,
+/// GLSL's `textureGatherOffsets`). SPIR-V's own `ConstOffsets` operand
+/// dimensionality tracks the image's real (non-arrayed) dimension count
+/// the same way `ConstOffset`'s does (`isSupportedOffset`'s own doc,
+/// above) -- always 2 here, since a gather's offsets are only ever
+/// legal against `Plain2D`/`Array2D` (never `Plain1D`/`Array1D`/
+/// `Plain3D`, and SPIR-V forbids any `ConstOffset*` against `Dim::Cube`
+/// outright) -- so this is always exactly 8 wide (`4 * 2`), never a
+/// per-shape-varying width the way `isSupportedOffset`'s own MinWidth is.
+bool isGatherOffsetsVector(const Value *Offset) {
+  const auto *VecTy = dyn_cast<FixedVectorType>(Offset->getType());
+  return isa<Constant>(Offset) && VecTy && VecTy->getNumElements() == 8 &&
          VecTy->getElementType()->isIntegerTy(32);
 }
 
@@ -1935,7 +1966,19 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // al.) that returns `<4 x i32>` instead of `<4 x float>` -- so the
     // result-type check now accepts either width, keyed off `IsInteger`
     // itself (SPIR-V's own sampled-type already determines which of the
-    // two the op produces, so there is no ambiguity to resolve).
+    // two the op produces, so there is no ambiguity to resolve). Roadmap
+    // L125(n): `isGatherOffsetsVector` now also accepts the flattened
+    // `ConstOffsets` (plural, 4-independent-offset) shape
+    // `ImageGatherPattern` produces (roadmap L125(m)) as an alternative
+    // to `isSupportedOffset`'s own single-shared-offset case, for
+    // `Plain2D`/`Array2D` only (never `Cube`, which forbids any
+    // `ConstOffset*` operand outright) -- `lowerImageAccesses`'s own
+    // matching branch below dispatches to a distinct `*Offsets` runtime
+    // entry-point family that applies each of the 4 offsets to its own
+    // gathered corner, rather than `isSupportedOffset`'s generic path
+    // (now upper-bounded to reject this exact 8-wide shape, see its own
+    // updated comment) silently reusing just the first offset for every
+    // corner.
     if (isGatherIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
           Shape != ImageShape::Cube)
@@ -1943,11 +1986,19 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                       // (roadmap L7g).
       if (CI->getArgOperand(0) != &Handle)
         return false;
+      // Roadmap L125(n): `Cube` never supports any `ConstOffset*` at all
+      // (SPIR-V forbids it outright), so `isGatherOffsetsVector`'s own
+      // 8-wide shape is only ever checked for `Plain2D`/`Array2D`; a
+      // `Cube` gather always falls through to `isSupportedOffset`'s own
+      // unconditional zero-offset case, exactly as before this row.
+      Value *GatherOffset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
+      bool HasOffsetsVector =
+          Shape != ImageShape::Cube && isGatherOffsetsVector(GatherOffset);
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isIntegerTy() ||
-          !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
-                             Shape, /*AllowArray2D=*/true,
-                             /*AllowPlain1DArray1D=*/false) ||
+          !(HasOffsetsVector ||
+            isSupportedOffset(GatherOffset, Shape, /*AllowArray2D=*/true,
+                              /*AllowPlain1DArray1D=*/false)) ||
           (IsInteger ? !isV4I32(CI->getType()) : !isV4F32(CI->getType())))
         return false;
       continue;
@@ -4425,7 +4476,16 @@ void lowerImageAccesses(
       // (`hasOnlySupportedImageUses` already ties that result width to
       // the image's own integer-sampled-type-ness, so `isV4I32` is a
       // reliable, self-contained test here without needing `IsInteger`
-      // itself threaded down into this loop).
+      // itself threaded down into this loop). Roadmap L125(n): when
+      // `hasOnlySupportedImageUses`'s own `isGatherOffsetsVector` check
+      // accepted an 8-wide flattened `ConstOffsets` operand instead of
+      // an ordinary shared offset, this dispatches to
+      // `createGather2DOffsets`/`createGatherArray2DOffsets` (and their
+      // `*I32` counterparts) instead, extracting all 8 lanes (4
+      // independent `(X, Y)` pairs, one per gathered corner) rather than
+      // just lanes 0/1 -- `Cube` is excluded from this check entirely
+      // (`hasOnlySupportedImageUses` never sets `HasOffsetsVector` for
+      // it), so this branch only ever runs for `Plain2D`/`Array2D`.
       if (isGatherIntrinsic(*CI)) {
         if (CI->getArgOperand(0) != Handle)
           continue;
@@ -4449,31 +4509,71 @@ void lowerImageAccesses(
                                            Mask, CI->getName());
         } else {
           Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
-          Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
-          Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-          if (Shape == ImageShape::Array2D) {
-            Value *ArrayLayer =
-                Builder.CreateExtractElement(Coord, uint64_t{2});
-            NewCall =
-                ResultIsInteger
-                    ? createGatherArray2DI32(Builder, Env, ImageIndex,
-                                            SamplerIndex, C0, C1, ArrayLayer,
-                                            Component, OffsetX, OffsetY, Mask,
-                                            CI->getName())
-                    : createGatherArray2D(Builder, Env, ImageIndex,
-                                         SamplerIndex, C0, C1, ArrayLayer,
-                                         Component, OffsetX, OffsetY, Mask,
-                                         CI->getName());
+          if (isGatherOffsetsVector(Offset)) {
+            Value *OffsetLanes[8];
+            for (unsigned I = 0; I != 8; ++I)
+              OffsetLanes[I] =
+                  Builder.CreateExtractElement(Offset, uint64_t{I});
+            if (Shape == ImageShape::Array2D) {
+              Value *ArrayLayer =
+                  Builder.CreateExtractElement(Coord, uint64_t{2});
+              NewCall =
+                  ResultIsInteger
+                      ? createGatherArray2DOffsetsI32(
+                            Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                            ArrayLayer, Component, OffsetLanes[0],
+                            OffsetLanes[1], OffsetLanes[2], OffsetLanes[3],
+                            OffsetLanes[4], OffsetLanes[5], OffsetLanes[6],
+                            OffsetLanes[7], Mask, CI->getName())
+                      : createGatherArray2DOffsets(
+                            Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                            ArrayLayer, Component, OffsetLanes[0],
+                            OffsetLanes[1], OffsetLanes[2], OffsetLanes[3],
+                            OffsetLanes[4], OffsetLanes[5], OffsetLanes[6],
+                            OffsetLanes[7], Mask, CI->getName());
+            } else {
+              NewCall =
+                  ResultIsInteger
+                      ? createGather2DOffsetsI32(
+                            Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                            Component, OffsetLanes[0], OffsetLanes[1],
+                            OffsetLanes[2], OffsetLanes[3], OffsetLanes[4],
+                            OffsetLanes[5], OffsetLanes[6], OffsetLanes[7],
+                            Mask, CI->getName())
+                      : createGather2DOffsets(
+                            Builder, Env, ImageIndex, SamplerIndex, C0, C1,
+                            Component, OffsetLanes[0], OffsetLanes[1],
+                            OffsetLanes[2], OffsetLanes[3], OffsetLanes[4],
+                            OffsetLanes[5], OffsetLanes[6], OffsetLanes[7],
+                            Mask, CI->getName());
+            }
           } else {
-            NewCall = ResultIsInteger
-                          ? createGather2DI32(Builder, Env, ImageIndex,
-                                             SamplerIndex, C0, C1, Component,
-                                             OffsetX, OffsetY, Mask,
-                                             CI->getName())
-                          : createGather2D(Builder, Env, ImageIndex,
-                                          SamplerIndex, C0, C1, Component,
-                                          OffsetX, OffsetY, Mask,
-                                          CI->getName());
+            Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+            Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+            if (Shape == ImageShape::Array2D) {
+              Value *ArrayLayer =
+                  Builder.CreateExtractElement(Coord, uint64_t{2});
+              NewCall =
+                  ResultIsInteger
+                      ? createGatherArray2DI32(Builder, Env, ImageIndex,
+                                              SamplerIndex, C0, C1, ArrayLayer,
+                                              Component, OffsetX, OffsetY, Mask,
+                                              CI->getName())
+                      : createGatherArray2D(Builder, Env, ImageIndex,
+                                           SamplerIndex, C0, C1, ArrayLayer,
+                                           Component, OffsetX, OffsetY, Mask,
+                                           CI->getName());
+            } else {
+              NewCall = ResultIsInteger
+                            ? createGather2DI32(Builder, Env, ImageIndex,
+                                               SamplerIndex, C0, C1, Component,
+                                               OffsetX, OffsetY, Mask,
+                                               CI->getName())
+                            : createGather2D(Builder, Env, ImageIndex,
+                                            SamplerIndex, C0, C1, Component,
+                                            OffsetX, OffsetY, Mask,
+                                            CI->getName());
+            }
           }
         }
         CI->replaceAllUsesWith(NewCall);
