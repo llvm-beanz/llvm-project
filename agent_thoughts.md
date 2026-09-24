@@ -101048,3 +101048,44 @@ This is an upstream-LLVM-only change (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`,
 1. **(~1-2 days, dedicated session)** Fix the two diagnosed-but-not-landed upstream bugs properly, as their own standalone contributions: (a) `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcoded `i32` result type for `ConstantArray`/`ConstantStruct`/`ConstantDataArray` (should use `COp->getType()`, matching the `ConstantVector` branch); (b) `IRTranslator.cpp`'s generic intrinsic-call lowering path needs aggregate-operand splitting support (a much bigger lift -- would need its own design, likely mirroring `CallLowering`'s existing per-argument splitting machinery). Neither blocks anything currently, so this is optional/lower-priority, but both are real bugs that will bite the next person who tries to pass an array/struct value to any SPIR-V target intrinsic.
 2. **`L125(n)`** is still the standing next real-Vulkan-correctness item per the last several sessions' logs (fix `isSupportedOffset` in `SPIRVResourceLowering.cpp` to reject rather than silently truncate a `4N`-wide flattened offset, then add the real `femeCpuImageGather*Offsets` runtime entry points) -- this session's `L125(p)` work is independent of it (different compile direction: `L125(p)` is LLVM-IR-to-SPIR-V for `dxc`, `L125(n)` is SPIR-V-to-CPU-runtime for feme's own import path) and does not unblock or change its scope.
 3. **(~5 min)** `/tmp` scratch from this session (`l125p_repro.ll`, `l125p_repro2.ll`, `SPIRVEmitIntrinsics.cpp.bak`) already deleted. Two unrelated leftover files from earlier sessions (`check_feme_l125g.log`, `l125p_struct_repro.ll`, dated Sep 20/24) were left alone since they predate this session and aren't mine to judge as safe to delete.
+
+# Session: Bug A misdiagnosis correction -- L125(p)'s "Bug A" isn't a bug, L125(l) struck, Bug B re-scoped as L181
+
+**Both of this session's assigned "next steps" turned out stale/unsafe. No FeMe code changed. Key output: a correction to the roadmap, not new functionality.** `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at session start.
+
+## Step 1 of 2: checked `L125(n)` -- already done
+
+The prompt said "fix `isSupportedOffset` ... still the standing next real Vulkan-correctness item." It wasn't. `git log` on `SPIRVResourceLowering.cpp` showed commits `13c2f4c04012`/`056de3a845e8` already landed this exact fix, `Roadmap.md` already has it struck through, `VulkanCTSReport.md` already has 98/98 + 36/36 passing recorded. No action needed. (Second time in recent sessions a prompt's "next steps" text was stale vs. actual repo state -- worth knowing the handoff text can lag reality.)
+
+## Step 2 of 2: attempted "Bug A" fix -- broke 136 tests, root-caused why, reverted
+
+**What "Bug A" claimed**: `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcodes `i32` as the result type for `ConstantArray`/`ConstantStruct`/`ConstantDataArray` placeholders, when it should use the constant's real type (like the `ConstantVector` branch already does).
+
+**What actually happened when fixed in isolation**: `ninja llc` succeeded, but the full `llvm/test/CodeGen/SPIRV` lit suite went from 1300/1303 passing to 1164/1303 (136 new failures). First failure (`select-composite-constant.ll`): `Invalid operands for select instruction! %v = select i1 %c, [2 x float] %2, i32 %4` -- a real LLVM Verifier failure, not a test artifact.
+
+**Root cause**: this isn't an independent bug. It's one piece of a deliberate, consistent, file-wide convention: every true LLVM aggregate (array/struct) constant that needs an intrinsic-call placeholder gets an artificial scalar `i32` LLVM-IR-level type, with the *real* SPIR-V type tracked separately in the `AggrConstTypes` map. Found the smoking gun: `lowerUndefOrPoison`, right next to the code I "fixed," has an explicit comment: *"Aggregates use an i32-result placeholder with the real type kept in AggrConstTypes."* There's also a shared `isAggrConstForceInt32()` helper codifying the same rule at the `spv_init_global` call site. **Why the workaround exists**: `IRTranslator.cpp`'s `translateIntrinsic()` (the generic target-intrinsic-call lowering path) cannot handle aggregate-typed SSA operands at all -- `getOrCreateVRegs` returns >1 register for any array/struct value, and the code just bails: `if (VRegs.size() > 1) return false;`. Keeping the placeholder's IR-level type as scalar `i32` sidesteps this entirely. `ConstantVector`'s branch is correctly exempt because a vector isn't an LLVM `AggregateType()` -- it never hits this bailout in the first place. My 3-branch partial fix broke IR validity because it made those 3 branches "correctly" typed while every sibling placeholder (undef/poison, `ConstantAggregateZero`) stayed i32 -- they used to type-match each other by shared wrongness; the partial fix broke that accidental consistency.
+
+Reverted (`git checkout --`), rebuilt `llc`, confirmed the lit suite is back to the clean 1300/1303 baseline. Net code diff for this whole investigation: **zero**.
+
+## What actually got committed this session (roadmap only, 2 commits)
+
+1. Struck through `L125(l)` -- the original parent/triage row `L125(m)`/`L125(n)`/`L125(p)` were split from. All 3 children are done; this row was pure superseded triage.
+2. Corrected `L125(p)`'s row text to say "Bug A" was misdiagnosed (documented the 136-test regression and root cause above), and filed the real remaining item -- the `IRTranslator.cpp` generic-intrinsic aggregate-operand gap ("Bug B") -- as its **own new row, `L125` is fully exhausted (a-z all used already, checked via grep), so this is a new top-level row, `L181`, not a deeper-nested letter, per the standing one-level-deep rule.
+
+`L181` is marked **not started, P4**: it's confirmed to be generic GlobalISel infrastructure (not SPIR-V-specific -- no target hook exists at this call site for any target), a real fix needs a new cross-target MI-operand-encoding design decision (most likely mirroring `CallLowering`'s existing per-argument register-array splitting), and there is zero existing test coverage to validate against since nothing today can produce this IR shape (the i32-placeholder workaround is universal). This is upstream-RFC-level work, not a patch. No current FeMe code depends on it -- `L125(p)`'s own `int_spv_resource_gather_offsets` intrinsic was deliberately designed with 4 separate ordinary vector operands specifically to avoid ever needing this.
+
+## Why no CTS run / VulkanCTSReport.md update this session
+
+No FeMe code changed (the only code edit was to upstream `SPIRVEmitIntrinsics.cpp`, and it was fully reverted). Nothing new to exercise through the Vulkan CTS. Stating this explicitly per standing instructions, rather than silently skipping it.
+
+## Verification performed
+
+1. Full `llvm/test/CodeGen/SPIRV` lit suite (1303 tests): 1300/1303 baseline -> 1164/1303 after the speculative fix -> 1300/1303 confirmed after revert.
+2. `ninja check-feme` after the roadmap-only commits: 3314/3317 pass, 3 unsupported, 0 failures -- confirms the doc-only changes didn't disturb anything (expected, but checked rather than assumed).
+3. `git diff --stat` on `SPIRVEmitIntrinsics.cpp` after revert: no output (clean).
+
+## Suggested next steps
+
+1. **(~5 min, do this first)** None of `L181`'s scope should be attempted piecemeal again -- if a future session is tempted to "just fix the i32 hardcoding," re-read this section first. It looks like an easy 3-line fix and isn't; the real fix is the IRTranslator aggregate-operand gap, which is upstream-RFC-scale.
+2. Scan `Roadmap.md`'s remaining not-yet-struck rows for a genuinely open, well-scoped item (candidates spotted but not yet individually inspected: `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L130`, `L131`, `L147`, `L154`, plus assorted `R`/`V`/`W`-prefixed rows) -- this session didn't get to individually vet any of these since both prompted items turned out to be already-resolved-or-unsafe, and correcting the record on them was the actual substantive work this session did.
+3. **(~1-2 days, dedicated session, not urgent)** If `L181` is ever picked up: needs its own repro corpus built from scratch (none exists today), and should probably start as an upstream LLVM RFC/discussion before any patch, given the cross-target blast radius.
