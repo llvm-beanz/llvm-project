@@ -61,19 +61,21 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~5 min, do this first)** None of `L181`'s scope should be attempted
-   piecemeal again -- if a future session is tempted to "just fix the i32
-   hardcoding," re-read this section first. It looks like an easy 3-line fix and
-   isn't; the real fix is the IRTranslator aggregate-operand gap, which is
-   upstream-RFC-scale.
-2. Scan `Roadmap.md`'s remaining not-yet-struck rows for a genuinely open,
-   well-scoped item (candidates spotted but not yet individually inspected:
-   `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
-   `L126(a)`, `L130`, `L131`, `L147`, `L154`, plus assorted `R`/`V`/`W`-prefixed
-   rows) -- this session didn't get to individually vet any of these since both
-   prompted items turned out to be already-resolved-or-unsafe, and correcting
-   the record on them was the actual substantive work this session did.
-3. **(~1-2 days, dedicated session, not urgent)** If `L181` is ever picked up:
-   needs its own repro corpus built from scratch (none exists today), and should
-   probably start as an upstream LLVM RFC/discussion before any patch, given the
-   cross-target blast radius.
+1. **(~1-2 hrs, well-scoped, recommend starting here)** `L131`: **Fix residual
+   graphics push-constant range/indexing cases.** 6 failures in
+   `pipeline.monolithic.push_constant`, all dynamic-index/range-size variants
+   (53 pass, 6 NotSupported already; the original crash this row used to also
+   cover, `count_1_shader_vert_frag_command2`, is already fixed by `L96`, so
+   this is narrowed to exactly the 6 ordinary mismatches). Files already
+   pinpointed by a prior session's scoping:
+   `feme/lib/Transforms/CPU/SPIRVPushConstantLowering.cpp`,
+   `feme/lib/Vulkan/GraphicsPipeline.cpp`. Small, concrete, self-contained -- a
+   good next pickup, same shape as `L154` was.
+2. If `L131` gets picked up and its own investigation turns up something bigger
+   than expected (as several `L1xx` rows have), scope the remainder as a new
+   top-level row rather than nesting a letter under `L131` -- keep following the
+   one-lowercase-letter-deep rule.
+3. **(~5 min)** `/tmp/ctsrun_l154/` (this session's own scratch: `caselist.txt`,
+   `results.qpa`, `results_full.qpa`) can be deleted -- both runs' findings are
+   already fully quoted in `VulkanCTSReport.md`'s new section above; nothing in
+   it is referenced from anywhere else.
