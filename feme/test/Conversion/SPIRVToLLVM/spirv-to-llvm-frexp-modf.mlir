@@ -1,7 +1,8 @@
 // RUN: feme-opt --feme-convert-spirv-to-llvm --split-input-file %s | FileCheck %s
 
-// Checks that `spirv.GL.FrexpStruct`/`spirv.GL.ModfStruct`/`spirv.GL.Modf`
-// (GLSL.std.450's `FrexpStruct`/`ModfStruct`/`Modf`, roadmap L120) convert
+// Checks that `spirv.GL.FrexpStruct`/`spirv.GL.ModfStruct`/`spirv.GL.Modf`/
+// `spirv.GL.Frexp` (GLSL.std.450's `FrexpStruct`/`ModfStruct`/`Modf`/`Frexp`,
+// roadmap L120/L184) convert
 // through this pass's own pipeline: an entry-point-less function is enough
 // here, since these ops' own conversion patterns
 // (`mlir::populateSPIRVToLLVMConversionPatterns`) don't depend on any of the
@@ -66,3 +67,28 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %0 : f32
   }
 }
+
+// -----
+
+// `Frexp` (unlike `FrexpStruct`) writes its exponent through a genuine
+// pointer operand rather than packing both parts into a struct result, so
+// it converts the same way except the exponent is extracted out of the
+// intrinsic's own tight struct result and stored through the
+// (already-converted, plain LLVM) pointer instead of being returned as
+// part of a struct.
+
+// CHECK-LABEL: llvm.func @frexp
+// CHECK: %[[PTR:.*]] = llvm.alloca {{.*}} x i32
+// CHECK: %[[STRUCT:.*]] = llvm.intr.frexp(%arg0) : (f32) -> !llvm.struct<(f32, i32)>
+// CHECK: %[[SIGNIFICAND:.*]] = llvm.extractvalue %[[STRUCT]][0] : !llvm.struct<(f32, i32)>
+// CHECK: %[[EXPONENT:.*]] = llvm.extractvalue %[[STRUCT]][1] : !llvm.struct<(f32, i32)>
+// CHECK: llvm.store %[[EXPONENT]], %[[PTR]]
+// CHECK: llvm.return %[[SIGNIFICAND]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @frexp(%arg0 : f32) -> f32 "None" {
+    %ptr = spirv.Variable : !spirv.ptr<i32, Function>
+    %0 = spirv.GL.Frexp %arg0, %ptr : f32, !spirv.ptr<i32, Function> -> f32
+    spirv.ReturnValue %0 : f32
+  }
+}
+
