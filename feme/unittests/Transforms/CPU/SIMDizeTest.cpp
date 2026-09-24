@@ -1140,6 +1140,49 @@ TEST(SIMDizeTest, WidensScalarToVectorOfFloatBitCast) {
   EXPECT_EQ(HalfBitCastCount, 2u);
 }
 
+TEST(SIMDizeTest, WidensVectorOfFloatToScalarBitCast) {
+  // (Roadmap L184) `bitcast <2 x half> %v to i32` -- the exact inverse of
+  // `WidensScalarToVectorOfFloatBitCast` above, and the shape a packed
+  // `f16x2` value takes on its way back into a scalar SPIR-V-ABI slot.
+  // Previously diagnosed as unsupported because `isVectorToScalarIntBitCast`/
+  // `widenVectorToScalarBitCast` only ever handled an *integer* source
+  // element type (a plain `zext` can't take a non-integer operand
+  // directly). `widenVectorToScalarBitCast` now `bitcast`s each
+  // non-integer component to an equally-wide integer first.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %h = fptrunc float %tidf to half
+      %v = insertelement <2 x half> poison, half %h, i32 0
+      %v2 = insertelement <2 x half> %v, half %h, i32 1
+      %bc = bitcast <2 x half> %v2 to i32
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned IntBitCastCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *BC = dyn_cast<BitCastInst>(&I))
+      if (BC->getDestTy() ==
+          FixedVectorType::get(IntegerType::get(Ctx, 16), 4))
+        ++IntBitCastCount;
+  }
+  // One `<W x i16>`-reinterpreting bitcast per source component (2).
+  EXPECT_EQ(IntBitCastCount, 2u);
+}
+
 TEST(SIMDizeTest, DecomposesVectorPHIAcrossUniformDiamond) {
   // Roadmap step C3: a divergent `phi` of vector type -- the shape
   // `feme::cpu::LinearizePass` leaves at a uniform diamond's merge block

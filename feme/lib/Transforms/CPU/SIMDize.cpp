@@ -465,7 +465,12 @@ bool isSupportedVectorReduceIntrinsic(Intrinsic::ID ID) {
 /// equally-wide scalar integer (`bitcast <4 x i32> %m to i128`) -- the shape
 /// GLSL's `subgroupBallotBitCount`/`gl_SubgroupEqMask`-family builtins take
 /// once the `uvec4` ballot mask is folded back into a single wide integer to
-/// be popcounted or shifted (roadmap L89g).
+/// be popcounted or shifted (roadmap L89g). Also covers a vector-of-*float*-
+/// to-scalar-integer bitcast (`bitcast <2 x half> %v to i32`, roadmap
+/// L184) -- the shape a packed-`f16x2` value takes on its way back into a
+/// scalar SPIR-V-ABI slot; `widenVectorToScalarBitCast`'s own zext/shift/or
+/// recomposition handles either source element kind identically once each
+/// component is reinterpreted as an equally-wide integer first.
 ///
 /// This is the one `CastInst` shape whose result is *not* a vector, so it
 /// cannot go through `widenVectorElementwise`'s component-for-component
@@ -475,7 +480,7 @@ bool isVectorToScalarIntBitCast(const Instruction &I) {
   if (!BC)
     return false;
   auto *SrcTy = dyn_cast<FixedVectorType>(BC->getSrcTy());
-  if (!SrcTy || !SrcTy->getElementType()->isIntegerTy())
+  if (!SrcTy)
     return false;
   return BC->getDestTy()->isIntegerTy();
 }
@@ -4205,11 +4210,20 @@ void FunctionWidener::widenVectorToScalarBitCast(BitCastInst &BC,
   unsigned ElemBits = BC.getSrcTy()->getScalarSizeInBits();
   unsigned NumComponents = Components.size();
   auto *WideTy = FixedVectorType::get(BC.getDestTy(), WaveSize);
+  // (Roadmap L184) A non-integer source element (e.g. `half`/`float`)
+  // can't be the direct operand of a `zext`, so always reinterpret each
+  // component as an equally-wide integer first -- a no-op cast when it
+  // already was one.
+  auto *WideIntElemTy =
+      FixedVectorType::get(Builder.getIntNTy(ElemBits), WaveSize);
   bool IsLittleEndian = NewF->getDataLayout().isLittleEndian();
 
   Value *Acc = Constant::getNullValue(WideTy);
   for (unsigned C = 0; C != NumComponents; ++C) {
-    Value *Wide = Builder.CreateZExt(Components[C], WideTy);
+    Value *Component = Components[C];
+    if (!Component->getType()->isIntOrIntVectorTy())
+      Component = Builder.CreateBitCast(Component, WideIntElemTy);
+    Value *Wide = Builder.CreateZExt(Component, WideTy);
     unsigned Shift = (IsLittleEndian ? C : NumComponents - 1 - C) * ElemBits;
     if (Shift != 0)
       Wide = Builder.CreateShl(
