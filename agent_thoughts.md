@@ -100939,3 +100939,39 @@ done and validated; `L125(n)` stays open, now more concretely scoped.
 2. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission) -- still the largest not-yet-started cross-repo item, good for a change-of-pace session. Only matters once an HLSL/`offload-test-suite` test exercises `Gather*` with 4 independent offsets.
 3. **`binding_model.shader_access` broader sweep** -- still on the list from 3 sessions ago as a low-priority final confirmation pass. Given this session confirmed 0 overlap between its own 340-failure sweep and `ConstOffset`/`ConstOffsets`, this specific sweep is likely fine to defer indefinitely unless a session has spare time and wants a confirmation pass.
 4. **(~5 min)** `/tmp` cleanup: this session's own scratch (`/tmp/ctsrun_l125n/*`) was deleted after its findings were quoted above/in `VulkanCTSReport.md`. `/tmp/check_feme_l125g.log` is pre-existing from an older, unrelated session and not referenced anywhere in this file -- leaving it alone rather than guessing it's safe to delete.
+
+# 2026-09-24 (session 5): verify-pass request was already done -- corrected a stale handoff, ran partial binding_model.shader_access confirmation sweep (0 fails so far)
+
+**Do this first**: Nothing blocking. No code change needed this session -- the requested item was already shipped. Read item 2 below before starting new work.
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`, confirmed.
+
+## What happened, in order
+
+1. This session's prompt re-requested "add `assert`/`opt -passes=verify` after `SPIRVUnmergeResourceLoadsPass`" -- the item session 4 (and others) kept re-floating.
+2. Checked first, before touching code: `Pipeline.cpp` already has it, `#ifndef NDEBUG`-gated, right after the pass, with a doc comment. `git log --follow` traced it to commit `70b7f8e0f4c9` ("session 2", 2026-09-24). `git merge-base --is-ancestor 70b7f8e0f4c9 HEAD` -> **yes, ancestor**. Not stale, not on a divergent branch -- genuinely already merged.
+3. Root cause of the stale request: session 4's own "What I did NOT do" section claimed this was "floated by 4 sessions now" and still undone -- without re-checking git history. It was already done 2 sessions before session 4 ran. Session 4 just repeated an old, already-false claim from whichever session preceded it.
+4. Confirmed the fix is *live*, not just present in source: `LLVM_ENABLE_ASSERTIONS=ON` in `build/CMakeCache.txt`, and a standalone `assert(false)` test binary aborted as expected -- `NDEBUG` is not defined in this build, so the `#ifndef NDEBUG` verify-pass block actually compiles in and runs.
+5. Rebuilt, `ninja check-feme`: 3314/3317 (3 unsupported), 0 regressions -- baseline unchanged.
+6. Picked up the next real item on the list: the long-deferred `binding_model.shader_access.*` broad confirmation sweep. Ran it live; it's much bigger than expected (still going after ~35 min, 4081/4081 pass with zero fails through the `primary_cmd_buf.bind.*` subset). Stopped it early rather than let it run indefinitely -- it's low-priority final confirmation, not new work, and the partial result is already a strong clean signal.
+
+## Wins, concretely
+
+- Confirmed (not re-implemented) the verify-pass defensive check is genuinely shipped and active in this exact build.
+- Root-caused *why* it kept getting re-floated (a stale claim in session 4's own summary), so future sessions can stop re-doing this.
+- `binding_model.shader_access.*` partial sweep: 4081/4081 pass, 0 fail, before being stopped early for time.
+- `ninja check-feme`: 3314/3317 (3 unsupported), 0 regressions -- confirmed baseline still holds, no drift.
+
+## What I did NOT do, and why
+
+- Did not re-implement the verify-pass check -- it already exists (commit `70b7f8e0f4c9`) and is confirmed live. Re-doing it would have been pure waste.
+- Did not finish the full `binding_model.shader_access.*` sweep -- the cluster is far larger than the narrower `descriptorset_random`/`inline_uniform_blocks` sweeps from prior sessions (thousands of cases across `primary_cmd_buf`/`secondary_cmd_buf` x many descriptor-type/stage/binding combinations). Stopped after ~35 min with 4081/4081 passing and zero failures, rather than block the whole session on a low-priority confirmation pass.
+- Did not touch `L125(p)` (upstream LLVM SPIR-V backend `ConstOffsets` emission) -- still correctly gated on an actual HLSL/`offload-test-suite` test needing 4 independent `Gather*` offsets, which doesn't exist yet.
+- No code changes this session at all, so no CTS-affecting change was made -- `VulkanCTSReport.md`/inventories/`Roadmap.md` are unchanged (nothing to update).
+
+## Suggested next steps
+
+1. **(~1 hr)** Finish the `binding_model.shader_access.*` sweep to completion in one dedicated session (it's large -- budget real time, run it detached/async and check back rather than blocking synchronously). If it stays 100% clean, mark it explicitly confirmed in this file and stop mentioning it as a "next step" (it has been on this list for 4+ sessions now as unstarted/partial busywork).
+2. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission, `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`) -- still the largest not-yet-started cross-repo item, good for a change-of-pace session. Remember: this is an "issue outside FeMe" scenario per standing instructions -- isolated repro, self-contained commit touching only non-FeMe files.
+3. **Before re-floating any "still not done" item from a prior session's summary**: check `git log --oneline --follow <path>` and grep this file for the actual completion first, as this session did. Session 4's stale claim cost this session real time it didn't need to spend. Don't repeat that mistake.
+4. **(~2 min)** No scratch left in `/tmp` -- `/tmp/ctsrun_bm_sweep/` (QPA + shadercache) and `/tmp/bm_caselist.xml` deleted after their findings were quoted above.
