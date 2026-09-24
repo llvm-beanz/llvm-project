@@ -101125,3 +101125,44 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates needed: t
 1. **(~1-2 hrs, well-scoped, recommend starting here)** `L131`: **Fix residual graphics push-constant range/indexing cases.** 6 failures in `pipeline.monolithic.push_constant`, all dynamic-index/range-size variants (53 pass, 6 NotSupported already; the original crash this row used to also cover, `count_1_shader_vert_frag_command2`, is already fixed by `L96`, so this is narrowed to exactly the 6 ordinary mismatches). Files already pinpointed by a prior session's scoping: `feme/lib/Transforms/CPU/SPIRVPushConstantLowering.cpp`, `feme/lib/Vulkan/GraphicsPipeline.cpp`. Small, concrete, self-contained -- a good next pickup, same shape as `L154` was.
 2. If `L131` gets picked up and its own investigation turns up something bigger than expected (as several `L1xx` rows have), scope the remainder as a new top-level row rather than nesting a letter under `L131` -- keep following the one-lowercase-letter-deep rule.
 3. **(~5 min)** `/tmp/ctsrun_l154/` (this session's own scratch: `caselist.txt`, `results.qpa`, `results_full.qpa`) can be deleted -- both runs' findings are already fully quoted in `VulkanCTSReport.md`'s new section above; nothing in it is referenced from anywhere else.
+
+# Session: L131 fixed -- dynamic-index graphics push-constant accesses now lowered correctly
+
+**Done: `L131` landed and CTS-verified.** `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at session start (this check had already been done once earlier in this same session before a context compaction, but the standing instruction says every session, every time, so it was re-run immediately after resuming). The row's own scoping text ("6 ordinary mismatches") was wrong -- corrected below.
+
+## The bug (two nested gaps, not one)
+
+`SPIRVPushConstantLoweringPass` deliberately leaves a whole function un-lowered when it sees a dynamically-indexed push-constant access -- a documented, correct bailout. But the header's own stated fallback (a downstream diagnostic cleanly rejecting the un-lowered global) was never actually implemented, so the real failure was an opaque JIT-link crash (`Symbols not found: [ spirv_var_NN ]`) at pipeline-creation time, not a graceful "unsupported" result.
+
+Captured the real pre-lowering IR shape via a new `FEME_DUMP_IR_PRENORM` dump point (kept, documented, own commit) and found a second, worse gap underneath: a `ConstantExpr` sub-GEP's users were assumed to always be loads, so any *further* dynamic GEP built on one was silently dropped, not rejected. Only the struct's first field (offset 0, no sub-GEP needed) ever reached the "reject the function" path -- the other 3 fields' dynamic reads vanished invisibly.
+
+## The fix
+
+Rebuilt the matcher around `GEPOperator::collectOffset` (an LLVM API that decomposes one GEP into a constant byte offset + at most one dynamic term). This let genuine dynamic-index support get implemented (not just a diagnostic), since the CTS cases need the access to actually *work*: real IR arithmetic (`sext`/`mul`/`add`) now computes each dynamic load's runtime byte offset, and a new `dynamicAccessMemberEndByte` helper reports a tight, correct `MaxOffset` bound (the containing struct member's own end byte, not the whole block -- avoiding padding-inflated `VkPushConstantRange`s).
+
+Bonus bug found via a new unit test (not by the real CTS shape): a dynamic index that is itself a function *Argument* went dangling after the pass's function-rebuild step, since `Argument`s (unlike instructions) aren't relocated by `splice`. Fixed with an explicit remap alongside the existing argument-replacement loop.
+
+## Verification
+
+- `feme/test/Transforms/CPU/` lit suite: 238/238 Pass.
+- `ninja check-feme`: 3317/3320 Passed, 3 pre-existing Unsupported, 0 Failed.
+- CTS: all 4 originally-failing cases (`dynamic_index_vert`/`dynamic_index_frag`, plain + `_command2`) now **Pass**.
+- Full `pipeline.monolithic.push_constant.*` (65 cases): **57 Pass / 2 Fail / 6 NotSupported**, up from 53/6/6 -- clean +4/-4, zero collateral regressions.
+- The 2 remaining fails (`range_size_max`/`range_size_max_command2`) are a *different*, pre-existing bug (SPIR-V spec-constant `OpTypeArray` count validation) -- broken out as new roadmap row `L182` rather than folded into `L131`'s own closure, per the one-lowercase-letter-deep / re-scope-as-new-row rule.
+
+## What got committed (3 commits, in order)
+
+1. `5f19c3e0a1fb` -- the `SPIRVPushConstantLowering.{h,cpp}` fix + updated/new lit tests (one logical change).
+2. `6ba9f5c0eda2` -- `Pipeline.cpp`'s `FEME_DUMP_IR_PRENORM` dump point + its `feme/.instructions.md` documentation.
+3. `94c433010e1f` -- `Roadmap.md` (struck `L131`, opened `L182`) + `VulkanCTSReport.md` (new dated section).
+4. This `agent_thoughts.md` entry (its own commit, next).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates needed -- correctness fix to an already-declared capability, not a change to what's advertised. Stating this explicitly per standing practice.
+
+`/tmp/ctsrun_l131/` scratch (`caselist.txt`, `results_fix.qpa`, `push_constant_full*.qpa`) already deleted -- all findings are fully quoted above / in `VulkanCTSReport.md`.
+
+## Suggested next steps
+
+1. **(~2-4 hrs, well-scoped, recommend starting here)** `L182`: root-cause `pipeline.monolithic.push_constant.graphics_pipeline.range_size_max`/`range_size_max_command2` -- both fail at pipeline-creation with `error: OpTypeArray count <id> N must come from a constant, specialization constant, or supported specialization constant operation`. Not yet investigated past this signature. Needs a repro isolating which stage of FeMe's SPIR-V ingestion emits/forwards this array-count operand -- likely a spec-constant-sized array FeMe's SPIR-V-to-LLVM conversion doesn't yet fold or support in `OpTypeArray` position. Confirmed unrelated to `L131`'s own fix (different failure signature, no dynamic index involved).
+2. **(optional, small, low priority)** The `checkSupportedRaisedOps`/`UnsupportedOps.cpp` diagnostic gap (no logic inspecting `GlobalVariable`s at all) is still open -- deliberately left unfixed this session since the real CTS shapes are now covered by `L131`'s own fix, shrinking its practical impact to zero currently-known cases. Worth a look only if a future dynamic-push-constant shape reappears as an opaque JIT crash instead of a clean rejection.
+3. **(~5 min)** No scratch left in `/tmp` from this session -- already cleaned up above.
