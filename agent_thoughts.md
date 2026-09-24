@@ -101166,3 +101166,47 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates needed --
 1. **(~2-4 hrs, well-scoped, recommend starting here)** `L182`: root-cause `pipeline.monolithic.push_constant.graphics_pipeline.range_size_max`/`range_size_max_command2` -- both fail at pipeline-creation with `error: OpTypeArray count <id> N must come from a constant, specialization constant, or supported specialization constant operation`. Not yet investigated past this signature. Needs a repro isolating which stage of FeMe's SPIR-V ingestion emits/forwards this array-count operand -- likely a spec-constant-sized array FeMe's SPIR-V-to-LLVM conversion doesn't yet fold or support in `OpTypeArray` position. Confirmed unrelated to `L131`'s own fix (different failure signature, no dynamic index involved).
 2. **(optional, small, low priority)** The `checkSupportedRaisedOps`/`UnsupportedOps.cpp` diagnostic gap (no logic inspecting `GlobalVariable`s at all) is still open -- deliberately left unfixed this session since the real CTS shapes are now covered by `L131`'s own fix, shrinking its practical impact to zero currently-known cases. Worth a look only if a future dynamic-push-constant shape reappears as an opaque JIT crash instead of a clean rejection.
 3. **(~5 min)** No scratch left in `/tmp` from this session -- already cleaned up above.
+
+# Session: L182 fixed -- upstream MLIR OpUDiv/OpSDiv array-length gap (issue outside FeMe)
+
+**Done: `L182` root-caused, fixed, and CTS-verified.** `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at session start. This was the recommended next pickup, and it turned out to be a genuine upstream MLIR bug, not a FeMe bug -- handled per the standing "issue outside FeMe" instruction (isolated repro, self-contained non-FeMe commit).
+
+## The bug
+
+`range_size_max`/`range_size_max_command2` size their push-constant array by a runtime-queried `maxPushConstantsSize`, via `vec4 color[(MaxPushConstantSize + 12) / 16]` where `MaxPushConstantSize` is a specialization constant. glslang compiles this to an `OpTypeArray` length naming `OpSpecConstantOp %uint UDiv %sum %uint_16`, itself wrapping `OpSpecConstantOp %uint IAdd %sc0 %uint_12`.
+
+`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s `resolveConstantArrayLength` (added/extended by an earlier session for `L100`) already folds `OpCompositeExtract`/`OpIMul`/`OpIAdd`/`OpISub`-wrapped array lengths, but had **no `OpUDiv`/`OpSDiv` case** -- so the whole expression fell through to the generic decline, even though the inner `OpIAdd` alone would have resolved. This is the literal source of the `"OpTypeArray count <id> N must come from a constant, ..."` error FeMe's pipeline creation surfaced.
+
+## The fix
+
+Confirmed the exact SPIR-V shape via a minimal glslang-compiled repro (`spirv-dis` disassembly matched the real CTS shader byte-for-byte). Added `OpUDiv`/`OpSDiv` cases to the same switch, mirroring the existing `OpIMul`/`OpIAdd`/`OpISub` pattern (`APInt::udiv`/`sdiv` on the two recursively-resolved operands), declining a zero divisor rather than tripping `APInt`'s own assert.
+
+## Tests
+
+3 spvasm lit tests (the established test method for this file, matching the pre-existing `array-spec-constant-add-length.spvasm` precedent):
+- New `array-spec-constant-div-length.spvasm` -- the real CTS shape (`OpIAdd` wrapped in `OpUDiv`).
+- New `array-spec-constant-sdiv-length.spvasm` -- the signed `OpSDiv` variant, so both new switch arms are exercised.
+- Updated `array-spec-constant-length-invalid.spvasm` -- its negative case used to use `OpUDiv` itself as the "still unsupported" stand-in; since `OpUDiv` is now resolved, switched to `OpUMod` (a distinct, still-unsupported opcode) so the test keeps testing the decline path instead of silently flipping to a pass.
+
+## Verification
+
+- `mlir/test/Target/SPIRV/`: 69/69 Pass. `mlir/test/Dialect/SPIRV/`: 122/122 Pass.
+- `ninja check-feme`: 3317/3320, 3 pre-existing Unsupported, 0 Failed -- unchanged, confirming no FeMe-side regression from an MLIR-layer fix.
+- CTS: both originally-failing cases now **Pass**. Full `pipeline.monolithic.push_constant.*` (65 cases): **59 Pass / 0 Fail / 6 NotSupported**, up from 57/2/6 -- **group fully closed**.
+- Broader `pipeline.pipeline_library.spec_constant.*` sweep (1170 cases, exercises the same array-length machinery independently): 0 Fail (655 Pass, 515 NotSupported) -- confirms no regression to the pre-existing add/sub/mul/composite-extract paths.
+
+## What got committed (3 commits, in order)
+
+1. `662f6991a264` -- the MLIR `Deserializer.cpp` fix + 2 new + 1 updated spvasm test (`mlir/` only, no `feme/` files -- self-contained per the "outside FeMe" instruction).
+2. `309d2118a43f` -- `Roadmap.md` (struck `L182`) + `VulkanCTSReport.md` (new dated section).
+3. This `agent_thoughts.md` entry (its own commit, next).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates needed -- correctness fix to an already-supported SPIR-V shape's ingestion, not a change to what's advertised.
+
+`/tmp/ctsrun_l182/` and `/tmp/l182/` scratch already deleted -- all findings fully quoted above / in `VulkanCTSReport.md`.
+
+## Suggested next steps
+
+1. **(optional, small, low priority, floated by 2 sessions now)** The `checkSupportedRaisedOps`/`UnsupportedOps.cpp` diagnostic gap (no logic inspecting `GlobalVariable`s at all, so an unsupported push-constant shape still surfaces as an opaque JIT crash rather than a clean rejection) remains open. Its practical impact is now essentially zero (both known CTS gaps that would have hit it -- `L131`'s dynamic-index shapes and this session's spec-constant-array shape -- are fixed at their own root causes instead), so this is genuinely low-value busywork unless a *new*, not-yet-seen push-constant shape surfaces the same way. Don't pick this up speculatively; wait for a concrete new case.
+2. **Scan `Roadmap.md` for the next open, well-scoped item.** With `L131`/`L182` both closed this pair of sessions, there's no obviously-queued "recommended starting here" item left from recent history -- a future session should re-scan not-yet-struck rows (the last full-scan candidates from a few sessions back, `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L130`, `L147`, plus assorted `R`/`V`/`W`-prefixed rows, were never individually vetted -- worth checking those first before a fresh full-roadmap read).
+3. **(~5 min)** No scratch left in `/tmp` from this session -- already cleaned up above.
