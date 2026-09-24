@@ -133,7 +133,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `storagePushConstant8` | no |  |
 | feature | VK_VERSION_1_2 | `shaderBufferInt64Atomics` | no |  |
 | feature | VK_VERSION_1_2 | `shaderSharedInt64Atomics` | no |  |
-| feature | VK_VERSION_1_2 | `shaderFloat16` | yes | required jointly with `storageInputOutput16` for shader stage-IO (roadmap L98(a)); caution: exposes a narrow, unrelated pre-existing crash in a `FrexpStruct`+`half` compute shape, see roadmap L183 |
+| feature | VK_VERSION_1_2 | `shaderFloat16` | yes | required jointly with `storageInputOutput16` for shader stage-IO (roadmap L98(a)); the narrow, unrelated pre-existing `FrexpStruct`+`half` compute crash (L183) and the follow-on `arithmetic_{2,3,4}` acosh/asinh/atanh/distance/frexpe/frexps/length/opdot/opcompositeextract.struct16arr3 failures it led to finding (L184) are both now fixed |
 | feature | VK_VERSION_1_2 | `shaderInt8` | no |  |
 | feature | VK_VERSION_1_2 | `descriptorIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayDynamicIndexing` | no |  |

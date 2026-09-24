@@ -12413,3 +12413,129 @@ stash` technique). See the new precedent note in `feme/.instructions.md`.
 No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed for this row (a bugfix to already-enabled `shaderFloat16`
 plumbing, not a feature/extension support-status change).
+
+## 2026-09-25: L184 fixed -- all 9 `arithmetic_{2,3,4}` cases (acosh/asinh/atanh/distance/frexpe/frexps/length/opdot/opcompositeextract.struct16arr3) root-caused and fixed, spanning 4 independent root causes; L185 opened for a 10th, related case
+
+### Root causes and fixes
+
+1. **`opcompositeextract.struct16arr3` crash**: `CompositeExtractMemberReorderPattern`/
+   `CompositeInsertMemberReorderPattern` never handled navigating through a
+   struct member and then landing on a single lane of a genuinely *bare*
+   (non-marker-substituted) vector -- exactly what a `vector<2xf16>` array
+   element converts to whenever its own natural LLVM ABI width already
+   matches its SPIR-V `ArrayStride` (so no `feme.tight_vector` marker
+   substitution is needed). Declining deferred to upstream's own generic
+   `CompositeExtractPattern`/`CompositeInsertPattern`, which also cannot
+   express this shape and crashed an internal `ExtractValueOp`/
+   `InsertValueOp` assertion instead. Replaced the ad hoc
+   `getPhysicalCompositeElementType` walk with a new
+   `resolvePhysicalCompositeAccess`/`PhysicalCompositeAccess` that
+   explicitly tracks whether the walk has landed on a genuine composite
+   position or a bare vector's own lane, emitting the extra
+   `llvm.extractelement`/`llvm.insertelement` for the latter case instead
+   of declining.
+2. **`spirv.VectorInsertDynamic` had zero conversion pattern at all**
+   (neither upstream nor FeMe-side) -- the write-side counterpart of
+   `VectorExtractDynamicPattern`, which *was* already handled. Fixed by a
+   new `VectorInsertDynamicPattern`, converting directly to
+   `llvm.insertelement`. Fixed the real `distance`/`length`/`opdot` CTS
+   cases, and was also a necessary (but not sufficient) part of fixing
+   `struct16arr3`.
+3. **`feme-cpu-simdize` rejected 3 related shapes** the fix above's own
+   output produces, discovered one at a time while re-verifying
+   `struct16arr3` end-to-end:
+   - A non-constant-index `insertelement` (`checkVectorDecompositionSupported`'s
+     producer check only accepted a `ConstantInt` index; `widenInsertElement`
+     unconditionally `cast<ConstantInt>`'d it) -- fixed with a `select`-chain
+     fallback mirroring `widenExtractElement`'s own existing non-constant-index
+     handling.
+   - A scalar-to-vector-of-*float* `bitcast` (`isScalarToVectorIntBitCast`
+     required an integer destination element type; `widenScalarToVectorBitCast`
+     used `CreateTrunc` directly to a possibly non-integer type, illegal) --
+     fixed by always truncating to an equally-wide integer first, then
+     `bitcast`ing to the real element type only if it isn't already integer.
+   - The inverse, vector-of-*float*-to-scalar `bitcast`
+     (`isVectorToScalarIntBitCast` required an integer source element type;
+     `widenVectorToScalarBitCast` used `CreateZExt` directly on a possibly
+     non-integer component, illegal) -- fixed symmetrically, reinterpreting
+     each non-integer component as an equally-wide integer via `bitcast`
+     before `zext`ing.
+   All 3 debugged via temporary `llvm::errs()` prints at each diagnostic's
+   emission site (the Release build has no usable DWARF for `gdb` local-
+   variable inspection -- see the new precedent this session added to
+   `.instructions.md`).
+4. **`acosh`/`asinh`/`atanh` had no lowering pattern at all** -- confirmed
+   via a direct `Intrinsics.td` grep that LLVM has `llvm.sinh`/`llvm.cosh`/
+   `llvm.tanh` but *no* `llvm.asinh`/`llvm.acosh`/`llvm.atanh` intrinsic, so
+   these three GLSL.std.450 ops have no analogous direct 1:1 lowering and
+   must be expanded algebraically instead. Fixed with a single templated
+   `InverseHyperbolicPattern<SPIRVOp, Kind>` covering all three via their
+   own standard closed-form identities (`asinh(x)=log(x+sqrt(x²+1))`,
+   `acosh(x)=log(x+sqrt(x²-1))`, `atanh(x)=0.5·log((1+x)/(1-x))`).
+5. **`frexpe`/`frexps` (scalar GLSL.std.450 `Frexp`, opcode 51) had no
+   deserialization at all** -- distinct from `FrexpStruct` (opcode 52,
+   already handled by `L183`). Confirmed via grep that upstream MLIR's
+   SPIR-V dialect defines `SPIRV_GLModfOp`/`SPIRV_GLModfStructOp` (the
+   directly analogous pointer-vs-struct opcode pair) but was missing the
+   plain `SPIRV_GLFrexpOp` entirely -- an out-of-FeMe upstream MLIR gap,
+   fixed per the `L87` precedent (own isolated, self-contained commits):
+   added `SPIRV_GLFrexpOp` (opcode 51) + `spirv::GLFrexpOp::verify()` to
+   `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVGLOps.td`/
+   `mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp`, mirroring `GLModfOp`'s shape
+   and `GLFrexpStructOp`'s exponent-type verification; added `FrexpPattern`
+   (the direct analogue of the pre-existing `ModfPattern`) to
+   `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`. No FeMe-side
+   override needed (unlike `FrexpStructPattern`/`ModfStructPattern`,
+   `GLFrexpOp`'s scalar/vector result never triggers the struct-alignment-
+   gap bug those two FeMe overrides exist to work around, since it's never
+   a `spirv::StructType`).
+
+### CTS verification
+
+All 9 originally-scoped cases confirmed passing via direct `deqp-vk`
+re-run: `arithmetic_2.{acosh,asinh,atanh,distance,frexpe,frexps,length,
+opdot}` all **Pass**; `opcompositeextract.struct16arr3` **Pass**.
+
+### New discovery: `opcompositeinsert.struct16arr3` (deferred, opened as `L185`)
+
+While re-verifying `struct16arr3` end-to-end, the closely related
+`opcompositeinsert.struct16arr3` case (not in this row's original scope)
+was also tried and found to hit a distinct, deeper gap: a genuine
+aggregate-typed `phi` reaches `SIMDize`, directly contradicting that
+pass's own documented invariant ("An aggregate-typed `phi` never itself
+reaches this pass -- `LinearizePass` always rewrites one into a `select`
+before this pass ever runs"). This is very likely a `LinearizePass` gap,
+not a `SIMDize.cpp` gap, and was deliberately **not** attempted this
+session -- opened as new roadmap row `L185` for its own dedicated
+investigation.
+
+### New unit tests
+
+- `feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`:
+  `StructMemberVectorLaneCompositeExtractLegalizes`,
+  `StructMemberVectorLaneCompositeInsertLegalizes`,
+  `VectorInsertDynamicLegalizesToInsertElement`,
+  `AsinhLegalizesToLogSqrtExpansion`, `AcoshLegalizesToLogSqrtExpansion`,
+  `AtanhLegalizesToLogExpansion`.
+- `feme/unittests/Transforms/CPU/SIMDizeTest.cpp`:
+  `WidensNonConstantIndexInsertElementIntoSelectChain`,
+  `WidensScalarToVectorOfFloatBitCast`, `WidensVectorOfFloatToScalarBitCast`.
+- `mlir/test/Dialect/SPIRV/IR/gl-ops.mlir`, `mlir/test/Target/SPIRV/gl-ops.mlir`,
+  `mlir/test/Conversion/SPIRVToLLVM/gl-ops-to-llvm.mlir` (upstream MLIR,
+  the new `GLFrexpOp` + its lowering).
+- `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-frexp-modf.mlir` (FeMe,
+  the new `Frexp` case alongside the file's existing `FrexpStruct`/
+  `ModfStruct`/`Modf` cases).
+
+Full `check-feme`: 3336 tests discovered, **3333 passed, 3 pre-existing
+Unsupported, 0 Failed** (up from the pre-session baseline of 3324/3327,
+confirming all 9 new unit tests run clean with zero regressions). Upstream
+`mlir/test/{Dialect,Target}/SPIRV` and `mlir/test/Conversion/SPIRVToLLVM`:
+145/145 passed. `ninja check-mlir` (full upstream MLIR suite): 4039/4673
+passed, 629 unsupported, 1 expectedly-failed, 4 skipped -- 0 unexpected
+failures.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed for this row (internal-lowering/legalization bugfixes across
+already-enabled `shaderFloat16` plumbing, not a feature/extension
+support-status change).
