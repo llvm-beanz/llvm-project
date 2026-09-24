@@ -1286,4 +1286,52 @@ TEST(SPIRVToLLVMTest, VectorInsertDynamicLegalizesToInsertElement) {
   EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
 }
 
+// (Roadmap L184) `spirv.GL.Asinh`/`Acosh`/`Atanh` had no conversion pattern
+// at all (neither upstream nor in this file) before this session -- LLVM
+// has no `llvm.asinh`/`llvm.acosh`/`llvm.atanh` intrinsic (unlike
+// `Sinh`/`Cosh`/`Tanh`, already mapped directly), so each expands
+// algebraically via its own standard closed-form identity instead (see
+// `InverseHyperbolicPattern`'s own comment). Confirms all three legalize
+// to a `log`/`sqrt`-based expansion with no leftover illegal op, one test
+// per op given each has a distinct formula.
+TEST(SPIRVToLLVMTest, AsinhLegalizesToLogSqrtExpansion) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Float16], []> { spirv.func @entry(%v : vector<2xf16>) -> "
+      "vector<2xf16> \"None\" { "
+      "%r = spirv.GL.Asinh %v : vector<2xf16> "
+      "spirv.ReturnValue %r : vector<2xf16> } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.intr.sqrt"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.intr.log"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.GL.Asinh"), std::string::npos) << Result;
+}
+
+TEST(SPIRVToLLVMTest, AcoshLegalizesToLogSqrtExpansion) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Float16], []> { spirv.func @entry(%v : vector<2xf16>) -> "
+      "vector<2xf16> \"None\" { "
+      "%r = spirv.GL.Acosh %v : vector<2xf16> "
+      "spirv.ReturnValue %r : vector<2xf16> } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.intr.sqrt"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.intr.log"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.fsub"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.GL.Acosh"), std::string::npos) << Result;
+}
+
+TEST(SPIRVToLLVMTest, AtanhLegalizesToLogExpansion) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Float16], []> { spirv.func @entry(%v : vector<2xf16>) -> "
+      "vector<2xf16> \"None\" { "
+      "%r = spirv.GL.Atanh %v : vector<2xf16> "
+      "spirv.ReturnValue %r : vector<2xf16> } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.fdiv"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.intr.log"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.GL.Atanh"), std::string::npos) << Result;
+}
+
 } // namespace

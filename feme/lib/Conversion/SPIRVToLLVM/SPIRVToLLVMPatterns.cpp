@@ -24,6 +24,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MathExtras.h"
 
+#include <optional>
+
 namespace {
 
 /// Benefit given to FeMe's patterns, so they win over the MLIR pattern for
@@ -11657,6 +11659,80 @@ public:
   }
 };
 
+/// Converts `spirv.GL.Asinh`/`Acosh`/`Atanh` (roadmap L184) via the
+/// standard closed-form identities the GLSL.std.450 spec itself defines
+/// them by:
+///
+///   asinh(x) = log(x + sqrt(x^2 + 1))
+///   acosh(x) = log(x + sqrt(x^2 - 1))
+///   atanh(x) = 0.5 * log((1 + x) / (1 - x))
+///
+/// Unlike `Sinh`/`Cosh`/`Tanh` (`TranscendentalFlushInputPattern` above,
+/// mapping directly onto `llvm.sinh`/`llvm.cosh`/`llvm.tanh`), LLVM has no
+/// `llvm.asinh`/`llvm.acosh`/`llvm.atanh` intrinsic at all (confirmed
+/// absent from `llvm/IR/Intrinsics.td`'s own transcendental-intrinsic
+/// list), so these three ops have no analogous direct 1:1 lowering and
+/// must be expanded algebraically instead -- surfaced by three real
+/// `dEQP-VK.spirv_assembly.instruction.compute.float16.arithmetic_2.
+/// {acosh,asinh,atanh}` cases, all failing to legalize with an identical
+/// "op ... explicitly marked illegal" signature before this fix. `Kind`
+/// selects which of the three identities `matchAndRewrite` builds, since
+/// they differ only in one sign (`Asinh`/`Acosh`) or an extra scale and a
+/// different combining op entirely (`Atanh`) -- not enough shared
+/// structure to make three separate one-off classes worthwhile.
+enum class InverseHyperbolicKind { Asinh, Acosh, Atanh };
+
+template <typename SPIRVOp, InverseHyperbolicKind Kind>
+class InverseHyperbolicPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getOperand();
+    mlir::Value One = createSameShapeFPConstant(Rewriter, Loc, DstType, 1.0);
+
+    if constexpr (Kind == InverseHyperbolicKind::Atanh) {
+      // atanh(x) = 0.5 * log((1 + x) / (1 - x))
+      mlir::Value OnePlusX =
+          mlir::LLVM::FAddOp::create(Rewriter, Loc, DstType, One, X);
+      mlir::Value OneMinusX =
+          mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, One, X);
+      mlir::Value Ratio = mlir::LLVM::FDivOp::create(Rewriter, Loc, DstType,
+                                                     OnePlusX, OneMinusX);
+      mlir::Value Log =
+          mlir::LLVM::LogOp::create(Rewriter, Loc, DstType, Ratio);
+      mlir::Value Half =
+          createSameShapeFPConstant(Rewriter, Loc, DstType, 0.5);
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::FMulOp>(Op, DstType, Half, Log);
+      return mlir::success();
+    } else {
+      // asinh(x) = log(x + sqrt(x^2 + 1))
+      // acosh(x) = log(x + sqrt(x^2 - 1))
+      mlir::Value XSq = mlir::LLVM::FMulOp::create(Rewriter, Loc, DstType, X, X);
+      mlir::Value Radicand =
+          Kind == InverseHyperbolicKind::Asinh
+              ? mlir::LLVM::FAddOp::create(Rewriter, Loc, DstType, XSq, One)
+                    .getResult()
+              : mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, XSq, One)
+                    .getResult();
+      mlir::Value Sqrt =
+          mlir::LLVM::SqrtOp::create(Rewriter, Loc, DstType, Radicand);
+      mlir::Value Sum =
+          mlir::LLVM::FAddOp::create(Rewriter, Loc, DstType, X, Sqrt);
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::LogOp>(Op, DstType, Sum);
+      return mlir::success();
+    }
+  }
+};
+
 /// Converts `spirv.GL.Radians`/`spirv.GL.Degrees` (roadmap H6m) the same way
 /// upstream's own `ScalePattern` does (a plain multiply by a compile-time
 /// constant), except flushing a subnormal operand to a same-signed zero
@@ -14468,6 +14544,14 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<FlushedInverseSqrtPattern>(Patterns.getContext(), TypeConverter,
                                           FeMeBenefit);
+  Patterns.add<
+      InverseHyperbolicPattern<mlir::spirv::GLAsinhOp,
+                               InverseHyperbolicKind::Asinh>,
+      InverseHyperbolicPattern<mlir::spirv::GLAcoshOp,
+                               InverseHyperbolicKind::Acosh>,
+      InverseHyperbolicPattern<mlir::spirv::GLAtanhOp,
+                               InverseHyperbolicKind::Atanh>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   // pi / 180
   Patterns.add<FlushedScalePattern<mlir::spirv::GLRadiansOp>>(
       0.017453292519943295, Patterns.getContext(), TypeConverter,
