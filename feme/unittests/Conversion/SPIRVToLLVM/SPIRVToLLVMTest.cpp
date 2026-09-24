@@ -1112,4 +1112,110 @@ TEST(SPIRVToLLVMTest, OutputStorageTwoArrayDimsStructRemapsMemberIndex) {
 }
 
 
+// (Roadmap L183) `spirv.GL.FrexpStruct`'s synthetic, non-memory `ResType`
+// result struct must legalize as a tightly packed
+// `{significand, exponent}` pair matching `llvm.intr.frexp`'s own always-
+// packed intrinsic signature, then be repacked into whatever "canonical"
+// (possibly padded, possibly `feme.tight_vector`-marker-wrapped) shape
+// `getTypeConverter()->convertType` computes for that same SPIR-V struct
+// type -- needed because a `spirv.CompositeExtract` consuming this
+// result may see either shape, depending on how the *specific* SPIR-V
+// module declares the result struct (see the two tests below, which
+// exercise both). This first test uses `FrexpStruct`'s own
+// undecorated/no-`Offset` result type (the hand-authored-GLSL-shader
+// shape this roadmap item was first diagnosed against) -- a vec2
+// significand/exponent pair extracted back out via `CompositeExtract`
+// must legalize to plain, marker-free LLVM values with no leftover
+// `builtin.unrealized_conversion_cast` (the symptom of the type-converter
+// canonical-type mismatch this pattern's own repacking step exists to
+// avoid).
+TEST(SPIRVToLLVMTest, FrexpStructVec2NoOffsetLegalizesWithoutUnresolvedCast) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Float16], []> { spirv.func @entry() -> () \"None\" { "
+      "%src = spirv.Constant dense<1.0> : vector<2xf16> "
+      "%r = spirv.GL.FrexpStruct %src : vector<2xf16> -> "
+      "!spirv.struct<(vector<2xf16>, vector<2xsi32>)> "
+      "%sig = spirv.CompositeExtract %r[0 : i32] : "
+      "!spirv.struct<(vector<2xf16>, vector<2xsi32>)> "
+      "%exp = spirv.CompositeExtract %r[1 : i32] : "
+      "!spirv.struct<(vector<2xf16>, vector<2xsi32>)> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.intr.frexp"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("unrealized_conversion_cast"), std::string::npos)
+      << Result;
+}
+
+// (Roadmap L183) The real CTS shape (`dEQP-VK.spirv_assembly.instruction.
+// compute.float16.arithmetic_2.frexpstructe`/`frexpstructs`, which
+// originally crashed with an LLVM `CallInst::init` "bad signature"
+// assertion) instead declares `FrexpStruct`'s own result struct with
+// explicit `Offset 0`/`Offset 4` member decorations (a genuinely
+// `Offset`-decorated, memory-layout-eligible struct, routing through
+// `layOutStructIfOffsetsMatch`'s *other* branch than the no-`Offset` test
+// above) -- and additionally stores that result into a `Function`-storage
+// local variable of the same struct type before a later `CompositeExtract`
+// reads a member back out. This exercises `getTightVectorArrayType`'s own
+// marker-struct substitution (needed here because a 2-lane `f16` vector's
+// own natural ABI alignment cannot reproduce these tight declared
+// offsets), so `CompositeExtractMemberReorderPattern`'s tight-vector
+// *unwrap* step (this session's own fix, alongside
+// `CompositeInsertMemberReorderPattern`'s wrap step for the intervening
+// `spirv.Store`) must run, not just `FrexpStructPattern`'s own repacking.
+TEST(SPIRVToLLVMTest,
+     FrexpStructVec2OffsetDecoratedMemberExtractUnwrapsTightVector) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Float16], []> { spirv.func @entry() -> () \"None\" { "
+      "%var = spirv.Variable : "
+      "!spirv.ptr<!spirv.struct<(vector<2xf16> [0], vector<2xsi32> [4])>, "
+      "Function> "
+      "%src = spirv.Constant dense<1.0> : vector<2xf16> "
+      "%r = spirv.GL.FrexpStruct %src : vector<2xf16> -> "
+      "!spirv.struct<(vector<2xf16> [0], vector<2xsi32> [4])> "
+      "spirv.Store \"Function\" %var, %r : "
+      "!spirv.struct<(vector<2xf16> [0], vector<2xsi32> [4])> "
+      "%loaded = spirv.Load \"Function\" %var : "
+      "!spirv.struct<(vector<2xf16> [0], vector<2xsi32> [4])> "
+      "%sig = spirv.CompositeExtract %loaded[0 : i32] : "
+      "!spirv.struct<(vector<2xf16> [0], vector<2xsi32> [4])> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.intr.frexp"), std::string::npos) << Result;
+  // The whole point of this test: no unresolved cast left over from
+  // either the FrexpStruct repack or the later CompositeExtract's own
+  // tight-vector unwrap.
+  EXPECT_EQ(Result.find("unrealized_conversion_cast"), std::string::npos)
+      << Result;
+  // The final extracted significand must be a plain, marker-free
+  // `vector<2xf16>` value (an `llvm.insertelement`-built vector, not a
+  // bare `feme.tight_vector` marker struct still needing unwrap).
+  EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
+}
+
+// (Roadmap L183) A regression guard for the bug this session's own fix
+// briefly introduced and then corrected: `CompositeExtractMemberReorder-
+// Pattern`/`CompositeInsertMemberReorderPattern` must decline (leaving the
+// op to upstream's own generic, `llvm.extractelement`/`insertelement`-
+// based pattern) whenever `spirv.CompositeExtract`'s own index selects a
+// single lane out of a *plain vector* composite -- `llvm.extractvalue`
+// cannot express that at all, and unconditionally attempting it (this
+// session's own first, briefly-broken version of this fix) aborts with an
+// LLVM `ExtractValueOp::build` "incompatible type" assertion. Modeled
+// directly on the exact shape that regression broke, from
+// feme-spirv-compute-shader.mlir: extracting a single scalar lane out of a
+// bare `vector<3xsi32>` (no enclosing struct or array at all).
+TEST(SPIRVToLLVMTest, PlainVectorLaneCompositeExtractStillLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%v : vector<3xsi32>) -> si32 \"None\" { "
+      "%lane = spirv.CompositeExtract %v[0 : i32] : vector<3xsi32> "
+      "spirv.ReturnValue %lane : si32 } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
+}
+
 } // namespace
