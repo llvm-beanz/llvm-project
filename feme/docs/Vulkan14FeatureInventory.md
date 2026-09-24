@@ -64,7 +64,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
-| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g): ImageGatherPattern already forwards the Component operand and every femeCpuImageGather*V4F32 runtime entry point handles it; the fresh full CTS run confirms the feature is advertised, with residual texture-gather correctness tracked by L144 |
+| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g): ImageGatherPattern already forwards the Component operand and every femeCpuImageGather*V4F32 runtime entry point handles it; the fresh full CTS run confirms the feature is advertised, with residual texture-gather correctness tracked by L144. Roadmap L125(m): `ImageGatherPattern` now also recognizes and flattens the `ConstOffsets` (plural, 4-independent-offset) image operand this same feature bit gates alongside `Offset`; the CPU-lowering side (`isSupportedOffset` in `SPIRVResourceLowering.cpp`) still needs widening (roadmap L125(n)) before the flattened offsets are correctly consumed per-corner rather than silently collapsed to one shared offset -- no change to this row's own advertised-feature status, a correctness gap underneath it. |
 | feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | yes |  |

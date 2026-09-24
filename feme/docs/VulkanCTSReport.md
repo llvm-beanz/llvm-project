@@ -11717,3 +11717,71 @@ random` again) both show **0 failures**; `dEQP-VK.binding_model.
 shader_access.*inline*` matches **0 cases** (that group has no
 inline-uniform-block-typed binding at all). This fully confirms `E14`/
 `L180` are closed with no hidden failures elsewhere in `binding_model`.
+
+## 2026-09-24: L125(m) implemented -- `ImageGatherPattern` widened to accept `ConstOffsets` (plural); `texture_gather.graphics.offsets.*` pipeline-creation failures resolved, pixel-verification gap now isolated to L125(n)
+
+Implemented the rescoped `L125(m)`: `feme/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVMPatterns.cpp`'s `ImageGatherPattern` now accepts `ConstOffsets`
+(plural, HLSL `Gather*`'s 4-independent-offset overload / GLSL's
+`textureGatherOffsets`) alongside the existing `ConstOffset` (singular).
+The new branch reads the `!spirv.array<4 x vector<Nxi32>>` operand
+(already correctly typed by MLIR's fully generic `spirv::ArrayType` ->
+`!llvm.array<4 x vector<Nxi32>>` lowering, confirmed via
+`convertArrayType` -- no type-converter change needed) and flattens it
+scalar-by-scalar (the same `PoisonOp`+`ExtractElementOp`/
+`InsertElementOp` idiom `ExpectConversionPattern` already establishes
+elsewhere in this file) into a single `4N`-wide vector fed unchanged
+through the existing `int_spv_resource_gather` intrinsic call (its
+offset operand is `llvm_any_ty`, needing no new overload). New lit test
+`gather_const_offsets` added to `spirv-to-llvm-image-gather.mlir`,
+verified with `FileCheck` against the flattening's exact expected
+output. `ninja check-feme`: **3313/3316, matching the established
+baseline exactly, 0 regressions**.
+
+Ran `dEQP-VK.glsl.texture_gather.graphics.offsets.*` (640 cases) before
+and after:
+- **Before this session's fix**: `ConstOffsets` was entirely
+  unrecognized by `ImageGatherPattern`, so every one of these cases
+  failed at pipeline creation (the shape `L125(l)`'s own investigation
+  root-caused to `notifyMatchFailure` surfacing as
+  `VK_ERROR_INITIALIZATION_FAILED`).
+- **After this session's fix**: 0 pipeline-creation failures. 542 cases
+  remain `NotSupported` (unrelated format/sparse-residency
+  restrictions, unaffected by this change), and **98 cases now fail
+  with `Result verification failed`** -- a genuine pixel mismatch, not
+  a crash or creation error, confirming the pipeline now builds and
+  renders successfully end to end.
+
+Root-caused the 98 remaining fails by inspecting one representative
+case's own QPA log (`min_required_offset.2d.rgba8.base_level.level_1`):
+rendering completes, but the compared pixels are wrong. Tracing
+`SPIRVResourceLowering.cpp`'s `isSupportedOffset` (the CPU-lowering
+gate `L125(n)` still needs to widen) confirms why: it only requires the
+offset operand to have *at least* 2 (`Plain2D`/`Array2D`) or 3
+(`Plain3D`) components and always reads just lanes 0/1(/2) via
+`CreateExtractElement` -- it has no notion of a `4N`-wide,
+per-gathered-corner offset shape at all, so it silently *accepts*
+`L125(m)`'s new flattened vector as if it were an ordinary single
+2-wide `ConstOffset`, meaning **every one of the 4 gathered texels
+silently reuses only the first of the 4 real per-corner offsets**
+instead of each getting its own. This is a strictly worse failure mode
+than the clean decline the pipeline-creation error was (wrong pixels
+rather than a caught, diagnosable error) and is now the single most
+concrete, well-understood remaining piece of `L125(n)`'s own scope:
+that row must not just add a new `ImageCallKind` family for the 4
+independent offsets, it must also *narrow* `isSupportedOffset`'s
+existing width check so a `4N`-wide `ConstOffsets`-flattened offset
+is never silently misinterpreted as a plain `ConstOffset` again.
+
+`L125(m)` itself is struck through as done in `Roadmap.md` -- it is a
+real, CTS-validated improvement (0 -> 0 pipeline-creation failures for
+this whole 640-case group, all genuine execution now reaching the
+pixel-verification stage) even though the group as a whole does not yet
+fully pass; `L125(n)` remains open and is now more concretely scoped
+than before this session.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- this is an internal MLIR-conversion-layer/CPU-lowering
+correctness fix underneath an already-advertised core Vulkan 1.0
+capability (`Gather*`/`textureGatherOffsets` require no separate
+extension), not a change to what capabilities are advertised.
