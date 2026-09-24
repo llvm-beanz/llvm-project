@@ -101568,3 +101568,144 @@ autoformatter on that region.
    full-table pass rather than keep deferring to this same list.
 6. **(~5 min)** No `/tmp` scratch left from this session --
    `/tmp/ctsrun_l116d/` already removed.
+
+## L186/L187 closed; L188 root cause found, fix designed but deliberately deferred
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+at session start (with `VK_ICD_FILENAMES` set -- without it, `vulkaninfo`
+falls back to `llvmpipe`).
+
+### What's done, verified right now
+
+`L186` and `L187` both fixed and CTS-verified. `L188` root-caused, not
+fixed.
+
+```
+export VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+./deqp-vk --deqp-case=dEQP-VK.graphicsfuzz.spv-load-from-frag-color
+./deqp-vk --deqp-case=dEQP-VK.graphicsfuzz.spv-stable-sampler-loop-extra-instructions
+```
+
+Both now **Pass**. `check-feme`: 3338/3341 passed (3 pre-existing
+Unsupported, 0 Failed), run twice (once per fix).
+
+### The two fixes
+
+1. **`L186`: `spirv.InBoundsAccessChain` had no legalization pattern.**
+   Confirmed via `SPIRVMemoryOps.td` that it's byte-identical to
+   `spirv.AccessChain` except for an "inbounds" contract -- generalized
+   upstream's `AccessChainPattern` into a template
+   `AccessChainConversion<SPIRVOp>` (`SPIRVToLLVM.cpp`), mapping the
+   contract onto `LLVM::GEPOp`'s `inbounds` flag.
+2. **`L187`: `spirv.UMulExtended`/`spirv.SMulExtended` had no pattern at
+   all.** LLVM has no wide-multiply intrinsic exposing real high bits
+   (`llvm.{u,s}mul.with.overflow` only reports a 1-bit overflow flag), so
+   `MulExtendedPattern<SPIRVOp, IsSigned>` zext/sext-extends both
+   operands to double width, multiplies, truncates low/high words, packs
+   into the result struct the same way `ArithmeticWithOverflowPattern`
+   already does next to it.
+
+Both touch only upstream MLIR files (`mlir/lib/Conversion/SPIRVToLLVM/`),
+landed in their own commits per this project's "isolate outside-FeMe
+fixes" rule, each with new FileCheck tests and a clean full `check-mlir`
+run (4039/4673 passed, 629 unsupported, 1 pre-existing expected-fail, 0
+regressions, both times).
+
+### Verification (full CTS sweep, not a spot-check)
+
+Combined L186+L187 757-case `graphicsfuzz.*` sweep (same per-case-isolated
+methodology as prior sessions):
+
+- Baseline (post-`L116(d)`): 663 Pass / 78 Fail / 8 NotSupported / 8
+  unaccounted.
+- Post-`L186`+`L187`: 665 Pass / 76 Fail / 8 NotSupported / 8 unaccounted.
+- **+2 Pass, 0 regressions**, exactly the two target cases and nothing
+  else.
+
+### `L188`: why I stopped at "root cause found," not "fixed"
+
+Reproduced directly, then traced the real pre-`SIMDizePass` IR using
+`FEME_DUMP_IR_PRESIMD` (pre-existing) plus a new debug hook I added and
+kept permanently, `FEME_DUMP_DIVERGENT_BRANCH` (documented in
+`.instructions.md`, own commit `04be56ec9bb6`). Found the exact offending
+block: `Flow195`'s `br i1 %.linearized70, label %loop.exit.guard2, label
+%Flow195._crit_edge`.
+
+**Root cause**: `LoopLinearizer::matchExitCheckWithRelay`
+(`Linearize.cpp`) should recognize this as a loop-exit check reaching the
+loop's real exit block via a relay chain through `loop.exit.guard2`, but
+its relay walk (`straightChain`) requires every hop to be unconditional --
+and this chain passes through a block (`%94`) with a genuinely *uniform*
+(not divergent) conditional branch (`%96 = icmp slt i32 %95, 4`, an
+ordinary nested counting-loop trip check) before reaching the real exit.
+`straightChain` rejects any conditional branch at all, uniform or not.
+
+**Fix design worked out, not implemented**: a BFS-based generalization
+that tolerates a uniform conditional branch, treats a revisited block as
+a harmless backedge (the real case's own nested-loop shape: one of `%94`'s
+arms loops back into its own sub-loop body, the other progresses toward
+the real exit), and succeeds only if exactly one visited block is a
+genuine `ExitBlock` predecessor.
+
+**Why I stopped there instead of implementing it**: designing the fix
+surfaced a second, adjacent bug candidate that has to be fixed at the
+same time, not after: `ExitCheck::RelayBlock` (used downstream to look up
+which of `ExitBlock`'s incoming phi values to carry forward) is currently
+set to the relay chain's *first* hop by both existing match paths, but a
+phi's incoming-block list only ever names the true *immediate*
+predecessor -- the chain's *last* hop. This looks like a pre-existing
+latent bug for any multi-hop relay chain, just currently unexercised
+(the one existing multi-hop-relay unit test matches `ExitBlock` directly
+in practice, not via relay, confirmed by manual trace). Landing a
+CFG-rewriting fix here half-verified, on top of an already-subtle
+pre-existing correctness question I'd just discovered, was more risk than
+this session's remaining time could safely retire -- both the new
+uniform-relay case and the `RelayBlock` correctness gap need their own
+new `LinearizeTest.cpp` coverage before anything lands here.
+
+Full implementation plan written into `Roadmap.md`'s `L188` row so a
+future session starts from a plan, not a re-derivation.
+
+### Commits (4)
+
+1. `388be9e6c980` -- `L186`: `InBoundsAccessChainPattern` + 2 FileCheck
+   tests.
+2. `1ddcb2da5e96` -- `L187`: `MulExtendedPattern` + 3 FileCheck tests.
+3. `04be56ec9bb6` -- `FEME_DUMP_DIVERGENT_BRANCH` debug hook +
+   `.instructions.md` entry.
+4. `f1128a2bc188` -- `Roadmap.md`/`VulkanCTSReport.md` updates.
+5. This commit -- `agent_thoughts.md`.
+
+### A gotcha worth remembering
+
+A C++ ternary between two different `*Op::create(...)` calls (e.g.
+`SExtOp::create`/`ZExtOp::create`) fails to compile even though both
+convert to `Value` -- the ternary needs a single common concrete type
+first, which two different op-builder return types don't have. Use an
+explicit `if`/`return` instead.
+
+### Suggested next steps
+
+1. **(~3-5 hrs, well-scoped, full implementation plan already in
+   `Roadmap.md`'s `L188` row)** Implement `L188`'s fix: generalize
+   `matchExitCheckWithRelay`'s relay-tolerance from `straightChain` to a
+   uniform-conditional-tolerant BFS walk, *and* fix `ExitCheck::RelayBlock`
+   in both call sites to use the walk's real last-hop predecessor instead
+   of the first hop. Add two new `LinearizeTest.cpp` cases: one mirroring
+   this row's own uniform-nested-loop relay shape, one isolating the
+   pre-existing multi-hop `RelayBlock` correctness gap directly (a
+   synthetic 3+-hop straight chain feeding a multi-predecessor `ExitBlock`
+   phi). Re-verify `stable-binarysearch-tree-false-if-discard-loop` plus a
+   full `graphicsfuzz.*` sweep for regressions.
+2. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+3. **Scan `Roadmap.md` fresh** if not picking up `L188` -- the long-stale
+   candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted; a future session should do a real full-table pass rather
+   than keep deferring to this same list.
+4. **(~5 min)** No `/tmp` scratch left from this session -- all L188
+   investigation artifacts and the combined CTS sweep output already
+   removed.
