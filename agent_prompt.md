@@ -58,6 +58,9 @@ file.
 
 # Request
 
+The previous session stalled out partway through. Intermediate products that
+were not committed were stashed and can be restored with `git stash pop`
+
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
