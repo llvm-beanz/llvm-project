@@ -48,6 +48,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/Scalar/JumpThreading.h"
@@ -393,6 +394,22 @@ Expected<PipelineResult> runPipeline(Module &M,
     // nothing upstream of this pipeline ever runs `InstCombinePass` over
     // one).
     Normalize.addPass(SPIRVUnmergeResourceLoadsPass());
+#ifndef NDEBUG
+    // (roadmap L176/L177) This pass has twice shipped a bug that only a
+    // live CTS sweep caught, not code review or its own lit tests -- once
+    // an invalid phi insertion point (`L176`), once an invalid
+    // incoming-block list on a *different* phi-of-pointer shape (`L177`).
+    // Both times the resulting invalid IR was silently accepted by every
+    // later pass and this pipeline's own `run()` return, only crashing or
+    // mis-rendering much further downstream (in one case, inside LLVM's
+    // own `Module::print` when a session tried to dump the IR to
+    // diagnose the *symptom*). Verify right here, in assertions-enabled
+    // builds only (an `ndebug` release build pays no extra verification
+    // cost), so a future latent bug in this pass fails loudly and
+    // immediately at the pass boundary instead of needing another CTS
+    // sweep to surface it.
+    Normalize.addPass(VerifierPass());
+#endif
     Normalize.addPass(PreparePass(Opts.EntryPoint, Opts.Stage));
     Normalize.addPass(BoundResourceNormalizationPass());
     // Lowers the one register-bound constant buffer "Root constants" in
