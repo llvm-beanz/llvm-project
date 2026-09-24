@@ -11908,3 +11908,69 @@ No `Roadmap.md`/`Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` updates needed -- this was a pure
 confirmation sweep of already-shipped functionality, not a new
 fix or feature.
+
+## L154 fixed -- `binding_model.descriptor_copy.misc.copy_immutable_sampler_*`'s 2-case failure resolved (0 regressions across full `descriptor_copy.*`)
+
+**Root cause** (already identified by a prior session reading the CTS
+source, confirmed unchanged this session): `copy_immutable_sampler_*`
+declares one `COMBINED_IMAGE_SAMPLER` binding per sampler
+(`descriptorCount == 1` each, via `addSingleSamplerBinding`), then
+issues a single `VkCopyDescriptorSet` whose own `descriptorCount`
+spans all of them. Per spec, a copy whose `descriptorCount` exceeds
+one binding's remaining array elements must continue into the next
+consecutively-numbered binding(s), for both the source and destination
+sides independently. `vkUpdateDescriptorSets`' copy loop (`Descriptor.cpp`)
+never did this for any of its three descriptor-kind loops (plain
+buffer, image/sampler, inline-uniform-block byte range) -- each only
+ever consulted the single named `Copy.srcBinding`/`Copy.dstBinding`'s
+own array/blob and silently dropped (buffer/image) or truncated
+(inline-uniform-block) anything past its bounds. Confirmed, as the
+prior session's root-cause noted, this is unrelated to
+`pImmutableSamplers` itself -- any multi-binding, `descriptorCount`-
+spanning copy of any descriptor kind would reproduce it.
+
+**Fix**: a new `BindingCursor` helper (`(Binding, Element)` pair with a
+`normalize()` that walks forward into later binding numbers as the
+current one's declared size, read via a caller-supplied accessor
+closure, is exhausted) used independently for the source and
+destination side of all three existing copy loops. The buffer and
+image/sampler loops now advance one `BindingCursor` step per array
+element instead of using a fixed `Copy.srcBinding`/`dstBinding` plus a
+flat `+ J` index; the inline-uniform-block loop now copies one
+contiguous in-bounds byte run at a time (bounded by whichever of the
+current src/dst binding's own remaining bytes or the overall remaining
+count is smallest) instead of a single un-spanned range, which as a
+side effect also fixes a related pre-existing correctness gap where an
+overflowing destination write used to be silently dropped in full by
+`writeInlineUniformBlock`'s own bounds check rather than partially
+applied up to the destination binding's actual capacity.
+
+New unit tests in `DescriptorTest.cpp`: `CopyDescriptorSetSpans
+ConsecutiveBufferBindings` (mirrors the CTS shape with `STORAGE_BUFFER`),
+`CopyDescriptorSetSpansConsecutiveImageBindings` (mirrors it exactly,
+with `COMBINED_IMAGE_SAMPLER`), and `CopyDescriptorSetSpansConsecutive
+InlineUniformBlockBindings` (no current CTS case exercises this shape,
+added purely to confirm the fix generalizes uniformly across all three
+loops). All three confirmed to fail without the fix (verified by
+temporarily reverting `Descriptor.cpp` alone and re-running just these
+3 tests) and pass with it.
+
+**Validation**:
+- `FeMeVulkanTests --gtest_filter='*Spans*'`: fails (3/3) without the
+  fix, passes (3/3) with it (both confirmed directly).
+- `ninja check-feme`: 3317/3320, 3 unsupported, 0 regressions (up from
+  the established 3314/3317 baseline -- 3 net new unit tests, no
+  failures).
+- Originally-failing pair,
+  `dEQP-VK.binding_model.descriptor_copy.misc.copy_immutable_sampler_4_images`
+  and its `_buffer_first` sibling: both now **Pass** (were `Fail`).
+- Full `dEQP-VK.binding_model.descriptor_copy.*` sweep: **143/289 Pass,
+  0 Fail, 146 NotSupported** (the `NotSupported` cases are all
+  `VK_EXT_descriptor_indexing`-gated `graphics_uab`/`compute_uab`
+  groups, expected and unrelated to this fix) -- confirms no
+  regression anywhere else in the group this fix's own file touches.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- this is a correctness fix to existing, already-advertised
+`vkUpdateDescriptorSets`/`VkCopyDescriptorSet` behavior, not a change
+to what capabilities are advertised.
