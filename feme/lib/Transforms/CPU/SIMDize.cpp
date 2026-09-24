@@ -935,6 +935,16 @@ bool FunctionWidener::checkSupportedControlFlow() {
   for (BasicBlock &BB : *OldF) {
     auto *BI = dyn_cast<CondBrInst>(BB.getTerminator());
     if (BI && UI.isDivergentTerminator(BI)) {
+      // Debug aid: with `FEME_DUMP_DIVERGENT_BRANCH` set in the
+      // environment, print which block's terminator this check is
+      // rejecting -- pinpoints the exact `feme::cpu::LinearizePass`
+      // output block a `feme-cpu-simdize` "has a divergent branch"
+      // diagnostic refers to, which the diagnostic's own function-wide
+      // error text does not otherwise name.
+      if (::getenv("FEME_DUMP_DIVERGENT_BRANCH")) {
+        errs() << "feme-cpu-simdize: divergent branch in block '"
+               << BB.getName() << "': " << *BI << "\n";
+      }
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent branch; the divergence transform "
