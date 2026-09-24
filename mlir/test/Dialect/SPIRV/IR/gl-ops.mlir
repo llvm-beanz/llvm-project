@@ -595,6 +595,40 @@ func.func @modf_struct_wrong_type(%arg0 : i32) -> () {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Frexp
+//===----------------------------------------------------------------------===//
+
+func.func @frexp(%arg0 : f32, %arg1 : !spirv.ptr<i32, Function>) -> () {
+  // CHECK: spirv.GL.Frexp {{%.*}}, {{%.*}} : f32, !spirv.ptr<i32, Function> -> f32
+  %0 = spirv.GL.Frexp %arg0, %arg1 : f32, !spirv.ptr<i32, Function> -> f32
+  return
+}
+
+func.func @frexp_vec(%arg0 : vector<3xf32>, %arg1 : !spirv.ptr<vector<3xi32>, Function>) -> () {
+  // CHECK: spirv.GL.Frexp {{%.*}}, {{%.*}} : vector<3xf32>, !spirv.ptr<vector<3xi32>, Function> -> vector<3xf32>
+  %0 = spirv.GL.Frexp %arg0, %arg1 : vector<3xf32>, !spirv.ptr<vector<3xi32>, Function> -> vector<3xf32>
+  return
+}
+
+// -----
+
+func.func @frexp_result_type_mismatch(%arg0 : f32, %arg1 : !spirv.ptr<i32, Function>) -> () {
+  // expected-error @+1 {{result type must be the same type as the first operand}}
+  %0 = spirv.GL.Frexp %arg0, %arg1 : f32, !spirv.ptr<i32, Function> -> f64
+  return
+}
+
+// -----
+
+func.func @frexp_pointee_type_mismatch(%arg0 : f32, %arg1 : !spirv.ptr<f32, Function>) -> () {
+  // expected-error @+1 {{pointee type of the second operand must be a scalar or vector of 32 bit integer type}}
+  %0 = spirv.GL.Frexp %arg0, %arg1 : f32, !spirv.ptr<f32, Function> -> f32
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.FrexpStruct
 //===----------------------------------------------------------------------===//
 

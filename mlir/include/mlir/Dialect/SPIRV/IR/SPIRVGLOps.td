@@ -1319,6 +1319,61 @@ def SPIRV_GLModfStructOp : SPIRV_GLOp<"ModfStruct", 36, [NoMemoryEffect]> {
 
 // ----
 
+def SPIRV_GLFrexpOp : SPIRV_GLOp<"Frexp", 51, []> {
+  let summary = "Splits x into two components such that x = significand * "
+                "2^exponent, writing the exponent through a pointer";
+
+  let description = [{
+    Result is the significand of x, a floating-point number in the range
+    (-1.0, 0.5] or [0.5, 1.0), such that:
+
+    x = Result * 2^exp
+
+    exp is the integral exponent of 2, written to the location pointed to
+    by the second operand.
+
+    If x is a zero, the exponent is 0.0 and the significand is the same as
+    x. If x is an infinity or a NaN, the exponent is poison and the
+    significand is the same as x. If x is 0.0, the exponent is 0.0.
+
+    The first operand, x, must be a scalar or vector whose component type
+    is floating-point.
+
+    The second operand, exp, must be a pointer whose pointee type is a
+    scalar or vector with integer component type, 32-bit component width,
+    and the same number of components as x -- unlike
+    `spirv.GL.FrexpStruct` (whose result is a struct holding both the
+    significand and the exponent, with no side effect), this op writes
+    its own exponent result through that pointer as a genuine memory side
+    effect, so it carries no `NoMemoryEffect` trait, mirroring
+    `spirv.GL.Modf`'s own analogous relationship to
+    `spirv.GL.ModfStruct`.
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.GL.Frexp %0, %1 : f32, !spirv.ptr<i32, Function> -> f32
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$x,
+    SPIRV_AnyPtr:$exp
+  );
+
+  let results = (outs
+    SPIRV_ScalarOrVectorOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $x `,` $exp `:` type($x) `,` type($exp) `->` type($result)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// ----
+
 def SPIRV_GLFrexpStructOp : SPIRV_GLOp<"FrexpStruct", 52, [NoMemoryEffect]> {
   let summary = "Splits x into two components such that x = significand * 2^exponent";
 

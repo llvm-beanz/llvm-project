@@ -2455,6 +2455,38 @@ LogicalResult spirv::GLModfStructOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Frexp
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::GLFrexpOp::verify() {
+  Type xTy = getX().getType();
+  if (getResult().getType() != xTy)
+    return emitError(
+        "result type must be the same type as the first operand");
+
+  auto ptrTy = dyn_cast<spirv::PointerType>(getExp().getType());
+  if (!ptrTy)
+    return emitError("second operand must be a pointer");
+
+  Type exponentTy = ptrTy.getPointeeType();
+  VectorType exponentVecTy = dyn_cast<VectorType>(exponentTy);
+  IntegerType exponentIntTy = dyn_cast<IntegerType>(exponentTy);
+
+  if (exponentVecTy) {
+    IntegerType componentIntTy =
+        dyn_cast<IntegerType>(exponentVecTy.getElementType());
+    if (!componentIntTy || componentIntTy.getWidth() != 32)
+      return emitError("pointee type of the second operand must be a "
+                       "scalar or vector of 32 bit integer type");
+  } else if (!exponentIntTy || exponentIntTy.getWidth() != 32) {
+    return emitError("pointee type of the second operand must be a "
+                     "scalar or vector of 32 bit integer type");
+  }
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.FrexpStruct
 //===----------------------------------------------------------------------===//
 
