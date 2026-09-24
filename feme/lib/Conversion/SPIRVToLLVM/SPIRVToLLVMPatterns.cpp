@@ -8951,10 +8951,41 @@ public:
 /// SPIR-V dialect before this row added both the missing op definition and
 /// this one MLIR-side conversion pattern needed to reach it. See
 /// `ImageDrefGatherPattern`'s own doc comment immediately below for the
-/// shared reasoning behind why only `ConstOffset` (no `Bias`/`Lod`/`Grad`/
-/// `MinLod`) needs to be recognized, and why `Coordinate` needs no
-/// `DrefCoordWidth`-style padding logic -- both apply identically here,
-/// confirmed via the same real `dxc`-compiled repro cited above.
+/// shared reasoning behind why no `Bias`/`Lod`/`Grad`/`MinLod` needs to be
+/// recognized (a gather instruction always operates at mip level 0 per the
+/// SPIR-V spec), and why `Coordinate` needs no `DrefCoordWidth`-style
+/// padding logic -- both apply identically here, confirmed via the same
+/// real `dxc`-compiled repro cited above.
+///
+/// (Roadmap L125(m), rescoped from its own original two-part framing --
+/// see that row's own text in Roadmap.md) `ConstOffsets` (plural, HLSL
+/// `Gather*`'s 4-independent-offset overload, `TextureGatherOffsets` in
+/// SPIR-V terms, confirmed via `dEQP-VK.glsl.texture_gather.graphics.
+/// offsets.*`, a real glslang-compiled repro) is also recognized here,
+/// alongside (not replacing) the single-offset `ConstOffset` case above.
+/// Per the SPIR-V spec, `ConstOffsets`' own operand is a compile-time
+/// constant of type `array<4 x vector<N x integer>>` (one independent
+/// offset per gathered texel, `N` matching `Coordinate`'s own non-array
+/// component count) -- `spirv::ArrayType`'s existing, generic (not
+/// gather-specific) LLVM type-converter lowering (`convertArrayType`,
+/// `SPIRVToLLVM.cpp`) already turns this into an ordinary
+/// `!llvm.array<4 x vector<Nxi32>>` with no new type-conversion code
+/// needed here. `int_spv_resource_gather`'s own offset operand is
+/// `llvm_any_ty` (`IntrinsicsSPIRV.td`), so this pattern can flatten the
+/// 4-vector array into one `4N`-wide vector (scalar-by-scalar, mirroring
+/// `ExpectConversionPattern`'s own `PoisonOp`+`ExtractElementOp`+
+/// `InsertElementOp` per-lane loop above in this file) and feed it through
+/// the exact same, unchanged intrinsic call this pattern already emits for
+/// `ConstOffset` -- no new intrinsic overload needed on this side.
+/// Consuming this wider offset shape on the LLVM SPIR-V *backend* side
+/// (`SPIRVInstructionSelector::selectGatherIntrinsic`, to actually emit a
+/// real `ConstOffsets` SPIR-V image operand for the *opposite*,
+/// LLVM-IR-to-SPIR-V compile direction `dxc`/clang's own HLSL frontend
+/// uses) is an independent, non-blocking concern split out to Roadmap
+/// L125(p) -- that function is never reached from this pattern's own
+/// import direction at all. Consuming this wider offset shape in feme's
+/// own CPU codegen (`ImageCalls.cpp`/`SPIRVResourceLowering.cpp`) is
+/// Roadmap L125(n), blocked on this row landing first.
 class ImageGatherPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageGatherOp> {
 public:
@@ -8971,12 +9002,22 @@ public:
       Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     mlir::spirv::ImageOperands SupportedMask =
-        mlir::spirv::ImageOperands::ConstOffset;
+        mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::ConstOffsets;
     if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
         Actual, mlir::spirv::ImageOperands::ConstOffset);
+    bool HasConstOffsets = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffsets);
+    // Nothing produces both on the same instruction (they are two
+    // different ways of spelling "an offset", never combined per the
+    // real-world producers this pattern targets); decline rather than
+    // guessing which operand slot wins.
+    if (HasConstOffset && HasConstOffsets)
+      return Rewriter.notifyMatchFailure(
+          Op, "combining ConstOffset and ConstOffsets is not supported");
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -8994,8 +9035,39 @@ public:
     auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
     mlir::Type OffsetType =
         mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
-    mlir::Value Offset =
-        HasConstOffset ? Adaptor.getOperandArguments()[0] : mlir::Value();
+    mlir::Value Offset;
+    if (HasConstOffset) {
+      Offset = Adaptor.getOperandArguments()[0];
+    } else if (HasConstOffsets) {
+      mlir::Value OffsetsArray = Adaptor.getOperandArguments()[0];
+      auto ArrayTy =
+          mlir::cast<mlir::LLVM::LLVMArrayType>(OffsetsArray.getType());
+      auto ElementVecTy =
+          mlir::cast<mlir::VectorType>(ArrayTy.getElementType());
+      int64_t NumOffsets = ArrayTy.getNumElements(); // 4, per the SPIR-V spec.
+      int64_t VecWidth = ElementVecTy.getNumElements(); // N, matching Coordinate.
+      mlir::Type FlatOffsetType = mlir::VectorType::get(
+          {NumOffsets * VecWidth}, ElementVecTy.getElementType());
+      mlir::Value Flattened =
+          mlir::LLVM::PoisonOp::create(Rewriter, Loc, FlatOffsetType);
+      for (int64_t I = 0; I != NumOffsets; ++I) {
+        mlir::Value OneOffset = mlir::LLVM::ExtractValueOp::create(
+            Rewriter, Loc, OffsetsArray, llvm::ArrayRef<int64_t>{I});
+        for (int64_t J = 0; J != VecWidth; ++J) {
+          mlir::Value SrcIndex = mlir::LLVM::ConstantOp::create(
+              Rewriter, Loc, Rewriter.getI64Type(),
+              Rewriter.getI64IntegerAttr(J));
+          mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+              Rewriter, Loc, OneOffset, SrcIndex);
+          mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
+              Rewriter, Loc, Rewriter.getI64Type(),
+              Rewriter.getI64IntegerAttr(I * VecWidth + J));
+          Flattened = mlir::LLVM::InsertElementOp::create(
+              Rewriter, Loc, Flattened, Lane, DstIndex);
+        }
+      }
+      Offset = Flattened;
+    }
     if (!Offset)
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
                                               Rewriter.getZeroAttr(OffsetType));
