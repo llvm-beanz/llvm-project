@@ -61,19 +61,21 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **Implement the rescoped `L125(m)`** (`ImageGatherPattern` in
-   `SPIRVToLLVMPatterns.cpp`): widen `SupportedMask` to accept
-   `ConstOffsets`, read `operand_arguments[0]` as a
-   `!spirv.array<4xvector<Nxi32>>`, flatten via 4 `ExtractValueOp`s +
-   a shuffle/concat into `<4N x i32>`, feed the same
-   `int_spv_resource_gather` intrinsic call. New lit test alongside the
-   existing `ConstOffset` coverage. Once this lands, `L125(n)` (CPU
-   codegen consuming the 4-offset shape) becomes unblocked.
-2. **`L125(p)`** (LLVM SPIR-V backend `ConstOffsets` emission) -- now
-   correctly independent and lower-priority; only relevant once an
-   HLSL/`offload-test-suite` test actually exercises `Gather*` with 4
+1. **(~1-2 hrs, now much more concretely scoped)** `L125(n)`: fix
+   `isSupportedOffset` in `SPIRVResourceLowering.cpp` to reject (not
+   silently truncate) a `4N`-wide `ConstOffsets`-flattened offset from
+   the plain-`ConstOffset` path, then add the real `ImageCallKind`
+   family + `femeCpuImageGather*Offsets` runtime entry points that
+   apply each of the 4 offsets to its own corner. This should turn all
+   98 `Result verification failed` cases in
+   `dEQP-VK.glsl.texture_gather.graphics.offsets.*` into passes.
+2. **`L125(p)`** (LLVM SPIR-V backend `ConstOffsets` emission) --
+   still independent and lower-priority; only relevant once an
+   HLSL/`offload-test-suite` test exercises `Gather*` with 4
    independent offsets.
-3. **(~5 min)** No scratch left in `/tmp` -- all `verify_binding_model_*`/
-   `iub_*` logs and qpa files, plus the stray root-level
-   `TestResults.qpa` (both repos), deleted; everything worth keeping is
-   already quoted in `VulkanCTSReport.md`/this file.
+3. **`binding_model.shader_access` broader sweep** -- still on the
+   list from 2 sessions ago as a low-priority final confirmation pass,
+   not done again this session (this session's own scope was L125(m)).
+4. **(~5 min)** No scratch left in `/tmp` from this session -- the one
+   CTS run's QPA/stdout files (`/tmp/ctsrun_l125m/*`) were deleted
+   after their findings were quoted above/in `VulkanCTSReport.md`.
