@@ -101247,3 +101247,65 @@ Filed as roadmap `L183`. `feme/.instructions.md` now warns against a blanket `sp
 3. **(~5 min)** `L98(b)` (`shaderFloat64` stage-IO) is still open and not attempted this session -- it needs genuinely variable-width storage or a two-slot decomposition, unlike `L98(a)`'s single-slot widen trick. See its own roadmap row for the design note.
 4. Scan `Roadmap.md` for the next open, well-scoped item if not picking up `L183`/`L98(b)` -- the last full-scan candidates (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`, plus `R`/`V`/`W`-prefixed rows) are still individually unvetted.
 5. No `/tmp` scratch left from this session -- already cleaned up.
+
+# Session: L183 fixed -- FrexpStruct struct-padding-vs-intrinsic-ABI crash
+
+Device check confirmed: `FeMe CPU Vulkan Device`.
+
+## What's done (verified, not just implemented)
+
+1. Fixed the `L183` crash. Root cause: FeMe's own struct-padding logic
+   (`layOutStructIfOffsetsMatch`) was applying alignment-gap padding to
+   `spirv.GL.FrexpStruct`'s result struct, which must instead exactly
+   match `llvm.intr.frexp`'s always-packed ABI. 100% FeMe-authored bug,
+   not upstream, not GlobalISel-scale like `L181`.
+2. Fixed a second bug the first fix's own testing exposed: `spirv.
+   CompositeExtract`/`CompositeInsert` didn't remap physical struct
+   indices or unwrap/wrap `feme.tight_vector` marker structs -- needed
+   for the *real* CTS shape (an `Offset`-decorated helper struct stored
+   through a `Function`-local variable), not just the hand-written repro.
+3. Caught and fixed my own regression before committing: an early version
+   of fix #2 broke 24 unrelated tests by misapplying `llvm.extractvalue`
+   to plain vector-lane extracts. `check-feme` is back to 100% green
+   (3324 passed / 3 pre-existing unsupported / 0 failed).
+4. Added 3 new unit tests in `SPIRVToLLVMTest.cpp` covering both struct
+   shapes and the vector-lane regression guard.
+5. CTS-verified: `arithmetic_2/3/4.frexpstructe`/`frexpstructs` all
+   **Pass**, both isolated and in full-subgroup sweeps (repeated 3x).
+6. Updated `Roadmap.md` (struck through `L183`, opened `L184` for newly-
+   confirmed pre-existing/unrelated failures), `VulkanCTSReport.md` (new
+   dated section), and `.instructions.md` (removed the stale crash-
+   avoidance caution, replaced with a QPA-log-scraping precedent note).
+
+## A wrong turn worth knowing about (so you don't repeat it)
+
+Mid-session, a broader CTS sweep seemed to show `frexpstructe` failing
+again, non-deterministically, alongside 7 different ops each run. This
+was **not real** -- it was a regex bug in my own QPA-log analysis script
+(a non-greedy `.*?` match without anchoring to `#endTestCaseResult`,
+bleeding a later test case's `Fail` status into an earlier case's name).
+Cost real time to chase. If you're ever scraping a `.qpa` file with
+Python/regex: always anchor each test case's own status lookup between
+`<TestCaseResult CasePath="...">` and that same case's own
+`#endTestCaseResult`, never a naive `.find()`/loose regex across the
+whole file.
+
+## Suggested next steps
+
+1. **(~2-4 hrs, well-scoped)** `L184`: root-cause 8 pre-existing,
+   confirmed-real `arithmetic_{2,3,4}.{acosh,asinh,atanh,distance,frexpe,
+   frexps,length,opdot}` pipeline-creation failures, plus the separate
+   pre-existing `opcompositeextract.struct16arr3` crash. None
+   investigated past the failure signature yet -- get each case's real
+   SPIR-V via its QPA log (mind the delimiter caution above) and pipe
+   through `feme-translate` the same way `L183` was diagnosed. Worth
+   checking first whether `frexpe`/`frexps`/`length`/`distance`/`opdot`
+   (several look vector-math-shaped) share one common root cause before
+   assuming 8 independent bugs.
+2. **(~5 min)** No `/tmp` scratch left from this session -- already
+   cleaned up (`ctsrun_l183*`, `frexp_*`, etc. all removed).
+3. Scan `Roadmap.md` for the next open, well-scoped item if not picking
+   up `L184` -- the last full-scan candidates from several sessions back
+   (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows) are still
+   individually unvetted.
