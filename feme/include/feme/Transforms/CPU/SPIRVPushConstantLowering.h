@@ -24,15 +24,25 @@
 // it is never legal to write to it.
 //
 // Scope: an access is recognized if it is a direct load of the global
-// itself, or a load through a `getelementptr` into it whose indices are all
-// compile-time constants (the common "read one push-constant member" shape
-// a real shader compiles down to). A dynamically-indexed array member, or
-// any other use (a store, a partially-constant GEP, a GEP result used as
-// anything but a load), is left entirely alone -- the whole function is
-// skipped, for `feme::cpu::checkSupportedRaisedOps` to reject exactly as if
-// this pass did not exist, rather than partially rewritten. This mirrors
-// `feme::cpu::SPIRVResourceLoweringPass::hasOnlySupportedUses`'s own
-// "leave it alone rather than partially lower it" contract.
+// itself, or a load through a chain of `getelementptr`s into it whose
+// indices are all compile-time constants (the common "read one
+// push-constant member" shape a real shader compiles down to), or --
+// roadmap L131 -- the same, except for a *single* index anywhere in that
+// chain that is a runtime-computed (non-constant) value, e.g. a
+// dynamically-uniform expression a shader uses to index a push-constant
+// array, vector, or matrix column, such as
+// `dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+// dynamic_index_vert`'s `pc.arrType[dynamicIndex]`. A second, independent
+// dynamic index anywhere in the same chain (e.g. a doubly-nested dynamic
+// array access), a dynamic *struct member* index (GLSL/SPIR-V never
+// generates one -- only array/vector/matrix indices are ever
+// runtime-computed), or any other use (a store, a GEP result used as
+// anything but a load or a further GEP), is left entirely alone -- the
+// whole function is skipped, for `feme::cpu::checkSupportedRaisedOps` to
+// reject exactly as if this pass did not exist, rather than partially
+// rewritten. This mirrors `feme::cpu::SPIRVResourceLoweringPass::
+// hasOnlySupportedUses`'s own "leave it alone rather than partially lower
+// it" contract.
 //
 // As with DXIL root constants, a function that also performs bound
 // (`spirv.VulkanBuffer` handle) resource access is supported, but lowered
@@ -56,18 +66,30 @@
 namespace llvm {
 class Function;
 class GlobalVariable;
-class Instruction;
+class LoadInst;
 class Value;
 } // namespace llvm
 
 namespace feme::cpu {
+
+/// One recognized load through the module's push-constant global: either a
+/// compile-time-constant byte offset alone (`DynamicIndex == nullptr`, the
+/// common case), or that same constant `BaseOffset` plus one further
+/// runtime-computed term -- `DynamicIndex * DynamicStride` bytes -- roadmap
+/// L131's dynamically-indexed case (see the file comment's scope note).
+struct SPIRVPushConstantLoad {
+  llvm::LoadInst *Load;
+  uint64_t BaseOffset = 0;
+  llvm::Value *DynamicIndex = nullptr;
+  uint64_t DynamicStride = 0;
+};
 
 /// One function's complete, supported push-constant access: the module's
 /// push-constant global, and every load recognized as reading through it
 /// (see the file comment for exactly what is recognized).
 struct SPIRVPushConstantAccess {
   llvm::GlobalVariable *Global;
-  llvm::SmallVector<llvm::Instruction *, 8> Loads;
+  llvm::SmallVector<SPIRVPushConstantLoad, 8> Loads;
 };
 
 /// Returns \p F's push-constant access if the module has a push-constant
@@ -99,10 +121,17 @@ struct PushConstantAccessSpan {
 /// root constant, which must report its full declared binding size (always
 /// starting at byte 0) because a dynamic row/array index means there is no
 /// fixed set of bytes to inspect statically, every access this pass
-/// recognizes has a compile-time-constant byte offset (see the file
-/// comment's scope note), so the tighter "bytes actually touched" span is
-/// always safe to report instead -- and, on a CPU target whose data layout
-/// does not mark vectors as element-aligned, `MaxOffset` is frequently
+/// recognizes has a compile-time-constant *base* byte offset (see the file
+/// comment's scope note) -- a dynamically-indexed load
+/// (`SPIRVPushConstantLoad::DynamicIndex != nullptr`) still contributes a
+/// precise `MinOffset` (its base offset), but, lacking a statically-known
+/// index value, the only sound `MaxOffset` contribution it can make is the
+/// end of whichever declared push-constant-struct *member* its own base
+/// offset falls within (the tightest bound derivable without reasoning
+/// about the dynamic index's own runtime range) -- so the tighter "bytes
+/// actually touched" span is always safe to report instead -- and, on a CPU
+/// target whose data layout does not mark vectors as element-aligned,
+/// `MaxOffset` is frequently
 /// *narrower* than the push-constant block's own declared-type
 /// `DataLayout` store size (e.g. a trailing `int3`/`float3` member's vector
 /// alignment rounds its store size up to the next power of two, inflating

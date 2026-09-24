@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -58,12 +59,126 @@ bool hasRootConstantParams(const Function &F) {
   });
 }
 
-/// Whether every index of \p GEP is a compile-time constant (see the
-/// header comment's scope note: a dynamically-indexed push-constant array
-/// member is not recognized).
-bool hasOnlyConstantIndices(const GEPOperator &GEP) {
-  return llvm::all_of(GEP.indices(),
-                      [](const Use &U) { return isa<ConstantInt>(U.get()); });
+/// Walks every user of \p Base -- `Access.Global` itself, at the top-level
+/// call from `matchSPIRVPushConstantAccess`, or a GEP already resolved
+/// relative to it on a deeper recursive call -- recognizing a load (pushed
+/// onto \p Loads) or a further GEP (recursed into) and rejecting (returning
+/// false) anything else, exactly per the file comment's scope note. \p
+/// BaseOffset/\p DynamicIndex/\p DynamicStride describe \p Base's own
+/// address relative to `Access.Global`: a compile-time-constant offset,
+/// plus -- if a dynamic index was already found on the way from the global
+/// down to \p Base -- that index's `Value` and byte stride (`nullptr`/`0`
+/// if every step so far has been compile-time constant).
+///
+/// A plain `Instruction` user is only visited once, from whichever call
+/// reaches it walking that same function's own users (`UI->getFunction()
+/// != &F` skips any other function's own use of a *shared* node -- see
+/// below); a `ConstantExpr` user, uniqued module-wide, is walked from every
+/// call that reaches it, since two different push-constant-consuming
+/// functions can share the exact same `ConstantExpr` instance (this is
+/// exactly why a per-load function filter is still needed one level below
+/// a `ConstantExpr`, even though a top-level `Instruction` walk needs it
+/// only once, at its own root).
+bool visitPushConstantUsers(Value *Base, uint64_t BaseOffset,
+                            Value *DynamicIndex, uint64_t DynamicStride,
+                            Function &F, const DataLayout &DL,
+                            SmallVectorImpl<SPIRVPushConstantLoad> &Loads) {
+  for (User *U : Base->users()) {
+    if (auto *UI = dyn_cast<Instruction>(U); UI && UI->getFunction() != &F)
+      continue; // Not this function's own use; visited when that one is.
+
+    if (auto *LI = dyn_cast<LoadInst>(U)) {
+      Loads.push_back({LI, BaseOffset, DynamicIndex, DynamicStride});
+      continue;
+    }
+
+    // Anything else must be a further GEP (a store, or a GEP result used
+    // as anything but a load or a further GEP, is unsupported) -- see the
+    // file comment. This also covers a constant-index GEP folded straight
+    // to a `ConstantExpr` rather than left as a real `GetElementPtrInst`
+    // (the shape the global's own address and every index being already
+    // compile-time constant collapses to by default, under every ordinary
+    // constant-folding IR builder, including the one `feme-translate`'s
+    // `--llvmdialect-to-llvmir` step uses): both are a `GEPOperator`,
+    // handled identically here.
+    auto *GEP = dyn_cast<GEPOperator>(U);
+    if (!GEP)
+      return false;
+
+    // Decompose this GEP's own indices into a compile-time-constant byte
+    // offset plus, if at most one of its own indices is not a compile-time
+    // constant, that index's own `Value` and byte stride --
+    // `GEPOperator::collectOffset` itself rejects (returns false) a
+    // dynamic *struct-member* index (GLSL/SPIR-V never generates one) or a
+    // dynamic index into a scalable-vector type (never applicable to a
+    // push-constant block).
+    unsigned BitWidth = DL.getIndexSizeInBits(GEP->getPointerAddressSpace());
+    SmallMapVector<Value *, APInt, 4> VariableOffsets;
+    APInt ConstantOffset(BitWidth, 0);
+    if (!GEP->collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset))
+      return false;
+    if (VariableOffsets.size() + (DynamicIndex ? 1 : 0) > 1)
+      return false; // A second, independent dynamic term: out of scope.
+
+    uint64_t NewBaseOffset = BaseOffset + ConstantOffset.getZExtValue();
+    Value *NewDynamicIndex = DynamicIndex;
+    uint64_t NewDynamicStride = DynamicStride;
+    if (!VariableOffsets.empty()) {
+      auto &[Index, Stride] = *VariableOffsets.begin();
+      NewDynamicIndex = Index;
+      NewDynamicStride = Stride.getZExtValue();
+    }
+    if (!visitPushConstantUsers(GEP, NewBaseOffset, NewDynamicIndex,
+                                NewDynamicStride, F, DL, Loads))
+      return false;
+  }
+  return true;
+}
+
+/// Returns the end byte (exclusive) of whichever member of \p PC's own
+/// declared type contains \p BaseOffset -- the tightest sound `MaxOffset`
+/// contribution a dynamically-indexed access can make (see
+/// `lowerSPIRVPushConstantAccess`'s header comment): the dynamic index's
+/// own runtime range is not known statically, but it can never carry a
+/// load past the end of the single declared array/vector/matrix member
+/// \p BaseOffset itself already pins down (every access this pass
+/// recognizes reaches its dynamic index through exactly one member, per
+/// the file comment's "one independent dynamic term" scope). Falls back to
+/// \p PC's own full declared-type store size if \p PC is not (as it always
+/// is for every real SPIR-V push-constant block, but a unit test may use a
+/// bare scalar or array global directly) a `StructType`.
+uint64_t dynamicAccessMemberEndByte(GlobalVariable *PC, uint64_t BaseOffset,
+                                   const DataLayout &DL) {
+  Type *ValueTy = PC->getValueType();
+  if (auto *STy = dyn_cast<StructType>(ValueTy)) {
+    const StructLayout *SL = DL.getStructLayout(STy);
+    if (BaseOffset < SL->getSizeInBytes()) {
+      unsigned ElementIdx = SL->getElementContainingOffset(BaseOffset);
+      return SL->getElementOffset(ElementIdx) +
+             DL.getTypeStoreSize(STy->getElementType(ElementIdx))
+                 .getFixedValue();
+    }
+  }
+  return DL.getTypeStoreSize(ValueTy).getFixedValue();
+}
+
+/// Erases every now-unused `getelementptr` reachable, through any chain of
+/// further GEPs, from a user of \p V -- post-order, so an outer GEP whose
+/// own base is another GEP is only erased once it is itself already empty.
+/// A `ConstantExpr` GEP is walked (its own users may still need cleaning
+/// up) but never erased -- unlike a `GetElementPtrInst`, it is not owned by
+/// any one function to begin with, and LLVM's own constant uniquing
+/// reclaims it once truly unreferenced.
+void eraseDeadPushConstantGEPs(Value *V) {
+  for (User *U : llvm::make_early_inc_range(V->users())) {
+    auto *GEP = dyn_cast<GEPOperator>(U);
+    if (!GEP)
+      continue;
+    eraseDeadPushConstantGEPs(GEP);
+    if (auto *GEPInst = dyn_cast<GetElementPtrInst>(GEP);
+        GEPInst && GEPInst->use_empty())
+      GEPInst->eraseFromParent();
+  }
 }
 
 } // namespace
@@ -81,62 +196,10 @@ matchSPIRVPushConstantAccess(Function &F) {
 
   SPIRVPushConstantAccess Access;
   Access.Global = PC;
-
-  for (User *U : PC->users()) {
-    // A constant-index GEP off the global's own address is almost always
-    // folded straight to a `ConstantExpr`, not left as a real
-    // `GetElementPtrInst`: the global's own address and every index are
-    // already compile-time constants, and every ordinary constant-folding
-    // IR builder (including the one `feme-translate`'s
-    // `--llvmdialect-to-llvmir` step uses) collapses that eagerly. Handle
-    // it identically to a genuine instruction-typed GEP below (both are a
-    // `GEPOperator`), except a `ConstantExpr`'s own uses can span more than
-    // one function (constants are uniqued module-wide, so two different
-    // push-constant-consuming shaders reading the same struct offset share
-    // the exact same `ConstantExpr` instance) -- unlike an
-    // instruction-typed GEP, already guaranteed single-function by `UI`'s
-    // own `getFunction()` filter above, each of *its* users needs its own
-    // per-load function filter here instead. Missing this case left every
-    // non-zero-offset load unrewritten (still referencing `@buffer`
-    // itself, an external declaration with no definition or initializer),
-    // producing a `JIT session error: Symbols not found: [ buffer ]` at
-    // run time for any push-constant struct with more than one member at
-    // a nonzero offset -- confirmed by reducing a real
-    // `offload-test-suite` `Feature/PushConstant/bool.test` failure (the
-    // first, offset-0 member loaded fine; the second, at offset 4, did
-    // not) down to this exact constant-expression shape.
-    if (auto *CE = dyn_cast<ConstantExpr>(U)) {
-      if (CE->getOpcode() != Instruction::GetElementPtr ||
-          !hasOnlyConstantIndices(cast<GEPOperator>(*CE)))
-        return std::nullopt; // A GEP too dynamic to fold.
-      for (User *GU : CE->users()) {
-        auto *GLoad = dyn_cast<LoadInst>(GU);
-        if (!GLoad || GLoad->getFunction() != &F)
-          continue; // Not a load, or not this function's own use.
-        Access.Loads.push_back(GLoad);
-      }
-      continue;
-    }
-
-    auto *UI = dyn_cast<Instruction>(U);
-    if (!UI || UI->getFunction() != &F)
-      continue; // Not this function's use; visited when that one is.
-
-    if (auto *LI = dyn_cast<LoadInst>(UI)) {
-      Access.Loads.push_back(LI);
-      continue;
-    }
-    auto *GEP = dyn_cast<GetElementPtrInst>(UI);
-    if (!GEP || !hasOnlyConstantIndices(cast<GEPOperator>(*GEP)))
-      return std::nullopt; // A store, or a GEP too dynamic to fold.
-
-    for (User *GU : GEP->users()) {
-      auto *GLoad = dyn_cast<LoadInst>(GU);
-      if (!GLoad)
-        return std::nullopt; // A store, or a further GEP: unsupported.
-      Access.Loads.push_back(GLoad);
-    }
-  }
+  const DataLayout &DL = PC->getDataLayout();
+  if (!visitPushConstantUsers(PC, /*BaseOffset=*/0, /*DynamicIndex=*/nullptr,
+                             /*DynamicStride=*/0, F, DL, Access.Loads))
+    return std::nullopt;
 
   if (Access.Loads.empty())
     return std::nullopt; // The global exists, but not referenced by `F`.
@@ -160,12 +223,15 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   // of its store size (12 -> 16) on a target whose data layout does not
   // mark vectors as element-aligned, inflating the *whole struct's* size
   // well past the last byte any `int3`/`float3` load actually touches.
-  // Every access this pass recognizes has a compile-time-constant byte
-  // offset (see the file comment's scope note: no dynamic index is ever
-  // accepted here), so -- unlike `feme::cpu::RootConstantLowering.h`'s own
-  // DXIL root constant, which must report its full declared size because a
-  // dynamic row/array index means there is no longer a fixed set of bytes
-  // to inspect statically -- there is no dynamic access this tighter span
+  // Every access this pass recognizes has a compile-time-constant *base*
+  // byte offset (see the file comment's scope note), so a constant-offset
+  // load's own tighter span is always safe to report; a dynamically-
+  // indexed load instead contributes its own containing member's end byte
+  // (see `dynamicAccessMemberEndByte`) -- unlike
+  // `feme::cpu::RootConstantLowering.h`'s own DXIL root constant, which
+  // must report its full declared size unconditionally because *every*
+  // access it lowers is dynamically indexed, there is no dynamic access
+  // here whose containing member's own declared bound this tighter span
   // could ever fail to cover.
   //
   // (Roadmap H6u) `MinAccessedByte` is the same idea applied to the low
@@ -179,42 +245,57 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   uint32_t MaxAccessedByte = 0;
   uint32_t MinAccessedByte = std::numeric_limits<uint32_t>::max();
 
-  for (Instruction *LoadI : Access.Loads) {
-    auto *Load = cast<LoadInst>(LoadI);
-    Value *Ptr = Load->getPointerOperand();
-
-    uint64_t ByteOffset = 0;
-    if (Ptr != Access.Global) {
-      APInt Offset(DL.getIndexSizeInBits(Ptr->getType()->getPointerAddressSpace()),
-                  0);
-      bool Resolved = cast<GEPOperator>(Ptr)->accumulateConstantOffset(
-          DL, Offset); // Guaranteed by `hasOnlyConstantIndices`.
-      (void)Resolved;
-      assert(Resolved && "matchSPIRVPushConstantAccess only accepts "
-                         "constant-index GEPs");
-      ByteOffset = Offset.getZExtValue();
-    }
-
+  for (const SPIRVPushConstantLoad &LoadInfo : Access.Loads) {
+    LoadInst *Load = LoadInfo.Load;
     Type *LoadedTy = Load->getType();
     uint64_t LoadSize = DL.getTypeStoreSize(LoadedTy).getFixedValue();
-    MaxAccessedByte =
-        std::max<uint64_t>(MaxAccessedByte, ByteOffset + LoadSize);
+
     MinAccessedByte =
-        std::min<uint64_t>(MinAccessedByte, ByteOffset);
+        std::min<uint64_t>(MinAccessedByte, LoadInfo.BaseOffset);
+    MaxAccessedByte = std::max<uint64_t>(
+        MaxAccessedByte,
+        LoadInfo.DynamicIndex
+            ? dynamicAccessMemberEndByte(Access.Global, LoadInfo.BaseOffset, DL)
+            : LoadInfo.BaseOffset + LoadSize);
 
     IRBuilder<> Builder(Load);
-    Value *InBounds = Builder.CreateICmpULE(
-        ConstantInt::get(I32Ty, ByteOffset + LoadSize), RootConstantSize,
-        "push_const.inbounds");
+
+    // The byte offset this particular load reads, as a 64-bit value ready
+    // for the `getelementptr` below -- the constant `BaseOffset` alone,
+    // widened, if this load's index chain never carried a dynamic term, or
+    // that same `BaseOffset` plus `DynamicIndex * DynamicStride`
+    // (replicating the very GEP arithmetic `matchSPIRVPushConstantAccess`
+    // decomposed) otherwise. `CreateSExtOrTrunc`, not a zero-extend,
+    // matches `getelementptr`'s own indexing semantics -- every index
+    // `GEPOperator::collectOffset` itself scales is treated as signed (see
+    // its own `sextOrTrunc` in `llvm/lib/IR/Operator.cpp`).
+    Value *ByteOffset64 = ConstantInt::get(I64Ty, LoadInfo.BaseOffset);
+    Value *InBoundsEndByte32 =
+        ConstantInt::get(I32Ty, LoadInfo.BaseOffset + LoadSize);
+    if (LoadInfo.DynamicIndex) {
+      Value *Index64 =
+          Builder.CreateSExtOrTrunc(LoadInfo.DynamicIndex, I64Ty);
+      Value *DynamicByteOffset64 = Builder.CreateMul(
+          Index64, ConstantInt::get(I64Ty, LoadInfo.DynamicStride),
+          "push_const.dyn_offset");
+      ByteOffset64 = Builder.CreateAdd(DynamicByteOffset64, ByteOffset64,
+                                       "push_const.byte_offset");
+      Value *ByteOffset32 = Builder.CreateTrunc(ByteOffset64, I32Ty);
+      InBoundsEndByte32 = Builder.CreateAdd(
+          ByteOffset32, ConstantInt::get(I32Ty, LoadSize),
+          "push_const.end_offset");
+    }
+    Value *InBounds = Builder.CreateICmpULE(InBoundsEndByte32, RootConstantSize,
+                                            "push_const.inbounds");
 
     Instruction *ThenTerm = nullptr;
     Instruction *ElseTerm = nullptr;
     SplitBlockAndInsertIfThenElse(InBounds, Load, &ThenTerm, &ElseTerm);
 
     IRBuilder<> ThenBuilder(ThenTerm);
-    Value *Offset64 = ConstantInt::get(I64Ty, ByteOffset);
     Value *ElemPtr = ThenBuilder.CreateInBoundsGEP(
-        ThenBuilder.getInt8Ty(), RootConstants, Offset64, "push_const.ptr");
+        ThenBuilder.getInt8Ty(), RootConstants, ByteOffset64,
+        "push_const.ptr");
     Value *Loaded = ThenBuilder.CreateAlignedLoad(
         LoadedTy, ElemPtr, Load->getAlign(), "push_const.load");
 
@@ -230,9 +311,7 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   // Drop every now-unused `getelementptr` this access rewrote through; the
   // global itself is left for the caller to erase once every function
   // referencing it has been processed (see the pass's own `run`).
-  for (User *U : llvm::make_early_inc_range(Access.Global->users()))
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(U); GEP && GEP->use_empty())
-      GEP->eraseFromParent();
+  eraseDeadPushConstantGEPs(Access.Global);
 
   return PushConstantAccessSpan{MinAccessedByte, MaxAccessedByte};
 }
@@ -278,6 +357,22 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
     NewF->splice(NewF->begin(), &F);
     for (auto [OldArg, NewArg] : llvm::zip(F.args(), NewF->args())) {
       NewArg.takeName(&OldArg);
+      // A recognized access's own `DynamicIndex` (see
+      // `matchSPIRVPushConstantAccess`, run against the original `F`
+      // before this rebuild) may itself be one of `F`'s own arguments --
+      // e.g. a shader-stage entry point that takes its own dynamic index
+      // as a real parameter rather than computing it from an earlier
+      // instruction. Unlike an instruction (relocated, not cloned, by
+      // `splice` above, so its own identity as a `Value` survives), an
+      // `Argument` belongs to its `Function`, not to any basic block, so
+      // it is not moved by `splice` at all -- it is only replaced,
+      // instruction-use by instruction-use, by the loop below. Without
+      // this remap, `Access.Loads`' own `DynamicIndex` would still point
+      // at `OldArg` once `F.eraseFromParent()` below frees it, a
+      // dangling-pointer read in `lowerSPIRVPushConstantAccess`.
+      for (SPIRVPushConstantLoad &LoadInfo : Access->Loads)
+        if (LoadInfo.DynamicIndex == &OldArg)
+          LoadInfo.DynamicIndex = &NewArg;
       OldArg.replaceAllUsesWith(&NewArg);
     }
     auto ArgIt = NewF->arg_begin() + F.arg_size();
@@ -293,8 +388,10 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
     // rebuilds the function, and the loads `Access` collected belong to the
     // original `F`'s instructions -- which `splice` moved into `NewF`
     // unchanged (a `BasicBlock::splice` relocates instructions in place, it
-    // does not clone them), so `Access.Loads`' pointers stay valid; only
-    // `Access.Global` may need nothing further, since it is a module-level
+    // does not clone them), so `Access.Loads`' pointers stay valid; a
+    // `DynamicIndex` that was one of `F`'s own arguments was already
+    // remapped to its `NewF` counterpart just above, for the same reason;
+    // `Access.Global` needs nothing further, since it is a module-level
     // `GlobalVariable`, not per-function.
     PushConstantAccessSpan Span =
         lowerSPIRVPushConstantAccess(*Access, RootConstants, RootConstantSize);

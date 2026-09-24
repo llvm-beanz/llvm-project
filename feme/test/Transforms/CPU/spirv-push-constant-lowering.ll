@@ -8,16 +8,86 @@
 %PushConstants = type { i32, float, [4 x i32] }
 @pc = external addrspace(13) constant %PushConstants
 
-; A dynamically-indexed access into the block's array member is left
-; entirely alone (see the pass's header comment's scope note), and stays in
-; its original module position; `checkSupportedRaisedOps` is left to
-; reject whatever remains referencing the global directly.
-; CHECK-LABEL: define i32 @dynamic_index(
-; CHECK-SAME: i32 %idx)
+; Two *independent* dynamic indices in the same access chain (here, a
+; further dynamic byte-index chained onto an already-dynamically-indexed
+; GEP) remain out of this pass's scope (see the file comment's "at most
+; one independent dynamic term" note) -- reasoning about two
+; simultaneously-runtime-computed offsets to derive a safe `MaxOffset`
+; bound is a meaningfully harder problem this pass does not attempt, and
+; no real shader shape needing it has been observed. Left entirely alone,
+; exactly like the single-dynamic-index case used to be. Printed first,
+; before every lowered function below: a function this pass leaves
+; unmodified keeps its original module position, unlike a lowered one
+; (its signature grows, so it is rebuilt and moved to the module's end --
+; see `SPIRVPushConstantLoweringPass::run`).
+; CHECK-LABEL: define i32 @two_dynamic_indices(
+; CHECK-SAME: i32 %i, i32 %j)
 ; CHECK-NOT: root_constants
 ; CHECK: getelementptr {{.*}} @pc
+define i32 @two_dynamic_indices(i32 %i, i32 %j) {
+  %base = getelementptr inbounds %PushConstants, ptr addrspace(13) @pc, i32 0, i32 2, i32 %i
+  %p = getelementptr i32, ptr addrspace(13) %base, i32 %j
+  %v = load i32, ptr addrspace(13) %p
+  ret i32 %v
+}
+
+; A dynamically-indexed access into the block's array member (roadmap
+; L131: a shader's own runtime-computed, "dynamically uniform" index into
+; a push-constant array/vector/matrix column, the shape
+; `dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+; dynamic_index_vert`'s own `arrType[dynamicIndex]` compiles down to) is
+; recognized and lowered exactly like a constant-offset access, except the
+; byte offset itself is computed at runtime -- `BaseOffset +
+; DynamicIndex * DynamicStride` (see `SPIRVPushConstantLoad`'s own
+; comment) -- rather than folded to a single constant. Before this row's
+; own fix, this whole function was left entirely unrewritten (still
+; referencing `@pc`, an external declaration with no definition),
+; producing a `JIT session error: Symbols not found: [ pc ]` at run time
+; rather than a valid (if runtime-bounds-checked) load.
+; CHECK-LABEL: define i32 @dynamic_index(
+; CHECK-SAME: i32 %idx, ptr %root_constants, i32 %root_constant_size)
+; CHECK: %[[IDX64:[0-9]+]] = sext i32 %idx to i64
+; CHECK: %push_const.dyn_offset = mul i64 %[[IDX64]], 4
+; CHECK: %push_const.byte_offset = add i64 %push_const.dyn_offset, 8
+; CHECK: %[[END32:[0-9]+]] = trunc i64 %push_const.byte_offset to i32
+; CHECK: %push_const.end_offset = add i32 %[[END32]], 4
+; CHECK: %push_const.inbounds = icmp ule i32 %push_const.end_offset, %root_constant_size
+; CHECK: %push_const.ptr = getelementptr inbounds i8, ptr %root_constants, i64 %push_const.byte_offset
+; CHECK: %push_const.load = load i32, ptr %push_const.ptr
 define i32 @dynamic_index(i32 %idx) {
   %p = getelementptr inbounds %PushConstants, ptr addrspace(13) @pc, i32 0, i32 2, i32 %idx
+  %v = load i32, ptr addrspace(13) %p
+  ret i32 %v
+}
+
+; The same dynamically-indexed shape, but based off a nonzero-offset
+; struct member reached through a constant-expression `getelementptr`
+; (see `reads_member_via_constant_expr_gep` below for why that shape
+; arises) rather than directly off `@pc` -- the real shape
+; `dynamic_index_vert`'s own `arrType[dynamicIndex]` (the block's own
+; last member, at a nonzero byte offset within its own larger, 4-member
+; push-constant struct -- this test file's own struct only has 3 members,
+; so the exact byte offset differs, but the shape is the same) reduces
+; to: an outer, dynamically-indexed `getelementptr` instruction whose own
+; base pointer is itself a constant-offset `getelementptr` constant
+; expression on `@pc`, not `@pc` directly. Before this row's own fix, even
+; a version of this pass already carrying separate (never-landed)
+; dynamic-index support for the directly-off-`@pc` shape above would
+; still have silently skipped this one entirely: a constant-expression
+; GEP's own users were assumed to always be loads (see `git log` on this
+; file for the pre-L131 shape of `matchSPIRVPushConstantAccess`), so a
+; further, dynamically-indexed GEP based on it was invisibly dropped
+; rather than rejected or lowered.
+; CHECK-LABEL: define i32 @dynamic_index_nonzero_base(
+; CHECK-SAME: i32 %idx, ptr %root_constants, i32 %root_constant_size)
+; CHECK: %[[IDX64:[0-9]+]] = sext i32 %idx to i64
+; CHECK: %push_const.dyn_offset = mul i64 %[[IDX64]], 4
+; CHECK: %push_const.byte_offset = add i64 %push_const.dyn_offset, 8
+; CHECK: %push_const.ptr = getelementptr inbounds i8, ptr %root_constants, i64 %push_const.byte_offset
+; CHECK: %push_const.load = load i32, ptr %push_const.ptr
+define i32 @dynamic_index_nonzero_base(i32 %idx) {
+  %p = getelementptr i32, ptr addrspace(13) getelementptr inbounds (
+      %PushConstants, ptr addrspace(13) @pc, i32 0, i32 2), i32 %idx
   %v = load i32, ptr addrspace(13) %p
   ret i32 %v
 }
