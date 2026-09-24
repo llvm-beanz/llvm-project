@@ -61,23 +61,20 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~5 min, do this first if picking up `L183`)** Re-read `L183`'s roadmap row
-   before touching it -- it already has the 2 exact case names, the ruled-out
-   hypotheses, and the "don't assume it's `L181`" warning. Don't re-derive any
-   of this from scratch.
-2. **(~1-2 hrs)** If picking up `L183`: get `feme-translate --import-spirv` ->
-   `--spirv-to-llvmir` working as a 2-step pipe (confirmed working command
-   shape: `feme-translate --import-spirv in.spv -o mid.mlir`, then
-   `feme-translate --spirv-to-llvmir mid.mlir -o out.ll`) on a
-   `FrexpStruct`+`half` compute shader, and diff its output against the same
-   shader with a `ModfStruct` swap-in (which works) to find exactly where the
-   two diverge.
-3. **(~5 min)** `L98(b)` (`shaderFloat64` stage-IO) is still open and not
-   attempted this session -- it needs genuinely variable-width storage or a
-   two-slot decomposition, unlike `L98(a)`'s single-slot widen trick. See its
-   own roadmap row for the design note.
-4. Scan `Roadmap.md` for the next open, well-scoped item if not picking up
-   `L183`/`L98(b)` -- the last full-scan candidates (`L90`-`L95`,
-   `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`, plus
-   `R`/`V`/`W`-prefixed rows) are still individually unvetted.
-5. No `/tmp` scratch left from this session -- already cleaned up.
+1. **(~2-4 hrs, well-scoped)** `L184`: root-cause 8 pre-existing,
+   confirmed-real `arithmetic_{2,3,4}.{acosh,asinh,atanh,distance,frexpe,
+   frexps,length,opdot}` pipeline-creation failures, plus the separate
+   pre-existing `opcompositeextract.struct16arr3` crash. None
+   investigated past the failure signature yet -- get each case's real
+   SPIR-V via its QPA log (mind the delimiter caution above) and pipe
+   through `feme-translate` the same way `L183` was diagnosed. Worth
+   checking first whether `frexpe`/`frexps`/`length`/`distance`/`opdot`
+   (several look vector-math-shaped) share one common root cause before
+   assuming 8 independent bugs.
+2. **(~5 min)** No `/tmp` scratch left from this session -- already
+   cleaned up (`ctsrun_l183*`, `frexp_*`, etc. all removed).
+3. Scan `Roadmap.md` for the next open, well-scoped item if not picking
+   up `L184` -- the last full-scan candidates from several sessions back
+   (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows) are still
+   individually unvetted.
