@@ -7047,44 +7047,122 @@ llvm::SmallVector<int64_t, 4> remapCompositeMemberIndices(
 /// inspect a type. Returns null if \p CompositeType's own structure
 /// disagrees with \p PhysicalIndices (should not happen for indices this
 /// file's own remap produced).
-mlir::Type getPhysicalCompositeElementType(mlir::Type CompositeType,
-                                           llvm::ArrayRef<int64_t> PhysicalIndices) {
+/// (Roadmap L184) The full result of resolving a `spirv.CompositeExtract`/
+/// `CompositeInsert`'s own physical index list against the already-
+/// converted LLVM composite type, purely at the type level (no IR
+/// emitted). Distinguishes the two shapes a physical composite access can
+/// end in: a plain struct/array leaf (`VectorLaneIndex < 0`, reachable
+/// entirely through `llvm.extractvalue`/`insertvalue`, `LeafType` its own
+/// type, possibly still a `feme.tight_vector` marker struct needing
+/// `unwrapTightVectorValue`/`reassembleTightVectorValue` on top), or a
+/// trailing bare-vector lane select (`VectorLaneIndex >= 0`, the one index
+/// `llvm.extractvalue`/`insertvalue` cannot express at all -- only
+/// `llvm.extractelement`/`insertelement` can -- `LeafType` the vector's own
+/// element type in that case).
+struct PhysicalCompositeAccess {
+  llvm::SmallVector<int64_t, 4> ExtractValueIndices;
+  int64_t VectorLaneIndex = -1;
+  mlir::Type LeafType;
+};
+
+/// Resolves \p PhysicalIndices (as `remapCompositeMemberIndices` computed
+/// them -- already physical-index-remapped where a struct level needed it,
+/// or identical to the original declared indices when no remap was needed)
+/// against the already-converted LLVM \p CompositeType. Transparently
+/// unwraps any `feme.tight_vector` marker struct encountered *before* its
+/// own final leaf (inserting an extra `0` `llvm.extractvalue` index to
+/// cross it) whenever more indices still remain to consume past it -- the
+/// marker's single member is itself always array-navigable via
+/// `llvm.extractvalue` (see `getTightVectorArrayType`'s own comment), so
+/// this never needs `llvm.extractelement` to cross. A remaining index into
+/// a genuinely bare (non-marker-substituted) `mlir::VectorType` is the one
+/// shape neither `llvm.extractvalue` (this function's own struct/array
+/// navigation) nor upstream's own generic `CompositeExtractPattern`/
+/// `CompositeInsertPattern` can express -- upstream only special-cases a
+/// vector container at the *very top* of the composite (single index,
+/// checked via `isa<VectorType>(op.getComposite().getType())`), and
+/// otherwise assumes the entire index list is struct/array-navigable,
+/// which crashes `ExtractValueOp::build`'s/`InsertValueOp::build`'s own
+/// internal type-checking walk once a nested member turns out to be a
+/// plain vector partway through a longer index list (confirmed via
+/// `dEQP-VK.spirv_assembly.instruction.compute.float16.opcompositeextract
+/// .struct16arr3`, whose `%struct16 = OpTypeStruct %f16 %v2f16arr3` middle
+/// member is exactly this shape -- an array of *bare* `vector<2xf16>`,
+/// no tight-vector substitution needed for this particular width/stride,
+/// confirmed via direct type inspection). Returns `std::nullopt` if
+/// \p CompositeType's own structure disagrees with \p PhysicalIndices in a
+/// way this cannot reconcile (should not happen for indices this file's
+/// own remap produced against a well-formed SPIR-V module).
+std::optional<PhysicalCompositeAccess> resolvePhysicalCompositeAccess(
+    mlir::Type CompositeType, llvm::ArrayRef<int64_t> PhysicalIndices) {
+  PhysicalCompositeAccess Result;
   mlir::Type CurrentType = CompositeType;
-  for (int64_t Index : PhysicalIndices) {
-    if (auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(CurrentType)) {
+  for (size_t I = 0, E = PhysicalIndices.size(); I != E; ++I) {
+    // Transparently cross any tight-vector marker(s) reached before
+    // consuming this index -- never counted against the caller's own
+    // index list, since the marker's single member occupies no logical
+    // SPIR-V nesting level of its own.
+    while (mlir::Type Inner = getTightVectorMarkerInnerType(CurrentType)) {
+      Result.ExtractValueIndices.push_back(0);
+      CurrentType = Inner;
+    }
+    int64_t Index = PhysicalIndices[I];
+    if (auto StructTy =
+            mlir::dyn_cast<mlir::LLVM::LLVMStructType>(CurrentType)) {
       if (Index < 0 || static_cast<size_t>(Index) >= StructTy.getBody().size())
-        return {};
+        return std::nullopt;
+      Result.ExtractValueIndices.push_back(Index);
       CurrentType = StructTy.getBody()[Index];
     } else if (auto ArrTy =
                    mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(CurrentType)) {
+      Result.ExtractValueIndices.push_back(Index);
       CurrentType = ArrTy.getElementType();
+    } else if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(CurrentType)) {
+      if (I + 1 != E)
+        // More than one index remains past a bare vector -- a vector
+        // lane is always a scalar leaf, so a well-formed SPIR-V module
+        // should never have a further index past it.
+        return std::nullopt;
+      Result.VectorLaneIndex = Index;
+      Result.LeafType = VecTy.getElementType();
+      return Result;
     } else {
-      return {};
+      return std::nullopt;
     }
   }
-  return CurrentType;
+  Result.LeafType = CurrentType;
+  return Result;
 }
 
-/// (Roadmap L183) Converts `spirv.CompositeExtract` whenever either (a) any
-/// struct level `remapCompositeMemberIndices` reaches along \p Op's own
-/// index list needs physical-index remapping, or (b) the physical value
+/// (Roadmap L183/L184) Converts `spirv.CompositeExtract` whenever any of:
+/// (a) any struct level `remapCompositeMemberIndices` reaches along \p Op's
+/// own index list needs physical-index remapping, (b) the physical value
 /// this extracts is wrapped in one or more `feme.tight_vector` marker
 /// structs (see `getTightVectorArrayType`) that \p Op's own declared,
-/// marker-free result type does not expect -- upstream's own generic
-/// `CompositeExtractPattern` handles neither: it forwards every index
-/// unchanged, assuming physical index always equals declared SPIR-V index
-/// (true only for a struct FeMe's own conversion needed no padding for,
-/// the same physical-index mismatch `OffsetStructMemberReorderAccessChainPattern`,
-/// roadmap H129, already fixes for `spirv.AccessChain`), and it never
-/// unwraps a tight-vector marker, since a pointer-typed `AccessChain` never
-/// needs to (see `getTightVectorArrayType`'s own comment on why the
-/// substitution is transparent for pointer-based access but not for a
-/// value, like this op's own result, crossing the member's boundary).
-/// Needed for a builtin GLSL.std.450 op's own transient, SSA-value-only
-/// result struct too (e.g. `FrexpStructPattern`'s own
-/// `{significand, exponent}` result), not just a genuinely memory-backed,
-/// offset-decorated struct -- both can carry the exact same interior
-/// alignment-gap padding and tight-vector substitution.
+/// marker-free result type does not expect, or (c) the index list's own
+/// final index selects a lane of a bare (non-marker-substituted) vector
+/// nested inside an otherwise struct/array-navigated composite -- upstream's
+/// own generic `CompositeExtractPattern` handles none of these: it forwards
+/// every index unchanged, assuming physical index always equals declared
+/// SPIR-V index (true only for a struct FeMe's own conversion needed no
+/// padding for, the same physical-index mismatch
+/// `OffsetStructMemberReorderAccessChainPattern`, roadmap H129, already
+/// fixes for `spirv.AccessChain`); it never unwraps a tight-vector marker,
+/// since a pointer-typed `AccessChain` never needs to (see
+/// `getTightVectorArrayType`'s own comment on why the substitution is
+/// transparent for pointer-based access but not for a value, like this
+/// op's own result, crossing the member's boundary); and it only
+/// special-cases a bare vector container at the very top of the index
+/// list (`isa<VectorType>(op.getComposite().getType())`), crashing
+/// `ExtractValueOp::build`'s own internal type-checking walk if a nested
+/// struct/array member turns out to be a plain vector partway through a
+/// longer index list (roadmap L184, confirmed via `dEQP-VK.spirv_assembly.
+/// instruction.compute.float16.opcompositeextract.struct16arr3`). Needed
+/// for a builtin GLSL.std.450 op's own transient, SSA-value-only result
+/// struct too (e.g. `FrexpStructPattern`'s own `{significand, exponent}`
+/// result), not just a genuinely memory-backed, offset-decorated struct --
+/// both can carry the exact same interior alignment-gap padding and
+/// tight-vector substitution.
 class CompositeExtractMemberReorderPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeExtractOp> {
 public:
@@ -7101,38 +7179,54 @@ public:
     mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
     if (!DstType)
       return Rewriter.notifyMatchFailure(Op, "result type failed to convert");
-    mlir::Type PhysicalType = getPhysicalCompositeElementType(
-        Adaptor.getComposite().getType(), PhysicalIndices);
-    if (!PhysicalType)
-      // PhysicalIndices descends into a plain (non-struct/array) leaf, e.g.
-      // a single lane of a vector -- `llvm.extractvalue` cannot express
-      // that at all (only `llvm.extractelement` can); decline in favor of
-      // upstream's own generic pattern, which already handles a plain
-      // vector-lane extract correctly on its own.
+    std::optional<PhysicalCompositeAccess> Access =
+        resolvePhysicalCompositeAccess(Adaptor.getComposite().getType(),
+                                        PhysicalIndices);
+    if (!Access)
       return Rewriter.notifyMatchFailure(
-          Op, "composite indexes through a non-struct/array leaf");
-    if (!NeedsIndexRemap && PhysicalType == DstType)
+          Op, "composite's physical type disagrees with its own index list");
+    bool NeedsVectorLaneSplit = Access->VectorLaneIndex >= 0;
+    if (!NeedsIndexRemap && !NeedsVectorLaneSplit &&
+        Access->LeafType == DstType)
       return Rewriter.notifyMatchFailure(
-          Op, "no physical index remap or tight-vector unwrap needed");
-    mlir::Value Raw = mlir::LLVM::ExtractValueOp::create(
-        Rewriter, Op.getLoc(), Adaptor.getComposite(), PhysicalIndices);
-    mlir::Value Result =
-        unwrapTightVectorValue(Raw, DstType, Rewriter, Op.getLoc());
-    if (!Result)
-      return Rewriter.notifyMatchFailure(
-          Op, "extracted value's shape disagrees with the declared result "
-              "type in a way tight-vector unwrapping cannot reconcile");
+          Op, "no physical index remap, tight-vector unwrap, or "
+              "vector-lane split needed");
+    mlir::Value Container =
+        Access->ExtractValueIndices.empty()
+            ? Adaptor.getComposite()
+            : mlir::LLVM::ExtractValueOp::create(
+                  Rewriter, Op.getLoc(), Adaptor.getComposite(),
+                  Access->ExtractValueIndices);
+    mlir::Value Result;
+    if (NeedsVectorLaneSplit) {
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Op.getLoc(), Rewriter.getI32Type(),
+          static_cast<int32_t>(Access->VectorLaneIndex));
+      Result = mlir::LLVM::ExtractElementOp::create(Rewriter, Op.getLoc(),
+                                                     Container, LaneIndex);
+    } else {
+      Result = unwrapTightVectorValue(Container, DstType, Rewriter,
+                                       Op.getLoc());
+      if (!Result)
+        return Rewriter.notifyMatchFailure(
+            Op, "extracted value's shape disagrees with the declared "
+                "result type in a way tight-vector unwrapping cannot "
+                "reconcile");
+    }
     Rewriter.replaceOp(Op, Result);
     return mlir::success();
   }
 };
 
-/// (Roadmap L183) The `spirv.CompositeInsert` counterpart of
+/// (Roadmap L183/L184) The `spirv.CompositeInsert` counterpart of
 /// CompositeExtractMemberReorderPattern -- see its own comment. Wraps \p
 /// Op's own (already marker-free) object operand into whatever
 /// `feme.tight_vector`-substituted shape the composite's physical member
-/// slot expects via reassembleTightVectorValue, the same helper
-/// `CompositeConstructPattern` below uses for the identical problem.
+/// slot expects via reassembleTightVectorValue (the same helper
+/// `CompositeConstructPattern` below uses for the identical problem), or,
+/// when the final index selects a lane of a bare vector nested inside an
+/// otherwise struct/array-navigated composite, emits `llvm.insertelement`
+/// into that vector member directly instead.
 class CompositeInsertMemberReorderPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeInsertOp> {
 public:
@@ -7146,22 +7240,40 @@ public:
     llvm::SmallVector<int64_t, 4> PhysicalIndices = remapCompositeMemberIndices(
         Op.getComposite().getType(), Op.getIndices().getValue(),
         *getTypeConverter(), NeedsIndexRemap);
-    mlir::Type PhysicalSlotType = getPhysicalCompositeElementType(
-        Adaptor.getComposite().getType(), PhysicalIndices);
-    if (!PhysicalSlotType)
-      // PhysicalIndices descends into a plain (non-struct/array) leaf, e.g.
-      // a single lane of a vector -- `llvm.insertvalue` cannot express that
-      // at all (only `llvm.insertelement` can); decline in favor of
-      // upstream's own generic pattern, which already handles a plain
-      // vector-lane insert correctly on its own.
+    std::optional<PhysicalCompositeAccess> Access =
+        resolvePhysicalCompositeAccess(Adaptor.getComposite().getType(),
+                                        PhysicalIndices);
+    if (!Access)
       return Rewriter.notifyMatchFailure(
-          Op, "composite indexes through a non-struct/array leaf");
-    if (!NeedsIndexRemap &&
-        PhysicalSlotType == Adaptor.getObject().getType())
+          Op, "composite's physical type disagrees with its own index list");
+    bool NeedsVectorLaneSplit = Access->VectorLaneIndex >= 0;
+    if (!NeedsIndexRemap && !NeedsVectorLaneSplit &&
+        Access->LeafType == Adaptor.getObject().getType())
       return Rewriter.notifyMatchFailure(
-          Op, "no physical index remap or tight-vector wrap needed");
+          Op, "no physical index remap, tight-vector wrap, or vector-lane "
+              "split needed");
+    if (NeedsVectorLaneSplit) {
+      mlir::Value Container =
+          Access->ExtractValueIndices.empty()
+              ? Adaptor.getComposite()
+              : mlir::LLVM::ExtractValueOp::create(
+                    Rewriter, Op.getLoc(), Adaptor.getComposite(),
+                    Access->ExtractValueIndices);
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Op.getLoc(), Rewriter.getI32Type(),
+          static_cast<int32_t>(Access->VectorLaneIndex));
+      mlir::Value UpdatedVector = mlir::LLVM::InsertElementOp::create(
+          Rewriter, Op.getLoc(), Container, Adaptor.getObject(), LaneIndex);
+      if (Access->ExtractValueIndices.empty())
+        Rewriter.replaceOp(Op, UpdatedVector);
+      else
+        Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
+            Op, Adaptor.getComposite(), UpdatedVector,
+            Access->ExtractValueIndices);
+      return mlir::success();
+    }
     mlir::Value Wrapped = reassembleTightVectorValue(
-        Adaptor.getObject(), PhysicalSlotType, Rewriter, Op.getLoc());
+        Adaptor.getObject(), Access->LeafType, Rewriter, Op.getLoc());
     if (!Wrapped)
       return Rewriter.notifyMatchFailure(
           Op, "inserted object's shape disagrees with the composite's "

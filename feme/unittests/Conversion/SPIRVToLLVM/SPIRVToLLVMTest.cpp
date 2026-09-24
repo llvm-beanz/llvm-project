@@ -1218,4 +1218,56 @@ TEST(SPIRVToLLVMTest, PlainVectorLaneCompositeExtractStillLegalizes) {
   EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
 }
 
+// (Roadmap L184) A regression guard for the `opcompositeextract.
+// struct16arr3` crash this session root-caused and fixed:
+// `CompositeExtractMemberReorderPattern`'s pre-fix version only ever
+// handled a fully struct/array-navigable index path (bottoming out at a
+// genuine scalar or a `feme.tight_vector`-marker-wrapped leaf) or declined
+// entirely -- it never handled navigating through a struct member and
+// *then* landing on a single lane of a genuinely bare (non-marker-
+// substituted) vector, which is what a `vector<2xf16>` array element
+// converts to whenever its own natural LLVM ABI width already matches its
+// SPIR-V `ArrayStride` (so no marker substitution is needed at all).
+// Declining this shape deferred to upstream's own generic
+// `CompositeExtractPattern`, which also cannot express it (it only
+// special-cases a vector at the very top of the whole composite) and
+// crashes an internal `ExtractValueOp` assertion instead. Modeled
+// directly on that failure's minimal shape: a two-member struct of plain
+// `vector<2xsi32>`s, extracting member 1's lane 0 via a single
+// `spirv.CompositeExtract` with a two-element index path.
+TEST(SPIRVToLLVMTest, StructMemberVectorLaneCompositeExtractLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry() -> si32 \"None\" { "
+      "%src = spirv.Undef : "
+      "!spirv.struct<(vector<2xsi32>, vector<2xsi32>)> "
+      "%lane = spirv.CompositeExtract %src[1 : i32, 0 : i32] : "
+      "!spirv.struct<(vector<2xsi32>, vector<2xsi32>)> "
+      "spirv.ReturnValue %lane : si32 } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.extractvalue"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
+}
+
+// (Roadmap L184) The `CompositeInsert` dual of the test just above --
+// `CompositeInsertMemberReorderPattern`'s own symmetric fix, inserting a
+// scalar into one lane of a struct member's bare vector via
+// `llvm.insertelement` wrapped in an outer `llvm.insertvalue`, rather than
+// deferring (and crashing) the same way its extract counterpart did.
+TEST(SPIRVToLLVMTest, StructMemberVectorLaneCompositeInsertLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%val : si32) -> "
+      "!spirv.struct<(vector<2xsi32>, vector<2xsi32>)> \"None\" { "
+      "%src = spirv.Undef : "
+      "!spirv.struct<(vector<2xsi32>, vector<2xsi32>)> "
+      "%result = spirv.CompositeInsert %val, %src[1 : i32, 0 : i32] : si32 "
+      "into !spirv.struct<(vector<2xsi32>, vector<2xsi32>)> "
+      "spirv.ReturnValue %result : "
+      "!spirv.struct<(vector<2xsi32>, vector<2xsi32>)> } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.insertvalue"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.insertelement"), std::string::npos) << Result;
+}
+
 } // namespace
