@@ -12690,3 +12690,99 @@ Properties` bitmask field, not one of the individually-tracked
 feature-struct-field/extension-string rows those two inventories track
 (neither file has any pre-existing `SHUFFLE_BIT`/`VOTE_BIT`/`BALLOT_BIT`
 row to update either, confirmed by grep before concluding this).
+
+## 2026-09-27: L116(d) fixed -- `spirv.Constant`/`spirv.CompositeConstruct` of aggregate (struct/array-of-struct) types now legalize; 3 distinct pre-existing bugs unmasked and split out as L186/L187/L188
+
+### Root causes and fixes
+
+Two independent sub-bugs, both under `spirv.Constant`/`spirv.CompositeConstruct`
+of an aggregate type, closed together since they were originally reported as
+one roadmap row:
+
+1. **A struct-containing `spirv.Constant` had no legal LLVM `ElementsAttr`
+   encoding at all** (struct-of-scalar/matrix, or array-of-struct, at any
+   nesting depth). Added `StructConstantPattern`
+   (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`), which
+   decomposes one aggregate level at a time into simpler per-member/
+   per-element `spirv.Constant`s feeding a `spirv.CompositeConstruct`. Nested
+   structs (struct-in-struct, or array-of-struct needing the pattern to fire
+   twice) required explicitly opting in to MLIR's bounded-rewrite-recursion
+   guard (`setHasBoundedRewriteRecursion()`), since the dialect conversion
+   framework otherwise refuses to re-apply the same pattern to an op it just
+   created, as a generic infinite-recursion safety guard. Also hardened
+   `ArrayConstantPattern` to reject any struct-containing type up front via a
+   new `containsStructType` helper, rather than relying on a flattened
+   element-count heuristic that could previously pass spuriously for an
+   array-of-struct shape and crash inside `mlir::DenseElementsAttr::get`
+   (`expected string value for non-DenseElementType element`).
+2. **`spirv.CompositeConstruct` building a stride-padded scalar array
+   (`convertArrayTypeIgnoringDecorations`, roadmap L17, widens an
+   overshooting-stride scalar element to an opaque byte-array stand-in) from
+   plain scalar operands** hard-failed on the resulting type mismatch.
+   `CompositeConstructPattern::convertArray` now round-trips any
+   type-mismatched constituent through a scratch `llvm.alloca` (store
+   narrower, load padded) before `insertvalue` -- the same reinterpret-cast
+   idiom `AggregateInitializedVariablePattern` already used for a related
+   whole-variable case.
+
+### Tests added
+
+- `SPIRVToLLVMTest.cpp`: `StructConstantDecomposesIntoCompositeConstruct`,
+  `ArrayOfStructConstantDecomposesRecursively`,
+  `CompositeConstructReinterpretsStridePaddedArrayElement`.
+- `spirv-to-llvm-constants.mlir`: new positive FileCheck case
+  (`array_of_struct_of_array`), replacing the now-obsolete
+  `spirv-to-llvm-constants-invalid.mlir` (deleted -- it documented the
+  pre-fix graceful-rejection behavior for this exact shape, which now
+  legalizes successfully instead).
+- `spirv-to-llvm-composite-construct.mlir`: new FileCheck case
+  (`construct_stride_padded_scalar_array`).
+
+`ninja check-feme`: 3338/3341 passed, 3 unsupported, 0 failed (both commits
+independently verified clean before landing).
+
+### CTS verification
+
+Ran the established per-case-isolated methodology (`--deqp-runmode=xml-
+caselist` then one `timeout 30 deqp-vk --deqp-case=<case>` per case) across
+the full 757-case `dEQP-VK.graphicsfuzz.*` group, capturing a fresh pre-fix
+baseline sweep this session before either fix landed, then re-running the
+identical sweep post-fix and diffing programmatically:
+
+- Baseline: 645 Pass / 93 Fail / 8 NotSupported / 11 unaccounted
+  (crash/timeout).
+- Post-fix: 663 Pass / 78 Fail / 8 NotSupported / 8 unaccounted.
+- **+18 Pass, 0 regressions.**
+
+Of the 18 originally-identified target cases (13 struct-constant shapes + 5
+array-stride shapes, confirmed no overlap), **15 now Pass**. The remaining 3
+hit genuinely separate, pre-existing bugs that this fix unmasked (they were
+previously hidden because the *same* shader hit this row's own
+constant-legalization bug earlier in the same compile, before ever reaching
+these other gaps):
+
+- `do-while-false-if`: now **Pass** (this was a mis-tracked case during
+  mid-session verification -- confirmed via direct per-case re-run).
+- `spv-load-from-frag-color`: **Fail**, `spirv.InBoundsAccessChain` of a
+  zero-index `Output`-storage-class pointer has no legalization -- filed as
+  new roadmap row **L186**.
+- `spv-stable-sampler-loop-extra-instructions`: **Fail**,
+  `spirv.UMulExtended` has no conversion pattern at all -- filed as new
+  roadmap row **L187**.
+- `stable-binarysearch-tree-false-if-discard-loop`: **Fail**,
+  `feme-cpu-simdize` cannot widen a divergent branch in this case's specific
+  CFG shape -- filed as new roadmap row **L188** (possibly the same family
+  as L116(b)'s own broader divergence-removal gaps, not yet confirmed).
+
+The remaining +3 improvements beyond the 18-minus-3 figure above are cases
+that previously crashed or timed out before reaching a clean Pass/Fail
+verdict in the pre-fix baseline sweep (e.g.
+`cov-function-loop-same-conditions-multiple-times-struct-array`,
+`cov-function-set-struct-field-zero-loop-reset-first-element`,
+`cov-two-functions-modify-struct-array-element-return-from-loop`), and now
+pass cleanly as a side effect of the same fix.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this is an internal SPIR-V-to-LLVM legalization-completeness fix
+(constant/composite-construct conversion patterns), not a feature-struct-
+field or extension-string change tracked by either inventory file.
