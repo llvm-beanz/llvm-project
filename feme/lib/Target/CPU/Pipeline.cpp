@@ -444,6 +444,18 @@ Expected<PipelineResult> runPipeline(Module &M,
                                "while preparing '%s' (see stderr)",
                                EntryName.c_str());
 
+    // Debug aid: with `FEME_DUMP_IR_PRENORM` set in the environment, print
+    // the module right after the `Normalize` pass group finishes -- the
+    // exact shape `checkSupportedRaisedOps` below inspects, and the one
+    // every `Normalize`-group pass itself (including
+    // `SPIRVPushConstantLoweringPass` and `SPIRVResourceLoweringPass`)
+    // actually operates on. `FEME_DUMP_IR` below dumps much later (right
+    // before the entry-wrapping stage), well after SIMDization/wave
+    // lowering have already transformed the module past recognition for
+    // triaging anything specific to an earlier, `Normalize`-group pass;
+    // `feme/.instructions.md` records the full recipe.
+    if (::getenv("FEME_DUMP_IR_PRENORM"))
+      M.print(errs(), nullptr);
     if (Error E = checkSupportedRaisedOps(M))
       return std::move(E);
 
