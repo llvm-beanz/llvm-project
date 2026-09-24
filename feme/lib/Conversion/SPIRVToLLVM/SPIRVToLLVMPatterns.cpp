@@ -10347,15 +10347,42 @@ private:
           Op, "constituent count does not match array element count");
 
     mlir::Type ElementTy = ArrTy.getElementType();
+    mlir::Location Loc = Op.getLoc();
+
+    // `convertArrayTypeIgnoringDecorations` (roadmap L17) widens a
+    // stride-overshooting scalar/vector element into an opaque
+    // `Stride`-sized byte-array stand-in, so `ElementTy` no longer matches
+    // the constituent's own converted type exactly, even though the
+    // constituent's real bits are still its own leading prefix. An
+    // `llvm.insertvalue` cannot express that (it requires the inserted
+    // value's type to match the aggregate's element type exactly at each
+    // index), so any mismatched constituent is instead round-tripped
+    // through a scratch `llvm.alloca` sized for the padded `ElementTy`:
+    // storing the constituent's own (narrower) value at offset 0, then
+    // loading the whole padded `ElementTy` back (its own trailing padding
+    // bytes are never read by anything, exactly as
+    // `convertArrayTypeIgnoringDecorations`'s own doc comment already
+    // establishes for this stand-in shape) -- the same "reinterpret via a
+    // scratch alloca" idiom `AggregateInitializedVariablePattern` above
+    // uses for a related, whole-variable-shaped case.
+    mlir::Type PtrTy = mlir::LLVM::LLVMPointerType::get(Rewriter.getContext());
+    mlir::Value One =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), 1);
+    llvm::SmallVector<mlir::Value, 8> Elements;
     for (mlir::Value Constituent : Adaptor.getConstituents()) {
-      if (Constituent.getType() != ElementTy)
-        return Rewriter.notifyMatchFailure(
-            Op, "constituent type does not match array element type");
+      if (Constituent.getType() == ElementTy) {
+        Elements.push_back(Constituent);
+        continue;
+      }
+      mlir::Value Slot =
+          mlir::LLVM::AllocaOp::create(Rewriter, Loc, PtrTy, ElementTy, One);
+      mlir::LLVM::StoreOp::create(Rewriter, Loc, Constituent, Slot);
+      Elements.push_back(
+          mlir::LLVM::LoadOp::create(Rewriter, Loc, ElementTy, Slot));
     }
 
-    mlir::Location Loc = Op.getLoc();
     mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
-    for (auto [Index, Element] : llvm::enumerate(Adaptor.getConstituents()))
+    for (auto [Index, Element] : llvm::enumerate(Elements))
       Result = mlir::LLVM::InsertValueOp::create(
           Rewriter, Loc, Result, Element,
           llvm::ArrayRef<int64_t>{static_cast<int64_t>(Index)});

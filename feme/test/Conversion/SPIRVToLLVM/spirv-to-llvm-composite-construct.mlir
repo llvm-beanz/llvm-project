@@ -171,3 +171,39 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %0 : !spirv.array<3 x !spirv.struct<HSInput, (vector<4xf32> [0])>>
   }
 }
+
+// -----
+
+// (Roadmap L116(d)) A `spirv.CompositeConstruct` building a
+// `!spirv.array<N x siN/f32, stride=Stride>` array (a scalar array whose
+// declared `ArrayStride` exceeds its element's natural size, e.g. an HLSL
+// array of scalars laid out at std140-style 16-byte stride) from plain
+// scalar constituents used to fail to legalize outright:
+// `convertArrayTypeIgnoringDecorations` widens each element's own LLVM
+// type to an opaque `Stride`-sized byte-array stand-in for GEP-addressing
+// purposes, but a plain scalar constituent never matches that padded
+// stand-in type. Each mismatched constituent is now round-tripped through
+// a scratch `llvm.alloca` (store the narrower value, load back the padded
+// type) before being inserted, discovered by real CTS
+// `dEQP-VK.graphicsfuzz.*` cases (e.g. `cov-left-shift-array-access`).
+
+// CHECK-LABEL: llvm.func @construct_stride_padded_scalar_array
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: %[[SLOT0:.*]] = llvm.alloca %[[ONE]] x !llvm.array<16 x i8>
+// CHECK: llvm.store %arg0, %[[SLOT0]]
+// CHECK: %[[LOAD0:.*]] = llvm.load %[[SLOT0]] : !llvm.ptr -> !llvm.array<16 x i8>
+// CHECK: %[[SLOT1:.*]] = llvm.alloca %[[ONE]] x !llvm.array<16 x i8>
+// CHECK: llvm.store %arg1, %[[SLOT1]]
+// CHECK: %[[LOAD1:.*]] = llvm.load %[[SLOT1]] : !llvm.ptr -> !llvm.array<16 x i8>
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.array<2 x array<16 x i8>>
+// CHECK: %[[V0:.*]] = llvm.insertvalue %[[LOAD0]], %[[POISON]][0]
+// CHECK: %[[V1:.*]] = llvm.insertvalue %[[LOAD1]], %[[V0]][1]
+// CHECK: llvm.return %[[V1]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @construct_stride_padded_scalar_array(%a : si32, %b : si32)
+      -> !spirv.array<2 x si32, stride=16> "None" {
+    %0 = spirv.CompositeConstruct %a, %b
+        : (si32, si32) -> !spirv.array<2 x si32, stride=16>
+    spirv.ReturnValue %0 : !spirv.array<2 x si32, stride=16>
+  }
+}

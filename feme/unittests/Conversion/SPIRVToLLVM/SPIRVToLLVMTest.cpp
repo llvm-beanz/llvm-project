@@ -1401,6 +1401,29 @@ TEST(SPIRVToLLVMTest, ArrayOfStructConstantDecomposesRecursively) {
   EXPECT_EQ(Result.find("spirv.Constant"), std::string::npos) << Result;
 }
 
+// (Roadmap L116(d)) `convertArrayTypeIgnoringDecorations` (roadmap L17)
+// widens a scalar array element whose declared `ArrayStride` exceeds its
+// natural size into an opaque `Stride`-sized byte-array stand-in type, but
+// `CompositeConstructPattern::convertArray` previously required every
+// constituent's own converted type to match that padded stand-in type
+// exactly, which a plain scalar operand never does -- it must instead be
+// reinterpreted via a scratch `llvm.alloca` round trip.
+TEST(SPIRVToLLVMTest, CompositeConstructReinterpretsStridePaddedArrayElement) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], "
+      "[]> { spirv.func @entry(%a : si32, %b : si32) -> () \"None\" { "
+      "%r = spirv.CompositeConstruct %a, %b : (si32, si32) -> "
+      "!spirv.array<2 x si32, stride=16> "
+      "spirv.Return } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.alloca"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.store"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.load"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.insertvalue"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.CompositeConstruct"), std::string::npos)
+      << Result;
+}
+
 TEST(SPIRVToLLVMTest, AtanhLegalizesToLogExpansion) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
