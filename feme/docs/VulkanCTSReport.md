@@ -11785,3 +11785,75 @@ needed -- this is an internal MLIR-conversion-layer/CPU-lowering
 correctness fix underneath an already-advertised core Vulkan 1.0
 capability (`Gather*`/`textureGatherOffsets` require no separate
 extension), not a change to what capabilities are advertised.
+
+## 2026-09-24: L125(n) implemented -- `Gather*` `ConstOffsets` (plural) now applies 4 independent per-tap offsets correctly; `texture_gather.graphics.offsets.*` fully passes (98/98)
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed.
+
+Implemented the CPU-lowering + runtime half of `ConstOffsets`
+(plural) gather support, completing the work `L125(m)` left open:
+
+1. **`isSupportedOffset`** (`SPIRVResourceLowering.cpp`): narrowed the
+   generic vector-offset width check to `MinWidth <= N <= 4`, closing
+   the exact silent-truncation gap `L125(m)`'s own CTS run found (an
+   8-wide `ConstOffsets`-flattened vector was previously accepted as an
+   ordinary 2-wide shared offset).
+2. **`isGatherOffsetsVector`** (new): explicitly detects the compile-
+   time-constant 8-wide `<8 x i32>` shape.
+3. **`hasOnlySupportedImageUses`/`lowerImageAccesses`**: widened to
+   recognize and dispatch this shape, extracting all 8 lanes (4
+   independent `(X, Y)` pairs) instead of just lanes 0/1.
+4. **New `ImageCallKind` family**: `Gather2DOffsets`/
+   `GatherArray2DOffsets`(`I32`) (no `Cube` variant -- SPIR-V forbids
+   `ConstOffset*` against `Dim::Cube` outright), plus `matchImageCall`
+   decode support (new `OffsetX0`..`OffsetY3` `MatchedImageCall`
+   fields).
+5. **New runtime entry points** (`FeMeRuntimeCPU.c`):
+   `femeCpuImageGather2DOffsetsV4F32`/`GatherArray2DOffsetsV4F32`/
+   `Gather2DOffsetsV4I32`/`GatherArray2DOffsetsV4I32`, backed by a new
+   `femeRTComputeGatherOffsetsSupport` helper.
+
+**Found and fixed a second bug mid-session, the hard way**: the first
+runtime implementation modeled the 4 gather taps as four different
+bilinear corners (mirroring `femeRTComputeBilinearSupport`'s own
+`X0/X1/Y0/Y1` pattern), each additionally displaced by its own
+`ConstOffsets` pair. A real CTS run showed this was wrong -- **0/98**
+passes, not just some subset -- so it was not a partial/edge-case bug
+but a fundamentally wrong model. Cross-checking against
+`VK-GL-CTS`'s own reference implementation
+(`fetchGatherArray2DOffsets` in `framework/common/tcuTexture.cpp`)
+confirmed the real semantics: all four taps read from the **same**
+base texel (`floor(U*Width - 0.5)`, `floor(V*Height - 0.5)`), each
+independently displaced by its own offset -- there is no per-tap `+1`
+corner delta at all, unlike an ordinary shared-offset gather's own
+four genuinely different corners. Removed the incorrect delta;
+re-ran the same CTS group and got 98/98 passes.
+
+**CTS results**:
+- `dEQP-VK.glsl.texture_gather.graphics.offsets.*`: **98/98 pass**
+  (98/98 `Result verification failed` before this session's fix,
+  542/640 `NotSupported` unaffected).
+- `dEQP-VK.glsl.texture_gather.compute.offsets.*`: **36/36 pass**.
+- Broader `dEQP-VK.glsl.texture_gather.*` sweep (3174 cases, run as a
+  final confirmation pass): 443 pass, 340 fail, 2391 not supported.
+  Inspected all 340 failures: every one is the separate,
+  already-known-unsupported *dynamic* (non-constant) SPIR-V `Offset`
+  image operand gap (`error: failed to legalize operation
+  'spirv.ImageGather' ... image_operands<Offset>`), confirmed
+  unrelated to `ConstOffset`/`ConstOffsets` (`grep -c "ConstOffset"
+  fails.txt` = 0) and therefore pre-existing, not a regression from
+  this session.
+
+`ninja check-feme`: 3314/3317 passed (3 unsupported), matching the
+prior session's own 3314/3317 baseline exactly, plus this session's
+new `LowersGatherConstOffsetsToImageGatherOffsets` unit test (0
+regressions).
+
+`L125(n)` struck through as done in `Roadmap.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- same as `L125(m)`'s own note, this is an internal
+CPU-lowering/runtime correctness fix underneath an already-advertised
+core Vulkan 1.0 capability, not a change to what capabilities are
+advertised.
