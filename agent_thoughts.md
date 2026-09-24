@@ -101012,3 +101012,39 @@ done and validated; `L125(n)` stays open, now more concretely scoped.
 1. **`L125(p)`** (upstream LLVM SPIR-V backend `ConstOffsets` emission, `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`) -- now the clear next item; largest not-yet-started, cross-repo, "issue outside FeMe" scoped work. Needs its own isolated repro + self-contained commit touching only non-FeMe files per standing instructions, since no current CTS/`offload-test-suite` case exercises 4-independent-offset `Gather*` yet.
 2. **Don't re-float the `binding_model.shader_access.*` sweep again.** It is done: 25,348 cases checked (19,639 exhaustive-prefix + 5,709 full-namespace 1/15 sample), 0 failures, full writeup in `VulkanCTSReport.md`'s 2026-09-24 "broad confirmation sweep completed" section. If a future session wants more assurance, extending the fraction (e.g. `0,30` instead of `0,15`) is cheap; a full exhaustive run is not, and isn't needed unless a future code change specifically touches binding-model/descriptor-access lowering.
 3. **(~2 min)** No scratch left in `/tmp` -- `ctsrun_bm_full/`, `ctsrun_bm_fraction/`, and the caselist-count dump files from this session were all deleted after their findings were quoted above/in `VulkanCTSReport.md`.
+
+# Session: L125(p) -- SPIR-V backend ConstOffsets gather support
+
+**Done: `L125(p)` landed.** Real 4-independent-offset `ConstOffsets` gather support now exists in the upstream LLVM SPIR-V backend, commit `e4ff6943c0b1`, plus a Roadmap update commit `3ed07d6ad2c7` documenting the design deviation. `vulkaninfo --summary` confirmed `FeMe CPU Vulkan Device` at session start.
+
+## What changed and why (read this before touching Gather-related SPIR-V backend code again)
+
+The original roadmap row assumed a simple fix: detect a 4x-wider offset operand in `selectGatherIntrinsic` and emit `ConstOffsets` instead of `ConstOffset`. That assumption was wrong. Two different "obvious" ways to represent 4 offsets in one operand are **both** independently blocked by real backend limitations, not by anything Gather-specific:
+
+1. **Flat `<4N x i32>` vector** (e.g. `<8 x i32>` for 2D) -- crashes in the legalizer. SPIR-V Shader-capability vectors are capped at width 4 by the spec itself, `SPIRVLegalizerInfo`'s `MaxVectorSize` enforces this, and `G_CONCAT_VECTORS`'s legality rules are capped the same way. An 8-wide `G_BUILD_VECTOR` can never legally reassemble. Confirmed via isolated repro, `LLVM ERROR: unable to legalize instruction ... G_CONCAT_VECTORS`.
+2. **`[4 x <2 x i32>]` LLVM array** (matches the MLIR-side shape from `L125(m)`) -- crashes twice. First, `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcodes the wrong (`i32`) result type for array/struct constants (a real, confirmed, pre-existing bug -- only the vector-constant branch does this correctly). Patching that alone just moves the crash: `IRTranslator.cpp`'s generic intrinsic-call lowering has **no support at all** for aggregate-typed operands (`getOrCreateVRegs` returns multiple registers per aggregate operand; the intrinsic-call MI-builder wants exactly one). This is a deep, structural GlobalISel gap, not a Gather-specific bug.
+
+Both bugs are real and worth fixing eventually, but neither unblocks anything on its own, so neither was fixed this session (would be an unverifiable "fix" -- nothing would newly pass).
+
+**Actual design landed**: new `int_spv_resource_gather_offsets` intrinsic, 4 offsets as 4 **separate** ordinary vector operands (each individually exactly like the already-working `ConstOffset` case) instead of one combined value. `selectGatherOffsetsIntrinsic` validates all 4 are same-typed compile-time constants, then hand-builds an `OpConstantComposite`/`OpTypeArray` at instruction-selection time -- entirely inside already-selected MIR, never touching the legalizer/IRTranslator for the array shape at all.
+
+One API gotcha worth remembering: `SPIRVGlobalRegistry::getOpTypeArray` is **private**. From the instruction selector, build the array type via the public LLVM-IR-type-based `getOrCreateSPIRVType(Type*, MachineInstr&, AQ, EmitIR=false)` overload instead (look up the offset's LLVM IR type via `getTypeForSPIRVType`, wrap in `ArrayType::get`). That comment right above the public overload ("this method may be called from InstructionSelector") is a strong hint this is the intended path.
+
+## Verification (all done, all green)
+
+1. `ninja llc` -- clean build after fixing the private-API compile error.
+2. `llvm/test/CodeGen/SPIRV/hlsl-resources` lit suite: 61/61 pass (60 pre-existing + 1 new file), confirming the `selectGatherIntrinsic`/`buildGatherSampledImage` refactor is behavior-preserving.
+3. Full `llvm/test/CodeGen/SPIRV` lit suite: 1300/1303 pass (3 pre-existing unsupported), no regressions anywhere in the backend.
+4. `spirv-val` on the new test's generated binary: valid.
+5. `ninja check-feme`: 3314/3317 pass (3 pre-existing unsupported), confirming no incidental FeMe-side regression from this LLVM-backend change.
+6. `git clang-format` applied to the new/changed lines before committing.
+
+## Why no CTS/VulkanCTSReport.md update this session
+
+This is an upstream-LLVM-only change (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`, `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`, 2 lit test files) -- no FeMe files touched, consistent with the "issue outside FeMe" instruction requiring a self-contained commit. No current CTS case or `offload-test-suite` test exercises `Gather*` with 4 independent offsets (this has been repeatedly confirmed across several prior sessions' `L125` rows), so there is nothing new to run through the Vulkan CTS for this specific change. Explicitly stating this rather than silently skipping it, per standing instructions.
+
+## Suggested next steps
+
+1. **(~1-2 days, dedicated session)** Fix the two diagnosed-but-not-landed upstream bugs properly, as their own standalone contributions: (a) `SPIRVEmitIntrinsics.cpp`'s `preprocessCompositeConstants` hardcoded `i32` result type for `ConstantArray`/`ConstantStruct`/`ConstantDataArray` (should use `COp->getType()`, matching the `ConstantVector` branch); (b) `IRTranslator.cpp`'s generic intrinsic-call lowering path needs aggregate-operand splitting support (a much bigger lift -- would need its own design, likely mirroring `CallLowering`'s existing per-argument splitting machinery). Neither blocks anything currently, so this is optional/lower-priority, but both are real bugs that will bite the next person who tries to pass an array/struct value to any SPIR-V target intrinsic.
+2. **`L125(n)`** is still the standing next real-Vulkan-correctness item per the last several sessions' logs (fix `isSupportedOffset` in `SPIRVResourceLowering.cpp` to reject rather than silently truncate a `4N`-wide flattened offset, then add the real `femeCpuImageGather*Offsets` runtime entry points) -- this session's `L125(p)` work is independent of it (different compile direction: `L125(p)` is LLVM-IR-to-SPIR-V for `dxc`, `L125(n)` is SPIR-V-to-CPU-runtime for feme's own import path) and does not unblock or change its scope.
+3. **(~5 min)** `/tmp` scratch from this session (`l125p_repro.ll`, `l125p_repro2.ll`, `SPIRVEmitIntrinsics.cpp.bak`) already deleted. Two unrelated leftover files from earlier sessions (`check_feme_l125g.log`, `l125p_struct_repro.ll`, dated Sep 20/24) were left alone since they predate this session and aren't mine to judge as safe to delete.
