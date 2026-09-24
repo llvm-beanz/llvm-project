@@ -685,6 +685,71 @@ TEST(SIMDizeTest, DecomposesAggregateSelect) {
   EXPECT_EQ(WideSelectCount, 2u);
 }
 
+// (Roadmap L185, `FunctionWidener::createWidenedAggregatePHIStub`/
+// `fillWidenedAggregatePHIIncoming`) A divergent `phi` of *aggregate* type
+// at a *uniform* diamond's merge block -- the aggregate analogue of
+// `DecomposesVectorPHIAcrossUniformDiamond` above -- decomposes into one
+// per-flattened-leaf `phi` instead of being diagnosed. This is the shape
+// `feme::cpu::LinearizePass`'s `DiamondFlattener` leaves behind at a
+// *uniform* branch's real (unconverted) merge block, since it
+// deliberately keeps every ordinary value `phi` there untouched (only its
+// own live/side-effect masks get a real `phi` too) rather than rewriting
+// it into a `select` the way it always does at a *divergent* branch's
+// merge block -- reduced from a real
+// `dEQP-VK.spirv_assembly.instruction.compute.float16.
+// opcompositeinsert.struct16arr3` failure. Both arms build their own
+// aggregate from a divergent (thread-ID-addressed) load, matching that
+// real case's own shape, so no genuinely uniform aggregate value is left
+// for this test to also (correctly) leave undecomposed.
+TEST(SIMDizeTest, DecomposesAggregatePHIAcrossUniformDiamond) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, i1 %cond) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %off = zext i32 %tid to i64
+      br i1 %cond, label %a, label %b
+    a:
+      %e0 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i1 true)
+      %ta = insertvalue [2 x i32] poison, i32 %e0, 0
+      br label %end
+    b:
+      %off1 = add i64 %off, 4
+      %e1 = call i32 @feme.cpu.resource.load.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off1, i1 true)
+      %fb = insertvalue [2 x i32] poison, i32 %e1, 0
+      br label %end
+    end:
+      %v = phi [2 x i32] [ %ta, %a ], [ %fb, %b ]
+      %r0 = extractvalue [2 x i32] %v, 0
+      call void @feme.cpu.resource.store.raw.i32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i32 %r0, i1 true)
+      ret void
+    }
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WidePHICount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isAggregateType());
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getType() == FixedVectorType::get(Type::getInt32Ty(Ctx), 4))
+        ++WidePHICount;
+  }
+  // One per-leaf `phi` for each of the array's two flattened `i32` leaves.
+  EXPECT_EQ(WidePHICount, 2u);
+}
+
 // (Roadmap L21, `FunctionWidener::widenGroupSharedAtomicCmpXchg`) A
 // groupshared `cmpxchg` (HLSL's `InterlockedCompareExchange` on a
 // `groupshared` variable) always produces an aggregate `{T, i1}` result
