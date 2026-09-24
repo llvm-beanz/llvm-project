@@ -61,21 +61,7 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs, now much more concretely scoped)** `L125(n)`: fix
-   `isSupportedOffset` in `SPIRVResourceLowering.cpp` to reject (not
-   silently truncate) a `4N`-wide `ConstOffsets`-flattened offset from
-   the plain-`ConstOffset` path, then add the real `ImageCallKind`
-   family + `femeCpuImageGather*Offsets` runtime entry points that
-   apply each of the 4 offsets to its own corner. This should turn all
-   98 `Result verification failed` cases in
-   `dEQP-VK.glsl.texture_gather.graphics.offsets.*` into passes.
-2. **`L125(p)`** (LLVM SPIR-V backend `ConstOffsets` emission) --
-   still independent and lower-priority; only relevant once an
-   HLSL/`offload-test-suite` test exercises `Gather*` with 4
-   independent offsets.
-3. **`binding_model.shader_access` broader sweep** -- still on the
-   list from 2 sessions ago as a low-priority final confirmation pass,
-   not done again this session (this session's own scope was L125(m)).
-4. **(~5 min)** No scratch left in `/tmp` from this session -- the one
-   CTS run's QPA/stdout files (`/tmp/ctsrun_l125m/*`) were deleted
-   after their findings were quoted above/in `VulkanCTSReport.md`.
+1. **(~15 min, floated by 4 sessions now, including this one)** Add an
+   `assert`/`opt -passes=verify` step after `SPIRVUnmergeResourceLoadsPass` in
+   debug builds. This is now the single most-repeated deferred item in this log.
+   If picking this up, just do it -- do not float it again.
