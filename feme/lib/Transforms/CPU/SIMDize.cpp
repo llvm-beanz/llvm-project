@@ -1112,8 +1112,14 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       // producer validity was already checked when its aggregate operand
       // was visited by `checkAggregateValueSupported` above.
       IsSupportedProducer = true;
-    } else if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
-      IsSupportedProducer = isa<ConstantInt>(IE->getOperand(2));
+    } else if (isa<InsertElementInst>(&I)) {
+      // Both a constant-index `insertelement` (the common "set one known
+      // lane" shape) and a non-constant-index one (roadmap L184, the
+      // dual of `widenExtractElement`'s own non-constant-index case just
+      // below -- `widenInsertElement` builds a `select` chain over the
+      // widened index instead of overwriting a single compile-time-known
+      // component) are supported; see that function's comment.
+      IsSupportedProducer = true;
     } else if (isa<PHINode>(&I)) {
       IsSupportedProducer = true;
     } else if (isa<SelectInst>(&I)) {
@@ -1308,7 +1314,7 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
-          "' of vector type; only a constant-index insertelement chain, a "
+          "' of vector type; only an insertelement chain, a "
           "phi, a select, a shufflevector, elementwise arithmetic/cast, a "
           "vector comparison, a homogeneous vectorizable intrinsic call, "
           "or a resource/image/ordinary load is supported (roadmap "
@@ -3769,15 +3775,38 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
   // form (see `checkVectorDecompositionSupported`'s file comment): start
   // from the base's own components (`getVectorComponents` handles both a
   // decomposed divergent base and a uniform one, including `poison`/
-  // `undef`), fill in the inserted element's widened value at its constant
-  // index, and record the result for the next link (or a select/shuffle/
+  // `undef`), fill in the inserted element's widened value at its
+  // (constant, or -- roadmap L184 -- widened non-constant) index, and
+  // record the result for the next link (or a select/shuffle/
   // resource-store/`extractelement` consumer) -- this instruction itself
   // never gets a single widened `<W x T>` replacement.
   SmallVector<Value *, 4> Components =
       getVectorComponents(IE.getOperand(0), Builder);
+  Value *InsertedValue = getWidened(IE.getOperand(1), Builder);
 
-  uint64_t Index = cast<ConstantInt>(IE.getOperand(2))->getZExtValue();
-  Components[Index] = getWidened(IE.getOperand(1), Builder);
+  if (auto *ConstIdx = dyn_cast<ConstantInt>(IE.getOperand(2))) {
+    Components[ConstIdx->getZExtValue()] = InsertedValue;
+    WidenedVectorComponents[&IE] = std::move(Components);
+    ToErase.push_back(&IE);
+    return;
+  }
+
+  // A non-constant index (roadmap L184, the dual of
+  // `widenExtractElement`'s own non-constant-index case just below): no
+  // single component is known to be overwritten at compile time, so
+  // splice a `select` per component instead, comparing the widened index
+  // against that component's compile-time position -- the surviving
+  // lanes keep the base's own (possibly already-widened) component, and
+  // the matching lane takes the inserted value.
+  Value *WideIndex = getWidened(IE.getOperand(2), Builder);
+  for (unsigned I = 0, E = Components.size(); I != E; ++I) {
+    Value *Splat = ConstantVector::getSplat(
+        ElementCount::getFixed(WaveSize),
+        ConstantInt::get(IE.getOperand(2)->getType(), I));
+    Value *Match = Builder.CreateICmpEQ(WideIndex, Splat);
+    Components[I] = Builder.CreateSelect(Match, InsertedValue, Components[I],
+                                         IE.getName() + ".wide");
+  }
 
   WidenedVectorComponents[&IE] = std::move(Components);
   ToErase.push_back(&IE);

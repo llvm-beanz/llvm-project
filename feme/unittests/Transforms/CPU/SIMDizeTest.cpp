@@ -1055,6 +1055,51 @@ TEST(SIMDizeTest, WidensNonConstantIndexExtractElementIntoSelectChain) {
   EXPECT_EQ(WideSelectCount, 4u);
 }
 
+TEST(SIMDizeTest, WidensNonConstantIndexInsertElementIntoSelectChain) {
+  // (Roadmap L184) The `insertelement` dual of
+  // `WidensNonConstantIndexExtractElementIntoSelectChain` above -- a
+  // non-constant-index `insertelement` into a decomposed vector, the
+  // shape `dEQP-VK.spirv_assembly.instruction.compute.float16.
+  // {distance,length,opdot,opcompositeextract.struct16arr3}` (via
+  // `spirv.VectorInsertDynamic`) all build a small local vector one
+  // dynamically-indexed lane at a time. `FunctionWidener::
+  // widenInsertElement` was extended to build a `select` chain per
+  // component (comparing the widened index against that component's
+  // compile-time position) instead of unconditionally `cast`ing the index
+  // operand to a `ConstantInt` -- previously diagnosed as an unsupported
+  // divergent producer before this session's fix.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %v = insertelement <4 x float> poison, float %tidf, i32 0
+      %v2 = insertelement <4 x float> %v, float %tidf, i32 %tid
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WideSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++WideSelectCount;
+  }
+  // One select per component, comparing the widened index against each
+  // compile-time position (0..3).
+  EXPECT_EQ(WideSelectCount, 4u);
+}
+
 TEST(SIMDizeTest, DecomposesVectorPHIAcrossUniformDiamond) {
   // Roadmap step C3: a divergent `phi` of vector type -- the shape
   // `feme::cpu::LinearizePass` leaves at a uniform diamond's merge block
