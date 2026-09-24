@@ -12786,3 +12786,62 @@ No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed: this is an internal SPIR-V-to-LLVM legalization-completeness fix
 (constant/composite-construct conversion patterns), not a feature-struct-
 field or extension-string change tracked by either inventory file.
+
+## L186/L187 closure; L188 root-cause investigation (this session)
+
+Picked up all three roadmap rows filed at the end of the L116(d) session
+above (unmasked once that session's constant-legalization fix stopped
+failing these three shaders earlier in their own compiles).
+
+**L186** (`spirv.InBoundsAccessChain` of a zero-index `Output`-storage
+pointer) and **L187** (`spirv.UMulExtended`/`spirv.SMulExtended`, no
+conversion pattern at all) are both fixed -- see `Roadmap.md`'s own closure
+narratives for the technical detail. Both fixes touch only upstream MLIR
+files (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` and its own test
+files), landed in two separate, self-contained commits per this project's
+"isolate outside-FeMe fixes" convention, each with new FileCheck coverage
+and a clean full `check-mlir` run (0 regressions both times).
+
+Combined-impact CTS verification, same per-case-isolated 757-case
+`graphicsfuzz.*` sweep methodology as the L116(d) session used:
+
+- Baseline (post-L116(d)): 663 Pass / 78 Fail / 8 NotSupported / 8
+  unaccounted (crash/timeout).
+- Post-L186+L187: 665 Pass / 76 Fail / 8 NotSupported / 8 unaccounted.
+- **+2 Pass, 0 regressions.** Confirmed via direct per-case re-run: both
+  `spv-load-from-frag-color` and `spv-stable-sampler-loop-extra-instructions`
+  now **Pass**.
+
+`check-feme` after each fix: 3338/3341 passed, 3 unsupported, 0 failed
+(matching baseline both times).
+
+**L188** (`stable-binarysearch-tree-false-if-discard-loop`'s
+`feme-cpu-simdize` divergent-branch error): root-caused but **not fixed**
+this session. Confirmed via a real IR trace (using two debug hooks --
+`FEME_DUMP_IR_PRESIMD`, pre-existing, and the new, now-permanent
+`FEME_DUMP_DIVERGENT_BRANCH`, added and documented in `.instructions.md`
+this session) that this is a distinct gap from L116(b)'s broader bucket:
+`feme::cpu::LinearizePass`'s `LoopLinearizer::matchExitCheckWithRelay`
+fails to recognize a genuine loop-exit check because its relay chain to
+the loop's real exit block passes through a *uniform* (not divergent)
+nested conditional branch, which the existing `straightChain` helper
+rejects regardless of the branch's actual divergence. A concrete,
+BFS-based fix design was worked out (tolerate a uniform conditional
+branch, treat a revisited block as a harmless backedge, require exactly
+one genuine `ExitBlock` predecessor reachable this way) but deliberately
+**not implemented** this session: designing it surfaced a second, adjacent
+correctness question (`ExitCheck::RelayBlock`'s current assignment may
+already be wrong for any *existing*, currently-unexercised multi-hop
+relay chain -- see `Roadmap.md`'s `L188` row for the full detail) that a
+fix must address at the same time, and landing a CFG-rewriting change in
+this file half-verified carries real regression risk this session's
+remaining time did not allow retiring properly (both the new
+uniform-tolerant-relay case *and* the pre-existing `RelayBlock`
+correctness gap need their own new `LinearizeTest.cpp` coverage before any
+fix here should land). `Roadmap.md`'s `L188` row now carries the full
+implementation plan so a future session can start directly from it
+instead of re-deriving the root cause.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed for any of the three: both landed fixes are internal SPIR-V-to-LLVM
+legalization-completeness fixes, and L188 has no fix landed yet.
