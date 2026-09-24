@@ -11677,3 +11677,43 @@ supported since `E14`; this session is a correctness fix to a
 previously-broken dispatch-consumption path underneath an
 already-advertised feature, not a change to what capabilities are
 advertised.
+
+## Defensive verify pass + L125(m)/L125(n) rescoping + broad binding_model IUB confirmation (no code-path changes, no new pass/fail numbers)
+
+Three prior sessions floated, but never did, adding an `llvm::VerifierPass`
+right after `SPIRVUnmergeResourceLoadsPass` in assertions-enabled builds
+(`Pipeline.cpp`'s `Normalize` pass list) -- that pass has shipped two
+found-by-CTS-not-by-review miscompiles (`L176`, `L177`), both silently
+accepted downstream until a much-later crash/mis-render. Added this
+session, gated `#ifndef NDEBUG`. `ninja check-feme`: 3313/3316, 0
+regressions -- confirms the verifier accepts every IR shape this
+pipeline currently produces; this is a safety net for a *future* latent
+bug in this pass, not a fix for a currently-known one.
+
+Investigated `L125(m)`'s original two-part framing and found it
+conflated two independent concerns: feme's own `ImageGatherPattern`
+(SPIR-V *import* direction, actually needed for
+`dEQP-VK.glsl.texture_gather.graphics.offsets.*` to pass) and
+`SPIRVInstructionSelector::selectGatherIntrinsic` (the LLVM SPIR-V
+*backend*, only reachable from the opposite, LLVM-IR-to-SPIR-V compile
+direction `dxc`/clang's HLSL frontend uses, never from feme's own
+import path). Rescoped `L125(m)` to the CTS-relevant slice only, split
+the backend half into a new row `L125(p)` (upstream-LLVM-only,
+independent, non-blocking). Also confirmed the real runtime import path
+(`feme::SPIRVImporter`) cannot hit the already-closed `L35(a)` crash
+(that only affects `feme-translate`'s own opt-in-verify debug path).
+Investigation and roadmap update only -- neither row implemented this
+session.
+
+Ran a broader confirmation sweep for any other inline-uniform-block-
+adjacent failures across all of `binding_model` (per the prior
+session's own suggested next step), narrower than a full
+`binding_model.*` sweep (which proved too large to complete in one
+session -- ~1.5 cases/sec observed, tens of thousands of cases,
+switched to a targeted approach instead): `dEQP-VK.binding_model.
+*inline_uniform*` (117 cases, 25 executable) and `dEQP-VK.binding_model.
+*iub*` (35,148 cases, 1028 executable, i.e. exactly `descriptorset_
+random` again) both show **0 failures**; `dEQP-VK.binding_model.
+shader_access.*inline*` matches **0 cases** (that group has no
+inline-uniform-block-typed binding at all). This fully confirms `E14`/
+`L180` are closed with no hidden failures elsewhere in `binding_model`.
