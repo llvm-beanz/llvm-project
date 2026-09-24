@@ -43,6 +43,35 @@ spirv.func @access_chain_zero_indices() "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.InBoundsAccessChain
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @in_bounds_access_chain
+spirv.func @in_bounds_access_chain() "None" {
+  // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i32) : i32
+  %0 = spirv.Constant 1: i32
+  %1 = spirv.Variable : !spirv.ptr<!spirv.struct<(f32, !spirv.array<4xf32>)>, Function>
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32) : i32
+  // CHECK: llvm.getelementptr inbounds %{{.*}}[%[[ZERO]], 1, %[[ONE]]] : (!llvm.ptr, i32, i32) -> !llvm.ptr, !llvm.struct<packed (f32, array<4 x f32>)>
+  %2 = spirv.InBoundsAccessChain %1[%0, %0] : !spirv.ptr<!spirv.struct<(f32, !spirv.array<4xf32>)>, Function>, i32, i32 -> !spirv.ptr<f32, Function>
+  spirv.Return
+}
+
+// A zero-index in-bounds access chain is a legal (if degenerate) SPIR-V
+// access chain, exactly like its `spirv.AccessChain` sibling above -- must
+// not crash while picking an index type for the leading "step through the
+// pointer" GEP index.
+// CHECK-LABEL: @in_bounds_access_chain_zero_indices
+spirv.func @in_bounds_access_chain_zero_indices() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32) : i32
+  // CHECK: llvm.getelementptr inbounds %{{.*}}[%[[ZERO]]] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+  %1 = "spirv.InBoundsAccessChain"(%0) : (!spirv.ptr<f32, Function>) -> !spirv.ptr<f32, Function>
+  %2 = spirv.Load "Function" %1 ["Volatile"] : f32
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GlobalVariable and spirv.mlir.addressof
 //===----------------------------------------------------------------------===//
 

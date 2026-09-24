@@ -434,12 +434,22 @@ collectAttrsForConversion(SourceOp op,
   return success();
 }
 
-class AccessChainPattern : public SPIRVToLLVMConversion<spirv::AccessChainOp> {
+/// Shared implementation for `spirv.AccessChain` and its
+/// `spirv.InBoundsAccessChain` sibling: both ops have identical operand,
+/// result, and indexing semantics (per `SPIRVMemoryOps.td`'s own
+/// description, "[InBoundsAccessChain] has the same operands, result, and
+/// type rules as `spirv.AccessChain`, with the additional contract that the
+/// resulting pointer points within the base object") and differ only in
+/// whether that additional in-bounds contract holds, which maps directly
+/// onto `LLVM::GEPOp`'s own `inbounds` flag.
+template <typename SPIRVOp>
+class AccessChainConversion : public SPIRVToLLVMConversion<SPIRVOp> {
 public:
-  using SPIRVToLLVMConversion<spirv::AccessChainOp>::SPIRVToLLVMConversion;
+  using SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using typename SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
 
   LogicalResult
-  matchAndRewrite(spirv::AccessChainOp op, OpAdaptor adaptor,
+  matchAndRewrite(SPIRVOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // This pattern builds an `LLVM::GEPOp`, which requires an ordinary LLVM
     // pointer base operand; some downstream `TypeConverter`s (e.g. FeMe's
@@ -458,22 +468,22 @@ public:
       return rewriter.notifyMatchFailure(op, "base is not an LLVM pointer");
 
     auto dstType =
-        getTypeConverter()->convertType(op.getComponentPtr().getType());
+        this->getTypeConverter()->convertType(op.getComponentPtr().getType());
     if (!dstType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
     // To use GEP we need to add a first 0 index to go through the pointer.
-    // `op.getIndices()` may legitimately be empty -- `spirv.AccessChain`'s
-    // indices are variadic, and a chain with zero indices is a valid (if
-    // degenerate) identity-like access into the base pointer's pointee --
-    // so the index type can't always be inferred from the first index;
-    // fall back to a plain 32-bit integer (a valid SPIR-V index type, per
-    // `SPIRV_Integer`) in that case, matching what a real zero-index-free
-    // access chain would ordinarily use.
+    // `op.getIndices()` may legitimately be empty -- both ops' indices are
+    // variadic, and a chain with zero indices is a valid (if degenerate)
+    // identity-like access into the base pointer's pointee -- so the index
+    // type can't always be inferred from the first index; fall back to a
+    // plain 32-bit integer (a valid SPIR-V index type, per `SPIRV_Integer`)
+    // in that case, matching what a real zero-index-free access chain
+    // would ordinarily use.
     auto indices = llvm::to_vector<4>(adaptor.getIndices());
     Type indexType = op.getIndices().empty()
                           ? rewriter.getIntegerType(32)
                           : op.getIndices().front().getType();
-    auto llvmIndexType = getTypeConverter()->convertType(indexType);
+    auto llvmIndexType = this->getTypeConverter()->convertType(indexType);
     if (!llvmIndexType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
     Value zero =
@@ -481,15 +491,26 @@ public:
                                  rewriter.getIntegerAttr(llvmIndexType, 0));
     indices.insert(indices.begin(), zero);
 
-    auto elementType = getTypeConverter()->convertType(
+    auto elementType = this->getTypeConverter()->convertType(
         cast<spirv::PointerType>(op.getBasePtr().getType()).getPointeeType());
     if (!elementType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
-    rewriter.replaceOpWithNewOp<LLVM::GEPOp>(op, dstType, elementType,
-                                             adaptor.getBasePtr(), indices);
+    // `spirv.InBoundsAccessChain`'s own stronger contract (the resulting
+    // pointer is guaranteed to stay within the base object) maps directly
+    // onto `LLVM::GEPOp`'s `inbounds` flag; `spirv.AccessChain` carries no
+    // such guarantee, so it gets none.
+    auto noWrapFlags = std::is_same_v<SPIRVOp, spirv::InBoundsAccessChainOp>
+                            ? LLVM::GEPNoWrapFlags::inbounds
+                            : LLVM::GEPNoWrapFlags::none;
+    rewriter.replaceOpWithNewOp<LLVM::GEPOp>(
+        op, dstType, elementType, adaptor.getBasePtr(), indices,
+        noWrapFlags);
     return success();
   }
 };
+using AccessChainPattern = AccessChainConversion<spirv::AccessChainOp>;
+using InBoundsAccessChainPattern =
+    AccessChainConversion<spirv::InBoundsAccessChainOp>;
 
 class AddressOfPattern : public SPIRVToLLVMConversion<spirv::AddressOfOp> {
 public:
@@ -2667,8 +2688,9 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::AnyOp, LLVM::vector_reduce_or>,
 
       // Memory ops
-      AccessChainPattern, AddressOfPattern, LoadStorePattern<spirv::LoadOp>,
-      LoadStorePattern<spirv::StoreOp>, VariablePattern,
+      AccessChainPattern, InBoundsAccessChainPattern, AddressOfPattern,
+      LoadStorePattern<spirv::LoadOp>, LoadStorePattern<spirv::StoreOp>,
+      VariablePattern,
 
       // Miscellaneous ops
       CompositeExtractPattern, CompositeInsertPattern,
