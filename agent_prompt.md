@@ -61,28 +61,17 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1 day, well-scoped, next session should start here)** `L185`:
-   `opcompositeinsert.struct16arr3` hits a genuine aggregate-typed `phi`
-   reaching `feme-cpu-simdize`, violating that pass's own documented
-   invariant ("`LinearizePass` always rewrites one into a `select`
-   before this pass ever runs"). Root cause is very likely in
-   `feme/lib/Transforms/CPU/Linearize.cpp`, not `SIMDize.cpp` -- don't
-   hack around it in `SIMDize.cpp`. Get the case's SPIR-V via its QPA
-   log (same `feme-translate --import-spirv`/`--spirv-to-llvmir` pipe
-   `L183`/`L184` both used), find the exact CFG shape not yet rewritten
-   (likely a loop-carried or multi-predecessor aggregate `phi`), fix in
-   `Linearize.cpp`.
-2. **(2-4 hrs, one-time setup, still not done across several sessions)**
+1. **(2-4 hrs, one-time setup, deferred across many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` has no build directory at
-   `/home/dev/dev/offload-test-suite/build` -- deferred again this
-   session given the size of the L184 work. Needs a from-scratch build
-   before it can run at all.
-3. **(~5 min)** Scratch cleanup: `/tmp/ctsrun_l184/`, `/tmp/l184_*.mlir`,
-   `/tmp/l184_frexp*`, `/tmp/patch_*.diff`, `/tmp/simdize_*.diff`,
-   `/tmp/patterns_full.diff`, `/tmp/frexp_pattern.diff`,
-   `/tmp/final_check.diff` -- none referenced by anything committed.
-4. Scan `Roadmap.md` for the next open, well-scoped item once `L185` is
-   picked up or skipped -- the last full-scan candidates from several
-   sessions back (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
-   `L126(a)`, `L147`, `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows)
-   are still individually unvetted.
+   `/home/dev/dev/offload-test-suite/build`. Still not started.
+2. **Scan `Roadmap.md` for the next open, well-scoped item.** `L184`/`L185`
+   are both closed now -- no queued item left from recent history. The
+   last full-scan candidates from several sessions back (`L90`-`L95`,
+   `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`, `L98(b)`, plus
+   assorted `R`/`V`/`W`-prefixed rows) are still individually unvetted --
+   a future session should do a fresh full-table pass rather than keep
+   deferring to this same stale list.
+3. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l185/`, `/tmp/l185_test.ll`, `/tmp/final_check.*` all
+   removed already.
+
