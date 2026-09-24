@@ -12279,3 +12279,137 @@ No `VulkanExtensionInventory.md` update needed (this is a feature-bit
 change, not an extension-support change); `Vulkan14FeatureInventory.md`
 updated: `storageInputOutput16`/`shaderFloat16` both flipped from `no`
 to `yes`, with a note on the `L183` caution for the latter.
+
+## 2026-09-25: L183 fixed -- `FrexpStruct`'s FeMe-authored struct-padding-vs-intrinsic-ABI mismatch resolved; two originally-crashing cases now pass, plus a related `CompositeExtract`/`CompositeInsert` physical-index/tight-vector gap closed
+
+### Root cause (confirmed 100% FeMe-side, not upstream/GlobalISel-scale)
+
+`spirv.GL.FrexpStructOp`'s synthetic, non-memory `ResType` result struct
+was being run through FeMe's own `spirv::StructType` type-converter
+override (`convertOffsetStructTypeIgnoringDecorations`/
+`layOutStructIfOffsetsMatch`, roadmap `L103`), which unconditionally
+applies memory-layout-matching alignment-gap padding to *every* SPIR-V
+struct conversion -- including a builtin GLSL.std.450 op's own transient
+SSA-value result struct, which must instead exactly match
+`LLVM::FractionExpOp`'s (`llvm.intr.frexp`'s) own always-fully-packed
+intrinsic return type. Confirmed via stock/unpatched `mlir-opt
+--convert-spirv-to-llvm` (no FeMe patterns registered) that upstream MLIR
+itself inserts zero padding for this exact shape, ruling out `L181`'s own
+upstream-GlobalISel-scale gap as the cause (this row's own prior, more
+cautious framing worried it might be the same class of issue -- it is
+not). `ModfStruct` (same aggregate-result shape) happened to "work"
+purely by coincidence: its two result members share one identical
+type/alignment, so the alignment-gap-insertion logic never has cause to
+fire for it -- fixed defensively alongside `FrexpStruct` in this session
+anyway, since nothing structurally protects it from the same bug for a
+differently-typed future case.
+
+### The fix (entirely inside `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`)
+
+1. **`FrexpStructPattern`/`ModfStructPattern`** (new classes, registered
+   at `FeMeBenefit`, superseding upstream's own unmodified
+   `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` patterns, which are
+   left untouched): build the `LLVM::FractionExpOp`/integer-and-fraction-
+   part values against a tight/packed struct type matching the
+   intrinsic's own ABI, then repack into whatever "canonical" (possibly
+   padded, possibly `feme.tight_vector`-marker-wrapped, roadmap `H101j`)
+   shape `getTypeConverter()->convertType(op.getType())` computes for the
+   same SPIR-V struct type, via a new `repackIntoCanonicalStructLayout`
+   helper (reusing the pre-existing `reassembleTightVectorValue` per
+   member). This repacking step is required, not optional: MLIR's
+   dialect-conversion driver silently reconciles any *other* consumer of
+   a value back to the type converter's own canonical answer via an
+   inserted `builtin.unrealized_conversion_cast` whenever a pattern's own
+   result disagrees with it -- confirmed by hitting exactly this failure
+   mode (`LLVM Translation failed for operation:
+   builtin.unrealized_conversion_cast`) on an initial, non-repacking
+   attempt.
+2. **`CompositeExtractMemberReorderPattern`/
+   `CompositeInsertMemberReorderPattern`** (new classes, also
+   `FeMeBenefit`): fix a second, related bug discovered only once testing
+   moved from a hand-authored GLSL repro to the *real* CTS shape, which
+   uses a helper struct (`%st_tmp`) with explicit `OpMemberDecorate ...
+   Offset` decorations (a genuinely `Offset`-decorated, memory-layout-
+   eligible struct -- a different branch of `layOutStructIfOffsetsMatch`
+   than the undecorated `ResType` case above) and additionally stores/
+   loads that struct through a `Function`-storage local variable before a
+   later `spirv.CompositeExtract` reads a member back out. Upstream's own
+   generic `CompositeExtract`/`CompositeInsert` patterns assume a
+   struct's declared SPIR-V member index always equals its physical LLVM
+   field index (true only when no padding/reordering was needed -- the
+   same class of gap `OffsetStructMemberReorderAccessChainPattern`/`H129`
+   already fixed for `spirv.AccessChain`), and separately never
+   unwrap/wrap a `feme.tight_vector` marker-substituted member (`H101j`)
+   crossing a *value* boundary the way `CompositeConstructPattern`
+   already does on the write side. Both gaps closed via a shared
+   `remapCompositeMemberIndices`/`getPhysicalCompositeElementType` helper
+   pair, plus a new `unwrapTightVectorValue` function (the read-side
+   mirror of the pre-existing `reassembleTightVectorValue`).
+3. **A brief regression, caught before commit**: an initial version of
+   the Extract/Insert fix unconditionally emitted `llvm.extractvalue`/
+   `insertvalue` whenever a physical-type lookup succeeded, without first
+   confirming the composite was actually a struct or array at the point
+   being indexed -- this incorrectly fired for an ordinary single-lane
+   vector extract/insert (`llvm.extractvalue`/`insertvalue` cannot express
+   that at all; only `llvm.extractelement`/`insertelement` can), breaking
+   24 unrelated `check-feme` tests with an `ExtractValueOp::build`
+   "incompatible type" assertion. Fixed by declining (falling back to
+   upstream's own generic, vector-lane-correct pattern) whenever
+   `getPhysicalCompositeElementType`'s type-only walk fails to resolve a
+   struct/array member at all -- confirmed via a full `check-feme` re-run
+   back to 100% green.
+
+### Investigation false alarm: a regex bug, not a real regression
+
+Mid-session, a broader `arithmetic_2`/`_3`/`_4` subgroup sweep appeared to
+show `frexpstructe` (plus 7 other, seemingly unrelated ops) failing again
+*only* when run as part of the full subgroup, not in isolation --
+apparently non-deterministic across repeated runs of the identical
+binary. This was fully traced to a bug in this session's own QPA-log
+analysis script: a non-greedy regex (`.*?StatusCode="Fail"`) without a
+per-case `#endTestCaseResult` anchor can match *across* test-case
+boundaries, attributing a later case's own `Fail` status to an earlier
+case's name whenever the earlier case's own result doesn't itself contain
+the word "Fail" first. Once every scrape was corrected to anchor on
+`#endTestCaseResult`, the result was fully deterministic and reproducible
+across 3 repeated runs: `frexpstructe`/`frexpstructs` pass cleanly in
+every context, and the same, real 8-per-group failures (`acosh`, `asinh`,
+`atanh`, `distance`, `frexpe`, `frexps`, `length`, `opdot`) appear every
+time -- confirmed via `git stash` to already fail identically before this
+session's fix, i.e. pre-existing and unrelated. Broken out as new roadmap
+row `L184` for a future session (this row's own 9 case names, including
+the separate, also-pre-existing `opcompositeextract.struct16arr3` crash a
+prior session had already confirmed pre-existing via the same `git
+stash` technique). See the new precedent note in `feme/.instructions.md`.
+
+### CTS verification
+
+- `arithmetic_2.frexpstructe`/`frexpstructs`, `arithmetic_3.frexpstructe`/
+  `frexpstructs`, `arithmetic_4.frexpstructe`/`frexpstructs`: all **Pass**,
+  both in isolation and within the full `arithmetic_{2,3,4}` subgroup
+  sweeps (repeated 3x each to confirm no flakiness).
+- `arithmetic_1.frexpstructe`/`frexpstructs` (scalar variant): still fail,
+  but this is the pre-existing, unrelated `arithmetic_1` (scalar)
+  `spirv.VectorInsertDynamic` legalization gap (confirmed this session:
+  `arithmetic_1.acos`, wholly unrelated to Frexp, fails identically) --
+  out of scope for `L183`, not newly introduced.
+- Full `check-feme`: 1155 tests / 3327 checks discovered, **3324 passed,
+  3 pre-existing Unsupported, 0 Failed** (up from the pre-fix baseline's
+  1153/3324, confirming the 2 new unit tests below run clean and nothing
+  regressed).
+
+### New unit tests (`feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`)
+
+- `FrexpStructVec2NoOffsetLegalizesWithoutUnresolvedCast`: the original
+  hand-authored-GLSL-shader shape (undecorated `ResType`), asserts no
+  leftover `unrealized_conversion_cast`.
+- `FrexpStructVec2OffsetDecoratedMemberExtractUnwrapsTightVector`: the
+  real CTS shape (`Offset`-decorated struct, `Function`-storage
+  store/load, then `CompositeExtract`), asserts both no leftover
+  unresolved cast and a correctly unwrapped, marker-free extracted value.
+- `PlainVectorLaneCompositeExtractStillLegalizes`: a regression guard for
+  the briefly-introduced vector-lane bug described above.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed for this row (a bugfix to already-enabled `shaderFloat16`
+plumbing, not a feature/extension support-status change).
