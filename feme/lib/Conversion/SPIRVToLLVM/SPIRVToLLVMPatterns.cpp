@@ -6967,6 +6967,211 @@ public:
   }
 };
 
+/// Forward declaration: defined below (alongside reassembleTightVectorValue,
+/// its own write-side counterpart). Needed by
+/// CompositeExtractMemberReorderPattern, defined below this point in the
+/// file but before reassembleTightVectorValue's own definition.
+mlir::Value unwrapTightVectorValue(mlir::Value Value, mlir::Type TargetType,
+                                   mlir::ConversionPatternRewriter &Rewriter,
+                                   mlir::Location Loc);
+
+/// Forward declaration: defined below, alongside CompositeConstructPattern
+/// (its own primary user). Needed by CompositeInsertMemberReorderPattern
+/// for the same reason unwrapTightVectorValue is forward-declared above.
+mlir::Value reassembleTightVectorValue(mlir::Value Constituent,
+                                       mlir::Type FieldTy,
+                                       mlir::ConversionPatternRewriter &Rewriter,
+                                       mlir::Location Loc);
+
+/// Walks \p Indices (a `spirv.CompositeExtract`/`spirv.CompositeInsert`'s
+/// own declared, constant-`IntegerAttr` index list) against \p
+/// CompositeType, remapping each index that selects a `spirv::StructType`
+/// member into that member's own real physical LLVM field index (via
+/// getStructMemberPhysicalIndex, exactly as
+/// OffsetStructMemberReorderAccessChainPattern already does for
+/// `spirv.AccessChain`), descending into whatever type each such index
+/// (remapped or not) selects for the next index in the list. Descends
+/// through an array's own element type unchanged (an array never needs a
+/// remap, only whichever struct sits inside one of its elements); stops
+/// remapping (forwarding every further index unchanged) once it reaches
+/// any other type (a vector or scalar leaf, which upstream's own generic
+/// `CompositeExtractPattern`/`CompositeInsertPattern` -- this pattern's own
+/// fallback whenever no remap is needed at all -- already handles
+/// correctly on its own, since only a struct member's own position can
+/// ever be shifted by FeMe's own struct-layout padding).
+///
+/// Returns `true` (via \p NeedsRemap) if at least one index actually
+/// differs from its own declared value -- an already-fine composite access
+/// (the overwhelmingly common case) gets an unchanged, identity list back,
+/// letting the caller decline in favor of the simpler generic pattern.
+llvm::SmallVector<int64_t, 4> remapCompositeMemberIndices(
+    mlir::Type CompositeType, llvm::ArrayRef<mlir::Attribute> Indices,
+    const mlir::TypeConverter &Converter, bool &NeedsRemap) {
+  NeedsRemap = false;
+  llvm::SmallVector<int64_t, 4> PhysicalIndices;
+  mlir::Type CurrentType = CompositeType;
+  bool StillNavigatingStructsAndArrays = true;
+  for (mlir::Attribute IndexAttr : Indices) {
+    auto IntAttr = mlir::cast<mlir::IntegerAttr>(IndexAttr);
+    unsigned DeclaredIndex =
+        static_cast<unsigned>(IntAttr.getValue().getZExtValue());
+    if (!StillNavigatingStructsAndArrays) {
+      PhysicalIndices.push_back(DeclaredIndex);
+      continue;
+    }
+    if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(CurrentType)) {
+      unsigned Physical =
+          getStructMemberPhysicalIndex(StructTy, DeclaredIndex, Converter);
+      NeedsRemap |= Physical != DeclaredIndex;
+      PhysicalIndices.push_back(Physical);
+      CurrentType = StructTy.getElementType(DeclaredIndex);
+    } else if (auto ArrTy = mlir::dyn_cast<mlir::spirv::ArrayType>(CurrentType)) {
+      PhysicalIndices.push_back(DeclaredIndex);
+      CurrentType = ArrTy.getElementType();
+    } else {
+      PhysicalIndices.push_back(DeclaredIndex);
+      StillNavigatingStructsAndArrays = false;
+    }
+  }
+  return PhysicalIndices;
+}
+
+/// Walks \p PhysicalIndices (already remapped by remapCompositeMemberIndices,
+/// or identical to the original declared indices when no remap was needed)
+/// against the already-converted LLVM \p CompositeType, purely at the type
+/// level (no IR emitted), returning the exact physical type this indexes
+/// down to. Lets CompositeInsertMemberReorderPattern learn its own
+/// composite's physical member slot type -- the shape
+/// reassembleTightVectorValue needs to wrap \p Op's own object operand
+/// into -- without emitting a throwaway `llvm.extractvalue` purely to
+/// inspect a type. Returns null if \p CompositeType's own structure
+/// disagrees with \p PhysicalIndices (should not happen for indices this
+/// file's own remap produced).
+mlir::Type getPhysicalCompositeElementType(mlir::Type CompositeType,
+                                           llvm::ArrayRef<int64_t> PhysicalIndices) {
+  mlir::Type CurrentType = CompositeType;
+  for (int64_t Index : PhysicalIndices) {
+    if (auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(CurrentType)) {
+      if (Index < 0 || static_cast<size_t>(Index) >= StructTy.getBody().size())
+        return {};
+      CurrentType = StructTy.getBody()[Index];
+    } else if (auto ArrTy =
+                   mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(CurrentType)) {
+      CurrentType = ArrTy.getElementType();
+    } else {
+      return {};
+    }
+  }
+  return CurrentType;
+}
+
+/// (Roadmap L183) Converts `spirv.CompositeExtract` whenever either (a) any
+/// struct level `remapCompositeMemberIndices` reaches along \p Op's own
+/// index list needs physical-index remapping, or (b) the physical value
+/// this extracts is wrapped in one or more `feme.tight_vector` marker
+/// structs (see `getTightVectorArrayType`) that \p Op's own declared,
+/// marker-free result type does not expect -- upstream's own generic
+/// `CompositeExtractPattern` handles neither: it forwards every index
+/// unchanged, assuming physical index always equals declared SPIR-V index
+/// (true only for a struct FeMe's own conversion needed no padding for,
+/// the same physical-index mismatch `OffsetStructMemberReorderAccessChainPattern`,
+/// roadmap H129, already fixes for `spirv.AccessChain`), and it never
+/// unwraps a tight-vector marker, since a pointer-typed `AccessChain` never
+/// needs to (see `getTightVectorArrayType`'s own comment on why the
+/// substitution is transparent for pointer-based access but not for a
+/// value, like this op's own result, crossing the member's boundary).
+/// Needed for a builtin GLSL.std.450 op's own transient, SSA-value-only
+/// result struct too (e.g. `FrexpStructPattern`'s own
+/// `{significand, exponent}` result), not just a genuinely memory-backed,
+/// offset-decorated struct -- both can carry the exact same interior
+/// alignment-gap padding and tight-vector substitution.
+class CompositeExtractMemberReorderPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeExtractOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CompositeExtractOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CompositeExtractOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    bool NeedsIndexRemap = false;
+    llvm::SmallVector<int64_t, 4> PhysicalIndices = remapCompositeMemberIndices(
+        Op.getComposite().getType(), Op.getIndices().getValue(),
+        *getTypeConverter(), NeedsIndexRemap);
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "result type failed to convert");
+    mlir::Type PhysicalType = getPhysicalCompositeElementType(
+        Adaptor.getComposite().getType(), PhysicalIndices);
+    if (!PhysicalType)
+      // PhysicalIndices descends into a plain (non-struct/array) leaf, e.g.
+      // a single lane of a vector -- `llvm.extractvalue` cannot express
+      // that at all (only `llvm.extractelement` can); decline in favor of
+      // upstream's own generic pattern, which already handles a plain
+      // vector-lane extract correctly on its own.
+      return Rewriter.notifyMatchFailure(
+          Op, "composite indexes through a non-struct/array leaf");
+    if (!NeedsIndexRemap && PhysicalType == DstType)
+      return Rewriter.notifyMatchFailure(
+          Op, "no physical index remap or tight-vector unwrap needed");
+    mlir::Value Raw = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Op.getLoc(), Adaptor.getComposite(), PhysicalIndices);
+    mlir::Value Result =
+        unwrapTightVectorValue(Raw, DstType, Rewriter, Op.getLoc());
+    if (!Result)
+      return Rewriter.notifyMatchFailure(
+          Op, "extracted value's shape disagrees with the declared result "
+              "type in a way tight-vector unwrapping cannot reconcile");
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// (Roadmap L183) The `spirv.CompositeInsert` counterpart of
+/// CompositeExtractMemberReorderPattern -- see its own comment. Wraps \p
+/// Op's own (already marker-free) object operand into whatever
+/// `feme.tight_vector`-substituted shape the composite's physical member
+/// slot expects via reassembleTightVectorValue, the same helper
+/// `CompositeConstructPattern` below uses for the identical problem.
+class CompositeInsertMemberReorderPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeInsertOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CompositeInsertOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CompositeInsertOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    bool NeedsIndexRemap = false;
+    llvm::SmallVector<int64_t, 4> PhysicalIndices = remapCompositeMemberIndices(
+        Op.getComposite().getType(), Op.getIndices().getValue(),
+        *getTypeConverter(), NeedsIndexRemap);
+    mlir::Type PhysicalSlotType = getPhysicalCompositeElementType(
+        Adaptor.getComposite().getType(), PhysicalIndices);
+    if (!PhysicalSlotType)
+      // PhysicalIndices descends into a plain (non-struct/array) leaf, e.g.
+      // a single lane of a vector -- `llvm.insertvalue` cannot express that
+      // at all (only `llvm.insertelement` can); decline in favor of
+      // upstream's own generic pattern, which already handles a plain
+      // vector-lane insert correctly on its own.
+      return Rewriter.notifyMatchFailure(
+          Op, "composite indexes through a non-struct/array leaf");
+    if (!NeedsIndexRemap &&
+        PhysicalSlotType == Adaptor.getObject().getType())
+      return Rewriter.notifyMatchFailure(
+          Op, "no physical index remap or tight-vector wrap needed");
+    mlir::Value Wrapped = reassembleTightVectorValue(
+        Adaptor.getObject(), PhysicalSlotType, Rewriter, Op.getLoc());
+    if (!Wrapped)
+      return Rewriter.notifyMatchFailure(
+          Op, "inserted object's shape disagrees with the composite's "
+              "physical member slot in a way tight-vector wrapping cannot "
+              "reconcile");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
+        Op, Adaptor.getComposite(), Wrapped, PhysicalIndices);
+    return mlir::success();
+  }
+};
 
 /// Historical note (roadmap L124(v)): this file used to reject any
 /// `Workgroup`-storage global containing `OpTypeBool` (`i1`) anywhere,
@@ -9577,6 +9782,66 @@ mlir::Value reassembleTightVectorValue(mlir::Value Constituent,
   return Result;
 }
 
+/// (Roadmap L183) The read-side mirror of reassembleTightVectorValue --
+/// unwraps \p Value (a physical composite member value, possibly carrying
+/// one or more `feme.tight_vector` marker structs somewhere inside it) back
+/// into \p TargetType, the *logical* (marker-free) type a
+/// `spirv.CompositeExtract` consumer actually expects (its own declared
+/// result type, already run through the type converter). Needed because
+/// `CompositeExtractMemberReorderPattern` extracts directly from the
+/// canonical (possibly tight-vector-substituted) struct/array shape a real
+/// offset-decorated struct's own conversion produces -- unlike
+/// `CompositeConstructPattern`'s write-side, which only ever *writes* a
+/// marker-wrapped member (via reassembleTightVectorValue), a
+/// `CompositeExtract` can pull that exact same member back out again as a
+/// value, and must reverse the substitution to hand its own consumer a
+/// plain vector rather than a single-member wrapper struct. Mirrors
+/// reassembleTightVectorValue's own recursion shape exactly, one level at
+/// a time, through any enclosing `LLVM::LLVMArrayType`. Returns a null
+/// `mlir::Value` if the two types' own shapes disagree in a way this
+/// cannot reconcile.
+mlir::Value unwrapTightVectorValue(mlir::Value Value, mlir::Type TargetType,
+                                   mlir::ConversionPatternRewriter &Rewriter,
+                                   mlir::Location Loc) {
+  if (Value.getType() == TargetType)
+    return Value;
+  if (mlir::Type MarkerInnerTy = getTightVectorMarkerInnerType(Value.getType())) {
+    auto VecTy = mlir::dyn_cast<mlir::VectorType>(TargetType);
+    auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(MarkerInnerTy);
+    if (!VecTy || !ArrTy ||
+        static_cast<uint64_t>(VecTy.getNumElements()) != ArrTy.getNumElements())
+      return {};
+    mlir::Value Array = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, Value, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Vec = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VecTy);
+    for (int64_t Lane = 0, E = VecTy.getNumElements(); Lane != E; ++Lane) {
+      mlir::Value Element = mlir::LLVM::ExtractValueOp::create(
+          Rewriter, Loc, Array, llvm::ArrayRef<int64_t>{Lane});
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), Lane);
+      Vec = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Vec, Element,
+                                                LaneIndex);
+    }
+    return Vec;
+  }
+  auto TargetArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(TargetType);
+  auto ValueArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Value.getType());
+  if (!TargetArrTy || !ValueArrTy ||
+      TargetArrTy.getNumElements() != ValueArrTy.getNumElements())
+    return {};
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, TargetArrTy);
+  for (int64_t I = 0, E = TargetArrTy.getNumElements(); I != E; ++I) {
+    mlir::Value Element = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, Value, llvm::ArrayRef<int64_t>{I});
+    mlir::Value Unwrapped = unwrapTightVectorValue(
+        Element, TargetArrTy.getElementType(), Rewriter, Loc);
+    if (!Unwrapped)
+      return {};
+    Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, Unwrapped,
+                                               llvm::ArrayRef<int64_t>{I});
+  }
+  return Result;
+}
 
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
@@ -13997,6 +14262,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,
+      CompositeExtractMemberReorderPattern, CompositeInsertMemberReorderPattern,
       FrexpStructPattern, ModfStructPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
       SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
