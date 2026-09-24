@@ -6967,6 +6967,7 @@ public:
   }
 };
 
+
 /// Historical note (roadmap L124(v)): this file used to reject any
 /// `Workgroup`-storage global containing `OpTypeBool` (`i1`) anywhere,
 /// under the assumption that addressing an `i1` field/element with
@@ -9575,6 +9576,7 @@ mlir::Value reassembleTightVectorValue(mlir::Value Constituent,
   }
   return Result;
 }
+
 
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
@@ -12536,6 +12538,207 @@ using GLUnpackUnorm2x16Pattern =
     GLUnpackNormPattern<mlir::spirv::GLUnpackUnorm2x16Op, /*NumComponents=*/2,
                         /*BitsPerComponent=*/16, /*IsSigned=*/false>;
 
+/// Builds a value of \p CanonicalType (an `LLVM::LLVMStructType`, possibly
+/// containing `feme.tight_vector`-marker-wrapped and/or synthetic `[N x
+/// i8]` filler members -- see `getTightVectorArrayType`'s and
+/// `layOutStructIfOffsetsMatch`'s own comments) containing the same member
+/// values, in the same order, as \p TightValue's own (also
+/// `LLVM::LLVMStructType`, always plain/unwrapped/unpadded) type.
+///
+/// Used by `FrexpStructPattern`/`ModfStructPattern` below to reconcile two
+/// facts that are both true at once for a GLSL.std.450 builtin's own
+/// synthetic multi-result struct (roadmap L183):
+/// - The *op actually producing* each real member value (`llvm.intr.frexp`
+///   for `FrexpStruct`, or a plain `fsub`/`ftrunc` pair for `ModfStruct`)
+///   needs its own operand/result types to be exactly the plain,
+///   tightly-packed shape the real LLVM intrinsic/instructions expect --
+///   never this file's own `getTightVectorArrayType` marker-wrapping (that
+///   substitution exists purely to give a *memory*-backed struct member a
+///   `DataLayout`-independent byte size, meaningless for a value never
+///   stored to memory) and never an interior alignment-gap filler either
+///   (`layOutStructIfOffsetsMatch`'s own padding, again meaningless for a
+///   transient SSA-value-only aggregate that must instead match the real
+///   intrinsic call's own always-fully-packed return shape byte for byte).
+/// - Every *consumer* of that same op's declared SPIR-V result type still
+///   expects whatever this file's own `spirv::StructType` conversion
+///   (`convertOffsetStructTypeIgnoringDecorations`) independently computes
+///   for it -- including any interior filler and/or tight-vector
+///   marker-wrapping -- since `CompositeExtractMemberReorderPattern`/
+///   `CompositeInsertMemberReorderPattern` (this file's own physical-index
+///   remap for exactly this padding, see their own comments) and the
+///   ordinary tight-vector-aware reassembly `reassembleTightVectorValue`
+///   already performs elsewhere both assume that canonical shape.
+///
+/// Repacking the op's own tightly-built, unwrapped result into the
+/// canonical shape right here, eagerly, in the producing pattern itself
+/// (rather than leaving the two to disagree and relying on MLIR's dialect-
+/// conversion driver's own automatic reconciliation, which for a struct
+/// value only inserts an unresolved, translation-fatal
+/// `builtin.unrealized_conversion_cast`) is what actually closes this
+/// loop; `reassembleTightVectorValue` handles the case where a target
+/// member itself needs `feme.tight_vector` marker-wrapping.
+mlir::Value repackIntoCanonicalStructLayout(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value TightValue, mlir::Type CanonicalType) {
+  auto TightStructType =
+      mlir::cast<mlir::LLVM::LLVMStructType>(TightValue.getType());
+  auto CanonicalStructType =
+      mlir::cast<mlir::LLVM::LLVMStructType>(CanonicalType);
+  if (TightStructType == CanonicalStructType)
+    return TightValue;
+
+  auto IsFillerMember = [](mlir::Type MemberType) {
+    auto ArrayTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(MemberType);
+    return ArrayTy && ArrayTy.getElementType().isInteger(8);
+  };
+
+  mlir::Value Result =
+      mlir::LLVM::PoisonOp::create(Rewriter, Loc, CanonicalStructType);
+  unsigned TightIndex = 0;
+  for (auto [CanonicalIndex, MemberType] :
+       llvm::enumerate(CanonicalStructType.getBody())) {
+    if (IsFillerMember(MemberType))
+      continue;
+    mlir::Value Member = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, TightValue,
+        llvm::ArrayRef<int64_t>{static_cast<int64_t>(TightIndex)});
+    mlir::Value Reassembled =
+        reassembleTightVectorValue(Member, MemberType, Rewriter, Loc);
+    Result = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, Result, Reassembled,
+        llvm::ArrayRef<int64_t>{static_cast<int64_t>(CanonicalIndex)});
+    ++TightIndex;
+  }
+  return Result;
+}
+
+/// (Roadmap L183) Converts the GLSL.std.450 `FrexpStruct` instruction
+/// (`spirv.GL.FrexpStruct`) into `LLVM::FractionExpOp` (`llvm.intr.frexp`).
+/// Registered at `FeMeBenefit` so it wins over upstream's own
+/// `DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`), which on its own
+/// would be entirely correct -- the problem is specific to this file's own
+/// `spirv::StructType` conversion (`convertOffsetStructTypeIgnoringDecora
+/// tions`/`layOutStructIfOffsetsMatch`, registered in
+/// `populateSPIRVToLLVMTargetTypeConversions`, taking priority over
+/// upstream's own struct conversion), which exists to reproduce a real
+/// *memory*-backed struct's own `Offset`-derived byte layout, but is
+/// applied unconditionally to every `spirv::StructType` including
+/// `FrexpStruct`'s own synthetic, non-memory `ResType` result struct.
+/// `FrexpStruct`'s `{significand, exponent}` result must instead match,
+/// byte for byte, whatever the real `llvm.frexp.*` intrinsic actually
+/// returns -- always fully packed, with no interior gap, regardless of the
+/// two result types' relative alignment (confirmed via a stock, unpatched
+/// `mlir-opt --convert-spirv-to-llvm`, run with none of this file's own
+/// patterns registered at all, on a minimal `f16`/`i32`-only repro, whose
+/// own result type has no filler) -- but this file's own struct
+/// conversion inserts one anyway whenever the two members' natural
+/// alignments differ (e.g. a `vector<2xf16>` significand, 4-byte natural
+/// alignment, followed by a `vector<2xi32>` exponent, 8-byte natural
+/// alignment: a spurious 4-byte `[4 x i8]` filler lands between them).
+/// This exact shape is what
+/// `dEQP-VK.spirv_assembly.instruction.compute.float16.arithmetic_2.
+/// frexpstructe`/`frexpstructs` hit, aborting the whole `deqp-vk` process
+/// with an `Instructions.cpp` `CallInst::init` "bad signature" assertion
+/// once the mismatched-shape struct reached final LLVM IR translation
+/// (`spirv.GL.ModfStruct`, the sibling instruction below, has the exact
+/// same latent exposure in principle -- its own two members simply happen
+/// to always share one identical type/alignment in practice, so this
+/// file's own alignment-gap logic never has cause to insert a gap for it
+/// -- fixed defensively alongside this one rather than left relying on
+/// that coincidence).
+///
+/// Builds the `llvm.intr.frexp` call itself against a tightly-packed,
+/// unwrapped, un-padded struct type (matching the intrinsic's own actual
+/// ABI exactly), then repacks that result into whatever this file's own
+/// struct conversion's canonical (correctly, memory-safe, but for this op
+/// unnecessarily padded/marker-wrapped) answer for `op.getType()` is --
+/// see `repackIntoCanonicalStructLayout`'s own comment for why both steps
+/// are needed.
+class FrexpStructPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLFrexpStructOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLFrexpStructOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLFrexpStructOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto ResultStructType = mlir::cast<mlir::spirv::StructType>(Op.getType());
+    mlir::Type CanonicalType =
+        getTypeConverter()->convertType(ResultStructType);
+    if (!CanonicalType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Type SignificandType = Adaptor.getOperand().getType();
+    mlir::Type ExponentType = getTypeConverter()->convertType(
+        ResultStructType.getElementType(1));
+    if (!ExponentType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type TightType = mlir::LLVM::LLVMStructType::getLiteral(
+        Rewriter.getContext(), {SignificandType, ExponentType},
+        /*isPacked=*/true);
+    mlir::Value TightResult = mlir::LLVM::FractionExpOp::create(
+        Rewriter, Loc, TightType, Adaptor.getOperand());
+    mlir::Value Result = repackIntoCanonicalStructLayout(
+        Rewriter, Loc, TightResult, CanonicalType);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// (Roadmap L183) Converts the GLSL.std.450 `ModfStruct` instruction
+/// (`spirv.GL.ModfStruct`), which splits its operand into an integer part
+/// and a fractional part, both of the same sign as the operand. Unlike
+/// `FrexpStruct` above, LLVM has no single intrinsic for this, so the two
+/// parts are computed directly: the integer part by truncating towards
+/// zero, and the fractional part as the remainder of that truncation.
+/// Registered at `FeMeBenefit` so it wins over upstream's own
+/// `ModfStructPattern` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+/// for the same reason `FrexpStructPattern` above wins over that file's
+/// own `FrexpStruct` conversion -- see its own comment for the full
+/// rationale, including why `ModfStruct`'s own two identical-typed members
+/// happen not to trigger the same bug in practice, fixed defensively here
+/// anyway.
+class ModfStructPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLModfStructOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLModfStructOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLModfStructOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type CanonicalType = getTypeConverter()->convertType(Op.getType());
+    if (!CanonicalType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type OperandType = Adaptor.getOperand().getType();
+    mlir::Type TightType = mlir::LLVM::LLVMStructType::getLiteral(
+        Rewriter.getContext(), {OperandType, OperandType},
+        /*isPacked=*/true);
+
+    mlir::Value Integer = mlir::LLVM::FTruncOp::create(
+        Rewriter, Loc, OperandType, Adaptor.getOperand());
+    mlir::Value Fraction = mlir::LLVM::FSubOp::create(
+        Rewriter, Loc, OperandType, Adaptor.getOperand(), Integer);
+
+    mlir::Value TightResult =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, TightType);
+    TightResult = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, TightResult, Fraction, llvm::ArrayRef<int64_t>{0});
+    TightResult = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, TightResult, Integer, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Result = repackIntoCanonicalStructLayout(
+        Rewriter, Loc, TightResult, CanonicalType);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.GL.Ldexp` (roadmap L120, `significand * 2^exponent`) to
 /// `llvm.intr.ldexp`. Not a `DirectConversionPattern`, because unlike
 /// every op in that table's own operand shape, `LLVM::LoadExpOp`'s own
@@ -13794,6 +13997,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,
+      FrexpStructPattern, ModfStructPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
       SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
       SUDotConversionPattern, SDotAccSatConversionPattern,
