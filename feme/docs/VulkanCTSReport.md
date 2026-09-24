@@ -12624,3 +12624,69 @@ confirming the 1 new unit test runs clean with zero regressions).
 No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed for this row (an internal `feme-cpu-simdize` widening-completeness
 fix, not a feature/extension support-status change).
+
+## L90 fixed -- `VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT` now advertised (`GroupNonUniformShuffleUp`/`Down` conversion patterns added)
+
+### Root cause
+
+`GroupNonUniformShuffleUp`/`GroupNonUniformShuffleDownOp` (SPIR-V opcodes
+347/348, gated by the `GroupNonUniformShuffleRelative` capability --
+distinct from plain `Shuffle`/`ShuffleXor`'s `GroupNonUniformShuffle`
+capability) already existed upstream in `mlir/include/mlir/Dialect/SPIRV/
+IR/SPIRVNonUniformOps.td`, but `SPIRVToLLVMPatterns.cpp` had no MLIR-to-
+LLVM conversion pattern for either op at all -- a purely FeMe-side gap,
+not an upstream one (confirmed by reading both ops' `.td` definitions
+before starting, following the row's own citation).
+
+### The fix
+
+- `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: added
+  `ShuffleRelativeConversionPattern<SPIRVOp, bool IsUp>` (a template,
+  mirroring `VoteConversionPattern<GroupOp>`'s own existing
+  `typename SPIRVOp::Adaptor Adaptor` signature shape for a templated
+  pattern), with `ShuffleUpConversionPattern`/`ShuffleDownConversionPattern`
+  aliases. Both share `ShuffleXorConversionPattern`'s own "compute a
+  target invocation id via `llvm.spv.subgroup.local.invocation.id`, then
+  `llvm.spv.wave.readlane` shuffle to it" shape: `ShuffleUp` subtracts
+  `Delta` from the local id, `ShuffleDown` adds it, per each op's own
+  spec wording. Registered both in the pattern-population list next to
+  the existing `ShuffleConversionPattern`/`ShuffleXorConversionPattern`
+  entries.
+- `feme/lib/Vulkan/PhysicalDeviceInfo.cpp`: `SubgroupSupportedOperations`
+  now also includes `VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT`, since the
+  two ops this bit gates (per `vktSubgroupsShuffleTests.cpp`'s own
+  `supportedCheck`) now have working conversion patterns.
+
+### New unit tests
+
+- `feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`:
+  `ShuffleUpLegalizesToReadLane`/`ShuffleDownLegalizesToReadLane`, each
+  confirming the expected `llvm.spv.wave.readlane`/
+  `llvm.spv.subgroup.local.invocation.id`/`llvm.sub`|`llvm.add` shape.
+- `feme/unittests/Vulkan/PhysicalDeviceInfoTest.cpp`:
+  `SubgroupSizeIsAPowerOfTwoInRange`'s existing
+  `VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT` expectation flipped from
+  `EXPECT_FALSE` to `EXPECT_TRUE`.
+
+Full `check-feme`: 3339 tests discovered, **3336 passed, 3 pre-existing
+Unsupported, 0 Failed** (up from the pre-session baseline of 3334/3337,
+confirming the 2 new unit tests run clean with zero regressions).
+
+### CTS verification
+
+A full `dEQP-VK.subgroups.shuffle.compute.*` re-run (1,200 cases, the
+group `subgroupshuffleup`/`subgroupshuffledown` cases live under) is
+**0 Fail** (320 Pass, 880 correctly `NotSupported` for unrelated
+feature/stage gates such as `longVector`). Isolating just the
+`subgroupshuffleup`/`subgroupshuffledown` cases specifically: **192
+Pass / 0 Fail / 528 NotSupported** (unrelated `longVector`/8-bit-type
+gates, not this bit) -- closing this row's own previously-stated
+remaining gap (`GroupNonUniformShuffleUp`/`ShuffleDown` had no
+conversion pattern at all before this fix).
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: `SubgroupSupportedOperations` is a `VkPhysicalDeviceSubgroup
+Properties` bitmask field, not one of the individually-tracked
+feature-struct-field/extension-string rows those two inventories track
+(neither file has any pre-existing `SHUFFLE_BIT`/`VOTE_BIT`/`BALLOT_BIT`
+row to update either, confirmed by grep before concluding this).
