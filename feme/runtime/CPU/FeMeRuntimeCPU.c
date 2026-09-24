@@ -5287,15 +5287,25 @@ femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U, float V,
   return S;
 }
 
-// (Roadmap L125(n)) The four address-mode-resolved gather-tap corners for
-// a `ConstOffsets`-plural gather, one independent `(X, Y)` per corner --
-// unlike `FemeRTBilinearSupport` above, whose four corners share one
-// `(OffsetX, OffsetY)` pair and are therefore always one contiguous 2x2
-// rectangle, `ConstOffsets` lets each of a gather's four taps carry its
-// own, potentially wildly different, offset (SPIR-V's `OpImageGather`
-// `ConstOffsets` image operand -- see `isGatherOffsetsVector`'s comment in
-// `SPIRVResourceLowering.cpp`), so the four corners here are independent
-// texel addresses, not a shared footprint's four derived corners.
+// (Roadmap L125(n)) The four address-mode-resolved gather-tap texel
+// addresses for a `ConstOffsets`-plural gather, one independent `(X, Y)`
+// per tap. Unlike `FemeRTBilinearSupport` above, whose four corners share
+// one `(OffsetX, OffsetY)` pair and therefore always form one contiguous
+// 2x2 rectangle (`(BaseX, BaseY)`, `(BaseX+1, BaseY)`, etc.), a
+// `ConstOffsets` gather's four taps are *not* four corners of one shared
+// footprint at all -- confirmed against `VK-GL-CTS`'s own reference model
+// (`fetchGatherArray2DOffsets` in `tcuTexture.cpp`): every tap reads from
+// the exact same base texel `(x0, y0) = (floor(U*Width - 0.5),
+// floor(V*Height - 0.5))` -- the same single corner an ordinary gather's
+// own `(X0, Y0)` tap would use -- offset independently by that tap's own
+// `ConstOffsets` pair; there is no per-tap `+1` corner delta the way
+// `FemeRTBilinearSupport`'s `X1`/`Y1` add one. (An earlier version of
+// this function incorrectly added a per-tap `+1` "corner" delta before
+// applying each offset, silently producing wrong pixels for every
+// non-zero-offset case -- a real `dEQP-VK.glsl.texture_gather.graphics.
+// offsets.*` run caught this class of bug the same way it caught
+// `isSupportedOffset`'s own silent-truncation gap this same roadmap item
+// fixes above.)
 typedef struct {
   int32_t X[4], Y[4];
   _Bool Border[4];
@@ -5303,12 +5313,9 @@ typedef struct {
 
 // Computes each of `FemeRTGatherOffsetsSupport`'s four independent taps
 // from `Img`/`Samp`'s own address-mode/mip-level state at normalized
-// coordinates `(U, V)`, given each tap's own `ConstOffsets` pair -- same
-// fixed corner-order convention every other gather runtime entry point
-// uses (tap 0 = `(X0, Y1)`, tap 1 = `(X1, Y1)`, tap 2 = `(X1, Y0)`, tap 3 =
-// `(X0, Y0)`, where `(X0, Y0)` is the texel `(U, V)` floors to before any
-// offset), each independently offset by its own `OffsetX`/`OffsetY` pair
-// rather than every tap sharing one.
+// coordinates `(U, V)`, given each tap's own `ConstOffsets` pair -- see
+// the struct's own comment above for why every tap shares one base texel
+// rather than four different corners.
 __attribute__((always_inline)) static FemeRTGatherOffsetsSupport
 femeRTComputeGatherOffsetsSupport(
     const FemeRTImageDescriptor *Img, float U, float V,
@@ -5321,22 +5328,17 @@ femeRTComputeGatherOffsetsSupport(
   float TexelV = V * (float)LevelHeight - 0.5f;
   int32_t FloorX = (int32_t)__builtin_floorf(TexelU);
   int32_t FloorY = (int32_t)__builtin_floorf(TexelV);
-  // Tap 0 = (X0, Y1); tap 1 = (X1, Y1); tap 2 = (X1, Y0); tap 3 = (X0, Y0).
-  int32_t DX[4] = {0, 1, 1, 0};
-  int32_t DY[4] = {1, 1, 0, 0};
   int32_t OffX[4] = {OffsetX0, OffsetX1, OffsetX2, OffsetX3};
   int32_t OffY[4] = {OffsetY0, OffsetY1, OffsetY2, OffsetY3};
 
   FemeRTGatherOffsetsSupport S;
   for (int I = 0; I != 4; ++I) {
     S.Border[I] = 0;
-    S.X[I] = femeRTApplyAddressMode(FloorX + DX[I] + OffX[I],
-                                    (int32_t)LevelWidth, Samp->AddressU,
-                                    &S.Border[I]);
+    S.X[I] = femeRTApplyAddressMode(FloorX + OffX[I], (int32_t)LevelWidth,
+                                    Samp->AddressU, &S.Border[I]);
     _Bool BorderY = 0;
-    S.Y[I] = femeRTApplyAddressMode(FloorY + DY[I] + OffY[I],
-                                    (int32_t)LevelHeight, Samp->AddressV,
-                                    &BorderY);
+    S.Y[I] = femeRTApplyAddressMode(FloorY + OffY[I], (int32_t)LevelHeight,
+                                    Samp->AddressV, &BorderY);
     S.Border[I] = S.Border[I] || BorderY;
   }
   return S;

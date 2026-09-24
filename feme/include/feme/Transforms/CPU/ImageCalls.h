@@ -898,15 +898,18 @@ struct MatchedImageCall {
   /// `Array2D`'s own 2-component one; null for every other kind.
   llvm::Value *OffsetZ = nullptr;
   /// `Gather2DOffsets`/`GatherArray2DOffsets`(`I32`) only (roadmap
-  /// L125(n)): the 4 independent per-tap `ConstOffsets` pairs, one per
-  /// gathered corner, in the same fixed `Result[0..3]` order as
-  /// `createGather2D`'s own single shared `OffsetX`/`OffsetY` pair above
-  /// (`Result[0]` = `(X0,Y1)` using `OffsetX0`/`OffsetY0`; `Result[1]` =
-  /// `(X1,Y1)` using `OffsetX1`/`OffsetY1`; `Result[2]` = `(X1,Y0)` using
-  /// `OffsetX2`/`OffsetY2`; `Result[3]` = `(X0,Y0)` using `OffsetX3`/
-  /// `OffsetY3`) -- null for every other kind, including the plain,
-  /// single-shared-offset `Gather2D`/`GatherArray2D`(`I32`) above, which
-  /// populate `OffsetX`/`OffsetY` instead.
+  /// L125(n)): the 4 independent per-tap `ConstOffsets` pairs, in
+  /// `Result[0..3]` order (`Result[I]` reads the same single base texel
+  /// `(floor(U*Width - 0.5), floor(V*Height - 0.5))` every other gather
+  /// kind's own `(X0, Y0)` tap does, offset by `OffsetX[I]`/`OffsetY[I]`
+  /// -- confirmed against `VK-GL-CTS`'s own reference model
+  /// (`fetchGatherArray2DOffsets` in `tcuTexture.cpp`), unlike the
+  /// plain, single-shared-offset `Gather2D`/`GatherArray2D`(`I32`)
+  /// above's own four *different* bilinear corners, which this kind does
+  /// not have -- there is no per-tap `+1` corner delta here at all, only
+  /// each tap's own independent offset applied to the one shared base
+  /// texel) -- null for every other kind, which populate `OffsetX`/
+  /// `OffsetY` instead.
   llvm::Value *OffsetX0 = nullptr;
   llvm::Value *OffsetY0 = nullptr;
   llvm::Value *OffsetX1 = nullptr;

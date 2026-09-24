@@ -4482,7 +4482,10 @@ void lowerImageAccesses(
       // an ordinary shared offset, this dispatches to
       // `createGather2DOffsets`/`createGatherArray2DOffsets` (and their
       // `*I32` counterparts) instead, extracting all 8 lanes (4
-      // independent `(X, Y)` pairs, one per gathered corner) rather than
+      // independent `(X, Y)` pairs, one per gathered tap -- see
+      // `femeRTComputeGatherOffsetsSupport`'s own doc in
+      // `FeMeRuntimeCPU.c` for why these are independent taps sharing
+      // one base texel, not four different bilinear corners) rather than
       // just lanes 0/1 -- `Cube` is excluded from this check entirely
       // (`hasOnlySupportedImageUses` never sets `HasOffsetsVector` for
       // it), so this branch only ever runs for `Plain2D`/`Array2D`.
