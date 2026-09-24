@@ -1187,7 +1187,7 @@ the ICD does not yet list `VK_EXT_descriptor_indexing` in
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Done (V4, same format scope) |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
 | Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
-| Inline uniform block | Byte-blob descriptor storage | Object model only (E14); dispatch consumption deferred |
+| Inline uniform block | Byte-blob descriptor storage, `Kind::Raw` `FemeDescriptor` from the blob | Done (E14 + L180, dispatch consumption) |
 | Acceleration structure | None | Out of scope |
 
 **Immutable samplers (roadmap L153).** `VkDescriptorSetLayoutBinding::

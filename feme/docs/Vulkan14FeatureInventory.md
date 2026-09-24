@@ -261,7 +261,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state` | yes | roadmap C4c: all 12 dynamic states implemented |
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_image_robustness` | no |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | yes | roadmap E14: VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK over Descriptor.{h,cpp}'s per-binding storage |
+| extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | yes | roadmap E14/L180: VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK over Descriptor.{h,cpp}'s per-binding storage, consumed by a real dispatch via CommandBuffer.cpp's buildBoundResources (L180) |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_cache_control` | yes | roadmap E9: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT/VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT implemented (Pipeline.cpp/GraphicsPipeline.cpp/PipelineCache.{h,cpp}) |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_feedback` | yes | roadmap E19: VkPipelineCreationFeedbackCreateInfo filled for vkCreateGraphicsPipelines/vkCreateComputePipelines (Pipeline.cpp's fillPipelineCreationFeedback) |
 | extension | VK_VERSION_1_3 | `VK_EXT_private_data` | yes | roadmap E10: VkPrivateDataSlot and its four commands (PrivateData.cpp) |

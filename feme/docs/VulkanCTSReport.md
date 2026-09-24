@@ -11589,3 +11589,91 @@ test-name suffixes). See `Roadmap.md`'s new `L180` row. No
 needed -- this is a correctness fix to an already-listed, already-
 supported feature (input attachments), not new feature/extension
 coverage.
+
+## L180 fixed -- `descriptorset_random`'s remaining 118 image-verification failures resolved (910 -> 1028/1028 executable pass); `inline_uniform_blocks` cluster also resolved by the same fix (0 -> 9/9)
+
+**Root cause**: all 118 remaining `descriptorset_random` failures share
+one signal invisible in the prior session's partial stage-suffix
+breakdown -- every one contains `iublimitlow` (inline uniform block,
+"limit low" variant) in its name, and a full-sweep cross-check found
+**100% of `iublimitlow` cases that actually execute** (rather than
+being skipped `NotSupported`, as every sibling `iublimithigh` case is
+in this environment) **fail**. This reframes `L180` from "several
+independent stage-specific bugs" to "one systemic inline-uniform-block
+bug." Reading the CTS's own shader generation
+(`vktBindingDescriptorSetRandomTests.cpp`) confirmed an inline uniform
+block has no SPIR-V-level distinction from an ordinary UBO -- the
+difference is purely in `vkUpdateDescriptorSets`' own API-level write
+mechanics (`VkWriteDescriptorSetInlineUniformBlockEXT`'s byte-ranged
+semantics) -- so the bug had to be entirely in the Vulkan-layer bridge,
+not a shader-lowering pass.
+
+Tracing `feme::vulkan::DescriptorSet` (`Descriptor.cpp`/`.h`) confirmed
+the write side was already fully correct -- `InlineUniformBlockBindings`
+sized and written correctly by all three of `vkUpdateDescriptorSets`'
+direct-write, copy, and template-write paths, exactly `E14`'s own
+original scope. The actual gap was in `CommandBuffer.cpp`'s
+`buildBoundResources`, the function building a dispatch's resource heap
+from a pipeline's bound descriptor sets: it branched only on
+image/sampler vs. "everything else" (`State.Set->bindingArray(...)`,
+which reads the *ordinary* per-binding buffer map) and never checked
+`isInlineUniformBlockDescriptorType` at all. Since the constructor
+routes inline-uniform-block bindings into a *separate* map
+(`InlineUniformBlockBindings`), `bindingArray()` returned an empty
+`ArrayRef` for these bindings, and the very next guard
+(`if (Array.empty()) continue;`) silently skipped building any
+`FemeDescriptor` for them -- the shader then read a zero-initialized,
+never-written resource-heap slot instead of the real inline data. This
+is exactly the gap `E14`'s own `isReadOnlyDescriptorType` doc comment
+had flagged as a known, deferred TODO ("even though no dispatch
+consumes one yet").
+
+**Fix**: a new branch in `buildBoundResources` for
+`isInlineUniformBlockDescriptorType(BindingDecl.Type)`, reading
+`DescriptorSet::inlineUniformBlockData(Binding)` and building a
+single-element (not `Array.size()`-driven -- one inline uniform block
+is exactly one descriptor regardless of its byte size) `Kind::Raw`
+`FemeDescriptor` from the blob's own backing bytes, pushed onto the
+same `Result.Storage`/`Result.Bindings` vectors an ordinary buffer
+binding uses. `Flags` resolves to `0` (read-only) via the existing
+`isReadOnlyDescriptorType`, which already covered inline uniform
+blocks. No new resource class, heap-layout change, or
+`SPIRVResourceLoweringPass` change needed -- the shader consumes it
+identically to a `UNIFORM_BUFFER` once its bytes are in the heap.
+Updated the now-stale `E14`-era comments in `Descriptor.h`/`.cpp` that
+described this as an unconsumed, object-model-only feature.
+
+New dispatch-level unit test, `InlineUniformBlockDispatchTest` in
+`CommandBufferTest.cpp` (reuses `kUniformBufferReadShader` unmodified,
+since the shader side is identical to an ordinary UBO read), confirmed
+to fail without the fix (`Result == 0` instead of the expected second
+field) and pass with it.
+
+**Validation**:
+- `FeMeVulkanTests --gtest_filter='*InlineUniformBlockDispatch*'`:
+  fails without the fix, passes with it (both confirmed directly).
+- `ninja check-feme`: 3313/3316, 3 unsupported, 0 regressions (up from
+  the established 3312/3315 baseline -- 1 net new unit test, no
+  failures).
+- Smallest repro
+  (`descriptorset_random.sets4.constant.ubolimitlow.sbolimitlow.sampledimglow.outimgtexlow.iublimitlow.nouab.comp.noia.0`):
+  now passes.
+- Full 118-case originally-failing subset: 118/118 (100%) now pass.
+- Full `dEQP-VK.binding_model.descriptorset_random.*` sweep:
+  **1028/1028 (100%) of executable cases pass, 0 failures** (up from
+  910 pass / 118 fail pre-session; the remaining 34,120 cases stay
+  `NotSupported`, unaffected, as expected).
+- `dEQP-VK.binding_model.inline_uniform_blocks.*` (a separate top-level
+  test group, 9 cases, never triaged by several prior sessions): the
+  same fix, with no further changes, resolves this cluster too --
+  **9/9 (100%) now pass** (up from 0/9), confirming this session's
+  hypothesis that it shared this exact root cause rather than being an
+  independent bug.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed for the extension/feature listing itself -- `VK_EXT_inline_
+uniform_block`/`inlineUniformBlock` was already correctly listed as
+supported since `E14`; this session is a correctness fix to a
+previously-broken dispatch-consumption path underneath an
+already-advertised feature, not a change to what capabilities are
+advertised.

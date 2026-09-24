@@ -105,7 +105,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_image_tiling_control` | Not implemented |  |
 | `VK_EXT_image_view_min_lod` | Not implemented |  |
 | `VK_EXT_index_type_uint8` | Not implemented |  |
-| `VK_EXT_inline_uniform_block` | Advertised |  |
+| `VK_EXT_inline_uniform_block` | Advertised | roadmap L180: dispatch-consumption verified end to end (CTS `descriptorset_random`/`inline_uniform_blocks` both fully passing) |
 | `VK_EXT_layer_settings` | Not implemented |  |
 | `VK_EXT_legacy_dithering` | Not implemented |  |
 | `VK_EXT_legacy_vertex_attributes` | Not implemented |  |
