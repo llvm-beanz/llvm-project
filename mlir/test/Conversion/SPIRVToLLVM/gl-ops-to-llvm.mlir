@@ -573,6 +573,21 @@ spirv.func @frexp_struct(%arg0: f32) "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.Frexp
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @frexp
+spirv.func @frexp(%arg0: f32, %arg1: !spirv.ptr<i32, Function>) -> f32 "None" {
+  // CHECK: %[[RESULT:.*]] = llvm.intr.frexp(%{{.*}}) : (f32) -> !llvm.struct<(f32, i32)>
+  // CHECK: %[[SIGNIFICAND:.*]] = llvm.extractvalue %[[RESULT]][0] : !llvm.struct<(f32, i32)>
+  // CHECK: %[[EXPONENT:.*]] = llvm.extractvalue %[[RESULT]][1] : !llvm.struct<(f32, i32)>
+  // CHECK: llvm.store %[[EXPONENT]], %{{.*}} : i32, !llvm.ptr
+  // CHECK: llvm.return %[[SIGNIFICAND]] : f32
+  %0 = spirv.GL.Frexp %arg0, %arg1 : f32, !spirv.ptr<i32, Function> -> f32
+  spirv.ReturnValue %0 : f32
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GL.ModfStruct
 //===----------------------------------------------------------------------===//
 

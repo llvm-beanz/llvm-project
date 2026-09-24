@@ -917,6 +917,46 @@ public:
   }
 };
 
+/// Converts the GLSL.std.450 `Frexp` instruction (`spirv.GL.Frexp`), which
+/// splits its operand into a normalized fractional significand in `[0.5,
+/// 1)` (or `0` if the operand is `0`) and an integer power-of-two
+/// exponent such that `significand * 2^exponent` equals the operand,
+/// writing the exponent through a pointer operand and returning the
+/// significand as the result. Computed the same way as `FrexpStruct`
+/// above (a single `llvm.intr.frexp` call), but the exponent is stored
+/// through the pointer operand instead of being packed into a struct
+/// result.
+class FrexpPattern : public SPIRVToLLVMConversion<spirv::GLFrexpOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::GLFrexpOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::GLFrexpOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type significandType = adaptor.getX().getType();
+    Type exponentElementType =
+        cast<spirv::PointerType>(op.getExp().getType()).getPointeeType();
+    Type convertedExponentType =
+        getTypeConverter()->convertType(exponentElementType);
+    if (!convertedExponentType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    Type resultStructType = LLVM::LLVMStructType::getLiteral(
+        rewriter.getContext(), {significandType, convertedExponentType});
+    Value result = LLVM::FractionExpOp::create(rewriter, loc, resultStructType,
+                                                adaptor.getX());
+    Value significand = LLVM::ExtractValueOp::create(
+        rewriter, loc, result, ArrayRef<int64_t>{0});
+    Value exponent = LLVM::ExtractValueOp::create(
+        rewriter, loc, result, ArrayRef<int64_t>{1});
+
+    LLVM::StoreOp::create(rewriter, loc, exponent, adaptor.getExp());
+    rewriter.replaceOp(op, significand);
+    return success();
+  }
+};
+
 /// Converts `spirv.ExecutionMode` into a global struct constant that holds
 /// execution mode information.
 class ExecutionModePattern
@@ -2577,7 +2617,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::GLTanOp, LLVM::TanOp>,
       DirectConversionPattern<spirv::GLTanhOp, LLVM::TanhOp>,
       DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>,
-      ModfStructPattern, ModfPattern,
+      ModfStructPattern, ModfPattern, FrexpPattern,
       InverseSqrtPattern, SAbsPattern, FractPattern,
       SignPattern<spirv::GLFSignOp, /*isFloat=*/true>,
       SignPattern<spirv::GLSSignOp, /*isFloat=*/false>, GLFMixPattern,
