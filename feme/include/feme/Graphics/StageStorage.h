@@ -16,7 +16,9 @@
 // stage) needs exactly the same "build one stage's storage from its own
 // `EntrySignature`" step.
 //
-// Scope: 32-bit scalars only, matching the executor's own long-standing
+// Scope: 32-bit scalars only (or, for a `float`, a genuine `float32` value
+// widened from a 16-bit `half` at the compiled wrapper's own load/store
+// boundary -- roadmap L98(a)), matching the executor's own long-standing
 // restriction -- `buildStageStorage` returns an `Error` for anything else
 // rather than laying out storage the compiled wrapper would misread.
 //

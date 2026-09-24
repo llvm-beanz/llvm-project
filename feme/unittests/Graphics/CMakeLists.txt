@@ -23,6 +23,7 @@ add_feme_unittest(FeMeGraphicsTests
   PreparedDrawTest.cpp
   SceneTest.cpp
   StageLinkTest.cpp
+  StageStorageTest.cpp
   TaskPayloadTest.cpp
   TessellationTest.cpp
   TessellatorTest.cpp

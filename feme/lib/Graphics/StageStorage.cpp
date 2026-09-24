@@ -157,10 +157,31 @@ Expected<StageStorage> buildStageStorage(const EntrySignature &Sig,
         Direction == SignatureDirection::Input &&
         !IsForwardedPerControlPointInput && !IsGeometryInputVertexArrayMember)
       continue;
-    if (Elt.BitWidth != 32)
+    // (Roadmap L98(a)) A 16-bit `float16_t`/`f16vec*` element is the one
+    // other width accepted here, alongside the ordinary 32-bit case: it is
+    // stored as a genuine (widened) IEEE-754 `float32` value in an
+    // ordinary 4-byte slot, not its own raw 16-bit bit pattern. This keeps
+    // every consumer of this storage -- most importantly
+    // `Executor.cpp`'s `lerpVertex`, which already interpolates any
+    // `Float`-`ComponentType` varying as a real `float32` bit pattern,
+    // with no notion of a narrower source width -- correct with no
+    // further change: the compiled wrapper (`VertexWrapper.cpp`/
+    // `HullWrapper.cpp`/`DomainWrapper.cpp`/`GeometryWrapper.cpp`/
+    // `FragmentWrapper.cpp`) is responsible for widening (`fpext`) a
+    // `half` value to `float` immediately before every store here, and
+    // narrowing (`fptrunc`) back immediately after every load, so this
+    // storage layer itself never observes a genuine 16-bit value. A
+    // 16-bit *non*-float element (there is currently no such shape in
+    // FeMe's own `SignatureComponentType` set, but the check below is
+    // explicit about it in case one is ever added) is declined exactly
+    // like any other still-unsupported width.
+    bool IsWidenedHalf =
+        Elt.BitWidth == 16 && Elt.ComponentType == SignatureComponentType::Float;
+    if (Elt.BitWidth != 32 && !IsWidenedHalf)
       return createStringError(inconvertibleErrorCode(),
                                "stage element %u has a %u-bit scalar; only "
-                               "32-bit elements are implemented yet",
+                               "32-bit (or, for a float, 16-bit widened) "
+                               "elements are implemented yet",
                                Elt.ElementID, Elt.BitWidth);
 
     E.ScalarKind = scalarKindFor(Elt.ComponentType);
