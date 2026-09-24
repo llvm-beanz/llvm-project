@@ -840,6 +840,33 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
           buildImageAndSamplerBinding(SetIdx, BindingDecl, ImageArray, Result);
         continue;
       }
+      // (Roadmap L180) An inline uniform block is a single descriptor --
+      // unlike every other binding here, `BindingDecl.Count`/`Descriptor
+      // Set::InlineUniformBlockBindings`' own array size is the block's
+      // *byte size*, not an array-of-descriptors count -- backed by the
+      // set's own captured byte blob (`DescriptorSet::
+      // inlineUniformBlockData`) rather than a bound `Buffer`. The shader
+      // side (SPIR-V/GLSL) sees it as an ordinary `Uniform`-storage-class
+      // block, exactly like `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`, so it
+      // resolves to the same read-only `Kind::Raw` descriptor shape one
+      // does, just sourced from the blob directly instead of a bound
+      // buffer's own memory.
+      if (isInlineUniformBlockDescriptorType(BindingDecl.Type)) {
+        llvm::ArrayRef<uint8_t> Blob =
+            State.Set->inlineUniformBlockData(BindingDecl.Binding);
+        if (Blob.empty())
+          continue;
+        std::vector<feme::cpu::FemeDescriptor> Descriptors(1);
+        feme::cpu::FemeDescriptor &Dst = Descriptors[0];
+        Dst.Data = const_cast<uint8_t *>(Blob.data());
+        Dst.SizeInBytes = Blob.size();
+        Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Raw);
+        Dst.Flags = 0; // Always read-only -- see isReadOnlyDescriptorType.
+        Result.Storage.push_back(std::move(Descriptors));
+        Result.Bindings.push_back(feme::cpu::BoundResourceBinding{
+            SetIdx, BindingDecl.Binding, Result.Storage.back()});
+        continue;
+      }
       llvm::ArrayRef<DescriptorBufferBinding> Array =
           State.Set->bindingArray(BindingDecl.Binding);
       bool Dynamic = isDynamicDescriptorType(BindingDecl.Type);

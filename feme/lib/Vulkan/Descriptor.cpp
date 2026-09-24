@@ -62,10 +62,12 @@ bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
          Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
          Type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ||
-         // (roadmap E14) Vulkan treats an inline uniform block's contents
+         // (roadmap L180) Vulkan treats an inline uniform block's contents
          // as an implicit uniform buffer -- read-only from the shader,
-         // exactly like `UNIFORM_BUFFER` above -- even though no dispatch
-         // consumes one yet (see Descriptor.h's file comment).
+         // exactly like `UNIFORM_BUFFER` above. `CommandBuffer.cpp`'s
+         // `buildBoundResources` consumes it via
+         // `DescriptorSet::inlineUniformBlockData`, resolving to this same
+         // `Flags = 0` (never `FEME_DESCRIPTOR_UAV`) shape.
          isInlineUniformBlockDescriptorType(Type);
 }
 

@@ -84,11 +84,15 @@
 // byte blob (`InlineUniformBlockBindings`), sized from the layout binding's
 // `descriptorCount` -- which for this one descriptor type is the block's
 // byte size, not an array element count (see `DescriptorSetLayoutBinding`'s
-// field comment). Like the image/sampler case above, this milestone's scope
-// is the object model only: a descriptor set can create, update
-// (`VkWriteDescriptorSetInlineUniformBlock`), copy, and bind an inline
-// uniform block, but no `feme::cpu::SPIRVResourceLoweringPass` conversion
-// consumes one from a real dispatch yet.
+// field comment). (Roadmap L180) Unlike the image/sampler case above,
+// `CommandBuffer.cpp`'s `buildBoundResources` does consume this from a real
+// dispatch: it reads `inlineUniformBlockData` directly (no
+// `feme::cpu::SPIRVResourceLoweringPass` involvement needed, since an
+// inline uniform block is an ordinary `Uniform`-storage-class handle at the
+// SPIR-V level, indistinguishable from `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`
+// there) and builds a single-element `Kind::Raw` `FemeDescriptor` from the
+// blob, exactly like `isReadOnlyDescriptorType` already resolves its
+// `Flags` for.
 //
 //===----------------------------------------------------------------------===//
 
