@@ -94,7 +94,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `storageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `uniformAndStorageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `storagePushConstant16` | no |  |
-| feature | VK_VERSION_1_1 | `storageInputOutput16` | no |  |
+| feature | VK_VERSION_1_1 | `storageInputOutput16` | yes | widen/narrow-at-wrapper-boundary `fpext`/`fptrunc` around `StageStorage`'s 32-bit slots (roadmap L98(a)) |
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
@@ -133,7 +133,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `storagePushConstant8` | no |  |
 | feature | VK_VERSION_1_2 | `shaderBufferInt64Atomics` | no |  |
 | feature | VK_VERSION_1_2 | `shaderSharedInt64Atomics` | no |  |
-| feature | VK_VERSION_1_2 | `shaderFloat16` | no |  |
+| feature | VK_VERSION_1_2 | `shaderFloat16` | yes | required jointly with `storageInputOutput16` for shader stage-IO (roadmap L98(a)); caution: exposes a narrow, unrelated pre-existing crash in a `FrexpStruct`+`half` compute shape, see roadmap L183 |
 | feature | VK_VERSION_1_2 | `shaderInt8` | no |  |
 | feature | VK_VERSION_1_2 | `descriptorIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayDynamicIndexing` | no |  |

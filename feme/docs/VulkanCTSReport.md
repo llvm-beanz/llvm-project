@@ -12183,3 +12183,99 @@ deserializer), not `feme/` -- committed separately, touching only
 `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp` and 3
 `mlir/test/Target/SPIRV/*.spvasm` files, per the standing "issue
 outside FeMe gets its own self-contained, non-FeMe commit" instruction.
+
+## L98(a) fixed -- `shaderFloat16`/`storageInputOutput16` shader stage-IO now supported (112/112); new L183 crash finding (unrelated, narrow)
+
+Resumed a prior stalled session's partial `L98(a)` work (restored via `git
+stash pop`): a `bool`/`i1`-style widen-at-boundary design (roadmap H6m
+precedent) for 16-bit `half`/`float16_t` shader-stage-IO varyings, which
+`StageStorage.cpp`'s `buildStageStorage` previously rejected outright
+(every component slot hardcoded to 32 bits). Confirmed the correct
+boundary for the widen/narrow is the **compiled wrapper** level
+(`VertexWrapper.cpp`/`HullWrapper.cpp`/`DomainWrapper.cpp`/
+`GeometryWrapper.cpp`/`FragmentWrapper.cpp`/`PatchConstantWrapper.cpp`'s
+own load/store call sites), not `CanonicalizeStage.cpp`'s leaf
+decomposition -- `Executor.cpp`'s `lerpVertex` (per-vertex clip
+interpolation) already generically treats any `Float`-typed varying's
+storage as a real `float32` bit pattern, so widening at the wrapper
+boundary means this consumer needs zero changes and stays correct by
+construction.
+
+Implemented across all 6 wrapper files: each gained a
+`stageStorageLoadType`/`narrowStageStorageLoad`/`widenForStageStorageStore`
+helper trio, wired into every relevant load/store call site (narrow
+immediately after a `StageStorage` read, widen immediately before a
+write -- and specifically *before* the existing masked partial-write
+`select`, so both its operands stay consistently `float`-typed).
+Deliberately left untouched: `FragmentWrapper.cpp`'s pull-model
+interpolation builtins (`InterpolateAt*`, already explicitly reject
+non-`float` varyings with their own error), `DomainWrapper.cpp`'s
+`gl_TessCoord` load (never `half`), `GeometryWrapper.cpp`'s
+`PrimitiveID`/`InvocationID`/`ViewIndex` system values (always int),
+`PatchConstantWrapper.cpp`'s system-value reads, and
+`MeshOutputWrapper.cpp`/`TaskPayloadWrapper.cpp` (mesh/task pipeline,
+not exercised by the target CTS test, separate scope).
+`StageStorage.cpp`'s `buildStageStorage` guard now accepts a 16-bit
+`Float`-typed element (widened-half) alongside the ordinary 32-bit case.
+Both `storageInputOutput16` and `shaderFloat16` flipped to `VK_TRUE` in
+`EntryPoints.cpp` (the target CTS test's own `checkSupport` requires
+both simultaneously -- confirmed via
+`vktPipelineShaderComponentDecoratedLayoutMatchingTests.cpp`).
+
+New unit tests: `feme/unittests/Graphics/StageStorageTest.cpp` (new
+file, 3 tests: widened-half accepted, non-float 16-bit still rejected,
+64-bit still rejected), and
+`VertexWrapperTest.WidensHalfVaryingAroundStageStorageAccess` (a
+hand-written `feme.stage.input.load.f16`/`feme.stage.output.store.f16`
+IR module run through the real `Linearize`->`SIMDize`->`WaveLowering`->
+`VertexWrapperPass` pipeline, scanning the per-lane function -- not the
+thin wave-loop trampoline, which contains no `fpext`/`fptrunc` itself --
+for the expected widen/narrow instructions). All pass.
+
+- `ninja check-feme`: **3321/3324 (99.91%), 3 pre-existing Unsupported,
+  0 Failed** -- no regressions from the wrapper changes or new tests.
+- CTS: `dEQP-VK.pipeline.pipeline_library.interface_matching.
+  shader_layout_component_matching.*float16*` and the `monolithic`
+  variant both **112/112 (100%)**, 0 Failed, 0 NotSupported.
+- Broader `dEQP-VK.pipeline.pipeline_library.interface_matching.*`
+  (the whole parent group, 1589 cases): **1557 Pass / 0 Fail / 32
+  NotSupported** -- the 32 NotSupported confirmed via grep to be
+  exactly the still-open `float64`/`L98(b)` cases, nothing else
+  regressed.
+
+**New finding, broken out as roadmap `L183`** (not fixed this session):
+sweeping `dEQP-VK.spirv_assembly.*float16*` more broadly (a sanity check
+that whole-device `shaderFloat16` doesn't break other float16-gated
+groups, since it's a device-wide capability bit, not scopable to
+stage-IO alone) found `arithmetic_2.frexpe`/`arithmetic_2.frexps` fail
+cleanly (a separate, pre-existing, unrelated upstream MLIR SPIR-V
+deserializer gap: `GLSL.std.450` opcode 51, `Frexp`, is not
+autogen-deserialized), and the very next case,
+`arithmetic_2.frexpstructe`, **crashes the entire `deqp-vk` process**
+with an LLVM assertion (`Instructions.cpp:785`, `CallInst::init`'s "bad
+signature" check) rather than failing cleanly. Individually re-running
+narrowed this to exactly 2 crashing cases
+(`arithmetic_2.frexpstructe`/`arithmetic_2.frexpstructs`, both
+`exit=134`/`SIGABRT`) -- confirmed **not** a broad "any aggregate-
+struct-result GLSL op" class bug: `ModfStruct` (same `{half,half}`
+aggregate-result shape) passes cleanly, and `FrexpStruct` itself fails
+*cleanly* (not a crash) in the sibling `arithmetic_1` variant. Ruled out
+generic LLVM intrinsic legalization/codegen as the cause (a hand-written
+`{half,i32} = call @llvm.frexp.f16.i32(half)` IR module compiles and
+runs correctly via both `llc` and `llc -global-isel`). Root-cause
+direction identified but not confirmed: `spirv.GL.FrexpStructOp`
+converts via stock upstream MLIR to `LLVM::FractionExpOp`/
+`llvm.frexp.*`, an aggregate-*result* intrinsic -- a related but
+distinct area from the already-triaged `L181` (aggregate-*operand*
+lowering gap), not yet root-caused to the same invariant. Filed as its
+own roadmap row (not nested under `L98(a)`, per the one-lowercase-
+letter-deep rule) so a future session has the exact 2 case names and
+investigation state without needing to rediscover them. `feme/
+.instructions.md` updated with a caution against a future blanket
+`spirv_assembly.*float16*` (or wider) sweep silently truncating early
+because of this.
+
+No `VulkanExtensionInventory.md` update needed (this is a feature-bit
+change, not an extension-support change); `Vulkan14FeatureInventory.md`
+updated: `storageInputOutput16`/`shaderFloat16` both flipped from `no`
+to `yes`, with a note on the `L183` caution for the latter.
