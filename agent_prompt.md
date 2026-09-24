@@ -61,22 +61,23 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~2-4 hrs, well-scoped, recommend starting here)** `L182`: root-cause
-   `pipeline.monolithic.push_constant.graphics_pipeline.range_size_max`/`range_size_max_command2`
-   -- both fail at pipeline-creation with `error: OpTypeArray count <id> N must
-   come from a constant, specialization constant, or supported specialization
-   constant operation`. Not yet investigated past this signature. Needs a repro
-   isolating which stage of FeMe's SPIR-V ingestion emits/forwards this
-   array-count operand -- likely a spec-constant-sized array FeMe's
-   SPIR-V-to-LLVM conversion doesn't yet fold or support in `OpTypeArray`
-   position. Confirmed unrelated to `L131`'s own fix (different failure
-   signature, no dynamic index involved).
-2. **(optional, small, low priority)** The
+1. **(optional, small, low priority, floated by 2 sessions now)** The
    `checkSupportedRaisedOps`/`UnsupportedOps.cpp` diagnostic gap (no logic
-   inspecting `GlobalVariable`s at all) is still open -- deliberately left
-   unfixed this session since the real CTS shapes are now covered by `L131`'s
-   own fix, shrinking its practical impact to zero currently-known cases. Worth
-   a look only if a future dynamic-push-constant shape reappears as an opaque
-   JIT crash instead of a clean rejection.
+   inspecting `GlobalVariable`s at all, so an unsupported push-constant shape
+   still surfaces as an opaque JIT crash rather than a clean rejection) remains
+   open. Its practical impact is now essentially zero (both known CTS gaps that
+   would have hit it -- `L131`'s dynamic-index shapes and this session's
+   spec-constant-array shape -- are fixed at their own root causes instead), so
+   this is genuinely low-value busywork unless a *new*, not-yet-seen
+   push-constant shape surfaces the same way. Don't pick this up speculatively;
+   wait for a concrete new case.
+2. **Scan `Roadmap.md` for the next open, well-scoped item.** With `L131`/`L182`
+   both closed this pair of sessions, there's no obviously-queued "recommended
+   starting here" item left from recent history -- a future session should
+   re-scan not-yet-struck rows (the last full-scan candidates from a few
+   sessions back, `L90`-`L95`, `L98`/`L98(a)`/`L98(b)`,
+   `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L130`, `L147`, plus
+   assorted `R`/`V`/`W`-prefixed rows, were never individually vetted -- worth
+   checking those first before a fresh full-roadmap read).
 3. **(~5 min)** No scratch left in `/tmp` from this session -- already cleaned
    up above.
