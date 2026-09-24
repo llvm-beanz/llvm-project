@@ -877,6 +877,76 @@ public:
   }
 };
 
+/// Converts `spirv.UMulExtended`/`spirv.SMulExtended`, which multiply two
+/// operands and produce a two-member `{low-order bits, high-order bits}`
+/// struct (both members the same width as the operands), into a
+/// widen-multiply-then-split sequence: both operands are extended (zero- or
+/// sign-extended, matching the op's own signedness) to double the operand's
+/// own bit width, multiplied at that width, then the low word is a plain
+/// truncation of the product and the high word is a truncation of the
+/// product logically shifted right by the operand's own bit width. Unlike
+/// `spirv.IAddCarry`/`ISubBorrow` (`ArithmeticWithOverflowPattern` above),
+/// LLVM has no single "wide multiply" intrinsic that directly yields both
+/// halves -- `llvm.{u,s}mul.with.overflow` only ever reports a 1-bit
+/// overflow flag, not the product's real high bits -- so this is computed
+/// directly via a widened multiply instead.
+template <typename SPIRVOp, bool IsSigned>
+class MulExtendedPattern : public SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(SPIRVOp op, typename SPIRVOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type dstType = this->getTypeConverter()->convertType(op.getType());
+    if (!dstType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    Location loc = op.getLoc();
+    Type operandType = adaptor.getOperand1().getType();
+    unsigned width = getLLVMTypeBitWidth(operandType);
+    Type wideElementType = rewriter.getIntegerType(width * 2);
+    auto vecType = dyn_cast<VectorType>(operandType);
+    Type wideType =
+        vecType ? VectorType::get(vecType.getShape(), wideElementType)
+                : wideElementType;
+
+    auto extend = [&](Value v) -> Value {
+      if (IsSigned)
+        return LLVM::SExtOp::create(rewriter, loc, wideType, v);
+      return LLVM::ZExtOp::create(rewriter, loc, wideType, v);
+    };
+    Value lhs = extend(adaptor.getOperand1());
+    Value rhs = extend(adaptor.getOperand2());
+    Value wideProduct = LLVM::MulOp::create(rewriter, loc, wideType, lhs, rhs);
+
+    Value lowBits =
+        LLVM::TruncOp::create(rewriter, loc, operandType, wideProduct);
+
+    Value shiftAmountScalar = LLVM::ConstantOp::create(
+        rewriter, loc, wideElementType,
+        rewriter.getIntegerAttr(wideElementType, width));
+    Value shiftAmount =
+        vecType ? broadcast(loc, shiftAmountScalar, vecType.getNumElements(),
+                            *this->getTypeConverter(), rewriter)
+                : shiftAmountScalar;
+    Value highBitsWide = LLVM::LShrOp::create(rewriter, loc, wideType,
+                                              wideProduct, shiftAmount);
+    Value highBits =
+        LLVM::TruncOp::create(rewriter, loc, operandType, highBitsWide);
+
+    Value result = LLVM::PoisonOp::create(rewriter, loc, dstType);
+    result = LLVM::InsertValueOp::create(rewriter, loc, result, lowBits,
+                                         ArrayRef<int64_t>{0});
+    result = LLVM::InsertValueOp::create(rewriter, loc, result, highBits,
+                                         ArrayRef<int64_t>{1});
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+using UMulExtendedPattern = MulExtendedPattern<spirv::UMulExtendedOp, false>;
+using SMulExtendedPattern = MulExtendedPattern<spirv::SMulExtendedOp, true>;
+
 /// Converts the GLSL.std.450 `ModfStruct` instruction (`spirv.GL.ModfStruct`),
 /// which splits its operand into an integer part and a fractional part, both
 /// of the same sign as the operand, into the matching two-member struct.
@@ -2531,6 +2601,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
                                     LLVM::UAddWithOverflowOp>,
       ArithmeticWithOverflowPattern<spirv::ISubBorrowOp,
                                     LLVM::USubWithOverflowOp>,
+      UMulExtendedPattern, SMulExtendedPattern,
 
       // Bitwise ops
       BitFieldInsertPattern, BitFieldUExtractPattern, BitFieldSExtractPattern,
