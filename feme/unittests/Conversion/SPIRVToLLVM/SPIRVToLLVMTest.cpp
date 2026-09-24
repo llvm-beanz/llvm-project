@@ -1360,6 +1360,47 @@ TEST(SPIRVToLLVMTest, ShuffleDownLegalizesToReadLane) {
   EXPECT_NE(Result.find("llvm.add"), std::string::npos) << Result;
 }
 
+// (Roadmap L116(d)) A `spirv.Constant` whose type contains a struct
+// constituent anywhere (directly, or nested inside an array) has no legal
+// LLVM `ElementsAttr` encoding -- `ArrayConstantPattern` explicitly rejects
+// it -- so it must instead be decomposed one aggregate level at a time into
+// simpler per-member `spirv.Constant`s feeding a `spirv.CompositeConstruct`,
+// which either convert directly or get re-decomposed by this same pattern.
+TEST(SPIRVToLLVMTest, StructConstantDecomposesIntoCompositeConstruct) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], "
+      "[]> { spirv.func @entry() -> () \"None\" { "
+      "%r = spirv.Constant [1 : si32, 2 : si32] : "
+      "!spirv.struct<(si32, si32)> "
+      "spirv.Return } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(1 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(2 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.insertvalue"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.Constant"), std::string::npos) << Result;
+}
+
+// Same gap, but for an array whose *element* type is a struct: the
+// `spirv.Constant`'s outer type is an `ArrayType`, so `StructConstantPattern`
+// must recurse per-element (via `containsStructType` walking through the
+// array layer) rather than only handling a top-level `StructType` directly.
+TEST(SPIRVToLLVMTest, ArrayOfStructConstantDecomposesRecursively) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], "
+      "[]> { spirv.func @entry() -> () \"None\" { "
+      "%r = spirv.Constant [[1 : si32], [2 : si32]] : "
+      "!spirv.array<2 x !spirv.struct<(si32)>> "
+      "spirv.Return } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(1 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(2 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_EQ(Result.find("spirv.Constant"), std::string::npos) << Result;
+}
+
 TEST(SPIRVToLLVMTest, AtanhLegalizesToLogExpansion) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "

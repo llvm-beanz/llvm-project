@@ -65,3 +65,35 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
   }
 }
+
+// -----
+
+// (Roadmap L116(d)) A `spirv.Constant` of an array-of-struct type -- e.g.
+// the shape an HLSL struct array compiles down to -- has no legal
+// `ElementsAttr` encoding at all (LLVM's own element-count computation
+// treats a `!llvm.struct` as a single opaque leaf, see
+// `LLVM::ConstantOp::verify`), so `ArrayConstantPattern` above always
+// rejects it. `StructConstantPattern` (SPIRVToLLVMPatterns.cpp) instead
+// decomposes it one aggregate level at a time -- an array-of-struct into
+// one new, simpler `spirv.Constant` per element feeding a
+// `spirv.CompositeConstruct`, cascading recursively for any further struct
+// nesting -- into a tree of scalar/array constants and `insertvalue`s,
+// with no `spirv.Constant`/`spirv.CompositeConstruct` left unconverted.
+
+// CHECK-LABEL: llvm.func @array_of_struct_of_array
+// CHECK-DAG: llvm.mlir.constant(0.000000e+00 : f32) : f32
+// CHECK-DAG: llvm.mlir.constant(dense<[1.000000e+00, 2.000000e+00]> : tensor<2xf32>) : !llvm.array<2 x f32>
+// CHECK-DAG: llvm.mlir.constant(3.000000e+00 : f32) : f32
+// CHECK-DAG: llvm.mlir.constant(dense<[4.000000e+00, 5.000000e+00]> : tensor<2xf32>) : !llvm.array<2 x f32>
+// CHECK-COUNT-4: llvm.insertvalue
+// CHECK-NOT: spirv.Constant
+// CHECK-NOT: spirv.CompositeConstruct
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @array_of_struct_of_array() -> !spirv.array<2 x !spirv.struct<(f32, !spirv.array<2 x f32>)>> "None" {
+    %0 = spirv.Constant [
+      [0.0 : f32, dense<[1.0, 2.0]> : tensor<2xf32>],
+      [3.0 : f32, dense<[4.0, 5.0]> : tensor<2xf32>]
+    ] : !spirv.array<2 x !spirv.struct<(f32, !spirv.array<2 x f32>)>>
+    spirv.ReturnValue %0 : !spirv.array<2 x !spirv.struct<(f32, !spirv.array<2 x f32>)>>
+  }
+}
