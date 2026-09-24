@@ -506,6 +506,42 @@ void applyDescriptorWrite(DescriptorSet &Set,
   }
 }
 
+/// (L154) A cursor walking one side (src or dst) of a `VkCopyDescriptorSet`
+/// copy. Per spec, if `descriptorCount` is greater than the number of
+/// elements (or, for an inline uniform block, bytes) remaining in the
+/// binding the copy starts at, the copy continues into the next
+/// consecutively-numbered binding, and so on -- the same rule a
+/// `VkWriteDescriptorSet` whose own `descriptorCount` overruns one binding
+/// follows. `Binding`/`Element` track the binding number and index/byte
+/// offset within it the copy is currently reading or writing.
+struct BindingCursor {
+  uint32_t Binding;
+  uint32_t Element;
+
+  /// Normalizes this cursor so `Element` is in-bounds for `Binding`,
+  /// spanning forward into later binding numbers (resetting `Element` to
+  /// count from each new binding's own start) as needed. \p Size returns
+  /// a given binding's declared array size (element count, or byte count
+  /// for an inline uniform block) -- 0 for a binding this set's layout
+  /// does not declare, which this cursor treats as nothing left to span
+  /// into. Returns false if the walk runs off the end of every
+  /// consecutively-declared binding before `Element` lands in bounds (an
+  /// undeclared/empty binding, or an already-out-of-bounds starting
+  /// element) -- the caller should stop its own copy loop there, exactly
+  /// like the single-binding bounds check this generalizes.
+  bool normalize(llvm::function_ref<size_t(uint32_t)> Size) {
+    for (;;) {
+      size_t N = Size(Binding);
+      if (Element < N)
+        return true;
+      if (N == 0)
+        return false;
+      Element -= static_cast<uint32_t>(N);
+      ++Binding;
+    }
+  }
+};
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
@@ -522,49 +558,87 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     const VkCopyDescriptorSet &Copy = pDescriptorCopies[I];
     auto *Src = fromHandle<DescriptorSet>(Copy.srcSet);
     auto *Dst = fromHandle<DescriptorSet>(Copy.dstSet);
-    llvm::ArrayRef<DescriptorBufferBinding> SrcArray =
-        Src->bindingArray(Copy.srcBinding);
+    // (L154) Both cursors may span into consecutively-numbered bindings as
+    // `Copy.descriptorCount` elements are consumed -- see `BindingCursor`'s
+    // own comment. `Src`/`Dst` here refer to the same-named `DescriptorSet`s
+    // captured above, not the `Src`/`Dst` sets of any other loop.
+    BindingCursor SrcCursor{Copy.srcBinding, Copy.srcArrayElement};
+    BindingCursor DstCursor{Copy.dstBinding, Copy.dstArrayElement};
     for (uint32_t J = 0; J != Copy.descriptorCount; ++J) {
-      uint32_t SrcElement = Copy.srcArrayElement + J;
-      if (SrcElement >= SrcArray.size())
+      if (!SrcCursor.normalize(
+              [&](uint32_t B) { return Src->bindingArray(B).size(); }))
         break;
-      const DescriptorBufferBinding &B = SrcArray[SrcElement];
+      if (!DstCursor.normalize(
+              [&](uint32_t B) { return Dst->bindingArray(B).size(); }))
+        break;
+      const DescriptorBufferBinding &B =
+          Src->bindingArray(SrcCursor.Binding)[SrcCursor.Element];
       if (B.View)
-        Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.View);
+        Dst->write(DstCursor.Binding, DstCursor.Element, B.View);
       else
-        Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.Buf, B.Offset,
+        Dst->write(DstCursor.Binding, DstCursor.Element, B.Buf, B.Offset,
                    B.Range);
+      ++SrcCursor.Element;
+      ++DstCursor.Element;
     }
 
     // (V5) A binding this set's layout declared as an image/sampler type
     // lives in `ImageBindings` instead (see `DescriptorSet`'s constructor);
     // `bindingArray` above returns empty for one, so it needs its own copy
-    // loop rather than falling out of the buffer one above.
-    llvm::ArrayRef<DescriptorImageBinding> SrcImageArray =
-        Src->imageBindingArray(Copy.srcBinding);
+    // loop rather than falling out of the buffer one above. (L154) Spans
+    // consecutive bindings exactly like the buffer loop above.
+    BindingCursor SrcImageCursor{Copy.srcBinding, Copy.srcArrayElement};
+    BindingCursor DstImageCursor{Copy.dstBinding, Copy.dstArrayElement};
     for (uint32_t J = 0; J != Copy.descriptorCount; ++J) {
-      uint32_t SrcElement = Copy.srcArrayElement + J;
-      if (SrcElement >= SrcImageArray.size())
+      if (!SrcImageCursor.normalize(
+              [&](uint32_t B) { return Src->imageBindingArray(B).size(); }))
         break;
-      const DescriptorImageBinding &B = SrcImageArray[SrcElement];
-      Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.View, B.Samp,
+      if (!DstImageCursor.normalize(
+              [&](uint32_t B) { return Dst->imageBindingArray(B).size(); }))
+        break;
+      const DescriptorImageBinding &B = Src->imageBindingArray(
+          SrcImageCursor.Binding)[SrcImageCursor.Element];
+      Dst->write(DstImageCursor.Binding, DstImageCursor.Element, B.View, B.Samp,
                  B.Layout);
+      ++SrcImageCursor.Element;
+      ++DstImageCursor.Element;
     }
 
     // (roadmap E14) An inline uniform block binding lives in its own byte
     // blob (see `DescriptorSet`'s constructor), and per spec `descriptorCount`/
     // `srcArrayElement`/`dstArrayElement` here are all byte counts/offsets
-    // rather than array element counts/indices -- a single ranged copy,
-    // not a per-element loop like the two above.
-    llvm::ArrayRef<uint8_t> SrcInlineData =
-        Src->inlineUniformBlockData(Copy.srcBinding);
-    if (Copy.srcArrayElement < SrcInlineData.size()) {
-      uint32_t Available =
-          static_cast<uint32_t>(SrcInlineData.size() - Copy.srcArrayElement);
-      uint32_t CopyCount = std::min(Copy.descriptorCount, Available);
-      Dst->writeInlineUniformBlock(Copy.dstBinding, Copy.dstArrayElement,
-                                   CopyCount,
-                                   SrcInlineData.data() + Copy.srcArrayElement);
+    // rather than array element counts/indices. (L154) Spans consecutive
+    // bindings like the two loops above, but copies one contiguous run of
+    // bytes at a time (bounded by whichever of the current src/dst
+    // binding's remaining bytes or the overall remaining count is
+    // smallest) rather than one byte at a time, since an inline-uniform-
+    // block copy is typically far larger than a single byte.
+    BindingCursor SrcInlineCursor{Copy.srcBinding, Copy.srcArrayElement};
+    BindingCursor DstInlineCursor{Copy.dstBinding, Copy.dstArrayElement};
+    uint32_t InlineRemaining = Copy.descriptorCount;
+    while (InlineRemaining != 0) {
+      if (!SrcInlineCursor.normalize([&](uint32_t B) {
+            return Src->inlineUniformBlockData(B).size();
+          }))
+        break;
+      if (!DstInlineCursor.normalize([&](uint32_t B) {
+            return Dst->inlineUniformBlockData(B).size();
+          }))
+        break;
+      llvm::ArrayRef<uint8_t> SrcBlob =
+          Src->inlineUniformBlockData(SrcInlineCursor.Binding);
+      uint32_t DstBlobSize = static_cast<uint32_t>(
+          Dst->inlineUniformBlockData(DstInlineCursor.Binding).size());
+      uint32_t SrcAvail =
+          static_cast<uint32_t>(SrcBlob.size()) - SrcInlineCursor.Element;
+      uint32_t DstAvail = DstBlobSize - DstInlineCursor.Element;
+      uint32_t Chunk = std::min({InlineRemaining, SrcAvail, DstAvail});
+      Dst->writeInlineUniformBlock(DstInlineCursor.Binding,
+                                   DstInlineCursor.Element, Chunk,
+                                   SrcBlob.data() + SrcInlineCursor.Element);
+      SrcInlineCursor.Element += Chunk;
+      DstInlineCursor.Element += Chunk;
+      InlineRemaining -= Chunk;
     }
   }
 }

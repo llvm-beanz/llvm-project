@@ -945,6 +945,242 @@ TEST_F(DescriptorTest, InlineUniformBlockCopyBetweenSets) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// (roadmap L154) A `VkCopyDescriptorSet` whose `descriptorCount` exceeds
+/// one binding's own declared array size must, per spec, continue into the
+/// next consecutively-numbered binding(s) -- exactly the shape
+/// `dEQP-VK.binding_model.descriptor_copy.misc.copy_immutable_sampler_*`
+/// exercises: several single-element (`descriptorCount == 1`) sampler
+/// bindings copied by one `VkCopyDescriptorSet` whose own `descriptorCount`
+/// spans all of them. Reproduces that shape directly with 3 single-element
+/// `STORAGE_BUFFER` bindings (0, 1, 2) instead, confirming the underlying
+/// bug (found while root-causing that CTS failure) is not specific to
+/// samplers/images: the copy loop only ever consulted `Copy.srcBinding`'s
+/// own array and silently dropped anything past its first element.
+TEST_F(DescriptorTest, CopyDescriptorSetSpansConsecutiveBufferBindings) {
+  VkDescriptorSetLayoutBinding Bindings[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    Bindings[I].binding = I;
+    Bindings[I].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[I].descriptorCount = 1;
+  }
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 3;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 2;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayout Layouts[2] = {Layout, Layout};
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 2;
+  AllocInfo.pSetLayouts = Layouts;
+  VkDescriptorSet Sets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, Sets), VK_SUCCESS);
+
+  VkBuffer Bufs[3] = {createStorageBuffer(64), createStorageBuffer(64),
+                      createStorageBuffer(64)};
+  VkDescriptorBufferInfo BufInfos[3]{};
+  VkWriteDescriptorSet Writes[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    BufInfos[I] = {Bufs[I], /*offset=*/I * 4u, /*range=*/16};
+    Writes[I].dstSet = Sets[0];
+    Writes[I].dstBinding = I;
+    Writes[I].descriptorCount = 1;
+    Writes[I].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Writes[I].pBufferInfo = &BufInfos[I];
+  }
+  vkUpdateDescriptorSets(Device, 3, Writes, 0, nullptr);
+
+  // One copy, spanning all 3 single-element source (and destination)
+  // bindings -- the exact shape the CTS failure exercises.
+  VkCopyDescriptorSet Copy{};
+  Copy.srcSet = Sets[0];
+  Copy.srcBinding = 0;
+  Copy.dstSet = Sets[1];
+  Copy.dstBinding = 0;
+  Copy.descriptorCount = 3;
+  vkUpdateDescriptorSets(Device, 0, nullptr, 1, &Copy);
+
+  auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
+  for (uint32_t I = 0; I != 3; ++I) {
+    llvm::ArrayRef<DescriptorBufferBinding> Array = Dst->bindingArray(I);
+    ASSERT_EQ(Array.size(), 1u);
+    EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Bufs[I]));
+    EXPECT_EQ(Array[0].Offset, I * 4u);
+    EXPECT_EQ(Array[0].Range, 16u);
+  }
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 2, Sets), VK_SUCCESS);
+  for (VkBuffer Buf : Bufs)
+    vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// (roadmap L154) Same bug, same fix, exercised through the image-binding
+/// copy loop instead of the buffer one -- the actual descriptor type
+/// (`COMBINED_IMAGE_SAMPLER`) the originally-failing
+/// `copy_immutable_sampler_*` CTS cases use.
+TEST_F(DescriptorTest, CopyDescriptorSetSpansConsecutiveImageBindings) {
+  VkDescriptorSetLayoutBinding Bindings[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    Bindings[I].binding = I;
+    Bindings[I].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    Bindings[I].descriptorCount = 1;
+  }
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 3;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 6};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 2;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayout Layouts[2] = {Layout, Layout};
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 2;
+  AllocInfo.pSetLayouts = Layouts;
+  VkDescriptorSet Sets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, Sets), VK_SUCCESS);
+
+  VkSamplerCreateInfo SamplerInfo{};
+  VkSampler Samp = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp), VK_SUCCESS);
+
+  VkDescriptorImageInfo ImageInfos[3]{};
+  VkWriteDescriptorSet Writes[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    ImageInfos[I].sampler = Samp;
+    ImageInfos[I].imageView =
+        reinterpret_cast<VkImageView>(static_cast<uintptr_t>(0x1000 + I));
+    ImageInfos[I].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    Writes[I].dstSet = Sets[0];
+    Writes[I].dstBinding = I;
+    Writes[I].descriptorCount = 1;
+    Writes[I].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    Writes[I].pImageInfo = &ImageInfos[I];
+  }
+  vkUpdateDescriptorSets(Device, 3, Writes, 0, nullptr);
+
+  VkCopyDescriptorSet Copy{};
+  Copy.srcSet = Sets[0];
+  Copy.srcBinding = 0;
+  Copy.dstSet = Sets[1];
+  Copy.dstBinding = 0;
+  Copy.descriptorCount = 3;
+  vkUpdateDescriptorSets(Device, 0, nullptr, 1, &Copy);
+
+  auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
+  for (uint32_t I = 0; I != 3; ++I) {
+    llvm::ArrayRef<DescriptorImageBinding> Array = Dst->imageBindingArray(I);
+    ASSERT_EQ(Array.size(), 1u);
+    EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfos[I].imageView));
+    EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(Samp));
+    EXPECT_EQ(Array[0].Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  }
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 2, Sets), VK_SUCCESS);
+  vkDestroySampler(Device, Samp, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// (roadmap L154) Same bug/fix as the two tests above, exercised through
+/// the inline-uniform-block copy loop's own byte-range spanning instead of
+/// an element-array one -- no current CTS case exercises this shape, but
+/// the fix generalizes uniformly across all three copy loops, so this
+/// confirms it actually does.
+TEST_F(DescriptorTest,
+       CopyDescriptorSetSpansConsecutiveInlineUniformBlockBindings) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  for (uint32_t I = 0; I != 2; ++I) {
+    Bindings[I].binding = I;
+    Bindings[I].descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+    Bindings[I].descriptorCount = 4;
+  }
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 2;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 16};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 2;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayout Layouts[2] = {Layout, Layout};
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 2;
+  AllocInfo.pSetLayouts = Layouts;
+  VkDescriptorSet Sets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, Sets), VK_SUCCESS);
+
+  // Binding 0 gets bytes 0-3, binding 1 gets bytes 4-7 -- one 8-byte
+  // payload, split across the two 4-byte blocks.
+  uint8_t Payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  for (uint32_t I = 0; I != 2; ++I) {
+    VkWriteDescriptorSetInlineUniformBlock InlineInfo{};
+    InlineInfo.sType =
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK;
+    InlineInfo.dataSize = 4;
+    InlineInfo.pData = Payload + I * 4;
+    VkWriteDescriptorSet Write{};
+    Write.pNext = &InlineInfo;
+    Write.dstSet = Sets[0];
+    Write.dstBinding = I;
+    Write.descriptorCount = 4;
+    Write.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+    vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+  }
+
+  // One copy, 8 bytes starting at binding 0 byte 0 -- spans past binding
+  // 0's own 4-byte block into binding 1's.
+  VkCopyDescriptorSet Copy{};
+  Copy.srcSet = Sets[0];
+  Copy.srcBinding = 0;
+  Copy.dstSet = Sets[1];
+  Copy.dstBinding = 0;
+  Copy.descriptorCount = 8;
+  vkUpdateDescriptorSets(Device, 0, nullptr, 1, &Copy);
+
+  auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
+  for (uint32_t I = 0; I != 2; ++I) {
+    llvm::ArrayRef<uint8_t> Data = Dst->inlineUniformBlockData(I);
+    ASSERT_EQ(Data.size(), 4u);
+    EXPECT_EQ(std::memcmp(Data.data(), Payload + I * 4, 4), 0);
+  }
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 2, Sets), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
 /// (roadmap L12c) `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` on
 /// the layout's own highest-numbered binding, with no chained
 /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` at allocation time:
