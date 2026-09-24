@@ -1110,6 +1110,68 @@ public:
   }
 };
 
+/// Shared implementation for `GroupNonUniformShuffleUp`/`DownOp` (roadmap
+/// L90): both compute a target invocation id via the SPIR-V spec's own
+/// "current invocation's id within the group -/+ Delta" arithmetic, then
+/// `llvm.spv.wave.readlane` shuffle to it -- the identical "compute an id,
+/// then shuffle" shape `ShuffleXorConversionPattern` above established for
+/// XOR, just with subtraction/addition instead. Unlike plain `Shuffle`/
+/// `ShuffleXor` (gated by the `GroupNonUniformShuffle` capability, already
+/// closed), these two share their own, separate
+/// `GroupNonUniformShuffleRelative` capability -- closing both is what
+/// actually completes `VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT` (roadmap
+/// L90). \p IsUp selects subtraction (`ShuffleUp`) vs. addition
+/// (`ShuffleDown`); an out-of-range target id (`Delta` exceeding the
+/// current invocation's own id for `ShuffleUp`, or exceeding the group size
+/// for `ShuffleDown`) is undefined behavior per the SPIR-V spec itself (see
+/// each op's own description), so this pattern applies the same raw
+/// arithmetic unconditionally, mirroring how `ShuffleXorConversionPattern`
+/// applies its own XOR unconditionally rather than range-checking it. Only
+/// `Subgroup` execution scope is implemented, mirroring every other
+/// `GroupNonUniform*` conversion pattern above.
+template <typename SPIRVOp, bool IsUp>
+class ShuffleRelativeConversionPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope shuffle-up/down is not supported");
+
+    mlir::Type I32 = Rewriter.getI32Type();
+    if (Adaptor.getDelta().getType() != I32)
+      return Rewriter.notifyMatchFailure(
+          Op, "delta must be 32-bit (as every known producer of this op "
+              "emits)");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value LocalId = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.subgroup.local.invocation.id", I32, {});
+    mlir::Value TargetId =
+        IsUp ? mlir::Value(mlir::LLVM::SubOp::create(Rewriter, Loc, LocalId,
+                                                      Adaptor.getDelta()))
+             : mlir::Value(mlir::LLVM::AddOp::create(Rewriter, Loc, LocalId,
+                                                      Adaptor.getDelta()));
+
+    mlir::Type ResultType = this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.readlane",
+                                ResultType, {Adaptor.getValue(), TargetId}));
+    return mlir::success();
+  }
+};
+
+using ShuffleUpConversionPattern = ShuffleRelativeConversionPattern<
+    mlir::spirv::GroupNonUniformShuffleUpOp, /*IsUp=*/true>;
+using ShuffleDownConversionPattern = ShuffleRelativeConversionPattern<
+    mlir::spirv::GroupNonUniformShuffleDownOp, /*IsUp=*/false>;
+
 /// Converts `spirv.GroupNonUniformQuadSwap` (roadmap H124l, `WaveOps/
 /// QuadReadAcross{X,Y,Diagonal}.32.test`/`.convergence.test`) into the same
 /// "compute a target id, then `llvm.spv.wave.readlane` shuffle to it" shape
@@ -14432,6 +14494,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       VoteConversionPattern<mlir::spirv::GroupNonUniformAnyOp>,
       BroadcastConversionPattern, BroadcastFirstConversionPattern,
       ShuffleConversionPattern, ShuffleXorConversionPattern,
+      ShuffleUpConversionPattern, ShuffleDownConversionPattern,
       QuadSwapConversionPattern,
       BallotConversionPattern, InverseBallotConversionPattern,
       BallotBitExtractConversionPattern, BallotBitCountConversionPattern,

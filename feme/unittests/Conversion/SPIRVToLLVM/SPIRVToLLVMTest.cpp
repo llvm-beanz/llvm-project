@@ -1321,6 +1321,45 @@ TEST(SPIRVToLLVMTest, AcoshLegalizesToLogSqrtExpansion) {
   EXPECT_EQ(Result.find("spirv.GL.Acosh"), std::string::npos) << Result;
 }
 
+// (Roadmap L90) `spirv.GroupNonUniformShuffleUp`/`Down` (HLSL's
+// `WaveReadLaneAt(WaveGetLaneIndex() -/+ delta, value)` idiom, gated by the
+// `GroupNonUniformShuffleRelative` capability -- distinct from plain
+// `Shuffle`/`ShuffleXor`'s own `GroupNonUniformShuffle`) convert directly to
+// `llvm.spv.wave.readlane`, sharing `ShuffleXorConversionPattern`'s own
+// "compute a target id, then shuffle" shape: no conversion pattern existed
+// for either op at all before this fix.
+TEST(SPIRVToLLVMTest, ShuffleUpLegalizesToReadLane) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, ["
+      "GroupNonUniform, GroupNonUniformShuffleRelative], []> { spirv.func "
+      "@entry(%v : f32, %delta : i32) -> f32 \"None\" { %r = "
+      "spirv.GroupNonUniformShuffleUp <Subgroup> %v, %delta : f32, i32 "
+      "spirv.ReturnValue %r : f32 } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.spv.wave.readlane"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.spv.subgroup.local.invocation.id"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.sub"), std::string::npos) << Result;
+}
+
+TEST(SPIRVToLLVMTest, ShuffleDownLegalizesToReadLane) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, ["
+      "GroupNonUniform, GroupNonUniformShuffleRelative], []> { spirv.func "
+      "@entry(%v : f32, %delta : i32) -> f32 \"None\" { %r = "
+      "spirv.GroupNonUniformShuffleDown <Subgroup> %v, %delta : f32, i32 "
+      "spirv.ReturnValue %r : f32 } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.spv.wave.readlane"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.spv.subgroup.local.invocation.id"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.add"), std::string::npos) << Result;
+}
+
 TEST(SPIRVToLLVMTest, AtanhLegalizesToLogExpansion) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
