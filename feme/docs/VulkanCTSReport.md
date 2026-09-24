@@ -11974,3 +11974,126 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
 needed -- this is a correctness fix to existing, already-advertised
 `vkUpdateDescriptorSets`/`VkCopyDescriptorSet` behavior, not a change
 to what capabilities are advertised.
+
+## 2026-09-24: L131 fixed -- graphics push-constant dynamic-index accesses now lowered correctly (57/65 in `push_constant.*`, up from 53/65); `range_size_max`/`range_size_max_command2` broken out as new `L182`
+
+**Root cause**: `L131`'s row, as inherited from a prior session, mischaracterized
+its 6 CTS failures as "ordinary mismatches." They were actually all
+`VK_ERROR_INITIALIZATION_FAILED` **pipeline-creation-time** failures
+(`vkPipelineConstructionUtil.cpp:176`) on exactly 4 unique test names
+(`graphics_pipeline.dynamic_index_vert`/`dynamic_index_frag`, each with
+a `_command2` variant). `FEME_VULKAN_LOG_CREATION_ERRORS=1` traced this
+to a JIT-link-time `Symbols not found: [ spirv_var_NN ]` error.
+Capturing the pre-`Normalize` IR (via a new, retained
+`FEME_DUMP_IR_PRENORM` debug dump point in `Pipeline.cpp`) confirmed
+the actual shape: the shader indexes into its push-constant struct's
+`vecType`/`matType`/`arrType` members using a runtime-computed
+(non-compile-time-constant) index, e.g.
+`getelementptr [4 x i8], ptr addrspace(13) getelementptr inbounds nuw
+(i8, ptr addrspace(13) @spirv_var_55, i64 16), i64 %24`.
+`SPIRVPushConstantLoweringPass` deliberately (per its own header
+comment) leaves a *whole function* entirely un-lowered whenever any of
+its push-constant accesses is not a compile-time-constant chain --
+correct as a conservative bailout, but the header's own stated
+expectation that `checkSupportedRaisedOps` (`UnsupportedOps.cpp`)
+would then cleanly reject the left-behind, still-external
+`@spirv_var_55` global at pipeline-creation time was never actually
+implemented (that pass only ever inspects `Function` declarations, not
+`GlobalVariable`s), so the failure surfaced as an opaque JIT crash
+rather than a diagnosable, clean rejection. A second, independent gap
+compounded this: the pass's own `ConstantExpr`-sub-GEP handling assumed
+every user of such a sub-GEP was itself a load, silently *dropping*
+(not rejecting) any further dynamic GEP built on it -- meaning only the
+struct's `index` field (accessed directly off the base global, offset
+0) ever actually reached the "reject the whole function" path; the
+other three fields' dynamic reads (`vecType`/`matType`/`arrType`, at
+nonzero offsets via a `ConstantExpr` sub-GEP base) were invisibly
+skipped rather than counted as unsupported.
+
+**Fix**: implemented genuine dynamic-index support, since the CTS
+cases require the access to actually work, not merely fail cleanly.
+Generalized `matchSPIRVPushConstantAccess`'s per-GEP decomposition from
+`GEPOperator::accumulateConstantOffset` (constant-only) to
+`GEPOperator::collectOffset`, which separates a single GEP's own
+indices into a compile-time-constant byte offset plus, if present, at
+most one runtime-computed term (a `Value*` and its byte stride) --
+still rejecting (leaving the whole function alone, as before) any
+shape with a *second*, independent dynamic term. Replaced the old ad
+hoc `ConstantExpr`/`Instruction` branching with a unified recursive
+`visitPushConstantUsers` matcher built on this API, which also fixes
+the silent-skip bug above (a further dynamic GEP off a `ConstantExpr`
+sub-GEP base is now correctly matched, not dropped).
+`lowerSPIRVPushConstantAccess` now emits real IR arithmetic
+(`sext`/`mul`/`add`, named `push_const.dyn_offset`/`byte_offset`/
+`end_offset`) to compute each load's runtime byte offset when a
+dynamic term is present, and reports a dynamically-indexed load's
+`MaxOffset` contribution as the end byte of whichever declared
+push-constant-struct *member* its own base offset falls within (a new
+`dynamicAccessMemberEndByte` helper, using
+`StructLayout::getElementContainingOffset`) -- deliberately not the
+whole block's declared size, per the header's own pre-existing
+"don't over-report `MaxOffset`" caution (padding would otherwise
+inflate the required `VkPushConstantRange`). A new
+`eraseDeadPushConstantGEPs` helper does recursive post-order cleanup of
+now-dead GEP chains, needed since dynamic GEPs can now nest more than
+one level deep off the global.
+
+Also found and fixed, while implementing this, a latent, more general
+bug exposed only by this fix's own new unit tests (not by the real CTS
+shape, whose entry point takes no parameters): `SPIRVPushConstantLoweringPass::run`
+rebuilds each matched function via `Function::Create` +
+`NewF->splice(...)` (which relocates instructions, preserving their
+identity) followed by a loop replacing every original `Argument` with a
+new one and `F.eraseFromParent()`. `Access.Loads`' own `DynamicIndex`
+field is captured *before* this rebuild; if it happens to be one of
+the function's own `Argument`s (not an instruction), it becomes a
+dangling pointer once the old `Function` is freed, since `Argument`s
+are owned by the `Function` object and are not relocated by `splice`
+the way instructions are. Fixed by remapping `DynamicIndex` alongside
+the pass's existing per-argument `replaceAllUsesWith` loop.
+
+**New/updated tests** (`feme/test/Transforms/CPU/spirv-push-constant-lowering.ll`):
+- `dynamic_index`: changed from asserting the function is left
+  entirely unlowered (the old, incomplete behavior) to asserting the
+  new lowered, dynamic-byte-offset-computing output.
+- `dynamic_index_nonzero_base` (new): a dynamic index through a
+  `ConstantExpr` sub-GEP with a nonzero base offset -- mirrors the real
+  CTS shape exactly, and specifically exercises the silent-skip fix
+  above (previously invisible to the matcher entirely, not merely
+  rejected).
+- `two_dynamic_indices` (new): two independent dynamic terms via
+  chained GEPs -- confirms this shape is still correctly rejected
+  (function left unlowered), i.e. the new support has an intentional
+  boundary.
+
+**Validation**:
+- `feme/test/Transforms/CPU/` lit suite: 238/238 Pass (up from the
+  prior baseline, 3 new/changed cases in this one file).
+- `ninja check-feme`: 3320 discovered, 3317 Passed, 3 pre-existing
+  Unsupported, 0 Failed -- no regressions.
+- CTS re-run of the 4 originally-failing cases
+  (`dynamic_index_vert`/`dynamic_index_frag`, each plain and
+  `_command2`): **4/4 Pass** (were 4/4 `VK_ERROR_INITIALIZATION_FAILED`).
+- Full `dEQP-VK.pipeline.monolithic.push_constant.*` (65 cases):
+  **57 Pass / 2 Fail / 6 NotSupported** (up from 53 Pass / 6 Fail / 6
+  NotSupported -- a clean +4/-4 shift, no collateral regressions among
+  the previously-passing 53). The 2 remaining failures
+  (`range_size_max`/`range_size_max_command2`) are a distinct,
+  pre-existing, unrelated signature (`error: OpTypeArray count <id> N
+  must come from a constant, specialization constant, or supported
+  specialization constant operation` -- a SPIR-V spec-constant
+  array-size validation error, not a dynamic-index or JIT-link issue),
+  broken out as new roadmap row `L182`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- this is a correctness fix to an existing, already-declared
+push-constant-range capability, not a change to what is advertised.
+
+The `checkSupportedRaisedOps`/`UnsupportedOps.cpp` diagnostic gap noted
+above (no logic inspecting `GlobalVariable`s, so any push-constant
+shape that still falls outside the now-larger recognized scope would
+still fail via an opaque JIT crash rather than a clean rejection) was
+deliberately left unfixed this session -- it is smaller in practice now
+(the real CTS shapes are covered) but not eliminated; noted as a
+possible future small follow-up, not scoped as its own roadmap row
+since no known CTS case currently exercises it.
