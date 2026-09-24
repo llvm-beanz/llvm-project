@@ -12097,3 +12097,89 @@ deliberately left unfixed this session -- it is smaller in practice now
 (the real CTS shapes are covered) but not eliminated; noted as a
 possible future small follow-up, not scoped as its own roadmap row
 since no known CTS case currently exercises it.
+
+## 2026-09-24: L182 fixed -- upstream MLIR SPIR-V deserializer OpUDiv/OpSDiv array-length gap (issue outside FeMe); `push_constant.*` group fully closed (59/59, up from 57/2/6)
+
+**Root cause** (an issue outside the FeMe subdirectory, per this
+session's fix in a standalone, self-contained, non-FeMe commit):
+`dEQP-VK.pipeline.monolithic.push_constant.graphics_pipeline.
+range_size_max`/`range_size_max_command2` declare a push-constant
+array sized by `layout (constant_id = 0) const uint
+MaxPushConstantSize = 128; vec4 color[(MaxPushConstantSize + 12) /
+16];`, queried from the real device's `maxPushConstantsSize` at
+runtime via a specialization constant override. glslang compiles this
+array-size expression to an `OpTypeArray` length naming a top-level
+`OpSpecConstantOp %uint UDiv %sum %uint_16`, itself wrapping an inner
+`OpSpecConstantOp %uint IAdd %sc0 %uint_12` (confirmed via a minimal
+glslang-compiled repro and `spirv-dis`, matching the real shader's own
+disassembly exactly). `mlir/lib/Target/SPIRV/Deserialization/
+Deserializer.cpp`'s `resolveConstantArrayLength` already recursively
+folds an `OpTypeArray` length built from `OpCompositeExtract`,
+`OpIMul`, `OpIAdd`, or `OpISub` down to its spec constants' own
+declared default values (added by an earlier session closing `L100`),
+but had no case for `OpUDiv`/`OpSDiv`, so this specific expression fell
+all the way through to the generic "must come from a constant,
+specialization constant, or supported specialization constant
+operation" decline -- even though its own inner `OpIAdd` operand would
+have resolved successfully by itself. This surfaced at FeMe's
+pipeline-creation time as `VK_ERROR_INITIALIZATION_FAILED` with that
+exact diagnostic text, once `feme-translate`'s SPIR-V ingestion
+(built on this MLIR deserializer) tried to import the shader.
+
+**Fix**: added `OpUDiv`/`OpSDiv` cases to
+`resolveConstantArrayLength`'s switch, mirroring the existing
+`OpIMul`/`OpIAdd`/`OpISub` shape exactly (recursively resolve both
+operands, then apply `APInt::udiv`/`sdiv`), declining (returning
+`std::nullopt`) a zero divisor rather than relying on `APInt`'s own
+division-by-zero assertion, matching this function's pre-existing
+"malformed input yields `std::nullopt`, never traps" contract.
+
+**New/updated tests** (`mlir/test/Target/SPIRV/`, spvasm lit tests --
+the established test method for this file, per the pre-existing
+`array-spec-constant-add-length.spvasm` precedent):
+- `array-spec-constant-div-length.spvasm` (new): the real CTS shape --
+  an `OpIAdd`-wrapped-in-`OpUDiv` expression, resolves to the expected
+  folded default-value length.
+- `array-spec-constant-sdiv-length.spvasm` (new): the signed `OpSDiv`
+  variant, confirming the second new switch case (not just `OpUDiv`)
+  is exercised.
+- `array-spec-constant-length-invalid.spvasm` (updated): its negative
+  case previously used `OpUDiv` itself as the "still unsupported"
+  stand-in opcode -- now that `OpUDiv` is resolved, switched to
+  `OpUMod` (a distinct, still genuinely unsupported opcode) so the
+  test continues to exercise the decline path rather than silently
+  becoming a positive case.
+
+**Validation**:
+- New spvasm tests: both pass; the updated invalid-case test still
+  correctly declines (`FileCheck`-confirmed error text) with its new
+  `OpUMod` stand-in.
+- `mlir/test/Target/SPIRV/`: 69/69 Pass. `mlir/test/Dialect/SPIRV/`:
+  122/122 Pass. No regressions to any pre-existing add/sub/mul/
+  composite-extract array-length folding path.
+- `ninja check-feme`: 3317/3320, 3 pre-existing Unsupported, 0 Failed
+  -- unchanged from the pre-fix baseline, confirming this MLIR-layer
+  fix introduces no FeMe-side regression.
+- CTS re-run: both originally-failing cases
+  (`range_size_max`/`range_size_max_command2`) now **Pass**. Full
+  `dEQP-VK.pipeline.monolithic.push_constant.*` (65 cases): **59 Pass
+  / 0 Fail / 6 NotSupported** (up from 57/2/6 after `L131`'s own fix
+  last session) -- the group is now fully closed, 0 failures. A
+  broader `dEQP-VK.pipeline.pipeline_library.spec_constant.*` sweep
+  (1170 cases, exercises the same specialization-constant
+  array-length machinery from a different, independent angle -- e.g.
+  `spec_const_expression`) also shows **0 Fail** (655 Pass, 515
+  NotSupported), confirming no regression to the pre-existing
+  add/sub/mul folding paths this fix's own switch statement sits
+  alongside.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updates
+needed -- this is a correctness fix to existing SPIR-V ingestion of an
+already-supported specialization-constant-sized array shape, not a
+change to what capabilities are advertised.
+
+This fix lives entirely in `mlir/` (upstream MLIR's SPIR-V
+deserializer), not `feme/` -- committed separately, touching only
+`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp` and 3
+`mlir/test/Target/SPIRV/*.spvasm` files, per the standing "issue
+outside FeMe gets its own self-contained, non-FeMe commit" instruction.
