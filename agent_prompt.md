@@ -61,17 +61,31 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(2-4 hrs, one-time setup, deferred across many sessions now)**
-   `offload-test-suite`'s `check-hlsl-feme-vk` has no build directory at
-   `/home/dev/dev/offload-test-suite/build`. Still not started.
-2. **Scan `Roadmap.md` for the next open, well-scoped item.** `L184`/`L185`
-   are both closed now -- no queued item left from recent history. The
-   last full-scan candidates from several sessions back (`L90`-`L95`,
-   `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`, `L98(b)`, plus
-   assorted `R`/`V`/`W`-prefixed rows) are still individually unvetted --
-   a future session should do a fresh full-table pass rather than keep
-   deferring to this same stale list.
-3. **(~5 min)** No `/tmp` scratch left from this session --
-   `/tmp/ctsrun_l185/`, `/tmp/l185_test.ll`, `/tmp/final_check.*` all
-   removed already.
-
+1. **(~1-2 hrs)** `L186`: `spirv.InBoundsAccessChain` of a zero-index
+   `Output`-storage pointer. Likely a simple no-op-passthrough pattern
+   (`spirv.ptr<T, Output> -> spirv.ptr<T, Output>`, same pointer back) --
+   check whether upstream's generic `AccessChainPattern` already handles
+   a zero-index case for other storage classes and just needs `Output`
+   added, before writing a new pattern from scratch.
+2. **(~1-2 hrs)** `L187`: `spirv.UMulExtended` has no pattern anywhere
+   (confirmed via grep, neither upstream nor FeMe). Candidate lowering:
+   `llvm.umul.with.overflow` (or wide-multiply-then-shift) plus a
+   `spirv.CompositeConstruct`-style struct-of-two-scalars assembly (the
+   same shape `L116(d)`'s own `StructConstantPattern` neighbor already
+   handles generically for the result). Check `spirv.SMulExtended` for
+   the identical gap while there.
+3. **(~2-4 hrs)** `L188`: get the real SPIR-V via QPA log +
+   `feme-translate --import-spirv`/`--spirv-to-llvmir` (established
+   `L183`/`L184`/`L185` methodology), diff its pre-SIMDize IR shape
+   against `L116(b)`'s own known divergent-branch cases to confirm or
+   rule out a shared root cause before assuming it's the same fix.
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+5. **Scan `Roadmap.md` fresh** if not picking up `L186`/`L187`/`L188` --
+   the long-stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`,
+   `L126(a)`, `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is
+   still individually unvetted; a future session should do a real
+   full-table pass rather than keep deferring to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l116d/` already removed.
