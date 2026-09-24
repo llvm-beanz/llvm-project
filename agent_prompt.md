@@ -61,31 +61,25 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs)** `L186`: `spirv.InBoundsAccessChain` of a zero-index
-   `Output`-storage pointer. Likely a simple no-op-passthrough pattern
-   (`spirv.ptr<T, Output> -> spirv.ptr<T, Output>`, same pointer back) --
-   check whether upstream's generic `AccessChainPattern` already handles
-   a zero-index case for other storage classes and just needs `Output`
-   added, before writing a new pattern from scratch.
-2. **(~1-2 hrs)** `L187`: `spirv.UMulExtended` has no pattern anywhere
-   (confirmed via grep, neither upstream nor FeMe). Candidate lowering:
-   `llvm.umul.with.overflow` (or wide-multiply-then-shift) plus a
-   `spirv.CompositeConstruct`-style struct-of-two-scalars assembly (the
-   same shape `L116(d)`'s own `StructConstantPattern` neighbor already
-   handles generically for the result). Check `spirv.SMulExtended` for
-   the identical gap while there.
-3. **(~2-4 hrs)** `L188`: get the real SPIR-V via QPA log +
-   `feme-translate --import-spirv`/`--spirv-to-llvmir` (established
-   `L183`/`L184`/`L185` methodology), diff its pre-SIMDize IR shape
-   against `L116(b)`'s own known divergent-branch cases to confirm or
-   rule out a shared root cause before assuming it's the same fix.
-4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+1. **(~3-5 hrs, well-scoped, full implementation plan already in
+   `Roadmap.md`'s `L188` row)** Implement `L188`'s fix: generalize
+   `matchExitCheckWithRelay`'s relay-tolerance from `straightChain` to a
+   uniform-conditional-tolerant BFS walk, *and* fix `ExitCheck::RelayBlock`
+   in both call sites to use the walk's real last-hop predecessor instead
+   of the first hop. Add two new `LinearizeTest.cpp` cases: one mirroring
+   this row's own uniform-nested-loop relay shape, one isolating the
+   pre-existing multi-hop `RelayBlock` correctness gap directly (a
+   synthetic 3+-hop straight chain feeding a multi-predecessor `ExitBlock`
+   phi). Re-verify `stable-binarysearch-tree-false-if-discard-loop` plus a
+   full `graphicsfuzz.*` sweep for regressions.
+2. **(2-4 hrs, one-time setup, deferred many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
    directory at `/home/dev/dev/offload-test-suite/build`.
-5. **Scan `Roadmap.md` fresh** if not picking up `L186`/`L187`/`L188` --
-   the long-stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`,
-   `L126(a)`, `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is
-   still individually unvetted; a future session should do a real
-   full-table pass rather than keep deferring to this same list.
-6. **(~5 min)** No `/tmp` scratch left from this session --
-   `/tmp/ctsrun_l116d/` already removed.
+3. **Scan `Roadmap.md` fresh** if not picking up `L188` -- the long-stale
+   candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted; a future session should do a real full-table pass rather
+   than keep deferring to this same list.
+4. **(~5 min)** No `/tmp` scratch left from this session -- all L188
+   investigation artifacts and the combined CTS sweep output already
+   removed.
