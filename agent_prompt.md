@@ -61,20 +61,28 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~2-4 hrs, well-scoped)** `L184`: root-cause 8 pre-existing,
-   confirmed-real `arithmetic_{2,3,4}.{acosh,asinh,atanh,distance,frexpe,
-   frexps,length,opdot}` pipeline-creation failures, plus the separate
-   pre-existing `opcompositeextract.struct16arr3` crash. None
-   investigated past the failure signature yet -- get each case's real
-   SPIR-V via its QPA log (mind the delimiter caution above) and pipe
-   through `feme-translate` the same way `L183` was diagnosed. Worth
-   checking first whether `frexpe`/`frexps`/`length`/`distance`/`opdot`
-   (several look vector-math-shaped) share one common root cause before
-   assuming 8 independent bugs.
-2. **(~5 min)** No `/tmp` scratch left from this session -- already
-   cleaned up (`ctsrun_l183*`, `frexp_*`, etc. all removed).
-3. Scan `Roadmap.md` for the next open, well-scoped item if not picking
-   up `L184` -- the last full-scan candidates from several sessions back
-   (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`, `L126(a)`, `L147`,
-   `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows) are still
-   individually unvetted.
+1. **(~1 day, well-scoped, next session should start here)** `L185`:
+   `opcompositeinsert.struct16arr3` hits a genuine aggregate-typed `phi`
+   reaching `feme-cpu-simdize`, violating that pass's own documented
+   invariant ("`LinearizePass` always rewrites one into a `select`
+   before this pass ever runs"). Root cause is very likely in
+   `feme/lib/Transforms/CPU/Linearize.cpp`, not `SIMDize.cpp` -- don't
+   hack around it in `SIMDize.cpp`. Get the case's SPIR-V via its QPA
+   log (same `feme-translate --import-spirv`/`--spirv-to-llvmir` pipe
+   `L183`/`L184` both used), find the exact CFG shape not yet rewritten
+   (likely a loop-carried or multi-predecessor aggregate `phi`), fix in
+   `Linearize.cpp`.
+2. **(2-4 hrs, one-time setup, still not done across several sessions)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` has no build directory at
+   `/home/dev/dev/offload-test-suite/build` -- deferred again this
+   session given the size of the L184 work. Needs a from-scratch build
+   before it can run at all.
+3. **(~5 min)** Scratch cleanup: `/tmp/ctsrun_l184/`, `/tmp/l184_*.mlir`,
+   `/tmp/l184_frexp*`, `/tmp/patch_*.diff`, `/tmp/simdize_*.diff`,
+   `/tmp/patterns_full.diff`, `/tmp/frexp_pattern.diff`,
+   `/tmp/final_check.diff` -- none referenced by anything committed.
+4. Scan `Roadmap.md` for the next open, well-scoped item once `L185` is
+   picked up or skipped -- the last full-scan candidates from several
+   sessions back (`L90`-`L95`, `L116`/`L116(b)`/`L116(d)`/`L116(f)`,
+   `L126(a)`, `L147`, `L98(b)`, plus assorted `R`/`V`/`W`-prefixed rows)
+   are still individually unvetted.
