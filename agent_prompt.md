@@ -61,25 +61,19 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~15 min, floated by 3 prior sessions, still not done)** Add an
-   `assert`/`opt -passes=verify` step after
-   `SPIRVUnmergeResourceLoadsPass` in debug builds. Every session that
-   touches that pass keeps finding a new found-by-CTS-not-by-review
-   bug in it (`L176`/`L177`/similar) -- this is now the single most
-   repeated "next step" across the whole log. Next session: just do
-   it, don't float it again.
-2. **`L125(m)`/`L125(n)`** (upstream MLIR+LLVM `ConstOffsets` plumbing)
-   -- still the largest not-yet-started cross-repo item, good for a
-   change-of-pace session. No longer blocked by anything from this
-   session.
-3. Run a broader `binding_model.shader_access.*` sweep (not just
-   `descriptorset_random`/`inline_uniform_blocks`) to check for any
-   other still-hiding inline-uniform-block-adjacent failures this
-   session's narrower sweeps might not have covered -- low priority,
-   both clusters this session touched are now fully green, but worth a
-   final confirmation pass before considering `E14`+`L180` fully
-   closed.
-4. **(~5 min)** No scratch left in `/tmp` from this session -- all
-   `l180_*` logs/qpa files and the stray root-level `TestResults.qpa`
-   deleted; everything worth keeping is already quoted in
-   `VulkanCTSReport.md`/this file.
+1. **Implement the rescoped `L125(m)`** (`ImageGatherPattern` in
+   `SPIRVToLLVMPatterns.cpp`): widen `SupportedMask` to accept
+   `ConstOffsets`, read `operand_arguments[0]` as a
+   `!spirv.array<4xvector<Nxi32>>`, flatten via 4 `ExtractValueOp`s +
+   a shuffle/concat into `<4N x i32>`, feed the same
+   `int_spv_resource_gather` intrinsic call. New lit test alongside the
+   existing `ConstOffset` coverage. Once this lands, `L125(n)` (CPU
+   codegen consuming the 4-offset shape) becomes unblocked.
+2. **`L125(p)`** (LLVM SPIR-V backend `ConstOffsets` emission) -- now
+   correctly independent and lower-priority; only relevant once an
+   HLSL/`offload-test-suite` test actually exercises `Gather*` with 4
+   independent offsets.
+3. **(~5 min)** No scratch left in `/tmp` -- all `verify_binding_model_*`/
+   `iub_*` logs and qpa files, plus the stray root-level
+   `TestResults.qpa` (both repos), deleted; everything worth keeping is
+   already quoted in `VulkanCTSReport.md`/this file.
