@@ -100837,3 +100837,64 @@ two repos.
    `iub_*` logs and qpa files, plus the stray root-level
    `TestResults.qpa` (both repos), deleted; everything worth keeping is
    already quoted in `VulkanCTSReport.md`/this file.
+
+# 2026-09-24 (session 3): L125(m) implemented -- `ConstOffsets` gather flattening done and CTS-verified; found the exact remaining bug L125(n) must fix
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed.
+
+## Wins, concretely
+
+1. Implemented the rescoped `L125(m)`: `ImageGatherPattern`
+   (`SPIRVToLLVMPatterns.cpp`) now accepts `ConstOffsets` (plural)
+   alongside `ConstOffset`. Flattens the `!llvm.array<4 x vector<Nxi32>>`
+   operand scalar-by-scalar into one `4N`-wide vector, reusing the
+   `PoisonOp`+`ExtractElementOp`/`InsertElementOp` idiom already
+   established elsewhere in this file (`ExpectConversionPattern`).
+2. New lit test `gather_const_offsets`. `ninja check-feme`: 3313/3316,
+   matching baseline exactly, 0 regressions.
+3. Ran `dEQP-VK.glsl.texture_gather.graphics.offsets.*` (640 cases)
+   with the fix: **0 pipeline-creation failures** (down from all 640
+   failing before this session) -- pipelines now build and render.
+4. Found the real remaining bug via one QPA log: 98 cases still fail
+   `Result verification failed` (pixel mismatch, not a crash). Root
+   cause: `SPIRVResourceLowering.cpp`'s `isSupportedOffset` only checks
+   the offset vector has *at least* 2/3 components and always reads
+   lanes 0/1(/2) -- it silently accepts the new `4N`-wide flattened
+   vector as an ordinary 2-wide `ConstOffset`, so **all 4 gathered
+   corners reuse only the first of the 4 real offsets**. This is worse
+   than a clean decline (wrong pixels, not a caught error) and gives
+   `L125(n)` a concrete, specific fix to make, not just "add a new
+   `ImageCallKind` family": it must also narrow `isSupportedOffset`'s
+   width check so this shape is never silently misinterpreted again.
+
+## What I did NOT do, and why
+
+Did not implement `L125(n)` itself (the CPU-lowering side) -- that was
+explicitly scoped as this session's next step, not this one; `L125(m)`
+alone is a real, measurable, CTS-validated improvement (0 pipeline
+crashes vs. 640/640 before) even though the group doesn't fully pass
+yet. Struck through `L125(m)` in `Roadmap.md` since its own scope
+(recognize + flatten `ConstOffsets` in the import path) is genuinely
+done and validated; `L125(n)` stays open, now more concretely scoped.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, now much more concretely scoped)** `L125(n)`: fix
+   `isSupportedOffset` in `SPIRVResourceLowering.cpp` to reject (not
+   silently truncate) a `4N`-wide `ConstOffsets`-flattened offset from
+   the plain-`ConstOffset` path, then add the real `ImageCallKind`
+   family + `femeCpuImageGather*Offsets` runtime entry points that
+   apply each of the 4 offsets to its own corner. This should turn all
+   98 `Result verification failed` cases in
+   `dEQP-VK.glsl.texture_gather.graphics.offsets.*` into passes.
+2. **`L125(p)`** (LLVM SPIR-V backend `ConstOffsets` emission) --
+   still independent and lower-priority; only relevant once an
+   HLSL/`offload-test-suite` test exercises `Gather*` with 4
+   independent offsets.
+3. **`binding_model.shader_access` broader sweep** -- still on the
+   list from 2 sessions ago as a low-priority final confirmation pass,
+   not done again this session (this session's own scope was L125(m)).
+4. **(~5 min)** No scratch left in `/tmp` from this session -- the one
+   CTS run's QPA/stdout files (`/tmp/ctsrun_l125m/*`) were deleted
+   after their findings were quoted above/in `VulkanCTSReport.md`.
