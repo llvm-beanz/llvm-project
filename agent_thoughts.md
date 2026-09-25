@@ -102945,3 +102945,145 @@ Next step if resuming: with the `L191`-`L194` bug-hunting streak now
 fully closed out (no more open, well-scoped `L19x` items), a future
 session should pick #1 or #2 above for a large research-heavy session,
 or do the full `Roadmap.md` sweep (#3) as a change of pace.
+
+# L195 session: PHINode gap narrowed to its real scope -- vector-typed masked-load/masked-alloca-load results feeding a uniform phi were getting poisoned; scalar case was already fixed
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 4 commits, all in `llvm-project`, all FeMe source + tests + docs.
+No non-FeMe issue found this session.** Real bug fixed: a `phi` merging a
+vector-typed `feme.cpu.masked.load.*`/masked-alloca-load result, with
+`UniformityInfo` judging both uniform, was silently `poison`-corrupted.
+
+## What I picked and why I changed course mid-session
+
+Picked item 1 from the last several sessions' menus: "the `PHINode`
+two-pass structural gap." Went in planning to fix it broadly (a new
+Pass-1 predicate to force-widen affected `phi`s). Built it, wrote 3
+regression tests, confirmed all 3 failed pre-fix and passed post-fix.
+
+Then ran the **full** `FeMeTransformsCPUTests` suite (not just my 3 new
+tests) and it caught the mistake: my fix broke a pre-existing test,
+`ReadsBackRealUniformValueThroughAMaskedLoadFeedingAnUnwidenedPhi`
+(roadmap `H107`/`L118`). Investigating why led to the real finding:
+
+**The scalar shape of this bug was already fixed**, by a different,
+narrower mechanism than I'd designed. `widen()`'s post-pass-3 cleanup
+step already recovers a real, entry-mask-derived-lane value for a
+surviving use of a scalar (`Widened`-map) force-decomposed producer,
+instead of RAUW'ing it to `poison` -- it deliberately keeps the `phi`
+un-widened, since `UI` is *right* that it's uniform. My Pass-1 approach
+would have widened it anyway, which is why it broke that test (different
+IR shape, not a correctness regression, but a needless architecture
+collision with established, working code). **My own two scalar-shaped
+tests had the wrong expected outcome** (`FoundWidePHI: true`) -- I had
+assumed the bug was unfixed everywhere it could occur, without first
+checking whether it already wasn't.
+
+The one thing that check didn't already cover: that cleanup step never
+consulted `WidenedVectorComponents`, only `Widened`. A vector-typed
+masked-load call (e.g. `<4 x float>`) merged into a genuinely-uniform
+`phi` was still getting blind-poisoned. That's the real, narrower gap.
+
+## The actual fix
+
+1. Reverted the Pass-1 widening approach entirely (`git checkout --`).
+2. Extended the existing cleanup step's `Widened`-map branch with a
+   parallel `WidenedVectorComponents` branch: rebuild the real narrow
+   `<N x elemT>` value one component at a time (extract each component
+   at the same memoized `getFirstActiveLaneIndex()`, reassemble with
+   `insertelement`), mirroring the scalar branch's own insertion-point
+   handling exactly.
+3. Checked whether `WidenedAggregateComponents` needed the same
+   treatment -- confirmed by direct code reading that it doesn't: none
+   of the three unconditional force-decomposing producers
+   (`widenMaskedLoad`/`widenMaskedAllocaLoad`/`widenMaskedAtomicRMW`) can
+   ever populate it (`getOrInsertMaskedLoad` rejects aggregate types,
+   `atomicrmw` is always scalar, and `widenMaskedAllocaLoad`'s own
+   aggregate-load case is a separate, unrelated, pre-existing bug of its
+   own, not a reachable "provably uniform" shape).
+4. Rewrote my 3 draft tests down to 2 real ones, with corrected
+   expectations: removed the fully-redundant scalar masked-load-call
+   test (H107/L118's own test already covers that shape), kept and
+   fixed `WidensPHIMergingMaskedAllocaLoad` (still useful -- a different
+   producer through the same, already-working scalar mechanism), and
+   kept `WidensVectorPHIMergingUniformlyMaskedLoad` as the one test
+   that actually needed a fix.
+
+## Verification
+
+- `FeMeTransformsCPUTests`: 565/565 passed, 0 regressions -- both
+  pre-existing `H107`/`L118` tests still pass, untouched.
+- `ninja check-feme`: 3350/3353 passed, 3 pre-existing Unsupported, 0
+  Failed, +2 new tests.
+- `check-hlsl-feme-vk` (offload-test-suite): unchanged at the same 2
+  pre-existing failures (`WaveActiveMax.test` flaky-by-design,
+  `array_of_matrices.test` XPASS), confirmed pre-existing via a
+  stash/rebuild/rerun/restore round-trip.
+- Full 757-case `graphicsfuzz.*` CTS sweep: 673 Pass / 73 Fail / 8
+  NotSupported / 1 crash / 2 timeouts -- exact match to baseline, 0
+  regressions (expected: this shape isn't exercised by that suite).
+
+## Lesson for future sessions picking up a "large, no fix designed"
+carried-forward item
+
+**Run the full existing test suite before declaring a fix done**, not
+just your own new tests -- a fix that only ever gets checked against
+tests written *for* that fix cannot catch "this collides with an
+already-shipped, differently-designed fix for the same bug class." That
+collision is exactly what happened here, and it's why this session's
+real scope ended up much narrower (one map lookup added to an existing
+loop) than the item's framing ("the single largest standing
+architectural gap") suggested going in. **Before scoping a fix for a
+carried-forward "large" item, grep the test file and `Roadmap.md` for
+prior related fixes first** -- `H107`/`L118` were sitting right there,
+one test away from where I started writing.
+
+## Files changed
+
+- `feme/lib/Transforms/CPU/SIMDize.cpp`: extended `widen()`'s "sever
+  every remaining `ToErase` use" cleanup step with a
+  `WidenedVectorComponents` branch.
+- `feme/unittests/Transforms/CPU/SIMDizeTest.cpp`: 2 new tests
+  (`WidensVectorPHIMergingUniformlyMaskedLoad`,
+  `WidensPHIMergingMaskedAllocaLoad`).
+- `feme/docs/Roadmap.md`: new `L195` row, closed.
+- `feme/docs/VulkanCTSReport.md`: new dated section, sweep result.
+- `feme/docs/FeMeCPUDesign.md`: corrected the milestone-7 erasure-pass
+  deviation note, which was already stale before this session (it still
+  said "severed (RAUW'd with `poison`)" unconditionally, even though
+  `H107`/`L118` had already narrowed that) -- now describes the real,
+  current lane-extraction-first-then-poison-fallback behavior.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed (internal `feme-cpu-simdize` correctness fix).
+
+## Suggested next steps
+
+1. **(large, still genuinely open, now more precisely scoped)** The
+   *aggregate*-typed side of the PHINode gap is confirmed **not**
+   reachable today (see above -- no unconditional force-decomposing
+   producer can populate `WidenedAggregateComponents`), so the
+   "PHINode two-pass structural gap" item can likely be considered
+   **closed for the force-decompose-producer sub-case** entirely now
+   (scalar: `H107`/`L118`; vector: this session's `L195`; aggregate:
+   provably unreachable). If a *new* unconditional force-decomposing
+   producer is ever added to `widenInstruction`'s dispatch (a 4th one,
+   beyond the 3 `isUnconditionallyForceWidenedProducer`-style producers
+   this row's own investigation enumerated), remember to check whether
+   it can produce an aggregate result and, if so, extend this same
+   cleanup step a third way.
+2. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause. This is now the single largest
+   standing item; a future session should treat it as its own dedicated
+   design session, not another incremental poke.
+3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted after many sessions of deferral.
+4. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/ctsrun_l195/` (sweep script, per-case logs) removed.
+
+Next step if resuming: item 2 (`LoopLinearizer` uniform-value tracking)
+is the most substantive remaining "large" item and deserves a session of
+its own dedicated design work before any implementation attempt.
