@@ -13467,3 +13467,103 @@ to root-cause either in depth):
 need no change: a test-infrastructure/build-configuration fix and a
 non-FeMe `offload-test-suite` regression-refix, no feature/extension
 surface touched anywhere.
+
+## 2026-10-02: L193 fixed -- `SampleCmp.test`'s crash, a second downstream crash it unmasked, and a `D32_FLOAT` sampled-image format gap, all resolved
+
+Picked up `L193` from the prior session's own next-steps list. Built an
+isolated minimal repro (`Texture1D::SampleCmp`/`SampleCmpLevelZero`
+alone, compiled directly with `dxc -spirv -fspv-target-env=vulkan1.3`,
+no `offloader` involved) and `spirv-dis`'d its output to root-cause the
+crash before touching any code.
+
+**Bug 1 (the crash itself, `SPIRVToLLVMPatterns.cpp`)**: `dxc`'s real
+SPIR-V for `Texture1D::SampleCmp`/`SampleCmpLevelZero` has a bare
+*scalar* `float` `Coordinate` operand on
+`OpImageSampleDrefImplicitLod`/`OpImageSampleDrefExplicitLod` --
+contradicting an extensively-documented prior-session assumption (valid
+for glslang, never actually checked against `dxc`'s own `Dim1D` case)
+that a depth-comparison sample's coordinate is "always a genuine
+vector." Fixed all 3 affected patterns
+(`ImageSampleDrefImplicitLodPattern`/`ImageSampleDrefGradPattern`/
+`ImageSampleDrefExplicitLodPattern`) to reuse the pre-existing
+`getDefaultZeroOffsetType` helper (already correct for this shape,
+already used by every non-`Dref` sample pattern) instead of duplicating
+the wrong assumption inline.
+
+**Bug 2 (a second crash one layer downstream, `SPIRVResourceLowering.cpp`)**:
+rebuilding and re-running against the fixed pattern traded the crash for
+a new one, `CreateExtractElement` on a non-vector, inside
+`lowerImageAccesses`'s dref-sample `C0`/`C1` extraction --
+`hasOnlySupportedImageUses` had its own identical prior-session
+"no real dxc `Texture1D::SampleCmp` case reaches here yet" doc comment
+deliberately rejecting this exact shape, which Bug 1's fix just made
+reachable for the first time. Fixed by widening the classification to
+accept `Plain1D`'s unpadded width unconditionally (mirroring every
+other shape) and making the `C0`/`C1` extraction branch on whether
+`Coord` is actually a vector, using the scalar directly as `C0`
+otherwise (mirroring the ordinary, non-`Dref` `Plain1D` sample path's
+own existing precedent).
+
+**Bug 3 (a third, unrelated gap, `Format.cpp`)**: with both crashes
+fixed, `SampleCmp.test` still failed, now at pipeline-creation time --
+`vkGetPhysicalDeviceImageFormatProperties` rejected the test's
+`Depth32`-backed `Tex2D`/`TexCube`/`Tex1D` outright with
+`VK_ERROR_FORMAT_NOT_SUPPORTED` for `VK_IMAGE_USAGE_SAMPLED_BIT`.
+Root cause (enabled via the ICD's own opt-in
+`FEME_VULKAN_LOG_CREATION_ERRORS` diagnostic, which turned out not to
+even be needed for this one -- the validation layer already named the
+exact rejected format/usage combination directly): `formatFeatureFlags`
+(`Format.cpp`) never granted `D32_FLOAT` `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT`
+at all, the same "genuine gap, not a reporting-only one" bug class
+`H8e` already found and fixed for the sibling `D16_UNORM` format -- the
+CPU runtime already fully decodes and depth-compares `D32_FLOAT`
+(`femeRTUnpackImageTexel`/`femeRTIsFixedPointDepthFormat`'s own
+pre-existing `F8b`/`L55` documentation), this was purely a missing
+advertisement bit. Fixed by adding a `D32_FLOAT` case alongside
+`D16_UNORM`'s.
+
+**Verification**:
+- `SampleCmp.test` (direct `llvm-lit -v -a`, offload-test-suite tree):
+  now **Pass** outright (was: hard crash, then graceful pipeline-
+  creation failure, now green).
+- Full `check-hlsl-feme-vk` re-run (680 tests): same 2 pre-existing
+  failures as before this session (`L194`'s own `CalculateLevelOfDetail.test`
+  gap; `H169`'s own already-documented flaky `WaveActiveMax.test`), same
+  1 known `XPASS` (`H124g`'s `array_of_matrices.test`), 0 new failures.
+- `ninja check-feme`: 3344/3347 Passed, 3 Unsupported, 0 Failed -- 2
+  existing unit tests updated to assert the new, correct behavior
+  (`FormatTest.FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope`;
+  `SPIRVResourceLoweringTest.LeavesAPlain1DSampleCmpWithUnpaddedCoordWidthAlone`
+  renamed/inverted to `LowersAPlain1DSampleCmpWithUnpaddedCoordWidth`),
+  plus 1 new `feme-opt` FileCheck lit case
+  (`spirv-to-llvm-sample-dref-and-query-lod.mlir`'s new `@samplecmp_1d`)
+  covering Bug 1 directly.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: both track core feature bits/limits/promoted
+extensions (machine-generated from the Vulkan registry), not
+per-`VkFormat` capability flags, and none of this session's three fixes
+touches either.
+
+**Full `graphicsfuzz.*` CTS re-sweep** (757 cases, crash-tolerant
+per-case-isolated driver, 30s-per-case timeout): **673 Pass, 73 Fail, 8
+NotSupported, 1 real process crash
+(`cov-function-multiple-loops-compare-integer-return`), 2 timeouts
+(`cov-multiple-functions-global-never-change`,
+`cov-nested-structs-function-set-inner-struct-field-return`)** -- an
+exact match, case-for-case total, to the established baseline this
+project's prior sessions have repeatedly reconfirmed (`L191`/`L192(a)`'s
+own reports), 0 regressions, 0 incidental new passes. None of this
+session's 3 fixes (dref-sample coordinate lowering, dref-sample CPU
+codegen, depth-format sampled-image support) touches `graphicsfuzz.*`'s
+own image-sampling shapes at all, so this result is exactly the
+"unaffected, confirm no regressions" outcome expected going in.
+
+**Build-dependency gotcha reconfirmed this session** (previously
+documented, worth restating): in the `offload-test-suite` build tree,
+`ninja hlsl-test-depends` does **not** rebuild `libfeme_vulkan.so` even
+when a FeMe source file it statically links has changed, since
+`offloader`/`api-query` load it at runtime via the Vulkan ICD mechanism
+rather than linking it directly. `ninja feme_vulkan` must be run
+explicitly after any FeMe source change, in *both* build trees
+(primary and offload-test-suite), before re-testing.
