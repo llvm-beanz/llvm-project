@@ -58,24 +58,31 @@ file.
 
 # Request
 
-1. **(large, no fix designed, carried forward many sessions now)** The
-   `PHINode` two-pass structural gap (Pass 1 creates phi stubs before
-   Pass 2 force-decomposes anything) -- unaddressed on both the vector
-   and aggregate sides. Still the single largest standing architectural
-   gap in this project; needs a dedicated design session, not another
-   incremental poke.
+1. **(large, still genuinely open, now more precisely scoped)** The
+   *aggregate*-typed side of the PHINode gap is confirmed **not**
+   reachable today (see above -- no unconditional force-decomposing
+   producer can populate `WidenedAggregateComponents`), so the
+   "PHINode two-pass structural gap" item can likely be considered
+   **closed for the force-decompose-producer sub-case** entirely now
+   (scalar: `H107`/`L118`; vector: this session's `L195`; aggregate:
+   provably unreachable). If a *new* unconditional force-decomposing
+   producer is ever added to `widenInstruction`'s dispatch (a 4th one,
+   beyond the 3 `isUnconditionallyForceWidenedProducer`-style producers
+   this row's own investigation enumerated), remember to check whether
+   it can produce an aggregate result and, if so, extend this same
+   cleanup step a third way.
 2. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
-   still-open nested-cycle root cause.
+   still-open nested-cycle root cause. This is now the single largest
+   standing item; a future session should treat it as its own dedicated
+   design session, not another incremental poke.
 3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted after many sessions of deferral. A future session should do
-   a real full-table pass rather than keep punting on this same list.
+   unvetted after many sessions of deferral.
 4. **(~5 min)** No `/tmp` scratch remains from this session --
-   `/tmp/l194repro/` and `/tmp/ctsrun_l194/` both removed.
+   `/tmp/ctsrun_l195/` (sweep script, per-case logs) removed.
 
-Next step if resuming: with the `L191`-`L194` bug-hunting streak now
-fully closed out (no more open, well-scoped `L19x` items), a future
-session should pick #1 or #2 above for a large research-heavy session,
-or do the full `Roadmap.md` sweep (#3) as a change of pace.
+Next step if resuming: item 2 (`LoopLinearizer` uniform-value tracking)
+is the most substantive remaining "large" item and deserves a session of
+its own dedicated design work before any implementation attempt.
