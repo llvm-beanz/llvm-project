@@ -3048,6 +3048,120 @@ TEST(SIMDizeTest, ScalarizesUniformImageAtomicCall) {
   EXPECT_EQ(AtomicCallCount, 4u);
 }
 
+// Roadmap L191: the `shufflevector`/`insertelement` analogue of L134(c)
+// above, but for a *different* unconditionally-decomposing producer: a
+// `feme.cpu.masked.load.*` call producing a vector-typed result (roadmap
+// L15's `widenMaskedLoad` vector case) always decomposes into per-
+// component `llvm.masked.gather`s and erases the original call, regardless
+// of whether `UI.isDivergentAtDef` judges that *call* itself divergent.
+// A `shufflevector` (widening a `vec3` load result into a `vec4`) built
+// directly on that masked-load result, followed by an `insertelement`
+// setting the `vec4`'s fourth lane, can both be classified uniform by
+// `UI.isDivergentAtDef` -- the mask governing the load's own divergence
+// isn't visible to a uniformity analysis over the `shufflevector`'s/
+// `insertelement`'s own operands. Left to fall through to the general
+// gate, both used to be misclassified "uniform: leave it exactly as it
+// is" and never rewritten: a dangling reference to the masked load once
+// it is erased, silently replaced with `poison` by `eraseFromParent`.
+// Found reducing `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s
+// own all-black-pixel failure (expected red) to this exact shape: this
+// shader's own `_GLF_color = vec4(data[0], 1.0)`, where `data[0]` is read
+// back through a `feme.cpu.masked.load.v3f32` call whose mask happens to
+// always be `true` by the time it reaches this pass (a linearized,
+// already-reconverged control-flow region), rather than through any
+// consuming instruction that itself becomes an ordinary divergent-scalar
+// widening.
+TEST(SIMDizeTest,
+     DecomposesShuffleVectorAndInsertElementFromUniformlyMaskedVectorLoad) {
+  LLVMContext Ctx;
+  // Every value here is uniform (no thread ID, no divergent branch) --
+  // `%wide`/`%color` are both classified uniform by `UI.isDivergentAtDef`,
+  // exactly the condition this fix targets: a uniform-classified consumer
+  // chained directly onto a masked-load call that gets unconditionally
+  // decomposed/erased regardless of its own divergence. Each lane is read
+  // back with an `extractelement` (already handled unconditionally by the
+  // pre-existing L134(c) case, once its vector operand is present in
+  // `WidenedVectorComponents`) and handed to an opaque scalar `@sink`
+  // call, mirroring the real shader's own per-component stage-output-store
+  // shape exactly.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %data) #0 {
+    entry:
+      %v = call <3 x float> @feme.cpu.masked.load.v3f32(ptr %data, i32 4, i1 true, <3 x float> zeroinitializer)
+      %wide = shufflevector <3 x float> %v, <3 x float> poison, <4 x i32> <i32 0, i32 1, i32 2, i32 poison>
+      %color = insertelement <4 x float> %wide, float 1.0, i64 3
+      %r = extractelement <4 x float> %color, i64 0
+      %g = extractelement <4 x float> %color, i64 1
+      %b = extractelement <4 x float> %color, i64 2
+      %a = extractelement <4 x float> %color, i64 3
+      call void @sink(float %r)
+      call void @sink(float %g)
+      call void @sink(float %b)
+      call void @sink(float %a)
+      ret void
+    }
+    declare void @sink(float)
+    declare <3 x float> @feme.cpu.masked.load.v3f32(ptr, i32, i1, <3 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Without this fix, `%wide`/`%color` are themselves left completely
+  // unrewritten (each classified uniform, so neither reaches
+  // `widenShuffleVector`/`widenInsertElement`, nor gets erased): `%wide`
+  // survives directly referencing the since-erased masked-load call
+  // (`%v`), replaced with a literal `poison` operand by `eraseFromParent`
+  // -- exactly the bug this fix targets. A syntactic "no `ShuffleVectorInst`/
+  // `InsertElementInst` anywhere has a poison operand" sweep is too broad
+  // a check here (an ordinary, unrelated per-lane splat broadcast this
+  // pass builds for other values, e.g. `insertelement <4 x ptr> poison,
+  // ptr %data, i64 0`, legitimately starts from `poison` too), so check
+  // `%wide`/`%color` specifically by name instead: found unrewritten (and
+  // poisoned) without the fix, or not found at all -- decomposed and
+  // erased -- with it.
+  for (Instruction &I : instructions(F)) {
+    if (I.getName() != "wide" && I.getName() != "color")
+      continue;
+    for (Value *Op : I.operands())
+      EXPECT_FALSE(isa<PoisonValue>(Op))
+          << "found the original, unrewritten '" << I.getName().str()
+          << "' still referencing a poison operand";
+  }
+
+  // None of the four `@sink` calls' scalar `extractelement` arguments may
+  // themselves be `poison` either -- the pre-existing L134(c) case already
+  // handles an `extractelement` reading a `WidenedVectorComponents`-
+  // decomposed vector operand, so this also transitively exercises that
+  // %color must actually have been decomposed by this fix for these
+  // `extractelement`s to read real, correct per-lane data instead of
+  // (before this fix) `%color`'s own single, un-widened, already-poisoned
+  // operand.
+  unsigned SinkCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getName() != "sink")
+      continue;
+    ++SinkCallCount;
+    EXPECT_FALSE(isa<PoisonValue>(CI->getArgOperand(0)));
+  }
+  EXPECT_EQ(SinkCallCount, 4u);
+
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+      FoundGather = true;
+  }
+  EXPECT_TRUE(FoundGather);
+}
+
 } // namespace
 
 
