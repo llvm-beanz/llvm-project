@@ -103385,3 +103385,106 @@ Next step if resuming: item 1 (`run()`'s traversal-order change) is the
 real payoff the last three sessions' work (L188's root cause, L196's
 mechanism, this session's test coverage) has been building toward --
 pick it up next.
+
+# L197 session: L188's traversal-order attempt -- 2 real hazards fixed, but a confirmed hang keeps nested-cycle attempts off
+
+**Next action, if you're picking this up cold**: read L197's row in
+`Roadmap.md`, then attach `gdb` to a hung `deqp-vk` process running
+`dEQP-VK.graphicsfuzz.cosh-return-inf-unused` and set a breakpoint
+*inside* `DiamondFlattener::flatten` (not just at its call site) to find
+why its `for (;;)` loop never reaches `Cur == End`/`RedirectTo` for this
+3-deep nested shape. That's the one open blocker standing between today's
+state and actually turning on nested-cycle support.
+
+## What I did
+
+This session's task (per the prior session's own menu) was L188's
+standing next step: attempt `LoopLinearizer::run()`'s traversal-order
+change to support nested cycles, but investigate block-deletion safety
+for a not-yet-processed parent cycle *first*.
+
+1. **(~45 min)** Confirmed a real hazard: `CI.getExitBlocks(C, ...)`
+   walks a frozen, `CI.compute()`-time block snapshot and permanently
+   memoizes whatever it finds -- calling it on a not-yet-processed parent
+   after a child has already erased some of the parent's own blocks is a
+   genuine use-after-free. Same hazard class as the L40 follow-up fix for
+   `UniformityInfo` (commit `b9cba5d890f3`), just via this analysis's own
+   separate cache.
+2. **(~30 min)** Fixed it: added `precomputeExitBlocks()`/
+   `ExitBlocksByCycle`/`getExitBlocks(CycleRef)`, populated once up front
+   against the pristine `CI`. Caught and fixed a dangling-`ArrayRef` bug
+   of my own along the way (`lookup()` returns by value; an `ArrayRef`
+   into that temporary would dangle -- fixed via `find()`).
+3. **(~1 hr)** Rewrote `run()` to a genuine post-order recursive walk
+   (`linearizeCyclePostOrder`), enabling non-leaf attempts. Wrote a new
+   nested-loop unit test. Hit two more real bugs building it:
+   - A pre-existing classification bug in `linearizeCycle`: it bailed out
+     ("unsupported") the instant *any* `OtherCondBrBlocks` entry existed
+     alongside a divergent Header/Latch check, without checking whether
+     that entry was actually still divergent. An already-linearized
+     nested child's own uniform continuation check was getting
+     misclassified as a second divergent check. Fixed by computing
+     `DivergentCandidates` first and only bailing when it's non-empty.
+   - A new hazard, not specific to nested cycles at all:
+     `DominatorTree`/`PostDominatorTree`, computed once up front and
+     never refreshed, go stale the moment *any* cycle's blocks are
+     erased -- confirmed via a real crash
+     (`DiamondFlattener::validate`'s `hasUseList()` assertion). Fixed via
+     `DT.recalculate(F)`/`PDT.recalculate(F)` once per cycle.
+4. **(~1.5 hrs)** Ran the real Vulkan CTS. Found the previously-known
+   crash case still passes, then swept `graphicsfuzz.*` and hit an
+   **infinite hang** on `cosh-return-inf-unused` (a genuinely 3-deep
+   nested loop). Confirmed via `gdb -p <pid> --batch -ex "bt"` it's stuck
+   inside `DiamondFlattener::flatten`'s own `for (;;)` walk, and via a
+   git-stash-and-rebuild comparison that this is a **new** regression
+   from enabling the non-leaf attempt, not pre-existing. Root cause not
+   found.
+5. **(~30 min)** Made the call: keep the two hazard fixes and the
+   classification fix (all real, independently valuable, verified
+   regression-free) but revert `linearizeCyclePostOrder` to only ever
+   call `linearizeCycle` for a genuine leaf cycle -- same actual behavior
+   as before this session, just built on safer infrastructure. Rewrote
+   the unit test to match: an inner leaf loop gets linearized, an outer
+   non-leaf loop is left completely alone.
+6. **(~1 hr)** Split the change into 3 commits, each independently built
+   and tested (566 or 567 unit tests passing standalone, not just at the
+   final combined state) -- this took longer than expected because my
+   first split attempt left an intermediate commit silently broken
+   (`precomputeExitBlocks()` declared but never called, so
+   `ExitBlocksByCycle` stayed empty and nothing ever linearized). Caught
+   it by actually building+testing each staged commit before committing,
+   not just trusting the diff looked right.
+
+## Wins visible now
+
+- `ninja check-feme`: **3352/3355** passed (3 pre-existing
+  `Unsupported`, 0 `Failed`), +1 over last session (the new test).
+- `dEQP-VK.graphicsfuzz.cosh-return-inf-unused`: was hanging forever
+  under the (reverted) full-enablement attempt; now completes in under a
+  second with an ordinary `Fail`.
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): 71/6/37, byte-identical
+  to baseline -- zero regressions from any of this session's changes.
+- 3 commits landed, each buildable and fully-tested standalone (not just
+  as a combined diff) -- a future `git bisect` on this range will work.
+
+## What I'd tell a future session
+
+1. **The real payoff is still one unsolved bug away.** Everything landed
+   this session is prerequisite plumbing. The actual "nested loops now
+   work" milestone needs `DiamondFlattener::flatten`'s hang root-caused
+   first. Don't re-attempt enabling the non-leaf call without that fix in
+   hand -- it will just hang again on the same shader.
+2. **Splitting commits after the fact is slower than splitting as you
+   go.** I wrote everything as one continuous session, then spent ~1 hr
+   untangling it into 3 commits after the fact, and got bitten once by an
+   intermediate commit that silently didn't work. If a future session
+   plans multiple logically-separate changes, commit each one as soon as
+   it's independently working, rather than batching the split to the
+   end.
+3. **`git stash push --keep-index` is the right tool for "test just the
+   staged hunks in isolation"** -- but only pop it back cleanly if you
+   haven't since amended the commit those hunks were staged against.
+   Amending mid-stream caused one avoidable merge conflict this session
+   (trivial to resolve, but wasted ~10 min).
+4. `/tmp` scratch is clean -- nothing left over from this session
+   (`/tmp/ctsrun_l197` created and removed within this session).
