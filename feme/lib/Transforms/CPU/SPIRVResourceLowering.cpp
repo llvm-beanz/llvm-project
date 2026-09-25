@@ -1819,27 +1819,29 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // sample's Coordinate), with `Dref` arriving purely through its own
       // separate operand and nothing echoed into the coordinate's own
       // trailing component. Both widths are accepted here for every
-      // shape but `Plain1D` (`lowerImageAccesses` already only ever
-      // reads the shape's own ordinary `C0`/`C1`/... components by fixed
-      // index, so an unread, potentially-absent trailing padding
-      // component was never actually load-bearing there) rather than
-      // replacing the glslang-derived width outright, so real
-      // GLSL-originated modules already exercising the padded shape
-      // (roadmap L46/L48) keep working unchanged. `Plain1D` is excluded
-      // from this widening: unlike every other shape, its own `C0`/`C1`
-      // extraction just below is unconditional (not gated by `Shape`),
-      // and a bare-scalar dxc-style coordinate (this shape's own
-      // unpadded `SampleCoordWidth` of 1, per `isCoordN`'s own N==1
-      // special case) is not a vector `CreateExtractElement` can apply
-      // to at all -- no real HLSL/dxc `Texture1D::SampleCmp` case has
-      // been confirmed to even reach this path yet, so accepting a
-      // shape this pre-existing code cannot actually consume would only
-      // trade one crash-free rejection for a real crash.
+      // shape (`lowerImageAccesses` already only ever reads the shape's
+      // own ordinary `C0`/`C1`/... components by fixed index, so an
+      // unread, potentially-absent trailing padding component was never
+      // actually load-bearing there) rather than replacing the
+      // glslang-derived width outright, so real GLSL-originated modules
+      // already exercising the padded shape (roadmap L46/L48) keep
+      // working unchanged. Roadmap L193: `Plain1D` is no longer excluded
+      // from this widening -- a real `dxc`-compiled `Texture1D::
+      // SampleCmp`/`SampleCmpLevelZero` repro (`Feature/Textures/
+      // SampleCmp.test`'s own `Tex1D`) confirmed `dxc`'s Coordinate
+      // operand for this shape really is a bare scalar `float`
+      // (`isCoordN`'s own N==1 special case), matching every other
+      // shape's own unpadded-DXC-width acceptance here; `lowerImageAccesses`
+      // below now branches on whether `Coord` is actually a vector before
+      // extracting `C0`/`C1`, rather than assuming it unconditionally is,
+      // so a bare scalar is no longer a `CreateExtractElement` crash --
+      // it is simply used directly as `C0`, mirroring the ordinary
+      // (non-comparison) `Plain1D` sample path's own identical precedent.
       unsigned DrefCoordWidth =
           Shape == ImageShape::Plain1D
               ? 3
               : (SampleCoordWidth + 1 > 4 ? 4 : SampleCoordWidth + 1);
-      bool AcceptsUnpaddedDxcWidth = Shape != ImageShape::Plain1D;
+      bool AcceptsUnpaddedDxcWidth = true;
       if (!(isCoordN(CI->getArgOperand(2), DrefCoordWidth, /*Float=*/true) ||
             (AcceptsUnpaddedDxcWidth &&
              isCoordN(CI->getArgOperand(2), SampleCoordWidth,
@@ -4166,8 +4168,23 @@ void lowerImageAccesses(
         Value *Dref = CI->getArgOperand(DrefSampleDrefIdx);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
-        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
-        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        // Roadmap L193: `Plain1D`'s own unpadded-DXC-width Coordinate
+        // (`hasOnlySupportedImageUses`'s own updated `AcceptsUnpaddedDxcWidth`
+        // comment) is a bare scalar `float`, not a vector
+        // `CreateExtractElement` can apply to at all -- unlike every
+        // other shape reaching this branch, whose Coordinate (whether
+        // glslang's own padded convention or another shape's unpadded
+        // DXC one) is always at least a genuine 2-component vector. Only
+        // `Plain1D`'s own switch arm below ever reads `C0` alone (never
+        // `C1`), so `C1` is left null for that one shape rather than
+        // synthesizing a meaningless extraction from a value that is not
+        // a vector to begin with.
+        Value *C0 = Coord->getType()->isVectorTy()
+                       ? Builder.CreateExtractElement(Coord, uint64_t{0})
+                       : Coord;
+        Value *C1 = Coord->getType()->isVectorTy()
+                       ? Builder.CreateExtractElement(Coord, uint64_t{1})
+                       : nullptr;
         Value *Lod = DrefHasLevel ? CI->getArgOperand(DrefSampleLevelIdx)
                                   : ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);

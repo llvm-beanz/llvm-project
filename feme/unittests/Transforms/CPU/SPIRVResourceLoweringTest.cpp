@@ -4916,16 +4916,18 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-     LeavesAPlain1DSampleCmpWithUnpaddedCoordWidthAlone) {
-  // Roadmap L7b: unlike every other shape, `Plain1D`'s own `C0`/`C1`
-  // extraction in `lowerImageAccesses` is unconditional (not gated by
-  // `Shape`), so a bare-scalar, dxc-style unpadded coordinate (this
-  // shape's own `SampleCoordWidth` of 1) is deliberately *not* accepted
-  // here even though every other shape now accepts its own unpadded
-  // width -- accepting a shape this pre-existing extraction code cannot
-  // actually consume would trade a crash-free rejection for a real
-  // `CreateExtractElement` crash. Only the glslang-padded width (3) is
-  // accepted for `Plain1D`.
+     LowersAPlain1DSampleCmpWithUnpaddedCoordWidth) {
+  // Roadmap L193: a real `dxc`-compiled `Texture1D::SampleCmp` repro
+  // (`Feature/Textures/SampleCmp.test`'s own `Tex1D`) confirmed `dxc`'s
+  // own Coordinate operand for this shape really is a bare scalar
+  // `float` (this shape's own unpadded `SampleCoordWidth` of 1), unlike
+  // this test's own prior name/comment, which predated that repro and
+  // assumed (incorrectly) that no real HLSL/dxc case ever reached this
+  // shape. `lowerImageAccesses` now branches on whether `Coord` is
+  // actually a vector before extracting `C0`/`C1`, using the scalar
+  // directly as `C0` when it is not, so this no longer crashes and is
+  // now accepted and lowered, mirroring every other shape's own
+  // unpadded-DXC-width acceptance.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(float %coord, float %dref) {
@@ -4949,8 +4951,8 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.samplecmp.1d.f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
 TEST(SPIRVResourceLoweringTest, LowersSampleCmpGradToImageSampleCmpWithGrad) {
