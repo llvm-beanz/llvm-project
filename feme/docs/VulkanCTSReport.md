@@ -13832,3 +13832,54 @@ functional change.
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed, for the same reason as the prior session's entry above.
+
+## 2026-09-25: L197 (L188 continuation) -- traversal-order investigation, partial fixes
+
+This session resumed L188's own standing next step: attempting
+`LoopLinearizer::run()`'s traversal-order change to support nested
+cycles. Two real hazards were found and fixed (a `CI.getExitBlocks`
+use-after-free for a not-yet-processed parent cycle, and a
+`DominatorTree`/`PostDominatorTree` staleness hazard not specific to
+nested cycles at all), plus an independent classification-logic gap in
+`linearizeCycle`'s own `OtherCondBrBlocks` handling. See `Roadmap.md`'s
+new L197 row for the full technical writeup.
+
+**Real CTS-driven finding**: actually enabling `linearizeCyclePostOrder`
+to attempt `linearizeCycle` on a genuine non-leaf (parent) cycle causes
+an infinite hang inside `DiamondFlattener::flatten` for
+`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, a genuinely 3-deep
+nested-loop shader -- confirmed via `gdb`-attached backtrace, and
+confirmed (via a git-stash-and-rebuild comparison against pre-session
+baseline) to be a new regression, not pre-existing. Root cause not
+found. **Decision**: keep the tested prerequisite infrastructure (the
+two hazard fixes, the classification fix, and the post-order recursive
+structure itself) but leave the actual non-leaf-cycle attempt disabled
+-- `linearizeCyclePostOrder` still only ever calls `linearizeCycle` for
+a genuine leaf cycle, exactly matching pre-session behavior for what
+gets linearized.
+
+Verification performed after landing (device check re-confirmed
+`FeMe CPU Vulkan Device` first):
+- `dEQP-VK.graphicsfuzz.cosh-return-inf-unused`: previously hung
+  indefinitely under the (reverted-scope) full-enablement attempt; with
+  the final, leaf-only-attempt state landed, it no longer hangs --
+  completes quickly with an ordinary, deterministic `Fail` (a later
+  `feme-cpu-simdize` diagnostic, not a crash or hang).
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): **71 Pass / 6 Fail / 37
+  NotSupported**, byte-for-byte identical to the pre-session baseline
+  (the 6 failures confirmed pre-existing via a git-stash-and-rebuild
+  comparison, unrelated `clip_geom`/`clip_plane`/`custom_attributes`
+  shapes).
+- `dEQP-VK.mesh_shader.ext.misc.maximize_primitives` (this project's own
+  historical crash-repro case): re-confirmed `Pass`.
+
+`ninja check-feme`: 3352/3355 passed (3 pre-existing `Unsupported`, 0
+`Failed`), +1 over the prior session's own count (the new
+`LinearizeTest.LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone`
+test), 0 regressions. `FeMeTransformsCPUTests` unit suite: 567/567
+passed.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed to
+need no change -- this session's changes are internal
+`LoopLinearizer`/`feme-cpu-linearize` soundness/correctness fixes,
+touching no feature bit, limit, or extension surface.
