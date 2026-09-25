@@ -134,6 +134,50 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// (Roadmap L192(b)) Unlike every other op/width combination above,
+// `spirv.GL.Sqrt` at `f16` does *not* flush its subnormal operand:
+// `Feature/HLSLLib/sqrt.16.test`'s own golden data was found to disagree
+// with the flushed answer there (its `ExpectedOut` assumes plain,
+// unflushed `f16` `sqrt` math), unlike `sqrt.32.test`'s own golden data,
+// which does still agree with the flush. No `llvm.intr.is.fpclass`/
+// `llvm.select` flush sequence should appear here at all -- just a direct,
+// unconditional `llvm.intr.sqrt`.
+// CHECK-LABEL: llvm.func @sqrt_no_flush_f16
+// CHECK-NOT: llvm.intr.is.fpclass
+// CHECK-NOT: llvm.select
+// CHECK: %[[RES:.*]] = llvm.intr.sqrt(%arg0) : (f16) -> f16
+// CHECK: llvm.return %[[RES]] : f16
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Float16], []> {
+  spirv.func @sqrt_no_flush_f16(%a: f16) -> (f16) "None" {
+    %0 = spirv.GL.Sqrt %a : f16
+    spirv.ReturnValue %0 : f16
+  }
+  spirv.EntryPoint "GLCompute" @sqrt_no_flush_f16
+  spirv.ExecutionMode @sqrt_no_flush_f16 "LocalSize", 1, 1, 1
+}
+
+// -----
+
+// `spirv.GL.Sinh` at `f16`, by contrast, still flushes -- `sinh.16.test`'s
+// own golden data confirms it wants the flushed answer, unlike `Sqrt`
+// above, so only `GLSqrtOp`'s own instantiation opts out of the flush at
+// this width.
+// CHECK-LABEL: llvm.func @sinh_flush_f16
+// CHECK: %[[SUBNORMAL:.*]] = "llvm.intr.is.fpclass"(%arg0) <{bit = 144 : i32}> : (f16) -> i1
+// CHECK: llvm.select %[[SUBNORMAL]], %{{.*}}, %arg0 : i1, f16
+// CHECK: %[[RES:.*]] = llvm.intr.sinh(%{{.*}}) : (f16) -> f16
+// CHECK: llvm.return %[[RES]] : f16
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Float16], []> {
+  spirv.func @sinh_flush_f16(%a: f16) -> (f16) "None" {
+    %0 = spirv.GL.Sinh %a : f16
+    spirv.ReturnValue %0 : f16
+  }
+  spirv.EntryPoint "GLCompute" @sinh_flush_f16
+  spirv.ExecutionMode @sinh_flush_f16 "LocalSize", 1, 1, 1
+}
+
+// -----
+
 // A vector-typed operand flushes lane-wise, same as
 // `spirv-to-llvm-denorm-flush-to-zero.mlir`'s own vector coverage for
 // ordinary arithmetic.
