@@ -13727,3 +13727,89 @@ suite, not this CTS sweep.
 need no change: this is a CPU-widening-pass (`FunctionWidener::widen`)
 correctness fix internal to `feme-cpu-simdize`, touching no feature bit,
 limit, or extension surface.
+
+## 2026-10-04: L196 -- `LoopLinearizer`'s "provably uniform by construction" value-tracking mechanism designed and landed; fixes a real sibling-cycle bug found only by the CTS sweep
+
+**Context**: roadmap L188's own root-cause investigation into
+`stable-binarysearch-tree-false-if-discard-loop`'s nested-cycle gap
+concluded that a real fix needs a new soundness mechanism first --
+`LoopLinearizer::UI`, a whole-function `UniformityInfo` computed once
+before any cycle is linearized and never recomputed, cannot be soundly
+queried (via `UI.isDivergentTerminator`) on a block whose terminator this
+same pass has since replaced with brand-new synthesized IR (e.g.
+`closeLatch`'s `loop.any.active` mask-reduction condition), since that
+query is keyed on the block's *original* terminator, not its current one.
+This session's task was explicitly to design (and, if it landed cleanly,
+implement) that tracking mechanism in isolation, deliberately *not* yet
+attempting the `run()` traversal-order change that would actually enable
+nested-cycle linearization itself.
+
+**Mechanism**: added `LoopLinearizer::KnownUniformValues` (a
+`SmallPtrSet<const Value *, 32>`) plus `isKnownUniform`/`isDivergentValue`/
+`isDivergentBranch`/`markUniformIfOperandsAreUniform`/`createUniformMaskAny`
+helper methods. `isDivergentBranch(Br)` replaces every
+`UI.isDivergentTerminator(Br)` call site in `LoopLinearizer` (and its two
+associated helpers, `collectUniformPassThroughRegion` -- whose own
+redundant explicit `UniformityInfo &UI` parameter, always passed
+`this->UI`, was also dropped -- and the free function `uniformRelayChain`,
+now taking a `function_ref<bool(const CondBrInst *)>` predicate instead of
+a raw `UniformityInfo &`) with a value-keyed query: `KnownUniformValues`
+first, falling back to `UI.isDivergentAtDef` on the branch's *current*
+condition operand otherwise. `KnownUniformValues` is seeded exclusively at
+each of this pass's own `feme.cpu.mask.any`-producing call sites (always
+unconditionally uniform -- it is a genuine wave-wide reduction primitive,
+regardless of its own input mask's uniformity) via a new
+`createUniformMaskAny` wrapper, plus `closeLatch`'s own `CreateNot`/
+`CreateAnd` compositions of already-uniform operands via
+`markUniformIfOperandsAreUniform`.
+
+**Verification and an unexpected real find**: `ninja check-feme`:
+3350/3353 passed, 3 pre-existing `Unsupported`, 0 `Failed` -- byte-for-
+byte identical to the pre-change baseline, confirming this is a sound,
+behavior-preserving refactor for every shape the existing regression
+suite covers. The full `graphicsfuzz.*` CTS re-sweep (754 of 757 cases;
+the 3 already-documented pre-existing crash/timeout cases --
+`cov-function-multiple-loops-compare-integer-return` (crash),
+`cov-multiple-functions-global-never-change`,
+`cov-nested-structs-function-set-inner-struct-field-return` (both
+confirmed via a stash/rebuild/rerun/restore round-trip to hang
+identically with or without this session's change, i.e. genuinely
+pre-existing and unrelated -- excluded from this sweep for that reason,
+not because of anything this session touched) -- found this was
+*not* purely behavior-preserving after all, in a good way: **674 Pass /
+72 Fail / 8 NotSupported**, one case better than the established
+baseline of **673 Pass / 73 Fail / 8 NotSupported**. Bisected via a
+stash/rebuild/rerun/restore round-trip against the exact same 754-case
+list: `dEQP-VK.graphicsfuzz.stable-colorgrid-modulo-double-always-false-
+discard` (a shader with two sequential, sibling `for` loops, confirmed
+from its own `.amber` source) flips from `Fail` to `Pass` with this
+session's change, and only this one case differs -- everything else is
+byte-for-byte identical between the two runs. This makes sense on
+reflection: `LoopLinearizer::run()`'s worklist processes multiple
+sibling (not nested) leaf cycles in the same function sequentially, and
+two sibling loops can share enough CFG structure (e.g. one loop's own
+synthesized `loop.continue` condition landing in a block a
+later-processed sibling's own `OtherCondBrBlocks`/
+`collectUniformPassThroughRegion` scan also reaches) for the same stale-
+`UI`-on-new-IR hazard L188 identified for the nested case to also occur
+between ordinary siblings -- a reach this session did not originally
+anticipate the mechanism would need to cover, since the design reasoning
+focused on parent/child cycle nesting specifically. `run()`'s own
+non-leaf-cycle skip is unchanged this session, so true nested-cycle
+support itself remains unimplemented -- but the prerequisite soundness
+mechanism it needs is now landed, tested, and already independently
+valuable.
+
+**No new dedicated unit test added this session**: `LoopLinearizer` is an
+anonymous-namespace class in `Linearize.cpp` only ever exercised via
+`LinearizePass`'s own public entry point in this file's existing tests,
+and the sibling-sharing shape that made this fix observable was found
+only by the broad CTS sweep, not constructed by hand. A future session
+should mine `stable-colorgrid-modulo-double-always-false-discard`'s own
+reduced IR for a minimal `LinearizeTest.cpp` regression case covering
+this specific two-sibling-loop shape.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: this is a `LoopLinearizer` (`feme-cpu-linearize`)
+internal-soundness/correctness fix, touching no feature bit, limit, or
+extension surface.
