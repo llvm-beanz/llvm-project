@@ -102184,3 +102184,100 @@ verbatim from the start instead of re-deriving it.
 Next step if resuming: pick #1 (`WidenedAggregateComponents` audit) --
 it's the same methodology as this session, already proven to work, and
 well-scoped at a few hours.
+
+# L191(b) session: WidenedAggregateComponents audited, no live bug found
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 3 commits landed, all tests/CTS green, 0 regressions, 0 new passes (expected).**
+
+1. `cdfd7a66cc01` -- `SIMDize.cpp`: `AnyOperandDecomposed` now also
+   checks `WidenedAggregateComponents`.
+2. `44083b1eba7c` -- new positive-confirmation test,
+   `WidensUniformlyOperandedGroupSharedAtomicCmpXchg`.
+3. `a5687813cf63` -- `Roadmap.md` (`L191(a)` closed, no more sub-rows
+   needed) + `VulkanCTSReport.md` dated section.
+
+## What this session was
+
+Picked up `L191(a)`'s own deferred item #1: audit
+`WidenedAggregateComponents` (struct/array analogue of
+`WidenedVectorComponents`) for the same bug class.
+
+**Audit method** (about 45 min): grep every `WidenedAggregateComponents[...]`
+write (6 sites, 5 producers) -> for each, check dispatch-site ordering
+relative to the general uniformity gate.
+
+**Found, this time, a negative result**: unlike the vector side, *no*
+aggregate producer has the unsafe shape-only pattern.
+- Phi/`InsertValueInst`/`ExtractValueInst`/`SelectInst` are all dispatched
+  *after* the general gate already -- they can only propagate divergence
+  `UI` has already seen, never hide new divergence.
+- The one producer dispatched ahead of the gate,
+  `widenGroupSharedAtomicCmpXchg`, is safe for a structural reason:
+  `AtomicCmpXchgInst` is hard-coded `NeverUniform` in
+  `WaveUniformity.cpp`, so `UI` can never misjudge it uniform in the
+  first place. No hidden divergence exists for a consumer to miss.
+
+**Confirmed by experiment, not just inspection**: built a reproducer
+(uniform-operand groupshared `cmpxchg` -> two `extractvalue`s) expecting
+it to fail like the vector-side bugs did. It didn't. Root-caused why
+(above), then rewrote the test as a positive confirmation instead of
+discarding it.
+
+**Fix landed anyway**: added `WidenedAggregateComponents.contains(...)`
+to the same check, purely defensive/zero-cost parity with the vector-side
+fix, in case a future unsafe aggregate producer is ever added.
+
+## Verification (all green)
+
+- `FeMeTransformsCPUTests`: 562/562 (+1 new test), 0 regressions.
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed, 0 regressions.
+- Full `graphicsfuzz.*` re-sweep, 757/757 cases: **673/73/8/1/2**
+  (Pass/Fail/NotSup/Crash/Timeout) -- byte-for-byte identical to
+  `L191(a)`'s own baseline. 0 regressions, 0 new passes, exactly the
+  expected result for a change that's provably a no-op today.
+
+## Lesson worth remembering
+
+A negative audit result is still a useful result. Don't force a bug to
+exist just because the methodology worked last time -- the aggregate
+side turned out to have a genuinely different (and safer) shape than the
+vector side, and confirming that by experiment (not just argument) is
+what makes the "no bug here" conclusion trustworthy enough to write down
+and stop looking.
+
+## Deferred, not started this session
+
+1. **(large, no fix designed, same note as `L191(a)`)** The `PHINode`
+   two-pass structural gap applies identically on the aggregate side.
+   Pass 1 creates phi stubs before Pass 2 force-decomposes anything, so a
+   phi merging a future force-decomposed value can't be special-cased
+   with the current architecture.
+2. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
+   never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic and
+   `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+   when a value is destroyed!" crash -- both confirmed still pre-existing,
+   reproduced identically in this session's sweep too.
+3. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`. This is
+   mechanical, not research-heavy -- a good pick if a future session
+   wants a change of pace from the `SIMDize.cpp` bug-hunting streak.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted; a future session should do a real full-table pass rather
+   than keep deferring to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l191b/` sweep output already removed.
+
+Next step if resuming: the `L134(c)`/`L191`/`L191(a)`/`L191(b)` bug
+family is now fully closed (both `WidenedVectorComponents` and
+`WidenedAggregateComponents` audited, both no-live-bug-remaining). Pick
+#4 (`offload-test-suite` build setup) for a mechanical change of pace, or
+#3 (`LoopLinearizer` design work) if ready for a large research-heavy
+session.
