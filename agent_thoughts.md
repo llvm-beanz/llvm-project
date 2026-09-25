@@ -102076,3 +102076,111 @@ bug class turns up.
    unvetted; a future session should do a real full-table pass.
 6. **(~5 min)** No `/tmp` scratch left from this session --
    `/tmp/ctsrun_l191/` and the stale `/tmp/ctsrun_l190b/` both removed.
+
+# L191(a) session: audit closes the L134(c)/L191 bug class for good, +5 CTS passes
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 3 commits landed, all tests/CTS green, 0 regressions.**
+
+1. `2a615b9396b9` -- generalized the `L134(c)`/`L191` special cases into
+   one check in `SIMDize.cpp`.
+2. `821d0fa5f04c` -- 3 new regression tests, each confirmed to fail
+   without the fix.
+3. `652dea17ba3c` -- `Roadmap.md` (new `L191(a)` row, done) +
+   `VulkanCTSReport.md` dated section.
+
+## What this session was
+
+`L191`'s own commit left an open design question: replace its 3
+hand-written special cases (`ExtractElementInst`/`ShuffleVectorInst`/
+`InsertElementInst`) with one generic check, or keep adding a new special
+case every time a new consumer shape turns up? This session answered it.
+
+**Audit method** (about 90 min): grep every `WidenedVectorComponents[...]`
+write in `SIMDize.cpp` (19 sites, 16 producer functions) -> for each, ask
+"does this producer's decompose-and-erase decision depend on
+`UI.isDivergentAtDef`, or purely on shape?" -> cross-reference
+`WaveUniformity.cpp`'s hard-coded `NeverUniform` table to rule producers
+safe without touching code.
+
+**Found**: the bug isn't confined to the 3 already-patched consumer
+types. A `SelectInst`, an arbitrary/homogeneous-intrinsic `CallInst`, and
+a plain `StoreInst` are all equally exposed.
+
+**Fix** (about 1 hr): one check replaces the general gate and all 3
+special cases:
+```cpp
+bool AnyOperandDecomposed = llvm::any_of(I.operands(), [&](Use &U) {
+  return WidenedVectorComponents.contains(U.get());
+});
+if (!AnyOperandDecomposed && !UI.isDivergentAtDef(&I))
+  return true;
+```
+Strictly widens which instructions reach the existing post-gate dispatch
+cascade -- can't regress anything that worked before.
+
+**One gap the audit caught before it could bite**: a vector-typed
+`llvm.fabs.v3f32`-style call reaching the post-gate cascade this way
+would have hit `widenElementwise`'s scalar-only homogeneous-intrinsic
+path and built an illegal `<W x <N x T>>` nested vector type. Added a
+matching case routing it to `widenVectorElementwise` instead, which
+already handles it. Caught this by hand-tracing the dispatch cascade
+*before* writing the fix, not by hitting a crash after.
+
+## Verification (all green)
+
+- `FeMeTransformsCPUTests`: 561/561 (+3 new tests), 0 regressions.
+- `ninja check-feme`: 3343/3346, 3 Unsupported, 0 Failed, 0 regressions.
+- Full `graphicsfuzz.*` re-sweep, 757/757 cases, before/after this fix
+  alone: 668/78/8/1/2 (Pass/Fail/NotSup/Crash/Timeout) -> **673/73/8/1/2**.
+  Exactly +5, 0 regressions (diffed the full pass/fail sets, not just
+  counts).
+- Each of the 3 new unit tests independently confirmed to fail (poison
+  operand) without the fix via stash/rebuild/rerun/restore.
+
+## Lesson worth remembering
+
+My first select-test attempt passed *without* the fix -- not because the
+bug wasn't there, but because `isa<PoisonValue>(sinkCallArg)` doesn't
+catch it: an `extractelement` of a select-with-a-poison-operand is still
+an ordinary `Instruction`, not itself a `PoisonValue`, even though it
+evaluates to poison at runtime. Had to switch to "check the specific
+unrewritten value (`%sel`) by name for a poison *operand*" -- the same
+pattern the `L191` test already used, which I should have copied
+verbatim from the start instead of re-deriving it.
+
+## Deferred, not started this session
+
+1. **(~2-4 hrs)** `WidenedAggregateComponents` (the struct/array analogue
+   of `WidenedVectorComponents`) was never audited. Same bug class is
+   plausible there too.
+2. **(large, no fix designed)** A `PHINode` consumer of a
+   to-be-force-decomposed value is structurally unaddressable with the
+   current two-pass architecture (Pass 1 creates phi stubs before Pass 2
+   force-decomposes anything). Would need a pre-pass classification of
+   "which producers will unconditionally force-decompose" before Pass 1
+   runs.
+3. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
+   never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic and
+   `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+   when a value is destroyed!" crash -- both confirmed still pre-existing
+   and unrelated to this session's fix (reproduced identically in both
+   the before and after sweeps).
+4. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+5. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+6. **Scan `Roadmap.md` fresh** if not picking up 1-5 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted.
+7. **(~5 min)** No `/tmp` scratch left from this session -- all
+   `/tmp/ctsrun_l191a/` sweep output, per-case QPA logs, and the baseline
+   comparison run already removed.
+
+Next step if resuming: pick #1 (`WidenedAggregateComponents` audit) --
+it's the same methodology as this session, already proven to work, and
+well-scoped at a few hours.
