@@ -101826,3 +101826,126 @@ way.
 5. **(~5 min)** No `/tmp` scratch left from this session -- all sweep
    output, debug traces, and the temporary comparison worktree already
    removed.
+
+# Session: L190 fixed -- `complex-nested-loops-and-call`'s `PHINode::getIncomingValueForBlock` crash resolved
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` at session start (repeated as required).
+
+### What this session did
+
+1. Root-caused the crash flagged, but not investigated, at the end of
+   the L188/L189 session:
+   `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call` hit
+   `PHINode::getIncomingValueForBlock`'s assertion deep inside upstream
+   LLVM's `JumpThreadingPass`.
+2. Confirmed via `opt -passes=verify` on IR captured right after
+   `LinearizePass` that the crashing `phi` was **already malformed**
+   long before `JumpThreadingPass` ever touched it -- a genuine FeMe bug,
+   not an upstream one.
+3. Traced the exact mechanism using `opt -passes='print<cycles>'`/
+   `print<postdomtree>'` ground truth plus targeted, now-removed debug
+   instrumentation: `peelConstantFlowPredecessors` (`Linearize.cpp`)
+   bypasses a relay predecessor with a constant condition-phi
+   contribution directly into `Target`, but its `SSAUpdater` use-loop
+   can't split an *existing* downstream phi slot (left by an earlier
+   peel/merge) into two -- so a second, later peel in the same cycle
+   left `Target`'s phi one entry short of its real predecessor count.
+4. Fixed by explicitly duplicating any existing `Target` phi entry for
+   the block being peeled into a new entry for the newly-direct
+   predecessor, before the ordinary use-rewriting loop runs.
+5. Added `LinearizeTest.
+   ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`,
+   distilled directly from a real captured IR dump of this exact CTS
+   case. Confirmed it fails identically without the fix (stash/rebuild/
+   rerun/restore round-trip).
+6. Verified: `ninja check-feme` 3339/3342 (3 unsupported, 0 failed, +1
+   new test, 0 regressions); `FeMeTransformsCPUTests` 557/557; a partial
+   757-case `graphicsfuzz.*` re-sweep (426 completed within this
+   session's time budget) showed 383 Pass/37 Fail/6 NotSupported, 0 new
+   crashes -- the sweep's own 2 process-terminating crashes were
+   confirmed pre-existing via the same stash/rebuild round-trip.
+7. Updated `Roadmap.md` (new `L190` row, struck through as done) and
+   `VulkanCTSReport.md` (dated section with the verification numbers
+   above). No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   change needed -- this is an internal CPU-backend correctness fix, not
+   a feature/extension surface change.
+
+### Wins
+
+- `complex-nested-loops-and-call` no longer crashes the whole `deqp-vk`
+  process. It now runs to completion.
+- `check-feme`: 0 regressions, +1 new passing test.
+- A real, previously-mysterious "many stages removed from the actual
+  bug" assertion crash is now understood and fixed at its true source,
+  not papered over near the crash site.
+
+### Commits (in order)
+
+1. `6c2ca427b682` -- `Linearize.cpp`: the actual fix (duplicate
+   existing `Target` phi entries for a new peeled predecessor; also
+   fixes an adjacent, unrelated `getIncomingBlock`-vs-`getParent()` bug
+   in the same use-rewriting loop).
+2. `18e6af59a6c7` -- `LinearizeTest.cpp`: the new regression test.
+3. `1e52ff38d9a8` -- `Roadmap.md` + `VulkanCTSReport.md`: documentation.
+
+### A trap worth remembering for the next nested-relay bug
+
+My first two attempts at this fix were both wrong, and both looked
+plausible on paper:
+
+- **Attempt 1** changed only the `UserBlock == BB` skip-check (the
+  `getIncomingBlock` vs. `getParent()` bug, real but not sufficient on
+  its own) and rebuilt -- the crash didn't even change shape. Turned out
+  `SSAUpdater::RewriteUse` never adds a *new* incoming slot to an
+  existing phi at all; it only ever rewrites the value of a slot that
+  already exists. No amount of fixing the skip-check touches that.
+- **Attempt 2** added explicit phi-slot duplication, but matched the
+  slot's old value against the *peeled block's own phi pointer*
+  (`TargetPN.getIncomingValue(Idx) == PN`) -- this worked for exactly 2
+  of the real case's 5 affected phis. The other 3 had already been
+  folded to a plain constant by an intervening
+  `collapseTriviallyRedundantPhisInCycle` pass between the first and
+  second peel, so the pointer match silently failed and those 3 stayed
+  broken. Only reusing the *current* slot value verbatim (falling back
+  to the peeled-pair value only on an exact pointer match) covers both
+  cases.
+- Lesson: when a fix changes the crash's shape but doesn't eliminate it,
+  don't assume "close, just needs a tweak" -- re-dump the actual IR and
+  check every affected phi individually, not just the first one that
+  looks fixed.
+
+### Suggested next steps
+
+1. **(~1-2 days, not scoped in detail yet)** The residual pixel-value
+   `Fail` `complex-nested-loops-and-call` now hits (expected red, got
+   black) instead of crashing. Likely a genuinely separate,
+   pre-existing correctness bug in the same shader -- worth its own
+   fresh QPA-log/`feme-translate` trace from scratch, not an extension
+   of this session's fix.
+2. **(~1-2 hrs each)** Finish the partial `graphicsfuzz.*` sweep this
+   session started (426/757 done, in `/tmp` no longer -- rerun from
+   scratch with a crash-tolerant per-batch driver, e.g. re-derive from
+   this session's own throwaway Python driver if useful as a starting
+   point) to get a full before/after comparison, then investigate the 2
+   pre-existing process-crashing cases found
+   (`cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+   when a value is destroyed!", `cov-function-loops-vector-mul-matrix-
+   never-executed`'s divergent-branch `feme-cpu-simdize` gap) as their
+   own rows if picked up.
+3. **(large, not yet re-scoped in detail, deferred from the L188/L189
+   session)** Design "provably uniform by construction" value tracking
+   for `LoopLinearizer` -- the real prerequisite for nested-cycle
+   support (`L188`'s own still-open root cause). Do this design in
+   isolation before touching `LoopLinearizer::run()`'s traversal order.
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the long-
+   stale candidate list (`L90`-`L95` [now closed, drop from this list],
+   `L116(b)`/`L116(f)`, `L126(a)`, `L147`, `L98(b)`, assorted
+   `R`/`V`/`W`-prefixed rows) is still individually unvetted; a future
+   session should do a real full-table pass rather than keep deferring
+   to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session -- all `l190_*`
+   QPA logs, IR dumps, and caselist files already removed.
