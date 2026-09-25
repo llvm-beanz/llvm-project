@@ -12923,3 +12923,63 @@ No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed: this session's landed fix is an internal CPU-backend
 control-flow-linearization correctness fix, not a feature/extension
 surface change.
+
+## 2026-09-28: L190 fixed -- `complex-nested-loops-and-call`'s `PHINode::getIncomingValueForBlock` assertion crash resolved
+
+The `PHINode::getIncomingValueForBlock` assertion crash flagged, but not
+investigated, at the end of the L188/L189 session
+(`dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`) is root-caused and
+fixed. See `Roadmap.md`'s new `L190` row and `agent_thoughts.md`'s "L190
+session" entry for the full investigation.
+
+Summary: the crashing `phi` was already malformed immediately after
+`LinearizePass` ran, long before the upstream `JumpThreadingPass` that
+actually asserted on it. `peelConstantFlowPredecessors` (`Linearize.cpp`)
+bypasses a relay predecessor whose contribution to a block's own
+condition `phi` is a literal constant directly into `Target`, using
+`SSAUpdater` to reconcile any of the block's *other* externally-used
+values there -- but when `Target` already has a `phi` reconciling a value
+across that same block (left behind by an *earlier* peel/merge bypassing
+a different predecessor into the same `Target` -- exactly what this CTS
+case's own doubly-nested relay chain produces once `Flow8` merges into
+`Flow9`), `SSAUpdater::RewriteUse` cannot split that existing slot into
+two; the newly-direct predecessor's edge never gains a matching entry.
+Fixed by explicitly duplicating any such existing entry for the new
+predecessor before the ordinary use-rewriting loop runs, reusing the
+existing value verbatim unless it is still literally one of the current
+peel's own not-yet-collapsed `phi`s (in which case that peel's own
+per-predecessor value is used instead, matching every other outside-use
+rewrite).
+
+Verification:
+
+- New regression test `LinearizeTest.
+  ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`,
+  distilled directly from a real captured pre-`feme-cpu-linearize` IR
+  dump of this exact CTS case; confirmed to fail identically (`verifyModule`
+  catching the same missing-entry shape) via a stash/rebuild/rerun/restore
+  round-trip with the fix removed.
+- `ninja check-feme`: 3339/3342 passed, 3 unsupported, 0 failed, 0
+  regressions (+1 new test).
+- Full `FeMeTransformsCPUTests`: 557/557 passed (+1 new test).
+- `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call` no longer crashes;
+  it now runs to completion and reports an ordinary pixel-value `Fail`
+  (expected red, got black) instead of `SIGABRT`. This is a **separate,
+  likely pre-existing correctness bug** in the same shader, not yet
+  root-caused -- this session's scope was the crash, not full correctness
+  for this specific case.
+- Partial per-case `graphicsfuzz.*` re-sweep (426 of 757 cases; the
+  remaining cases were not reached within this session's time budget):
+  383 Pass / 37 Fail / 6 NotSupported, 0 new crashes observed. The sweep's
+  own two process-terminating crashes
+  (`cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+  when a value is destroyed!", `cov-function-loops-vector-mul-matrix-
+  never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic) were
+  both confirmed, via the same stash/rebuild/rerun round-trip, to
+  reproduce byte-for-byte identically without this fix -- pre-existing,
+  unrelated to this change, not investigated further this session.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this session's landed fix is an internal CPU-backend
+control-flow-linearization correctness fix, not a feature/extension
+surface change.
