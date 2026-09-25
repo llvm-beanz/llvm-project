@@ -102386,3 +102386,120 @@ Next step if resuming: `L192(b)` (`sqrt.16.test`) is the more interesting
 pick -- it may reveal a genuine `feme` `fp16` bug, or close out as a test
 issue like `H169` did. `L192(a)` is more mechanical (just confirm which
 bucket it's in). Either is well-scoped at 1-2 hours.
+
+# L192(b) session: fp16 sqrt denormal-flush bug found and fixed; L192(a) triaged
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 3 commits landed, all tests/CTS green, 0 regressions, a real bug fixed.**
+
+1. `1f00be7b33e1` -- `SPIRVToLLVMPatterns.cpp`: `f16` `Sqrt` no longer
+   flushes subnormal operands.
+2. `1bf9e7fbc84c` -- 2 new lit-test cases confirming the fix and locking
+   in `Sinh` still flushes at the same width.
+3. `bcd596514977` -- `Roadmap.md` (`L192(b)` struck through, `L192(a)`
+   updated with this session's triage) + `VulkanCTSReport.md`.
+
+## What this session was
+
+Picked `L192(b)` (the more interesting of the last session's two
+picks): triage `sqrt.16.test`'s fp16 mismatch.
+
+## Root cause (about 30 min once I looked in the right place)
+
+`TranscendentalFlushInputPattern` already existed, already documented
+(in its own comment!) that it models "a real GPU's own special-function
+hardware unit" flushing subnormal inputs to zero for `Log`/`Log2`/
+`Sqrt`/`Sinh` -- and its own comment even said "at `f32` precision", but
+the code applied the flush at *every* width, `f16` included. Nobody had
+ever actually checked whether `f16` wants the same flush.
+
+**Hand-computed the real math** (`python3` + `numpy.float16`) for the
+two mismatching input values instead of guessing:
+- `sqrt(-denormal 0x8001)`: real math = `NaN` (`0x7e00`). `feme`'s
+  flushed answer = `sqrt(-0.0) = -0.0` (`0x8000`). Test expects `0x7e00`
+  -- **wants the real, unflushed answer**.
+- `sqrt(+denormal 0x03FF)`: real math = `0.0078087` -> rounds to `0x1fff`
+  in `f16`. `feme`'s flushed answer = `sqrt(0.0) = 0.0`. Test expects
+  `0x1fff` -- **wants the real, unflushed answer**.
+
+**Before assuming the flush model itself was wrong, checked whether
+`Sinh`/`Log`/`Log2` at `f16` still want it** -- they do.
+`sinh.16.test`'s own denormal inputs: real `sinh(x) ~= x` for tiny `x`
+would round back to the *same* nonzero denormal, but the golden data
+expects flushed-to-zero `0.0`. So the flush model is correct for
+`Sinh`/`Log`/`Log2` at both widths; it's specifically `Sqrt` at `f16`
+that's the outlier. This is presumably a genuine real-GPU
+special-function-unit difference (fp16 sqrt implemented differently in
+hardware than fp32 sqrt), not a bug in the modeling approach.
+
+## Fix
+
+Added a `FlushF16Denormals` template parameter (default `true`,
+preserving every other instantiation), set to `false` only for the
+`GLSqrtOp` instantiation.
+
+## Verification
+
+- 2 new lit-test cases: one confirming no flush sequence appears for
+  `f16` `Sqrt` at all, one confirming `Sinh` still flushes at the same
+  width (so a future regression to "flush everything again" would be
+  caught).
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed, 0 regressions.
+- Full `graphicsfuzz.*` CTS re-sweep: unchanged, 673/73/8/1/2 -- expected,
+  this bug's shape isn't in that suite.
+- **Real-world confirmation against the actual regression**: rebuilt
+  `offload-test-suite`'s `check-hlsl-feme-vk` (the build directory set
+  up last session) -- `sqrt.16.test` now `PASS`. Re-ran the entire
+  `Feature/HLSLLib/*` family (263 cases) individually: 0 failures,
+  confirming no regression to any other flush-dependent test
+  (`log`/`log2`/`sinh`/`radians`/`degrees`/`rsqrt`, both widths).
+
+## L192(a) triaged along the way (not fixed)
+
+While re-running `check-hlsl-feme-vk` to verify the sqrt fix, looked at
+`SimpleLines.test`'s failure output too, since it was right there.
+**Not the same bug as `L30`** (`SimpleAmplification.test`'s own
+`"Symbols not found"` JIT error): the shader runs fine end-to-end
+(`offloader`'s stdout shows "Cleanup complete."), but the *comparison*
+step afterward fails: `imgdiff: error: Failed reading PNG header from
+file`. This is an output-image write/read problem, not a shader bug.
+Filed as its own row (`L192(a)`, triaged-not-fixed) rather than
+guessing at a fix without isolating which side (feme's own PNG writer,
+or `offload-test-suite`'s own `imgdiff` reader, or a path/rules
+misconfiguration for this one test) is actually at fault.
+
+## Lesson worth remembering
+
+`TranscendentalFlushInputPattern`'s own doc comment already said "at
+`f32` precision" -- a design note nobody had gone back to verify against
+real `f16` golden data until this session. When a comment describes a
+narrower intent than the code actually implements, that gap is worth
+checking directly, not assuming the wider implementation was
+intentional.
+
+## Deferred, not started this session
+
+1. **(~1-2 hrs)** `L192(a)` (`SimpleLines.test`/`SimpleTriangle.test`'s
+   PNG read/write failure): isolate which side is at fault (feme's own
+   image-write path, `offload-test-suite`'s `imgdiff`, or a
+   path/rules misconfiguration) before attempting a fix.
+2. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
+   two-pass structural gap -- unaddressed on both the vector and
+   aggregate sides.
+3. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted.
+5. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/otsbuild.log`/`/tmp/otsbuild2.log`/`/tmp/ctsrun_l192b/` all
+   removed.
+
+Next step if resuming: `L192(a)`'s PNG failure is well-scoped and
+mechanical to start (run `SimpleLines.test`'s own `offloader` invocation
+by hand, check whether `Output.png` even exists / has nonzero size
+before blaming `imgdiff`). If a change of pace is wanted instead, pick
+#2 or #3 for a larger research session.
