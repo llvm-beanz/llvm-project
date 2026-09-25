@@ -4784,74 +4784,64 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
   }
 
-  // (Roadmap L134(c)) An `extractelement` reading a vector `LI` a
-  // preceding `MaskedAllocas` special case (`widenMaskedAllocaLoad` just
-  // above) has *already* decomposed into `WidenedVectorComponents` must
-  // be routed through `widenExtractElement` too, even though the ordinary
-  // `UI.isDivergentAtDef` gate below cannot see it: that analysis judges
-  // `LI` itself uniform from its (genuinely uniform) *address* alone, for
-  // exactly the reason `widenMaskedAllocaLoad`'s own comment gives, with
-  // no way to see that the per-lane *values* `LI` reads back now
-  // genuinely differ. Left to fall through to that general gate, this
-  // `extractelement` would be misclassified "uniform: leave it exactly as
-  // it is" and never rewritten -- a dangling reference to `LI` once the
-  // masked-alloca load producing it is erased, silently replaced with
-  // `poison` by `eraseFromParent` (found reducing
+  // (Roadmap L191(a)) `L134(c)`/`L191` each added a narrow, hand-written
+  // special case here for one specific consumer instruction *type*
+  // (`ExtractElementInst`, then `ShuffleVectorInst`/`InsertElementInst`)
+  // reading a vector value an earlier, unconditionally-decomposing
+  // producer (`widenMaskedAllocaLoad`, `widenMaskedLoad`) had *already*
+  // force-decomposed into `WidenedVectorComponents` and erased,
+  // regardless of whether `UI.isDivergentAtDef` judged that *producer*
+  // itself divergent. Both were found the same way: `UI` judges the
+  // *consumer* uniform too (from its own, genuinely-uniform-looking
+  // operands -- the mask/address driving the producer's real divergence
+  // isn't visible to a uniformity analysis over the consumer's own
+  // operands), so it fell through to the general gate below,
+  // misclassified "uniform: leave it exactly as it is", and was left
+  // permanently referencing the since-erased producer -- silently
+  // replaced with `poison` by `eraseFromParent` (`L134(c)` found reducing
   // `dEQP-VK.draw.renderpass.multiple_interpolation.*`'s own
-  // all-transparent-black-pixel failure to this exact shape: a per-lane
-  // dynamically-indexed local array read back through a runtime,
-  // push-constant-derived index).
-  if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
-    if (WidenedVectorComponents.contains(EE->getVectorOperand())) {
-      widenExtractElement(*EE, Builder);
-      return true;
-    }
-  }
+  // all-transparent-black-pixel failure to this shape; `L191` found
+  // reducing `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s own
+  // all-black-pixel failure (expected red) to it, one producer over).
+  //
+  // A systematic audit of every `WidenedVectorComponents`-populating
+  // producer in this file (roadmap `L191(a)`) found this is not confined
+  // to those three instruction types: *any* instruction with at least one
+  // operand already present in `WidenedVectorComponents` is exposed to
+  // the identical bug if `UI` separately (and, by the same reasoning as
+  // above, incorrectly) judges *it* uniform too -- a `select` between a
+  // decomposed vector and an ordinary one, an arbitrary call taking a
+  // decomposed vector argument directly, or a plain `store` of a whole
+  // decomposed vector value, are all just as exposed, and none of them
+  // had a special case here. Rather than keep hand-adding one more
+  // narrow, per-instruction-type special case each time a new consumer
+  // shape turns up, replace all three of the above with a single general
+  // check instead: skip the ordinary gate for *any* instruction with a
+  // decomposed operand, regardless of what `UI` says about the
+  // instruction itself, and let it fall through to whichever dispatch
+  // case below already exists for its own concrete type. This is a strict
+  // widening of which instructions reach that dispatch cascade (the new
+  // condition below is a logical AND with the old one, so it can only add
+  // early-return exceptions, never remove one that existed before), and
+  // every dispatch case it can newly reach was individually confirmed
+  // (roadmap `L191(a)`) to already reconstruct a decomposed operand
+  // correctly and generically via `getVectorComponents`/`getWidened`,
+  // independently of *why* it is being widened -- see `widenVectorSelect`,
+  // `widenScalarizedFallback`, and the new homogeneous-intrinsic-`CallInst`
+  // dispatch case added below for `widenVectorElementwise` alongside this
+  // change, which closes the one gap the audit did find in that cascade
+  // (a vector-typed homogeneous "trivially vectorizable" intrinsic call,
+  // e.g. `llvm.fabs.v3f32`, previously reached `widenElementwise`'s
+  // scalar-only homogeneous-intrinsic path instead, which assumes `I`'s
+  // own type is scalar and would build an illegal `<W x <N x T>>` nested
+  // vector type for a vector-typed one).
+  bool AnyOperandDecomposed = llvm::any_of(I.operands(), [&](Use &U) {
+    return WidenedVectorComponents.contains(U.get());
+  });
 
-  // (Roadmap L191) The `shufflevector` analogue of L134(c) just above, hit
-  // by a *different* unconditionally-decomposing producer this time: a
-  // `feme.cpu.masked.load.*` call producing a vector-typed result (roadmap
-  // L15's `widenMaskedLoad` vector case) always decomposes into `N`
-  // per-component `llvm.masked.gather`s in `WidenedVectorComponents` and
-  // erases the original call, regardless of whether `UI.isDivergentAtDef`
-  // judges that *call* itself divergent -- exactly like
-  // `widenMaskedAllocaLoad` does for a masked-alloca read. A `shufflevector`
-  // built directly on top of that masked-load result to reassemble a
-  // `vec3`-into-`vec4` (e.g. this shader's own `_GLF_color = vec4(data[0],
-  // 1.0)`) can itself be classified uniform by `UI.isDivergentAtDef` --
-  // the mask governing the load's own divergence isn't visible to a
-  // uniformity analysis over the `shufflevector`'s own operands -- and,
-  // left to fall through to the general gate below, gets misclassified
-  // "uniform: leave it exactly as it is", permanently referencing the
-  // since-erased masked-load call, silently replaced with `poison` by
-  // `eraseFromParent`. Found reducing
-  // `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s own
-  // all-black-pixel failure (expected red) to this exact shape.
-  if (auto *SV = dyn_cast<ShuffleVectorInst>(&I)) {
-    if (WidenedVectorComponents.contains(SV->getOperand(0)) ||
-        WidenedVectorComponents.contains(SV->getOperand(1))) {
-      widenShuffleVector(*SV, Builder);
-      return true;
-    }
-  }
-
-  // (Roadmap L191) The `insertelement` analogue of the `shufflevector`
-  // case just above: `_GLF_color`'s own `vec4(data[0], 1.0)` construction
-  // chains an `insertelement` directly onto that same masked-load-derived
-  // `shufflevector`'s result (widening the `vec3`-shaped load into the
-  // `vec4`'s first three lanes before setting the fourth to a constant
-  // `1.0`), and can itself be classified uniform by `UI.isDivergentAtDef`
-  // for exactly the same reason the `shufflevector` case above already
-  // documents in detail.
-  if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
-    if (WidenedVectorComponents.contains(IE->getOperand(0))) {
-      widenInsertElement(*IE, Builder);
-      return true;
-    }
-  }
-
-  if (!UI.isDivergentAtDef(&I))
-    return true; // Uniform: leave it exactly as it is.
+  if (!AnyOperandDecomposed && !UI.isDivergentAtDef(&I))
+    return true; // Uniform, and no operand was force-decomposed: leave it
+                 // exactly as it is.
 
   if (isa<CondBrInst>(I) || isa<UncondBrInst>(I) || isa<ReturnInst>(I))
     return true; // Handled/verified by checkSupportedControlFlow already.
@@ -4944,6 +4934,34 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
        isa<CastInst>(&I) || isa<CmpInst>(&I))) {
     widenVectorElementwise(I, Builder);
     return true;
+  }
+
+  // (Roadmap L191(a)) A vector-typed homogeneous "trivially vectorizable"
+  // intrinsic call (e.g. `llvm.fabs.v3f32`) reaching *this* general
+  // dispatch cascade -- rather than the identically-shaped, earlier check
+  // in the initial `CallInst` dispatch block above, gated on
+  // `UI.isDivergentAtDef(CI)` -- can now happen because of the
+  // `AnyOperandDecomposed` gate-widening just above this function's own
+  // general gate: a call itself classified uniform by `UI`, but taking a
+  // `WidenedVectorComponents`-decomposed vector argument, no longer
+  // early-returns there. `widenElementwise`'s own homogeneous-intrinsic
+  // path (reached by falling all the way through to the bottom
+  // `widenElementwise(I, Builder)` call below) assumes its `CallInst`'s
+  // type is *scalar* (building a `<W x T>` overload from it) and would
+  // build an illegal `<W x <N x T>>` nested vector type for a vector-typed
+  // one instead -- route it to `widenVectorElementwise` here first, which
+  // already handles this exact `CallInst`-over-vector-typed-arguments
+  // shape correctly (each argument reconstructed generically via
+  // `getVectorComponents`, independently of why it is being widened).
+  if (auto *CI = dyn_cast<CallInst>(&I); CI && I.getType()->isVectorTy()) {
+    if (Function *Callee = CI->getCalledFunction();
+        Callee && isElementwiseVectorizableIntrinsic(Callee->getIntrinsicID()) &&
+        llvm::all_of(CI->args(), [&](const Value *Arg) {
+          return Arg->getType() == I.getType();
+        })) {
+      widenVectorElementwise(I, Builder);
+      return true;
+    }
   }
 
   widenElementwise(I, Builder);
