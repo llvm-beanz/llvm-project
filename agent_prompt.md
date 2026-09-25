@@ -61,28 +61,26 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~30 min-1 hr)** Triage `L192(a)`
-   (`SimpleLines.test`/`SimpleTriangle.test`): confirm same-family as
-   `L30` or distinct.
-2. **(~1-2 hrs)** Triage `L192(b)` (`sqrt.16.test`): hand-trace `feme`'s
-   `fp16` `sqrt` lowering for the 2 mismatching values before guessing at
-   a fix -- may turn out to be a stale/wrong test expectation, not a
-   `feme` bug, same shape as `H169`'s own resolution.
-3. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
-   two-pass structural gap (Pass 1 creates phi stubs before Pass 2
-   force-decomposes anything) -- unaddressed on both the vector and
+1. **(~1-2 hrs)** `L192(a)` (`SimpleLines.test`/`SimpleTriangle.test`'s
+   PNG read/write failure): isolate which side is at fault (feme's own
+   image-write path, `offload-test-suite`'s `imgdiff`, or a
+   path/rules misconfiguration) before attempting a fix.
+2. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
+   two-pass structural gap -- unaddressed on both the vector and
    aggregate sides.
-4. **(large, deferred many sessions now)** "Provably uniform by
+3. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
    still-open nested-cycle root cause.
-5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
    unvetted.
-6. **(~5 min)** `/tmp/otsbuild.log` (this session's build log) can be
-   deleted -- scratch only, nothing references it.
+5. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/otsbuild.log`/`/tmp/otsbuild2.log`/`/tmp/ctsrun_l192b/` all
+   removed.
 
-Next step if resuming: `L192(b)` (`sqrt.16.test`) is the more interesting
-pick -- it may reveal a genuine `feme` `fp16` bug, or close out as a test
-issue like `H169` did. `L192(a)` is more mechanical (just confirm which
-bucket it's in). Either is well-scoped at 1-2 hours.
+Next step if resuming: `L192(a)`'s PNG failure is well-scoped and
+mechanical to start (run `SimpleLines.test`'s own `offloader` invocation
+by hand, check whether `Output.png` even exists / has nonzero size
+before blaming `imgdiff`). If a change of pace is wanted instead, pick
+#2 or #3 for a larger research session.
