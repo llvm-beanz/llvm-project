@@ -13813,3 +13813,22 @@ this specific two-sibling-loop shape.
 need no change: this is a `LoopLinearizer` (`feme-cpu-linearize`)
 internal-soundness/correctness fix, touching no feature bit, limit, or
 extension surface.
+
+## 2026-10-04 (follow-on session): L196 unit test added; single-case CTS re-check only
+
+This session's own change is `LinearizeTest.cpp`-only (a new regression
+test, `TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit`, mined
+from this row's own real CTS shader via `llvm-reduce` -- see
+`Roadmap.md`'s L196 row for the full derivation) with **zero functional
+code change** to `Linearize.cpp` or any other pass; `ninja check-feme`
+alone (3351/3354 passed, +1 over the prior session's own landing, 3
+pre-existing `Unsupported`, 0 `Failed`) already confirms no regression,
+so a full `graphicsfuzz.*` re-sweep was not repeated this session. A
+single, targeted re-run of
+`dEQP-VK.graphicsfuzz.stable-colorgrid-modulo-double-always-false-discard`
+alone (the case this row's own fix and this session's new test both
+concern) was done as a sanity check: still `Pass`, as expected given no
+functional change.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed, for the same reason as the prior session's entry above.
