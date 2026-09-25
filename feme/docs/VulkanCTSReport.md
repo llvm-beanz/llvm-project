@@ -13644,3 +13644,86 @@ accounted-for `Fail`s; only 1
 (`cov-function-multiple-loops-compare-integer-return`, `rc=134`/
 `SIGABRT`) was a genuine crash, matching the single crash the
 established baseline has always reported.
+
+## 2026-10-03: L195 fixed -- vector-typed masked-load/masked-alloca-load result feeding an unwidened uniform `phi` no longer gets `poison`-RAUW'd
+
+Picked up the "PHINode two-pass structural gap" item (`L191(b)`'s own
+carried-forward item 1) from the prior session's next-steps menu, with
+an explicit goal of fully scoping and attempting a real, bounded fix
+for one concrete sub-case rather than the full, still-open general
+architectural problem.
+
+Root-caused a genuine, reachable bug: `widen()`'s pass 2 unconditionally
+force-decomposes and erases any `feme.cpu.masked.load.*` call/masked-
+alloca `load` (`widenMaskedLoad`/`widenMaskedAllocaLoad`), regardless of
+what `UniformityInfo` says about that specific instance's own operands
+-- a compile-time-constant governing mask can make `UI` correctly judge
+both the call and a `phi` merging its result uniform, even though
+`feme::cpu::LinearizePass` built it as a masked access in the first
+place because the *access* may be lane-varying in general. Confirmed the
+project already has an established, working fix for the *scalar* shape
+of this bug class (roadmap `H107`/`L118`): `widen()`'s post-pass-3
+"sever every remaining `ToErase` use" cleanup step deliberately leaves
+such a `phi` un-widened (since `UI` is right that it's uniform) and
+instead recovers a real, entry-mask-derived-lane value from the scalar
+`Widened` map for its stale operand, rather than RAUW'ing it to
+`poison`. An initial attempt at this session's own fix (force-widening
+the `phi` in pass 1 instead) was abandoned once a full regression run
+caught it breaking those two pre-existing H107/L118 tests -- the scalar
+case was never actually broken; the real, narrower gap is that this same
+cleanup step never consulted `WidenedVectorComponents` for the *vector*-
+typed branch of the same force-decomposing producers.
+
+**Fix**: extended the cleanup step with a parallel `WidenedVectorComponents`
+branch, rebuilding a real narrow `<N x elemT>` value component-by-
+component (one `extractelement` at the same memoized
+`getFirstActiveLaneIndex()` per widened component, reassembled with
+`insertelement`), mirroring the scalar branch's own approach and its
+`phi`-must-stay-grouped-at-block-top insertion-point handling exactly.
+(`WidenedAggregateComponents` was confirmed, by direct code reading, to
+never actually need the same treatment: none of the three unconditional
+force-decomposing producers this row covers can ever populate it --
+`getOrInsertMaskedLoad` rejects aggregate element types outright,
+`atomicrmw` is always scalar, and `widenMaskedAllocaLoad`'s own
+aggregate-typed-load case is a separate, pre-existing, out-of-scope bug
+of its own, not a reachable "provably uniform aggregate" shape.)
+
+**Verification**:
+- 2 new `SIMDizeTest.cpp` regression cases:
+  `WidensVectorPHIMergingUniformlyMaskedLoad` (the genuinely new
+  vector-typed gap -- confirmed via a stash/rebuild/rerun/restore
+  round-trip to reproduce real `poison` corruption without the fix) and
+  `WidensPHIMergingMaskedAllocaLoad` (the `widenMaskedAllocaLoad`
+  producer path through the pre-existing scalar mechanism, confirming it
+  generalizes across producers, not just the masked-load-call shape
+  H107/L118's own test already covers).
+- `FeMeTransformsCPUTests`: 565/565 passed, 0 regressions -- both
+  pre-existing H107/L118 tests (`ReadsBackRealUniformValueThroughA
+  MaskedLoadFeedingAnUnwidenedPhi`/`RecoversUniformValueFromEntryMask
+  DerivedLaneNotHardcodedLaneZero`) still pass unaffected, since the
+  scalar branch itself is untouched.
+- `ninja check-feme`: 3350/3353 passed, 3 pre-existing Unsupported, 0
+  Failed, 0 regressions (+2 new tests).
+- `check-hlsl-feme-vk` (offload-test-suite, 680 tests): unchanged at the
+  same 2 pre-existing failures (`WaveOps/WaveActiveMax.test`
+  flaky-by-design `H169`, `Feature/PushConstant/array_of_matrices.test`
+  XPASS `H124g`), confirmed pre-existing and unrelated via a stash/
+  rebuild/rerun/restore round-trip against this same tree.
+
+**Full `graphicsfuzz.*` CTS re-sweep** (757 cases, crash-tolerant
+per-case-isolated driver, 30s-per-case timeout, same re-classification
+methodology the `L194` session's note above documents): **673 Pass, 73
+Fail, 8 NotSupported, 1 real process crash
+(`cov-function-multiple-loops-compare-integer-return`), 2 timeouts** --
+an exact match, case-for-case total, to the established baseline. 0
+regressions, 0 incidental new passes. `graphicsfuzz.*` does not happen
+to exercise the specific vector-masked-load-feeding-uniform-phi shape
+this fix targets, so this result is exactly the "unaffected, confirm no
+regressions" outcome expected going in -- the fix's own direct
+verification is the 2 new unit tests above and the `check-feme` lit
+suite, not this CTS sweep.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: this is a CPU-widening-pass (`FunctionWidener::widen`)
+correctness fix internal to `feme-cpu-simdize`, touching no feature bit,
+limit, or extension surface.
