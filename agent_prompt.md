@@ -61,35 +61,35 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~2-4 hrs)** `WidenedAggregateComponents` (the struct/array analogue
-   of `WidenedVectorComponents`) was never audited. Same bug class is
-   plausible there too.
-2. **(large, no fix designed)** A `PHINode` consumer of a
-   to-be-force-decomposed value is structurally unaddressable with the
-   current two-pass architecture (Pass 1 creates phi stubs before Pass 2
-   force-decomposes anything). Would need a pre-pass classification of
-   "which producers will unconditionally force-decompose" before Pass 1
-   runs.
-3. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
+1. **(large, no fix designed, same note as `L191(a)`)** The `PHINode`
+   two-pass structural gap applies identically on the aggregate side.
+   Pass 1 creates phi stubs before Pass 2 force-decomposes anything, so a
+   phi merging a future force-decomposed value can't be special-cased
+   with the current architecture.
+2. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
    never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic and
    `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
-   when a value is destroyed!" crash -- both confirmed still pre-existing
-   and unrelated to this session's fix (reproduced identically in both
-   the before and after sweeps).
-4. **(large, deferred many sessions now)** "Provably uniform by
+   when a value is destroyed!" crash -- both confirmed still pre-existing,
+   reproduced identically in this session's sweep too.
+3. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
    still-open nested-cycle root cause.
-5. **(2-4 hrs, one-time setup, deferred many sessions now)**
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
-   directory at `/home/dev/dev/offload-test-suite/build`.
-6. **Scan `Roadmap.md` fresh** if not picking up 1-5 above -- the
+   directory at `/home/dev/dev/offload-test-suite/build`. This is
+   mechanical, not research-heavy -- a good pick if a future session
+   wants a change of pace from the `SIMDize.cpp` bug-hunting streak.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted.
-7. **(~5 min)** No `/tmp` scratch left from this session -- all
-   `/tmp/ctsrun_l191a/` sweep output, per-case QPA logs, and the baseline
-   comparison run already removed.
+   unvetted; a future session should do a real full-table pass rather
+   than keep deferring to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l191b/` sweep output already removed.
 
-Next step if resuming: pick #1 (`WidenedAggregateComponents` audit) --
-it's the same methodology as this session, already proven to work, and
-well-scoped at a few hours.
+Next step if resuming: the `L134(c)`/`L191`/`L191(a)`/`L191(b)` bug
+family is now fully closed (both `WidenedVectorComponents` and
+`WidenedAggregateComponents` audited, both no-live-bug-remaining). Pick
+#4 (`offload-test-suite` build setup) for a mechanical change of pace, or
+#3 (`LoopLinearizer` design work) if ready for a large research-heavy
+session.
