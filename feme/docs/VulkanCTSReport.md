@@ -12845,3 +12845,81 @@ instead of re-deriving the root cause.
 No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed for any of the three: both landed fixes are internal SPIR-V-to-LLVM
 legalization-completeness fixes, and L188 has no fix landed yet.
+
+## L188 root cause corrected; L189 (relay-chain hop-selection fix) landed instead
+
+This session started from the prior session's L188 fix design above
+(generalize `straightChain` into a uniform-conditional-tolerant BFS walk,
+fix `ExitCheck::RelayBlock`'s first-vs-last-hop bug). Implemented it,
+verified via the full existing test suite (`FeMeTransformsCPUTests`
+556/556, `Transforms/CPU` lit suite 238/238, 0 regressions), rebuilt
+`feme_vulkan`, and re-ran the target case directly via `deqp-vk` --
+**still failed, identically, at the same offending block (`Flow195`)**.
+
+Root-caused with a fresh IR trace (`FEME_DUMP_IR_PRESIMD` again) rather
+than assuming the fix needed tweaking: `Flow195`'s enclosing loop (header
+block `45`) contains an already-successfully-linearized *inner* loop
+(header block `94`, confirmed via the `loop.any.active` mask-reduction
+name `closeLatch`/`createMaskAny` produce), making the outer loop
+non-leaf. `LoopLinearizer::run` (`Linearize.cpp` ~line 2887) has a
+pre-existing, deliberate `if (!CI.children(C).empty()) continue;` that
+silently skips any non-leaf cycle with **no diagnostic at all** -- an
+already-documented "nested loops are future work" limitation, not a bug
+introduced by any recent change. `Flow195`'s own divergent branch belongs
+to this silently-skipped outer cycle, so `LinearizePass` never touches it,
+and it survives unchanged into `feme-cpu-simdize`, which reports it there
+instead (explaining the error's own pass name). Confirmed with a
+temporary, now-removed `FEME_DEBUG_RELAY_CHAIN` trace inside the new
+relay-walk function: **zero output** for this CTS case, proving the
+relay-chain code path is never even reached by this shape.
+
+This fully overturns the prior session's L188 diagnosis. `Roadmap.md`'s
+`L188` row is corrected with the real root cause and why a real fix (bottom-up
+nested-cycle processing, plus a new "provably uniform by construction"
+value-tracking mechanism for a child cycle's own synthesized IR, since the
+pass's `UniformityInfo`/`CycleInfo` are computed once and are unsound to
+query against IR a child cycle's own linearization just created) is a
+substantially larger design effort than either this row or the relay-chain
+fix originally scoped.
+
+The relay-chain hop-selection fix itself (BFS-based `uniformRelayChain`
+replacing `straightChain`, plus the `RelayBlock` first-vs-last-hop
+correctness fix) was landed anyway, on its own independent merits as new
+roadmap row **L189** -- a real, correctly-reasoned latent-bug fix, not
+something this session invented to appear productive. No new unit test:
+a synthetic repro for the uniform-mid-chain-hop shape specifically was
+attempted and abandoned after tracing why it is not tractable in a single
+leaf cycle (the `Candidate` block `matchExitCheckWithRelay` starts its
+walk from is topologically forced to already equal the cycle's one
+recognized `ExitBlock`, unless a relay block also has an independent path
+back to the header -- and any such shape collides with
+`DiamondFlattener`'s own top-level reconvergence-walk requirements in ways
+this session's time budget could not resolve). Left for a future session
+once a real captured case is found, the same way the existing hard-won
+`LinearizesLoopWithTwoRelayHopsToDivergentExit` two-hop test was
+originally captured rather than invented from scratch.
+
+Verification after landing:
+
+- `check-feme`: 3338/3341 passed, 3 unsupported, 0 failed (unchanged from
+  baseline).
+- Full per-case-isolated 757-case `graphicsfuzz.*` sweep: 665 Pass / 76
+  Fail / 8 unaccounted (crash/timeout) -- **identical to the post-
+  L186+L187 baseline, 0 regressions, 0 improvements** (expected: L189's
+  new tolerance is not reached by any of these 757 cases either, per the
+  same topological argument above).
+- One of the 8 "unaccounted" cases
+  (`dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`) crashes with a
+  `PHINode::getIncomingValueForBlock` assertion; verified this predates
+  L189 entirely (reproduced identically after temporarily reverting
+  `Linearize.cpp` to its pre-L189 state and rebuilding `feme_vulkan`) --
+  not a regression, and not investigated further this session (a
+  candidate for a future `L190`-style row if picked up).
+- L188's own target case
+  (`dEQP-VK.graphicsfuzz.stable-binarysearch-tree-false-if-discard-loop`)
+  re-confirmed still **Fail**, identically, directly via `deqp-vk`.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this session's landed fix is an internal CPU-backend
+control-flow-linearization correctness fix, not a feature/extension
+surface change.
