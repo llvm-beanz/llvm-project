@@ -1527,6 +1527,98 @@ private:
   /// there is no need to recompute it at all.
   UniformityInfo &UI;
 
+  /// Roadmap L196: values this pass itself has synthesized and separately
+  /// proven provably uniform "by construction" -- populated exclusively
+  /// by `markUniformIfOperandsAreUniform`/`createUniformMaskAny` at each
+  /// point in `linearizeCycle`/`closeLatch` that builds one, never by
+  /// consulting `UI`. This is the mechanism roadmap L188's own root-cause
+  /// investigation concluded a real nested-cycle fix would need: `UI` (see
+  /// this class's own member comment above) is computed once, before any
+  /// cycle in \p F is linearized, and deliberately never recomputed --
+  /// meaning a value this pass creates while linearizing one cycle (a
+  /// mask-any reduction, a closed-latch continue condition, ...) did not
+  /// exist when `UI` was computed and so cannot be soundly asked about via
+  /// `UI` directly. `UniformityInfo::isDivergentAtDef`'s own documented
+  /// "value not present at analysis time -> conservatively divergent"
+  /// default (see `GenericUniformityImpl.h`'s own `isDivergent` comment)
+  /// is *safe* to fall through to for such a value (it only ever costs
+  /// precision, e.g. this milestone's own classification treating a
+  /// genuinely uniform new value as an unsupported second divergent check
+  /// instead of recognizing it as a harmless pass-through), but
+  /// `UniformityInfo::isDivergentTerminator`'s own block-keyed cache is
+  /// not merely imprecise but outright *unsound* to consult on a block
+  /// whose original terminator (whatever `UI` actually analyzed) this
+  /// pass has since replaced with a brand new one of its own construction
+  /// -- the cache reflects the old, erased terminator's own verdict, not
+  /// the new one's, and can therefore give a wrong answer in either
+  /// direction (see `isDivergentBranch`'s own comment for the concrete
+  /// double-so-far-unrealized failure mode this would otherwise permit
+  /// once a future session lets `run()` linearize a non-leaf cycle after
+  /// its own children). Every place in this class that used to query `UI`
+  /// directly for a branch/value this pass itself might have replaced now
+  /// goes through `isDivergentBranch`/`isDivergentValue` instead, which
+  /// consult this set first.
+  SmallPtrSet<const Value *, 32> KnownUniformValues;
+
+  /// Whether \p V is provably uniform "by construction": either a
+  /// `Constant` (trivially so -- every lane agrees on a compile-time
+  /// constant), or a value this pass itself already recorded in
+  /// `KnownUniformValues`. Does *not* fall back to `UI` at all -- callers
+  /// needing the full, sound "is `V` divergent" answer (pre-existing IR
+  /// included) should call `isDivergentValue` instead; this helper alone
+  /// only ever answers "yes, provably uniform" or "not proven either way
+  /// by this pass's own construction," never "provably divergent."
+  bool isKnownUniform(const Value *V) const;
+
+  /// The sound, `KnownUniformValues`-aware replacement for a raw
+  /// `UI.isDivergentAtDef(V)` query anywhere in this pass: returns
+  /// `false` (uniform) whenever `isKnownUniform(V)` already proves it so,
+  /// otherwise falls back to `UI.isDivergentAtDef(V)` -- correct for any
+  /// value that predates this pass's own mutations (exactly what `UI` was
+  /// computed against), and safely (if conservatively) divergent for a new
+  /// value this pass created but has not (or cannot) prove uniform.
+  bool isDivergentValue(const Value *V) const;
+
+  /// The sound, `KnownUniformValues`-aware replacement for a raw
+  /// `UI.isDivergentTerminator(Br)` query anywhere in this pass. Unlike
+  /// that call -- keyed on `Br`'s own *block*, and therefore stale the
+  /// moment this pass replaces a block's terminator with a new one of its
+  /// own (see `KnownUniformValues`'s own comment) -- this is keyed on
+  /// `Br`'s own *current* condition value via `isDivergentValue`, so it
+  /// stays correct no matter how many times this pass itself has already
+  /// replaced that block's terminator. Concretely, the failure mode this
+  /// avoids: if `Br`'s block's *original* terminator (whatever `UI`
+  /// actually analyzed) happened to be genuinely divergent, but this pass
+  /// has since replaced it with a brand new, provably-uniform-by-
+  /// construction backedge condition (exactly `closeLatch`'s own
+  /// product), a raw `UI.isDivergentTerminator(Br)` call would still
+  /// report "divergent" (the block-keyed cache never learns of the
+  /// replacement) -- misclassifying an already-linearized child cycle's
+  /// own harmless, fully-masked continuation branch as a second,
+  /// unsupported divergent check the moment a parent cycle's own
+  /// `OtherCondBrBlocks` scan reaches it.
+  bool isDivergentBranch(const CondBrInst *Br) const;
+
+  /// Records \p V (freshly created by this pass) into `KnownUniformValues`
+  /// iff every one of \p Ops is *itself* already provably uniform (via
+  /// `isDivergentValue`, so an operand may be either a pre-existing value
+  /// `UI` already vouches for, or a value this same mechanism already
+  /// proved uniform earlier in the same walk) -- a boolean AND/OR/NOT (or
+  /// any other side-effect-free combination) of only uniform operands is
+  /// itself always uniform, since every active lane necessarily computes
+  /// the identical result from identical inputs. Returns \p V unchanged,
+  /// for convenient chaining at each call site.
+  Value *markUniformIfOperandsAreUniform(Value *V, ArrayRef<Value *> Ops);
+
+  /// `feme::cpu::createMaskAny` is *always* uniform regardless of its own
+  /// operand's uniformity -- it models a genuine wave-wide reduction
+  /// primitive (every lane observes the same reduced answer, by
+  /// definition), not an ordinary per-lane computation -- so this thin
+  /// wrapper marks its result uniform unconditionally rather than needing
+  /// `markUniformIfOperandsAreUniform`'s own per-operand check.
+  Value *createUniformMaskAny(IRBuilderBase &B, Value *Mask,
+                              const Twine &Name);
+
   /// The exit-check shape a single loop block can have: a conditional
   /// branch where exactly one successor is the loop's shared exit block and
   /// the other stays inside the loop.
@@ -1612,7 +1704,6 @@ private:
   std::optional<SmallPtrSet<BasicBlock *, 8>>
   collectUniformPassThroughRegion(BasicBlock *From, BasicBlock *To,
                                   BasicBlock *ExitBlock, CycleRef C,
-                                  UniformityInfo &UI,
                                   const SmallPtrSetImpl<BasicBlock *> &PeeledFrom);
 
   /// Finalizes \p Latch's backedge once its loop-carried masks are fully
@@ -1668,9 +1759,21 @@ private:
 /// loop's own real one -- `linearizeCycle`'s own `OtherCondBrBlocks`
 /// classification already rejects that shape elsewhere, but this walk
 /// must not silently paper over it either).
-std::optional<BasicBlock *> uniformRelayChain(BasicBlock *From,
-                                              BasicBlock *ExitBlock,
-                                              UniformityInfo &UI) {
+///
+/// \p IsDivergentBranch decides whether a conditional branch encountered
+/// mid-chain counts as "genuinely divergent" for this purpose; callers
+/// should pass `LoopLinearizer::isDivergentBranch` (bound to the caller's
+/// own instance) rather than a raw `UniformityInfo::isDivergentTerminator`
+/// query, so that a branch this same pass has itself already replaced --
+/// e.g. an already-linearized child cycle's own closed-latch continue
+/// condition -- is judged by its *current* condition value rather than a
+/// stale, block-keyed cache entry left over from before the replacement
+/// (see `LoopLinearizer::KnownUniformValues`'s own comment for why a raw
+/// `UI` query is not sound here).
+std::optional<BasicBlock *>
+uniformRelayChain(BasicBlock *From, BasicBlock *ExitBlock,
+                  llvm::function_ref<bool(const CondBrInst *)>
+                      IsDivergentBranch) {
   SmallPtrSet<BasicBlock *, 8> Visited;
   SmallVector<BasicBlock *, 8> Worklist{From};
   BasicBlock *LastHop = nullptr;
@@ -1694,7 +1797,7 @@ std::optional<BasicBlock *> uniformRelayChain(BasicBlock *From,
       continue;
     }
     auto *CBr = dyn_cast<CondBrInst>(Cur->getTerminator());
-    if (!CBr || UI.isDivergentTerminator(CBr))
+    if (!CBr || IsDivergentBranch(CBr))
       return std::nullopt;
     if (!ConsiderSuccessor(Cur, CBr->getSuccessor(0)) ||
         !ConsiderSuccessor(Cur, CBr->getSuccessor(1)))
@@ -2374,8 +2477,9 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
   std::optional<ExitCheck> Result;
   for (unsigned I = 0; I != 2; ++I) {
     BasicBlock *Candidate = Br->getSuccessor(I);
-    std::optional<BasicBlock *> Relay =
-        uniformRelayChain(Candidate, ExitBlock, UI);
+    std::optional<BasicBlock *> Relay = uniformRelayChain(
+        Candidate, ExitBlock,
+        [this](const CondBrInst *CBr) { return isDivergentBranch(CBr); });
     if (!Relay)
       continue;
     if (Result)
@@ -2394,7 +2498,7 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
 std::optional<SmallPtrSet<BasicBlock *, 8>>
 LoopLinearizer::collectUniformPassThroughRegion(
     BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock, CycleRef C,
-    UniformityInfo &UI, const SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
+    const SmallPtrSetImpl<BasicBlock *> &PeeledFrom) {
   SmallPtrSet<BasicBlock *, 8> Visited;
   SmallVector<BasicBlock *, 8> Worklist{From};
   while (!Worklist.empty()) {
@@ -2417,7 +2521,7 @@ LoopLinearizer::collectUniformPassThroughRegion(
     // shape this milestone does not yet support -- `PeeledFrom` wins the
     // same way it does everywhere else in this pass (see
     // `linearizeCycle`'s own comment).
-    if (!PeeledFrom.contains(Cur) && UI.isDivergentTerminator(CBr))
+    if (!PeeledFrom.contains(Cur) && isDivergentBranch(CBr))
       return std::nullopt;
     Worklist.push_back(CBr->getSuccessor(0));
     Worklist.push_back(CBr->getSuccessor(1));
@@ -2425,18 +2529,51 @@ LoopLinearizer::collectUniformPassThroughRegion(
   return Visited;
 }
 
+bool LoopLinearizer::isKnownUniform(const Value *V) const {
+  return isa<Constant>(V) || KnownUniformValues.contains(V);
+}
+
+bool LoopLinearizer::isDivergentValue(const Value *V) const {
+  if (isKnownUniform(V))
+    return false;
+  return UI.isDivergentAtDef(V);
+}
+
+bool LoopLinearizer::isDivergentBranch(const CondBrInst *Br) const {
+  return isDivergentValue(Br->getCondition());
+}
+
+Value *LoopLinearizer::markUniformIfOperandsAreUniform(Value *V,
+                                                       ArrayRef<Value *> Ops) {
+  if (llvm::all_of(Ops,
+                   [&](Value *Op) { return !isDivergentValue(Op); }))
+    KnownUniformValues.insert(V);
+  return V;
+}
+
+Value *LoopLinearizer::createUniformMaskAny(IRBuilderBase &B, Value *Mask,
+                                           const Twine &Name) {
+  Value *V = createMaskAny(B, Mask, Name);
+  KnownUniformValues.insert(V);
+  return V;
+}
+
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
                                   const MaskPair &MasksAtLatch) {
   auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
   IRBuilder<> B(Latch->getTerminator());
-  Value *AnyActive = createMaskAny(B, MasksAtLatch.Live, "loop.any.active");
+  Value *AnyActive = createUniformMaskAny(B, MasksAtLatch.Live, "loop.any.active");
   Value *Continue;
   if (NaturalBr) {
     Value *NaturalCond = NaturalBr->getCondition();
     bool ContinueOnTrue = NaturalBr->getSuccessor(0) == Header;
-    Value *NaturalContinue =
-        ContinueOnTrue ? NaturalCond : B.CreateNot(NaturalCond);
-    Continue = B.CreateAnd(NaturalContinue, AnyActive, "loop.continue");
+    Value *NaturalContinue = NaturalCond;
+    if (!ContinueOnTrue)
+      NaturalContinue = markUniformIfOperandsAreUniform(
+          B.CreateNot(NaturalCond), {NaturalCond});
+    Continue = markUniformIfOperandsAreUniform(
+        B.CreateAnd(NaturalContinue, AnyActive, "loop.continue"),
+        {NaturalContinue, AnyActive});
     NaturalBr->eraseFromParent();
   } else {
     Continue = AnyActive;
@@ -2615,7 +2752,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
 
     std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
-    if (!HeaderExit || !UI.isDivergentTerminator(HeaderExit->Br))
+    if (!HeaderExit || !isDivergentBranch(HeaderExit->Br))
       return false; // No divergence: leave this real uniform loop alone.
 
     MaskPair Masks = makeActivePNPair();
@@ -2624,7 +2761,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
                                             : HeaderExit->Cond;
     MaskPair MasksNext = stayInLoop(B, Masks, Staying, "active.next");
-    Value *Continue = createMaskAny(B, MasksNext.Live, "loop.continue");
+    Value *Continue = createUniformMaskAny(B, MasksNext.Live, "loop.continue");
     CondBrInst::Create(Continue, HeaderExit->StayInLoop, ExitBlock,
                        HeaderExit->Br->getIterator());
     HeaderExit->Br->eraseFromParent();
@@ -2661,7 +2798,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
           continue;
         auto *CondBr = dyn_cast<CondBrInst>(BB.getTerminator());
         if (!CondBr || PeeledFrom.contains(&BB) ||
-            !UI.isDivergentTerminator(CondBr))
+            !isDivergentBranch(CondBr))
           continue;
         // Whether `BB` is a genuine exit check (one arm reaches
         // `ExitBlock`, possibly via a relay chain) is `flattenLoopBodyDiamond`'s
@@ -2681,8 +2818,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
-  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
-  bool LatchDivergent = LatchExit && UI.isDivergentTerminator(LatchExit->Br);
+  bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
+  bool LatchDivergent = LatchExit && isDivergentBranch(LatchExit->Br);
 
   // Every other cycle block, if any, must instead be the single "Flow
   // merge" exit-check block described above (see the file comment).
@@ -2746,7 +2883,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // comment for the region walk that recognizes it instead.
     SmallVector<BasicBlock *, 2> DivergentCandidates;
     for (BasicBlock *BB : OtherCondBrBlocks)
-      if (!PeeledFrom.contains(BB) && UI.isDivergentTerminator(BB->getTerminator()))
+      if (!PeeledFrom.contains(BB) &&
+          isDivergentBranch(cast<CondBrInst>(BB->getTerminator())))
         DivergentCandidates.push_back(BB);
 
     if (DivergentCandidates.size() > 1) {
@@ -2772,11 +2910,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
 
     std::optional<SmallPtrSet<BasicBlock *, 8>> PreRegion =
-        collectUniformPassThroughRegion(Header, CheckBlock, ExitBlock, C, UI,
+        collectUniformPassThroughRegion(Header, CheckBlock, ExitBlock, C,
                                         PeeledFrom);
     std::optional<SmallPtrSet<BasicBlock *, 8>> PostRegion =
         collectUniformPassThroughRegion(CheckExit->StayInLoop, Latch,
-                                        ExitBlock, C, UI, PeeledFrom);
+                                        ExitBlock, C, PeeledFrom);
     if (!PreRegion || !PostRegion) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
@@ -2915,7 +3053,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     Value *Cond = LatchExit->Cond;
     Value *Staying = LatchExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
     MasksAfterLatchCheck = stayInLoop(B, MasksAtLatch, Staying, "active.latch");
-    Continue = createMaskAny(B, MasksAfterLatchCheck.Live, "loop.continue");
+    Continue = createUniformMaskAny(B, MasksAfterLatchCheck.Live, "loop.continue");
     CondBrInst::Create(Continue, Header, ExitBlock,
                        LatchExit->Br->getIterator());
     LatchExit->Br->eraseFromParent();
