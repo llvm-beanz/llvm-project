@@ -61,44 +61,21 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs, well-scoped)** `L193`: root-cause the `SampleCmp.test`
-   crash -- get an isolated repro (this test alone, or its own compiled
-   `.o` fed straight to `feme-translate`/`feme-opt`), then `spirv-dis`
-   the failing call's operand types to find which one the pattern
-   wrongly assumes is a vector.
-2. **(~1-2 hrs, well-scoped, same shape as `H124u`'s own prior work)**
-   `L194`: add a `QueryLod1D`/`QueryLodArray1D` counterpart to
-   `H124u`'s own `QueryLodCube` work.
-3. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
-   two-pass structural gap -- unaddressed on both the vector and
-   aggregate sides.
-4. **(large, deferred many sessions now)** "Provably uniform by
+1. **(~1-2 hrs, well-scoped)** `L194`: add a `QueryLod1D`/
+   `QueryLodArray1D` counterpart to `H124u`'s own `QueryLodCube` work,
+   same shape (new `ImageCallKind`, `hasOnlySupportedImageUses`
+   widening, a new runtime entry point) -- still the most immediately
+   next well-scoped item.
+2. **(large, no fix designed, carried forward many sessions now)** The
+   `PHINode` two-pass structural gap (Pass 1 creates phi stubs before
+   Pass 2 force-decomposes anything) -- unaddressed on both the vector
+   and aggregate sides.
+3. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
    still-open nested-cycle root cause.
-5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
    unvetted.
-6. **Worth a broader sanity sweep at some point**: since this session
-   found one already-documented fix (`H140`'s `offload-test-suite`
-   side) silently lost from the checkout, it's plausible other
-   `offload-test-suite`-side fixes from other roadmap rows citing
-   "offload-test-suite" as a touched file might have the same problem
-   -- a `grep`-for-roadmap-rows-mentioning-offload-test-suite-then-
-   verify-each-is-actually-committed-there pass would be cheap
-   insurance, though not urgent (only 1 other row currently references
-   an `offload-test-suite`-side change, per a quick `grep` this
-   session, so the blast radius is probably small).
-7. **(~5 min)** No `/tmp` scratch remains from this session --
-   `/tmp/ctsrun_l192a/` (case list, per-case sweep driver, raw QPA logs)
-   removed. Note: the golden images themselves now live persistently at
-   `/home/dev/dev/offload-golden-images` (sibling to `VK-GL-CTS`/
-   `offload-test-suite`), not `/tmp` -- do *not* delete that directory,
-   the `check-hlsl-feme-vk` build's own `GOLDENIMAGE_DIR` CMake cache
-   variable now points there.
-
-Next step if resuming: `L193` (the `SampleCmp.test` crash) is the more
-interesting pick -- a real, previously-hidden FeMe bug, well-scoped at
-1-2 hours. `L194` is more mechanical (same shape as `H124u`'s own prior
-`QueryLodCube` work, just for `Plain1D`). Either is a good, focused next
-session.
+5. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/l193repro/` and `/tmp/ctsrun_l193/` both removed.
