@@ -103564,3 +103564,80 @@ needed (unlike last session's own note about this).
    individually unvetted after many sessions of deferral -- a genuine
    change-of-pace option if bug 3 feels too heavy for a given session.
 4. `/tmp` scratch is clean -- nothing left over from this session.
+
+# L199 session (L198 continuation): fixed bug 3 (PDT staleness within linearizeCycle); found a 4th, distinct blocker before non-leaf traversal can actually ship
+
+Device check done first: `FeMe CPU Vulkan Device` confirmed.
+
+## What's fixed and shippable right now
+
+**Bug 3 root-caused directly from the code** (no tracing needed this
+time): `linearizeCyclePostOrder` recomputes `DT`/`PDT` once per cycle,
+but `linearizeCycle`'s own fold/peel/merge fixed-point logic erases
+blocks *after* that recompute and *before* `DiamondFlattener` (which
+uses the same `DT`/`PDT`) gets constructed later in the same call. Fixed
+with a second recompute right before `DiamondFlattener DF(...)` is
+built. Committed standalone, verified regression-free on the shipped
+leaf-only config (567/567 unit tests x5, check-feme 3352/3355/0-failed,
+mesh_shader 71/6/37, graphicsfuzz 674/72/8 -- all baseline-identical).
+
+## What's NOT fixed: a 4th bug, found by actually testing the fix
+
+To confirm bug 3 was really gone, I temporarily re-enabled non-leaf
+traversal (uncommitted, reverted after testing) and ran it against real
+CTS content. Bug 3 itself: gone -- 567/567 x5, no more flaky crash, and
+the original hang reproducer now fails cleanly instead of hanging or
+crashing. But the *full* `graphicsfuzz.*` sweep (754 cases) hit a
+**new, reliably-reproducible crash**:
+`cov-nested-loop-large-array-index-using-vector-components` aborts with
+an LLVM `formLCSSAImpl` assertion (`L.isLCSSAForm(DT)` failed) --
+`LinearizePass` is leaving some loop-escaping value without a proper
+LCSSA phi once nesting is genuinely non-leaf. Not root-caused. Given
+this, I reverted non-leaf traversal back off and only kept the bug-3
+fix itself, which is real and safe on its own.
+
+**This is good news, not a setback**: bug 3 was a real, standing crash
+risk; it's gone. What's left (bug 4) is a *different* problem than
+anything found in L197/L198, meaning the non-leaf-traversal effort keeps
+making real forward progress each session, one distinct bug at a time --
+not stuck repeating the same issue.
+
+## Verification (all clean on the shipped, leaf-only state)
+
+- `FeMeTransformsCPUTests`: 567/567 x5.
+- `ninja check-feme`: 3352/3355, 0 Failed, 3 pre-existing Unsupported.
+- `dEQP-VK.mesh_shader.ext.misc.*`: 71/6/37, matches baseline.
+- Full filtered `dEQP-VK.graphicsfuzz.*` (754 cases): 674/72/8, matches
+  baseline exactly.
+- `git clang-format --diff`: clean.
+
+3 commits this session (1 code fix, 1 docs update, this one).
+
+## What I'd tell a future session
+
+1. **Bug 4 (LCSSA violation) is the next blocker for non-leaf
+   traversal.** Reproduces reliably (not flaky like bug 3 was) via a
+   single case: `deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.cov-nested-
+   loop-large-array-index-using-vector-components'` with non-leaf
+   traversal temporarily re-enabled (see this session's reverted
+   one-line change: replace `if (CI.children(C).empty())
+   Changed |= linearizeCycle(C);` with an unconditional
+   `Changed |= linearizeCycle(C);` in `linearizeCyclePostOrder`).
+   Budget ~2-3 hrs: find which value `linearizeCycle`'s own new-block
+   insertion (masked continue/break guards, relay hops) fails to give a
+   proper exit-block phi once an *enclosing*, not-yet-linearized cycle
+   is involved -- a shape leaf-only cycles never exercised. A minimal
+   repro (llvm-reduce on the JIT'd IR, not the full shader) would help a
+   lot here given the reliable repro.
+2. **Once bug 4 is fixed, actually flip on non-leaf traversal** (remove
+   the `CI.children(C).empty()` guard for real) and update
+   `LinearizeTest.LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone`
+   to match the new, correct behavior (this session saw exactly what
+   that looks like: 2 mask-any reductions instead of 1, a real
+   `loop.continue3` condition instead of `outer.break`) -- don't just
+   delete the test, update its expectations.
+3. **`Roadmap.md` full-table sweep** (`L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted after many sessions of deferral -- still a
+   valid change-of-pace option.
+4. `/tmp` scratch is clean -- nothing left over from this session.
