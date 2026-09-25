@@ -2905,6 +2905,35 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // other, deeper in the same body, is a plain post-barrier uniform load
   // comparison already tolerated by the "leave alone" path below.
   {
+    // Roadmap L198: `DT`/`PDT` were last recomputed once, at
+    // `linearizeCyclePostOrder`'s own entry, *before* this same
+    // `linearizeCycle` call ran any of the fold/peel/merge fixed-point
+    // logic above (`foldRedundantFlowBlocksInCycle`/
+    // `peelConstantFlowPredecessorsInCycle`/
+    // `collapseTriviallyRedundantPhisInCycle`/
+    // `mergeTrivialRelayBlocksInCycle`) -- and those genuinely
+    // `eraseFromParent()` blocks (a redundant "Flow" re-derivation, or a
+    // now-phi-less relay merged into its predecessor) whenever they find
+    // one. Constructing `DiamondFlattener` with that same, now-stale
+    // `PDT` here would let its own `immediatePostDom` calls (see
+    // `flattenLoopBodyDiamond`) return a dangling `BasicBlock*` for any
+    // reconvergence point whose post-dominator answer routed through one
+    // of those just-erased blocks -- confirmed via a real, reproducible
+    // (if heap-layout-dependent, hence flaky) crash: `validate`'s
+    // `R->hasNPredecessors(2)` check hitting a `hasUseList()` assertion
+    // failure on such a dangling `R`. Recomputing both here, immediately
+    // before `DiamondFlattener` is built (and hence before any
+    // `immediatePostDom` call it makes), closes that gap: everything
+    // above that can delete a block has already run, and nothing below
+    // this point deletes one before `DF` is done using `PDT` (`flatten`
+    // itself only ever rewires edges and erases *instructions* --
+    // branches, phis -- never a whole `BasicBlock`, see its own comment).
+    // Same "cheap enough to always do, rather than track exactly what
+    // changed" reasoning as the per-cycle recompute in
+    // `linearizeCyclePostOrder` -- cycles are typically small, and this
+    // fixes a genuine crash, not just a latent hazard.
+    DT.recalculate(F);
+    PDT.recalculate(F);
     // Roadmap L197: `DiamondFlattener::isLoopControlEdge` classifies loop-
     // control edges via a live `CI.contains` membership check (O(1), no
     // block-list walk) rather than any `CI.getExitBlocks`-derived list --
@@ -3283,11 +3312,9 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   // unconditionally, once per cycle, rather than trying to track exactly
   // which children actually mutated anything.
   //
-  // Roadmap L197: attempting `C` itself here (not just its children) is
-  // *not yet enabled* -- three distinct bugs have now been found via a
-  // real Vulkan CTS shader (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`,
-  // a genuinely 3-deep nested-loop shape) once a non-leaf `C` was
-  // actually attempted:
+  // Roadmap L197/L198: attempting `C` itself here (not just its children)
+  // is *not yet enabled* -- four distinct bugs have now been found via
+  // real Vulkan CTS shaders once a non-leaf `C` was actually attempted:
   //  1. `DiamondFlattener::isLoopControlEdge` misclassifying a genuine
   //     loop-exit edge once `CI`'s own exit-block accounting (live or
   //     precomputed) went stale against blocks a child's own
@@ -3303,24 +3330,50 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   //     first place -- fixed (see that method's own comment): it now
   //     checks whether `Start`'s terminator was actually replaced before
   //     reporting success.
-  //  3. **Still open**: `DiamondFlattener::validate`'s own
+  //  3. **Fixed**: `DiamondFlattener::validate`'s own
   //     `R->hasNPredecessors(2)` check (`R` being a divergent branch's
   //     reconvergence point, from `immediatePostDom`, i.e. from `PDT`)
-  //     hits a real `llvm::Value::materialized_user_begin` assertion
-  //     (`hasUseList()` failed) -- `R` is a dangling `BasicBlock*` whose
-  //     use list has already been torn down. `DT`/`PDT` are recalculated
-  //     once per cycle, before `linearizeCycle(C)` runs (see the comment
-  //     above), but `linearizeCycle`'s own "flatten loop body diamond to
-  //     a fixed point" step (and other interior mutations) can erase
-  //     blocks *after* that recalculation, inside the very call this
-  //     crash was seen in -- meaning even a fresh-at-entry `PDT` can go
-  //     stale *during* a single `linearizeCycle(C)` call once `C` is a
-  //     non-leaf whose own body was already restructured by a child.
-  //     Root cause not yet fully isolated (which specific interior
-  //     mutation invalidates which specific later `immediatePostDom`
-  //     call is still an open question for a future session). Only ever
-  //     call `linearizeCycle` here for a genuine leaf
-  //     (`CI.children(C).empty()`) until this is fixed.
+  //     could hit a real `llvm::Value::materialized_user_begin` assertion
+  //     (`hasUseList()` failed) on a dangling `BasicBlock*` whose use list
+  //     had already been torn down. Root cause: `linearizeCycle`'s own
+  //     fold/peel/merge fixed-point logic (`foldRedundantFlowBlocksInCycle`
+  //     /`peelConstantFlowPredecessorsInCycle`/
+  //     `collapseTriviallyRedundantPhisInCycle`/
+  //     `mergeTrivialRelayBlocksInCycle`) genuinely `eraseFromParent()`s
+  //     blocks -- but it runs *after* the one `DT`/`PDT` recalculation at
+  //     this function's own top, and *before* `DiamondFlattener` (which
+  //     also uses that same `DT`/`PDT`) is constructed a bit further down
+  //     in the same `linearizeCycle(C)` call -- so a fresh-at-entry `PDT`
+  //     could still be stale by the time `DiamondFlattener` used it, once
+  //     `C` was a non-leaf whose body those folds actually mutated. Fixed
+  //     by adding a second `DT.recalculate(F)`/`PDT.recalculate(F)` pair
+  //     immediately before `DiamondFlattener DF(...)` is constructed
+  //     inside `linearizeCycle` itself (see that call site's own comment)
+  //     -- `flatten()` itself never erases a whole `BasicBlock` (only
+  //     instructions within one), so nothing after that point needs a
+  //     third recompute.
+  //  4. **Still open, newly found**: once bugs 1-3 above were fixed and
+  //     non-leaf traversal was enabled for real CTS testing, a full
+  //     `dEQP-VK.graphicsfuzz.*` sweep hit a different, real crash on
+  //     `dEQP-VK.graphicsfuzz.cov-nested-loop-large-array-index-using-
+  //     vector-components`: `llvm/lib/Transforms/Utils/LCSSA.cpp`'s own
+  //     `formLCSSAImpl` asserts `L.isLCSSAForm(DT)` -- i.e. some value
+  //     `LinearizeCPUPass` leaves behind, defined inside a loop and used
+  //     outside it, is not represented as a proper LCSSA `phi` at that
+  //     loop's exit block by the time a later pass in the compilation
+  //     pipeline calls `formLCSSA` on it. Not yet root-caused: could be
+  //     `linearizeCycle`'s own new-block insertions (masked continue/
+  //     break guards, relay hops) failing to thread an escaping value's
+  //     new `phi` all the way out through an *enclosing* (not-yet-
+  //     linearized) cycle's own exit block once nesting is genuinely
+  //     two-plus levels deep -- a shape a leaf-only cycle, by definition,
+  //     never needed to handle. Reproduces reliably (not flaky, unlike
+  //     bug 3) via a single-case run:
+  //     `deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.cov-nested-loop-large-
+  //     array-index-using-vector-components'`. Given this, non-leaf
+  //     traversal remains disabled. Only ever call `linearizeCycle` here
+  //     for a genuine leaf (`CI.children(C).empty()`) until bug 4 is
+  //     fixed.
   bool Changed = false;
   for (CycleRef Child : CI.children(C))
     Changed |= linearizeCyclePostOrder(Child);
