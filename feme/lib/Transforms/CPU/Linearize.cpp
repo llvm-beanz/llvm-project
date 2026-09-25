@@ -1535,16 +1535,23 @@ private:
     Value *Cond = nullptr;
     BasicBlock *StayInLoop = nullptr;
     bool ExitOnTrue = false;
-    // The block whose own terminator (or, for a relay match, whose own
-    // "into the relay chain" successor -- see `matchExitCheckWithRelay`)
-    // directly reaches `ExitBlock`: `BB` itself for a direct match, or
-    // the relay chain's own first hop for a relay match. Roadmap H94a:
-    // this is the block whose own incoming contribution to any of
-    // `ExitBlock`'s *other* phis (besides the live/side-effect masks,
-    // which `addLatchIncoming` handles separately) is the semantically
-    // correct value to also carry along the new `Latch`->`ExitBlock`
-    // edge this milestone's "never really exit here, defer to Latch"
-    // strategy installs -- see `linearizeCycle`'s own use of it.
+    // The block whose own terminator directly reaches `ExitBlock`: `BB`
+    // itself for a direct match, or -- for a relay match (see
+    // `matchExitCheckWithRelay`) -- the relay chain's real *last* hop,
+    // i.e. the actual literal CFG predecessor of `ExitBlock`, not its
+    // first hop (`uniformRelayChain`'s own return value already resolves
+    // this; roadmap L189 fixed a pre-existing bug here where a
+    // multi-hop chain's *first* hop was used instead -- see its own
+    // comment). Roadmap H94a: this is the block whose own incoming
+    // contribution to any of `ExitBlock`'s *other* phis (besides the
+    // live/side-effect masks, which `addLatchIncoming` handles
+    // separately) is the semantically correct value to also carry along
+    // the new `Latch`->`ExitBlock` edge this milestone's "never really
+    // exit here, defer to Latch" strategy installs -- see
+    // `linearizeCycle`'s own use of it. A `PHINode`'s incoming-block list
+    // only ever names a value's true *immediate* predecessor, which is
+    // why the last (not first) hop is required whenever the chain has
+    // more than one block.
     BasicBlock *RelayBlock = nullptr;
   };
 
@@ -1555,11 +1562,20 @@ private:
 
   /// Roadmap H19k: like `matchExitCheck`, but additionally tries each of
   /// \p BB's own two successors as a candidate "exit" arm reaching \p
-  /// ExitBlock only through a plain, single-predecessor straight chain
-  /// (see `straightChain`) when neither successor literally *is* \p
-  /// ExitBlock -- `BreakCriticalEdges`'s own relay trampoline is the
-  /// common real-world case left behind once `foldRedundantFlowBlock`/
-  /// `peelConstantFlowPredecessors` bypass a redundant re-derivation.
+  /// ExitBlock through a relay chain (see `uniformRelayChain`) when
+  /// neither successor literally *is* \p ExitBlock -- `BreakCriticalEdges`'s
+  /// own relay trampoline is the common real-world case left behind once
+  /// `foldRedundantFlowBlock`/`peelConstantFlowPredecessors` bypass a
+  /// redundant re-derivation. Roadmap L189: the relay chain may itself
+  /// pass through a further, genuinely uniform conditional branch on the
+  /// way to \p ExitBlock, not just a plain unconditional chain -- see
+  /// `uniformRelayChain`'s own comment for why this is sound. (This
+  /// milestone was investigated while root-causing roadmap L188, but
+  /// does *not* fix it: L188's own real shape never reaches this code at
+  /// all, because its divergent exit check belongs to a *non-leaf*
+  /// cycle, which `LoopLinearizer::run` skips entirely before any of
+  /// this file's per-cycle logic runs -- see L188's own, corrected
+  /// roadmap entry.)
   std::optional<ExitCheck> matchExitCheckWithRelay(BasicBlock &BB,
                                                    BasicBlock *ExitBlock);
 
@@ -1616,32 +1632,77 @@ private:
   bool linearizeCycle(CycleRef C);
 };
 
-/// Walks the straight, unconditional chain from \p From (inclusive) to
-/// \p To (exclusive) -- every block in between (but not \p From itself,
-/// which may legitimately have more than one predecessor, e.g. the loop
-/// header's backedge) must be entered only via this chain's previous
-/// block -- returning the blocks visited in order, or `std::nullopt` if
-/// the chain does not reach \p To this way. This is the "straight-line"
-/// requirement `LoopLinearizer::linearizeCycle` places on whatever lies
-/// between the header/latch and a loop's exit check when that check sits
-/// in neither of them directly (see its comment): in particular, the
-/// extra blocks `StructurizeCFG`'s general "Flow" merge-block scheme (or
-/// `feme::cpu::DiamondFlattener`, flattening a divergent diamond that
-/// used to feed the check) can leave behind.
-std::optional<SmallVector<BasicBlock *, 4>> straightChain(BasicBlock *From,
-                                                          BasicBlock *To) {
-  SmallVector<BasicBlock *, 4> Chain;
-  BasicBlock *Cur = From;
-  while (Cur != To) {
-    if (Cur != From && Cur->getUniquePredecessor() == nullptr)
+/// Roadmap L189: walks forward from \p From (inclusive, guaranteed by
+/// `matchExitCheckWithRelay`'s own caller to not already be \p ExitBlock)
+/// toward \p ExitBlock, tolerating not just a plain unconditional chain
+/// (this function's own pre-L189 behavior, under its former name
+/// `straightChain`) but also a further, genuinely uniform (per \p UI,
+/// not merely one this milestone has chosen to leave unmasked --
+/// `isDivergentTerminator` is the same real divergence test
+/// `collectUniformPassThroughRegion` above already trusts for its own,
+/// structurally similar uniform-region tolerance) conditional branch
+/// along the way, exploring both of its successors. A visited block is
+/// never re-expanded (a node reached a second time, e.g. via some
+/// uniform sub-region's own backedge, is simply treated as already
+/// accounted for, not walked again). Deliberately does *not* require a
+/// unique predecessor at each
+/// hop the way the old `straightChain` did: a block reached this way may
+/// well have another, entirely unrelated real predecessor elsewhere in
+/// the function too, but that does not matter here -- this function only
+/// needs to know where control flow goes *given* it reached this block
+/// via `From`'s own uniform decisions, and a block whose own branch is
+/// genuinely uniform executes identically for every active lane
+/// regardless of how it was reached, so no masking treatment of it is
+/// ever required either way.
+///
+/// Returns the walk's unique block whose own terminator has `ExitBlock`
+/// as a literal successor -- the walk's real *last* hop, the
+/// semantically correct block for `ExitCheck::RelayBlock` to name (see
+/// its own comment) -- or `std::nullopt` if: `ExitBlock` is never
+/// reached this way at all, is reached via more than one such block
+/// (ambiguous: which one is "live" would then depend on a runtime value
+/// this pass has no way to thread through), or a visited block ends in
+/// anything but an `UncondBr`/`CondBr` terminator, or a `CondBr` that is
+/// itself genuinely divergent (that would be a second, unrelated
+/// divergent check this milestone does not support coexisting with the
+/// loop's own real one -- `linearizeCycle`'s own `OtherCondBrBlocks`
+/// classification already rejects that shape elsewhere, but this walk
+/// must not silently paper over it either).
+std::optional<BasicBlock *> uniformRelayChain(BasicBlock *From,
+                                              BasicBlock *ExitBlock,
+                                              UniformityInfo &UI) {
+  SmallPtrSet<BasicBlock *, 8> Visited;
+  SmallVector<BasicBlock *, 8> Worklist{From};
+  BasicBlock *LastHop = nullptr;
+  auto ConsiderSuccessor = [&](BasicBlock *Cur, BasicBlock *Succ) {
+    if (Succ != ExitBlock) {
+      Worklist.push_back(Succ);
+      return true;
+    }
+    if (LastHop && LastHop != Cur)
+      return false; // Ambiguous: reached via more than one block.
+    LastHop = Cur;
+    return true;
+  };
+  while (!Worklist.empty()) {
+    BasicBlock *Cur = Worklist.pop_back_val();
+    if (!Visited.insert(Cur).second)
+      continue; // Already visited via another arm, or a uniform backedge.
+    if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
+      if (!ConsiderSuccessor(Cur, UBr->getSuccessor(0)))
+        return std::nullopt;
+      continue;
+    }
+    auto *CBr = dyn_cast<CondBrInst>(Cur->getTerminator());
+    if (!CBr || UI.isDivergentTerminator(CBr))
       return std::nullopt;
-    Chain.push_back(Cur);
-    auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
-    if (!UBr)
+    if (!ConsiderSuccessor(Cur, CBr->getSuccessor(0)) ||
+        !ConsiderSuccessor(Cur, CBr->getSuccessor(1)))
       return std::nullopt;
-    Cur = UBr->getSuccessor(0);
   }
-  return Chain;
+  if (!LastHop)
+    return std::nullopt; // Never actually reached `ExitBlock` this way.
+  return LastHop;
 }
 
 /// Roadmap H19k: `StructurizeCFG` unconditionally routes *every* two-way
@@ -2249,7 +2310,9 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
   std::optional<ExitCheck> Result;
   for (unsigned I = 0; I != 2; ++I) {
     BasicBlock *Candidate = Br->getSuccessor(I);
-    if (!straightChain(Candidate, ExitBlock))
+    std::optional<BasicBlock *> Relay =
+        uniformRelayChain(Candidate, ExitBlock, UI);
+    if (!Relay)
       continue;
     if (Result)
       return std::nullopt; // Both arms reach it: ambiguous.
@@ -2258,7 +2321,7 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
     EC.Cond = Br->getCondition();
     EC.ExitOnTrue = (I == 0);
     EC.StayInLoop = Br->getSuccessor(1 - I);
-    EC.RelayBlock = Candidate;
+    EC.RelayBlock = *Relay;
     Result = EC;
   }
   return Result;
