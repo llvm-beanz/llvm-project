@@ -103488,3 +103488,79 @@ for a not-yet-processed parent cycle *first*.
    (trivial to resolve, but wasted ~10 min).
 4. `/tmp` scratch is clean -- nothing left over from this session
    (`/tmp/ctsrun_l197` created and removed within this session).
+
+# L198 session (L197 continuation): root-caused and fixed 2 of 3 non-leaf-traversal hazards; a third is found and scoped, not fixed
+
+Device check done first: `FeMe CPU Vulkan Device` confirmed.
+
+## What's fixed and shippable right now
+
+1. **`isLoopControlEdge` exit-block staleness (bug 1)** -- replaced
+   `CI.getExitBlocks` (live or L197's own cache of it) with a live
+   `CI.contains(C, Target)` check. Both prior approaches went stale once
+   a non-leaf cycle's children restructure its body; this one can't,
+   since it does no block-list walk at all.
+2. **`flattenLoopBodyDiamond` false-success (bug 2)** -- it now checks
+   whether the branch it was asked to flatten was actually replaced
+   before reporting success. Before this fix, a caller/callee
+   divergence-notion mismatch let it "succeed" while leaving the
+   original branch in place, causing the caller's fixed-point scan to
+   find it again forever.
+
+Both are committed separately (2 commits), each independently
+buildable/testable (verified: `check-feme` clean at each commit, not
+just the final diff).
+
+## What's still broken (bug 3, NOT fixed)
+
+`DiamondFlattener::validate`'s `R->hasNPredecessors(2)` check crashes
+(`hasUseList()` assertion, flaky/non-deterministic) on a dangling
+reconvergence-point block once non-leaf traversal is actually turned on.
+Cause: `DT`/`PDT` are computed once per cycle at `linearizeCycle`'s
+entry, but its own interior mutations (the flatten-to-fixed-point loop)
+can erase blocks mid-call, after that one recalculation -- so a
+fresh-at-entry `PDT` can still go stale before the call ends. Not
+isolated to one specific mutation yet.
+
+**Decision made**: kept the `CI.children(C).empty()` leaf-only guard in
+`linearizeCyclePostOrder` (i.e. non-leaf traversal is still OFF), since
+turning it on requires bug 3 fixed first. Bugs 1 and 2 are real
+correctness wins on their own regardless.
+
+## Verification (all clean, zero regressions)
+
+- `FeMeTransformsCPUTests`: 567/567, run 5x back-to-back (bug 3's crash
+  was itself flaky, so one clean run doesn't prove safety).
+- `ninja check-feme`: 3352/3355, 0 Failed, 3 pre-existing Unsupported --
+  identical to the L197 baseline.
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): 71/6/37, byte-identical
+  to baseline.
+- Full filtered `dEQP-VK.graphicsfuzz.*` sweep (754 of 757 cases, same 3
+  pre-existing unrelated crash/hang cases excluded as always): **674
+  Pass / 72 Fail / 8 NotSupported**, byte-for-byte identical to the
+  documented baseline.
+- `git clang-format --diff`: clean.
+
+4 commits this session (2 code fixes, 1 docs update, this one) -- split
+as I went this time, each buildable standalone, no post-hoc untangling
+needed (unlike last session's own note about this).
+
+## What I'd tell a future session
+
+1. **Bug 3 is the actual remaining blocker for non-leaf traversal.**
+   Needs a dedicated tracing session inside `linearizeCycle`'s own
+   interior mutation steps (the flatten-to-fixed-point loop is the prime
+   suspect) to find exactly which block deletion invalidates which later
+   `immediatePostDom` call. Budget ~2-3 hrs: this bug is flaky, so expect
+   to need repeated runs (5+) to confirm any fix actually holds, not
+   just one clean pass.
+2. **A possible fix shape worth trying first**: recompute `PDT`
+   immediately before each `immediatePostDom` call that could be affected
+   by a just-prior mutation, rather than once per `linearizeCycle` call.
+   This trades some CPU time for correctness -- given cycles are
+   typically small, likely acceptable, but not measured.
+3. **`Roadmap.md` full-table sweep** (`L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted after many sessions of deferral -- a genuine
+   change-of-pace option if bug 3 feels too heavy for a given session.
+4. `/tmp` scratch is clean -- nothing left over from this session.
