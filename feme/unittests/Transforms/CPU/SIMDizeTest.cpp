@@ -3162,6 +3162,205 @@ TEST(SIMDizeTest,
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap L191(a): systematic audit of the L134(c)/L191 bug class found
+// two more consumer shapes with the identical gap -- neither yet observed
+// in a real failing CTS case, but both structurally identical to L134(c)/
+// L191's own confirmed bug (an unconditionally-decomposing producer's
+// erasure is driven by *shape*, not by `UI.isDivergentAtDef`, so a
+// consumer `UI` separately judges uniform can still dangle). This first
+// one: a `select` choosing between a decomposed masked-load vector and an
+// ordinary uniform vector, itself classified uniform (a compile-time-true
+// condition looks exactly as uniform to `UI` as it does to a human
+// reader, even though one arm secretly depends on a per-lane-varying
+// load).
+TEST(SIMDizeTest, DecomposesUniformlyClassifiedSelectOverDecomposedVector) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %data) #0 {
+    entry:
+      %v = call <3 x float> @feme.cpu.masked.load.v3f32(ptr %data, i32 4, i1 true, <3 x float> zeroinitializer)
+      %sel = select i1 true, <3 x float> %v, <3 x float> zeroinitializer
+      %r = extractelement <3 x float> %sel, i64 0
+      %g = extractelement <3 x float> %sel, i64 1
+      %b = extractelement <3 x float> %sel, i64 2
+      call void @sink(float %r)
+      call void @sink(float %g)
+      call void @sink(float %b)
+      ret void
+    }
+    declare void @sink(float)
+    declare <3 x float> @feme.cpu.masked.load.v3f32(ptr, i32, i1, <3 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // As the L191 test above documents, an unrewritten `select` (left
+  // uniform-classified, unrewritten) does *not* itself become a literal
+  // `PoisonValue` merely because one of its own operands was RAUW'd to
+  // `poison` -- the `select` instruction, and each `extractelement`
+  // reading it, both remain ordinary (non-poison-typed) instructions that
+  // just happen to *evaluate* to poison at runtime once the erased masked
+  // load feeds them. Check `%sel` by name for a literal poison operand
+  // instead, mirroring the L191 test's own "check the specific
+  // unrewritten value by name" pattern.
+  for (Instruction &I : instructions(F)) {
+    if (I.getName() != "sel")
+      continue;
+    for (Value *Op : I.operands())
+      EXPECT_FALSE(isa<PoisonValue>(Op))
+          << "found the original, unrewritten 'sel' still referencing a "
+             "poison operand";
+  }
+
+  unsigned SinkCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getName() != "sink")
+      continue;
+    ++SinkCallCount;
+    EXPECT_FALSE(isa<PoisonValue>(CI->getArgOperand(0)));
+  }
+  EXPECT_EQ(SinkCallCount, 3u);
+
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+      FoundGather = true;
+  }
+  EXPECT_TRUE(FoundGather);
+}
+
+// Roadmap L191(a): the second new consumer-shape gap the audit found --
+// a homogeneous "trivially vectorizable" intrinsic call (`llvm.fabs.v3f32`,
+// same shape `LeavesUniformVectorizableIntrinsicCallUnchanged` above
+// confirms is correctly left alone when genuinely uniform) taking a
+// `WidenedVectorComponents`-decomposed masked-load result directly as its
+// one and only argument, itself classified uniform by `UI.isDivergentAtDef`
+// for the identical reason the `select` test above documents. This shape
+// also exercises the one gap the audit found in the post-gate dispatch
+// cascade itself: falling through to `widenElementwise`'s own
+// homogeneous-intrinsic path (as it used to, unconditionally, before this
+// fix) would build an illegal `<W x <3 x float>>` nested vector type,
+// since that path assumes a *scalar* result/argument type -- this shape
+// must instead reach `widenVectorElementwise`, which already handles a
+// vector-typed homogeneous intrinsic call correctly.
+TEST(SIMDizeTest,
+     DecomposesUniformlyClassifiedHomogeneousIntrinsicCallOverDecomposedVector) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %data) #0 {
+    entry:
+      %v = call <3 x float> @feme.cpu.masked.load.v3f32(ptr %data, i32 4, i1 true, <3 x float> zeroinitializer)
+      %fabs = call <3 x float> @llvm.fabs.v3f32(<3 x float> %v)
+      %r = extractelement <3 x float> %fabs, i64 0
+      %g = extractelement <3 x float> %fabs, i64 1
+      %b = extractelement <3 x float> %fabs, i64 2
+      call void @sink(float %r)
+      call void @sink(float %g)
+      call void @sink(float %b)
+      ret void
+    }
+    declare void @sink(float)
+    declare <3 x float> @llvm.fabs.v3f32(<3 x float>)
+    declare <3 x float> @feme.cpu.masked.load.v3f32(ptr, i32, i1, <3 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  for (Instruction &I : instructions(F)) {
+    if (I.getName() != "fabs")
+      continue;
+    for (Value *Op : I.operands())
+      EXPECT_FALSE(isa<PoisonValue>(Op))
+          << "found the original, unrewritten 'fabs' still referencing a "
+             "poison operand";
+  }
+
+  unsigned SinkCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getName() != "sink")
+      continue;
+    ++SinkCallCount;
+    EXPECT_FALSE(isa<PoisonValue>(CI->getArgOperand(0)));
+  }
+  EXPECT_EQ(SinkCallCount, 3u);
+
+  bool FoundWideFAbs = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getIntrinsicID() == Intrinsic::fabs &&
+        CI->getType()->isVectorTy())
+      FoundWideFAbs = true;
+  }
+  EXPECT_TRUE(FoundWideFAbs);
+}
+
+// Roadmap L191(a): the third new consumer-shape gap the audit found -- a
+// plain (non-groupshared, non-`MaskedAllocas`) `store` of a whole
+// `WidenedVectorComponents`-decomposed vector value at a uniform address,
+// itself classified uniform by `UI.isDivergentAtDef` (a `store`'s own
+// divergence, per `WaveUniformity.cpp`'s generic rule, depends only on its
+// *pointer* operand, not its stored *value* -- so a genuinely uniform
+// address storing a secretly-decomposed value is classified uniform here
+// exactly like the `select`/homogeneous-intrinsic-call cases above).
+// Reaching the general dispatch cascade this way falls to
+// `widenElementwise` -> `widenScalarizedFallback` (neither `BinaryOperator`,
+// `CmpInst`, `CastInst`, `SelectInst`, nor `UnaryOperator`), which already
+// handles a vector-typed *operand* (as opposed to vector-typed *result*,
+// which is its usual reason for existing) correctly via
+// `getVectorComponents`.
+TEST(SIMDizeTest,
+     DecomposesUniformlyClassifiedStoreOfDecomposedVectorAtUniformAddress) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %data, ptr %out) #0 {
+    entry:
+      %v = call <3 x float> @feme.cpu.masked.load.v3f32(ptr %data, i32 4, i1 true, <3 x float> zeroinitializer)
+      store <3 x float> %v, ptr %out, align 4
+      ret void
+    }
+    declare <3 x float> @feme.cpu.masked.load.v3f32(ptr, i32, i1, <3 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned StoreCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *SI = dyn_cast<StoreInst>(&I);
+    if (!SI)
+      continue;
+    ++StoreCount;
+    EXPECT_FALSE(isa<PoisonValue>(SI->getValueOperand()))
+        << "found a store still referencing a poison operand";
+  }
+  // `widenScalarizedFallback`'s per-lane clone loop must have produced
+  // more than one `store` -- a single, unrewritten `store <3 x float>`
+  // surviving would (incorrectly) mean the original, uniform-classified
+  // instruction was left completely untouched.
+  EXPECT_GT(StoreCount, 1u);
+}
+
 } // namespace
 
 
