@@ -13149,3 +13149,83 @@ session; and a `PHINode` consumer of a to-be-force-decomposed value
 remains structurally unaddressable with the current two-pass (`Pass 1`:
 phi-stub creation; `Pass 2`: everything else) architecture, since Pass 1
 runs before anything has been force-decomposed yet.
+
+## 2026-10-01: L191(b) audited -- `WidenedAggregateComponents` deferred from L191(a), no live bug found, defensive parity fix added
+
+`L191(a)`'s own closing note deferred the aggregate-side analogue of its
+audit: `WidenedAggregateComponents` (the struct/array-leaf tracking map,
+parallel to `WidenedVectorComponents`) had never been checked for the
+same `L134(c)`/`L191` bug class. This session did that audit.
+
+**Audit.** Enumerated all 6 `WidenedAggregateComponents`-populating call
+sites across 5 distinct producer functions
+(`createWidenedAggregatePHIStub`/`fillWidenedAggregatePHIIncoming`,
+`widenGroupSharedAtomicCmpXchg`, `widenInsertValue`, `widenExtractValue`,
+`widenAggregateSelect`), and traced each one's dispatch-site gating
+relative to the general uniformity gate. Unlike the vector side, no
+aggregate producer has the unsafe "shape-only, ahead-of-the-general-gate"
+pattern that made `widenMaskedLoad`/`widenMaskedAllocaLoad` unsafe: the
+phi/`InsertValueInst`/`ExtractValueInst`/`SelectInst` producers are all
+already dispatched *after* the general gate, so they can only ever run
+once `UI.isDivergentAtDef` (or, post-`L191(a)`, an already-force-decomposed
+operand) has already judged them divergent -- they can only propagate
+visible divergence through ordinary SSA dataflow, never hide it. The one
+producer dispatched unconditionally ahead of the gate,
+`widenGroupSharedAtomicCmpXchg`, is safe for a different, structural
+reason: `AtomicCmpXchgInst` is hard-coded `ValueUniformity::NeverUniform`
+in `WaveUniformity.cpp` (same treatment as `AtomicRMWInst`), so
+`UI.isDivergentAtDef` can never disagree with reality about it -- unlike
+a masked-load's mask-derived divergence or a masked-alloca-load's
+memory-aliasing-derived divergence, both genuinely invisible to `UI`'s
+ordinary operand-based reasoning about *that producer's own operands*.
+
+An initial reproducer hypothesis -- a groupshared `cmpxchg` with fully
+uniform (constant) address/compare/new-value operands, feeding two
+`extractvalue` consumers -- was built and run to test this conclusion by
+direct experiment. It did not reproduce a poison-operand bug: both
+`extractvalue` consumers were correctly routed through the decomposed
+path, confirming the audit's structural reasoning.
+
+**Fix.** `WidenedAggregateComponents.contains(U.get())` was added to the
+`AnyOperandDecomposed` check anyway, alongside the existing
+`WidenedVectorComponents.contains(U.get())` check:
+
+```cpp
+bool AnyOperandDecomposed = llvm::any_of(I.operands(), [&](Use &U) {
+  return WidenedVectorComponents.contains(U.get()) ||
+         WidenedAggregateComponents.contains(U.get());
+});
+```
+
+This is not required by any bug found today -- it is zero-cost,
+strictly-safe defense-in-depth (same "widening never narrowing" argument
+as `L191(a)`'s own fix) against a future aggregate producer being added
+with `widenMaskedLoad`'s unsafe pattern instead of
+`widenGroupSharedAtomicCmpXchg`'s safe one.
+
+**Testing.**
+
+- New test `SIMDizeTest.WidensUniformlyOperandedGroupSharedAtomicCmpXchg`:
+  a positive confirmation (not a bug-reproduction case, since none exists)
+  that a fully-uniform-operanded groupshared `cmpxchg` still decomposes
+  correctly into 4 per-lane clones with no poison operands and no
+  dangling unrewritten `extractvalue` consumers.
+- Full `FeMeTransformsCPUTests`: 562/562 passed (+1 new test), 0
+  regressions.
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed, 0 regressions.
+- Full per-case `graphicsfuzz.*` re-sweep (all 757 cases, crash-tolerant
+  per-case-isolated driver): **673 Pass / 73 Fail / 8 NotSupported / 1
+  Crash / 2 Timeout**, byte-for-byte identical to `L191(a)`'s own
+  post-fix baseline -- 0 regressions, 0 new passes, exactly as expected
+  for a change that is provably a no-op for every code path reachable
+  today.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this session's change is a pure CPU-widening-pass
+correctness/hardening change, not a feature/extension surface change.
+
+**Still open, deferred**: the `PHINode` two-pass structural gap (Pass 1
+creates phi stubs before Pass 2 force-decomposes anything, so a phi
+merging a *future* force-decomposed value can't be special-cased with the
+current architecture) applies identically on the aggregate side and
+remains unaddressed, same as `L191(a)`'s own note.
