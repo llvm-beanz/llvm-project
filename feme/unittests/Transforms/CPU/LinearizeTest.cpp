@@ -1562,4 +1562,82 @@ TEST(LinearizeTest, TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit) {
   EXPECT_TRUE(FoundMaskAny);
 }
 
+// Roadmap L197/L188: genuinely nested cycles -- an outer loop whose body
+// contains its own, separate inner loop, each with its own divergent
+// exit check. `LoopLinearizer::run()` traverses post-order
+// (`linearizeCyclePostOrder`, recursing into every child before
+// considering its parent) and, as a real prerequisite step toward one
+// day attempting a non-leaf cycle too, now precomputes every cycle's own
+// exit-block list up front (`precomputeExitBlocks`/`getExitBlocks`,
+// sidestepping a genuine use-after-free `CI.getExitBlocks` would
+// otherwise hit against an ancestor cycle whose descendant already
+// erased some of its own blocks -- see `ExitBlocksByCycle`'s own comment
+// for the full hazard writeup, and historical commit b9cba5d890f3 for
+// the closely related, previously-hit `UniformityInfo`-recomputation
+// crash this shares its root cause with) and refreshes `DT`/`PDT` after
+// every cycle (a second, independent staleness hazard this same
+// investigation found, affecting even today's leaf-only traversal across
+// *sibling* leaf cycles). Attempting `linearizeCycle` on the *outer*,
+// non-leaf cycle itself is deliberately still not enabled, though: doing
+// so was confirmed, via a real Vulkan CTS shader
+// (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, a genuinely 3-deep
+// nested-loop shape), to hang forever inside `DiamondFlattener::flatten`
+// for reasons not yet root-caused (see `linearizeCyclePostOrder`'s own
+// comment) -- so this test instead documents today's actual, honest
+// boundary: the *inner* leaf cycle is still correctly linearized on its
+// own, while the *outer* cycle (having a child, so never attempted) is
+// left completely alone, exactly as it always was before this
+// milestone's own work, with neither a crash nor a hang.
+TEST(LinearizeTest, LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %outer.header
+    outer.header:
+      %i = phi i32 [0, %entry], [%i.inc, %outer.latch]
+      br label %inner.header
+    inner.header:
+      %j = phi i32 [0, %outer.header], [%j.inc, %inner.header]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %j.inc = add i32 %j, 1
+      %inner.break = icmp eq i32 %tid, %j.inc
+      br i1 %inner.break, label %outer.latch, label %inner.header
+    outer.latch:
+      %i.inc = add i32 %i, 1
+      %outer.break = icmp eq i32 %tid, %i.inc
+      br i1 %outer.break, label %exit, label %outer.header
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  unsigned MaskAnyCount = 0;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
+        ++MaskAnyCount;
+  // Only the inner loop's own divergent exit gets its own reduction --
+  // the outer loop, having a child cycle, is not attempted yet (see the
+  // comment above), so its own `outer.break` check is left completely
+  // untouched (still a plain, unreduced `icmp`/`br`).
+  EXPECT_EQ(MaskAnyCount, 1u);
+  BasicBlock *OuterLatch = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName() == "outer.latch")
+      OuterLatch = &BB;
+  ASSERT_TRUE(OuterLatch);
+  auto *OuterBr = dyn_cast<CondBrInst>(OuterLatch->getTerminator());
+  ASSERT_TRUE(OuterBr);
+  EXPECT_EQ(OuterBr->getCondition()->getName(), "outer.break");
+}
+
 } // namespace

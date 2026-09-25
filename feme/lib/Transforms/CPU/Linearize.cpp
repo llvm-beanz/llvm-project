@@ -3154,18 +3154,84 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 bool LoopLinearizer::run() {
   precomputeExitBlocks();
   bool Changed = false;
-  SmallVector<CycleRef, 8> Worklist(CI.toplevel_begin(), CI.toplevel_end());
-  while (!Worklist.empty()) {
-    CycleRef C = Worklist.pop_back_val();
-    // Innermost cycles first: an outer loop containing this one is not
-    // itself linearized by this milestone (nested loops are future work),
-    // but its inner cycle might still be a supported shape on its own.
-    for (CycleRef Child : CI.children(C))
-      Worklist.push_back(Child);
-    if (!CI.children(C).empty())
-      continue; // Only leaf cycles match this milestone's supported shape.
+  for (CycleRef C : CI.toplevel_cycles())
+    Changed |= linearizeCyclePostOrder(C);
+  return Changed;
+}
+
+bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
+  // Roadmap L197: recurses post-order (every descendant fully attempted
+  // before `C` itself would be), and `C` itself is designed to be
+  // attempted here too once safe -- see the hazard comment below for
+  // exactly why that last step is not yet enabled. The reasoning in this
+  // comment (about why a linearized child's own interior is safe for an
+  // enclosing cycle's own classification logic to treat as ordinary
+  // uniform pass-through content) is preserved for whenever that step is
+  // turned on: `linearizeCycle(C)`, if it did attempt a non-leaf `C`,
+  // would trust an already-processed child's own interior to already
+  // look like an ordinary uniform pass-through region to
+  // `collectUniformPassThroughRegion`'s own scan: a linearized child's
+  // `Header`/`Latch` still end in a real `CondBrInst` (its backedge is
+  // never removed, only ever made unconditional on one arm when a
+  // divergent header/latch check is converted -- see `closeLatch`), but
+  // that `CondBr`'s own condition is always either a genuinely uniform,
+  // untouched original value or one this pass itself already recorded in
+  // `KnownUniformValues` (a `feme.cpu.mask.any` reduction, or one of
+  // `closeLatch`'s own uniform-operand compositions) -- never a stale
+  // answer from `UI`, thanks to `isDivergentBranch` consulting
+  // `KnownUniformValues` first (see that member's own comment). A child
+  // left unsupported (still containing a genuinely divergent shape this
+  // milestone's classification cannot handle, or one this pass simply
+  // declined to touch) would likewise be safe to leave alone: `C`'s own
+  // scan would still see whatever divergent `CondBr` that child's own
+  // failed attempt left behind, and correctly diagnose or decline `C`
+  // itself the same way it always has for an unsupported interior branch.
+  // Roadmap L197: `DT`/`PDT` are, like `CI`'s own frozen `ExitBlocks`
+  // cache this milestone's own `getExitBlocks` accessor was added to
+  // sidestep, invalidated by a child cycle's own block erasures
+  // (`foldRedundantFlowBlocksInCycle`/`mergeTrivialRelayBlocksInCycle`)
+  // -- unlike that cache, though, there is no way to precompute every
+  // cycle's own dominance answer up front, since `linearizeCycle`'s own
+  // interior `DiamondFlattener` (used for its "flatten loop body
+  // diamond" fixed point below) genuinely needs live, correct dominance
+  // over whatever the CFG currently looks like at the point it runs, not
+  // a snapshot from before any earlier sibling/child was linearized.
+  // Unlike `UniformityInfo` (see the `UI` member's own comment, and
+  // historical commit b9cba5d890f3), a plain structural recompute here
+  // is always sound: `DominatorTree`/`PostDominatorTree` encode no
+  // per-value uniformity judgment to go stale, only genuine CFG shape,
+  // so refreshing them in place via `recalculate` against the current,
+  // fully-linked (if not yet fully linearized) CFG is exactly correct,
+  // not merely tolerated. Cheap enough next to getting this wrong to do
+  // unconditionally, once per cycle, rather than trying to track exactly
+  // which children actually mutated anything.
+  //
+  // Roadmap L197: attempting `C` itself here (not just its children) is
+  // *not yet enabled* -- confirmed, via a real Vulkan CTS shader
+  // (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, a genuinely 3-deep
+  // nested-loop shape), to hang forever inside
+  // `DiamondFlattener::flatten`'s own `for (;;)` walk when `C` is a
+  // not-yet-leaf (parent) cycle: `flatten` keeps re-entering the same
+  // block sequence without ever reaching its own `Cur == End`/`RedirectTo`
+  // termination, root cause not yet found (a stale `isInCycle`/cycle-
+  // boundary classification against `CI`'s own frozen cycle membership is
+  // suspected -- see this row's own investigation notes -- but not yet
+  // confirmed). The `getExitBlocks`/`DT`/`PDT` fixes above are genuine,
+  // independently useful correctness improvements in their own right (the
+  // second is a real latent hazard even for today's leaf-only-attempt
+  // traversal, across *sibling* leaf cycles sharing one function -- see
+  // the comment above), so they are kept and exercised even though the
+  // actual traversal-order change they were built to enable is not yet
+  // turned on. Only ever call `linearizeCycle` here for a genuine leaf
+  // (`CI.children(C).empty()`) until that hang's root cause is found and
+  // fixed by a future session.
+  bool Changed = false;
+  for (CycleRef Child : CI.children(C))
+    Changed |= linearizeCyclePostOrder(Child);
+  DT.recalculate(F);
+  PDT.recalculate(F);
+  if (CI.children(C).empty())
     Changed |= linearizeCycle(C);
-  }
   return Changed;
 }
 
