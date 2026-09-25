@@ -58,31 +58,33 @@ file.
 
 # Request
 
-1. **(large, still genuinely open, now more precisely scoped)** The
-   *aggregate*-typed side of the PHINode gap is confirmed **not**
-   reachable today (see above -- no unconditional force-decomposing
-   producer can populate `WidenedAggregateComponents`), so the
-   "PHINode two-pass structural gap" item can likely be considered
-   **closed for the force-decompose-producer sub-case** entirely now
-   (scalar: `H107`/`L118`; vector: this session's `L195`; aggregate:
-   provably unreachable). If a *new* unconditional force-decomposing
-   producer is ever added to `widenInstruction`'s dispatch (a 4th one,
-   beyond the 3 `isUnconditionallyForceWidenedProducer`-style producers
-   this row's own investigation enumerated), remember to check whether
-   it can produce an aggregate result and, if so, extend this same
-   cleanup step a third way.
-2. **(large, deferred many sessions now)** "Provably uniform by
-   construction" value tracking for `LoopLinearizer` -- `L188`'s own
-   still-open nested-cycle root cause. This is now the single largest
-   standing item; a future session should treat it as its own dedicated
-   design session, not another incremental poke.
+1. **(~1-2 hrs)** Mine `stable-colorgrid-modulo-double-always-false-
+   discard`'s own reduced IR for a minimal `LinearizeTest.cpp` regression
+   case covering the two-sibling-loop shape this session found but
+   didn't hand-construct a test for -- the `.amber` source (two
+   sequential `for` loops) is the starting point; reduce via
+   `feme-translate`/`feme-opt` the same way prior sessions have done for
+   other real CTS-found bugs.
+2. **(large, the actual next step for L188 itself)** Now that the
+   prerequisite mechanism is landed and tested, attempt `run()`'s own
+   traversal-order change: make it a genuine post-order traversal (all
+   descendants fully processed before their parent is attempted) instead
+   of permanently skipping any cycle with children. Before writing that
+   change, separately investigate whether a child cycle's own block
+   deletions (`foldRedundantFlowBlocksInCycle`/
+   `mergeTrivialRelayBlocksInCycle`) can invalidate a not-yet-processed
+   *parent* cycle's own `CI.getHeader`/`getExitBlocks`/`contains`
+   results -- a distinct safety question this session did not
+   investigate at all.
 3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
    unvetted after many sessions of deferral.
-4. **(~5 min)** No `/tmp` scratch remains from this session --
-   `/tmp/ctsrun_l195/` (sweep script, per-case logs) removed.
+4. **(~5 min)** No `/tmp` scratch remains from this session -- all
+   `/tmp/ctsrun_l196*`/`/tmp/l196_*` scratch (case lists, per-case QPA
+   logs, a baseline comparison run) removed.
 
-Next step if resuming: item 2 (`LoopLinearizer` uniform-value tracking)
-is the most substantive remaining "large" item and deserves a session of
-its own dedicated design work before any implementation attempt.
+Next step if resuming: item 2 (`run()`'s traversal-order change) is the
+real payoff this session's mechanism was built for -- pick it up next,
+but budget real time for the block-deletion-safety investigation first,
+not just the traversal rewrite itself.
