@@ -102686,3 +102686,141 @@ interesting pick -- a real, previously-hidden FeMe bug, well-scoped at
 1-2 hours. `L194` is more mechanical (same shape as `H124u`'s own prior
 `QueryLodCube` work, just for `Plain1D`). Either is a good, focused next
 session.
+
+# L193 session: 3 layered bugs found and fixed from one crash -- SampleCmp.test now fully passes
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 4 commits, all in `llvm-project`, all FeMe source + tests + docs.
+No non-FeMe issue found this session, so no `offload-test-suite` commit
+this time.** `SampleCmp.test` went from hard crash -> graceful pipeline
+failure -> full pass, in that order, across 3 separate root causes found
+by working outward from one isolated minimal repro.
+
+## What I was assigned vs. what I actually found
+
+Picked up `L193`: `Feature/Textures/SampleCmp.test` crashes with
+`Assertion 'isa<To>(Val)... cast<Ty>() argument of incompatible type!'
+failed`. The prior session's own next-steps framed this as "get an
+isolated repro, then `spirv-dis` the failing call's operand types to
+find which one the pattern wrongly assumes is a vector" -- exactly
+right, and exactly what I did first, before touching any code.
+
+Fixing that first bug did not make the test pass. It unmasked a second,
+structurally-identical crash one layer downstream, and fixing *that*
+still didn't make the test pass -- it unmasked a third, completely
+unrelated bug (a missing format-capability bit) at pipeline-creation
+time. All 3 needed fixing before this one test went green.
+
+## Bug 1: the crash itself (`SPIRVToLLVMPatterns.cpp`)
+
+`dxc`'s real SPIR-V for `Texture1D::SampleCmp`/`SampleCmpLevelZero` has
+a bare **scalar** `float` Coordinate operand on
+`OpImageSampleDrefImplicitLod`/`OpImageSampleDrefExplicitLod`. A prior
+session's own extensively-documented assumption -- "a depth-comparison
+sample's coordinate is always a genuine vector, even against
+`Plain1D`" -- was true for glslang (confirmed via a real `deqp-vk`
+capture) but never actually checked against `dxc`'s own `Dim1D` case.
+3 patterns (`ImageSampleDrefImplicitLodPattern`/
+`ImageSampleDrefGradPattern`/`ImageSampleDrefExplicitLodPattern`) each
+had an unconditional `cast<VectorType>(Coordinate.getType())` that
+crashed on this shape.
+
+**Fix**: reuse the pre-existing `getDefaultZeroOffsetType` helper
+(already correct for `Dim1D`, already used by every non-`Dref` sample
+pattern) instead of duplicating the wrong assumption 3 times.
+
+## Bug 2: a second crash Bug 1's fix unmasked (`SPIRVResourceLowering.cpp`)
+
+Rebuilding and re-running traded the crash for a new one: the same
+shape now reached `SPIRVResourceLowering.cpp`'s dref-sample codegen for
+the first time ever -- which had its *own*, symmetric, deliberate prior
+assumption ("no real dxc `Texture1D::SampleCmp` case has been confirmed
+to even reach this path yet") explicitly rejecting the shape, followed
+by an unconditional `CreateExtractElement` that would have crashed on
+it anyway if it hadn't been rejected first.
+
+**Fix**: widen the classification (`hasOnlySupportedImageUses`) to
+accept `Plain1D`'s unpadded width unconditionally, and make the
+`C0`/`C1` extraction (`lowerImageAccesses`) branch on whether `Coord` is
+actually a vector -- using the scalar directly as `C0` otherwise,
+mirroring the ordinary (non-`Dref`) `Plain1D` sample path's own
+existing precedent.
+
+## Bug 3: an unrelated format-capability gap (`Format.cpp`)
+
+With both crashes fixed, the test still failed -- now at pipeline
+creation, `VkResult = -3`. Enabled the ICD's own opt-in
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic (a genuinely useful,
+previously-undiscovered debugging tool -- see "Lessons learned" below)
+and got the real message directly: a `D32_FLOAT`
+(`VK_FORMAT_D32_SFLOAT`) image handle couldn't be normalized, because
+`vkGetPhysicalDeviceImageFormatProperties` had already rejected
+`D32_FLOAT` + `VK_IMAGE_USAGE_SAMPLED_BIT` outright.
+
+Root cause: `formatFeatureFlags`'s per-format switch never granted
+`D32_FLOAT` `VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT` at all -- the exact
+same "genuine gap, not a reporting-only one" bug class `H8e` already
+found and fixed for the sibling `D16_UNORM` format. The CPU runtime
+already fully decodes and depth-compares `D32_FLOAT`
+(`femeRTUnpackImageTexel`/`femeRTIsFixedPointDepthFormat`'s own
+pre-existing `F8b`/`L55` documentation) -- this was purely a missing
+advertisement bit.
+
+**Fix**: add a `D32_FLOAT` case alongside `D16_UNORM`'s.
+
+## Verification
+
+1. `SampleCmp.test` (direct `llvm-lit -v -a`): **Pass** (was: crash).
+2. Full `check-hlsl-feme-vk` (680 tests): same 2 pre-existing failures
+   as before (`L194`, `H169`), same 1 known `XPASS`, 0 new failures.
+3. `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed (2 unit tests
+   updated to assert the new correct behavior, 1 new lit test case
+   added).
+4. Full `graphicsfuzz.*` CTS sweep (757 cases): 673 Pass/73 Fail/8
+   NotSupported/1 crash/2 timeout -- an **exact case-for-case match** to
+   the established baseline. 0 regressions.
+
+## Lessons learned (added to standing gotchas)
+
+- **`FEME_VULKAN_LOG_CREATION_ERRORS=1`** (`Diagnostics.h`) is a real,
+  already-implemented opt-in env var that prints the actual
+  `llvm::Error` message behind a generic `VkResult` failure --
+  previously undiscovered by name in this session's own history. Use it
+  *before* reaching for `-validation-layer` or manual IR dumps next
+  time a pipeline/resource creation call fails with a bare `VkResult`
+  and no obvious cause; it would have saved real time on `Bug 3` above
+  if reached for immediately rather than partway through.
+- The `ninja hlsl-test-depends` vs `ninja feme_vulkan` build-dependency
+  gap (documented by a prior session) reconfirmed again this session:
+  still must run `ninja feme_vulkan` explicitly in *both* build trees
+  after any FeMe source change.
+- This is now the **third** time this project has hit "an assumption
+  about SPIR-V shape verified for one producer (glslang) turned out
+  silently wrong for another (dxc)" (`L7b`, `L134(c)`-family, now
+  `L193`). Worth treating as a standing pattern: any doc comment
+  claiming "X is always true of this operand" that cites only one real
+  capture as evidence is a candidate for a second look whenever a new
+  shape/shader/producer starts exercising that code path for the first
+  time.
+
+## Suggested next steps
+
+1. **(~1-2 hrs, well-scoped)** `L194`: add a `QueryLod1D`/
+   `QueryLodArray1D` counterpart to `H124u`'s own `QueryLodCube` work,
+   same shape (new `ImageCallKind`, `hasOnlySupportedImageUses`
+   widening, a new runtime entry point) -- still the most immediately
+   next well-scoped item.
+2. **(large, no fix designed, carried forward many sessions now)** The
+   `PHINode` two-pass structural gap (Pass 1 creates phi stubs before
+   Pass 2 force-decomposes anything) -- unaddressed on both the vector
+   and aggregate sides.
+3. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted.
+5. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/l193repro/` and `/tmp/ctsrun_l193/` both removed.
