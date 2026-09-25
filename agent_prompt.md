@@ -61,35 +61,28 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(large, no fix designed, same note as `L191(a)`)** The `PHINode`
-   two-pass structural gap applies identically on the aggregate side.
-   Pass 1 creates phi stubs before Pass 2 force-decomposes anything, so a
-   phi merging a future force-decomposed value can't be special-cased
-   with the current architecture.
-2. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
-   never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic and
-   `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
-   when a value is destroyed!" crash -- both confirmed still pre-existing,
-   reproduced identically in this session's sweep too.
-3. **(large, deferred many sessions now)** "Provably uniform by
+1. **(~30 min-1 hr)** Triage `L192(a)`
+   (`SimpleLines.test`/`SimpleTriangle.test`): confirm same-family as
+   `L30` or distinct.
+2. **(~1-2 hrs)** Triage `L192(b)` (`sqrt.16.test`): hand-trace `feme`'s
+   `fp16` `sqrt` lowering for the 2 mismatching values before guessing at
+   a fix -- may turn out to be a stale/wrong test expectation, not a
+   `feme` bug, same shape as `H169`'s own resolution.
+3. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
+   two-pass structural gap (Pass 1 creates phi stubs before Pass 2
+   force-decomposes anything) -- unaddressed on both the vector and
+   aggregate sides.
+4. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
    still-open nested-cycle root cause.
-4. **(2-4 hrs, one-time setup, deferred many sessions now)**
-   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
-   directory at `/home/dev/dev/offload-test-suite/build`. This is
-   mechanical, not research-heavy -- a good pick if a future session
-   wants a change of pace from the `SIMDize.cpp` bug-hunting streak.
 5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted; a future session should do a real full-table pass rather
-   than keep deferring to this same list.
-6. **(~5 min)** No `/tmp` scratch left from this session --
-   `/tmp/ctsrun_l191b/` sweep output already removed.
+   unvetted.
+6. **(~5 min)** `/tmp/otsbuild.log` (this session's build log) can be
+   deleted -- scratch only, nothing references it.
 
-Next step if resuming: the `L134(c)`/`L191`/`L191(a)`/`L191(b)` bug
-family is now fully closed (both `WidenedVectorComponents` and
-`WidenedAggregateComponents` audited, both no-live-bug-remaining). Pick
-#4 (`offload-test-suite` build setup) for a mechanical change of pace, or
-#3 (`LoopLinearizer` design work) if ready for a large research-heavy
-session.
+Next step if resuming: `L192(b)` (`sqrt.16.test`) is the more interesting
+pick -- it may reveal a genuine `feme` `fp16` bug, or close out as a test
+issue like `H169` did. `L192(a)` is more mechanical (just confirm which
+bucket it's in). Either is well-scoped at 1-2 hours.
