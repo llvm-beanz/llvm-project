@@ -7621,7 +7621,15 @@ constexpr mlir::spirv::ImageOperands DiscardedImageOperandBits =
 /// directly, always correctly scalar), and only surfaced for a `Grad`+
 /// `MinLod` sample with no `ConstOffset` at all -- the fallback zero-offset
 /// type is the only path that ever went through this (buggy,
-/// coordinate-derived) computation instead.
+/// coordinate-derived) computation instead. Roadmap L193: the three
+/// depth-comparison-sample patterns (`ImageSampleDrefImplicitLodPattern`/
+/// `ImageSampleDrefGradPattern`/`ImageSampleDrefExplicitLodPattern`)
+/// previously each hand-rolled their own `cast<VectorType>(Coordinate.
+/// getType())`, wrongly assuming a shadow sampler's own `Coordinate` is
+/// always a genuine vector (true for glslang's own SPIR-V, but not for a
+/// real `dxc`-compiled `Texture1D::SampleCmp`, whose `Coordinate` is a
+/// bare scalar `float`) -- they now call this same shared helper instead
+/// of duplicating (and getting wrong) that special case themselves.
 mlir::Type getDefaultZeroOffsetType(mlir::spirv::ImageType ImageTy,
                                     mlir::Type CoordinateType,
                                     mlir::OpBuilder &Builder) {
@@ -9063,21 +9071,26 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
-    // own comment), a depth-comparison sample's `Coordinate` is always a
-    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
-    // SPIR-V capture confirms a shadow sampler's own coordinate is a
-    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
-    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
-    // synthesized zero offset must mirror it directly instead: every
-    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
-    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
-    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
-    // never consume the extracted values), so it can never be a bare
-    // scalar here even for `Dim::Dim1D`.
-    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
+    // Roadmap L193: unlike glslang's own shadow-sampler convention (a
+    // real `deqp-vk` SPIR-V capture confirms `sampler2dshadow`/
+    // `samplercubeshadow` always spell their own `Coordinate` as a
+    // genuine vector, even redundantly padded with an extra "unused"
+    // lane -- see the "+1" padding discussion elsewhere in this file's
+    // own `SPIRVResourceLowering.cpp` dref-sample handling), a real
+    // `dxc`-compiled `Texture1D::SampleCmp`/`SampleCmpLevelZero` produces
+    // a bare scalar `float` `Coordinate` operand instead (confirmed via
+    // `spirv-dis` on a real compiled module: `OpImageSampleDrefImplicitLod
+    // %float %sampledImage %float_u %float_dref None`, no vector type
+    // anywhere) -- mirroring `getDefaultZeroOffsetType`'s own identical
+    // `Dim1D` special case for an ordinary (non-comparison) sample. An
+    // unconditional `cast<VectorType>` here previously asserted on this
+    // exact shape (`SampleCmp.test`'s own `Texture1D::SampleCmp` calls).
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
 
     // Same fixed Image Operands bit order as `ImageSampleImplicitLodPattern`
     // above (`Bias` before `ConstOffset` before `MinLod`), whichever subset
@@ -9174,21 +9187,26 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
-    // own comment), a depth-comparison sample's `Coordinate` is always a
-    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
-    // SPIR-V capture confirms a shadow sampler's own coordinate is a
-    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
-    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
-    // synthesized zero offset must mirror it directly instead: every
-    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
-    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
-    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
-    // never consume the extracted values), so it can never be a bare
-    // scalar here even for `Dim::Dim1D`.
-    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
+    // Roadmap L193: unlike glslang's own shadow-sampler convention (a
+    // real `deqp-vk` SPIR-V capture confirms `sampler2dshadow`/
+    // `samplercubeshadow` always spell their own `Coordinate` as a
+    // genuine vector, even redundantly padded with an extra "unused"
+    // lane -- see the "+1" padding discussion elsewhere in this file's
+    // own `SPIRVResourceLowering.cpp` dref-sample handling), a real
+    // `dxc`-compiled `Texture1D::SampleCmp`/`SampleCmpLevelZero` produces
+    // a bare scalar `float` `Coordinate` operand instead (confirmed via
+    // `spirv-dis` on a real compiled module: `OpImageSampleDrefImplicitLod
+    // %float %sampledImage %float_u %float_dref None`, no vector type
+    // anywhere) -- mirroring `getDefaultZeroOffsetType`'s own identical
+    // `Dim1D` special case for an ordinary (non-comparison) sample. An
+    // unconditional `cast<VectorType>` here previously asserted on this
+    // exact shape (`SampleCmp.test`'s own `Texture1D::SampleCmp` calls).
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
 
     // Same fixed order as `ImageSampleGradPattern` above (`Grad`'s own
     // pair always comes first, then `ConstOffset`, then `MinLod`), but
@@ -9300,21 +9318,26 @@ public:
     mlir::Value Dref = Adaptor.getDref();
 
     mlir::Value Coordinate = Adaptor.getCoordinate();
-    // Unlike an ordinary sample's own `getDefaultZeroOffsetType` (see its
-    // own comment), a depth-comparison sample's `Coordinate` is always a
-    // genuine vector, even against `Plain1D`/`Array1D` (a real `deqp-vk`
-    // SPIR-V capture confirms a shadow sampler's own coordinate is a
-    // `vec3(u, <unused-or-layer>, compare)`, never a bare scalar --
-    // `ImageSampleDrefImplicitLodPattern`'s own comment), so this
-    // synthesized zero offset must mirror it directly instead: every
-    // shape's own switch arm in `SPIRVResourceLowering.cpp`'s dref-sample
-    // handling always extracts `OffsetX`/`OffsetY` from it unconditionally
-    // before dispatching per-shape (`Plain1D`/`Array1D`'s own arms simply
-    // never consume the extracted values), so it can never be a bare
-    // scalar here even for `Dim::Dim1D`.
-    auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
+    // Roadmap L193: unlike glslang's own shadow-sampler convention (a
+    // real `deqp-vk` SPIR-V capture confirms `sampler2dshadow`/
+    // `samplercubeshadow` always spell their own `Coordinate` as a
+    // genuine vector, even redundantly padded with an extra "unused"
+    // lane -- see the "+1" padding discussion elsewhere in this file's
+    // own `SPIRVResourceLowering.cpp` dref-sample handling), a real
+    // `dxc`-compiled `Texture1D::SampleCmp`/`SampleCmpLevelZero` produces
+    // a bare scalar `float` `Coordinate` operand instead (confirmed via
+    // `spirv-dis` on a real compiled module: `OpImageSampleDrefImplicitLod
+    // %float %sampledImage %float_u %float_dref None`, no vector type
+    // anywhere) -- mirroring `getDefaultZeroOffsetType`'s own identical
+    // `Dim1D` special case for an ordinary (non-comparison) sample. An
+    // unconditional `cast<VectorType>` here previously asserted on this
+    // exact shape (`SampleCmp.test`'s own `Texture1D::SampleCmp` calls).
+    auto ImageTy = mlir::cast<mlir::spirv::ImageType>(
+        mlir::cast<mlir::spirv::SampledImageType>(
+            Op.getSampledImage().getType())
+            .getImageType());
     mlir::Type OffsetType =
-        mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
+        getDefaultZeroOffsetType(ImageTy, Coordinate.getType(), Rewriter);
     mlir::Value Offset =
         HasConstOffset ? Adaptor.getOperandArguments()[1] : mlir::Value();
     if (!Offset)

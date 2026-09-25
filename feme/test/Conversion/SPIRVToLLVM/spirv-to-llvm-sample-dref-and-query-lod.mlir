@@ -312,3 +312,37 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %5 : vector<2xf32>
   }
 }
+
+// -----
+
+// Roadmap L193: `spirv.ImageSampleDrefImplicitLod` against a `Dim1D` image
+// (what `dxc` emits for `Texture1D<T>::SampleCmp(sampler, coord, dref)`,
+// confirmed via a real minimal `dxc -spirv -fspv-target-env=vulkan1.3`
+// repro) has a bare scalar `f32` Coordinate, unlike every other shape's
+// vector one -- `ImageSampleDrefImplicitLodPattern` previously assumed a
+// depth-comparison sample's Coordinate is always a genuine vector (true
+// for glslang, confirmed false for dxc's own `Dim1D` case) and
+// unconditionally `cast<VectorType>`'d it when defaulting `Offset` to
+// zero, crashing outright for this shape. It now reuses the same
+// `getDefaultZeroOffsetType` helper the ordinary (non-`Dref`) sample
+// patterns already use, which correctly returns a scalar `i32` zero
+// offset for `Dim1D` instead of a vector one.
+
+// CHECK-LABEL: llvm.func @samplecmp_1d
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: %[[OFFSET:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.samplecmp"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %[[OFFSET]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img_1d bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp_1d bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @samplecmp_1d(%coord : f32, %dref : f32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @img_1d : !spirv.ptr<!spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp_1d : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageSampleDrefImplicitLod %4, %coord, %dref : !spirv.sampled_image<!spirv.image<f32, Dim1D, IsDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, f32, f32 -> f32
+    spirv.ReturnValue %5 : f32
+  }
+}
