@@ -102281,3 +102281,108 @@ family is now fully closed (both `WidenedVectorComponents` and
 #4 (`offload-test-suite` build setup) for a mechanical change of pace, or
 #3 (`LoopLinearizer` design work) if ready for a large research-heavy
 session.
+
+# L192 session: offload-test-suite build directory finally set up
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 1 commit landed (docs only -- no feme source changed this session).**
+
+`5c9ce350324a` -- `Roadmap.md` (new `L192`/`L192(a)`/`L192(b)` rows) +
+`VulkanCTSReport.md` dated section.
+
+## What this session was
+
+Picked the mechanical item from the last 7+ sessions' own next-steps
+lists: `/home/dev/dev/offload-test-suite/build` had never existed. Set it
+up.
+
+## Setup (about 20 min hands-on, ~15 min unattended build)
+
+```
+mkdir /home/dev/dev/offload-test-suite/build
+cmake -G Ninja -B/home/dev/dev/offload-test-suite/build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=/usr/bin/clang \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+  -DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_ENABLE_PROJECTS="feme;mlir" \
+  -DLLVM_EXTERNAL_FEME_SOURCE_DIR=/home/dev/dev/llvm-project/feme \
+  -DLLVM_EXTERNAL_PROJECTS=OffloadTest \
+  -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=/home/dev/dev/offload-test-suite \
+  -DLLVM_TARGETS_TO_BUILD="Native;SPIRV;AMDGPU;NVPTX;AArch64" \
+  -DFEME_ENABLE_VULKAN=ON -DDXC_DIR=/usr/local/bin \
+  /home/dev/dev/llvm-project/llvm
+ninja -C /home/dev/dev/offload-test-suite/build check-hlsl-feme-vk
+```
+
+Two things worth remembering for next time:
+
+1. **`LLVM_ENABLE_PROJECTS="feme;mlir"` alone quietly builds clang too.**
+   `llvm/CMakeLists.txt` has a `"feme" IN_LIST LLVM_ENABLE_PROJECTS`
+   block that force-appends `clang` (and `mlir`, though I'd already
+   listed that one) as a `feme` dependency. This means
+   `check-hlsl-clang-feme-vk` comes along for free, and it's *why* the
+   existing main `build/` tree (only ever configured with `feme;mlir`)
+   already has a working `bin/clang` too -- not a mystery, just this one
+   line.
+2. **System CMake is 4.2.3 now.** An earlier session's own setup note
+   said to `pip install cmake` because the system one was 3.28 (below
+   the project's 3.31 floor). That's no longer true -- don't repeat that
+   step.
+
+## First full run: 428/680 Passed
+
+Rather than re-triage all 8 failures + 1 XPASS from scratch, cross-
+referenced each one against this file's and `Roadmap.md`'s own multi-
+session history first:
+
+| Test | Verdict |
+|---|---|
+| `array_of_matrices.test` (XPASS) | already-documented flake, 6+ sessions |
+| `spec_const_32_bits.test` | `H140` |
+| `Array.CalculateLevelOfDetail.test` | `H124t` |
+| `WaveOps/WaveActiveMax.test` | `H169`, triaged-closed (test's own reference convention question) |
+| `SimpleAmplification.test` | `L30`'s mesh-payload gap |
+| `SampleCmp.test` | `L7b`-adjacent |
+
+Two are genuinely new (not chased further this session -- out of scope
+for a build-setup task): `SimpleLines.test`/`SimpleTriangle.test` (maybe
+the same `L30` family, not confirmed) and `sqrt.16.test` (an `fp16`
+`sqrt` mismatch on 2 of 12 values -- one looks like the *test's own*
+expected value might be wrong, not `feme`: it expects a NaN pattern for
+`sqrt(-0.0)` but `feme` returns the IEEE-754-correct `-0.0`).
+
+## Verification
+
+- `ninja check-feme` (primary `build/` tree): 3344/3347, 3 Unsupported, 0
+  Failed -- unchanged, confirming this session's new build directory
+  didn't disturb anything.
+- No `VK-GL-CTS` re-run: no `feme` source touched this session.
+
+## Deferred, not started this session
+
+1. **(~30 min-1 hr)** Triage `L192(a)`
+   (`SimpleLines.test`/`SimpleTriangle.test`): confirm same-family as
+   `L30` or distinct.
+2. **(~1-2 hrs)** Triage `L192(b)` (`sqrt.16.test`): hand-trace `feme`'s
+   `fp16` `sqrt` lowering for the 2 mismatching values before guessing at
+   a fix -- may turn out to be a stale/wrong test expectation, not a
+   `feme` bug, same shape as `H169`'s own resolution.
+3. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
+   two-pass structural gap (Pass 1 creates phi stubs before Pass 2
+   force-decomposes anything) -- unaddressed on both the vector and
+   aggregate sides.
+4. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted.
+6. **(~5 min)** `/tmp/otsbuild.log` (this session's build log) can be
+   deleted -- scratch only, nothing references it.
+
+Next step if resuming: `L192(b)` (`sqrt.16.test`) is the more interesting
+pick -- it may reveal a genuine `feme` `fp16` bug, or close out as a test
+issue like `H169` did. `L192(a)` is more mechanical (just confirm which
+bucket it's in). Either is well-scoped at 1-2 hours.
