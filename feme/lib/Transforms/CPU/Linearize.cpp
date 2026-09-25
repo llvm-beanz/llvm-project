@@ -932,13 +932,50 @@ private:
   /// linearizeCycle`'s own comment for why an internal diamond feeding that
   /// decision -- as opposed to being the decision itself -- is fine for
   /// this pass to flatten first).
+  ///
+  /// Roadmap L197: deliberately does *not* call `CI.getExitBlocks` (live or
+  /// via any precomputed cache of it) at all. \p Cur is already known (by
+  /// every caller) to be a member of its own cycle \p C; since \p Cur has a
+  /// direct edge to \p Target, \p Target is an exit of \p C if and only if
+  /// \p Target itself is *not* a member of \p C -- exactly what
+  /// `CI.contains` answers, in O(1), via a live per-block cycle-membership
+  /// lookup (the same one `isInCycle` above already relies on). Two earlier
+  /// approaches were tried and rejected for this same call:
+  ///  1. A live `CI.getExitBlocks(C, Exits)` call: per `GenericCycleInfo`'s
+  ///     own implementation, this walks \p C's frozen, `compute()`-time
+  ///     block snapshot and calls `successors()` on every block in it --
+  ///     including any block a previously-linearized child or sibling
+  ///     cycle has since `eraseFromParent()`'d, a genuine use-after-free.
+  ///     Confirmed (via a real crash) to cause `DiamondFlattener::flatten`'s
+  ///     own `for (;;)` walk to never terminate on a 3-deep nested loop
+  ///     (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`) once
+  ///     `LoopLinearizer::linearizeCyclePostOrder` began attempting a
+  ///     non-leaf cycle.
+  ///  2. A precomputed, once-at-`run()`-start cache of every cycle's exit
+  ///     blocks (avoiding the use-after-free above by never touching a
+  ///     freed block's `successors()`): still wrong, because
+  ///     `LoopLinearizer::linearizeCycle` itself *inserts new blocks* into
+  ///     a cycle's body while restructuring it (masked continue/break
+  ///     guards, relay hops, critical-edge splits) -- by the time a
+  ///     *parent* cycle is finally attempted (post-order, children first),
+  ///     its body contains blocks that did not exist when the cache was
+  ///     built, so any exit path reached via one of *those* new blocks is
+  ///     simply absent from the stale, pre-mutation cache. Confirmed via
+  ///     targeted tracing: for the same 3-deep reproducer, a genuine
+  ///     loop-exit-guard block's own exit edge was misclassified because
+  ///     its cycle's cached exit list was empty (built before that guard
+  ///     block existed), causing the identical non-termination as (1).
+  /// The `CI.contains`-based check below is immune to both: it performs no
+  /// block-list walk at all (nothing to free out from under it), and
+  /// answers against \p Target's *live*, current cycle membership rather
+  /// than any frozen snapshot, so a newly-inserted block is classified
+  /// correctly the moment it exists (in or out of \p C, exactly as
+  /// `LoopLinearizer` itself set it up).
   bool isLoopControlEdge(BasicBlock *Cur, BasicBlock *Target) {
     CycleRef C = CI.getCycle(Cur);
     if (Target == CI.getHeader(C))
       return true;
-    SmallVector<BasicBlock *, 2> Exits;
-    CI.getExitBlocks(C, Exits);
-    return llvm::is_contained(Exits, Target);
+    return !CI.contains(C, Target);
   }
 
   /// The immediate post-dominator of \p BB, or `nullptr` if none (should not
@@ -2836,6 +2873,14 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // other, deeper in the same body, is a plain post-barrier uniform load
   // comparison already tolerated by the "leave alone" path below.
   {
+    // Roadmap L197: `DiamondFlattener::isLoopControlEdge` classifies loop-
+    // control edges via a live `CI.contains` membership check (O(1), no
+    // block-list walk) rather than any `CI.getExitBlocks`-derived list --
+    // see its own comment for why both a live call and a precomputed
+    // cache of that method were tried and rejected here (a genuine
+    // use-after-free for the former, and staleness against blocks this
+    // same fixed-point loop itself inserts for the latter). No extra
+    // plumbing is needed at this call site as a result.
     DiamondFlattener DF(F, DT, PDT, CI, UI);
     bool FlattenedAny = true;
     while (FlattenedAny) {
