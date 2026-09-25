@@ -13045,3 +13045,107 @@ Verification:
 No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed: this session's landed fix is a pure CPU-widening-pass correctness
 fix, not a feature/extension surface change.
+
+## 2026-09-30: L191(a) fixed -- systematic audit of the L134(c)/L191 bug class generalizes the fix to a single check, closing 5 more previously-silent-poison consumer-shape gaps
+
+`L191`'s own row had explicitly deferred a design question: should the two
+narrow, hand-written per-instruction-type special cases it (and `L134(c)`
+before it) added to `FunctionWidener::widenInstruction` be replaced by a
+single generic "any operand already decomposed" check instead? This
+session picked that question back up with a full audit.
+
+**Audit.** Enumerated every one of the 19 `WidenedVectorComponents`-
+populating call sites across all 16 distinct `FunctionWidener::` producer
+functions in `SIMDize.cpp`, and classified each producer's decomposition
+gating as safe (consistent with `UniformityInfo::isDivergentAtDef`, e.g.
+`widenWaveCall`'s `ReadLane` branch checks it directly; `widenStageOp`'s
+vector branch is safe because every `StageOpKind` reaching it is
+hard-coded `NeverUniform` in `WaveUniformity.cpp`; `widenResourceCall`/
+`widenImageCall` gate on their own operands already having been widened,
+which is itself always downstream-consistent) or unsafe (shape-only,
+ignoring `UI`'s verdict on the producer entirely -- the actual bug
+pattern, already known for `widenMaskedAllocaLoad`/`widenMaskedLoad`).
+
+This found the bug is not confined to the three consumer types
+`L134(c)`/`L191` had already patched (`ExtractElementInst`/
+`ShuffleVectorInst`/`InsertElementInst`): a `SelectInst` choosing between a
+decomposed vector and an ordinary one, an arbitrary/homogeneous-intrinsic
+`CallInst` taking a decomposed vector argument directly, and a plain
+(non-groupshared, non-`MaskedAllocas`) `StoreInst` storing a whole
+decomposed vector value are all equally exposed if `UI` separately (and
+incorrectly, for the identical reason as before) classifies *them*
+uniform too.
+
+**Fix.** Replaced the three narrow special cases and the general
+uniformity gate itself with a single check:
+
+```cpp
+bool AnyOperandDecomposed = llvm::any_of(I.operands(), [&](Use &U) {
+  return WidenedVectorComponents.contains(U.get());
+});
+if (!AnyOperandDecomposed && !UI.isDivergentAtDef(&I))
+  return true; // Uniform, and no operand was force-decomposed: leave it
+               // exactly as it is.
+```
+
+This is a strict widening of which instructions reach the existing
+post-gate dispatch cascade (the new condition is a logical AND with the
+unchanged old one, so it can only add early-return exceptions, never
+remove one that existed before) -- every dispatch case it can newly reach
+was individually confirmed to already reconstruct a decomposed operand
+correctly and generically (`widenVectorSelect`, `widenScalarizedFallback`,
+...), independently of *why* it is being widened.
+
+The audit also found one latent gap this generalization would otherwise
+have newly exposed: a vector-typed homogeneous "trivially vectorizable"
+intrinsic call (e.g. `llvm.fabs.v3f32`) reaching the post-gate cascade
+this way used to fall to `widenElementwise`'s scalar-only
+homogeneous-intrinsic path, which assumes its `CallInst`'s own type is
+scalar and would build an illegal `<W x <N x T>>` nested vector type for
+a vector-typed one -- fixed by adding a matching vector-typed-homogeneous-
+intrinsic-`CallInst` case to the post-gate cascade, routing to
+`widenVectorElementwise` (which already handles this shape correctly)
+instead.
+
+**Testing.**
+
+- Three new `SIMDizeTest.cpp` cases
+  (`DecomposesUniformlyClassifiedSelectOverDecomposedVector`,
+  `DecomposesUniformlyClassifiedHomogeneousIntrinsicCallOverDecomposedVector`,
+  `DecomposesUniformlyClassifiedStoreOfDecomposedVectorAtUniformAddress`),
+  each confirmed via a stash/rebuild/rerun/restore round-trip to fail
+  identically (a poison operand on the original, unrewritten value)
+  without this fix.
+- Full `FeMeTransformsCPUTests`: 561/561 passed (+3 new tests), 0
+  regressions.
+- `ninja check-feme`: 3343/3346, 3 Unsupported, 0 Failed, 0 regressions.
+- Full per-case `graphicsfuzz.*` re-sweep (all 757 cases, crash-tolerant
+  per-case-isolated driver, before/after this fix alone): 668 Pass / 78
+  Fail / 8 NotSupported / 1 Crash / 2 Timeout -> **673 Pass / 73 Fail**,
+  exactly +5, 0 regressions (identical `Pass` set retained; `Fail`/
+  `NotSupported`/`Crash`/`Timeout` sets otherwise unchanged). The 5 newly
+  passing cases: `cov-clamp-vector-component-condition-using-matrix`,
+  `cov-loop-construct-vec4-from-vec4-clamp-same-min-max`,
+  `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`,
+  `cov-nested-loops-decrease-vector-component-by-matrix-element-global-loop-counter`,
+  `cov-reinitialize-matrix-after-undefined-value` -- all individually
+  re-confirmed `Pass` in isolation afterwards. The one known pre-existing
+  process-crashing case
+  (`cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+  when a value is destroyed!") and the one known pre-existing
+  divergent-branch diagnostic failure
+  (`cov-function-loops-vector-mul-matrix-never-executed`) both reproduce
+  identically, confirmed unrelated to this fix.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this session's landed fix is a pure CPU-widening-pass correctness
+fix, not a feature/extension surface change.
+
+**Deferred, out of this session's scope**: the separate
+`WidenedAggregateComponents` map (an analogous but distinct tracking map
+for flattened struct/array leaf values) was not audited at all -- a
+plausible area for the same latent bug class, worth a dedicated future
+session; and a `PHINode` consumer of a to-be-force-decomposed value
+remains structurally unaddressable with the current two-pass (`Pass 1`:
+phi-stub creation; `Pass 2`: everything else) architecture, since Pass 1
+runs before anything has been force-decomposed yet.
