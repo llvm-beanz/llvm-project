@@ -1469,4 +1469,97 @@ TEST(LinearizeTest,
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L196: distilled from a real captured pre-`feme-cpu-linearize` IR
+// dump of the `stable-colorgrid-modulo-double-always-false-discard`
+// graphicsfuzz Vulkan CTS case's own `variant_fragment_shader` (see
+// agent_thoughts.md's "L196(b) session" entry for the full derivation:
+// `spirv-as` -> `feme-translate --import-spirv` -> `feme-translate
+// --no-implicit-module --spirv-to-llvmir` -> the real `feme-cpu` target's
+// own `feme-graphics-canonicalize-stage`/`feme-cpu-prepare`/... normalize
+// pipeline, run via `feme-opt -passes=...` up to (but not including)
+// `feme-cpu-linearize` -- then `llvm-reduce`, in two passes (first over
+// the raw pre-normalize IR with an interestingness test comparing this
+// pass's pre-L196-fix and post-L196-fix `feme.cpu.mask.any` counts on the
+// *whole* normalize-then-linearize pipeline, then again directly on the
+// captured pre-linearize IR with the same comparison run through this
+// pass alone) to reach the minimal shape below.
+//
+// The real shader's own "two sibling top-level loops" shape that
+// motivated this reduction (see `agent_thoughts.md`'s L196 session
+// entry) did not survive either reduction pass: both `llvm-reduce` runs
+// independently converged on a *single* loop whose one exit check is
+// itself composed, via an inner one-arm-diamond's own merge `phi`
+// (`%4` below), from a genuinely divergent value (`%3`, a stage input
+// load) and a constant. This is a different concrete trigger for the
+// exact same underlying hazard `KnownUniformValues` fixes, not the
+// original sibling-cycle shape itself: `DiamondFlattener` first
+// flattens the one-arm diamond (`1`/`._crit_edge.Flow5_crit_edge`) that
+// computes `%3`, replacing `Flow5`'s own original terminator (whatever
+// `UniformityInfo` actually analyzed it as, before this pass ran) with a
+// brand new conditional branch on the freshly created merge `phi` `%4`
+// -- itself divergent, since one of its two incoming values (`%3`) is.
+// Before this fix, `isDivergentBranch`'s predecessor,
+// `UI.isDivergentTerminator`, is keyed on `Flow5`'s own *block* and
+// therefore still reports whatever verdict `UniformityInfo` gave
+// `Flow5`'s *original* terminator, not this pass's own newly created
+// one -- exactly the same stale-block-keyed-cache hazard the real
+// sibling-cycle CTS case hit, just via a diamond-then-loop-exit
+// composition within a single cycle rather than across two.
+//
+// Confirmed by temporarily reverting the `KnownUniformValues` mechanism
+// (`Linearize.cpp`'s own L196 commit) and re-running this exact test
+// via a standalone `feme-opt -passes=feme-cpu-linearize` invocation on
+// this same IR: without the fix, `Flow5`'s own backedge condition is
+// misclassified as uniform (no `feme.cpu.mask.any` reduction is
+// created, and the loop's continuation branches directly on `%4`'s own
+// genuinely divergent, unreduced per-lane value instead) -- the same
+// silently-wrong-render class of bug (not a crash or verifier failure)
+// the real CTS sweep observed.
+TEST(LinearizeTest, TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() {
+      br label %._crit_edge
+
+    ._crit_edge:                                      ; preds = %Flow5.._crit_edge_crit_edge, %0
+      br i1 false, label %1, label %._crit_edge.Flow5_crit_edge
+
+    ._crit_edge.Flow5_crit_edge:                       ; preds = %._crit_edge
+      br label %Flow5
+
+    1:                                                  ; preds = %._crit_edge
+      %2 = call float @feme.stage.input.load.f32()
+      %3 = fcmp ult float 0.000000e+00, %2
+      br label %Flow7
+
+    Flow5:                                              ; preds = %Flow7, %._crit_edge.Flow5_crit_edge
+      %4 = phi i1 [ %3, %Flow7 ], [ true, %._crit_edge.Flow5_crit_edge ]
+      br i1 %4, label %loop.exit.guard, label %Flow5.._crit_edge_crit_edge
+
+    Flow5.._crit_edge_crit_edge:                       ; preds = %Flow5
+      br label %._crit_edge
+
+    Flow7:                                              ; preds = %1
+      br label %Flow5
+
+    loop.exit.guard:                                   ; preds = %Flow5
+      ret void
+    }
+    declare float @feme.stage.input.load.f32()
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskAny = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
+        FoundMaskAny = true;
+  EXPECT_TRUE(FoundMaskAny);
+}
+
 } // namespace
