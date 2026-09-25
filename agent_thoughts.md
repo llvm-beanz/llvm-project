@@ -103223,3 +103223,165 @@ Next step if resuming: item 2 (`run()`'s traversal-order change) is the
 real payoff this session's mechanism was built for -- pick it up next,
 but budget real time for the block-deletion-safety investigation first,
 not just the traversal rewrite itself.
+
+# L196(b) session: added the deferred sibling-hazard regression test -- llvm-reduce found a smaller, different trigger than the real shader's own shape
+
+**Next action, if you're picking this up cold**: read L188's row in
+`Roadmap.md` and pick item 2 below (`run()`'s traversal-order change) --
+it's the real remaining payoff of the last two sessions' work. Everything
+in *this* session is now closed out.
+
+## What I did
+
+The prior L196 session designed and landed `KnownUniformValues` (the
+"provably uniform by construction" value-tracking mechanism), and along
+the way found and fixed a real CTS bug -- but explicitly left "add a
+dedicated unit test" as an open follow-on, since the bug was found only
+by a broad CTS sweep, not constructed by hand. This session did that:
+
+1. **(~1 hr)** Extracted the real shader (`stable-colorgrid-modulo-
+   double-always-false-discard`'s `variant_fragment_shader`) from its
+   `.amber` CTS source and ran it through the full real pipeline:
+   `spirv-as` -> `feme-translate --import-spirv` -> `feme-translate
+   --no-implicit-module --spirv-to-llvmir` -> the real `feme-cpu`
+   target's own normalize passes (found the exact list and order by
+   reading `Pipeline.cpp`, not by trusting an old `agent_thoughts.md`
+   shorthand -- see "What I'd tell a future session" below).
+2. **(~30 min)** Confirmed the real, un-reduced shader IR reproduces
+   the bug directly: built a "broken" `feme-opt` (temporarily reverting
+   just `Linearize.cpp` to its pre-`KnownUniformValues` state) and
+   diffed its `feme.cpu.mask.any` count against the real, fixed
+   `feme-opt`'s -- 3 vs 4, confirmed different.
+3. **(~30 min)** Used `llvm-reduce` (built in-tree, not the system
+   one) with a shell-script interestingness test comparing those same
+   two binaries' `feme.cpu.mask.any` counts, in two passes: once over
+   the raw pre-normalize IR (315 lines -> 37 lines), then again
+   directly on the captured pre-`feme-cpu-linearize` IR alone (109
+   lines -> 32 lines) to get the smallest form actually usable as a
+   `LinearizeTest.cpp` string literal.
+4. **(~20 min)** Wrote the new `TEST()`
+   (`TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit`), with a
+   provenance comment documenting the derivation and the surprise below.
+   Confirmed it fails without the fix (temporary revert/rebuild/rerun/
+   restore round-trip on `Linearize.cpp` again, this time rebuilding
+   `FeMeTransformsCPUTests` too) and passes with it.
+5. Ran `ninja check-feme`: 3351/3354 passed (+1 over the prior
+   session's landing), 3 pre-existing `Unsupported`, 0 `Failed`.
+6. Re-ran the one real CTS case this row concerns
+   (`dEQP-VK.graphicsfuzz.stable-colorgrid-modulo-double-always-false-
+   discard`) standalone: still `Pass`. Did not repeat the full
+   `graphicsfuzz.*` sweep, since this session's only change is a new
+   unit test with zero functional code change -- `check-feme` alone
+   already proves no regression.
+7. Updated `Roadmap.md`'s L196 row and `VulkanCTSReport.md` with a new
+   dated section; confirmed the feature/extension inventories need no
+   change (same reasoning as the prior session: no feature/extension
+   surface touched).
+
+## The surprise: the real shape didn't survive reduction
+
+I expected the reduced test to end up looking like the real bug: two
+sibling top-level loops sharing structure. It didn't. Both `llvm-reduce`
+passes independently converged on something smaller and structurally
+different: a **single** loop whose one exit check is itself composed,
+via an inner one-arm diamond's own merge `phi`, from a genuinely
+divergent value and a constant. `DiamondFlattener` flattens that inner
+diamond first, replacing the merge block's own original terminator with
+a brand new conditional branch on the freshly created `phi` -- and *that
+new terminator* is exactly the kind of newly-synthesized-branch the
+stale, block-keyed `UI.isDivergentTerminator` cache was already known
+(from the *nested*-cycle case, L188's original motivation) to get wrong.
+
+So this reduction found a **third**, independent way to trigger the
+identical underlying hazard (nested cycles: L188; sibling cycles: the
+prior L196 session; diamond-flatten-then-loop-exit within one cycle:
+this session), not a smaller version of the second one. That's actually
+a *better* regression test than a hand-preserved two-sibling-loop shape
+would have been -- it's simpler, and it demonstrates the fix generalizes
+beyond the one shape that happened to surface it. I did not go back and
+also try to hand-construct the literal two-sibling-loop shape once I saw
+this; the mechanism is the same and already covered, and chasing the
+exact original shape after this smaller one already worked and verified
+would have been diminishing returns.
+
+## What I'd tell a future session
+
+**Don't trust `agent_thoughts.md`'s own recalled pass-pipeline shorthand
+strings across sessions without cross-checking `Pipeline.cpp` -- they
+drift.** An earlier session's grep turned up
+`-passes='feme-cpu-fold-spirv-builtins,feme-cpu-prepare,feme-cpu-
+linearize'` as "the" recipe; it's incomplete (missing
+`feme-graphics-canonicalize-stage`/`feme-graphics-validate-stage`
+entirely, which is what actually lowers `@gl_FragCoord` from a raw
+`addrspace(7)` load into the `feme.stage.input.load.f32` call form
+`computeWaveUniformity` knows to treat as `NeverUniform` -- without it,
+`LinearizePass` sees a raw global load it doesn't recognize as an input,
+and silently linearizes *nothing at all*, 0 `feme.cpu.mask.any` calls,
+no error). I spent real time on this before reading `feme-opt.cpp`'s own
+`registerFeMePasses` (the authoritative list of every pass name string
+`-passes=` actually accepts) and `Pipeline.cpp`'s own `Normalize` pass
+group construction directly, cross-checking both against each other.
+That combination -- not any one file alone -- is the source of truth for
+"what's the real pipeline," and it's worth reading fresh each time this
+kind of reduction is needed rather than trusting a prior session's
+shorthand.
+
+**The two-phase `llvm-reduce` approach (raw IR first, then re-reduce
+just the captured pre-pass-under-test IR) is a good pattern worth
+reusing.** Reducing directly against the *real* multi-stage pipeline
+first (with the interestingness test invoking the *whole* normalize-
+then-linearize chain) keeps every intermediate reduction candidate
+"real" -- i.e. still something the actual production pipeline would
+produce, not an already-invalid or non-representative shape a human
+might accidentally hand-construct. Only after that first reduction
+converges is it safe (and much faster/simpler) to capture the exact
+pre-target-pass IR and re-reduce *that* alone against the target pass in
+isolation, which is what a unit test actually needs to embed.
+
+**Building two `feme-opt` binaries under ccache (reverting one file,
+rebuilding, comparing, then restoring and rebuilding again) is fast
+enough to do more than once per session** -- each round-trip was under
+2 minutes here. Don't hesitate to do this confirmation twice (once for
+the real un-reduced shader, once more after reduction) rather than
+trusting a single earlier confirmation still applies to a since-reduced
+module.
+
+## Files changed
+
+- `feme/unittests/Transforms/CPU/LinearizeTest.cpp`: new
+  `TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit` test.
+- `feme/docs/Roadmap.md`: L196 row's status text updated to record the
+  new test and the reduction's own surprise finding.
+- `feme/docs/VulkanCTSReport.md`: new dated section recording this
+  session's targeted (not full-sweep) CTS re-check.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed (test-only change, no feature/extension surface
+  touched).
+
+## Suggested next steps
+
+1. **(large, the actual next step for L188 itself, unchanged from the
+   last two sessions)** Attempt `run()`'s own traversal-order change:
+   make it a genuine post-order traversal (all descendants fully
+   processed before their parent is attempted) instead of permanently
+   skipping any cycle with children. Before writing that change,
+   separately investigate whether a child cycle's own block deletions
+   (`foldRedundantFlowBlocksInCycle`/`mergeTrivialRelayBlocksInCycle`)
+   can invalidate a not-yet-processed *parent* cycle's own
+   `CI.getHeader`/`getExitBlocks`/`contains` results -- still an
+   entirely open safety question no session has investigated yet.
+2. **Scan `Roadmap.md` fresh** if not picking up 1 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted after many sessions of deferral. A future session should do
+   a real full-table pass rather than keep punting on this same list.
+3. **(~5 min)** No `/tmp` scratch remains from this session -- all
+   `/tmp/l196b_*`/`/tmp/ctsrun_l196b/`/`/tmp/Linearize_*.cpp` scratch
+   (extracted SPIR-V, intermediate `.ll` dumps, both temporary `feme-opt`
+   binaries, `llvm-reduce` interestingness scripts, one CTS `.qpa` log)
+   removed.
+
+Next step if resuming: item 1 (`run()`'s traversal-order change) is the
+real payoff the last three sessions' work (L188's root cause, L196's
+mechanism, this session's test coverage) has been building toward --
+pick it up next.
