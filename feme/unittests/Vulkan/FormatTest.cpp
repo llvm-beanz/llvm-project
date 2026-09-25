@@ -839,23 +839,27 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }
   // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only)
-  // and a depth format is never a color-sampled format at all -- both are
-  // honestly left unset, same as every other unimplemented sampled
+  // -- honestly left unset, same as every other unimplemented sampled
   // format.
-  for (ResourceFormat Format :
-       {ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
-    EXPECT_FALSE(formatFeatureFlags(Format) &
-                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
-  }
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_SFLOAT) &
+               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   // Roadmap H8e: `D16_UNORM`'s own missing `SAMPLED_IMAGE_BIT` is a
-  // genuine gap, not a reporting-only one -- unlike `D32_FLOAT` above,
-  // the real mandatory-format-table `deqp-vk` run this row's own
-  // investigation used does require it, and `femeRTFetchTexel2D` already
-  // decodes `D16_UNORM` (roadmap F8b), so this is just the missing
-  // advertisement. No `_FILTER_LINEAR_BIT`: that same CTS run does not
-  // require it for `d16_unorm`.
-  {
-    VkFormatFeatureFlags Flags = formatFeatureFlags(ResourceFormat::D16_UNORM);
+  // genuine gap, not a reporting-only one -- the real mandatory-format-
+  // table `deqp-vk` run this row's own investigation used does require
+  // it, and `femeRTFetchTexel2D` already decodes `D16_UNORM` (roadmap
+  // F8b), so this is just the missing advertisement. No
+  // `_FILTER_LINEAR_BIT`: that same CTS run does not require it for
+  // `d16_unorm`. Roadmap L193: `D32_FLOAT` is the identical omission for
+  // the other depth format the CPU runtime already fully decodes and
+  // depth-compares (`femeRTUnpackImageTexel`'s own `D32_FLOAT` case,
+  // roadmap F8b; `femeRTIsFixedPointDepthFormat`'s own unclamped-compare
+  // documentation, `FeMeRuntimeCPU.c`), found via `Feature/Textures/
+  // SampleCmp.test`'s own `Depth32`-backed `Tex2D`/`TexCube`/`Tex1D`
+  // being rejected outright by `vkGetPhysicalDeviceImageFormatProperties`
+  // before pipeline creation ever got a chance to run.
+  for (ResourceFormat Format :
+       {ResourceFormat::D16_UNORM, ResourceFormat::D32_FLOAT}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }

@@ -1105,6 +1105,30 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::D16_UNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
+  // (Roadmap L193) `D32_FLOAT`: the same H8e-shaped omission, just for
+  // the other depth format the CPU runtime already fully decodes and
+  // depth-compares (`femeRTUnpackImageTexel`'s own `D32_FLOAT` case,
+  // roadmap F8b; `femeRTIsFixedPointDepthFormat` already documents
+  // `D32_FLOAT`'s own unclamped-compare behavior, `FeMeRuntimeCPU.c`) --
+  // found via `Feature/Textures/SampleCmp.test`'s own `Texture2D<float4>
+  // Tex2D`/`TextureCube<float4> TexCube`/`Texture1D<float4> Tex1D`, all
+  // three of which the test backs with a `Format: Depth32` (`VK_FORMAT_
+  // D32_SFLOAT`) resource for `SampleCmp`/`SampleCmpLevelZero`'s own
+  // depth-comparison sampling: `vkGetPhysicalDeviceImageFormatProperties`
+  // (`EntryPoints.cpp`) rejected the image outright with `VK_ERROR_
+  // FORMAT_NOT_SUPPORTED` before pipeline creation ever got a chance to
+  // run, since this switch (unlike `D16_UNORM`'s own already-fixed case)
+  // never advertised `SAMPLED_IMAGE_BIT` for it at all. No
+  // `_FILTER_LINEAR_BIT` here either, mirroring `D16_UNORM`'s own
+  // precedent: depth-comparison sampling's own hardware-modeled
+  // filtering (`femeRTSampleFilteredCmp2D`/`Cube`/`1D`, roadmap L46/L48/
+  // L54) is a fixed 2x2/4-texel box filter over the *compared* boolean
+  // results, not a real bilinear filter over the depth texel values
+  // themselves, so `_FILTER_LINEAR_BIT` was never a meaningful
+  // capability to claim for either depth format.
+  case ResourceFormat::D32_FLOAT:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    break;
   default:
     if (ASTCLdr)
       Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
