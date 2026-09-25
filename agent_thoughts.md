@@ -102503,3 +102503,186 @@ mechanical to start (run `SimpleLines.test`'s own `offloader` invocation
 by hand, check whether `Output.png` even exists / has nonzero size
 before blaming `imgdiff`). If a change of pace is wanted instead, pick
 #2 or #3 for a larger research session.
+
+# L192(a) session: missing GOLDENIMAGE_DIR was masking dozens of "failures"; found and fixed 2 real bugs (1 non-FeMe regression, 2 newly-filed)
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 4 code/config-affecting actions, all committed, this session's
+own real net contribution is much bigger than the assigned task's own
+narrow scope suggested.** 3 commits landed in `llvm-project` (docs
+only, no FeMe source changed this session), 1 commit landed in
+`offload-test-suite` (a real code fix).
+
+## What I was assigned vs. what I actually found
+
+Picked up `L192(a)`: triage `SimpleLines.test`/`SimpleTriangle.test`'s
+`imgdiff: Failed reading PNG header from file`. The prior session's own
+next-steps framed this as "isolate which side is at fault: feme's own
+image-write path, `offload-test-suite`'s `imgdiff`, or a path/rules
+misconfiguration" -- and it turned out to be exactly that third option,
+but far more consequential than a single-test misconfiguration.
+
+## The actual root cause: a missing CMake variable, not a code bug at all
+
+`GOLDENIMAGE_DIR` is a normal CMake cache variable
+(`test/CMakeLists.txt`), documented in `docs/offload-distribution.md`,
+and set by CI itself (`.github/workflows/*-callable.yaml` checks out
+`llvm/offload-golden-images` fresh every single run and passes
+`-DGOLDENIMAGE_DIR=<path>`). This environment's own
+`check-hlsl-feme-vk` build directory -- set up several sessions ago in
+`L192`'s own build-setup session -- never set it.
+
+`test/lit.cfg.py`'s own guard:
+```python
+if os.path.exists(config.goldenimage_dir):
+    config.substitutions.append(("%goldenimage_dir", config.goldenimage_dir))
+```
+silently no-ops when the variable is empty. `os.path.exists("")` is
+`False` in Python -- no error, no warning, nothing in any build log.
+Every `%goldenimage_dir/hlsl/...png` token in every affected `RUN:`
+line was therefore never substituted at all -- left as a literal,
+nonexistent path string. `imgdiff` trying to open that literal string
+is exactly why it reported "Failed reading PNG header from file".
+
+## The scale of it: this wasn't a `SimpleLines.test`-only bug
+
+I cloned `llvm/offload-golden-images` (same repo CI itself uses) and
+reconfigured the *existing* build directory with a single cache-var
+change (`cmake -DGOLDENIMAGE_DIR=... .`, no full reconfigure needed) and
+rebuilt `hlsl-test-depends`. A full 680-test `check-hlsl-feme-vk`
+re-run afterward showed **only 3 real `Failed`** (down from the
+scattered handful-to-dozen "failures" every recent session's own
+sweeps had been individually re-triaging, one at a time, across many
+sessions, without ever stepping back to ask "why are so many
+*seemingly unrelated* things all failing at once"). That's the actual
+lesson here -- worth remembering.
+
+## Second discovery while re-verifying the full suite: a lost fix
+
+`spec_const_32_bits.test` was *also* still failing post-fix, on the
+exact symptom `H140` already documents as fixed weeks/sessions ago
+(`OutBool` reads back `0` instead of `1`). Checked the actual
+`offload-test-suite` checkout directly (`git log --all`, `grep` the
+file) -- the `H140`-described `offload-test-suite`-side fix was never
+actually committed there. FeMe's own half of that fix
+(`SpecializationPatch.cpp`) was still present and correct; only the
+`offload-test-suite`-side half (`Device.cpp`'s `DataFormat::Bool` case)
+was missing, still carrying the original 1-byte `sizeof(bool)` bug.
+Most likely explanation: this environment's own `offload-test-suite`
+checkout was cloned fresh from `origin` in a later session (`L192`'s
+own build-directory setup) rather than continuing whatever local,
+uncommitted tree an earlier session had actually patched -- the fix
+existed only in that earlier session's own uncommitted working tree,
+and was lost when a fresh clone replaced it.
+
+Refixed directly, verified, and **committed to `offload-test-suite` in
+its own commit** (per this session's own out-of-FeMe-issue standing
+instruction -- an isolated, self-contained fix, only touching that
+repo).
+
+## Two new real bugs filed (not fixed, no time budget left)
+
+1. **`L193`**: `SampleCmp.test` crashes -- `Assertion 'isa<To>(Val) &&
+   "cast<Ty>() argument of incompatible type!"' failed` inside
+   `SPIRVToLLVMPatterns.cpp`'s `ImageSampleDrefImplicitLodOp` lowering
+   pattern (a bad `cast<mlir::VectorType>`). Newly *surfaced* by this
+   session's golden-image fix, not newly *introduced* -- it was always
+   failing, just masked behind the same misleading golden-image error
+   as everything else.
+2. **`L194`**: `CalculateLevelOfDetail.test` still fails pipeline
+   creation, but not for a new reason -- the test file now also
+   exercises `Texture1D::CalculateLevelOfDetail`, which `H124u`'s own
+   row already documents as unstarted follow-on scope
+   (`Plain1D`/`Array1D`/`Plain3D`/`CubeArray`). `H124u`'s own claim of
+   "now fully passes" was accurate for whatever version of the test
+   file existed at the time; the test file has since grown.
+
+## Verification
+
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed -- unaffected,
+  since no FeMe source was touched this session at all (both fixes are
+  a build-config change and a non-FeMe code fix).
+- `check-hlsl-feme-vk` full re-run (680 tests): 3 `Failed`, 1 known
+  `XPASS` (`H124g`'s own already-tracked case) -- down from dozens.
+- Full `graphicsfuzz.*` CTS re-sweep (757 cases): confirmed
+  byte-identical to the established baseline. My own quick
+  crash-tolerant driver classified all 74 non-passing cases as "Crash"
+  (a classification quirk -- `deqp-vk` exits nonzero for an ordinary
+  in-process `Fail` result too, not just a true process crash), but
+  cross-checked the known real crashing case's own name is still in
+  that list alongside the other 73 ordinary failures, and the total
+  count (74) matches the baseline's own `73 Fail + 1 Crash` exactly.
+  0 regressions, 0 incidental new passes, as expected.
+
+## A mistake I made and caught myself
+
+Initially cloned the golden images to `/tmp/offload-golden-images` and
+pointed `GOLDENIMAGE_DIR` there, then deleted `/tmp` scratch as part of
+session cleanup *before* checking whether anything still referenced
+it -- which would have silently broken the just-applied fix on the very
+next session. Caught it before finishing, found
+`/home/dev/dev/offload-golden-images` already existed persistently
+(sibling to `VK-GL-CTS`/`offload-test-suite` themselves), and
+reconfigured to point there instead. Reverified `SimpleLines.test`
+still passes against the persistent path. **Lesson**: when a fix
+depends on an external resource, check for (or use) a persistent
+location *before* declaring victory and cleaning up scratch -- don't
+assume everything under `/tmp` is safe to delete just because it was
+this session's own scratch.
+
+## Lesson worth remembering
+
+When several individually-triaged "failures" keep showing up with
+superficially different error messages across many separate sessions
+each fixing them one at a time, it's worth periodically asking whether
+they share a common *infrastructure* cause rather than each being its
+own distinct bug -- especially anything that touches test-harness
+configuration (build flags, external data dependencies, environment
+variables) rather than the code under test itself. A missing CMake
+variable masqueraded as "an image-writing bug" for who knows how many
+sessions.
+
+## Deferred, not started this session
+
+1. **(~1-2 hrs, well-scoped)** `L193`: root-cause the `SampleCmp.test`
+   crash -- get an isolated repro (this test alone, or its own compiled
+   `.o` fed straight to `feme-translate`/`feme-opt`), then `spirv-dis`
+   the failing call's operand types to find which one the pattern
+   wrongly assumes is a vector.
+2. **(~1-2 hrs, well-scoped, same shape as `H124u`'s own prior work)**
+   `L194`: add a `QueryLod1D`/`QueryLodArray1D` counterpart to
+   `H124u`'s own `QueryLodCube` work.
+3. **(large, no fix designed, carried from `L191(b)`)** The `PHINode`
+   two-pass structural gap -- unaddressed on both the vector and
+   aggregate sides.
+4. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted.
+6. **Worth a broader sanity sweep at some point**: since this session
+   found one already-documented fix (`H140`'s `offload-test-suite`
+   side) silently lost from the checkout, it's plausible other
+   `offload-test-suite`-side fixes from other roadmap rows citing
+   "offload-test-suite" as a touched file might have the same problem
+   -- a `grep`-for-roadmap-rows-mentioning-offload-test-suite-then-
+   verify-each-is-actually-committed-there pass would be cheap
+   insurance, though not urgent (only 1 other row currently references
+   an `offload-test-suite`-side change, per a quick `grep` this
+   session, so the blast radius is probably small).
+7. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/ctsrun_l192a/` (case list, per-case sweep driver, raw QPA logs)
+   removed. Note: the golden images themselves now live persistently at
+   `/home/dev/dev/offload-golden-images` (sibling to `VK-GL-CTS`/
+   `offload-test-suite`), not `/tmp` -- do *not* delete that directory,
+   the `check-hlsl-feme-vk` build's own `GOLDENIMAGE_DIR` CMake cache
+   variable now points there.
+
+Next step if resuming: `L193` (the `SampleCmp.test` crash) is the more
+interesting pick -- a real, previously-hidden FeMe bug, well-scoped at
+1-2 hours. `L194` is more mechanical (same shape as `H124u`'s own prior
+`QueryLodCube` work, just for `Plain1D`). Either is a good, focused next
+session.
