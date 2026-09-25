@@ -4808,6 +4808,48 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
   }
 
+  // (Roadmap L191) The `shufflevector` analogue of L134(c) just above, hit
+  // by a *different* unconditionally-decomposing producer this time: a
+  // `feme.cpu.masked.load.*` call producing a vector-typed result (roadmap
+  // L15's `widenMaskedLoad` vector case) always decomposes into `N`
+  // per-component `llvm.masked.gather`s in `WidenedVectorComponents` and
+  // erases the original call, regardless of whether `UI.isDivergentAtDef`
+  // judges that *call* itself divergent -- exactly like
+  // `widenMaskedAllocaLoad` does for a masked-alloca read. A `shufflevector`
+  // built directly on top of that masked-load result to reassemble a
+  // `vec3`-into-`vec4` (e.g. this shader's own `_GLF_color = vec4(data[0],
+  // 1.0)`) can itself be classified uniform by `UI.isDivergentAtDef` --
+  // the mask governing the load's own divergence isn't visible to a
+  // uniformity analysis over the `shufflevector`'s own operands -- and,
+  // left to fall through to the general gate below, gets misclassified
+  // "uniform: leave it exactly as it is", permanently referencing the
+  // since-erased masked-load call, silently replaced with `poison` by
+  // `eraseFromParent`. Found reducing
+  // `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s own
+  // all-black-pixel failure (expected red) to this exact shape.
+  if (auto *SV = dyn_cast<ShuffleVectorInst>(&I)) {
+    if (WidenedVectorComponents.contains(SV->getOperand(0)) ||
+        WidenedVectorComponents.contains(SV->getOperand(1))) {
+      widenShuffleVector(*SV, Builder);
+      return true;
+    }
+  }
+
+  // (Roadmap L191) The `insertelement` analogue of the `shufflevector`
+  // case just above: `_GLF_color`'s own `vec4(data[0], 1.0)` construction
+  // chains an `insertelement` directly onto that same masked-load-derived
+  // `shufflevector`'s result (widening the `vec3`-shaped load into the
+  // `vec4`'s first three lanes before setting the fourth to a constant
+  // `1.0`), and can itself be classified uniform by `UI.isDivergentAtDef`
+  // for exactly the same reason the `shufflevector` case above already
+  // documents in detail.
+  if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
+    if (WidenedVectorComponents.contains(IE->getOperand(0))) {
+      widenInsertElement(*IE, Builder);
+      return true;
+    }
+  }
+
   if (!UI.isDivergentAtDef(&I))
     return true; // Uniform: leave it exactly as it is.
 
