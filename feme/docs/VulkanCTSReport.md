@@ -13567,3 +13567,80 @@ when a FeMe source file it statically links has changed, since
 rather than linking it directly. `ninja feme_vulkan` must be run
 explicitly after any FeMe source change, in *both* build trees
 (primary and offload-test-suite), before re-testing.
+
+## 2026-10-02: L194 fixed -- `Texture1D`/`Texture1DArray::CalculateLevelOfDetail` now supported, closing offload-test-suite's `CalculateLevelOfDetail.test`
+
+Picked up `L194` from the prior session's own next-steps list. Before
+writing any code, captured `Texture1D::CalculateLevelOfDetail`'s (and
+`Texture1DArray::CalculateLevelOfDetail`'s) real SPIR-V shape via a
+minimal isolated `dxc -spirv -fspv-target-env=vulkan1.3` repro and
+`spirv-dis`, following this project's own established
+verify-before-coding methodology (the same one `L193` used last
+session): both shapes compile to an `OpImageQueryLod` with an identical
+bare-scalar `%float` `Coordinate` operand, no array-layer component at
+all -- the array dimension plays no part in the LOD computation for
+`Plain1D`/`Array1D` either, the same sharing precedent `QueryLod2D`
+already established for `Plain2D`/`Array2D`.
+
+**Fix** (mirroring `H124u`'s own `QueryLodCube` work, same 4 touch
+points): added one new `ImageCallKind::QueryLod1D` (serving both
+`Plain1D` and `Array1D`, not a separate pair), a `createQueryLod1D`
+builder (`ImageCalls.h`/`.cpp`), a `femeCpuImageQueryLod1DV2F32` runtime
+entry point plus its own `femeRTComputeUnclampedQueryLod1D` helper (the
+single-axis counterpart of `femeRTComputeUnclampedQueryLod`, mirroring
+`femeRTPlanImplicitLod1D`'s own identical narrowing of
+`femeRTPlanImplicitLod` for an ordinary implicit-LOD sample --
+`FeMeRuntimeCPU.c`), and widened `hasOnlySupportedImageUses`'s/
+`lowerImageAccesses`'s `isQueryLodIntrinsic` branches
+(`SPIRVResourceLowering.cpp`) to accept `Plain1D`/`Array1D` with a fixed
+coordinate width of 1 (`isCoordN`'s own pre-existing bare-scalar special
+case). `SPIRVToLLVMPatterns.cpp`'s `ImageQueryLodPattern` needed no
+change at all -- it was already shape-agnostic, forwarding whatever
+`Coordinate` type/width the source SPIR-V op has.
+
+**Verification**:
+- `Feature/Textures/CalculateLevelOfDetail.test` (direct `llvm-lit -v`,
+  offload-test-suite tree): now **Pass** outright (was: pipeline-creation
+  failure).
+- Full `check-hlsl-feme-vk` re-run (680 tests): only the pre-existing
+  flaky `WaveOps/WaveActiveMax.test` failure and the pre-existing,
+  already-documented (`H124g`) `Feature/PushConstant/array_of_matrices.test`
+  XPASS remain, both confirmed unrelated to this session's change --
+  `L194`'s own prior failure is gone, 0 new failures.
+- `ninja check-feme`: 3348/3351 Passed, 3 pre-existing Unsupported, 0
+  Failed -- 5 new unit tests (2 `SPIRVResourceLoweringTest` classification/
+  dispatch cases, one of which replaces the now-stale
+  `LeavesAPlain1DQueryLodHandleAlone` negative test since `Plain1D` is no
+  longer left unlowered; 3 `ImageSamplingTest` runtime-formula cases
+  mirroring `QueryLod2D`'s own zero-derivative/real-derivative/
+  inactive-lane trio).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: this is a CPU-lowering-pass capability widening (an
+existing SPIR-V op against an existing image shape), not a feature bit,
+limit, or extension.
+
+**Full `graphicsfuzz.*` CTS re-sweep** (757 cases, crash-tolerant
+per-case-isolated driver, 30s-per-case timeout): **673 Pass, 73 Fail, 8
+NotSupported, 1 real process crash
+(`cov-function-multiple-loops-compare-integer-return`), 2 timeouts
+(`cov-multiple-functions-global-never-change`,
+`cov-nested-structs-function-set-inner-struct-field-return`)** -- an
+exact match, case-for-case total, to the established baseline. 0
+regressions, 0 incidental new passes. `graphicsfuzz.*` exercises no
+`CalculateLevelOfDetail`/`OpImageQueryLod` call at all, so this result
+is exactly the "unaffected, confirm no regressions" outcome expected
+going in.
+
+Note on sweep methodology this session: the per-case driver's initial
+`CRASH` bucket (74 cases) turned out to be a detection-script bug, not a
+regression -- `deqp-vk`'s own exit code is `0` for an ordinary `Fail`
+*unless* `--deqp-log-filename` is passed a custom path (as this sweep's
+own driver does), in which case it becomes `1` even for a plain `Fail`,
+indistinguishable by exit code alone from a real crash. Re-classified
+all 74 by grepping each case's own captured output text for `"Fail
+(Fail)"` vs. no completion message at all: 73 were ordinary, already-
+accounted-for `Fail`s; only 1
+(`cov-function-multiple-loops-compare-integer-return`, `rc=134`/
+`SIGABRT`) was a genuine crash, matching the single crash the
+established baseline has always reported.
