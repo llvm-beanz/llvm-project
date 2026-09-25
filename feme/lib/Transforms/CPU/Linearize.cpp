@@ -2898,14 +2898,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // check coexisting with another divergent check elsewhere is the
     // genuinely harder two-divergent-exit shape this milestone does not
     // yet support.
-    if (HeaderDivergent || LatchDivergent) {
-      diagnose(F, "loop at '" + Header->getName() +
-                      "' has an internal branch in '" +
-                      OtherCondBrBlocks.front()->getName() +
-                      "'; unsupported (roadmap milestone 6 deviation)");
-      return false;
-    }
-
+    //
     // Find the single, genuinely divergent block among
     // `OtherCondBrBlocks` -- any other entry here must instead be a
     // separate, non-divergent "pass-through" block (like `Header`/
@@ -2916,6 +2909,17 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // block already structurally proven redundant by the peel is never a
     // pass-through/real-check ambiguity `UniformityInfo` needs to
     // resolve.
+    //
+    // Roadmap L197: an already-linearized nested child cycle's own
+    // `Header`/`Latch` (see `linearizeCyclePostOrder`'s own comment) is
+    // exactly one more reason a block here can be non-divergent despite
+    // still ending in a real `CondBrInst`: `closeLatch` always finalizes
+    // a fully-linearized cycle's own continuation check on a value this
+    // pass itself already recorded in `KnownUniformValues`, so
+    // `isDivergentBranch` correctly reports it as *not* divergent here,
+    // the same as any other genuine compile-time-uniform pass-through
+    // block -- computed by the exact same `DivergentCandidates` filter
+    // below, with no separate case needed.
     //
     // Roadmap L42: classification here is driven by actual divergence
     // (`UI.isDivergentTerminator`), not by whether a block happens to
@@ -2934,6 +2938,21 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
           isDivergentBranch(cast<CondBrInst>(BB->getTerminator())))
         DivergentCandidates.push_back(BB);
 
+    // Roadmap L197: only bail out here if some `OtherCondBrBlocks` entry
+    // is *itself* still genuinely divergent -- an already-linearized
+    // nested child cycle contributes no `DivergentCandidates` entry at
+    // all (see the comment above), so it never reaches this diagnostic;
+    // it instead simply falls through, untouched, to the ordinary
+    // `Header`/`Latch`-only handling below, exactly like any other
+    // uniform pass-through block already does.
+    if (!DivergentCandidates.empty() && (HeaderDivergent || LatchDivergent)) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" +
+                      DivergentCandidates.front()->getName() +
+                      "'; unsupported (roadmap milestone 6 deviation)");
+      return false;
+    }
+
     if (DivergentCandidates.size() > 1) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has more than one divergent exit check ('" +
@@ -2942,9 +2961,18 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                       "'); unsupported (roadmap milestone 6 deviation)");
       return false;
     }
-    if (DivergentCandidates.empty())
-      return false; // No divergence anywhere here either: leave alone.
-
+    if (DivergentCandidates.empty()) {
+      // Roadmap L197: nothing here is actually divergent -- either this
+      // cycle has no divergent exit check at all (the pre-existing
+      // "leave alone" case), or `Header`/`Latch` still has its own
+      // divergent check while every `OtherCondBrBlocks` entry is already
+      // uniform (e.g. an already-linearized nested child cycle's own
+      // continuation check -- see the comment above). Either way,
+      // nothing here needs its own special handling: fall through to the
+      // ordinary `Header`/`Latch`-only linearization below, which itself
+      // returns `false` (leave alone) in the genuinely-nothing-divergent
+      // case via its own `!HeaderDivergent && !LatchDivergent` check.
+    } else {
     BasicBlock *CheckBlock = DivergentCandidates.front();
     std::optional<ExitCheck> CheckExit =
         matchExitCheckWithRelay(*CheckBlock, ExitBlock);
@@ -3067,6 +3095,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(Masks, MasksAfterCheck);
     return true;
+    } // end DivergentCandidates-non-empty handling (Roadmap L197)
   }
 
   if (!HeaderDivergent && !LatchDivergent)
