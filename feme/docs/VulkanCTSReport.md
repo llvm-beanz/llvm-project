@@ -13883,3 +13883,86 @@ passed.
 need no change -- this session's changes are internal
 `LoopLinearizer`/`feme-cpu-linearize` soundness/correctness fixes,
 touching no feature bit, limit, or extension surface.
+
+## 2026-09-25 (continued session): L198 (L197 continuation) -- two of three non-leaf-traversal hazards fixed; a third found and scoped
+
+Device check re-confirmed at session start:
+`VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName`
+-> `FeMe CPU Vulkan Device`.
+
+Picked up directly where L197 left off: L197 landed the prerequisite
+post-order traversal structure and two hazard fixes (`getExitBlocks`
+use-after-free, `DT`/`PDT` staleness across cycles) but found that
+actually attempting `linearizeCycle` on a genuine non-leaf cycle hangs
+`DiamondFlattener::flatten` forever on
+`dEQP-VK.graphicsfuzz.cosh-return-inf-unused` (a real, 3-deep nested-loop
+CTS shader), root cause unknown at the time. This session root-caused
+that hang via temporary, env-var-gated (`FEME_DEBUG_FLATTEN`/
+`FEME_DEBUG_FLATTEN2`, both reverted before commit) `errs()` tracing
+inside `flatten`'s own `for (;;)` loop and `validate`'s classification
+point, and found **two distinct real bugs**, plus a **third, still
+open**:
+
+- **Bug 1 (fixed)**: `isLoopControlEdge`'s exit-block accounting (live
+  `CI.getExitBlocks`, or L197's own precomputed cache of it) goes stale
+  once a non-leaf cycle's children have restructured its body -- a live
+  call is a genuine use-after-free (walks a frozen block snapshot,
+  calling `successors()` on blocks a child already erased); the cache
+  avoids that but misses exit edges reached via blocks a child's own
+  restructuring newly *inserted* after the cache was built. Fixed by
+  replacing both with a live `CI.contains(C, Target)` check: an exit of
+  `C` is exactly a non-member of `C`, answerable in O(1) with no
+  block-list walk, immune to both hazards.
+- **Bug 2 (fixed)**: `flattenLoopBodyDiamond` could report "success"
+  without actually removing the branch it was asked to flatten, because
+  `flatten`'s own stricter "is this really divergent" notion can
+  disagree with the caller's broader one that decided to attempt it in
+  the first place -- the "leave a uniform branch alone" path still
+  mutates something downstream (new merge phis), masking the fact the
+  original branch survived. Fixed by checking whether `Start`'s
+  terminator was actually replaced before reporting success.
+- **Bug 3 (found, scoped, NOT fixed)**: even with both of the above
+  fixed, `DiamondFlattener::validate`'s `R->hasNPredecessors(2)` check
+  still hit a real, flaky (non-deterministic) `hasUseList()` assertion
+  on a dangling reconvergence-point `BasicBlock*` once non-leaf
+  traversal was actually turned on for verification. `DT`/`PDT` are
+  recalculated once per cycle before `linearizeCycle(C)` runs, but
+  `linearizeCycle`'s own interior mutations (its "flatten loop body
+  diamond to a fixed point" step, among others) can erase blocks
+  *during* that same call, after the one recalculation already
+  happened -- a fresh-at-entry `PDT` can still go stale mid-call. Which
+  specific interior mutation invalidates which specific later
+  `immediatePostDom` call is not yet isolated.
+
+**Decision**: given bug 3 is real, reproducible, but not yet root-caused,
+restored `linearizeCyclePostOrder`'s `CI.children(C).empty()` leaf-only
+guard (matching pre-L197 behavior for what actually gets linearized),
+while keeping bugs 1 and 2's fixes as real, independently-valuable
+correctness improvements -- verified safe via 5 consecutive full
+unit-test-suite runs (bug 3's own crash was itself flaky, so a single
+clean run does not prove safety).
+
+Verification performed:
+- `FeMeTransformsCPUTests`: 567/567, run 5 consecutive times back-to-back
+  to rule out bug 3's own flakiness resurfacing (all 5 clean).
+- `ninja check-feme`: 3352/3355 passed, 3 pre-existing `Unsupported`, 0
+  `Failed` -- identical to the L197 baseline (no new tests added this
+  session; the fixes are behavior-preserving for the leaf-only-traversal
+  configuration actually shipped).
+- `dEQP-VK.graphicsfuzz.cosh-return-inf-unused`: still completes quickly
+  with the same ordinary, deterministic `Fail` L197 already documented
+  (unchanged, since non-leaf traversal remains off).
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): **71 Pass / 6 Fail / 37
+  NotSupported**, byte-for-byte identical to the documented baseline.
+- Full `dEQP-VK.graphicsfuzz.*` re-sweep (754 of 757 cases, excluding the
+  same 3 already-documented, pre-existing, unrelated crash/timeout
+  cases -- `cov-function-multiple-loops-compare-integer-return`,
+  `cov-multiple-functions-global-never-change`,
+  `cov-nested-structs-function-set-inner-struct-field-return` -- L197
+  and prior sessions have always excluded): **674 Pass / 72 Fail / 8
+  NotSupported**, byte-for-byte identical to the established baseline.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed to
+need no change -- this session's changes are internal
+`DiamondFlattener`/`LoopLinearizer` soundness/correctness fixes, touching
+no feature bit, limit, or extension surface.
