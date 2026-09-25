@@ -58,24 +58,24 @@ file.
 
 # Request
 
-Can you please work on the FeMe ICD implementation? The previous session gave
-the next steps:
-
-1. **(~1-2 hrs, well-scoped)** `L194`: add a `QueryLod1D`/
-   `QueryLodArray1D` counterpart to `H124u`'s own `QueryLodCube` work,
-   same shape (new `ImageCallKind`, `hasOnlySupportedImageUses`
-   widening, a new runtime entry point) -- still the most immediately
-   next well-scoped item.
-2. **(large, no fix designed, carried forward many sessions now)** The
+1. **(large, no fix designed, carried forward many sessions now)** The
    `PHINode` two-pass structural gap (Pass 1 creates phi stubs before
    Pass 2 force-decomposes anything) -- unaddressed on both the vector
-   and aggregate sides.
-3. **(large, deferred many sessions now)** "Provably uniform by
+   and aggregate sides. Still the single largest standing architectural
+   gap in this project; needs a dedicated design session, not another
+   incremental poke.
+2. **(large, deferred many sessions now)** "Provably uniform by
    construction" value tracking for `LoopLinearizer` -- `L188`'s own
    still-open nested-cycle root cause.
-4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the
+3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted.
-5. **(~5 min)** No `/tmp` scratch remains from this session --
-   `/tmp/l193repro/` and `/tmp/ctsrun_l193/` both removed.
+   unvetted after many sessions of deferral. A future session should do
+   a real full-table pass rather than keep punting on this same list.
+4. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/l194repro/` and `/tmp/ctsrun_l194/` both removed.
+
+Next step if resuming: with the `L191`-`L194` bug-hunting streak now
+fully closed out (no more open, well-scoped `L19x` items), a future
+session should pick #1 or #2 above for a large research-heavy session,
+or do the full `Roadmap.md` sweep (#3) as a change of pace.
