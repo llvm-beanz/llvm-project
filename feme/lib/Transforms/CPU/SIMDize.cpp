@@ -4835,8 +4835,27 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // scalar-only homogeneous-intrinsic path instead, which assumes `I`'s
   // own type is scalar and would build an illegal `<W x <N x T>>` nested
   // vector type for a vector-typed one).
+  // (Roadmap L191(b)) A follow-up audit of every `WidenedAggregateComponents`
+  // producer -- the struct/array analogue of `WidenedVectorComponents`,
+  // deferred from `L191(a)`'s own vector-only pass -- found no *live* bug
+  // of this kind on the aggregate side: `InsertValueInst`/
+  // `ExtractValueInst`/`SelectInst`/`PHINode` are all already gated behind
+  // this very check (so none of them can independently create hidden
+  // divergence the way `widenMaskedLoad` does), and the one producer that
+  // *is* dispatched unconditionally, ahead of this gate
+  // (`widenGroupSharedAtomicCmpXchg`), is safe by construction --
+  // `AtomicCmpXchgInst` is hard-coded `ValueUniformity::NeverUniform` in
+  // `WaveUniformity.cpp`, so `UI.isDivergentAtDef` always judges it
+  // divergent regardless of its own operands, and ordinary forward
+  // divergence propagation then correctly classifies every consumer of
+  // its result divergent too. `WidenedAggregateComponents` is nonetheless
+  // added to this check anyway, for parity with the vector-side fix above
+  // and as a zero-cost defense against a future aggregate producer being
+  // added with `widenMaskedLoad`'s own unsafe (shape-only,
+  // ahead-of-the-gate) pattern instead.
   bool AnyOperandDecomposed = llvm::any_of(I.operands(), [&](Use &U) {
-    return WidenedVectorComponents.contains(U.get());
+    return WidenedVectorComponents.contains(U.get()) ||
+           WidenedAggregateComponents.contains(U.get());
   });
 
   if (!AnyOperandDecomposed && !UI.isDivergentAtDef(&I))
