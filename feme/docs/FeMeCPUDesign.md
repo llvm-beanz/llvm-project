@@ -601,9 +601,17 @@ called out inline where it's discussed, and summarized here:
   routinely sorts earlier in the list than a cycle-exit block whose value
   it still uses, once a loop and a diamond after it both need linearizing
   (see `simdize-erasure-order.ll`). Every to-be-erased instruction's uses
-  are now severed (RAUW'd with `poison`) up front, across the whole
-  to-be-erased set, before any of them are actually erased, making every
-  remaining erasure order safe.
+  are now severed up front, across the whole to-be-erased set, before any
+  of them are actually erased, making every remaining erasure order safe.
+  (Roadmap `H107`/`L118`/`L195` later narrowed "severed" further: a
+  surviving, non-`ToErase` use of a force-decomposed value whose own
+  widened form (`Widened`/`WidenedVectorComponents`) is still known gets a
+  real, entry-mask-derived-lane-extracted narrow value instead of blind
+  `poison` -- see that erasure loop's own inline comment for why a
+  same-signed-lane-0-might-be-inactive fragment-shader helper invocation
+  makes lane 0 specifically unsafe to hardcode there -- falling back to
+  `poison` only once no widened form is known at all, e.g. a
+  `ToErase`-to-`ToErase` edge that is dead code by construction anyway.)
 - **Masked memory ops are implemented, but only via `llvm.masked.gather`/
   `.scatter`.** `feme::cpu::LinearizePass` now rewrites a plain, non-atomic,
   non-volatile `load`/`store` inside a masked region into a
