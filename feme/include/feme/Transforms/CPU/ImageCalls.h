@@ -421,8 +421,9 @@ enum class ImageCallKind : uint8_t {
   /// from. Scoped to `Plain2D`/`Array2D` (roadmap H124t reuses this same
   /// entry point for `Array2D`, whose own `CalculateLevelOfDetail` has an
   /// identical 2-component coordinate and formula) -- `Cube`/`CubeArray`
-  /// (see `QueryLodCube` immediately below)/`Plain1D`/`Array1D`/
-  /// `Plain3D` counterparts remain unstarted follow-on work.
+  /// (see `QueryLodCube` immediately below) and `Plain1D`/`Array1D` (see
+  /// `QueryLod1D` below) are covered separately; `Plain3D`'s own
+  /// counterpart remains unstarted follow-on work.
   QueryLod2D,
   /// `feme.cpu.image.querylod.cube.v2f32` (roadmap H124u): `Cube`'s own
   /// counterpart of `OpImageQueryLod` (HLSL's `TextureCube::
@@ -443,6 +444,24 @@ enum class ImageCallKind : uint8_t {
   /// otherwise identical to `QueryLod2D`'s (lane 0 clamped level, lane 1
   /// raw unclamped LOD).
   QueryLodCube,
+  /// `feme.cpu.image.querylod.1d.v2f32` (roadmap L194): `Plain1D`'s own
+  /// counterpart of `OpImageQueryLod` (HLSL's
+  /// `Texture1D::CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`).
+  /// Unlike `QueryLod2D`'s two-axis `(DUdX, DUdY, DVdX, DVdY)` operand
+  /// pair, a 1D coordinate has only a single addressed axis, so this
+  /// takes just `(DUdX, DUdY)` -- the same single-axis derivative shape
+  /// `getOrSynthesizeSample1DDerivatives` already synthesizes for an
+  /// ordinary implicit-LOD `Sample1D`. Scoped to `Plain1D`/`Array1D`
+  /// (mirroring `QueryLod2D`'s own `Plain2D`/`Array2D` sharing: a real
+  /// `spirv-dis` capture of both `Texture1D::CalculateLevelOfDetail` and
+  /// `Texture1DArray::CalculateLevelOfDetail` confirms both compile to
+  /// an `OpImageQueryLod` with an identical bare-scalar `%float`
+  /// coordinate -- the array dimension plays no part in the LOD
+  /// computation here either, same as `QueryLod2D`'s own `Array2D`
+  /// case). The `<2 x float>` result's own lane convention is otherwise
+  /// identical to `QueryLod2D`'s (lane 0 clamped level, lane 1 raw
+  /// unclamped LOD). `Plain3D` remains unstarted follow-on work.
+  QueryLod1D,
   /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a
   /// real `Bias`/`MinLodClamp` pair by roadmap L67(a) and real `Grad`
   /// support by roadmap L67(b)): the volumetric counterpart of
@@ -804,7 +823,8 @@ struct MatchedImageCall {
   /// always requires real ones (see `createQueryLod2D`'s doc) -- `U`/`V`
   /// themselves stay null for `QueryLod2D`, unlike `Sample2D`, since its
   /// own runtime entry point never needs the coordinate itself, only its
-  /// derivatives.
+  /// derivatives. `QueryLod1D` (roadmap L194) uses just `DUdX`/`DUdY`
+  /// the same way, leaving `DVdX`/`DVdY` null (there is no second axis).
   llvm::Value *DUdX = nullptr;
   llvm::Value *DUdY = nullptr;
   llvm::Value *DVdX = nullptr;
@@ -1676,6 +1696,21 @@ createQueryLodCube(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                    llvm::Value *DDirYdX, llvm::Value *DDirYdY,
                    llvm::Value *DDirZdX, llvm::Value *DDirZdY,
                    llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querylod.1d.v2f32` call (roadmap L194): see
+/// `ImageCallKind::QueryLod1D`'s own doc for its `<2 x float>` result
+/// shape. \p DUdX/\p DUdY are the caller's own screen-space partial
+/// derivatives of the single sampled coordinate axis -- unlike
+/// `createSample1D`, always real ones (see
+/// `getOrSynthesizeSample1DDerivatives`), never zero constants, since
+/// `OpImageQueryLod` has no explicit-LOD form to fall back to (mirroring
+/// `createQueryLod2D`'s own identical rationale).
+llvm::CallInst *createQueryLod1D(llvm::IRBuilderBase &Builder,
+                                 const ImageCallEnv &Env,
+                                 llvm::Value *ImageIndex,
+                                 llvm::Value *SamplerIndex, llvm::Value *DUdX,
+                                 llvm::Value *DUdY, llvm::Value *Mask,
+                                 const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a),
 /// extended with a real \p Bias/\p MinLodClamp pair by roadmap L67(a) and
