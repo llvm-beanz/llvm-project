@@ -58,22 +58,20 @@ file.
 
 # Request
 
-1. **The real payoff is still one unsolved bug away.** Everything landed
-   this session is prerequisite plumbing. The actual "nested loops now
-   work" milestone needs `DiamondFlattener::flatten`'s hang root-caused
-   first. Don't re-attempt enabling the non-leaf call without that fix in
-   hand -- it will just hang again on the same shader.
-2. **Splitting commits after the fact is slower than splitting as you
-   go.** I wrote everything as one continuous session, then spent ~1 hr
-   untangling it into 3 commits after the fact, and got bitten once by an
-   intermediate commit that silently didn't work. If a future session
-   plans multiple logically-separate changes, commit each one as soon as
-   it's independently working, rather than batching the split to the
-   end.
-3. **`git stash push --keep-index` is the right tool for "test just the
-   staged hunks in isolation"** -- but only pop it back cleanly if you
-   haven't since amended the commit those hunks were staged against.
-   Amending mid-stream caused one avoidable merge conflict this session
-   (trivial to resolve, but wasted ~10 min).
-4. `/tmp` scratch is clean -- nothing left over from this session
-   (`/tmp/ctsrun_l197` created and removed within this session).
+1. **Bug 3 is the actual remaining blocker for non-leaf traversal.**
+   Needs a dedicated tracing session inside `linearizeCycle`'s own
+   interior mutation steps (the flatten-to-fixed-point loop is the prime
+   suspect) to find exactly which block deletion invalidates which later
+   `immediatePostDom` call. Budget ~2-3 hrs: this bug is flaky, so expect
+   to need repeated runs (5+) to confirm any fix actually holds, not
+   just one clean pass.
+2. **A possible fix shape worth trying first**: recompute `PDT`
+   immediately before each `immediatePostDom` call that could be affected
+   by a just-prior mutation, rather than once per `linearizeCycle` call.
+   This trades some CPU time for correctness -- given cycles are
+   typically small, likely acceptable, but not measured.
+3. **`Roadmap.md` full-table sweep** (`L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted after many sessions of deferral -- a genuine
+   change-of-pace option if bug 3 feels too heavy for a given session.
+4. `/tmp` scratch is clean -- nothing left over from this session.
