@@ -2073,6 +2073,46 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
     PredBr->setSuccessor(0, Target);
     Changed = true;
 
+    // Roadmap L190: `Target` can *already* have a `phi` reconciling some
+    // value across `BB` and an unrelated predecessor -- left behind by an
+    // earlier peel that bypassed a *different* predecessor of `BB`
+    // directly into `Target` before this one ever ran (that earlier
+    // peel's own `SSAUpdater` use-rewriting, below, synthesized it on
+    // demand for some genuinely external use). `SSAUpdater::RewriteUse`
+    // only ever replaces the value of a *single existing* `Use` in
+    // place; given a `Use` that is itself one of that existing `phi`'s
+    // incoming operands for `BB`, it has no way to *split* that one slot
+    // into two (one for `BB`, one for the new, now-direct edge from
+    // `Pred`) -- so left to the use-rewriting loop alone, `Pred` would
+    // become a real predecessor of `Target` without any such `phi` ever
+    // gaining a matching incoming entry for it. Add that missing entry
+    // explicitly, before rewriting any other, genuinely external use of
+    // `BB`'s own phis below.
+    //
+    // The value to use for the new entry is usually the *existing*
+    // `BB`-slot value verbatim: intervening folds (`collapseTrivially
+    // RedundantPhisInCycle`) only ever collapse a `phi` once every one of
+    // its *current* incoming values agree, so whatever a downstream
+    // `phi` already holds for `BB` is loop-invariant across `BB`'s
+    // predecessors *unless* it is still literally one of `BB`'s own,
+    // not-yet-collapsed `phi`s (one of this call's own `Incoming` pairs)
+    // -- in which case the value along `Pred` specifically is that
+    // pair's own peeled value instead, exactly like every other use of
+    // that `phi` being rewritten below.
+    for (PHINode &TargetPN : Target->phis()) {
+      int Idx = TargetPN.getBasicBlockIndex(BB);
+      if (Idx < 0)
+        continue;
+      Value *NewV = TargetPN.getIncomingValue(Idx);
+      for (auto &Pair : Incoming) {
+        if (Pair.first == NewV) {
+          NewV = Pair.second;
+          break;
+        }
+      }
+      TargetPN.addIncoming(NewV, Pred);
+    }
+
     for (auto &Pair : Incoming) {
       PHINode *PN = Pair.first;
       Value *V = Pair.second;
@@ -2100,12 +2140,36 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
       // untouched. Only a use genuinely outside `BB` (where the edge
       // being peeled really can change which value reaches it) needs
       // `SSAUpdater`'s help at all.
+      //
+      // Roadmap L190: "genuinely outside `BB`" means the *user
+      // instruction itself* is not physically located in `BB` --
+      // `UserInst->getParent() == BB`, checked the same way for a `phi`
+      // user as for any other. An earlier version of this loop instead
+      // special-cased a `PHINode` user to `UserPN->getIncomingBlock(U)`
+      // (the predecessor an incoming value arrives *from*, not the
+      // block the `phi` itself lives in), reasoning it needed to mirror
+      // `SSAUpdater::RewriteUse`'s own dispatch (which *does* resolve a
+      // `phi` operand's reaching value as of the end of its incoming
+      // block rather than the middle of the `phi`'s own block) -- but
+      // `SSAUpdater::RewriteUse` already performs that dispatch
+      // correctly on its own once called; this pre-check exists only to
+      // decide whether to call it *at all*, for which the user's own
+      // physical location is what matters. That mismatch let a genuinely
+      // downstream `phi` slip through unrewritten whenever its incoming
+      // value for *this* edge happened to be labeled with `BB` as the
+      // source block (always true of any `phi` immediately past `BB`,
+      // e.g. `Target`'s own `phi`s reconciling `BB`'s two now-merged
+      // predecessors) -- silently leaving that `phi` with one fewer
+      // entry than `Target`'s real predecessor count once `Pred` is
+      // retargeted below, corrupting the IR (reproduced via
+      // `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s own
+      // doubly-nested nested-loop shape, where a second, later peel in
+      // the same cycle retargets a predecessor of a block whose own
+      // condition a first, earlier peel had already collapsed into one
+      // of `Target`'s `phi`s).
       for (Use &U : llvm::make_early_inc_range(PN->uses())) {
         auto *UserInst = cast<Instruction>(U.getUser());
-        auto *UserPN = dyn_cast<PHINode>(UserInst);
-        BasicBlock *UserBlock =
-            UserPN ? UserPN->getIncomingBlock(U) : UserInst->getParent();
-        if (UserBlock == BB)
+        if (UserInst->getParent() == BB)
           continue;
         Updater.RewriteUse(U);
       }
