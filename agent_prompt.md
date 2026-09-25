@@ -61,25 +61,35 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(large, not yet re-scoped in detail)** Design "provably uniform by
-   construction" value tracking for `LoopLinearizer` (a `SmallPtrSet` of
-   pass-synthesized mask/reduction values, consulted before falling back
-   to the stale, once-computed `UniformityInfo`) -- the actual prerequisite
-   for real `L188` nested-cycle support. Do this design in isolation
-   *before* touching `LoopLinearizer::run()`'s traversal order at all.
-2. **(2-4 hrs, one-time setup, deferred many sessions now)**
+1. **(~1-2 days, not scoped in detail yet)** The residual pixel-value
+   `Fail` `complex-nested-loops-and-call` now hits (expected red, got
+   black) instead of crashing. Likely a genuinely separate,
+   pre-existing correctness bug in the same shader -- worth its own
+   fresh QPA-log/`feme-translate` trace from scratch, not an extension
+   of this session's fix.
+2. **(~1-2 hrs each)** Finish the partial `graphicsfuzz.*` sweep this
+   session started (426/757 done, in `/tmp` no longer -- rerun from
+   scratch with a crash-tolerant per-batch driver, e.g. re-derive from
+   this session's own throwaway Python driver if useful as a starting
+   point) to get a full before/after comparison, then investigate the 2
+   pre-existing process-crashing cases found
+   (`cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+   when a value is destroyed!", `cov-function-loops-vector-mul-matrix-
+   never-executed`'s divergent-branch `feme-cpu-simdize` gap) as their
+   own rows if picked up.
+3. **(large, not yet re-scoped in detail, deferred from the L188/L189
+   session)** Design "provably uniform by construction" value tracking
+   for `LoopLinearizer` -- the real prerequisite for nested-cycle
+   support (`L188`'s own still-open root cause). Do this design in
+   isolation before touching `LoopLinearizer::run()`'s traversal order.
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
    directory at `/home/dev/dev/offload-test-suite/build`.
-3. **(~1-2 hrs)** `complex-nested-loops-and-call`'s
-   `PHINode::getIncomingValueForBlock` assertion crash (pre-existing,
-   confirmed unrelated to this session) -- worth its own root-cause
-   session; not investigated past reproducing + confirming it predates
-   this change.
-4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the long-
-   stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`,
-   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
-   individually unvetted; a future session should do a real full-table
-   pass rather than keep deferring to this same list.
-5. **(~5 min)** No `/tmp` scratch left from this session -- all sweep
-   output, debug traces, and the temporary comparison worktree already
-   removed.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the long-
+   stale candidate list (`L90`-`L95` [now closed, drop from this list],
+   `L116(b)`/`L116(f)`, `L126(a)`, `L147`, `L98(b)`, assorted
+   `R`/`V`/`W`-prefixed rows) is still individually unvetted; a future
+   session should do a real full-table pass rather than keep deferring
+   to this same list.
+6. **(~5 min)** No `/tmp` scratch left from this session -- all `l190_*`
+   QPA logs, IR dumps, and caselist files already removed.
