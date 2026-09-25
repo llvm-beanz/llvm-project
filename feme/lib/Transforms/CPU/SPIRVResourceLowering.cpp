@@ -2006,9 +2006,9 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L52e/H124t/H124u: `OpImageQueryLod`'s own two intrinsic
+    // Roadmap L52e/H124t/H124u/L194: `OpImageQueryLod`'s own two intrinsic
     // halves (`calculate.lod`/`calculate.lod.unclamped`), scoped to
-    // `Plain2D`/`Array2D`/`Cube` -- `CubeArray`/`Plain1D`/`Array1D`/
+    // `Plain2D`/`Array2D`/`Cube`/`Plain1D`/`Array1D` -- `CubeArray`/
     // `Plain3D` counterparts remain unstarted follow-on work, mirroring
     // this same narrowing's precedent (e.g. roadmap L46's own initial
     // `Plain2D`-only depth-comparison-sample scope, later widened by
@@ -2020,22 +2020,33 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // CalculateLevelOfDetail`'s own HLSL signature has no slice argument
     // at all -- confirmed via `spirv-dis`, `%v2float` regardless of
     // shape -- the array dimension plays no part in the LOD computation),
-    // but a `Cube` handle's own coordinate is instead a 3-component
+    // a `Cube` handle's own coordinate is instead a 3-component
     // direction vector (`TextureCube::CalculateLevelOfDetail`'s own
     // `%v3float` coordinate -- also confirmed via `spirv-dis`, since
     // there is no 2D face-local UV until face selection happens inside
-    // the runtime function itself), so this uses a fixed width of 2 for
-    // `Plain2D`/`Array2D` but 3 for `Cube`, rather than `SampleCoordWidth`'s
-    // own per-shape value.
+    // the runtime function itself), and a `Plain1D`/`Array1D` handle's
+    // own coordinate is a bare scalar `%float` (`Texture1D`'s/
+    // `Texture1DArray`'s own `CalculateLevelOfDetail` -- also confirmed
+    // via a fresh `spirv-dis` capture this session, roadmap L194: the
+    // array dimension again plays no part in the LOD computation, same
+    // as `Array2D`'s own precedent immediately above), so this uses a
+    // fixed width of 2 for `Plain2D`/`Array2D`, 3 for `Cube`, and 1 for
+    // `Plain1D`/`Array1D`, rather than `SampleCoordWidth`'s own
+    // per-shape value.
     bool Unclamped = false;
     if (isQueryLodIntrinsic(*CI, Unclamped)) {
       if (IsInteger ||
           (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
-           Shape != ImageShape::Cube))
+           Shape != ImageShape::Cube && Shape != ImageShape::Plain1D &&
+           Shape != ImageShape::Array1D))
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
-      unsigned QueryLodCoordWidth = Shape == ImageShape::Cube ? 3 : 2;
+      unsigned QueryLodCoordWidth =
+          Shape == ImageShape::Cube ? 3
+          : (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
+              ? 1
+              : 2;
       if (!isCoordN(CI->getArgOperand(2), QueryLodCoordWidth, /*Float=*/true) ||
           !CI->getType()->isFloatTy())
         return false;
@@ -4630,8 +4641,6 @@ void lowerImageAccesses(
         Value *Coord = CI->getArgOperand(2);
         Value *SamplerIndex =
             HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1))).Index;
-        Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
-        Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
         CallInst *NewCall;
         if (Shape == ImageShape::Cube) {
           // Roadmap H124u: a `Cube` handle's own `OpImageQueryLod`
@@ -4644,6 +4653,8 @@ void lowerImageAccesses(
           // those derivatives to `createQueryLodCube`, which defers face
           // selection and face-local UV-derivative remapping to the
           // runtime function itself (`femeCpuImageQueryLodCubeV2F32`).
+          Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+          Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
           CubeDirectionDerivatives CD = getOrSynthesizeSampleCubeDerivatives(
               Builder, *CI->getFunction(), C0, C1, C2);
@@ -4651,7 +4662,25 @@ void lowerImageAccesses(
                                        C0, C1, C2, CD.DDirXdX, CD.DDirXdY,
                                        CD.DDirYdX, CD.DDirYdY, CD.DDirZdX,
                                        CD.DDirZdY, Mask, "querylodcube");
+        } else if (Shape == ImageShape::Plain1D ||
+                   Shape == ImageShape::Array1D) {
+          // Roadmap L194: a `Plain1D`/`Array1D` handle's own
+          // `OpImageQueryLod` coordinate is a bare scalar (see
+          // `hasOnlySupportedImageUses`'s own doc above) -- no
+          // `CreateExtractElement` is needed the way `Plain2D`'s/
+          // `Cube`'s own vector coordinates require, mirroring
+          // `Sample1D`'s own identical scalar-coordinate precedent.
+          // `getOrSynthesizeSample1DDerivatives` synthesizes real
+          // (Fragment stage) or zero (otherwise) derivatives, the same
+          // helper an ordinary implicit-LOD `Sample1D`/`Sample1DArray`
+          // call already uses.
+          SampleDerivatives1D D = getOrSynthesizeSample1DDerivatives(
+              Builder, *CI->getFunction(), Coord);
+          NewCall = createQueryLod1D(Builder, Env, ImageIndex, SamplerIndex,
+                                     D.DUdX, D.DUdY, Mask, "querylod1d");
         } else {
+          Value *C0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+          Value *C1 = Builder.CreateExtractElement(Coord, uint64_t{1});
           SampleDerivatives D = getOrSynthesizeSample2DDerivatives(
               Builder, *CI->getFunction(), C0, C1);
           NewCall =

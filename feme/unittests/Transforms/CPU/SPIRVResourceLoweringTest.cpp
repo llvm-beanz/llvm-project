@@ -7074,12 +7074,16 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAPlain1DQueryLodHandleAlone) {
-  // Roadmap L52e/H124t/H124u deliberately scope `OpImageQueryLod` support
-  // to `Plain2D`/`Array2D`/`Cube` -- `Plain1D` (and every other
-  // still-unwidened shape) is left entirely unlowered, the same honest
-  // all-or-nothing contract every other unsupported shape gets
-  // (`collectHandles` declines the whole function).
+TEST(SPIRVResourceLoweringTest,
+     LowersPlain1DQueryLodToImageQueryLod1DWithScalarCoordinate) {
+  // Roadmap L194: `Plain1D`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `Texture1D`) -- unlike `Plain2D`/
+  // `Array2D`/`Cube` above, this op's own coordinate is a bare scalar
+  // `float` (confirmed via a real `spirv-dis` dump), so this lowers to a
+  // distinct `feme.cpu.image.querylod.1d.v2f32` call carrying just the
+  // single-axis `DUdX`/`DUdY` derivative pair, rather than reusing
+  // `QueryLod2D`'s (vector-coordinate) or `QueryLodCube`'s (direction-
+  // vector) calls.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define float @main(float %coord) {
@@ -7102,9 +7106,50 @@ TEST(SPIRVResourceLoweringTest, LeavesAPlain1DQueryLodHandleAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  CallInst *QueryLod = findImageCall(*F, "feme.cpu.image.querylod.1d.v2f32");
+  ASSERT_TRUE(QueryLod);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dudx, dudy, mask) -- 9 operands total.
+  EXPECT_EQ(QueryLod->arg_size(), 9u);
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
+TEST(SPIRVResourceLoweringTest,
+     LowersArray1DQueryLodToImageQueryLod1DSharingPlain1DFormula) {
+  // Roadmap L194: `Array1D`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `Texture1DArray`) -- mirroring
+  // `Array2D`'s own sharing of `Plain2D`'s `QueryLod2D` call
+  // (`LowersArray2DQueryLodToImageQueryLodSharingPlain2DFormula` above),
+  // this op's own coordinate is likewise a bare scalar `float` regardless
+  // of arrayness (confirmed via a real `spirv-dis` dump -- the array
+  // dimension plays no part in the LOD computation here either), so this
+  // reuses `QueryLod1D`'s own runtime call and formula unchanged.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(float %coord) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, float %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylod.1d.v2f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 
 // Roadmap L66(e): a real use-after-free, found via CTS re-runs once L66's
 // other sub-items began clearing more pipelines. Two functions each declare
