@@ -58,28 +58,22 @@ file.
 
 # Request
 
-1. **(large, the actual next step for L188 itself, unchanged from the
-   last two sessions)** Attempt `run()`'s own traversal-order change:
-   make it a genuine post-order traversal (all descendants fully
-   processed before their parent is attempted) instead of permanently
-   skipping any cycle with children. Before writing that change,
-   separately investigate whether a child cycle's own block deletions
-   (`foldRedundantFlowBlocksInCycle`/`mergeTrivialRelayBlocksInCycle`)
-   can invalidate a not-yet-processed *parent* cycle's own
-   `CI.getHeader`/`getExitBlocks`/`contains` results -- still an
-   entirely open safety question no session has investigated yet.
-2. **Scan `Roadmap.md` fresh** if not picking up 1 above -- the
-   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
-   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted after many sessions of deferral. A future session should do
-   a real full-table pass rather than keep punting on this same list.
-3. **(~5 min)** No `/tmp` scratch remains from this session -- all
-   `/tmp/l196b_*`/`/tmp/ctsrun_l196b/`/`/tmp/Linearize_*.cpp` scratch
-   (extracted SPIR-V, intermediate `.ll` dumps, both temporary `feme-opt`
-   binaries, `llvm-reduce` interestingness scripts, one CTS `.qpa` log)
-   removed.
-
-Next step if resuming: item 1 (`run()`'s traversal-order change) is the
-real payoff the last three sessions' work (L188's root cause, L196's
-mechanism, this session's test coverage) has been building toward --
-pick it up next.
+1. **The real payoff is still one unsolved bug away.** Everything landed
+   this session is prerequisite plumbing. The actual "nested loops now
+   work" milestone needs `DiamondFlattener::flatten`'s hang root-caused
+   first. Don't re-attempt enabling the non-leaf call without that fix in
+   hand -- it will just hang again on the same shader.
+2. **Splitting commits after the fact is slower than splitting as you
+   go.** I wrote everything as one continuous session, then spent ~1 hr
+   untangling it into 3 commits after the fact, and got bitten once by an
+   intermediate commit that silently didn't work. If a future session
+   plans multiple logically-separate changes, commit each one as soon as
+   it's independently working, rather than batching the split to the
+   end.
+3. **`git stash push --keep-index` is the right tool for "test just the
+   staged hunks in isolation"** -- but only pop it back cleanly if you
+   haven't since amended the commit those hunks were staged against.
+   Amending mid-stream caused one avoidable merge conflict this session
+   (trivial to resolve, but wasted ~10 min).
+4. `/tmp` scratch is clean -- nothing left over from this session
+   (`/tmp/ctsrun_l197` created and removed within this session).
