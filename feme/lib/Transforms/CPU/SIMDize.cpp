@@ -5144,28 +5144,51 @@ Function *FunctionWidener::widen() {
         continue;
       }
       if (!UniformReplacement) {
+        // A `phi` must stay grouped with every other `phi` at its
+        // block's own top (LLVM's own well-formedness rule) --
+        // inserting straight "before `I`" the way every non-`phi`
+        // producer safely can would land this `extractelement`/
+        // `insertelement` chain in the middle of that group whenever
+        // another, later-in-the-group `phi` still follows `I` (exactly
+        // `Linearize.cpp`'s own "live.merge"/"sideeffect.merge"
+        // multi-`phi` merge blocks). The block's first *non*-`phi`
+        // insertion point, mirroring `FunctionWidener::getWidened`'s own
+        // identical `phi` special case a few hundred lines up, is always
+        // both legal and -- because it dominates every instruction in
+        // the block -- sufficient.
+        IRBuilder<> B(isa<PHINode>(I) ? &*I->getParent()->getFirstInsertionPt()
+                                      : I);
         auto It = Widened.find(I);
-        if (It == Widened.end()) {
-          UniformReplacement = PoisonValue::get(I->getType());
-        } else {
-          // A `phi` must stay grouped with every other `phi` at its
-          // block's own top (LLVM's own well-formedness rule) --
-          // inserting straight "before `I`" the way every non-`phi`
-          // producer safely can would land this `extractelement` in the
-          // middle of that group whenever another, later-in-the-group
-          // `phi` still follows `I` (exactly `Linearize.cpp`'s own
-          // "live.merge"/"sideeffect.merge" multi-`phi` merge blocks).
-          // The block's first *non*-`phi` insertion point, mirroring
-          // `FunctionWidener::getWidened`'s own identical `phi` special
-          // case a few hundred lines up, is always both legal and --
-          // because it dominates every instruction in the block --
-          // sufficient.
-          IRBuilder<> B(isa<PHINode>(I)
-                            ? &*I->getParent()->getFirstInsertionPt()
-                            : I);
+        if (It != Widened.end()) {
           UniformReplacement = B.CreateExtractElement(
               It->second, getFirstActiveLaneIndex(),
               I->getName() + ".uniform");
+        } else if (auto VecIt = WidenedVectorComponents.find(I);
+                   VecIt != WidenedVectorComponents.end()) {
+          // (Roadmap L195) The vector analogue of the scalar case just
+          // above: `I`'s own force-decomposed form left its `N`
+          // components independently widened (`WidenedVectorComponents`)
+          // rather than producing a single scalar `Widened` entry -- see
+          // e.g. `widenMaskedLoad`'s/`widenMaskedAllocaLoad`'s own
+          // vector-typed branch. A surviving use expects `I`'s original
+          // narrow `<N x elemT>` value, so rebuild it one component at a
+          // time: extract each component's own first-active-lane scalar
+          // (the same real, entry-mask-derived lane the scalar case
+          // above uses) and reassemble them with `insertelement`,
+          // mirroring `getVectorComponents`'s opposite (broadcast a
+          // uniform narrow vector out to `N` wide components) direction.
+          Value *Lane = getFirstActiveLaneIndex();
+          Value *Result = PoisonValue::get(I->getType());
+          for (unsigned C = 0, E = VecIt->second.size(); C != E; ++C) {
+            Value *Scalar = B.CreateExtractElement(
+                VecIt->second[C], Lane,
+                I->getName() + ".uniform.elt" + Twine(C));
+            Result = B.CreateInsertElement(Result, Scalar, B.getInt32(C),
+                                           I->getName() + ".uniform");
+          }
+          UniformReplacement = Result;
+        } else {
+          UniformReplacement = PoisonValue::get(I->getType());
         }
       }
       U.set(UniformReplacement);
