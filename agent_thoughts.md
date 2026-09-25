@@ -103087,3 +103087,139 @@ one test away from where I started writing.
 Next step if resuming: item 2 (`LoopLinearizer` uniform-value tracking)
 is the most substantive remaining "large" item and deserves a session of
 its own dedicated design work before any implementation attempt.
+
+# L196 session: designed and landed LoopLinearizer's uniform-value-tracking mechanism -- a pure design task that turned up a real bug too
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 3 commits, all in `llvm-project`, all FeMe source + docs. No
+non-FeMe issue found this session.** Real bug fixed as a side effect of
+a deliberately scoped "design only" task:
+`stable-colorgrid-modulo-double-always-false-discard` now passes.
+
+## What I was asked to do
+
+Item 2 from the last several sessions' menus: a *dedicated design
+session* for `LoopLinearizer`'s "provably uniform by construction"
+value tracking -- L188's own explicit sequencing says design this
+first, in isolation, before touching `run()`'s traversal order (the
+change that would actually enable nested-cycle linearization). Not
+asked to enable nested cycles this session.
+
+## The mechanism, in one paragraph
+
+`LoopLinearizer::UI` is a whole-function `UniformityInfo` computed once,
+before any cycle is linearized, never recomputed. `UI.isDivergentTerminator(Br)`
+is keyed on `Br`'s *block*, not its condition value -- fine for original
+IR, but wrong the moment this pass replaces a block's terminator with a
+new one of its own (the cached bit still reflects the old, erased
+terminator). Added `KnownUniformValues` (a set this pass populates
+itself, e.g. every `feme.cpu.mask.any` result -- always uniform, it's a
+wave-wide reduction) plus `isDivergentBranch`, a value-keyed replacement
+that checks that set first and falls back to `UI.isDivergentAtDef`
+otherwise. Migrated every `UI.isDivergentTerminator` call site in the
+file to it.
+
+## The part I didn't expect
+
+I reasoned hard (and wrote it into the roadmap text mid-session) that
+this would be a *pure, behavior-preserving refactor* -- since `run()`
+still skips every non-leaf cycle, no currently-supported shape should be
+able to reach a block whose terminator this pass itself already
+replaced. `ninja check-feme` agreed: 3350/3353, byte-for-byte identical.
+
+Then I ran the mandatory `graphicsfuzz.*` CTS sweep anyway (754 of 757
+cases -- excluded 3 already-documented pre-existing crash/timeout cases,
+each individually re-confirmed unrelated via a stash/rebuild/rerun/
+restore round-trip first) and it came back **674 Pass / 72 Fail**, one
+*better* than the established 673/73 baseline. Not a flake: reran the
+exact same 754-case list against a stashed pre-change build and got
+673/73 again, byte-for-byte identical apart from that one case.
+
+Root cause: `run()`'s worklist processes multiple *sibling* (not nested)
+leaf cycles in the same function, one after another, all sharing the
+same `UI`. Two sibling loops can share enough CFG structure -- e.g. one
+loop's own synthesized `loop.continue` condition landing in a block a
+later-processed sibling's own `OtherCondBrBlocks` scan also reaches --
+for the *exact same* stale-`UI`-on-new-IR hazard L188 identified for
+parent/child nesting to also occur between ordinary siblings. I hadn't
+designed for that case; it just fell out of the same mechanism, because
+`isDivergentBranch` doesn't care *why* a value postdates `UI`, only
+that it does.
+
+## Verification
+
+- `ninja check-feme`: 3350/3353 passed, 3 pre-existing Unsupported, 0
+  Failed -- identical before and after.
+- Full `graphicsfuzz.*` CTS re-sweep (754/757 cases, 3 pre-existing
+  crash/timeout cases excluded and individually reconfirmed unrelated):
+  674 Pass / 72 Fail / 8 NotSupported, vs. 673/73/8 baseline -- +1 Pass,
+  bisected to exactly one case via a stash/rebuild/rerun/restore
+  round-trip against the identical case list.
+- No new unit test: `LoopLinearizer` is only exercised via
+  `LinearizePass`'s public entry point in existing tests, and the
+  sibling-sharing shape that surfaced this fix was found by the broad
+  CTS sweep, not by hand-construction. Flagged as a follow-up.
+
+## Lesson for future "design only" sessions
+
+**Run the mandated CTS sweep even when you're confident a change is a
+pure refactor.** My own reasoning about behavior-preservation was
+correct as far as it went (checked *within* one `linearizeCycle` call)
+but I hadn't checked *across* sequential calls for different (sibling)
+cycles in the same `run()` invocation. The regression suite has no
+cross-cycle-sharing test case to catch this either way; only the CTS
+sweep, which exercises real, complex shader CFGs, found it.
+
+## Files changed
+
+- `feme/lib/Transforms/CPU/Linearize.cpp`: `KnownUniformValues` +
+  `isKnownUniform`/`isDivergentValue`/`isDivergentBranch`/
+  `markUniformIfOperandsAreUniform`/`createUniformMaskAny`; migrated
+  every `UI.isDivergentTerminator` call site; dropped
+  `collectUniformPassThroughRegion`'s redundant `UniformityInfo &`
+  parameter; `uniformRelayChain` now takes a
+  `function_ref<bool(const CondBrInst*)>` predicate instead of a raw
+  `UniformityInfo &`.
+- `feme/docs/Roadmap.md`: new `L196` row (done: mechanism landed, fixes
+  a real sibling-cycle bug; `run()`'s traversal-order change and actual
+  nested-cycle enablement remain open); `L188`'s own row updated to
+  point at it.
+- `feme/docs/VulkanCTSReport.md`: new dated section with the full
+  bisection account.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed (internal `feme-cpu-linearize` soundness fix, no
+  feature/extension surface touched).
+
+## Suggested next steps
+
+1. **(~1-2 hrs)** Mine `stable-colorgrid-modulo-double-always-false-
+   discard`'s own reduced IR for a minimal `LinearizeTest.cpp` regression
+   case covering the two-sibling-loop shape this session found but
+   didn't hand-construct a test for -- the `.amber` source (two
+   sequential `for` loops) is the starting point; reduce via
+   `feme-translate`/`feme-opt` the same way prior sessions have done for
+   other real CTS-found bugs.
+2. **(large, the actual next step for L188 itself)** Now that the
+   prerequisite mechanism is landed and tested, attempt `run()`'s own
+   traversal-order change: make it a genuine post-order traversal (all
+   descendants fully processed before their parent is attempted) instead
+   of permanently skipping any cycle with children. Before writing that
+   change, separately investigate whether a child cycle's own block
+   deletions (`foldRedundantFlowBlocksInCycle`/
+   `mergeTrivialRelayBlocksInCycle`) can invalidate a not-yet-processed
+   *parent* cycle's own `CI.getHeader`/`getExitBlocks`/`contains`
+   results -- a distinct safety question this session did not
+   investigate at all.
+3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted after many sessions of deferral.
+4. **(~5 min)** No `/tmp` scratch remains from this session -- all
+   `/tmp/ctsrun_l196*`/`/tmp/l196_*` scratch (case lists, per-case QPA
+   logs, a baseline comparison run) removed.
+
+Next step if resuming: item 2 (`run()`'s traversal-order change) is the
+real payoff this session's mechanism was built for -- pick it up next,
+but budget real time for the block-deletion-safety investigation first,
+not just the traversal rewrite itself.
