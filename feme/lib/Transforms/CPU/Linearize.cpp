@@ -1721,6 +1721,54 @@ private:
                     const MaskPair &MasksAtLatch);
 
   bool linearizeCycle(CycleRef C);
+
+  /// Roadmap L197: attempts every descendant of \p C, post-order (deepest
+  /// first), before attempting \p C itself -- see `run()`'s own comment
+  /// for why this order, not just leaf cycles, is now safe to attempt.
+  bool linearizeCyclePostOrder(CycleRef C);
+
+  /// Roadmap L197: every cycle's own exit-block list, precomputed by
+  /// `run()` up front -- before *any* cycle is linearized -- and consulted
+  /// by `linearizeCycle` instead of a live `CI.getExitBlocks` call. This
+  /// is the `getExitBlocks`-specific counterpart to `UI`'s own member
+  /// comment above: `GenericCycleInfo::getExitBlocks` walks the *live*
+  /// successor edges of every block in `CI.getBlocks(C)` -- itself a
+  /// frozen snapshot of every block that was ever in \p C, taken once at
+  /// `CI.compute()` time, not just the ones still alive -- and lazily
+  /// memoizes whatever it finds, permanently, the first time it is
+  /// called for a given cycle. A not-yet-processed *parent* cycle's own
+  /// `getBlocks(C)` snapshot always includes every one of its
+  /// already-processed *child* cycles' own blocks too (cycles nest via a
+  /// contiguous Euler-tour range -- see `GenericCycleInfo::contains`'s own
+  /// comment), some of which `foldRedundantFlowBlocksInCycle`/
+  /// `mergeTrivialRelayBlocksInCycle` may have already `eraseFromParent`'d
+  /// by the time that parent is finally attempted (post-order, children
+  /// first): calling `CI.getExitBlocks` on the parent at that point would
+  /// walk `successors()` of one of those now-freed blocks, a genuine
+  /// use-after-free -- precisely the same class of dangling-`CycleInfo`
+  /// hazard the L40 follow-up fix (see `UI`'s own comment) hit and fixed
+  /// for `UniformityInfo`, just via this analysis's own, separate
+  /// lazily-memoized cache instead. Precomputing every cycle's exit
+  /// blocks here, in one pass over the pristine, wholly unmutated `CI`
+  /// before `run()` linearizes anything at all, sidesteps the hazard
+  /// entirely: by the time any cycle -- leaf or, once genuine nested-cycle
+  /// support lands, a non-leaf parent -- is actually linearized, its own
+  /// exit-block answer was already computed and cached, against blocks
+  /// every one of which was still alive at the time.
+  DenseMap<CycleRef, SmallVector<BasicBlock *, 2>> ExitBlocksByCycle;
+
+  /// Populates `ExitBlocksByCycle` for every cycle in `CI` (not just
+  /// leaves -- see that member's own comment for why a future non-leaf
+  /// cycle needs this too), called once at the very start of `run()`
+  /// before any mutation begins.
+  void precomputeExitBlocks();
+
+  ArrayRef<BasicBlock *> getExitBlocks(CycleRef C) const {
+    auto It = ExitBlocksByCycle.find(C);
+    if (It == ExitBlocksByCycle.end())
+      return {};
+    return It->second;
+  }
 };
 
 /// Roadmap L189: walks forward from \p From (inclusive, guaranteed by
@@ -2597,8 +2645,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // or one not connected by a straight chain -- is left alone and
   // diagnosed.
   BasicBlock *Header = CI.getHeader(C);
-  SmallVector<BasicBlock *, 2> ExitBlocks;
-  CI.getExitBlocks(C, ExitBlocks);
+  ArrayRef<BasicBlock *> ExitBlocks = getExitBlocks(C);
   if (ExitBlocks.size() != 1)
     return false; // Not this pass's problem to diagnose; verifyStructured
                   // owns that postcondition and should already have failed.
@@ -3076,6 +3123,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 }
 
 bool LoopLinearizer::run() {
+  precomputeExitBlocks();
   bool Changed = false;
   SmallVector<CycleRef, 8> Worklist(CI.toplevel_begin(), CI.toplevel_end());
   while (!Worklist.empty()) {
@@ -3090,6 +3138,18 @@ bool LoopLinearizer::run() {
     Changed |= linearizeCycle(C);
   }
   return Changed;
+}
+
+void LoopLinearizer::precomputeExitBlocks() {
+  // Roadmap L197: every cycle, not just leaves -- see `ExitBlocksByCycle`'s
+  // own comment for why a not-yet-processed parent cycle needs its own
+  // answer computed here too, before any child is linearized (and,
+  // potentially, has some of its own blocks erased).
+  for (CycleRef C : CI.cycles()) {
+    SmallVector<BasicBlock *, 2> Exits;
+    CI.getExitBlocks(C, Exits);
+    ExitBlocksByCycle.try_emplace(C, std::move(Exits));
+  }
 }
 
 } // namespace
