@@ -61,25 +61,25 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~3-5 hrs, well-scoped, full implementation plan already in
-   `Roadmap.md`'s `L188` row)** Implement `L188`'s fix: generalize
-   `matchExitCheckWithRelay`'s relay-tolerance from `straightChain` to a
-   uniform-conditional-tolerant BFS walk, *and* fix `ExitCheck::RelayBlock`
-   in both call sites to use the walk's real last-hop predecessor instead
-   of the first hop. Add two new `LinearizeTest.cpp` cases: one mirroring
-   this row's own uniform-nested-loop relay shape, one isolating the
-   pre-existing multi-hop `RelayBlock` correctness gap directly (a
-   synthetic 3+-hop straight chain feeding a multi-predecessor `ExitBlock`
-   phi). Re-verify `stable-binarysearch-tree-false-if-discard-loop` plus a
-   full `graphicsfuzz.*` sweep for regressions.
+1. **(large, not yet re-scoped in detail)** Design "provably uniform by
+   construction" value tracking for `LoopLinearizer` (a `SmallPtrSet` of
+   pass-synthesized mask/reduction values, consulted before falling back
+   to the stale, once-computed `UniformityInfo`) -- the actual prerequisite
+   for real `L188` nested-cycle support. Do this design in isolation
+   *before* touching `LoopLinearizer::run()`'s traversal order at all.
 2. **(2-4 hrs, one-time setup, deferred many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
    directory at `/home/dev/dev/offload-test-suite/build`.
-3. **Scan `Roadmap.md` fresh** if not picking up `L188` -- the long-stale
-   candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`, `L147`,
-   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted; a future session should do a real full-table pass rather
-   than keep deferring to this same list.
-4. **(~5 min)** No `/tmp` scratch left from this session -- all L188
-   investigation artifacts and the combined CTS sweep output already
+3. **(~1-2 hrs)** `complex-nested-loops-and-call`'s
+   `PHINode::getIncomingValueForBlock` assertion crash (pre-existing,
+   confirmed unrelated to this session) -- worth its own root-cause
+   session; not investigated past reproducing + confirming it predates
+   this change.
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the long-
+   stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted; a future session should do a real full-table
+   pass rather than keep deferring to this same list.
+5. **(~5 min)** No `/tmp` scratch left from this session -- all sweep
+   output, debug traces, and the temporary comparison worktree already
    removed.
