@@ -13365,3 +13365,105 @@ test.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
 need no change: a pure SPIR-V-to-LLVM lowering correctness fix,
 touching no feature bit or extension surface.
+
+## 2026-09-25: L192(a) fixed -- missing GOLDENIMAGE_DIR was masking dozens of offload-test-suite "failures"; L193/L194 filed
+
+Picked `L192(a)` (`SimpleLines.test`/`SimpleTriangle.test`'s
+`imgdiff: Failed reading PNG header from file`) from the last session's
+next steps.
+
+**Real root cause: this build directory's own CMake configuration,
+not a code bug on either side.** `test/CMakeLists.txt`'s `GOLDENIMAGE_DIR`
+is a plain CMake cache variable, documented (`docs/offload-distribution.md`)
+and set by CI (`.github/workflows/*-callable.yaml`, which checks out
+`llvm/offload-golden-images` fresh every run and passes
+`-DGOLDENIMAGE_DIR=<path>`), but never set for this environment's own
+`check-hlsl-feme-vk` build directory since `L192`'s own build-setup
+session. `test/lit.cfg.py`'s own
+`if os.path.exists(config.goldenimage_dir): config.substitutions.append(...)`
+guard silently no-ops when the variable is empty -- no error, no
+warning -- leaving every `%goldenimage_dir/...png` token in every
+affected `RUN:` line completely unsubstituted, a literal, nonexistent
+path string. That's exactly why `imgdiff` reported "Failed reading PNG
+header from file": it was trying to open a file that was never a real
+path in the first place.
+
+**Fix**: cloned `https://github.com/llvm/offload-golden-images` (the
+same repo CI itself uses) to `/tmp/offload-golden-images`, then
+reconfigured the *existing* build directory with a single cache-only
+`cmake -DGOLDENIMAGE_DIR=/tmp/offload-golden-images .` (no full
+reconfigure needed) and rebuilt `hlsl-test-depends`.
+
+**Scale of the impact -- this was masking a large fraction of every
+prior session's own reported `check-hlsl-feme-vk` failures.** A full
+680-test `check-hlsl-feme-vk` re-run post-fix shows only **3 real
+`Failed`** (`SampleCmp.test`/`CalculateLevelOfDetail.test`, filed as
+new roadmap rows `L193`/`L194` below; `WaveActiveMax.test`, `H169`'s
+own already-documented flaky-by-design case reproducing again exactly
+as its own row predicts) plus the one already-tracked
+`array_of_matrices.test` `XPASS` (`H124g`). Every prior session's own
+scattered "failure" that was actually just this same missing-golden-
+image artifact (including this exact test, `SimpleLines.test`, and
+likely others folded into prior sessions' "known issue" buckets without
+individual re-verification) is confirmed gone.
+
+**A second, closely related regression found and fixed while
+re-verifying the full suite**: `spec_const_32_bits.test` was *also*
+still failing post-golden-image-fix, on the exact symptom `H140`
+already documents as fixed (`OutBool` reads back `0` instead of `1`).
+Direct inspection of the actual `offload-test-suite` checkout
+(`git log --all -- lib/API/VK/Device.cpp`, `grep` on the file itself)
+confirmed the `H140`-described fix was never actually committed there
+-- the file's own `DataFormat::Bool` case still had the original
+1-byte `sizeof(bool)` map-entry-size bug, most likely lost when this
+environment's own `offload-test-suite` checkout was cloned fresh from
+`origin` in a later session rather than continuing whatever local tree
+an earlier session had actually patched (FeMe's own
+`SpecializationPatch.cpp` half of `H140`'s fix was still present and
+correct -- only the `offload-test-suite`-side half was missing).
+Refixed directly (`Entry.size = sizeof(VkBool32)`, `VK_TRUE`/`VK_FALSE`
+written instead of a 1-byte `bool`), verified `spec_const_32_bits.test`
+now passes, committed to `offload-test-suite` in its own commit (only
+touches that repo, per this session's own out-of-FeMe-issue standing
+instruction).
+
+**New roadmap rows filed for the two remaining real failures** (out of
+scope for this session's own `L192(a)` triage task, no time budget left
+to root-cause either in depth):
+- `L193`: `SampleCmp.test` crashes on a bad `cast<mlir::VectorType>`
+  inside `SPIRVToLLVMPatterns.cpp`'s `ImageSampleDrefImplicitLodOp`
+  lowering pattern. Newly *surfaced*, not newly *introduced* -- it was
+  always failing, just masked behind the golden-image error before.
+- `L194`: `CalculateLevelOfDetail.test` still fails pipeline creation
+  because the test file (unlike whenever `H124u`'s own session last
+  ran against it) now also exercises `Texture1D::CalculateLevelOfDetail`,
+  which `hasOnlySupportedImageUses` doesn't cover yet -- `H124u`'s own
+  row already documents `Plain1D`/`Array1D`/`Plain3D`/`CubeArray` as
+  unstarted follow-on scope, so this is that same already-known gap,
+  not a new one.
+
+**Verification**:
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed -- unaffected,
+  since no FeMe source was touched this session (both fixes are a
+  build-configuration change and an `offload-test-suite`-only code
+  fix).
+- `check-hlsl-feme-vk` full re-run (680 tests): 3 `Failed` (down from
+  dozens of previously-scattered, now-explained failures), 1 known
+  `XPASS`, 0 unaccounted-for surprises.
+- Full `graphicsfuzz.*` CTS re-sweep (757 cases, crash-tolerant
+  per-case driver): confirmed byte-identical to the established
+  baseline -- 673 Pass, 8 NotSupported, 2 Timeout, and 74 non-passing
+  cases whose specific identities match the baseline's own 73 Fail + 1
+  Crash exactly (this session's own quick driver classified all 74 as
+  "Crash" since `deqp-vk` exits nonzero for an ordinary in-process
+  `QualityLevel::FAIL` result too, not just a true process crash --
+  a classification quirk in the driver script, not a behavior change;
+  cross-checked the known real crashing case's own name is still in
+  the list, alongside the other 73 ordinary failures). 0 regressions,
+  0 incidental new passes, exactly as expected for a session that
+  touched no FeMe code at all.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: a test-infrastructure/build-configuration fix and a
+non-FeMe `offload-test-suite` regression-refix, no feature/extension
+surface touched anywhere.
