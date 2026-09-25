@@ -101709,3 +101709,120 @@ explicit `if`/`return` instead.
 4. **(~5 min)** No `/tmp` scratch left from this session -- all L188
    investigation artifacts and the combined CTS sweep output already
    removed.
+
+## Session: L189 landed; L188 root-cause overturned (nested/non-leaf cycles, not a relay-chain gap)
+
+### Next action right now
+
+None -- this session's work is fully committed. Start with next step 1
+below in a future session.
+
+### What happened
+
+1. Started from the prior session's own `L188` fix plan (generalize
+   `straightChain` into a uniform-tolerant BFS walk + fix
+   `ExitCheck::RelayBlock`'s first-vs-last-hop bug).
+2. Implemented it exactly as planned. Full test suite: 0 regressions
+   (`FeMeTransformsCPUTests` 556/556, `Transforms/CPU` lit 238/238).
+3. Rebuilt `feme_vulkan`, re-ran the actual target CTS case directly --
+   **still failed, identically**. The plan's own root-cause hypothesis
+   was wrong.
+4. Re-traced the real IR from scratch (not "tweak and re-guess"). Found
+   the true cause: `LoopLinearizer::run()` has a pre-existing
+   `if (!CI.children(C).empty()) continue;` that silently skips every
+   *non-leaf* (nested) cycle, with **no diagnostic**. The target case's
+   loop is nested (an already-linearized inner loop sits inside it), so
+   its own divergent branch is never touched by `LinearizePass` at all --
+   it survives untouched into `feme-cpu-simdize`, which reports it there
+   instead.
+5. Confirmed with a temporary debug trace inside the new relay-walk
+   function: zero output for this case. The relay-chain code path is
+   never even reached. This is not a smaller version of the same bug --
+   it's a structurally different, larger gap (this file's own comments
+   already call nested-loop support "future work").
+6. Tried for a while to build a synthetic unit test for the relay-chain
+   fix's own new tolerance (a uniform conditional branch mid-relay-chain).
+   Traced through why a single-cycle synthetic repro is topologically
+   impossible without colliding with `DiamondFlattener`'s own
+   reconvergence-walk requirements. Abandoned it rather than burn more
+   time -- documented why in the roadmap instead of forcing something
+   fragile.
+7. Landed the relay-chain fix anyway as its own roadmap row (`L189`) --
+   it's a real, independently-reasoned latent-bug fix, safe (0
+   regressions), just not what closes `L188`.
+8. Corrected `L188`'s roadmap row with the real root cause and why a real
+   fix is bigger than either row originally assumed (need a new "provably
+   uniform by construction" tracking mechanism for a child cycle's own
+   synthesized IR, since `UniformityInfo`/`CycleInfo` are computed once
+   and can't be safely re-queried against IR a child cycle's own
+   linearization just created).
+9. Ran the full 757-case `graphicsfuzz.*` sweep: 665 Pass / 76 Fail / 8
+   unaccounted -- identical to the pre-session baseline. 0 regressions, 0
+   improvements (expected, since `L189` isn't reached by any of these
+   cases either).
+10. Found one of the 8 "unaccounted" cases
+    (`complex-nested-loops-and-call`) crashes with an unrelated
+    `PHINode::getIncomingValueForBlock` assertion. Verified it predates
+    this session (reproduced identically after temporarily reverting
+    `Linearize.cpp` and rebuilding `feme_vulkan`) -- not a regression, not
+    investigated further.
+
+### Wins
+
+- `L189` landed: a real, tested (via full regression suite), safe latent-
+  bug fix in `LoopLinearizer`'s relay-chain handling.
+- `L188`'s diagnosis is now *correct* instead of confidently wrong --
+  worth more than a rushed fix on a mistaken foundation.
+- `check-feme`: 3338/3341, 0 regressions.
+
+### Commits (in order)
+
+1. `6819719767b6` -- `L189`: `uniformRelayChain` (replaces
+   `straightChain`) + `RelayBlock` last-hop fix, in `Linearize.cpp`.
+2. `a93d157ddc28` -- `Roadmap.md`: corrected `L188` root cause, added
+   `L189`.
+3. `9f6f262386ce` -- `VulkanCTSReport.md`: this session's findings.
+
+### A gotcha worth remembering
+
+In `LoopLinearizer`, a `CheckBlock`'s own relay-chain `Candidate` (its
+own direct successor) is topologically *forced* to already equal the
+cycle's one recognized `ExitBlock` in a single (leaf) cycle -- a forward-
+only chain block with no path back to the header can't be "in the
+cycle," so it's automatically one of `CI.getExitBlocks()`'s own entries,
+and that set is required to have exactly one member. A genuinely
+multi-hop relay chain therefore requires one of its own blocks to have
+an *independent* path back to the header (not just forward toward the
+exit) -- which is exactly what makes hand-building a minimal synthetic
+repro for this shape hard: any such shape tends to also trip
+`DiamondFlattener`'s own top-level reconvergence-walk requirements before
+`LoopLinearizer` even gets a look-in. Don't assume "just build a small
+3-block IR test" is easy for this specific class of bug; the existing
+`LinearizesLoopWithTwoRelayHopsToDivergentExit` test's own comment already
+flags this same difficulty, and this session re-confirmed it the hard
+way.
+
+### Suggested next steps
+
+1. **(large, not yet re-scoped in detail)** Design "provably uniform by
+   construction" value tracking for `LoopLinearizer` (a `SmallPtrSet` of
+   pass-synthesized mask/reduction values, consulted before falling back
+   to the stale, once-computed `UniformityInfo`) -- the actual prerequisite
+   for real `L188` nested-cycle support. Do this design in isolation
+   *before* touching `LoopLinearizer::run()`'s traversal order at all.
+2. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+3. **(~1-2 hrs)** `complex-nested-loops-and-call`'s
+   `PHINode::getIncomingValueForBlock` assertion crash (pre-existing,
+   confirmed unrelated to this session) -- worth its own root-cause
+   session; not investigated past reproducing + confirming it predates
+   this change.
+4. **Scan `Roadmap.md` fresh** if not picking up 1-3 above -- the long-
+   stale candidate list (`L90`-`L95`, `L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted; a future session should do a real full-table
+   pass rather than keep deferring to this same list.
+5. **(~5 min)** No `/tmp` scratch left from this session -- all sweep
+   output, debug traces, and the temporary comparison worktree already
+   removed.
