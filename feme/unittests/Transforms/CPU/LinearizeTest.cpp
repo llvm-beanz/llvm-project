@@ -1243,5 +1243,230 @@ TEST(LinearizeTest,
   run(*M);
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
+// Roadmap L190: distilled from a real captured pre-`feme-cpu-linearize` IR
+// dump of `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`'s fragment
+// stage (see agent_thoughts.md's "L190 session" entry for the full trace
+// this was root-caused from). `Flow8`'s own condition `phi` (`%44`) has a
+// literal-constant contribution from its critical-edge relay predecessor
+// `.Flow8_crit_edge`, which `peelConstantFlowPredecessors` peels first,
+// bypassing that edge directly into `loop.exit.guard3` and using
+// `SSAUpdater` to seed a brand-new reconciling `phi` there for each of
+// `Flow8`'s own externally-used values. `collapseTriviallyRedundantPhisInCycle`
+// and `mergeTrivialRelayBlocksInCycle` then fold `Flow8` (now phi-less)
+// into its sole remaining predecessor `Flow9`, relabeling those new
+// `phi`s' `Flow8` entries to `Flow9`. `Flow9`'s own condition `phi` (`%60`
+// after that merge) *also* has a literal-constant contribution, from its
+// own critical-edge relay `.Flow9_crit_edge` -- so the very same peel
+// runs again, this time on `Flow9`, needing to give `loop.exit.guard3`'s
+// *already-existing* `phi`s (created by the first peel) a *third*
+// incoming entry for this newly-direct edge too.
+//
+// Before this fix: `SSAUpdater::RewriteUse` only ever replaces the value
+// of a single *existing* `Use` in place -- it cannot split an existing
+// incoming slot into two, so an existing downstream `phi`'s entry
+// labeled `Flow9` never gained a matching entry for `.Flow9_crit_edge`,
+// leaving `loop.exit.guard3` with `phi`s that list only 2 incoming values
+// despite the block now having 3 real predecessors. That invalid IR
+// verified successfully at the time (nothing downstream in the pass
+// itself calls `verifyModule`), but crashed deep inside upstream LLVM's
+// `JumpThreadingPass` (via `TryToSimplifyUncondBranchFromEmptyBlock`'s
+// `PHINode::getIncomingValueForBlock`, whose own assertion this row is
+// named for) many stages later, once that pass tried to look up one of
+// `loop.exit.guard3`'s `phi`s' value for a predecessor it did not
+// actually have an entry for. Confirmed by temporarily reverting this
+// fix and re-running this exact test: `verifyModule` now catches the
+// same missing-predecessor-entry shape directly, immediately after this
+// pass runs, instead of only much later and by assertion crash.
+TEST(LinearizeTest,
+     ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+    
+    @spirv_var_38.str = private constant [13 x i8] c"spirv_var_38\00"
+    @gl_FragCoord = external addrspace(7) constant <4 x float>
+    @_GLF_color = external addrspace(8) global <4 x float>
+    
+    declare void @llvm.spv.discard()
+    
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    
+    declare void @feme.stage.discard(i1)
+    
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #1 {
+      %1 = alloca [16 x <3 x float>], align 4
+      br label %2
+    
+    2:                                                ; preds = %Flow12._crit_edge, %0
+      %3 = phi i32 [ 0, %0 ], [ %55, %Flow12._crit_edge ]
+      %4 = phi <3 x float> [ undef, %0 ], [ %54, %Flow12._crit_edge ]
+      %5 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 4, i1 true)
+      %6 = fptosi float %5 to i32
+      %7 = icmp slt i32 %3, %6
+      br i1 %7, label %._crit_edge, label %.Flow12_crit_edge
+    
+    .Flow12_crit_edge:                                ; preds = %2
+      br label %Flow12
+    
+    ._crit_edge:                                      ; preds = %2
+      br label %16
+    
+    common.ret:                                       ; preds = %Flow.common.ret_crit_edge, %9
+      ret void
+    
+    Flow:                                             ; preds = %loop.exit.guard.Flow_crit_edge, %48
+      %8 = phi i1 [ false, %48 ], [ true, %loop.exit.guard.Flow_crit_edge ]
+      br i1 %8, label %9, label %Flow.common.ret_crit_edge
+    
+    Flow.common.ret_crit_edge:                        ; preds = %Flow
+      br label %common.ret
+    
+    9:                                                ; preds = %Flow
+      %10 = load <3 x float>, ptr %1, align 4
+      %11 = shufflevector <3 x float> %10, <3 x float> poison, <4 x i32> <i32 0, i32 1, i32 2, i32 poison>
+      %12 = insertelement <4 x float> %11, float 1.000000e+00, i64 3
+      %13 = extractelement <4 x float> %12, i64 0
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %13, i32 0)
+      %14 = extractelement <4 x float> %12, i64 1
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float %14, i32 0)
+      %15 = extractelement <4 x float> %12, i64 2
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float %15, i32 0)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.000000e+00, i32 0)
+      br label %common.ret
+    
+    16:                                               ; preds = %Flow10._crit_edge, %._crit_edge
+      %17 = phi <3 x float> [ %27, %Flow10._crit_edge ], [ %4, %._crit_edge ]
+      %18 = phi i32 [ %25, %Flow10._crit_edge ], [ 0, %._crit_edge ]
+      %19 = icmp slt i32 %18, 2
+      br i1 %19, label %22, label %.Flow10_crit_edge
+    
+    .Flow10_crit_edge:                                ; preds = %16
+      br label %Flow10
+    
+    20:                                               ; preds = %loop.exit.guard1
+      %21 = add i32 %3, 1
+      br label %Flow13
+    
+    22:                                               ; preds = %16
+      %23 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %24 = fptosi float %23 to i32
+      br label %29
+    
+    Flow10:                                           ; preds = %.Flow10_crit_edge, %Flow11
+      %25 = phi i32 [ %51, %Flow11 ], [ poison, %.Flow10_crit_edge ]
+      %26 = phi i1 [ false, %Flow11 ], [ true, %.Flow10_crit_edge ]
+      %27 = phi <3 x float> [ %52, %Flow11 ], [ %17, %.Flow10_crit_edge ]
+      %28 = phi i1 [ %53, %Flow11 ], [ true, %.Flow10_crit_edge ]
+      br i1 %28, label %loop.exit.guard1, label %Flow10._crit_edge
+    
+    Flow10._crit_edge:                                ; preds = %Flow10
+      br label %16
+    
+    29:                                               ; preds = %Flow8._crit_edge, %22
+      %30 = phi i32 [ %43, %Flow8._crit_edge ], [ 1, %22 ]
+      %31 = fcmp uge float %23, 1.000000e+01
+      br i1 %31, label %39, label %.Flow8_crit_edge
+    
+    .Flow8_crit_edge:                                 ; preds = %29
+      br label %Flow8
+    
+    32:                                               ; preds = %loop.exit.guard3
+      %33 = sitofp i32 %43 to float
+      %34 = insertelement <3 x float> <float poison, float 0.000000e+00, float 0.000000e+00>, float %33, i64 0
+      %35 = select i1 %31, <3 x float> %42, <3 x float> %34
+      %36 = sext i32 %24 to i64
+      %37 = getelementptr [16 x i8], ptr %1, i64 %36
+      store <3 x float> %35, ptr %37, align 4
+      %38 = add i32 %18, 1
+      br label %Flow11
+    
+    39:                                               ; preds = %29
+      %40 = fcmp uge float %23, 2.000000e+01
+      br i1 %40, label %45, label %.Flow9_crit_edge
+    
+    .Flow9_crit_edge:                                 ; preds = %39
+      br label %Flow9
+    
+    Flow8:                                            ; preds = %.Flow8_crit_edge, %Flow9
+      %41 = phi i1 [ %58, %Flow9 ], [ true, %.Flow8_crit_edge ]
+      %42 = phi <3 x float> [ splat (float 1.000000e+00), %Flow9 ], [ %17, %.Flow8_crit_edge ]
+      %43 = phi i32 [ %59, %Flow9 ], [ %30, %.Flow8_crit_edge ]
+      %44 = phi i1 [ %60, %Flow9 ], [ true, %.Flow8_crit_edge ]
+      br i1 %44, label %loop.exit.guard3, label %Flow8._crit_edge
+    
+    Flow8._crit_edge:                                 ; preds = %Flow8
+      br label %29
+    
+    45:                                               ; preds = %39
+      %46 = add i32 %30, 1
+      %47 = fcmp olt float %23, 3.000000e+01
+      br label %Flow9
+    
+    48:                                               ; preds = %loop.exit.guard
+      call void @feme.stage.discard(i1 true)
+      br label %Flow
+    
+    Flow13:                                           ; preds = %loop.exit.guard1.Flow13_crit_edge, %20
+      %49 = phi i32 [ %21, %20 ], [ poison, %loop.exit.guard1.Flow13_crit_edge ]
+      %50 = phi i1 [ false, %20 ], [ true, %loop.exit.guard1.Flow13_crit_edge ]
+      br label %Flow12
+    
+    loop.exit.guard:                                  ; preds = %Flow12
+      %Guard..inv = xor i1 %56, true
+      br i1 %Guard..inv, label %48, label %loop.exit.guard.Flow_crit_edge
+    
+    loop.exit.guard.Flow_crit_edge:                   ; preds = %loop.exit.guard
+      br label %Flow
+    
+    Flow11:                                           ; preds = %loop.exit.guard3.Flow11_crit_edge, %32
+      %51 = phi i32 [ %38, %32 ], [ poison, %loop.exit.guard3.Flow11_crit_edge ]
+      %52 = phi <3 x float> [ %35, %32 ], [ %17, %loop.exit.guard3.Flow11_crit_edge ]
+      %53 = phi i1 [ false, %32 ], [ true, %loop.exit.guard3.Flow11_crit_edge ]
+      br label %Flow10
+    
+    Flow12:                                           ; preds = %.Flow12_crit_edge, %Flow13
+      %54 = phi <3 x float> [ %27, %Flow13 ], [ %4, %.Flow12_crit_edge ]
+      %55 = phi i32 [ %49, %Flow13 ], [ poison, %.Flow12_crit_edge ]
+      %56 = phi i1 [ false, %Flow13 ], [ true, %.Flow12_crit_edge ]
+      %57 = phi i1 [ %50, %Flow13 ], [ true, %.Flow12_crit_edge ]
+      br i1 %57, label %loop.exit.guard, label %Flow12._crit_edge
+    
+    Flow12._crit_edge:                                ; preds = %Flow12
+      br label %2
+    
+    loop.exit.guard1:                                 ; preds = %Flow10
+      br i1 %26, label %20, label %loop.exit.guard1.Flow13_crit_edge
+    
+    loop.exit.guard1.Flow13_crit_edge:                ; preds = %loop.exit.guard1
+      br label %Flow13
+    
+    Flow9:                                            ; preds = %.Flow9_crit_edge, %45
+      %58 = phi i1 [ true, %45 ], [ false, %.Flow9_crit_edge ]
+      %59 = phi i32 [ %46, %45 ], [ poison, %.Flow9_crit_edge ]
+      %60 = phi i1 [ %47, %45 ], [ true, %.Flow9_crit_edge ]
+      br label %Flow8
+    
+    loop.exit.guard3:                                 ; preds = %Flow8
+      br i1 %41, label %32, label %loop.exit.guard3.Flow11_crit_edge
+    
+    loop.exit.guard3.Flow11_crit_edge:                ; preds = %loop.exit.guard3
+      br label %Flow11
+    }
+    
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1)
+    
+    attributes #1 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+
+  // Must not crash the process, and the resulting IR must remain valid
+  // SSA -- before this fix, `loop.exit.guard3`'s own reconciling `phi`s
+  // (created by the first of two, same-cycle constant-flow-predecessor
+  // peels) were left with only 2 incoming entries despite the block
+  // ending up with 3 real predecessors once the second peel ran, which
+  // `verifyModule` catches as a malformed `phi` node.
+  run(*M);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
 
 } // namespace
