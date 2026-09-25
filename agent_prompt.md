@@ -61,32 +61,35 @@ file.
 Can you please work on the FeMe ICD implementation? The previous session gave
 the next steps:
 
-1. **(~1-2 hrs)** Systematically audit for the L134(c)/L191 bug class:
-   grep every "unconditionally decomposes + erases" producer in
-   `SIMDize.cpp` (`widenMaskedLoad`, `widenMaskedAllocaLoad`,
-   `widenResourceCall`, `widenImageCall`, `widenGroupSharedLoad`, ...),
-   and for each, check whether every consumer-instruction-type that can
-   read a `WidenedVectorComponents` value is already special-cased before
-   the general uniformity gate (currently only `ExtractElementInst`,
-   `ShuffleVectorInst`, `InsertElementInst` are). Consider whether a
-   single generic check (replacing all three special cases) is worth
-   the style change at that point.
-2. **(~1-2 days, not scoped in detail, still open from the L190 session)**
-   `cov-function-loops-vector-mul-matrix-never-executed`'s divergent-
-   branch `feme-cpu-simdize` diagnostic and
+1. **(~2-4 hrs)** `WidenedAggregateComponents` (the struct/array analogue
+   of `WidenedVectorComponents`) was never audited. Same bug class is
+   plausible there too.
+2. **(large, no fix designed)** A `PHINode` consumer of a
+   to-be-force-decomposed value is structurally unaddressable with the
+   current two-pass architecture (Pass 1 creates phi stubs before Pass 2
+   force-decomposes anything). Would need a pre-pass classification of
+   "which producers will unconditionally force-decompose" before Pass 1
+   runs.
+3. **(~1-2 days, not scoped)** `cov-function-loops-vector-mul-matrix-
+   never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic and
    `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
-   when a value is destroyed!" crash -- both confirmed pre-existing and
-   unrelated to L190/L191, neither root-caused yet.
-3. **(large, not yet re-scoped in detail, deferred from the L188/L189
-   session)** Design "provably uniform by construction" value tracking
-   for `LoopLinearizer` -- the real prerequisite for nested-cycle support
-   (`L188`'s own still-open root cause).
-4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   when a value is destroyed!" crash -- both confirmed still pre-existing
+   and unrelated to this session's fix (reproduced identically in both
+   the before and after sweeps).
+4. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+5. **(2-4 hrs, one-time setup, deferred many sessions now)**
    `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
    directory at `/home/dev/dev/offload-test-suite/build`.
-5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+6. **Scan `Roadmap.md` fresh** if not picking up 1-5 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted; a future session should do a real full-table pass.
-6. **(~5 min)** No `/tmp` scratch left from this session --
-   `/tmp/ctsrun_l191/` and the stale `/tmp/ctsrun_l190b/` both removed.
+   unvetted.
+7. **(~5 min)** No `/tmp` scratch left from this session -- all
+   `/tmp/ctsrun_l191a/` sweep output, per-case QPA logs, and the baseline
+   comparison run already removed.
+
+Next step if resuming: pick #1 (`WidenedAggregateComponents` audit) --
+it's the same methodology as this session, already proven to work, and
+well-scoped at a few hours.
