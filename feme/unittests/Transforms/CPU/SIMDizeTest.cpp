@@ -798,6 +798,82 @@ TEST(SIMDizeTest, WidensGroupSharedAtomicCmpXchg) {
   EXPECT_EQ(CmpXchgCount, 4u);
 }
 
+// Roadmap L191(b): a systematic audit of `WidenedAggregateComponents`
+// (the aggregate analogue of `WidenedVectorComponents`, deferred from
+// `L191(a)`'s own vector-only audit) for the identical `L134(c)`/`L191`
+// bug class: is there an aggregate producer that unconditionally
+// decomposes and erases regardless of `UI.isDivergentAtDef`'s own verdict
+// on it, the way `widenMaskedLoad`/`widenMaskedAllocaLoad` do for
+// vectors? `checkAggregateValueSupported`'s file comment enumerates the
+// entire supported set: `InsertValueInst`/`ExtractValueInst`/`SelectInst`/
+// `PHINode` (all four gated behind the *same* general uniformity check
+// this file's whole dispatch cascade already uses, so none of them can
+// introduce hidden divergence independently -- unlike `widenMaskedLoad`,
+// which decomposes *ahead* of that gate), and a groupshared `cmpxchg`
+// (`widenGroupSharedAtomicCmpXchg`, dispatched unconditionally, ahead of
+// the gate, exactly like `widenMaskedLoad` -- the one real candidate for
+// this bug class). Unlike `widenMaskedLoad`'s masked-load call, though,
+// `AtomicCmpXchgInst` is hard-coded `ValueUniformity::NeverUniform` in
+// `WaveUniformity.cpp` (roadmap `H164`): `UI.isDivergentAtDef` always
+// judges a `cmpxchg` divergent, regardless of how uniform its own
+// address/compare/new-value operands look, so a consumer reading its
+// result is, via ordinary forward divergence propagation from an
+// always-divergent operand, always correctly classified divergent too --
+// safe by construction, the same reasoning `L191(a)`'s own audit already
+// found for `widenWaveCall`'s prefix-scan branch and `widenStageOp`'s
+// vector branch. This test confirms that reasoning holds in practice: a
+// groupshared `cmpxchg` whose address, compare, and new-value operands
+// are *all* genuinely uniform (a fixed global address and two literal
+// constants -- as uniform-looking as the shape can get) still decomposes
+// correctly, and neither of its two `extractvalue` consumers is ever
+// left dangling on a poison operand.
+//
+// No live bug was found in this audit -- `AnyOperandDecomposed`
+// (`L191(a)`) is nonetheless extended below to also check
+// `WidenedAggregateComponents`, not because any producer in this file
+// currently needs it, but for parity with the vector-side fix and as a
+// zero-cost defense against a *future* aggregate producer being added
+// with `widenMaskedLoad`'s own unsafe (shape-only, ahead-of-the-gate)
+// pattern instead of `widenGroupSharedAtomicCmpXchg`'s safe one.
+TEST(SIMDizeTest, WidensUniformlyOperandedGroupSharedAtomicCmpXchg) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %pair = cmpxchg ptr addrspace(3) @shared, i32 0, i32 42 seq_cst seq_cst
+      %val = extractvalue { i32, i1 } %pair, 0
+      %ok = extractvalue { i32, i1 } %pair, 1
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Neither `%val` nor `%ok` may survive as the original, unrewritten
+  // `extractvalue`, dangling on the since-erased `%pair` -- confirming
+  // the whole `cmpxchg`/`extractvalue` chain was actually widened, not
+  // left alone as "uniform".
+  for (Instruction &I : instructions(F))
+    EXPECT_NE(I.getName(), "val");
+  for (Instruction &I : instructions(F))
+    EXPECT_NE(I.getName(), "ok");
+
+  unsigned CmpXchgCount = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CX = dyn_cast<AtomicCmpXchgInst>(&I)) {
+      ++CmpXchgCount;
+      for (Value *Op : CX->operands())
+        EXPECT_FALSE(isa<PoisonValue>(Op));
+    }
+  }
+  EXPECT_EQ(CmpXchgCount, 4u);
+}
+
 // Roadmap L27: a divergent, whole *vector*-typed value inserted as a single
 // struct-field leaf via `insertvalue` (rather than each scalar component
 // individually, the only shape roadmap L21 supported), then read back out
