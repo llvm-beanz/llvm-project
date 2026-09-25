@@ -102824,3 +102824,124 @@ advertisement bit.
    unvetted.
 5. **(~5 min)** No `/tmp` scratch remains from this session --
    `/tmp/l193repro/` and `/tmp/ctsrun_l193/` both removed.
+
+# L194 session: Texture1D/Texture1DArray CalculateLevelOfDetail added -- exact mirror of QueryLodCube's design, no surprises
+
+Device check passed: `FeMe CPU Vulkan Device`.
+
+**Done. 4 commits, all in `llvm-project`, all FeMe source + tests + docs.
+No non-FeMe issue found this session, so no `offload-test-suite` commit
+this time.** `CalculateLevelOfDetail.test` now passes outright.
+
+## What I was assigned vs. what I actually found
+
+Picked up `L194`: add a `QueryLod1D`/`QueryLodArray1D` counterpart to
+`H124u`'s prior `QueryLodCube` work. Unlike the last several sessions
+(`L192(b)`, `L192(a)`, `L193`), this one had **no surprises** -- the
+scoping from prior sessions was exactly right, and the fix followed the
+established `QueryLod2D` design precedent cleanly on the first try.
+
+1. Built a minimal isolated `dxc -spirv` repro (`Tex1D`/`Tex1DArray`
+   both calling `CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`)
+   and `spirv-dis`'d it *before* writing any code -- this project's own
+   established methodology, and it paid off again: confirmed both
+   `Plain1D` and `Array1D` emit `OpImageQueryLod` against a bare scalar
+   `float` coordinate, no array-layer component, mirroring `Plain2D`/
+   `Array2D`'s existing sharing (not `Cube`'s separate-entry-point
+   design).
+2. Added one new `ImageCallKind::QueryLod1D` shared by both shapes,
+   plus its builder, runtime name, and `FunctionType` registration
+   (`ImageCalls.h`/`.cpp`).
+3. Widened `hasOnlySupportedImageUses`/`lowerImageAccesses`
+   (`SPIRVResourceLowering.cpp`) to accept `Plain1D`/`Array1D` `QueryLod`
+   using the pre-existing `isCoordN` bare-scalar special case --
+   `SPIRVToLLVMPatterns.cpp`'s `ImageQueryLodPattern` needed *zero*
+   changes, it was already shape-agnostic.
+4. Added the CPU runtime entry point (`femeCpuImageQueryLod1DV2F32`)
+   plus its own single-axis derivative helper.
+5. Added 5 new unit tests (2 classification/dispatch,
+   3 runtime-formula), all passing.
+
+## Verification
+
+- `ninja check-feme`: 3348/3351 Passed, 3 pre-existing Unsupported, 0
+  Failed.
+- `CalculateLevelOfDetail.test` (direct `llvm-lit`, offload-test-suite
+  tree): now **Pass** (was failing).
+- Full `check-hlsl-feme-vk`: only the pre-existing flaky
+  `WaveActiveMax.test` and the pre-existing documented
+  `array_of_matrices.test` XPASS remain, 0 new failures.
+- Full 757-case `graphicsfuzz.*` CTS sweep: 673 Pass / 73 Fail / 8
+  NotSupported / 1 crash / 2 timeouts -- exact match to the established
+  baseline, 0 regressions (expected, since `graphicsfuzz.*` doesn't
+  exercise `CalculateLevelOfDetail` at all).
+
+## A CTS sweep-tooling bug found along the way (not a FeMe bug)
+
+My per-case sweep driver initially mis-bucketed 74 cases as `CRASH`.
+Root cause: `deqp-vk`'s own exit code is `1`, not `0`, for an ordinary
+`Fail` *whenever `--deqp-log-filename` is passed a custom path* (my
+driver did this to keep each case's QPA log from clobbering the
+previous one) -- indistinguishable from a real crash by exit code
+alone. Caught it by manually re-running one flagged case directly and
+seeing it print a plain `Fail (Fail)` with the sweep-recorded rc=1.
+Fixed by re-classifying based on the case's own output text (`"Fail
+(Fail)"` vs. no completion message) rather than exit code. Re-swept all
+74: 73 were ordinary already-expected Fails, 1 was the single real,
+already-known crash (`cov-function-multiple-loops-compare-integer-return`,
+`SIGABRT`). This was throwaway `/tmp` tooling, not a repo bug, so no
+commit for it -- but worth remembering for any future sweep script: **do
+not trust `deqp-vk`'s exit code as a crash signal when
+`--deqp-log-filename` is set; check the output text instead.**
+
+## Lessons learned (sandbox environment, not FeMe)
+
+Discovered this session: background (`async`) `bash` processes do not
+reliably advance in wall-clock time if you only poll them with
+`read_bash`'s `delay` parameter -- I saw the same elapsed-time/line-count
+across several consecutive 300-400s waits. Switching to **foreground**
+`bash` calls containing an explicit `sleep N` (so the tool call itself
+blocks) reliably let the background process advance between checks.
+Future sessions running a long CTS sweep in the background should poll
+this way, not via `read_bash` alone.
+
+## Files changed
+
+- `feme/include/feme/Transforms/CPU/ImageCalls.h`,
+  `feme/lib/Transforms/CPU/ImageCalls.cpp`: new `ImageCallKind::QueryLod1D`
+  + builder + runtime-name/signature registration.
+- `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: classification +
+  codegen dispatch widened to `Plain1D`/`Array1D`.
+- `feme/runtime/CPU/FeMeRuntimeCPU.c`: new
+  `femeCpuImageQueryLod1DV2F32` + `femeRTComputeUnclampedQueryLod1D`.
+- `feme/unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp`,
+  `feme/unittests/Runtime/CPU/ImageSamplingTest.cpp`: 5 new tests.
+- `feme/docs/Roadmap.md`: `L194` struck through, `done`.
+- `feme/docs/VulkanCTSReport.md`: new dated section, sweep result,
+  sweep-tooling-bug note.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+  no change needed (capability widening, not a feature/extension bit).
+
+## Suggested next steps
+
+1. **(large, no fix designed, carried forward many sessions now)** The
+   `PHINode` two-pass structural gap (Pass 1 creates phi stubs before
+   Pass 2 force-decomposes anything) -- unaddressed on both the vector
+   and aggregate sides. Still the single largest standing architectural
+   gap in this project; needs a dedicated design session, not another
+   incremental poke.
+2. **(large, deferred many sessions now)** "Provably uniform by
+   construction" value tracking for `LoopLinearizer` -- `L188`'s own
+   still-open nested-cycle root cause.
+3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted after many sessions of deferral. A future session should do
+   a real full-table pass rather than keep punting on this same list.
+4. **(~5 min)** No `/tmp` scratch remains from this session --
+   `/tmp/l194repro/` and `/tmp/ctsrun_l194/` both removed.
+
+Next step if resuming: with the `L191`-`L194` bug-hunting streak now
+fully closed out (no more open, well-scoped `L19x` items), a future
+session should pick #1 or #2 above for a large research-heavy session,
+or do the full `Roadmap.md` sweep (#3) as a change of pace.
