@@ -11798,7 +11798,29 @@ mlir::Value createSameShapeFPConstant(mlir::ConversionPatternRewriter &Rewriter,
 /// own math is continuous and non-singular near zero), so they are left on
 /// MLIR's own unconditional `DirectConversionPattern` rather than needing
 /// this override too.
-template <typename SPIRVOp, typename LLVMOp>
+///
+/// (Roadmap L192(b)) The flush is *not* uniform across every floating-point
+/// width for every one of these ops, though: `Feature/HLSLLib/sqrt.16.test`
+/// -- unlike `sqrt.32.test`, `log.16.test`, `log2.16.test`, and
+/// `sinh.16.test`, all of which agree with the flushed-input answer at
+/// their own tested denormal inputs -- has its own golden `ExpectedOut`
+/// data computed from the *unflushed*, full-precision `sqrt` at `f16`: a
+/// negative subnormal input's real square root is `NaN` there (not the
+/// flushed `-0.0` `sqrt(-0.0)` would give), and a positive subnormal
+/// input's real square root rounds to a nonzero `f16` result (not the
+/// flushed `0.0`). This is plausible as a genuine per-op, per-width real
+/// hardware difference (whatever special-function unit a real GPU uses for
+/// `f16 sqrt` may simply not share the same denormal-flushing quirk its
+/// `f32` counterpart has), not a reason to doubt the flush model itself for
+/// `Log`/`Log2`/`Sinh` (whose own `f16` golden data independently confirms
+/// they *do* still want it -- e.g. `sinh.16.test`'s denormal inputs, whose
+/// real, unflushed `sinh(x) ~= x` answer would round back to the same
+/// nonzero denormal `x`, yet the golden data expects flushed-to-zero
+/// `0.0`). The `FlushF16Denormals` template parameter below defaults to
+/// `true` (matching every other instantiation's existing, still-correct
+/// behavior) and is overridden to `false` only for the `GLSqrtOp`
+/// instantiation.
+template <typename SPIRVOp, typename LLVMOp, bool FlushF16Denormals = true>
 class TranscendentalFlushInputPattern
     : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
@@ -11812,8 +11834,10 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
-    mlir::Value Operand =
-        flushSubnormalToZero(Rewriter, Loc, Adaptor.getOperand());
+    mlir::Value Operand = Adaptor.getOperand();
+    unsigned Width = mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
+    if (FlushF16Denormals || Width != 16)
+      Operand = flushSubnormalToZero(Rewriter, Loc, Operand);
     Rewriter.replaceOpWithNewOp<LLVMOp>(Op, DstType, Operand);
     return mlir::success();
   }
@@ -14727,13 +14751,16 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // an unconditional subnormal-input flush (roadmap H6m), modeling a real
   // GPU's own special-function-unit hardware behavior; see
   // `TranscendentalFlushInputPattern`'s own comment above for why only
-  // these ops (and not every GLSL.std.450 op) need it.
+  // these ops (and not every GLSL.std.450 op) need it, and (roadmap
+  // L192(b)) why `GLSqrtOp` alone opts out of the flush at `f16` width --
+  // `sqrt.16.test`'s own golden data disagrees with the flushed answer
+  // there, unlike every other op/width combination this pattern covers.
   Patterns.add<
       TranscendentalFlushInputPattern<mlir::spirv::GLLogOp, mlir::LLVM::LogOp>,
       TranscendentalFlushInputPattern<mlir::spirv::GLLog2Op,
                                       mlir::LLVM::Log2Op>,
-      TranscendentalFlushInputPattern<mlir::spirv::GLSqrtOp,
-                                      mlir::LLVM::SqrtOp>,
+      TranscendentalFlushInputPattern<mlir::spirv::GLSqrtOp, mlir::LLVM::SqrtOp,
+                                      /*FlushF16Denormals=*/false>,
       TranscendentalFlushInputPattern<mlir::spirv::GLSinhOp,
                                       mlir::LLVM::SinhOp>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
