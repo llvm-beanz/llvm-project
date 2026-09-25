@@ -1371,6 +1371,147 @@ TEST(SIMDizeTest, DecomposesVectorPHIAcrossUniformDiamond) {
   EXPECT_EQ(WidePHICount, 4u);
 }
 
+// (Roadmap L195) The scalar shape of this gap -- a `phi` merging a
+// `feme.cpu.masked.load.*` call whose own operands (a compile-time-constant
+// governing mask, here) happen to make `UI` judge *it* uniform too, even
+// though `widenMaskedLoad` force-decomposes and erases it unconditionally
+// regardless of `UI`'s verdict (see that function's own comment) -- is
+// already covered by `ReadsBackRealUniformValueThroughAMaskedLoadFeedingAn
+// UnwidenedPhi`/`RecoversUniformValueFromEntryMaskDerivedLaneNotHardcoded
+// LaneZero` below (roadmap H107/L118): the `phi` correctly stays un-widened
+// (since `UI` is right that it is uniform), and `widen()`'s post-pass-3
+// "sever every remaining `ToErase` use" cleanup already recovers a real,
+// entry-mask-derived-lane value for it rather than leaving a dangling
+// `poison`-RAUW'd operand. `WidensVectorPHIMergingUniformlyMaskedLoad`
+// just below is the vector-typed analogue of that same shape: this fix's
+// actual new ground, since that cleanup step (before this fix) only ever
+// consulted the scalar `Widened` map, never `WidenedVectorComponents`.
+//
+// The vector-typed counterpart of that established scalar shape:
+// `widenMaskedLoad`'s own vector case populates `WidenedVectorComponents`
+// rather than `Widened`, so this exercises the vector branch of `widen()`'s
+// cleanup step instead of its scalar one, closing the same gap for
+// `PN->getType()->isVectorTy()`.
+TEST(SIMDizeTest, WidensVectorPHIMergingUniformlyMaskedLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p, i1 %cond) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %sink = alloca float
+      store float %tidf, ptr %sink
+      br i1 %cond, label %a, label %b
+    a:
+      %loaded = call <4 x float> @feme.cpu.masked.load.v4f32(
+          ptr %p, i32 16, i1 true,
+          <4 x float> <float 0.0, float 0.0, float 0.0, float 0.0>)
+      br label %end
+    b:
+      br label %end
+    end:
+      %v = phi <4 x float> [ %loaded, %a ],
+          [ <float 1.0, float 1.0, float 1.0, float 1.0>, %b ]
+      %e0 = extractelement <4 x float> %v, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare <4 x float> @feme.cpu.masked.load.v4f32(ptr, i32, i1, <4 x float>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned NarrowPHICount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Nothing may widen a `<4 x float>` into a `<W x <4 x float>>` --
+    // `UI` correctly judges this whole merge uniform, so it must stay
+    // narrow throughout.
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *PN = dyn_cast<PHINode>(&I)) {
+      if (PN->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++NarrowPHICount;
+      for (Value *Incoming : PN->incoming_values())
+        EXPECT_FALSE(isa<PoisonValue>(Incoming));
+    }
+  }
+  // The merge `phi` stays a single, un-widened `<4 x float>` `phi` (`UI` is
+  // right that it is uniform) -- rather than pass 1 force-widening it into
+  // four separate per-component `phi`s the way a genuinely divergent merge
+  // would, `widen()`'s post-pass-3 cleanup step rebuilds a real `<4 x
+  // float>` value for its `%loaded` incoming edge (one `extractelement`
+  // per widened component, reassembled with `insertelement`), so the
+  // `phi`'s own shape and count are unaffected.
+  EXPECT_EQ(NarrowPHICount, 1u);
+}
+
+// The `widenMaskedAllocaLoad` counterpart of the established H107/L118
+// scalar shape (`ReadsBackRealUniformValueThroughAMaskedLoadFeedingAn
+// UnwidenedPhi` below): an unconditional, *not itself* masked, `load`
+// reading back a `MaskedAllocas` base is force-decomposed by
+// `widenMaskedAllocaLoad` just as unconditionally as a real masked-load
+// call is (see that function's own comment for why: a plain `LoadInst`'s
+// divergence, per `UI`'s ordinary operand-based propagation, can only ever
+// reflect its *pointer* operand, never the divergent *value* an earlier
+// store through the same uniform address wrote -- there is no SSA def-use
+// edge from a store to a later load of the same address for that
+// propagation to follow). A `phi` merging this load's result, with `UI`
+// (consistently, by that same blind spot) judging both the load and the
+// `phi` uniform, exercises the same "sever every remaining `ToErase` use"
+// cleanup step as the masked-load-call shape, just through a different
+// force-decomposing producer -- confirming that mechanism is not somehow
+// specific to `widenMaskedLoad` alone.
+TEST(SIMDizeTest, WidensPHIMergingMaskedAllocaLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) #0 {
+    entry:
+      %local = alloca float
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      store float %tidf, ptr %local
+      br i1 %cond, label %a, label %b
+    a:
+      %loaded = load float, ptr %local
+      br label %end
+    b:
+      br label %end
+    end:
+      %v = phi float [ %loaded, %a ], [ 2.000000e+00, %b ]
+      %use = fadd float %v, 1.000000e+00
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The merge `phi` stays a single, un-widened scalar `float` `phi` (`UI`
+  // is right that it is uniform); its `%loaded` incoming edge must read a
+  // real, non-`poison` recovered value rather than a dangling
+  // `poison`-RAUW'd operand.
+  bool FoundNarrowPHI = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *PN = dyn_cast<PHINode>(&I)) {
+      if (PN->getType()->isFloatTy())
+        FoundNarrowPHI = true;
+      for (Value *Incoming : PN->incoming_values())
+        EXPECT_FALSE(isa<PoisonValue>(Incoming));
+    }
+  }
+  EXPECT_TRUE(FoundNarrowPHI);
+}
+
 TEST(SIMDizeTest, DecomposesScalarConditionVectorSelect) {
   // Roadmap step C3: a vector-typed `select` with a scalar `i1` condition
   // decomposes into one `select` per component sharing that condition (see
