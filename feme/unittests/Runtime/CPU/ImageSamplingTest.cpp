@@ -327,6 +327,13 @@ using QueryLod2DFn = void (*)(const FemeImageDescriptor *, uint32_t,
                               const FemeSamplerDescriptor *, uint32_t,
                               uint32_t, uint32_t, float, float, float, float,
                               bool, void *);
+/// Roadmap L194: the `Plain1D`/`Array1D` counterpart of `QueryLod2DFn` --
+/// no `V`-axis derivative pair at all (see `ImageCallKind::QueryLod1D`'s
+/// own doc for why), just the single `DUdX`/`DUdY` pair, mirroring
+/// `Sample1DFn`'s own relationship to `SampleFn`.
+using QueryLod1DFn = void (*)(const FemeImageDescriptor *, uint32_t,
+                              const FemeSamplerDescriptor *, uint32_t,
+                              uint32_t, uint32_t, float, float, bool, void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
@@ -5132,6 +5139,80 @@ TEST_F(ImageSamplingTest, QueryLod2DInactiveLaneReadsZero) {
   float Out[2] = {9.0f, 9.0f};
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.0f, 0.0f, 0.0f,
      /*Mask=*/false, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+}
+
+TEST_F(ImageSamplingTest, QueryLod1DZeroDerivativesReportUnclampedNegativeInfinity) {
+  // Roadmap L194: the `Plain1D`/`Array1D` counterpart of
+  // `QueryLod2DZeroDerivativesReportUnclampedNegativeInfinity` -- a
+  // coordinate with no measurable derivative reports an unclamped raw
+  // lod of `-infinity` here too (`femeRTComputeUnclampedQueryLod1D`'s own
+  // identical convention), with the clamped level still resolving to
+  // `0.0` for the same reason.
+  float Storage[4][4] = {}; // Uninitialized texel contents don't matter.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(Storage, sizeof(Storage), 4,
+                                        ResourceFormat::R32G32B32A32_FLOAT,
+                                        Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod1DFn Fn = resolve<QueryLod1DFn>(
+      addWrapper("querylod_1d", "feme.cpu.image.querylod.1d.v2f32"));
+  float Out[2] = {1.0f, 1.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DUdX=*/0.0f, /*DUdY=*/0.0f, true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_EQ(Out[1], -std::numeric_limits<float>::infinity());
+}
+
+TEST_F(ImageSamplingTest, QueryLod1DReportsRawLodFromDerivatives) {
+  // The `Plain1D`/`Array1D` counterpart of
+  // `QueryLod2DReportsRawLodFromDerivatives`: a real, nonzero
+  // `dU/dx = 0.25` (this image's own `1/Width`) against a single-mip
+  // image is the standard one-screen-pixel-per-texel footprint
+  // (`Pmax == 1.0`), so the clamped level is this non-mipmapped image's
+  // own always-`0.0` special case, while the unclamped lod is
+  // `femeRTFastLog2(1.0)`.
+  float Storage[4][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(Storage, sizeof(Storage), 4,
+                                        ResourceFormat::R32G32B32A32_FLOAT,
+                                        Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod1DFn Fn = resolve<QueryLod1DFn>(
+      addWrapper("querylod_1d", "feme.cpu.image.querylod.1d.v2f32"));
+  float Out[2] = {-9.0f, -9.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DUdX=*/0.25f, /*DUdY=*/0.0f, true,
+     Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_NEAR(Out[1], expectedFastLog2(1.0f), 1e-5f);
+}
+
+TEST_F(ImageSamplingTest, QueryLod1DInactiveLaneReadsZero) {
+  // Mirrors `QueryLod2DInactiveLaneReadsZero`'s own `Mask=false`
+  // convention.
+  float Storage[4][4] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage1D(Storage, sizeof(Storage), 4,
+                                        ResourceFormat::R32G32B32A32_FLOAT,
+                                        Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  QueryLod1DFn Fn = resolve<QueryLod1DFn>(
+      addWrapper("querylod_1d", "feme.cpu.image.querylod.1d.v2f32"));
+  float Out[2] = {9.0f, 9.0f};
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.25f, 0.0f, /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
 }
