@@ -12983,3 +12983,65 @@ No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
 needed: this session's landed fix is an internal CPU-backend
 control-flow-linearization correctness fix, not a feature/extension
 surface change.
+
+## 2026-09-29: L191 fixed -- `complex-nested-loops-and-call`'s residual pixel-value `Fail` resolved
+
+The residual pixel-value `Fail` (expected red, got black) L190 left open
+once it stopped `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call` from
+crashing is root-caused and fixed. See `Roadmap.md`'s new `L191` row and
+`agent_thoughts.md`'s "L191 session" entry for the full investigation.
+
+Summary: hand-traced the real Vulkan runtime's own IR at pre- and
+post-`feme-cpu-simdize` stages against a concrete, hand-derived
+`injectionSwitch=(0.0,1.0)` execution trace. Pre-`feme-cpu-simdize` IR
+computes the correct answer throughout (ruling out `LinearizePass`/L190's
+own fix area entirely); the post-widening IR's final `_GLF_color =
+vec4(data[0], 1.0)` construction -- a `shufflevector` widening `data[0]`'s
+`vec3` read into a `vec4`, then an `insertelement` setting the alpha lane
+-- ends up built entirely from literal `poison`. Root cause:
+`FunctionWidener::widenMaskedLoad`'s vector-typed-result branch
+unconditionally decomposes any `feme.cpu.masked.load.*` call producing a
+vector result into per-component `llvm.masked.gather`s and erases the
+original call, regardless of whether `UniformityInfo` judges that call
+itself divergent; the `shufflevector`/`insertelement` built directly on
+top of it can themselves be classified *uniform*, and, left to fall
+through `widenInstruction`'s general uniformity gate, permanently
+reference the since-erased call -- silently replaced with `poison` by
+`eraseFromParent`. This is the second known instance of this exact bug
+class, the first being **L134(c)** (`widenMaskedAllocaLoad` /
+`ExtractElementInst`, `dEQP-VK.draw.renderpass.multiple_interpolation.*`'s
+own all-transparent-black-pixel failure). Fixed by reusing L134(c)'s
+established narrow-per-consumer-type pattern verbatim: two new special
+cases in `widenInstruction`, immediately before the general uniformity
+gate, for `ShuffleVectorInst` and `InsertElementInst`.
+
+Verification:
+
+- New regression test `SIMDizeTest.
+  DecomposesShuffleVectorAndInsertElementFromUniformlyMaskedVectorLoad`,
+  hand-crafting the exact `feme.cpu.masked.load.v3f32` -> `shufflevector`
+  -> `insertelement` -> (four `extractelement` + opaque scalar-call sink,
+  mirroring the real shader's own per-component stage-output-store shape)
+  chain with an all-uniform IR body; confirmed to fail identically (a
+  poison operand on the original, unrewritten `%wide`) via a
+  stash/rebuild/rerun/restore round-trip with the fix removed.
+- `ninja check-feme`: 3340/3343 passed, 3 unsupported, 0 failed, 0
+  regressions (+1 new test).
+- Full `FeMeTransformsCPUTests`: 558/558 passed (+1 new test).
+- `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call` now `Pass`
+  (previously pixel-value `Fail`).
+- Full per-case `graphicsfuzz.*` re-sweep (all 757 cases, crash-tolerant
+  per-case-isolated driver): 668 Pass / 78 Fail / 8 NotSupported / 3
+  crash-or-timeout, up from L116(d)'s own last full-sweep baseline of
+  663/78/8/8 -- +5 Pass (this row's own +1, plus L188/L189/L190's own
+  intervening fixes not yet reflected in a full-sweep number before now),
+  0 regressions (`Fail` count unchanged at 78). The two known
+  pre-existing process-crashing cases
+  (`cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+  when a value is destroyed!", `cov-function-loops-vector-mul-matrix-
+  never-executed`'s divergent-branch `feme-cpu-simdize` diagnostic)
+  reproduce identically, confirmed unrelated to this fix.
+
+No `VulkanExtensionInventory.md`/`Vulkan14FeatureInventory.md` update
+needed: this session's landed fix is a pure CPU-widening-pass correctness
+fix, not a feature/extension surface change.
