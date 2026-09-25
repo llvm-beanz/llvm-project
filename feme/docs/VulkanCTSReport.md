@@ -13966,3 +13966,78 @@ Verification performed:
 need no change -- this session's changes are internal
 `DiamondFlattener`/`LoopLinearizer` soundness/correctness fixes, touching
 no feature bit, limit, or extension surface.
+
+## 2026-09-25 (continued session): L199 (L198 continuation) -- bug 3 (PDT staleness within linearizeCycle) fixed; a fourth, distinct crash found
+
+Device check re-confirmed: `FeMe CPU Vulkan Device`.
+
+Picked up L198's own open item (bug 3: `DiamondFlattener::validate`'s
+`hasNPredecessors(2)` check crashing on a dangling reconvergence-point
+`BasicBlock*`). Root-caused it directly from the code (no new tracing
+needed, unlike L198's own bugs 1/2): `linearizeCyclePostOrder`
+recalculates `DT`/`PDT` once per cycle, before `linearizeCycle(C)` runs,
+but `linearizeCycle`'s own fold/peel/merge fixed-point logic
+(`foldRedundantFlowBlocksInCycle`/`peelConstantFlowPredecessorsInCycle`/
+`collapseTriviallyRedundantPhisInCycle`/`mergeTrivialRelayBlocksInCycle`)
+genuinely erases blocks, running *after* that recalculation but
+*before* `DiamondFlattener` (which also uses that same `DT`/`PDT`) is
+constructed further down in the same call. Fixed with a second
+`DT.recalculate(F)`/`PDT.recalculate(F)` pair immediately before
+`DiamondFlattener DF(...)` is constructed.
+
+Verified this specific fix by temporarily re-enabling non-leaf cycle
+traversal (a one-line, uncommitted change, reverted before this
+session's own commit):
+- `FeMeTransformsCPUTests`: 567/567 clean across 5 consecutive runs
+  (previously flaky, 2-of-3 crashing before this fix, per L198's own
+  report). The one always-failing test
+  (`LinearizeTest.LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone`)
+  now fails differently -- it asserts the outer non-leaf loop is left
+  untouched, which is no longer true once non-leaf traversal genuinely
+  runs (2 mask-any reductions instead of 1, a real `loop.continue3`
+  condition instead of the old uniform `outer.break` check) -- this is
+  expected, correct progress, not a regression, and the test itself
+  will need updating once non-leaf traversal is actually enabled for
+  real.
+- `ninja check-feme`: 3352/3355 (0 Failed, matching baseline exactly
+  except for the one expected test above).
+- The original hang/crash reproducer
+  (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`) no longer hangs or
+  crashes: completes cleanly with a different, separate diagnostic
+  (`"has more than one divergent exit check"`), an unrelated
+  classification-scope limitation for this specific 3-deep shape.
+- `dEQP-VK.mesh_shader.ext.misc.*` (114 cases): 71/6/37, matching
+  baseline.
+- A full `dEQP-VK.graphicsfuzz.*` sweep (754 cases) with non-leaf
+  traversal enabled hit a **new, fourth, real, reliably reproducible
+  (not flaky) crash**: `dEQP-VK.graphicsfuzz.cov-nested-loop-large-
+  array-index-using-vector-components` aborts with
+  `llvm/lib/Transforms/Utils/LCSSA.cpp:442: Assertion
+  'L.isLCSSAForm(DT)' failed` inside `formLCSSAImpl`. This means
+  `LinearizePass` leaves some value, defined inside a loop and used
+  outside it, without a proper LCSSA `phi` at that loop's exit once
+  nesting is genuinely non-leaf -- not yet root-caused, but reproduces
+  reliably via a single-case run (unlike bug 3's own flakiness).
+
+**Decision**: given this fourth bug, non-leaf traversal remains
+disabled (`linearizeCyclePostOrder`'s leaf-only guard is unchanged from
+before this session). The bug 3 fix itself is real, independently
+verified, and committed on its own.
+
+Verification on the actually-shipped (leaf-only) configuration:
+- `FeMeTransformsCPUTests`: 567/567 (5 consecutive runs).
+- `ninja check-feme`: 3352/3355 (0 Failed, 3 pre-existing
+  `Unsupported`), matching baseline exactly.
+- `dEQP-VK.mesh_shader.ext.misc.*`: 71/6/37, matching baseline.
+- Full `dEQP-VK.graphicsfuzz.*` re-sweep (754 of 757 cases, same 3
+  pre-existing crash/timeout exclusions as always): **674 Pass / 72
+  Fail / 8 NotSupported**, byte-for-byte identical to the established
+  baseline. Confirmed the crash-point case
+  (`cov-nested-loop-large-array-index-using-vector-components`) fails
+  cleanly with a diagnostic in this (leaf-only) configuration, not a
+  crash.
+- `git clang-format --diff`: clean.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+to need no change -- an internal `LoopLinearizer` dominance-tracking
+correctness fix, touching no feature bit, limit, or extension surface.
