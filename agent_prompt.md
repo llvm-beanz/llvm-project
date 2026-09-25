@@ -58,33 +58,28 @@ file.
 
 # Request
 
-1. **(~1-2 hrs)** Mine `stable-colorgrid-modulo-double-always-false-
-   discard`'s own reduced IR for a minimal `LinearizeTest.cpp` regression
-   case covering the two-sibling-loop shape this session found but
-   didn't hand-construct a test for -- the `.amber` source (two
-   sequential `for` loops) is the starting point; reduce via
-   `feme-translate`/`feme-opt` the same way prior sessions have done for
-   other real CTS-found bugs.
-2. **(large, the actual next step for L188 itself)** Now that the
-   prerequisite mechanism is landed and tested, attempt `run()`'s own
-   traversal-order change: make it a genuine post-order traversal (all
-   descendants fully processed before their parent is attempted) instead
-   of permanently skipping any cycle with children. Before writing that
-   change, separately investigate whether a child cycle's own block
-   deletions (`foldRedundantFlowBlocksInCycle`/
-   `mergeTrivialRelayBlocksInCycle`) can invalidate a not-yet-processed
-   *parent* cycle's own `CI.getHeader`/`getExitBlocks`/`contains`
-   results -- a distinct safety question this session did not
-   investigate at all.
-3. **Scan `Roadmap.md` fresh** if not picking up 1-2 above -- the
+1. **(large, the actual next step for L188 itself, unchanged from the
+   last two sessions)** Attempt `run()`'s own traversal-order change:
+   make it a genuine post-order traversal (all descendants fully
+   processed before their parent is attempted) instead of permanently
+   skipping any cycle with children. Before writing that change,
+   separately investigate whether a child cycle's own block deletions
+   (`foldRedundantFlowBlocksInCycle`/`mergeTrivialRelayBlocksInCycle`)
+   can invalidate a not-yet-processed *parent* cycle's own
+   `CI.getHeader`/`getExitBlocks`/`contains` results -- still an
+   entirely open safety question no session has investigated yet.
+2. **Scan `Roadmap.md` fresh** if not picking up 1 above -- the
    long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
    `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
-   unvetted after many sessions of deferral.
-4. **(~5 min)** No `/tmp` scratch remains from this session -- all
-   `/tmp/ctsrun_l196*`/`/tmp/l196_*` scratch (case lists, per-case QPA
-   logs, a baseline comparison run) removed.
+   unvetted after many sessions of deferral. A future session should do
+   a real full-table pass rather than keep punting on this same list.
+3. **(~5 min)** No `/tmp` scratch remains from this session -- all
+   `/tmp/l196b_*`/`/tmp/ctsrun_l196b/`/`/tmp/Linearize_*.cpp` scratch
+   (extracted SPIR-V, intermediate `.ll` dumps, both temporary `feme-opt`
+   binaries, `llvm-reduce` interestingness scripts, one CTS `.qpa` log)
+   removed.
 
-Next step if resuming: item 2 (`run()`'s traversal-order change) is the
-real payoff this session's mechanism was built for -- pick it up next,
-but budget real time for the block-deletion-safety investigation first,
-not just the traversal rewrite itself.
+Next step if resuming: item 1 (`run()`'s traversal-order change) is the
+real payoff the last three sessions' work (L188's root cause, L196's
+mechanism, this session's test coverage) has been building toward --
+pick it up next.
