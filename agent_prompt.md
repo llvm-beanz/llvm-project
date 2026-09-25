@@ -58,20 +58,29 @@ file.
 
 # Request
 
-1. **Bug 3 is the actual remaining blocker for non-leaf traversal.**
-   Needs a dedicated tracing session inside `linearizeCycle`'s own
-   interior mutation steps (the flatten-to-fixed-point loop is the prime
-   suspect) to find exactly which block deletion invalidates which later
-   `immediatePostDom` call. Budget ~2-3 hrs: this bug is flaky, so expect
-   to need repeated runs (5+) to confirm any fix actually holds, not
-   just one clean pass.
-2. **A possible fix shape worth trying first**: recompute `PDT`
-   immediately before each `immediatePostDom` call that could be affected
-   by a just-prior mutation, rather than once per `linearizeCycle` call.
-   This trades some CPU time for correctness -- given cycles are
-   typically small, likely acceptable, but not measured.
+1. **Bug 4 (LCSSA violation) is the next blocker for non-leaf
+   traversal.** Reproduces reliably (not flaky like bug 3 was) via a
+   single case: `deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.cov-nested-
+   loop-large-array-index-using-vector-components'` with non-leaf
+   traversal temporarily re-enabled (see this session's reverted
+   one-line change: replace `if (CI.children(C).empty())
+   Changed |= linearizeCycle(C);` with an unconditional
+   `Changed |= linearizeCycle(C);` in `linearizeCyclePostOrder`).
+   Budget ~2-3 hrs: find which value `linearizeCycle`'s own new-block
+   insertion (masked continue/break guards, relay hops) fails to give a
+   proper exit-block phi once an *enclosing*, not-yet-linearized cycle
+   is involved -- a shape leaf-only cycles never exercised. A minimal
+   repro (llvm-reduce on the JIT'd IR, not the full shader) would help a
+   lot here given the reliable repro.
+2. **Once bug 4 is fixed, actually flip on non-leaf traversal** (remove
+   the `CI.children(C).empty()` guard for real) and update
+   `LinearizeTest.LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone`
+   to match the new, correct behavior (this session saw exactly what
+   that looks like: 2 mask-any reductions instead of 1, a real
+   `loop.continue3` condition instead of `outer.break`) -- don't just
+   delete the test, update its expectations.
 3. **`Roadmap.md` full-table sweep** (`L116(b)`/`L116(f)`, `L126(a)`,
    `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
-   individually unvetted after many sessions of deferral -- a genuine
-   change-of-pace option if bug 3 feels too heavy for a given session.
+   individually unvetted after many sessions of deferral -- still a
+   valid change-of-pace option.
 4. `/tmp` scratch is clean -- nothing left over from this session.
