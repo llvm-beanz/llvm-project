@@ -1188,6 +1188,38 @@ DiamondFlattener::flattenLoopBodyDiamond(BasicBlock *Start) {
   MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
                      ConstantInt::getTrue(F.getContext())};
   flatten(Start, R, AllActive, /*RedirectTo=*/R);
+  // Roadmap L197: `flatten` (see its own comment on the uniform-branch
+  // case) leaves a branch it judges *not* to be an actual divergent
+  // terminator -- `UI.isDivergentTerminator`, plus a masked-load-taint
+  // check neither this method's own caller nor `validate` can see --
+  // entirely untouched, merely walking past it to keep processing its
+  // arms. That notion of "divergent" is `DiamondFlattener`'s own,
+  // authoritative one, but it can genuinely disagree with
+  // `LoopLinearizer::isDivergentBranch`'s own, broader, `KnownUniform
+  // Values`-aware notion that `linearizeCycle`'s "flatten loop body
+  // diamond to a fixed point" caller uses to decide whether to *attempt*
+  // this method at all (see that method's own comment): a branch
+  // `isDivergentBranch` calls divergent (so worth attempting) but
+  // `flatten` itself judges uniform (so leaves untouched) is a genuine,
+  // real shape -- confirmed via targeted tracing on a real 3-deep nested
+  // CTS reproducer (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`) --
+  // not a defensive/theoretical case. Without this check, such a branch
+  // is "successfully" flattened (this method returns non-null, since
+  // `flatten` genuinely walked and mutated *something* downstream -- new
+  // merge `phi`s at `R`, for instance) yet `Start`'s own terminator is
+  // never actually replaced, so `linearizeCycle`'s caller finds the exact
+  // same divergent-looking branch again on its very next fixed-point
+  // sweep, forever: this was the confirmed root cause of a second,
+  // distinct infinite hang in `DiamondFlattener::flatten`'s own `for (;;)`
+  // walk (after an earlier, different use-after-free/staleness hazard in
+  // `isLoopControlEdge` was fixed) once `LoopLinearizer` began attempting
+  // a non-leaf cycle. Detecting the no-real-progress case here, by simply
+  // checking whether `Start`'s own terminator was actually replaced,
+  // lets the caller correctly treat it as "nothing to do" (returning
+  // `std::nullopt`, same as any other reason this shape cannot be
+  // flattened) instead of an infinitely-repeatable "success".
+  if (isa<CondBrInst>(Start->getTerminator()))
+    return std::nullopt;
   return R;
 }
 
@@ -3252,24 +3284,43 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   // which children actually mutated anything.
   //
   // Roadmap L197: attempting `C` itself here (not just its children) is
-  // *not yet enabled* -- confirmed, via a real Vulkan CTS shader
-  // (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, a genuinely 3-deep
-  // nested-loop shape), to hang forever inside
-  // `DiamondFlattener::flatten`'s own `for (;;)` walk when `C` is a
-  // not-yet-leaf (parent) cycle: `flatten` keeps re-entering the same
-  // block sequence without ever reaching its own `Cur == End`/`RedirectTo`
-  // termination, root cause not yet found (a stale `isInCycle`/cycle-
-  // boundary classification against `CI`'s own frozen cycle membership is
-  // suspected -- see this row's own investigation notes -- but not yet
-  // confirmed). The `getExitBlocks`/`DT`/`PDT` fixes above are genuine,
-  // independently useful correctness improvements in their own right (the
-  // second is a real latent hazard even for today's leaf-only-attempt
-  // traversal, across *sibling* leaf cycles sharing one function -- see
-  // the comment above), so they are kept and exercised even though the
-  // actual traversal-order change they were built to enable is not yet
-  // turned on. Only ever call `linearizeCycle` here for a genuine leaf
-  // (`CI.children(C).empty()`) until that hang's root cause is found and
-  // fixed by a future session.
+  // *not yet enabled* -- three distinct bugs have now been found via a
+  // real Vulkan CTS shader (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`,
+  // a genuinely 3-deep nested-loop shape) once a non-leaf `C` was
+  // actually attempted:
+  //  1. `DiamondFlattener::isLoopControlEdge` misclassifying a genuine
+  //     loop-exit edge once `CI`'s own exit-block accounting (live or
+  //     precomputed) went stale against blocks a child's own
+  //     linearization erased or newly inserted -- fixed (see that
+  //     method's own comment): it no longer consults any exit-block list
+  //     at all, just a live `CI.contains` membership check.
+  //  2. `DiamondFlattener::flattenLoopBodyDiamond` "succeeding" (return
+  //     non-null) without actually removing `Start`'s own divergent-
+  //     looking branch, because `flatten`'s own, stricter notion of
+  //     "divergent" (`UI.isDivergentTerminator` plus masked-load taint)
+  //     can disagree with `LoopLinearizer::isDivergentBranch`'s broader,
+  //     `KnownUniformValues`-aware one that decided to attempt it in the
+  //     first place -- fixed (see that method's own comment): it now
+  //     checks whether `Start`'s terminator was actually replaced before
+  //     reporting success.
+  //  3. **Still open**: `DiamondFlattener::validate`'s own
+  //     `R->hasNPredecessors(2)` check (`R` being a divergent branch's
+  //     reconvergence point, from `immediatePostDom`, i.e. from `PDT`)
+  //     hits a real `llvm::Value::materialized_user_begin` assertion
+  //     (`hasUseList()` failed) -- `R` is a dangling `BasicBlock*` whose
+  //     use list has already been torn down. `DT`/`PDT` are recalculated
+  //     once per cycle, before `linearizeCycle(C)` runs (see the comment
+  //     above), but `linearizeCycle`'s own "flatten loop body diamond to
+  //     a fixed point" step (and other interior mutations) can erase
+  //     blocks *after* that recalculation, inside the very call this
+  //     crash was seen in -- meaning even a fresh-at-entry `PDT` can go
+  //     stale *during* a single `linearizeCycle(C)` call once `C` is a
+  //     non-leaf whose own body was already restructured by a child.
+  //     Root cause not yet fully isolated (which specific interior
+  //     mutation invalidates which specific later `immediatePostDom`
+  //     call is still an open question for a future session). Only ever
+  //     call `linearizeCycle` here for a genuine leaf
+  //     (`CI.children(C).empty()`) until this is fixed.
   bool Changed = false;
   for (CycleRef Child : CI.children(C))
     Changed |= linearizeCyclePostOrder(Child);
