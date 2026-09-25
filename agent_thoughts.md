@@ -101949,3 +101949,130 @@ plausible on paper:
    to this same list.
 6. **(~5 min)** No `/tmp` scratch left from this session -- all `l190_*`
    QPA logs, IR dumps, and caselist files already removed.
+
+## L191 session: `complex-nested-loops-and-call`'s residual `Fail` fixed
+
+**Fixed and verified.** `dEQP-VK.graphicsfuzz.complex-nested-loops-and-call`
+now `Pass`es. Full regression check clean.
+
+### What I did
+
+1. Confirmed device: `vulkaninfo --summary | grep deviceName` ->
+   `FeMe CPU Vulkan Device`. Repo/build already at prior session's tip,
+   no rebuild needed.
+2. Reproduced the L190 session's leftover residual `Fail` (expected red,
+   got black) directly via `deqp-vk` (must run with cwd =
+   `/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan`).
+3. Extracted the SPIR-V from the `.qpa` log, read the `.amber` test's
+   GLSL + uniform data (`injectionSwitch=(0.0,1.0)`), hand-derived the
+   correct answer (`data[0] = vec3(1,0,0)`, i.e. red).
+4. Used `FEME_DUMP_IR_PRESIMD`/`FEME_DUMP_IR` (env vars already in
+   `Pipeline.cpp`) against a real `deqp-vk` run to get ground-truth IR at
+   two pipeline stages, and hand-traced both against the concrete
+   `injectionSwitch` values.
+5. Pre-`feme-cpu-simdize` IR: correct. Post-widening IR: the final
+   `_GLF_color` construction (`shufflevector` + `insertelement`) was built
+   entirely from `poison`.
+6. Root-caused: `widenMaskedLoad`'s vector-result branch unconditionally
+   erases the masked-load call regardless of its own divergence
+   classification; a `shufflevector`/`insertelement` chained onto it can
+   be classified *uniform* and falls through the general gate untouched,
+   left referencing the now-erased call -> `poison`. Confirmed via
+   temporary, since-removed debug instrumentation.
+7. Recognized this as the same bug class as an existing fix, **L134(c)**
+   (different producer/consumer pair, same mechanism). Reused its
+   established fix pattern: two new special cases in `widenInstruction`
+   (`ShuffleVectorInst`, `InsertElementInst`), checking
+   `WidenedVectorComponents` before the general uniformity gate.
+8. Verified the fix manually against the real CTS case first (`Pass`),
+   then wrote a unit test. **This took three iterations** to get right --
+   my first two test designs accidentally routed around the bug entirely
+   (a divergent store address, then an opaque vector-typed sink call,
+   both triggered *different*, already-correct fallback paths instead of
+   exercising my fix). The working version mirrors the real shader's
+   exact shape: masked-load -> shufflevector -> insertelement -> four
+   `extractelement`s -> opaque scalar `@sink` calls, all-uniform (no
+   thread ID, no divergent branch).
+9. Confirmed the test actually detects the bug: stashed the fix, rebuilt,
+   reran -- test failed with the predicted poison operand. Restored the
+   fix, reran -- passed.
+10. Ran the full regression suite: `FeMeTransformsCPUTests` 558/558,
+    `ninja check-feme` 3340/3343 (3 pre-existing unsupported, 0 failed).
+11. Ran a full `graphicsfuzz.*` re-sweep (all 757 cases, via a
+    crash-tolerant per-case Python driver, since two cases in this suite
+    are known pre-existing process-crashers): 668 Pass/78 Fail/8
+    NotSupported/3 crash-or-timeout, up from L116(d)'s last full-sweep
+    baseline (663/78/8/8) -- 0 regressions (`Fail` count unchanged), the
+    two known pre-existing crashes reproduce identically.
+12. Updated `Roadmap.md` (new `L191` row) and `VulkanCTSReport.md` (new
+    dated entry). No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- confirmed, not assumed
+    -- this is a pure compiler-correctness fix.
+13. Cleaned up `/tmp/ctsrun_l191/` and the stale `/tmp/ctsrun_l190b/` left
+    from the prior session.
+
+### Lesson learned this session
+
+Writing a regression unit test for a "consumer left unrewritten because
+it's classified uniform" bug is trickier than it looks: **the exact final
+consumer shape matters**. An opaque call taking the whole vector directly
+is never rewritten at all (nothing queries `WidenedVectorComponents` on
+its behalf) regardless of whether the fix is present -- it's simply not
+the right test shape. A divergent-address store routes through an
+entirely different (already-correct) generic fallback that incidentally
+resolves things via `getVectorComponents`, masking whether the specific
+fix under test even ran. The reliable way to build this kind of test:
+mirror the real shader's own exact IR shape as closely as possible
+(here: extractelement-then-opaque-scalar-call, matching a real
+stage-output-store), not a simplified stand-in that seems equivalent but
+exercises a different code path. Also: a broad "sweep every instruction
+of type X for a poison operand" assertion is too blunt when the pass
+itself legitimately builds fresh poison-based splat/insert chains
+elsewhere for unrelated reasons -- name-match (or otherwise scope) the
+check to the specific instructions the bug is actually about.
+
+### Open question, not resolved this session
+
+Whether other consumer-instruction shapes (`PHINode`, `SelectInst`,
+`InsertValueInst`, ...) or other unconditionally-decomposing producers
+(`widenResourceCall`, `widenImageCall`, `widenGroupSharedLoad`, ...) hit
+the same bug class. This fix, like L134(c) before it, is reactive --
+matching only the two shapes this one real CTS case exercised, not a
+systematic audit. A more general fix (single "any operand already
+decomposed" check, applied once for all instruction types, rather than
+one narrow special case per type) was considered but deliberately not
+pursued, to keep the codebase's existing narrow-per-type-with-detailed-
+comment style consistent. Worth revisiting if a third instance of this
+bug class turns up.
+
+### Suggested next steps
+
+1. **(~1-2 hrs)** Systematically audit for the L134(c)/L191 bug class:
+   grep every "unconditionally decomposes + erases" producer in
+   `SIMDize.cpp` (`widenMaskedLoad`, `widenMaskedAllocaLoad`,
+   `widenResourceCall`, `widenImageCall`, `widenGroupSharedLoad`, ...),
+   and for each, check whether every consumer-instruction-type that can
+   read a `WidenedVectorComponents` value is already special-cased before
+   the general uniformity gate (currently only `ExtractElementInst`,
+   `ShuffleVectorInst`, `InsertElementInst` are). Consider whether a
+   single generic check (replacing all three special cases) is worth
+   the style change at that point.
+2. **(~1-2 days, not scoped in detail, still open from the L190 session)**
+   `cov-function-loops-vector-mul-matrix-never-executed`'s divergent-
+   branch `feme-cpu-simdize` diagnostic and
+   `cov-function-multiple-loops-compare-integer-return`'s "Uses remain
+   when a value is destroyed!" crash -- both confirmed pre-existing and
+   unrelated to L190/L191, neither root-caused yet.
+3. **(large, not yet re-scoped in detail, deferred from the L188/L189
+   session)** Design "provably uniform by construction" value tracking
+   for `LoopLinearizer` -- the real prerequisite for nested-cycle support
+   (`L188`'s own still-open root cause).
+4. **(2-4 hrs, one-time setup, deferred many sessions now)**
+   `offload-test-suite`'s `check-hlsl-feme-vk` still has no build
+   directory at `/home/dev/dev/offload-test-suite/build`.
+5. **Scan `Roadmap.md` fresh** if not picking up 1-4 above -- the
+   long-stale candidate list (`L116(b)`/`L116(f)`, `L126(a)`, `L147`,
+   `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still individually
+   unvetted; a future session should do a real full-table pass.
+6. **(~5 min)** No `/tmp` scratch left from this session --
+   `/tmp/ctsrun_l191/` and the stale `/tmp/ctsrun_l190b/` both removed.
