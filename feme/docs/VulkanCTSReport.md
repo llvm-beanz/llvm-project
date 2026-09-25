@@ -13288,3 +13288,80 @@ session, as expected for a session that touched no `feme` source.
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/`VK-GL-CTS`
 update needed: this session added build infrastructure only, no
 compiler/runtime change.
+
+## 2026-10-01: L192(b) fixed -- fp16 sqrt no longer flushes subnormal operands, closing offload-test-suite's sqrt.16.test
+
+`L192`'s own build-setup session filed `sqrt.16.test`'s failure
+untriaged. This session root-caused and fixed it, and additionally
+triaged (but did not fix) `L192(a)`'s `SimpleLines.test`/
+`SimpleTriangle.test` failures along the way.
+
+**Root cause.** `SPIRVToLLVMPatterns.cpp`'s `TranscendentalFlushInputPattern`
+(roadmap H6m) models a real GPU special-function unit's own hardware
+quirk: it flushes a subnormal `Log`/`Log2`/`Sqrt`/`Sinh` operand to a
+same-signed zero, unconditionally, regardless of any
+`VK_KHR_shader_float_controls` execution mode -- and this flush was
+applied uniformly across every floating-point width the pattern
+matches, `f16` included.
+
+Hand-computed the real IEEE-754 `f16` math for `sqrt.16.test`'s own two
+mismatching input values (`python3` + `numpy.float16`, cross-checked bit
+patterns by hand): `sqrt(-denormal 0x8001)` is genuinely `NaN` (`0x7e00`)
+under real, unflushed math -- not the flushed `sqrt(-0.0) = -0.0`
+(`0x8000`) `feme` was producing -- and `sqrt(+denormal 0x03FF)` rounds to
+a nonzero `f16` result (`0x1fff`, confirmed by direct computation), not
+the flushed `sqrt(0.0) = 0.0` `feme` was producing. `sqrt.16.test`'s own
+golden `ExpectedOut` data matches the unflushed, real math exactly.
+
+**This isn't a reason to doubt the flush model generally.** Checked
+`sqrt.32.test`, `log.16.test`, `log2.16.test`, and `sinh.16.test`
+individually: all four's own golden data still agrees with the flushed
+answer at their own tested denormal inputs. `sinh.16.test` in particular
+has denormal test inputs whose real, unflushed `sinh(x) ~= x` answer
+would round back to the same nonzero denormal `x`, yet its golden data
+expects flushed-to-zero `0.0` -- so `Sinh` genuinely still wants the
+flush at `f16`, unlike `Sqrt`. This is a real, `Sqrt`-specific,
+`f16`-specific hardware-behavior divergence, not a systemic modeling
+error in the pattern.
+
+**Fix.** Added a `FlushF16Denormals` template parameter to
+`TranscendentalFlushInputPattern`, defaulting to `true` (preserving
+every other instantiation's existing, still-correct behavior), and
+overridden to `false` only for the `GLSqrtOp` instantiation.
+
+**Testing.**
+
+- Two new `spirv-to-llvm-transcendental-flush-to-zero.mlir` cases:
+  `sqrt_no_flush_f16` (confirms no `is.fpclass`/`select` flush sequence
+  at all now appears for `f16` `Sqrt` -- just a direct
+  `llvm.intr.sqrt`), `sinh_flush_f16` (confirms `Sinh` still flushes at
+  the same width, locking in that only `Sqrt` opts out).
+- `ninja check-feme`: 3344/3347, 3 Unsupported, 0 Failed, 0 regressions.
+- Full `graphicsfuzz.*` CTS re-sweep: unchanged at **673 Pass/73
+  Fail/8 NotSupported/1 Crash/2 Timeout** -- this fix's own
+  denormal-`f16`-`sqrt` shape isn't exercised by that suite, so 0
+  regressions and 0 new passes are both expected.
+- Real-world verification against the actual regression this fix
+  targets: rebuilt `offload-test-suite`'s own `check-hlsl-feme-vk`
+  (the `L192` build directory) -- `sqrt.16.test` now `PASS` (428 -> 429
+  Passed, 8 -> 7 Failed), and the entire `Feature/HLSLLib/*` family (263
+  cases) individually re-run shows 0 failures, confirming no regression
+  across every other flush-dependent case (`log`/`log2`/`sinh`/`radians`/
+  `degrees`/`rsqrt` at both `f32` and `f16`).
+
+**`L192(a)` triaged along the way, not fixed.** `SimpleLines.test`'s own
+failure is not the same `L30` mesh-payload gap
+(`SimpleAmplification.test`'s own `"Symbols not found"` JIT error
+signature): the shader itself runs to completion (`offloader`'s stdout
+shows every pipeline stage completing normally, ending "Cleanup
+complete."), but the subsequent `imgdiff` comparison step fails with
+`"error: Failed reading PNG header from file"` -- an output-image
+write/read problem, not a shader-execution one. Filed as its own
+roadmap row (`L192(a)`, triaged/not-fixed), needing a dedicated session
+to isolate whether the PNG write itself is malformed or the
+golden-image comparison path/rules are misconfigured for this specific
+test.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` confirmed to
+need no change: a pure SPIR-V-to-LLVM lowering correctness fix,
+touching no feature bit or extension surface.
