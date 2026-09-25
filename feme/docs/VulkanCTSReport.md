@@ -13229,3 +13229,62 @@ creates phi stubs before Pass 2 force-decomposes anything, so a phi
 merging a *future* force-decomposed value can't be special-cased with the
 current architecture) applies identically on the aggregate side and
 remains unaddressed, same as `L191(a)`'s own note.
+
+## 2026-10-01: offload-test-suite `check-hlsl-feme-vk` build directory set up (L192) -- first full run, 428/680 Passed
+
+No `VK-GL-CTS` re-run this session -- no `feme` compiler/runtime source was
+touched. Instead, this session finally set up the long-deferred
+`/home/dev/dev/offload-test-suite/build` build directory (flagged in
+`agent_thoughts.md`'s own next-steps across many prior sessions, never
+picked up), and ran `offload-test-suite`'s own driver-level test suite
+(`check-hlsl-feme-vk`) against the real `feme` Vulkan ICD as a
+complementary verification signal alongside `VK-GL-CTS`.
+
+**Setup.** A fresh in-tree LLVM build, `-DLLVM_ENABLE_PROJECTS="feme;mlir"`
+(which pulls in `clang` too, automatically, as a `feme` dependency -- see
+`llvm/CMakeLists.txt`), `-DLLVM_EXTERNAL_PROJECTS=OffloadTest` +
+`-DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=/home/dev/dev/offload-test-suite`,
+`-DDXC_DIR=/usr/local/bin` (a system `dxc` is already installed; `dxv` is
+absent but is D3D12-only, not needed for the Vulkan suite), ccache +
+assertions enabled to match every other build in this repo. `ninja
+check-hlsl-feme-vk` built all 5409 targets from scratch (about 15 minutes
+on this machine) and ran the suite to completion, confirming the
+target's own dependency wiring (`add_dependencies(check-hlsl-${suite}
+feme_vulkan)`) is correct -- the ICD builds before the suite runs, no
+missing-binary failures.
+
+**Results.** 680 discovered: 428 Passed (62.94%), 212 Unsupported
+(31.18%), 31 Expectedly Failed (4.56%), 8 Failed (1.18%), 1 Unexpectedly
+Passed (0.15%).
+
+**Cross-referenced against this project's own history**, rather than
+re-triaging from scratch:
+- `array_of_matrices.test` XPASS: the already-documented flake (carried
+  6+ sessions).
+- `spec_const_32_bits.test`: `H140`.
+- `Array.CalculateLevelOfDetail.test`: `H124t`.
+- `WaveOps/WaveActiveMax.test`: `H169`, triaged-closed as a
+  reference-value convention question in the test itself, not a `feme`
+  bug.
+- `Graphics/MeshShaders/SimpleAmplification.test`: `L30`'s own
+  mesh-shader payload gap.
+- `Feature/Textures/SampleCmp.test`: `L7b`-adjacent.
+
+**Two failures are genuinely new**, filed as `L192(a)`/`L192(b)`, neither
+root-caused this session (out of scope for a build-setup task):
+- `Graphics/MeshShaders/SimpleLines.test`/`SimpleTriangle.test`: not yet
+  confirmed as the same `L30` payload-gap family or a distinct issue.
+- `Feature/HLSLLib/sqrt.16.test`: an `fp16` `sqrt` mismatch on two of
+  twelve values -- one looks like the *test's* own reference may be wrong
+  (expects a NaN pattern for `sqrt(-0.0)`, `feme` returns the
+  IEEE-754-correct `-0.0`), the other looks like acceptable Vulkan
+  denormal-flush-to-zero behavior (expects a subnormal, `feme` returns
+  flush-to-zero `0x0`) -- neither hypothesis confirmed by a real trace.
+
+`ninja check-feme` in the primary `build/` tree re-confirmed unaffected:
+3344/3347 Passed, 3 Unsupported, 0 Failed -- identical to before this
+session, as expected for a session that touched no `feme` source.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/`VK-GL-CTS`
+update needed: this session added build infrastructure only, no
+compiler/runtime change.
