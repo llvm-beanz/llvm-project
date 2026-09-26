@@ -485,6 +485,16 @@ Expected<PipelineResult> runPipeline(Module &M,
     };
     if (Error E = runAndCheck("lowering resources for", ResourceLoweringPass()))
       return std::move(E);
+    // Debug aid: with `FEME_DUMP_IR_PRELINEARIZE` set in the environment,
+    // print the module right before `LinearizePass` runs. Roadmap L200
+    // added this alongside `FEME_OPT_DUMP_INVALID` (see `feme-opt.cpp`)
+    // after finding that a shader's own SPIR-V extracted and re-assembled
+    // by hand can produce IR that, while superficially similar, does not
+    // exactly match what the real pipeline hands to a given pass -- this
+    // dump captures the real, exact input instead, for feeding into a
+    // standalone `feme-opt --llvm -passes=feme-cpu-linearize` repro.
+    if (::getenv("FEME_DUMP_IR_PRELINEARIZE"))
+      M.print(errs(), nullptr);
     if (Error E = runAndCheck("linearizing", LinearizePass()))
       return std::move(E);
     // Debug aid: with `FEME_DUMP_IR_PRESIMD` set in the environment, print

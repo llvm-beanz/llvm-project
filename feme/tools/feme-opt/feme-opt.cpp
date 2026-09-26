@@ -456,6 +456,16 @@ int runLLVMIRMode(int Argc, char **Argv) {
 
   if (verifyModule(*M, &errs())) {
     errs() << Argv[0] << ": output module is invalid\n";
+    // Debug aid: with `FEME_OPT_DUMP_INVALID` set in the environment,
+    // print the (invalid) module anyway, instead of just refusing to
+    // continue -- letting e.g. `opt -disable-verify
+    // -passes='print<domtree>'` inspect exactly which blocks/values
+    // triggered the verifier failure. Roadmap L200 added this while
+    // root-causing a dominance corruption bug that was otherwise only
+    // ever visible as a much-later, more confusing assertion deep inside
+    // a downstream pass.
+    if (::getenv("FEME_OPT_DUMP_INVALID"))
+      M->print(errs(), nullptr);
     return 1;
   }
 
