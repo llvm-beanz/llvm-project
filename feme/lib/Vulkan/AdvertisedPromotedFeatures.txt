@@ -35,7 +35,7 @@ alphaToOne
 pipelineStatisticsQuery
 vertexPipelineStoresAndAtomics
 fragmentStoresAndAtomics
-shaderImageGatherExtended = roadmap L125(g): ImageGatherPattern already forwards the Component operand and every femeCpuImageGather*V4F32 runtime entry point handles it; the fresh full CTS run confirms the feature is advertised, with residual texture-gather correctness tracked by L144
+shaderImageGatherExtended = roadmap L125(g)/L125(m)/L125(n): component selection and singular/plural constant offsets are implemented; the fresh full run's dynamic-offset regressions remain tracked separately
 shaderStorageImageMultisample
 shaderStorageImageExtendedFormats
 shaderStorageImageReadWithoutFormat
@@ -91,6 +91,9 @@ drawIndirectFirstInstance
 #
 # --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features).
 #
+# storageInputOutput16: roadmap L98(a) -- 16-bit floating-point stage I/O is
+# widened to 32-bit at the stage-storage boundary and narrowed on output.
+storageInputOutput16 = roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; integer 16-bit storage remains unimplemented
 # multiview: roadmap H2 -- vkCreateFramebuffer accepts layers > 1,
 # vkCreateRenderPass/vkCreateRenderPass2 accept a nonzero viewMask
 # (RenderPass.cpp), and CommandBuffer.cpp's runDraw runs one draw per set
@@ -101,6 +104,9 @@ multiviewGeometryShader
 # --- Core Vulkan 1.2 (VkPhysicalDeviceVulkan12Features): roadmap C6,
 # --- plus timelineSemaphore from V3.
 #
+# shaderFloat16: roadmap L98(a) -- SPIR-V float16 maps to LLVM half and the
+# CPU pipeline legalizes half arithmetic.
+shaderFloat16 = roadmap L98(a): float16 arithmetic uses LLVM half; this does not imply the separate 16-bit buffer-storage features
 # imagelessFramebuffer: vkCreateFramebuffer/vkCmdBeginRenderPass defer a
 # framebuffer's attachment views to VkRenderPassAttachmentBeginInfo.
 imagelessFramebuffer

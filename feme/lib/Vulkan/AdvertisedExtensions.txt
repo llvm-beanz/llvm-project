@@ -21,7 +21,7 @@ VK_EXT_private_data
 VK_EXT_shader_demote_to_helper_invocation
 VK_KHR_shader_terminate_invocation
 VK_KHR_zero_initialize_workgroup_memory
-VK_EXT_inline_uniform_block
+VK_EXT_inline_uniform_block = roadmap E14/L180: descriptor updates and dispatch-time reads are implemented
 VK_EXT_texel_buffer_alignment
 VK_EXT_4444_formats
 VK_EXT_pipeline_creation_feedback

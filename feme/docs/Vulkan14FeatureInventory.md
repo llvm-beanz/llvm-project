@@ -64,7 +64,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
-| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g): ImageGatherPattern already forwards the Component operand and every femeCpuImageGather*V4F32 runtime entry point handles it; the fresh full CTS run confirms the feature is advertised, with residual texture-gather correctness tracked by L144. Roadmap L125(m): `ImageGatherPattern` now also recognizes and flattens the `ConstOffsets` (plural, 4-independent-offset) image operand this same feature bit gates alongside `Offset`. Roadmap L125(n) (done): the CPU-lowering side (`isSupportedOffset`/`isGatherOffsetsVector` in `SPIRVResourceLowering.cpp`) now correctly recognizes the flattened `ConstOffsets` shape and dispatches it to a dedicated `Gather*Offsets` runtime family (`FeMeRuntimeCPU.c`) that applies each of the 4 offsets independently rather than silently collapsing them to one shared offset -- `dEQP-VK.glsl.texture_gather.graphics.offsets.*`/`.compute.offsets.*` now fully pass (98/98, 36/36); no change to this row's own advertised-feature status, a correctness gap underneath it now closed. |
+| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g)/L125(m)/L125(n): component selection and singular/plural constant offsets are implemented; the fresh full run's dynamic-offset regressions remain tracked separately |
 | feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | yes |  |
@@ -94,7 +94,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `storageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `uniformAndStorageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `storagePushConstant16` | no |  |
-| feature | VK_VERSION_1_1 | `storageInputOutput16` | yes | widen/narrow-at-wrapper-boundary `fpext`/`fptrunc` around `StageStorage`'s 32-bit slots (roadmap L98(a)) |
+| feature | VK_VERSION_1_1 | `storageInputOutput16` | yes | roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; integer 16-bit storage remains unimplemented |
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
@@ -133,7 +133,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `storagePushConstant8` | no |  |
 | feature | VK_VERSION_1_2 | `shaderBufferInt64Atomics` | no |  |
 | feature | VK_VERSION_1_2 | `shaderSharedInt64Atomics` | no |  |
-| feature | VK_VERSION_1_2 | `shaderFloat16` | yes | required jointly with `storageInputOutput16` for shader stage-IO (roadmap L98(a)); the narrow, unrelated pre-existing `FrexpStruct`+`half` compute crash (L183) and the follow-on `arithmetic_{2,3,4}` acosh/asinh/atanh/distance/frexpe/frexps/length/opdot/opcompositeextract.struct16arr3 failures it led to finding (L184) are both now fixed |
+| feature | VK_VERSION_1_2 | `shaderFloat16` | yes | roadmap L98(a): float16 arithmetic uses LLVM half; this does not imply the separate 16-bit buffer-storage features |
 | feature | VK_VERSION_1_2 | `shaderInt8` | no |  |
 | feature | VK_VERSION_1_2 | `descriptorIndexing` | no |  |
 | feature | VK_VERSION_1_2 | `shaderInputAttachmentArrayDynamicIndexing` | no |  |
@@ -261,7 +261,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state` | yes | roadmap C4c: all 12 dynamic states implemented |
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_image_robustness` | no |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | yes | roadmap E14/L180: VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK over Descriptor.{h,cpp}'s per-binding storage, consumed by a real dispatch via CommandBuffer.cpp's buildBoundResources (L180) |
+| extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | yes | roadmap E14/L180: VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK over Descriptor.{h,cpp}'s per-binding storage, including dispatch-time consumption from the materialized descriptor heap |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_cache_control` | yes | roadmap E9: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT/VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT implemented (Pipeline.cpp/GraphicsPipeline.cpp/PipelineCache.{h,cpp}) |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_feedback` | yes | roadmap E19: VkPipelineCreationFeedbackCreateInfo filled for vkCreateGraphicsPipelines/vkCreateComputePipelines (Pipeline.cpp's fillPipelineCreationFeedback) |
 | extension | VK_VERSION_1_3 | `VK_EXT_private_data` | yes | roadmap E10: VkPrivateDataSlot and its four commands (PrivateData.cpp) |
