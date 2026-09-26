@@ -308,7 +308,12 @@ formatMeshOutputTopology(feme::graphics::MeshOutputTopology Topology) {
 /// constrained `llvm.experimental.constrained.*` intrinsic for exactly
 /// this reason, needing `strictfp` on the enclosing entry point just as
 /// much as a whole-entry-point `RoundingModeRTZ` execution mode does (see
-/// EntryPointInfo::RoundingModeRTZWidths).
+/// EntryPointInfo::RoundingModeRTZWidths). `spirv.FConvert`'s own
+/// per-instruction `FPRoundingMode` decoration (roadmap L208) is
+/// deliberately *not* checked here: `FConvertRoundingModePattern` does
+/// not use a constrained intrinsic at all (see its own comment for why:
+/// a reproduced AArch64 backend gap silently discards a fixed non-default
+/// rounding mode on a constrained op), so it never needs `strictfp`.
 bool hasNonDefaultPerInstructionRoundingMode(mlir::spirv::FuncOp Func) {
   bool Found = false;
   Func.walk([&](mlir::Operation *Op) {

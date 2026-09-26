@@ -13938,6 +13938,291 @@ getRoundingModeDecoration(mlir::Operation *Op) {
   llvm_unreachable("unhandled spirv::FPRoundingMode");
 }
 
+/// Returns \p Ty's IEEE 754 binaryN exponent-field width and mantissa-field
+/// width (excluding the implicit leading `1.` bit), for whichever of the
+/// three binary floating-point widths SPIR-V's core `OpTypeFloat` actually
+/// allows (`f16`/`f32`/`f64` -- `binary16`/`binary32`/`binary64` in IEEE
+/// 754's own naming): `mlir::FloatType` has no generic accessor for these
+/// (unlike, say, its own `getWidth()`), so this hardcodes the three
+/// standard layouts by total bit width.
+std::pair<unsigned, unsigned> getIEEEFloatLayout(mlir::Type Ty) {
+  switch (Ty.getIntOrFloatBitWidth()) {
+  case 16:
+    return {5, 10};
+  case 32:
+    return {8, 23};
+  case 64:
+    return {11, 52};
+  }
+  llvm_unreachable("getIEEEFloatLayout only supports f16/f32/f64");
+}
+
+/// (Roadmap L208) Builds a scalar, round-toward-zero narrowing conversion
+/// of \p Src (of float type \p SrcTy) to \p DstTy, entirely out of
+/// ordinary integer bitwise/arithmetic `LLVM` dialect ops (`bitcast`/
+/// `lshr`/`shl`/`and`/`or`/`icmp`/`select`/`trunc`) -- deliberately *not*
+/// `mlir::LLVM::ConstrainedFPTruncIntr` (the more obvious choice, mirroring
+/// `FloatControlArithmeticPattern`'s own binary-op constrained-intrinsic
+/// precedent): a small, isolated pair of standalone `.ll` reproducers
+/// (`llc -mtriple=aarch64-unknown-linux-gnu` on
+/// `llvm.experimental.constrained.fptrunc.f16.f32`/
+/// `llvm.experimental.constrained.fadd.f32`, both with an explicit
+/// `metadata !"round.towardzero"`) confirmed AArch64's own backend
+/// silently emits the plain, default-rounding `fcvt`/`fadd` instruction
+/// for a fixed non-default rounding-mode constrained op, with no
+/// `FPCR`-manipulation of any kind around it -- i.e. the requested
+/// rounding mode is silently discarded at codegen time regardless of the
+/// `strictfp`/constrained-intrinsic machinery, a genuine LLVM/AArch64
+/// backend correctness gap (out of scope to fix here; see
+/// `agent_thoughts.md`'s own L208 entry for the reproducers and the
+/// decision to defer it rather than risk a broad SelectionDAG-legalization
+/// change this session). This function reimplements exactly the one
+/// direction (`RTZ`) `input_output_float_32_to_16`'s own CTS cases need,
+/// as a self-contained bit-manipulation algorithm that entirely sidesteps
+/// that backend gap -- and, as a purely elementwise sequence of ordinary
+/// integer ops (no call at all), it is trivially widenable by
+/// `feme-cpu-simdize`'s existing `BinaryOperator`/`CmpInst`/`CastInst`/
+/// `SelectInst` handling with no further changes needed there, unlike the
+/// constrained-intrinsic approach this replaces (which would have needed
+/// new call-widening support in `SIMDize.cpp` for
+/// `llvm.experimental.constrained.fptrunc` in the first place, on top of
+/// not even producing a correct answer).
+///
+/// Round-toward-zero is pure bit truncation: unlike round-to-nearest (which
+/// must inspect the discarded bits to decide whether to round up) or
+/// round-to-nearest-even's tie-breaking, toward-zero simply drops the
+/// low-order mantissa bits that don't fit in \p DstTy's narrower mantissa
+/// field, which always moves the represented value toward zero (or leaves
+/// it exact) -- the algorithm below is standard IEEE-754 narrowing-
+/// conversion bit manipulation, just without any rounding-adjustment step:
+///  - `NaN`/`Inf` (an all-ones source exponent field) map to \p DstTy's own
+///    `NaN`/`Inf` (sign preserved, `NaN`s canonicalized to \p DstTy's own
+///    quiet `NaN` pattern).
+///  - A source value whose true magnitude exceeds \p DstTy's largest finite
+///    value saturates to that largest finite value (same sign) -- *never*
+///    infinity, which is exactly what distinguishes round-toward-zero's
+///    own overflow behavior from every other rounding direction.
+///  - A source value too small to be \p DstTy's own smallest subnormal
+///    magnitude simply becomes signed zero (a source subnormal is already
+///    far smaller than any of the three IEEE binaryN formats' own smallest
+///    representable subnormal in a narrower format, so `ExpSrc == 0` is
+///    handled as "signed zero" directly, without a separate subnormal-
+///    input branch).
+///  - Otherwise (an ordinary in-range value, possibly landing in \p
+///    DstTy's own subnormal range), the mantissa (with its implicit
+///    leading `1` reinstated) is shifted right by however many bits
+///    \p DstTy's narrower format requires and the low bits are simply
+///    dropped (truncated).
+mlir::Value buildRTZNarrowingConversion(mlir::ConversionPatternRewriter &Rewriter,
+                                        mlir::Location Loc, mlir::Value Src,
+                                        mlir::Type SrcTy, mlir::Type DstTy) {
+  unsigned SrcBits = SrcTy.getIntOrFloatBitWidth();
+  unsigned DstBits = DstTy.getIntOrFloatBitWidth();
+  auto [SrcExpBits, SrcMantBits] = getIEEEFloatLayout(SrcTy);
+  auto [DstExpBits, DstMantBits] = getIEEEFloatLayout(DstTy);
+  mlir::Type IntSrcTy = Rewriter.getIntegerType(SrcBits);
+
+  auto ConstI = [&](uint64_t V) {
+    return mlir::LLVM::ConstantOp::create(Rewriter, Loc, IntSrcTy, V);
+  };
+  auto Lshr = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::LShrOp::create(Rewriter, Loc, LHS, RHS);
+  };
+  auto Shl = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::ShlOp::create(Rewriter, Loc, LHS, RHS);
+  };
+  auto And = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::AndOp::create(Rewriter, Loc, LHS, RHS);
+  };
+  auto Or = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::OrOp::create(Rewriter, Loc, LHS, RHS);
+  };
+  auto Eq = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::ICmpOp::create(Rewriter, Loc,
+                                      mlir::LLVM::ICmpPredicate::eq, LHS, RHS);
+  };
+  auto Sge = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::ICmpOp::create(Rewriter, Loc,
+                                      mlir::LLVM::ICmpPredicate::sge, LHS, RHS);
+  };
+  auto Sle = [&](mlir::Value LHS, mlir::Value RHS) {
+    return mlir::LLVM::ICmpOp::create(Rewriter, Loc,
+                                      mlir::LLVM::ICmpPredicate::sle, LHS, RHS);
+  };
+  auto Select = [&](mlir::Value C, mlir::Value T, mlir::Value F) {
+    return mlir::LLVM::SelectOp::create(Rewriter, Loc, C, T, F);
+  };
+
+  const uint64_t SrcExpMask = (uint64_t{1} << SrcExpBits) - 1;
+  const uint64_t SrcMantMask = (uint64_t{1} << SrcMantBits) - 1;
+  const int64_t SrcBias = (int64_t{1} << (SrcExpBits - 1)) - 1;
+  const int64_t DstBias = (int64_t{1} << (DstExpBits - 1)) - 1;
+  const int64_t DstMaxExp = (int64_t{1} << DstExpBits) - 2; // largest finite
+
+  mlir::Value ISrc = mlir::LLVM::BitcastOp::create(Rewriter, Loc, IntSrcTy, Src);
+  mlir::Value Sign = Lshr(ISrc, ConstI(SrcBits - 1));
+  mlir::Value ExpSrc = And(Lshr(ISrc, ConstI(SrcMantBits)), ConstI(SrcExpMask));
+  mlir::Value MantSrc = And(ISrc, ConstI(SrcMantMask));
+
+  // Signed (in the "biased exponent minus bias" sense) destination
+  // exponent, computed at the source's own bit width for headroom; only
+  // meaningful along the "ordinary in-range value" path below, but cheap
+  // enough to always compute.
+  mlir::Value UnbiasedExp =
+      mlir::LLVM::SubOp::create(Rewriter, Loc, ExpSrc, ConstI(SrcBias));
+  mlir::Value DstBiasedExp =
+      mlir::LLVM::AddOp::create(Rewriter, Loc, UnbiasedExp, ConstI(DstBias));
+
+  // Ordinary in-range path: either \p DstTy's normal range (truncate the
+  // mantissa to width) or its subnormal range (also shift right by the
+  // extra exponent deficit, still truncating, never rounding).
+  mlir::Value NormalShift = ConstI(SrcMantBits - DstMantBits);
+  mlir::Value FullMant = Or(MantSrc, Shl(ConstI(1), ConstI(SrcMantBits)));
+  mlir::Value SubnormalShift = mlir::LLVM::AddOp::create(
+      Rewriter, Loc, NormalShift,
+      mlir::LLVM::SubOp::create(Rewriter, Loc, ConstI(1), DstBiasedExp));
+  mlir::Value ShiftTooLarge = Sge(SubnormalShift, ConstI(SrcMantBits + 1));
+  mlir::Value SubnormalMant =
+      Select(ShiftTooLarge, ConstI(0), Lshr(FullMant, SubnormalShift));
+  mlir::Value NormalMant = Lshr(MantSrc, NormalShift);
+
+  mlir::Value IsSubnormalDst = Sle(DstBiasedExp, ConstI(0));
+  mlir::Value InRangeExpField =
+      Select(IsSubnormalDst, ConstI(0), DstBiasedExp);
+  mlir::Value InRangeMant =
+      Select(IsSubnormalDst, SubnormalMant, NormalMant);
+  mlir::Value InRangeBits =
+      Or(Shl(InRangeExpField, ConstI(DstMantBits)), InRangeMant);
+
+  // Overflow: RTZ saturates to the largest finite value, never infinity.
+  mlir::Value Overflows = Sge(DstBiasedExp, ConstI(DstMaxExp + 1));
+  mlir::Value MaxFiniteBits =
+      Or(Shl(ConstI(DstMaxExp), ConstI(DstMantBits)),
+         ConstI((uint64_t{1} << DstMantBits) - 1));
+
+  // Underflow: a source subnormal (`ExpSrc == 0`) is always far smaller
+  // than any narrower IEEE binaryN format's own smallest subnormal.
+  mlir::Value IsSrcSubnormalOrZero = Eq(ExpSrc, ConstI(0));
+
+  mlir::Value MagnitudeBits =
+      Select(IsSrcSubnormalOrZero, ConstI(0),
+             Select(Overflows, MaxFiniteBits, InRangeBits));
+
+  // `Inf`/`NaN`: preserve as \p DstTy's own `Inf`/its own canonical quiet
+  // `NaN`, sign preserved either way.
+  mlir::Value IsInfOrNan = Eq(ExpSrc, ConstI(SrcExpMask));
+  mlir::Value IsNan =
+      mlir::LLVM::AndOp::create(Rewriter, Loc, IsInfOrNan,
+                                mlir::LLVM::ICmpOp::create(
+                                    Rewriter, Loc,
+                                    mlir::LLVM::ICmpPredicate::ne, MantSrc,
+                                    ConstI(0)));
+  const uint64_t DstExpFieldAllOnes = (uint64_t{1} << DstExpBits) - 1;
+  mlir::Value DstInfBits = Shl(ConstI(DstExpFieldAllOnes), ConstI(DstMantBits));
+  mlir::Value DstNanBits =
+      Or(DstInfBits, ConstI(uint64_t{1} << (DstMantBits - 1)));
+  mlir::Value UnsignedBits =
+      Select(IsInfOrNan, Select(IsNan, DstNanBits, DstInfBits), MagnitudeBits);
+
+  mlir::Value ResultBits =
+      Or(Shl(Sign, ConstI(DstBits - 1)), UnsignedBits);
+  mlir::Type IntDstTy = Rewriter.getIntegerType(DstBits);
+  mlir::Value TruncBits =
+      mlir::LLVM::TruncOp::create(Rewriter, Loc, IntDstTy, ResultBits);
+  return mlir::LLVM::BitcastOp::create(Rewriter, Loc, DstTy, TruncBits);
+}
+
+/// (Roadmap L208) Honors a per-instruction `FPRoundingMode` decoration
+/// (roadmap F15c) on `spirv.FConvert`'s own *narrowing* (higher- to
+/// lower-precision) case -- e.g. `dEQP-VK.spirv_assembly.instruction.
+/// graphics.16bit_storage.input_output_float_32_to_16.*_rtz*`'s own
+/// `OpDecorate %ret0 FPRoundingMode RTZ` on an `f32`-to-`f16` `OpFConvert`,
+/// which needs no `VK_KHR_shader_float_controls2`/`shaderFloatControls2`
+/// at all (unlike `FloatControlArithmeticPattern`'s own arithmetic ops,
+/// this decoration is usable on core `OpFConvert` with nothing more than
+/// ordinary 16-bit-storage support already in place) -- this was never
+/// covered by `FloatControlArithmeticPattern` itself, which only
+/// instantiates over the five binary arithmetic ops (`FAdd`/`FSub`/`FMul`/
+/// `FDiv`/`FRem`), never the unary, mixed-input/output-type `FConvert`.
+/// Absent this pattern, `FConvert` falls through entirely to upstream
+/// MLIR's `IndirectCastPattern<spirv::FConvertOp, LLVM::FPExtOp,
+/// LLVM::FPTruncOp>`, which always rounds a narrowing conversion to
+/// nearest (`llvm.fptrunc`'s only rounding behavior) regardless of any
+/// `FPRoundingMode` decoration -- silently discarding an explicit `RTZ`/
+/// `RTP`/`RTN` request. An explicit `RTE` decoration (already the plain
+/// `fptrunc`'s own natural behavior) and an absent decoration both need no
+/// special handling at all, so this pattern falls through to that same
+/// upstream pattern for both, matching `FloatControlArithmeticPattern`'s
+/// own "only intervene for a genuine, non-default rounding direction"
+/// precedent; a *widening* conversion (`f16`-to-`f32`) is exact regardless
+/// of any rounding-mode decoration (per IEEE 754, widening never loses
+/// precision), so it also always falls through unconditionally. `RTP`/
+/// `RTN` (round toward +/-infinity) also fall through unimplemented for
+/// now (see `buildRTZNarrowingConversion`'s own comment on why the more
+/// obvious constrained-intrinsic approach doesn't work at all on this
+/// session's AArch64 host) -- no current CTS case exercises either
+/// direction for `FConvert` specifically, only `RTZ`.
+class FConvertRoundingModePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::FConvertOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::FConvertOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::FConvertOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<mlir::LLVM::RoundingMode> Rounding =
+        getRoundingModeDecoration(Op);
+    if (!Rounding || *Rounding != mlir::LLVM::RoundingMode::TowardZero)
+      return Rewriter.notifyMatchFailure(
+          Op, "no FPRoundingMode decoration, an RTE decoration matching "
+              "plain fptrunc's own default rounding behavior already, or an "
+              "RTP/RTN decoration not yet implemented for FConvert");
+
+    mlir::Type SrcType = mlir::getElementTypeOrSelf(Op.getOperand().getType());
+    mlir::Type ScalarDstType = mlir::getElementTypeOrSelf(Op.getType());
+    unsigned SrcWidth = SrcType.getIntOrFloatBitWidth();
+    unsigned DstWidth = ScalarDstType.getIntOrFloatBitWidth();
+    if (SrcWidth <= DstWidth)
+      return Rewriter.notifyMatchFailure(
+          Op, "a widening (or same-width) FConvert is exact regardless of "
+              "any rounding-mode decoration");
+
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    auto VecType = mlir::dyn_cast<mlir::VectorType>(DstType);
+    if (!VecType) {
+      mlir::Value Result = buildRTZNarrowingConversion(
+          Rewriter, Loc, Adaptor.getOperand(), SrcType, DstType);
+      Rewriter.replaceOp(Op, Result);
+      return mlir::success();
+    }
+
+    mlir::Type ScalarSrcTy =
+        mlir::cast<mlir::VectorType>(
+            getTypeConverter()->convertType(Op.getOperand().getType()))
+            .getElementType();
+    mlir::Type ScalarDstTy = VecType.getElementType();
+    mlir::Value Src = Adaptor.getOperand();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VecType);
+    for (int64_t I = 0, E = VecType.getNumElements(); I != E; ++I) {
+      mlir::Value IndexValue = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      mlir::Value SrcLane =
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Src, IndexValue);
+      mlir::Value LaneResult = buildRTZNarrowingConversion(
+          Rewriter, Loc, SrcLane, ScalarSrcTy, ScalarDstTy);
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                   LaneResult, IndexValue);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Translates \p Mode, a decorated instruction's own `fp_fast_math_mode`
 /// (roadmap F15c) or an entry point's per-type `FPFastMathDefault` (roadmap
 /// F15d), to the LLVM fast-math flags it requests, mapping each bit
@@ -15151,6 +15436,16 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                                     mlir::LLVM::ConstrainedFRemIntr>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths,
       DenormFlushToZeroWidths, FastMathDefaults);
+  // (Roadmap L208) `FConvertRoundingModePattern` is not templated over
+  // `RoundingModeRTZWidths`/`DenormFlushToZeroWidths`/`FastMathDefaults`
+  // the way `FloatControlArithmeticPattern` above is: `RoundingModeRTZ`/
+  // `DenormFlushToZero` are both whole-entry-point execution modes this
+  // pattern's own real CTS motivation (a bare `FPRoundingMode` decoration
+  // needing only ordinary 16-bit-storage support, not
+  // `VK_KHR_shader_float_controls2`/`shaderFloatControls2` at all) never
+  // needs to consult.
+  Patterns.add<FConvertRoundingModePattern>(Patterns.getContext(),
+                                            TypeConverter, FeMeBenefit);
   // Overrides upstream's own unconditional `DirectConversionPattern`/
   // `InverseSqrtPattern`/`ScalePattern` for these six GLSL.std.450 ops with
   // an unconditional subnormal-input flush (roadmap H6m), modeling a real
