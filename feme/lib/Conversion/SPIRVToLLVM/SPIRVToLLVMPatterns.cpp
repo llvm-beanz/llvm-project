@@ -11948,6 +11948,151 @@ public:
   }
 };
 
+/// Converts a `spirv.Store` of a *whole* matrix value directly into a
+/// pointer whose pointee is a bare `spirv.matrix` -- any storage class,
+/// including `Workgroup` (shared memory), which (unlike `StorageBuffer`/
+/// `Uniform`) has no block/wrapper semantics at all, so
+/// `getMatrixWholeAccess` (RowMajorMatrixStorePattern's own match
+/// condition, `getBufferBlockElement`/`getUniformBlockElement`-gated)
+/// never matches it. Reconciles the stored matrix *value*'s own
+/// conversion -- always the generic, deliberately "natural"/ABI-rounded
+/// `spirv::MatrixType` addConversion's result (see that addConversion's
+/// own comment), since a matrix value produced in isolation (a constant,
+/// a composite-construct result, an arithmetic result, ...) has no
+/// enclosing struct-member context of its own to be converted
+/// differently -- with the *pointee*'s own declared conversion, which,
+/// for a member whose layout is representable, is always the *tightened*
+/// form `getTightMatrixType` builds (see
+/// `getTightOrPhysicalMatrixMemberType`'s own comment, and
+/// `convertOffsetStructTypeIgnoringDecorations`'s own per-member loop,
+/// which substitutes that exact tightened type into any *offset-
+/// decorated* struct's own member list whenever the natural conversion is
+/// representable). Without this reconciliation, storing e.g. a `mat4x3`
+/// constant into such a member's pointer writes the wider, ABI-rounded
+/// natural shape (16 bytes/column) over a field whose own declared, tight
+/// footprint is only 12 bytes/column, silently overflowing into whatever
+/// field follows in memory (roadmap L207).
+///
+/// `reassembleTightVectorValue` is a no-op whenever the stored value
+/// already exactly matches the pointee's own type (e.g. a value freshly
+/// loaded from another such tight-vector-substituted member), so this is
+/// safe to apply unconditionally to every bare-matrix-pointee store this
+/// pattern reaches, not just a provably mismatching one. Explicitly
+/// defers (via `notifyMatchFailure`) to RowMajorMatrixStorePattern
+/// whenever `getMatrixWholeAccess` itself would match (the physically-
+/// substituted, non-representable case that pattern alone knows how to
+/// lay out), so the two patterns' own match conditions never overlap
+/// and their relative registration order does not matter. Registered at
+/// `FeMeBenefit` for the same reason as RowMajorMatrixStorePattern: it
+/// must win over the plain upstream `spirv.Store` conversion, which has
+/// no notion of this tightening at all.
+class TightMatrixStorePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::StoreOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::StoreOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::StoreOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto PointerType =
+        mlir::dyn_cast<mlir::spirv::PointerType>(Op.getPtr().getType());
+    if (!PointerType)
+      return Rewriter.notifyMatchFailure(Op, "not a SPIR-V pointer store");
+    auto MatrixTy =
+        mlir::dyn_cast<mlir::spirv::MatrixType>(PointerType.getPointeeType());
+    if (!MatrixTy)
+      return Rewriter.notifyMatchFailure(Op, "not a whole-matrix store");
+
+    if (auto AccessChain =
+            Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
+      if (getMatrixWholeAccess(AccessChain))
+        return Rewriter.notifyMatchFailure(
+            Op, "physically-substituted store, defer to "
+                "RowMajorMatrixStorePattern");
+    }
+
+    mlir::Type TightTy = getTightMatrixType(MatrixTy, *getTypeConverter());
+    if (!TightTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value TightValue =
+        reassembleTightVectorValue(Adaptor.getValue(), TightTy, Rewriter, Loc);
+    if (!TightValue)
+      return Rewriter.notifyMatchFailure(
+          Op, "stored matrix value's own shape does not match its "
+              "pointee's own tightened type");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, TightValue,
+                                                     Adaptor.getPtr());
+    return mlir::success();
+  }
+};
+
+/// The `spirv.Load` counterpart to TightMatrixStorePattern above (roadmap
+/// L207): a plain `llvm.load` of a bare matrix pointee, if typed with the
+/// generic, "natural"/ABI-rounded `spirv::MatrixType` addConversion's
+/// result (the type a naive `getTypeConverter()->convertType(Op.getType())`
+/// would give, exactly like the upstream, generic `spirv.Load` conversion
+/// this pattern must outrank), reads too many bytes per column whenever
+/// the pointee's own real, tightened footprint (`getTightMatrixType`) is
+/// smaller -- e.g. a `mat4x3`'s natural 16-byte columns overrunning its
+/// real, tightly packed 12-byte columns -- corrupting the loaded value
+/// with whatever bytes happen to follow in memory (the exact inverse of
+/// the store-side overflow TightMatrixStorePattern's own comment
+/// describes). Loads using the pointee's own real tight type instead,
+/// then unwraps the result back to the ordinary natural `MatrixType`
+/// conversion (`unwrapTightVectorValue`) every other matrix consumer
+/// (`MatrixCompositeExtractPattern`, the arithmetic patterns, ...) already
+/// expects, so nothing downstream needs to know this pointee was ever
+/// tight-vector-substituted. Defers to RowMajorMatrixLoadPattern for the
+/// physically-substituted case, exactly as TightMatrixStorePattern defers
+/// to RowMajorMatrixStorePattern.
+class TightMatrixLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::LoadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::LoadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::LoadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto PointerType =
+        mlir::dyn_cast<mlir::spirv::PointerType>(Op.getPtr().getType());
+    if (!PointerType)
+      return Rewriter.notifyMatchFailure(Op, "not a SPIR-V pointer load");
+    auto MatrixTy =
+        mlir::dyn_cast<mlir::spirv::MatrixType>(PointerType.getPointeeType());
+    if (!MatrixTy)
+      return Rewriter.notifyMatchFailure(Op, "not a whole-matrix load");
+
+    if (auto AccessChain =
+            Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
+      if (getMatrixWholeAccess(AccessChain))
+        return Rewriter.notifyMatchFailure(
+            Op, "physically-substituted load, defer to "
+                "RowMajorMatrixLoadPattern");
+    }
+
+    mlir::Type TightTy = getTightMatrixType(MatrixTy, *getTypeConverter());
+    mlir::Type NaturalTy = getTypeConverter()->convertType(MatrixTy);
+    if (!TightTy || !NaturalTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value TightValue =
+        mlir::LLVM::LoadOp::create(Rewriter, Loc, TightTy, Adaptor.getPtr());
+    mlir::Value NaturalValue =
+        unwrapTightVectorValue(TightValue, NaturalTy, Rewriter, Loc);
+    if (!NaturalValue)
+      return Rewriter.notifyMatchFailure(
+          Op, "loaded matrix value's own tight shape does not match its "
+              "natural type");
+    Rewriter.replaceOp(Op, NaturalValue);
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -14960,7 +15105,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       GLMatrixInversePattern, OuterProductPattern,
       RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
-      MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,
+      MatrixColumnStorePattern, TightMatrixStorePattern,
+      TightMatrixLoadPattern,
+      OffsetStructMemberReorderAccessChainPattern,
       CompositeExtractMemberReorderPattern, CompositeInsertMemberReorderPattern,
       FrexpStructPattern, ModfStructPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,
