@@ -58,6 +58,9 @@ file.
 
 # Request
 
+The previous session ended without completing any work. Any intermediate
+products are stashed and may be restored with `git stash pop`.
+
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
