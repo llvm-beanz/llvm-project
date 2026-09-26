@@ -61,27 +61,27 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-## Suggested next steps (ranked, pick top one)
-
-1. **L202(a)** (runtime gather-offset arithmetic in
-   `SPIRVResourceLowering.cpp`): the highest-value remaining item since it's the
-   only of the three original targets with a clear, scoped, and CTS-confirmed
-   remaining blocker. Estimate: half a day to a full day, since it touches the
-   CPU backend's actual sampling math, not just a dialect-conversion pattern.
-2. **L201(a)** (`16bit_storage.input_output_*`, 300 cases, generic
-   `VK_ERROR_INITIALIZATION_FAILED` with no diagnostic text): highest case-count
-   remaining L201 cluster. Needs a `gdb` session or submission-path
-   instrumentation to find the real error before any fix is possible. Estimate:
-   1-2 hours just to get a real error message, unknown after that.
+1. **L201(e)** (50 memory-model cases): cross-reference against the
+   existing milestone-9 barrier-linearization row before opening new work
+   -- likely a known duplicate. Estimate: 10 minutes. Cheapest win
+   available, still untouched from 2 sessions ago.
+2. **L201(a)** (`16bit_storage.input_output_*`, 300 cases): generic
+   `VK_ERROR_INITIALIZATION_FAILED` with no diagnostic text even with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` -- needs a `gdb` session or
+   submission-path instrumentation to get a real error before any fix is
+   possible. Estimate: 1-2 hours just to get a real error message, unknown
+   after that. Highest case count of any remaining open L201 row.
 3. **L201(d)** (mesh-shader/tessellation f16 I/O correctness, 120 cases
-   combined): "Result does not match reference" with no pixel-diff detail --
-   needs `--deqp-log-images=enable` or a hand-built repro with known-good values
-   to even start. Estimate: 1 hour to get first real diagnostic.
-4. Cross-reference L201(e) (50 memory-model cases) against the existing
-   milestone-9 barrier-linearization row before opening any new work -- it may
-   already be a known, tracked duplicate. Estimate: 10 minutes.
-5. Run `check-hlsl-feme-vk` from the `feme` branch of
-   `/home/dev/dev/offload-test-suite` at least once, to validate this session's
-   MatrixInverse/OuterProduct fixes against real `dxc`-compiled HLSL shapes, not
-   just glslang-compiled CTS SPIR-V. Estimate: 15-30 minutes if the branch is
-   already fetched and builds cleanly.
+   combined): "Result does not match reference" with no pixel-diff detail
+   -- needs `--deqp-log-images=enable` or a hand-built repro with
+   known-good values to even start. Estimate: 1 hour to get first real
+   diagnostic.
+4. **L201(b)/(c)** (27 + 25 cases): both reduced to distinct symptoms
+   (`feme-cpu-wrap-patch-constant` unknown-signature-element for (b);
+   unreduced composite-op cluster for (c)) but neither started. Lower
+   priority than (a)/(d) purely on case count.
+5. A full/broad CTS re-run has not been done since the 2026-09-26
+   baseline -- only targeted case-list reruns. Once L201's remaining rows
+   are closed, a fresh full run would re-baseline the verified-failure
+   count and might surface newly-fixed incidental cases the same way this
+   session's L202 rerun did.
