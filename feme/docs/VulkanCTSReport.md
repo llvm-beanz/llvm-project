@@ -186,3 +186,32 @@ zero ordinary-failure count alone would not establish conformance. The
 roadmap's C/H/K/L rows retain implementation ownership; the full-run
 re-triage there records current counts and separates the newly exposed
 16-bit/f16, texture-gather, multisample-copy, and attachment-clear clusters.
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Targeted re-runs of the specific affected case lists (not a new full run;
+see roadmap L201/L202/L203 for the detailed narrative):
+
+- **`spirv.GL.MatrixInverse`** (roadmap L201): 9/9 previously-failing
+  `matrixinverse`-named cases now Pass (`spirv_assembly.instruction.compute`,
+  5 graphics stages, and `glsl.builtin.precision_fp16_storage32b.inverse.*`).
+- **`spirv.OuterProduct`** (roadmap L201): 117/117 previously-failing
+  `outerproduct`-named cases now Pass, plus incidentally the 3
+  `glsl.builtin.precision_fp16_storage32b.outerproduct.compute.*` cases.
+- **`spirv.Image{,Dref}Gather` dynamic `Offset`** (roadmap L202): the
+  MLIR-level legalization gap is fixed, but a re-run of the full 540-case
+  `texture_gather.*.offset`/`.offset_dynamic` list is still 0/540 Pass -- a
+  deeper CPU-backend limitation (`isSupportedOffset` requiring a compile-time
+  constant) remains; see L202(a).
+- **`depth_stencil_msaa_copy`** (roadmap L203): investigated, not fixed --
+  root-caused to a verified bug in VK-GL-CTS itself (an accidental
+  `VkImageLayout` value OR'd into a `VkImageUsageFlags` mask), confirmed via
+  an isolated Vulkan reproducer independent of the CTS harness. FeMe's own
+  behavior is correct and already unit-tested; classified as won't-fix in
+  FeMe. All 72 cases remain Fail against the CTS's own (buggy) test code.
+
+Net this session: 226 of the original 48,307 verified failures confirmed
+fixed (MatrixInverse + OuterProduct), 0 additional fixed yet for L202/L203
+(both still open, one backend-blocked and one an external test bug), 0
+regressions in any of the re-run case lists or in `check-feme` (3352/3355
+passing throughout, matching the pre-session baseline exactly).
