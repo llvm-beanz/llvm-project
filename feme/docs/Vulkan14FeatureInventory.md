@@ -64,7 +64,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_0 | `vertexPipelineStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `fragmentStoresAndAtomics` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderTessellationAndGeometryPointSize` | no |  |
-| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g)/L125(m)/L125(n): component selection and singular/plural constant offsets are implemented; the fresh full run's dynamic-offset regressions remain tracked separately |
+| feature | VK_VERSION_1_0 | `shaderImageGatherExtended` | yes | roadmap L125(g)/L125(m)/L125(n)/L202/L202(a)/L202(b): component selection, singular/plural constant offsets, and dynamic (runtime, non-constant) offsets (including `ImageDrefGather`+`ConstOffsets`) are all implemented; the full 616-case `texture_gather` CTS list now passes 616/616 |
 | feature | VK_VERSION_1_0 | `shaderStorageImageExtendedFormats` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageMultisample` | yes |  |
 | feature | VK_VERSION_1_0 | `shaderStorageImageReadWithoutFormat` | yes |  |

@@ -215,3 +215,37 @@ fixed (MatrixInverse + OuterProduct), 0 additional fixed yet for L202/L203
 (both still open, one backend-blocked and one an external test bug), 0
 regressions in any of the re-run case lists or in `check-feme` (3352/3355
 passing throughout, matching the pre-session baseline exactly).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Continuing from the prior session's L202 addendum above (`isSupportedOffset`
+requiring a compile-time constant offset, blocking the full 540-case
+`texture_gather.*.offset`/`.offset_dynamic` list at the CPU-backend layer):
+
+- **CPU-backend runtime gather offsets** (roadmap L202(a)): relaxed
+  `isSupportedOffset`'s `isa<Constant>` requirement (a new
+  `AllowNonConstant` parameter, `true` only for the two gather call sites)
+  -- the actual gather codegen and runtime entry points never required a
+  compile-time-constant offset in the first place, so no new
+  coordinate-computation code was needed. A single-case repro
+  (`texture_gather.compute.offset.implementation_offset.2d.depth32f.
+  base_level.level_1`) flipped Fail -> Pass; a re-run of the full 616-case
+  `texture_gather` case list (the broader superset originally used to scope
+  L202, encompassing the 540-case `offset`/`offset_dynamic` subgroup) showed
+  540/616 now Pass, up from 0/616 before this fix.
+- **`ImageDrefGather`+`ConstOffsets`** (roadmap L202(b), a gap flagged but
+  not filed by L125(k)'s own closing text): the 616-case rerun's own 76
+  residual failures were all this exact shape -- `ImageDrefGatherPattern`
+  never gained the `ConstOffsets` (plural) widening `ImageGatherPattern` got
+  under L125(m)/L125(n). Fixed by sharing `ImageGatherPattern`'s existing
+  flattening logic via a new `flattenConstOffsetsArray` helper and mirroring
+  `isGatherIntrinsic`'s CPU-backend `ConstOffsets` handling into
+  `isGatherCmpIntrinsic`, including new `GatherCmp2DOffsets`/
+  `GatherCmpArray2DOffsets` runtime entry points. A re-run of the same
+  616-case list now shows **616/616 Pass** -- roadmap L202 (and both of its
+  one-level-deep sub-rows, L202(a)/L202(b)) is fully closed.
+
+Net this session: 616 of the original 48,307 verified failures confirmed
+fixed (the full `texture_gather` cluster L202/L202(a)/L202(b) tracked), 0
+regressions in `check-feme` (3353/3356 passing, +1 new unit test versus the
+prior session's 3352/3355 baseline).
