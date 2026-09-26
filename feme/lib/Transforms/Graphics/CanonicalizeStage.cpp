@@ -1321,14 +1321,20 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
 /// `extractelement` instead of `insertvalue`/`insertelement`). (Roadmap
 /// H2e) When \p Shadow is non-null, each terminal scalar store also writes
 /// through to that leaf's own shadow alloca, so a later read-back of the
-/// same element (see `loadStageIOValue`) resolves to it.
+/// same element (see `loadStageIOValue`) resolves to it. (Roadmap L206)
+/// \p SignedInt16ElementIDs -- if \p ElementID is a member of it -- means
+/// \p Ty's own terminal 16-bit-integer leaf scalar was originally a
+/// genuinely signed `OpTypeInt 16 1`, so its own widen below must be
+/// `sext`, not this function's own otherwise-unconditional `zext`.
 void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
                        uint32_t ElementID, Value *Row, Value *Component,
-                       Value *Zero, ShadowValueMap *Shadow) {
+                       Value *Zero, ShadowValueMap *Shadow,
+                       const DenseSet<uint32_t> &SignedInt16ElementIDs) {
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 1) {
       storeStageIOValue(B, B.CreateExtractValue(Val, 0), ST->getElementType(0),
-                        ElementID, Row, Component, Zero, Shadow);
+                        ElementID, Row, Component, Zero, Shadow,
+                        SignedInt16ElementIDs);
       return;
     }
   } else if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
@@ -1341,7 +1347,7 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
               : B.getInt32(R);
       storeStageIOValue(B, B.CreateExtractValue(Val, R),
                         ArrTy->getElementType(), ElementID, CombinedRow,
-                        Component, Zero, Shadow);
+                        Component, Zero, Shadow, SignedInt16ElementIDs);
     }
     return;
   } else if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
@@ -1353,31 +1359,31 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
           Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
       storeStageIOValue(B, B.CreateExtractElement(Val, C),
                         VecTy->getElementType(), ElementID, Row,
-                        CombinedComponent, Zero, Shadow);
+                        CombinedComponent, Zero, Shadow,
+                        SignedInt16ElementIDs);
     }
     return;
   }
-  // (Roadmap H6m, L201(a)) The store-side mirror of `loadStageIOValue`'s
-  // own `i1`/16-bit-integer widening: `getComponentType` canonicalized
-  // this leaf's element to a 32-bit scalar, so the `feme.stage.output.
-  // store` this emits must widen \p Val to match, not store the bare,
-  // narrower value `StageStorage` has no addressable representation for.
-  // `zext` (a bit-preserving pad, not a numeric conversion) round-trips
-  // correctly regardless of the source's true signedness, since the load
-  // side's own `trunc` back down discards exactly those same padding
-  // bits -- and this element's own true SPIR-V signedness (`OpTypeInt 16
-  // 0` vs. `OpTypeInt 16 1`) is erased by the time this LLVM IR only has
-  // a plain, signedness-less `i16` to work with anyway (see
-  // `vktSpvAsm16bitStorageTests.cpp`'s own
-  // `addGraphics16BitStorageInputOutputInt16To16Group`, whose own comment
-  // says exactly this: a "sint"-named case's data must still round-trip
-  // *bit-exact*, "as long as we passed the bits in faithfully", even
-  // though it's `OpTypeInt 16 1`-declared). The shadow alloca (read-back
-  // within this same invocation) keeps \p Val's own narrower type,
-  // matching `loadStageIOValue`'s `Shadow` load above, which is narrowed
-  // back down from `i32` only on the non-shadow (real stage-IO) path.
+  // (Roadmap H6m, L201(a), L206) The store-side mirror of
+  // `loadStageIOValue`'s own `i1`/16-bit-integer widening:
+  // `getComponentType` canonicalized this leaf's element to a 32-bit
+  // scalar, so the `feme.stage.output.store` this emits must widen \p Val
+  // to match, not store the bare, narrower value `StageStorage` has no
+  // addressable representation for. A `bool` (`i1`) always widens with
+  // `zext` (a bit-preserving pad, not a numeric conversion) regardless of
+  // its own "signedness" -- a 1-bit value's own 0/1 numeric convention
+  // does not have one. A 16-bit integer, however, only round-trips
+  // bit-exact through `readFragmentColorInt`'s own later, destination-
+  // format-driven reinterpretation (see roadmap L206's own row) when its
+  // widen matches its *true* SPIR-V-declared signedness -- `sext` for a
+  // genuine `OpTypeInt 16 1` (per `SignedInt16ElementIDs`), `zext`
+  // otherwise (`OpTypeInt 16 0`, i.e. every other, unsigned-or-signless,
+  // 16-bit-integer element this function ever widens).
+  bool IsSignedInt16 =
+      Ty->isIntegerTy(16) && SignedInt16ElementIDs.contains(ElementID);
   Value *StoredVal = (Ty->isIntegerTy(1) || Ty->isIntegerTy(16))
-                         ? B.CreateZExt(Val, B.getInt32Ty())
+                         ? (IsSignedInt16 ? B.CreateSExt(Val, B.getInt32Ty())
+                                          : B.CreateZExt(Val, B.getInt32Ty()))
                          : Val;
   createStageOutputStore(B, ElementID, Row, Component, StoredVal, Zero);
   if (Shadow)
@@ -1432,19 +1438,24 @@ Value *loadStageIOBlockValue(IRBuilderBase &B, Type *Ty,
   return New;
 }
 
-/// The store-side mirror of `loadStageIOBlockValue`.
+/// The store-side mirror of `loadStageIOBlockValue`. (Roadmap L206) \p
+/// SignedInt16ElementIDs is forwarded to `storeStageIOValue` unchanged --
+/// see its own comment.
 void storeStageIOBlockValue(IRBuilderBase &B, Value *Val, Type *Ty,
                             ArrayRef<uint32_t> MemberIDs, Value *Row,
                             Value *Component, Value *Zero,
-                            ShadowValueMap *Shadow) {
+                            ShadowValueMap *Shadow,
+                            const DenseSet<uint32_t> &SignedInt16ElementIDs) {
   if (MemberIDs.size() == 1) {
-    storeStageIOValue(B, Val, Ty, MemberIDs[0], Row, Component, Zero, Shadow);
+    storeStageIOValue(B, Val, Ty, MemberIDs[0], Row, Component, Zero, Shadow,
+                      SignedInt16ElementIDs);
     return;
   }
   auto *ST = cast<StructType>(Ty);
   for (unsigned I = 0, E = MemberIDs.size(); I != E; ++I)
     storeStageIOValue(B, B.CreateExtractValue(Val, I), ST->getElementType(I),
-                      MemberIDs[I], Row, Component, Zero, Shadow);
+                      MemberIDs[I], Row, Component, Zero, Shadow,
+                      SignedInt16ElementIDs);
 }
 
 /// (Roadmap L115(b)) Recognizes a `feme.spirv.interpolate_at_{centroid,
@@ -4182,6 +4193,14 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   }
 
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
+  // (Roadmap L206) The subset of `ElementIDs`' own values whose global is
+  // a genuinely signed 16-bit integer (`feme.spirv.Int16Signed` metadata,
+  // attached by `feme::spirv::attachStageIOInt16Signedness`) -- consulted
+  // only by the store-rewriting loop below, to widen such an element with
+  // `sext` rather than every other narrow-scalar element's own `zext`;
+  // see `storeStageIOValue`'s own comment for why only this one case
+  // needs it.
+  DenseSet<uint32_t> SignedInt16ElementIDs;
   // Hoisted out of the `if` below (rather than left a block-local, as
   // every other `Sig` in this file is) so the element-building loop
   // further down can append to it directly.
@@ -4246,6 +4265,14 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Elt.FromInputPatch = Info.FromInputPatch;
       Elt.CapturedSelfIndex =
           GV->getMetadata("feme.captured.self.index") != nullptr;
+
+      // (Roadmap L206) See `SignedInt16ElementIDs`' own declaration
+      // comment: `GV`'s presence of this metadata means it was originally
+      // an `OpTypeInt 16 1`-typed (signed) leaf scalar/vector/array
+      // element, not just a plain `i16` whose true signedness LLVM's own
+      // type system cannot otherwise distinguish.
+      if (GV->getMetadata("feme.spirv.Int16Signed"))
+        SignedInt16ElementIDs.insert(NextID);
 
       Sig.Elements.push_back(Elt);
       ElementIDs[GV].push_back(NextID);
@@ -5342,7 +5369,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // ordinary constant `Zero` every other stage-IO store still uses.
         Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
         storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
-                               Component, Vertex, &ShadowValues);
+                               Component, Vertex, &ShadowValues,
+                               SignedInt16ElementIDs);
         SI->eraseFromParent();
         EraseIfNowDead(Ptr);
         Changed = true;

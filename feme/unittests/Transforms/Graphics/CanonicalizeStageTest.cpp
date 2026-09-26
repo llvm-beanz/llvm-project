@@ -4512,6 +4512,69 @@ TEST(CanonicalizeStageTest,
   ASSERT_THAT_EXPECTED(OutStorage, Succeeded());
 }
 
+/// (Roadmap L206) The one case the test just above deliberately does
+/// *not* cover: an `out_var` carrying `!feme.spirv.Int16Signed` metadata
+/// (the marker `feme::spirv::attachStageIOInt16Signedness` attaches on a
+/// genuinely `OpTypeInt 16 1`-declared global, once real SPIR-V input
+/// reaches this pass through `SPIRVToLLVMPatterns.cpp` -- this test
+/// attaches it by hand, the same way the plain `!spirv.Decorations`
+/// metadata above is hand-written rather than produced by a real
+/// conversion run, to keep this a focused, single-phase unit test) widens
+/// with `sext`, not `zext` -- the CPU-side fix for
+/// `dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.
+/// input_output_int_16_to_16.scalar_sint*`/`vector_sint*`, whose stored
+/// value must reach `Executor.cpp`'s `readFragmentColorInt` sign-extended
+/// to match that helper's own signed reinterpretation of the destination
+/// attachment's format. A sibling `in_var` with no such metadata (this
+/// test's own `SignatureElement` index 0) keeps widening with `zext`,
+/// confirming the choice is genuinely per-element, not a pass-wide
+/// default flip (the exact defect an earlier, reverted attempt at this
+/// fix had: switching every `i16` store to `sext` unconditionally traded
+/// the `sint` cases' failures for the `uint` cases' instead, since both
+/// shapes share the same `SignatureComponentType::SInt` reflected tag and
+/// so cannot be told apart at that level).
+TEST(CanonicalizeStageTest,
+     CanonicalizesSignedInt16StageIOScalarWithSExt) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_var = external addrspace(7) constant i16, !spirv.Decorations !0
+    @out_var = external addrspace(8) global i16, !spirv.Decorations !1, !feme.spirv.Int16Signed !4
+    define void @main() #0 {
+      %v = load i16, ptr addrspace(7) @in_var
+      store i16 %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 30, i32 0}
+    !3 = !{i32 30, i32 1}
+    !4 = !{}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    Value *StoredVal = CI->getArgOperand(3);
+    EXPECT_TRUE(StoredVal->getType()->isIntegerTy(32));
+    auto *SExt = dyn_cast<SExtInst>(StoredVal);
+    ASSERT_TRUE(SExt);
+    EXPECT_TRUE(SExt->getOperand(0)->getType()->isIntegerTy(16));
+  }
+  EXPECT_EQ(SeenStores, 1u);
+}
+
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
 /// import shape (roadmap H6h) -- canonicalizes into
 /// `feme.stage.task.payload.store` by its resolved constant byte offset,
