@@ -101,3 +101,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageGatherExten
     spirv.ReturnValue %5 : vector<4xf32>
   }
 }
+
+// -----
+
+// Roadmap L202: `spirv.ImageGather` with the plain (non-constant) `Offset`
+// image operand -- glslang's own `textureGatherOffset` lowering when the
+// offset argument isn't a compile-time constant, confirmed via a real
+// repro reduced from
+// `dEQP-VK.glsl.texture_gather.compute.offset.implementation_offset.*`
+// (SPIR-V's own compile-time-constant requirement on `ConstOffset` is a
+// producer-side/validator constraint, not something MLIR's own import
+// needs to structurally distinguish: `%offset` here is an ordinary SSA
+// value, threaded through the exact same intrinsic operand
+// `gather_const_offset` above threads its own literal `%offset` through).
+
+// CHECK-LABEL: llvm.func @gather_dynamic_offset
+// CHECK: %[[IMG:.*]] = llvm.extractvalue %{{.*}}[0]
+// CHECK: %[[SAMP:.*]] = llvm.extractvalue %{{.*}}[1]
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.gather"(%[[IMG]], %[[SAMP]], %{{.*}}, %{{.*}}, %[[OFFSET:.*]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @gather_dynamic_offset(%coord : vector<2xf32>, %component : i32, %offset : vector<2xsi32>) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %3 = spirv.Load "UniformConstant" %2 : !spirv.sampler
+    %4 = spirv.SampledImage %1, %3 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %5 = spirv.ImageGather %4, %coord, %component ["Offset"], %offset : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, i32, vector<2xsi32> -> vector<4xf32>
+    spirv.ReturnValue %5 : vector<4xf32>
+  }
+}

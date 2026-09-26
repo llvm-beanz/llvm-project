@@ -9425,6 +9425,14 @@ public:
 /// import direction at all. Consuming this wider offset shape in feme's
 /// own CPU codegen (`ImageCalls.cpp`/`SPIRVResourceLowering.cpp`) is
 /// Roadmap L125(n), blocked on this row landing first.
+///
+/// (Roadmap L202) The non-constant `Offset` image operand -- structurally
+/// identical to `ConstOffset`, just an ordinary SSA value rather than a
+/// SPIR-V compile-time constant -- is also accepted and handled the exact
+/// same way: `getOperandArguments()[0]` is already just the (converted)
+/// operand value regardless of whether the original SPIR-V operand was an
+/// `OpConstant`, so no new code path is needed, only widening
+/// `SupportedMask`/`HasConstOffset`'s own recognition to this sibling bit.
 class ImageGatherPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageGatherOp> {
 public:
@@ -9442,12 +9450,14 @@ public:
 
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::ConstOffset |
-        mlir::spirv::ImageOperands::ConstOffsets;
+        mlir::spirv::ImageOperands::ConstOffsets |
+        mlir::spirv::ImageOperands::Offset;
     if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
-        Actual, mlir::spirv::ImageOperands::ConstOffset);
+        Actual, mlir::spirv::ImageOperands::ConstOffset |
+                    mlir::spirv::ImageOperands::Offset);
     bool HasConstOffsets = mlir::spirv::bitEnumContainsAny(
         Actual, mlir::spirv::ImageOperands::ConstOffsets);
     // Nothing produces both on the same instruction (they are two
@@ -9552,6 +9562,10 @@ public:
 /// ordinary, non-dref `Coordinate` uses, not `ImageSampleDrefImplicitLod`'s
 /// own "may be a vector larger than needed" caveat), so no
 /// `DrefCoordWidth`-style padding logic is needed here at all.
+///
+/// (Roadmap L202) Also accepts the non-constant `Offset` image operand
+/// alongside `ConstOffset`, mirroring `ImageGatherPattern`'s own identical
+/// extension: structurally the same single-operand shape either way.
 class ImageDrefGatherPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageDrefGatherOp> {
 public:
@@ -9568,12 +9582,14 @@ public:
       Actual = mlir::spirv::bitEnumClear(*ImageOperandsAttr, DiscardedImageOperandBits);
 
     mlir::spirv::ImageOperands SupportedMask =
-        mlir::spirv::ImageOperands::ConstOffset;
+        mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::Offset;
     if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
-        Actual, mlir::spirv::ImageOperands::ConstOffset);
+        Actual, mlir::spirv::ImageOperands::ConstOffset |
+                    mlir::spirv::ImageOperands::Offset);
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
