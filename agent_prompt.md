@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: ed0156d8-7270-4d71-9053-e6cff6d7f6b5
 ---
 # Initial Guidelines
 
@@ -60,13 +61,27 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. Start with L201: reduce one representative from each f16/16-bit subgroup
-   and decide whether to complete or temporarily withdraw any feature promise
-   that is broader than the implementation.
-2. Triage L202's dynamic-offset texture gathers separately from the already
-   completed constant `Offset`/`ConstOffsets` implementation.
-3. Reduce one core L203 depth/stencil multisample copy before examining its
-   dedicated-allocation and `copy_commands2` twins; they likely share one
-   command-normalization or sample-addressing defect.
-4. Keep the 48,307-case verified-failure list as the next comparison baseline,
-   and rerun affected groups after each fix before another full-suite run.
+## Suggested next steps (ranked, pick top one)
+
+1. **L202(a)** (runtime gather-offset arithmetic in
+   `SPIRVResourceLowering.cpp`): the highest-value remaining item since it's the
+   only of the three original targets with a clear, scoped, and CTS-confirmed
+   remaining blocker. Estimate: half a day to a full day, since it touches the
+   CPU backend's actual sampling math, not just a dialect-conversion pattern.
+2. **L201(a)** (`16bit_storage.input_output_*`, 300 cases, generic
+   `VK_ERROR_INITIALIZATION_FAILED` with no diagnostic text): highest case-count
+   remaining L201 cluster. Needs a `gdb` session or submission-path
+   instrumentation to find the real error before any fix is possible. Estimate:
+   1-2 hours just to get a real error message, unknown after that.
+3. **L201(d)** (mesh-shader/tessellation f16 I/O correctness, 120 cases
+   combined): "Result does not match reference" with no pixel-diff detail --
+   needs `--deqp-log-images=enable` or a hand-built repro with known-good values
+   to even start. Estimate: 1 hour to get first real diagnostic.
+4. Cross-reference L201(e) (50 memory-model cases) against the existing
+   milestone-9 barrier-linearization row before opening any new work -- it may
+   already be a known, tracked duplicate. Estimate: 10 minutes.
+5. Run `check-hlsl-feme-vk` from the `feme` branch of
+   `/home/dev/dev/offload-test-suite` at least once, to validate this session's
+   MatrixInverse/OuterProduct fixes against real `dxc`-compiled HLSL shapes, not
+   just glslang-compiled CTS SPIR-V. Estimate: 15-30 minutes if the branch is
+   already fetched and builds cleanly.
