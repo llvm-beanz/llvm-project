@@ -61,30 +61,23 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(5 min)** Check whether `input_output_float_32_to_16`'s `_rtz` cases
-   are still failing at all, now that the full 48,307-case list shows
-   only 2 failures -- if they're gone, cross this off permanently instead
-   of carrying it forward again.
-2. **(15-30 min)** Triage the `check-hlsl-feme-vk` findings above: run
-   each of the 3 failing tests individually with full output, and check
-   whether `array_of_matrices.test`'s `XFAIL` for `Clang`/`DXC` was ever
-   meant to include FeMe, or if this is a genuine new pass worth
-   registering as expected (removing the false-XFAIL) or worth double-
-   checking as a coincidental symptom of something else.
-3. Given the 48,307-case list is now down to 2 (both permanent, by
-   design), **the next full/broad CTS re-run has no urgent trigger
-   anymore** -- the remaining work is entirely in the groups this
-   baseline never covered in the first place (L201(b)/(c)/(d), and
-   whatever `check-hlsl-feme-vk` turns up). Consider whether a *fresh*
-   full-suite sweep (not just the old verified-failure list) is now
-   worth doing from scratch, since the old list's own scope was fixed
-   as of 2026-09-26 and may not reflect cases that have started
-   NotSupported->Fail or similar drift.
-4. L201(d) (mesh/tessellation f16 I/O, 120 cases) is still the largest
-   untouched group with a real, distinct symptom already known
-   ("Result does not match reference," fail location
-   `vktMeshShaderInOutTestsEXT.cpp:1590` from 2 sessions ago) -- highest
-   remaining case count of any carried-over item.
-5. `stash@{0}`/`stash@{1}`: inspect (`git stash show -p stash@{N}`) and
-   either finish or `git stash drop` explicitly, rather than carrying
-   forward a 5th/6th time.
+1. **(unknown, start here)** Pick either `L209` (`log(0)` -> `nan`) or
+   `L210` (byte-address 16-bit offset-8 store/load returns 0) and root-
+   cause it -- both are small, already-isolated, standalone-reproducible
+   `offload-test-suite` tests, no further triage needed before diving in.
+2. **(30-60 min)** Investigate the `check-hlsl-feme-vk` parallel-worker
+   flakiness (3 tests fail under default parallelism, a different 12
+   fail under `-j1`, all pass individually) -- likely a shared-resource
+   contention bug in FeMe's own CPU Vulkan implementation under
+   concurrent command-buffer submission, which could itself be a hidden
+   correctness bug worth its own roadmap row once localized.
+3. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
+   largest still-untouched group, already has a real fail location from
+   two sessions ago (`vktMeshShaderInOutTestsEXT.cpp:1590`) but no
+   pixel-level diff yet.
+4. **(10 min)** Confirm/deny the F15c AArch64-constrained-intrinsic risk
+   flagged in the L208 roadmap row -- a quick `.ll` reproducer using one
+   of `FloatControlArithmeticPattern`'s 5 ops with an explicit non-
+   default rounding mode would confirm or rule this out fast.
+5. L201(b)/(c) (27+25 cases): lowest case count of the remaining L201
+   sub-items, still just "reduced to distinct symptoms," not started.
