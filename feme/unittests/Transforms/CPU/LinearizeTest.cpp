@@ -1562,32 +1562,32 @@ TEST(LinearizeTest, TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit) {
   EXPECT_TRUE(FoundMaskAny);
 }
 
-// Roadmap L197/L188: genuinely nested cycles -- an outer loop whose body
-// contains its own, separate inner loop, each with its own divergent
+// Roadmap L197/L198/L200: genuinely nested cycles -- an outer loop whose
+// body contains its own, separate inner loop, each with its own divergent
 // exit check. `LoopLinearizer::run()` traverses post-order
 // (`linearizeCyclePostOrder`, recursing into every child before
-// considering its parent) and, as a real prerequisite step toward one
-// day attempting a non-leaf cycle too, now precomputes every cycle's own
-// exit-block list up front (`precomputeExitBlocks`/`getExitBlocks`,
-// sidestepping a genuine use-after-free `CI.getExitBlocks` would
-// otherwise hit against an ancestor cycle whose descendant already
-// erased some of its own blocks -- see `ExitBlocksByCycle`'s own comment
-// for the full hazard writeup, and historical commit b9cba5d890f3 for
-// the closely related, previously-hit `UniformityInfo`-recomputation
-// crash this shares its root cause with) and refreshes `DT`/`PDT` after
-// every cycle (a second, independent staleness hazard this same
-// investigation found, affecting even today's leaf-only traversal across
-// *sibling* leaf cycles). Attempting `linearizeCycle` on the *outer*,
-// non-leaf cycle itself is deliberately still not enabled, though: doing
-// so was confirmed, via a real Vulkan CTS shader
-// (`dEQP-VK.graphicsfuzz.cosh-return-inf-unused`, a genuinely 3-deep
-// nested-loop shape), to hang forever inside `DiamondFlattener::flatten`
-// for reasons not yet root-caused (see `linearizeCyclePostOrder`'s own
-// comment) -- so this test instead documents today's actual, honest
-// boundary: the *inner* leaf cycle is still correctly linearized on its
-// own, while the *outer* cycle (having a child, so never attempted) is
-// left completely alone, exactly as it always was before this
-// milestone's own work, with neither a crash nor a hang.
+// considering its parent), precomputing every cycle's own exit-block
+// list up front (`precomputeExitBlocks`/`getExitBlocks`, sidestepping a
+// genuine use-after-free `CI.getExitBlocks` would otherwise hit against
+// an ancestor cycle whose descendant already erased some of its own
+// blocks -- see `ExitBlocksByCycle`'s own comment for the full hazard
+// writeup, and historical commit b9cba5d890f3 for the closely related,
+// previously-hit `UniformityInfo`-recomputation crash this shares its
+// root cause with) and refreshing `DT`/`PDT` after every cycle (a second,
+// independent staleness hazard this same investigation found, affecting
+// even today's leaf-only traversal across *sibling* leaf cycles).
+// Attempting `linearizeCycle` on the *outer*, non-leaf cycle itself is
+// deliberately still not enabled, though: four of five distinct bugs
+// found via real Vulkan CTS shaders once a non-leaf cycle was actually
+// attempted are fixed, but the fifth -- a genuine stack-overflowing
+// runaway recursion inside `DiamondFlattener::validate`, found on
+// `dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop` -- is not
+// yet root-caused (see `linearizeCyclePostOrder`'s own comment for the
+// full writeup of all five). So this test instead documents today's
+// actual, honest boundary: the *inner* leaf cycle is still correctly
+// linearized on its own, while the *outer* cycle (having a child, so
+// never attempted) is left completely alone, exactly as it always was
+// before this milestone's own work, with neither a crash nor a hang.
 TEST(LinearizeTest, LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

@@ -2220,6 +2220,36 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
   if (!CondPN)
     return false;
 
+  // Roadmap L200: bail out entirely if `BB` contains any non-`phi`
+  // instruction whose result escapes `BB` (used by an instruction in some
+  // other block). Peeling below redirects one of `BB`'s predecessors to
+  // bypass it outright; every one of `BB`'s own `phi`s gets its downstream
+  // uses repaired via `SSAUpdater` (see the `Incoming`/`Updater` loop
+  // further down), but an *ordinary* instruction defined in `BB` -- not a
+  // `phi` -- has no equivalent path-sensitive value this fold could
+  // substitute for the newly-bypassed predecessor. Once any predecessor is
+  // peeled, `BB` no longer necessarily dominates every place its own
+  // instructions are used, and the verifier requires that regardless of
+  // which particular (still fully valid, at runtime) path a given use
+  // actually observes. Reduced from a real, reliably-reproducing
+  // `dEQP-VK.graphicsfuzz.cov-nested-loop-large-array-index-using-vector-
+  // components` crash: a `%.inv = xor i1 <phi>, true`-shaped value in `BB`,
+  // itself consumed further downstream through more merges, was left used
+  // without dominating its use once this fold's own peel of an unrelated
+  // predecessor added a second, bypassing edge into one of `BB`'s
+  // descendants -- an `Instruction does not dominate all uses!` verifier
+  // failure that (with verification disabled, as `feme-cpu-linearize`'s
+  // own JIT-embedded pipeline runs) only actually asserted much further
+  // downstream, inside `formLCSSAImpl`, once the enclosing loop tried to
+  // complete LCSSA form over the now-invalid def/use.
+  for (Instruction &I : *BB) {
+    if (isa<PHINode>(I) || I.isTerminator())
+      continue;
+    for (User *U : I.users())
+      if (cast<Instruction>(U)->getParent() != BB)
+        return false;
+  }
+
   // Collect every incoming index whose value is a literal constant --
   // candidates to peel. If none are, there is nothing to do here; if
   // *every* one is, `foldRedundantFlowBlock` above already fully replaces
@@ -3312,9 +3342,10 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   // unconditionally, once per cycle, rather than trying to track exactly
   // which children actually mutated anything.
   //
-  // Roadmap L197/L198: attempting `C` itself here (not just its children)
-  // is *not yet enabled* -- four distinct bugs have now been found via
-  // real Vulkan CTS shaders once a non-leaf `C` was actually attempted:
+  // Roadmap L197/L198/L200: attempting `C` itself here (not just its
+  // children) has needed five distinct bugs fixed so far, each found via
+  // a real Vulkan CTS shader once a non-leaf `C` was actually attempted
+  // (four fixed, one -- bug 5 below -- still open):
   //  1. `DiamondFlattener::isLoopControlEdge` misclassifying a genuine
   //     loop-exit edge once `CI`'s own exit-block accounting (live or
   //     precomputed) went stale against blocks a child's own
@@ -3330,14 +3361,14 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   //     first place -- fixed (see that method's own comment): it now
   //     checks whether `Start`'s terminator was actually replaced before
   //     reporting success.
-  //  3. **Fixed**: `DiamondFlattener::validate`'s own
-  //     `R->hasNPredecessors(2)` check (`R` being a divergent branch's
-  //     reconvergence point, from `immediatePostDom`, i.e. from `PDT`)
-  //     could hit a real `llvm::Value::materialized_user_begin` assertion
-  //     (`hasUseList()` failed) on a dangling `BasicBlock*` whose use list
-  //     had already been torn down. Root cause: `linearizeCycle`'s own
-  //     fold/peel/merge fixed-point logic (`foldRedundantFlowBlocksInCycle`
-  //     /`peelConstantFlowPredecessorsInCycle`/
+  //  3. `DiamondFlattener::validate`'s own `R->hasNPredecessors(2)` check
+  //     (`R` being a divergent branch's reconvergence point, from
+  //     `immediatePostDom`, i.e. from `PDT`) could hit a real
+  //     `llvm::Value::materialized_user_begin` assertion (`hasUseList()`
+  //     failed) on a dangling `BasicBlock*` whose use list had already
+  //     been torn down. Root cause: `linearizeCycle`'s own fold/peel/merge
+  //     fixed-point logic (`foldRedundantFlowBlocksInCycle`/
+  //     `peelConstantFlowPredecessorsInCycle`/
   //     `collapseTriviallyRedundantPhisInCycle`/
   //     `mergeTrivialRelayBlocksInCycle`) genuinely `eraseFromParent()`s
   //     blocks -- but it runs *after* the one `DT`/`PDT` recalculation at
@@ -3352,28 +3383,58 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   //     -- `flatten()` itself never erases a whole `BasicBlock` (only
   //     instructions within one), so nothing after that point needs a
   //     third recompute.
-  //  4. **Still open, newly found**: once bugs 1-3 above were fixed and
-  //     non-leaf traversal was enabled for real CTS testing, a full
+  //  4. **Fixed**: once bugs 1-3 above were fixed, a full
   //     `dEQP-VK.graphicsfuzz.*` sweep hit a different, real crash on
   //     `dEQP-VK.graphicsfuzz.cov-nested-loop-large-array-index-using-
   //     vector-components`: `llvm/lib/Transforms/Utils/LCSSA.cpp`'s own
-  //     `formLCSSAImpl` asserts `L.isLCSSAForm(DT)` -- i.e. some value
-  //     `LinearizeCPUPass` leaves behind, defined inside a loop and used
-  //     outside it, is not represented as a proper LCSSA `phi` at that
-  //     loop's exit block by the time a later pass in the compilation
-  //     pipeline calls `formLCSSA` on it. Not yet root-caused: could be
-  //     `linearizeCycle`'s own new-block insertions (masked continue/
-  //     break guards, relay hops) failing to thread an escaping value's
-  //     new `phi` all the way out through an *enclosing* (not-yet-
-  //     linearized) cycle's own exit block once nesting is genuinely
-  //     two-plus levels deep -- a shape a leaf-only cycle, by definition,
-  //     never needed to handle. Reproduces reliably (not flaky, unlike
-  //     bug 3) via a single-case run:
-  //     `deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.cov-nested-loop-large-
-  //     array-index-using-vector-components'`. Given this, non-leaf
-  //     traversal remains disabled. Only ever call `linearizeCycle` here
-  //     for a genuine leaf (`CI.children(C).empty()`) until bug 4 is
-  //     fixed.
+  //     `formLCSSAImpl` asserted `L.isLCSSAForm(DT)` -- some value this
+  //     pass left behind, defined inside a loop and used outside it, was
+  //     not a proper LCSSA `phi` at that loop's exit by the time a later
+  //     pass called `formLCSSA` on it. Root cause, isolated via a
+  //     standalone `feme-opt --llvm -passes=feme-cpu-linearize` repro of
+  //     the same shader's own pre-linearize IR (bypassing `formLCSSA`'s
+  //     own much-later assertion in favor of the plain, immediate
+  //     `verifyModule` dominance check `feme-opt` already runs): inside
+  //     `peelConstantFlowPredecessors`, redirecting one of `BB`'s
+  //     constant-valued predecessors to bypass `BB` outright repairs every
+  //     downstream use of `BB`'s own `phi`s (via `SSAUpdater`, see that
+  //     loop's own comment) but left any *ordinary*, non-`phi` instruction
+  //     defined in `BB` with a use outside it (e.g. a `%.inv = xor i1
+  //     <phi>, true` consuming one of `BB`'s own condition `phi`s, itself
+  //     further consumed downstream through more merges) completely
+  //     unrepaired -- once the peel added a second, bypassing predecessor
+  //     edge into one of `BB`'s descendants, `BB` no longer necessarily
+  //     dominated that instruction's own use, corrupting the IR. Fixed by
+  //     having `peelConstantFlowPredecessors` bail out entirely (leaving
+  //     `BB` untouched) whenever it finds such an escaping non-`phi`
+  //     value, rather than only ever guarding `phi`s (see that function's
+  //     own comment for the full writeup).
+  //  5. **Still open, newly found**: with bug 4 fixed and non-leaf
+  //     traversal temporarily re-enabled for a full sweep,
+  //     `dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop`
+  //     genuinely crashed (a real `SIGSEGV`, confirmed via `gdb`, not an
+  //     assertion): stack-overflowing tens of thousands of frames deep
+  //     inside `DiamondFlattener::validate`'s own recursive-descent
+  //     (`validate(T, R, Quiet) || validate(Fsucc, R, Quiet)`) calls,
+  //     immediately after printing this exact function's own "divergent
+  //     branch in 'loop.exit.guard' has no reconvergence point"
+  //     diagnostic -- meaning some genuinely-nested shape here drives
+  //     `validate` into runaway recursion rather than the bounded
+  //     diamond-nesting depth it is supposed to have, on a walk that
+  //     (per the printed diagnostic) was already headed for a clean,
+  //     non-crashing failure once it actually reached the top of that
+  //     recursion. Not yet root-caused: worth checking first whether
+  //     `isInCycle`/`isLoopControlEdge` (the same two functions bug 1
+  //     above already found one staleness bug in) are failing to
+  //     recognize `loop.exit.guard`'s own branch as a loop control edge
+  //     for *this* shape, causing `validate` to walk around the same
+  //     loop body over and over instead of stopping at
+  //     `CycleBoundaryBlocks` the way it is meant to. Given this, non-leaf
+  //     traversal remains disabled below (leaf-only, via
+  //     `CI.children(C).empty()`) until bug 5 is fixed -- bugs 1-4 are
+  //     real, safe, already-shipped fixes on their own, but this new
+  //     crash means the "attempt every non-leaf cycle unconditionally"
+  //     change itself is not yet safe to ship for real.
   bool Changed = false;
   for (CycleRef Child : CI.children(C))
     Changed |= linearizeCyclePostOrder(Child);
