@@ -103641,3 +103641,114 @@ not stuck repeating the same issue.
    individually unvetted after many sessions of deferral -- still a
    valid change-of-pace option.
 4. `/tmp` scratch is clean -- nothing left over from this session.
+
+# L200 session (L199 continuation): fixed bug 4 (LCSSA-violating dominance corruption); actually flipped on non-leaf traversal, then found a 5th, distinct crash and reverted it back off
+
+Device check done first: `FeMe CPU Vulkan Device` confirmed.
+
+## What's fixed and shippable right now
+
+**Bug 4 root-caused via a standalone `feme-opt` repro** (not the real
+pipeline's own much-later, more confusing assertion): a hand-extracted
+SPIR-V repro didn't match the real pre-linearize IR shape, so I added a
+temporary-turned-permanent env dump (`FEME_DUMP_IR_PRELINEARIZE` in
+`Pipeline.cpp`) to capture the exact real IR, then fed it into `feme-opt
+--llvm -passes=feme-cpu-linearize`. That reproduced a plain
+`verifyModule` dominance failure instead of the real crash's LCSSA
+assertion -- much easier to inspect. (`feme-opt` normally refuses to
+print an invalid module at all, so I added `FEME_OPT_DUMP_INVALID` too,
+also kept permanently.)
+
+Root cause: `peelConstantFlowPredecessors` bypasses `BB` for one of its
+constant-valued predecessors and repairs `BB`'s own escaping *phi*
+uses via `SSAUpdater` -- but not ordinary, non-phi instructions defined
+in `BB` with uses outside it. Once bypassed, `BB` no longer dominates
+such a use. Fixed by bailing out of the whole peel if any such escaping
+non-phi value exists.
+
+## What I attempted next: actually enabling non-leaf traversal for real
+
+With bug 4 fixed, I removed the `CI.children(C).empty()` guard for
+real (not a temp change this time) and updated the stale unit test to
+match (2 mask-any reductions instead of 1, `loop.continue3` instead of
+`outer.break`). Extensive verification passed: 567/567 unit tests x5,
+`check-feme` 3352/3355 clean, the original bug-4 CTS case now Passes.
+
+## What's NOT fixed: a 5th bug, found only by the full CTS sweep
+
+A full `graphicsfuzz.*` sweep with non-leaf traversal genuinely enabled
+hit a **new, real crash**:
+`increment-value-in-nested-for-loop` segfaults -- confirmed via `gdb`
+as a genuine stack overflow, ~47,000+ frames of self-recursion inside
+`DiamondFlattener::validate`'s own two-armed recursive calls. This is a
+structurally different kind of bug than bugs 1-4 (all dominance-
+corruption bugs); this one is a runaway-recursion bug, immediately after
+`validate` prints its own "no reconvergence point" diagnostic from a
+much deeper frame -- suggesting it should have stopped there but didn't.
+
+**Decision**: per the standing "don't ship a known-crashing change"
+rule, I reverted non-leaf traversal back out (guard restored, test
+reverted to leaf-only expectations) before committing, keeping only the
+bug-4 fix (real and safe on its own regardless of non-leaf traversal).
+
+**This is still real forward progress**: 4 of 5 bugs blocking non-leaf
+traversal are now fixed. Bug 5 is a genuinely different failure mode
+(stack overflow, not dominance corruption) -- the mechanism built across
+L196-L199 (post-order traversal, exit-block precomputation, DT/PDT
+refresh, the bug 1-4 fixes) is all real and shipped; only the very last
+step (`validate`'s own recursion bound) remains broken.
+
+## Verification (all clean on the shipped, leaf-only + bug-4-fix-only state)
+
+- `FeMeTransformsCPUTests`: 567/567 x5.
+- `ninja check-feme`: 3352/3355, 0 Failed, 3 pre-existing Unsupported.
+- `dEQP-VK.mesh_shader.ext.misc.*`: 71/6/37, matches baseline.
+- Full filtered `dEQP-VK.graphicsfuzz.*` (755 of 757 cases -- excluding
+  only 2 pre-existing hangs this session reconfirmed; a 3rd,
+  previously-documented exclusion no longer seems to hang, unresolved
+  discrepancy): 676/71/8, consistent with baseline (the +1/-1 shift is
+  fully explained by the one fewer exclusion).
+- `git clang-format --diff`: clean.
+
+4 commits this session: (1) the bug-4 fix + comment updates + reverted
+unit test, (2) the two debug-dump additions, (3) docs (Roadmap/CTS
+report), (4) this file.
+
+## What I'd tell a future session
+
+1. **Bug 5 (stack overflow in `DiamondFlattener::validate`) is the
+   actual remaining blocker for non-leaf traversal.** Reproduces
+   reliably via `deqp-vk --deqp-case='dEQP-VK.graphicsfuzz.increment-
+   value-in-nested-for-loop'` with non-leaf traversal temporarily
+   re-enabled (same one-line change as bug 4's own repro: remove the
+   `CI.children(C).empty()` guard in `linearizeCyclePostOrder`). Budget
+   ~2-3 hrs. Start with the `isInCycle`/`isLoopControlEdge` staleness
+   hypothesis (untested) -- check whether `loop.exit.guard`'s own branch
+   is being correctly recognized as a loop control edge for this
+   specific nested shape, or whether `validate` is walking around the
+   same loop body repeatedly instead of stopping at a
+   `CycleBoundaryBlocks` entry. `gdb -batch -ex run -ex bt` on the
+   isolated case is the fastest way to see the actual recursion shape;
+   a standalone `feme-opt` repro (using `FEME_DUMP_IR_PRELINEARIZE`,
+   same technique as bug 4) would likely help narrow it down further,
+   though a stack-overflow bug may need the debugger more than
+   dominator-tree inspection this time.
+2. **Once bug 5 is fixed, re-flip non-leaf traversal on for real** --
+   this session already proved the mechanism, test update, and
+   verification steps all work cleanly; just repeat them once bug 5's
+   fix is in hand.
+3. **Re-catalogue the exact current set of known-hanging
+   `graphicsfuzz.*` cases.** This session found 2 hangs
+   (`cov-multiple-functions-global-never-change`,
+   `cov-nested-structs-function-set-inner-struct-field-return`), one
+   fewer than the previously-documented 3, with different names than
+   past sessions recorded. Worth a dedicated pass to confirm which
+   cases are genuinely environmental (CTS/Amber-related, not a FeMe
+   bug) versus real, fixable FeMe bugs -- an open discrepancy no session
+   has resolved yet.
+4. **`Roadmap.md` full-table sweep** (`L116(b)`/`L116(f)`, `L126(a)`,
+   `L147`, `L98(b)`, assorted `R`/`V`/`W`-prefixed rows) is still
+   individually unvetted after many sessions of deferral -- still a
+   valid change-of-pace option if bug 5 feels too heavy for a given
+   session.
+5. `/tmp` scratch is clean -- nothing left over from this session.
