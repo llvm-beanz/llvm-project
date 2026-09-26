@@ -388,3 +388,60 @@ in `check-feme` (3361/3364 passing, +1 net new unit test versus the prior
 session's 3359/3362 baseline: 2 new tests added for the fix itself, 1
 scratch/throwaway diagnostic test used during root-cause investigation
 removed before committing).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Picked up roadmap **L207** (`memory_model.shared.16bit.*`'s remaining 19
+cases, `Counter value incorrect` at runtime), the row L205's own fix split
+out last session.
+
+- **`memory_model.shared.16bit.*`** (roadmap L207): fixed. Root cause: a
+  whole-matrix `spirv.Store`/`spirv.Load` through a bare `spirv::MatrixType`
+  pointer (e.g. a `mat4x3` field read/written as one value, not per-column)
+  converted the stored/loaded value through the generic, "natural"/
+  ABI-rounded matrix conversion, which never tightens a non-power-of-2-lane
+  column vector (a `vec3` column rounds up to 16 bytes instead of the tight
+  12) -- disagreeing with the pointee struct member's own already-tightened
+  type and overflowing into the next field. This never went through the
+  existing `RowMajorMatrixStorePattern`/`RowMajorMatrixLoadPattern`
+  reconciliation, since `getMatrixWholeAccess` (which those patterns key
+  off) only ever matches `Uniform`/`StorageBuffer` block/wrapper shapes,
+  never `Workgroup` (shared-memory) storage. Fixed by two new dedicated
+  patterns, `TightMatrixStorePattern`/`TightMatrixLoadPattern`
+  (`SPIRVToLLVMPatterns.cpp`), reconciling a whole-matrix `spirv.Store`/
+  `spirv.Load` with the pointee's own tight type whenever
+  `getMatrixWholeAccess` does not already match, leaving the matrix value's
+  own general conversion (extract/insert/arithmetic/constant/composite-
+  construct) untouched. A re-run of the full `memory_model.shared.16bit.*`
+  group (70 cases) shows **70/70 now Pass, up from 51/70**.
+
+Net this session: 19 of the original 48,307 verified failures confirmed
+fixed (L207's own cases), 0 regressions in `check-feme` (3363/3366 passing,
++2 net new tests versus the prior session's 3361/3364 baseline: 1 new lit
+test and 1 new unit test for the fix itself).
+
+### Full re-run of the 2026-09-26 48,307-case verified-failure list
+
+Overdue since 2026-09-26 (three fix rounds -- L202, L206, L205 -- had
+landed since the last full run, on top of this session's own L207). Reran
+the entire 48,307-case verified-failure list from
+`/home/dev/dev/VK-GL-CTS/run/feme-20260926-full/verified-failures.txt`
+through `feme/utils/run_vulkan_cts.py` (6 workers, default batch/recovery
+sizes), against the FeMe build as of this session's final commit.
+
+**Result: 48,305 of the original 48,307 cases now Pass or NotSupported.
+Only 2 genuine failures remain**, both expected/by-design, not new bugs:
+
+| Case | Result | Why |
+|---|---|---|
+| `dEQP-VK.api.driver_properties.conformance_version` | Fail (unchanged) | `VkPhysicalDeviceDriverProperties.conformanceVersion` is intentionally reported as a truthful `{0,0,0,0}` (roadmap C5) -- this driver has no official conformance submission, so this self-check test is *expected* to fail for any honest, non-certified implementation. |
+| `dEQP-VK.info.device_mandatory_features` | Fail (unchanged) | `cooperativeMatrix` (`VK_KHR_cooperative_matrix`) is a mandatory-for-1.4-submission feature this driver does not implement -- already tracked as an explicit, deliberate scope exclusion (`feme/lib/Vulkan/PlannedExtensions.txt`'s own comment: "is optional for a 1.4 submission and stays out of scope, Roadmap.md Part 4"). |
+
+Both are pre-existing, intentional design decisions from before this
+session, not regressions or newly-discovered bugs -- no further action
+taken on either. Full result counts from the rerun: 38,941 Pass, 9,364
+NotSupported, 2 Fail (0 Crashed, 0 timed out, every case's `deqp-vk` process
+completed and every prior `Fail` was re-verified alone per
+`run_vulkan_cts.py`'s own verification round). Artifacts retained at
+`/tmp/feme-l207-rerun/` (not committed -- see this session's own
+`agent_thoughts.md` entry for the full path and reproduction command).
