@@ -61,26 +61,28 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **L206** (signedness-preservation through SPIRVToLLVM, ~90 cases): the
-   only unstarted item with a fully diagnosed root cause and a concrete
-   scope (preserve `OpTypeInt`'s `Signedness` bit as `!feme.spirv.*`
-   metadata through `SPIRVToLLVMPatterns.cpp`, teach `CanonicalizeStage.
-   cpp` to pick `zext`/`sext` per element). Estimate: half a day -- the
-   design is clear, but it's a new metadata channel through a conversion
-   pass, not a two-line patch.
-2. **L205** (chain-with-phi branch generalization, 50 cases): scoped in
-   detail last session, still not started. Estimate: half a day to a
-   full day (`EntryWrapper.cpp`'s `BranchShape`/`matchBranchShape`/
-   `buildWrapperForBranch`, three coordinated changes).
-3. **L201(d)** (mesh/tessellation f16 I/O, 120 cases): "Result does not
-   match reference," no pixel detail yet. Needs
+1. **L205** (chain-with-phi branch generalization in `EntryWrapper.cpp`,
+   50 cases, `memory_model.shared.16bit.*`): fully scoped by a prior
+   session (see roadmap row), not started. Estimate: half a day to a
+   full day -- three coordinated changes to `BranchShape`/
+   `matchBranchShape`/`buildWrapperForBranch`. Highest-value remaining
+   item with a clear scope.
+2. **L201(d)** (mesh/tessellation f16 I/O correctness, 120 cases):
+   "Result does not match reference," no pixel detail yet. Needs
    `--deqp-log-images=enable` or a hand-built repro first. Estimate: 1
    hour just to get a first real diagnostic, unknown after that.
-4. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms last
-   session, neither started. Lower case count than (d)/L205/L206.
-5. `input_output_float_32_to_16`'s own 100 `_rtz`-rounding-mode failures
-   (found this session, not investigated): a pre-existing, separate gap,
-   not part of L201(a)'s own scope. Worth a 10-minute look to confirm
-   whether it's tracked anywhere before opening a new row.
-6. A full/broad CTS re-run is still overdue (last one: 2026-09-26). Once
-   L205/L206 close, that's the natural trigger point.
+3. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms two
+   sessions ago, neither started. Lower case count than (d)/L205.
+4. `input_output_float_32_to_16`'s own 100 `_rtz`-rounding-mode failures
+   (noted, not investigated, two sessions running now): worth a 10-minute
+   look to confirm it isn't already tracked before opening a new row.
+5. A full/broad CTS re-run is overdue (last one: 2026-09-26). This
+   session only reran `16bit_storage.*` (2431 cases), not the full
+   48,307-case list. Once L205 closes, that's a natural trigger point --
+   or do it now, since two fix rounds (L202, L206) have landed since the
+   last full run and might have surfaced more incidental passes.
+6. Not yet done this session: `check-hlsl-feme-vk` against the
+   offload-test-suite `feme` branch (`/home/dev/dev/offload-test-suite`),
+   carried over unstarted from two sessions ago. Estimate: 15-30 minutes
+   if the branch still builds cleanly -- worth doing before the next
+   dxc-shape-sensitive fix, not just after.
