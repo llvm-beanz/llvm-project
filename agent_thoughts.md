@@ -103864,3 +103864,23 @@ Next action: run `ninja check-feme` in `/home/dev/dev/llvm-project/build` to con
 5. `6645d3953d0e` -- `[feme] Roadmap: update L201/L202/L203 with this session's findings`
 6. `ff0998ce29cd` -- `[feme] VulkanCTSReport: record this session's post-run L201/L202/L203 fixes`
 7. This file is committed separately as required.
+
+## Addendum: offload-test-suite run (after writing the above)
+
+Ran `check-hlsl-feme-vk` from `/home/dev/dev/offload-test-suite` (already on
+the `feme` branch, already built against this same llvm-project tree --
+`ninja feme_vulkan` found nothing to rebuild, confirming it already picked up
+this session's changes). Result: 447 Passed, 200 Unsupported, 31 Expectedly
+Failed, 1 Failed, 1 Unexpectedly Passed (680 total).
+
+- The 1 Failed (`WaveOps/WaveActiveMax.test`, NaN/Inf wave-reduction
+  handling) is unrelated to this session's changes (no wave-op code touched).
+- The 1 Unexpectedly Passed (`Feature/PushConstant/array_of_matrices.test`,
+  `float2x2` push-constant indexing) is also unrelated to MatrixInverse/
+  OuterProduct (no push-constant or matrix-*indexing* code touched this
+  session) -- likely a pre-existing XFAIL that's stale for an unrelated
+  reason. Did not update its expected-failure marker in the offload-test-suite
+  repo itself: out of scope for this session (didn't cause or investigate it),
+  and that repo's `feme` branch is maintained upstream, not something to
+  casually edit in passing.
+- No regressions attributable to this session's 4 feme-touching commits.
