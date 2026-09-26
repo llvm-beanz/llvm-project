@@ -714,6 +714,19 @@ enum class ImageCallKind : uint8_t {
   /// the `Array2D` counterpart of `Gather2DOffsetsI32` above, adding
   /// `ArrayLayer` the same way `GatherArray2DI32` does to `Gather2DI32`.
   GatherArray2DOffsetsI32,
+  /// `feme.cpu.image.gathercmp.2d.offsets.v4f32` (roadmap L202(a)): the
+  /// `ConstOffsets` (plural, 4-independent-offset) counterpart of
+  /// `GatherCmp2D` above, mirroring `Gather2DOffsets`'s own relationship
+  /// to `Gather2D` -- same fixed bilinear footprint/result ordering, each
+  /// of the 4 gathered corners gets its own independent `(OffsetX,
+  /// OffsetY)` pair. `GatherCmp*` has no integer counterpart at all
+  /// (depth-format images are never integer-sampled in Vulkan), unlike
+  /// `Gather2DOffsets`'s own `Gather2DOffsetsI32` sibling.
+  GatherCmp2DOffsets,
+  /// `feme.cpu.image.gathercmp.array2d.offsets.v4f32` (roadmap L202(a)):
+  /// the `Array2D` counterpart of `GatherCmp2DOffsets` above, adding
+  /// `ArrayLayer` the same way `GatherCmpArray2D` does to `GatherCmp2D`.
+  GatherCmpArray2DOffsets,
   /// `feme.cpu.image.sample.1d.v4i32` (roadmap L125(b)): the `Plain1D`
   /// counterpart of `Sample2DI32`, mirroring `Sample1D`'s own relationship
   /// to `Sample2D` -- a `Texture1D` nearest-filtered sample against an
@@ -1321,6 +1334,35 @@ llvm::CallInst *createGatherArray2DOffsetsI32(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
     llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Component,
+    llvm::Value *OffsetX0, llvm::Value *OffsetY0, llvm::Value *OffsetX1,
+    llvm::Value *OffsetY1, llvm::Value *OffsetX2, llvm::Value *OffsetY2,
+    llvm::Value *OffsetX3, llvm::Value *OffsetY3, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gathercmp.2d.offsets.v4f32` call (roadmap
+/// L202(a)): the `ConstOffsets` (plural) counterpart of
+/// `createGatherCmp2D` above, mirroring `createGather2DOffsets`'s own
+/// relationship to `createGather2D` -- \p OffsetX0/\p OffsetY0..
+/// \p OffsetX3/\p OffsetY3 are 4 independent texel offsets, one per
+/// gathered corner, same fixed ordering as `createGather2DOffsets`
+/// documents. Takes \p Dref in place of \p Component, exactly like
+/// `createGatherCmp2D`'s own relationship to `createGather2D`.
+llvm::CallInst *createGatherCmp2DOffsets(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *Dref, llvm::Value *OffsetX0,
+    llvm::Value *OffsetY0, llvm::Value *OffsetX1, llvm::Value *OffsetY1,
+    llvm::Value *OffsetX2, llvm::Value *OffsetY2, llvm::Value *OffsetX3,
+    llvm::Value *OffsetY3, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.gathercmp.array2d.offsets.v4f32` call
+/// (roadmap L202(a)): the `Array2D` counterpart of
+/// `createGatherCmp2DOffsets` above, adding \p ArrayLayer the same way
+/// `createGatherCmpArray2D` does to `createGatherCmp2D`.
+llvm::CallInst *createGatherCmpArray2DOffsets(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Dref,
     llvm::Value *OffsetX0, llvm::Value *OffsetY0, llvm::Value *OffsetX1,
     llvm::Value *OffsetY1, llvm::Value *OffsetX2, llvm::Value *OffsetY2,
     llvm::Value *OffsetX3, llvm::Value *OffsetY3, llvm::Value *Mask,

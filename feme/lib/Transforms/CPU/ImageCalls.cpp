@@ -170,6 +170,10 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.gather.2d.offsets.v4i32";
   case ImageCallKind::GatherArray2DOffsetsI32:
     return "feme.cpu.image.gather.array2d.offsets.v4i32";
+  case ImageCallKind::GatherCmp2DOffsets:
+    return "feme.cpu.image.gathercmp.2d.offsets.v4f32";
+  case ImageCallKind::GatherCmpArray2DOffsets:
+    return "feme.cpu.image.gathercmp.array2d.offsets.v4f32";
   case ImageCallKind::Sample1DI32:
     return "feme.cpu.image.sample.1d.v4i32";
   case ImageCallKind::Sample1DArrayI32:
@@ -941,6 +945,31 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
          I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
+  case ImageCallKind::GatherCmp2DOffsets:
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, u, v, dref, offset_x0, offset_y0,
+    //  offset_x1, offset_y1, offset_x2, offset_y2, offset_x3, offset_y3,
+    //  mask) -> <4 x float> (roadmap L202(a)): the `ConstOffsets`
+    // (plural) counterpart of `GatherCmp2D` above, mirroring
+    // `Gather2DOffsets`'s own relationship to `Gather2D` -- `dref` (`f32`)
+    // in place of `component` (`i32`), same 4 independent
+    // `(offset_x, offset_y)` pairs.
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, I32Ty,
+         I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::GatherCmpArray2DOffsets:
+    // Same as GatherCmp2DOffsets above, plus `array_layer` (`f32`) right
+    // after `v`, mirroring `GatherCmpArray2D`'s own relationship to
+    // `GatherCmp2D`.
+    FTy = FunctionType::get(
+        V4F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
   case ImageCallKind::Sample1DI32:
     // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
     //  image_index, sampler_index, u, lod, offset, mask) -> <4 x i32>
@@ -1438,6 +1467,40 @@ CallInst *feme::cpu::createGatherArray2DOffsetsI32(
        Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, ArrayLayer,
        Component, OffsetX0, OffsetY0, OffsetX1, OffsetY1, OffsetX2, OffsetY2,
        OffsetX3, OffsetY3, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createGatherCmp2DOffsets(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *V, Value *Dref, Value *OffsetX0,
+    Value *OffsetY0, Value *OffsetX1, Value *OffsetY1, Value *OffsetX2,
+    Value *OffsetY2, Value *OffsetX3, Value *OffsetY3, Value *Mask,
+    const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::GatherCmp2DOffsets);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, Dref, OffsetX0, OffsetY0, OffsetX1, OffsetY1,
+                             OffsetX2, OffsetY2, OffsetX3, OffsetY3, Mask},
+                            Name);
+}
+
+CallInst *feme::cpu::createGatherCmpArray2DOffsets(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *SamplerIndex, Value *U, Value *V, Value *ArrayLayer, Value *Dref,
+    Value *OffsetX0, Value *OffsetY0, Value *OffsetX1, Value *OffsetY1,
+    Value *OffsetX2, Value *OffsetY2, Value *OffsetX3, Value *OffsetY3,
+    Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F =
+      getOrInsertImageCall(*M, ImageCallKind::GatherCmpArray2DOffsets);
+  return Builder.CreateCall(
+      F,
+      {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+       Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, ArrayLayer, Dref,
+       OffsetX0, OffsetY0, OffsetX1, OffsetY1, OffsetX2, OffsetY2, OffsetX3,
+       OffsetY3, Mask},
       Name);
 }
 
@@ -2327,6 +2390,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::GatherArray2DOffsets,
       ImageCallKind::Gather2DOffsetsI32,
       ImageCallKind::GatherArray2DOffsetsI32,
+      ImageCallKind::GatherCmp2DOffsets,
+      ImageCallKind::GatherCmpArray2DOffsets,
       ImageCallKind::Sample1DI32,
       ImageCallKind::Sample1DArrayI32,
       ImageCallKind::Sample2DArrayI32,
@@ -3229,6 +3294,51 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.V = CI.getArgOperand(7);
     Result.ArrayLayer = CI.getArgOperand(8);
     Result.Component = CI.getArgOperand(9);
+    Result.OffsetX0 = CI.getArgOperand(10);
+    Result.OffsetY0 = CI.getArgOperand(11);
+    Result.OffsetX1 = CI.getArgOperand(12);
+    Result.OffsetY1 = CI.getArgOperand(13);
+    Result.OffsetX2 = CI.getArgOperand(14);
+    Result.OffsetY2 = CI.getArgOperand(15);
+    Result.OffsetX3 = CI.getArgOperand(16);
+    Result.OffsetY3 = CI.getArgOperand(17);
+    Result.Mask = CI.getArgOperand(18);
+    break;
+  case ImageCallKind::GatherCmp2DOffsets:
+    if (CI.arg_size() != 18)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.Dref = CI.getArgOperand(8);
+    Result.OffsetX0 = CI.getArgOperand(9);
+    Result.OffsetY0 = CI.getArgOperand(10);
+    Result.OffsetX1 = CI.getArgOperand(11);
+    Result.OffsetY1 = CI.getArgOperand(12);
+    Result.OffsetX2 = CI.getArgOperand(13);
+    Result.OffsetY2 = CI.getArgOperand(14);
+    Result.OffsetX3 = CI.getArgOperand(15);
+    Result.OffsetY3 = CI.getArgOperand(16);
+    Result.Mask = CI.getArgOperand(17);
+    break;
+  case ImageCallKind::GatherCmpArray2DOffsets:
+    if (CI.arg_size() != 19)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.U = CI.getArgOperand(6);
+    Result.V = CI.getArgOperand(7);
+    Result.ArrayLayer = CI.getArgOperand(8);
+    Result.Dref = CI.getArgOperand(9);
     Result.OffsetX0 = CI.getArgOperand(10);
     Result.OffsetY0 = CI.getArgOperand(11);
     Result.OffsetX1 = CI.getArgOperand(12);

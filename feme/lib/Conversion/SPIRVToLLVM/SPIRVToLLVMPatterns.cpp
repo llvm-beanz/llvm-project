@@ -9365,6 +9365,47 @@ public:
   }
 };
 
+/// Flattens a `ConstOffsets`-shaped (roadmap L125(m)) operand -- a
+/// compile-time-constant `array<4 x vector<N x integer>>`, already lowered
+/// by `spirv::ArrayType`'s existing, generic (not gather-specific) LLVM
+/// type-converter into an ordinary `!llvm.array<4 x vector<Nxi32>>` -- into
+/// one `4N`-wide `vector<4Nxi32>`, scalar by scalar, so it can be threaded
+/// through `int_spv_resource_gather`/`int_spv_resource_gather_cmp`'s own
+/// `llvm_any_ty` offset operand unchanged. Shared by `ImageGatherPattern`
+/// and `ImageDrefGatherPattern` (roadmap L202(a)): both accept the
+/// identical `ConstOffsets` shape on their own single `Offset` operand
+/// slot, so the flattening itself has nothing gather-vs-gather-cmp-
+/// specific about it.
+mlir::Value flattenConstOffsetsArray(mlir::ConversionPatternRewriter &Rewriter,
+                                     mlir::Location Loc,
+                                     mlir::Value OffsetsArray) {
+  auto ArrayTy = mlir::cast<mlir::LLVM::LLVMArrayType>(OffsetsArray.getType());
+  auto ElementVecTy =
+      mlir::cast<mlir::VectorType>(ArrayTy.getElementType());
+  int64_t NumOffsets = ArrayTy.getNumElements(); // 4, per the SPIR-V spec.
+  int64_t VecWidth = ElementVecTy.getNumElements(); // N, matching Coordinate.
+  mlir::Type FlatOffsetType = mlir::VectorType::get(
+      {NumOffsets * VecWidth}, ElementVecTy.getElementType());
+  mlir::Value Flattened =
+      mlir::LLVM::PoisonOp::create(Rewriter, Loc, FlatOffsetType);
+  for (int64_t I = 0; I != NumOffsets; ++I) {
+    mlir::Value OneOffset = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, OffsetsArray, llvm::ArrayRef<int64_t>{I});
+    for (int64_t J = 0; J != VecWidth; ++J) {
+      mlir::Value SrcIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(J));
+      mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
+          Rewriter, Loc, OneOffset, SrcIndex);
+      mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(),
+          Rewriter.getI64IntegerAttr(I * VecWidth + J));
+      Flattened = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Flattened,
+                                                       Lane, DstIndex);
+    }
+  }
+  return Flattened;
+}
+
 /// Converts a `spirv.ImageGather` with `None` or `ConstOffset` image
 /// operands into an `llvm.spv.resource.gather` intrinsic call (roadmap
 /// L7g, split out of L7's original filing text; confirmed via a real
@@ -9488,34 +9529,8 @@ public:
     if (HasConstOffset) {
       Offset = Adaptor.getOperandArguments()[0];
     } else if (HasConstOffsets) {
-      mlir::Value OffsetsArray = Adaptor.getOperandArguments()[0];
-      auto ArrayTy =
-          mlir::cast<mlir::LLVM::LLVMArrayType>(OffsetsArray.getType());
-      auto ElementVecTy =
-          mlir::cast<mlir::VectorType>(ArrayTy.getElementType());
-      int64_t NumOffsets = ArrayTy.getNumElements(); // 4, per the SPIR-V spec.
-      int64_t VecWidth = ElementVecTy.getNumElements(); // N, matching Coordinate.
-      mlir::Type FlatOffsetType = mlir::VectorType::get(
-          {NumOffsets * VecWidth}, ElementVecTy.getElementType());
-      mlir::Value Flattened =
-          mlir::LLVM::PoisonOp::create(Rewriter, Loc, FlatOffsetType);
-      for (int64_t I = 0; I != NumOffsets; ++I) {
-        mlir::Value OneOffset = mlir::LLVM::ExtractValueOp::create(
-            Rewriter, Loc, OffsetsArray, llvm::ArrayRef<int64_t>{I});
-        for (int64_t J = 0; J != VecWidth; ++J) {
-          mlir::Value SrcIndex = mlir::LLVM::ConstantOp::create(
-              Rewriter, Loc, Rewriter.getI64Type(),
-              Rewriter.getI64IntegerAttr(J));
-          mlir::Value Lane = mlir::LLVM::ExtractElementOp::create(
-              Rewriter, Loc, OneOffset, SrcIndex);
-          mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
-              Rewriter, Loc, Rewriter.getI64Type(),
-              Rewriter.getI64IntegerAttr(I * VecWidth + J));
-          Flattened = mlir::LLVM::InsertElementOp::create(
-              Rewriter, Loc, Flattened, Lane, DstIndex);
-        }
-      }
-      Offset = Flattened;
+      Offset = flattenConstOffsetsArray(Rewriter, Loc,
+                                        Adaptor.getOperandArguments()[0]);
     }
     if (!Offset)
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
@@ -9566,6 +9581,15 @@ public:
 /// (Roadmap L202) Also accepts the non-constant `Offset` image operand
 /// alongside `ConstOffset`, mirroring `ImageGatherPattern`'s own identical
 /// extension: structurally the same single-operand shape either way.
+///
+/// (Roadmap L202(a)) Also accepts `ConstOffsets` (plural), reusing
+/// `ImageGatherPattern`'s own `flattenConstOffsetsArray` helper -- a real
+/// `dEQP-VK.glsl.texture_gather.graphics.offsets.*` repro
+/// (`Array2D`/`Plain2D` depth formats) exercises `OpImageDrefGather` with
+/// this shape the same way `OpImageGather` already did before this row
+/// (`ImageGatherPattern` accepted it under L125(m)/L125(n), but its
+/// depth-comparison sibling was never widened to match, a gap L125(k)'s
+/// own closing text first flagged without filing).
 class ImageDrefGatherPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageDrefGatherOp> {
 public:
@@ -9583,6 +9607,7 @@ public:
 
     mlir::spirv::ImageOperands SupportedMask =
         mlir::spirv::ImageOperands::ConstOffset |
+        mlir::spirv::ImageOperands::ConstOffsets |
         mlir::spirv::ImageOperands::Offset;
     if (!mlir::spirv::bitEnumContainsAll(SupportedMask, Actual))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
@@ -9590,6 +9615,13 @@ public:
     bool HasConstOffset = mlir::spirv::bitEnumContainsAny(
         Actual, mlir::spirv::ImageOperands::ConstOffset |
                     mlir::spirv::ImageOperands::Offset);
+    bool HasConstOffsets = mlir::spirv::bitEnumContainsAny(
+        Actual, mlir::spirv::ImageOperands::ConstOffsets);
+    // Mirrors `ImageGatherPattern`'s own identical decline: nothing
+    // produces both on the same instruction.
+    if (HasConstOffset && HasConstOffsets)
+      return Rewriter.notifyMatchFailure(
+          Op, "combining ConstOffset and ConstOffsets is not supported");
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -9607,8 +9639,13 @@ public:
     auto CoordVecTy = mlir::cast<mlir::VectorType>(Coordinate.getType());
     mlir::Type OffsetType =
         mlir::VectorType::get(CoordVecTy.getShape(), Rewriter.getI32Type());
-    mlir::Value Offset =
-        HasConstOffset ? Adaptor.getOperandArguments()[0] : mlir::Value();
+    mlir::Value Offset;
+    if (HasConstOffset) {
+      Offset = Adaptor.getOperandArguments()[0];
+    } else if (HasConstOffsets) {
+      Offset = flattenConstOffsetsArray(Rewriter, Loc,
+                                        Adaptor.getOperandArguments()[0]);
+    }
     if (!Offset)
       Offset = mlir::LLVM::ConstantOp::create(Rewriter, Loc, OffsetType,
                                               Rewriter.getZeroAttr(OffsetType));

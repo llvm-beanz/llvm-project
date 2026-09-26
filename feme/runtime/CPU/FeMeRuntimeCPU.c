@@ -6766,6 +6766,54 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmp2DV4F32(
   return Result;
 }
 
+// `feme.cpu.image.gathercmp.2d.offsets.v4f32` (roadmap L202(a)): the
+// `ConstOffsets`-plural counterpart of `femeCpuImageGatherCmp2DV4F32`
+// above, mirroring `femeCpuImageGather2DOffsetsV4F32`'s own relationship
+// to `femeCpuImageGather2DV4F32` -- each of the four gathered corners
+// uses its own independent `(OffsetXn, OffsetYn)` pair
+// (`femeRTComputeGatherOffsetsSupport`) rather than every corner sharing
+// one, comparing each tap's depth component against `Dref` exactly like
+// `femeCpuImageGatherCmp2DV4F32`'s own single-offset path does.
+FemeRTv4f32 femeCpuImageGatherCmp2DOffsetsV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Dref,
+    int32_t OffsetX0, int32_t OffsetY0, int32_t OffsetX1, int32_t OffsetY1,
+    int32_t OffsetX2, int32_t OffsetY2, int32_t OffsetX3, int32_t OffsetY3,
+    _Bool Mask) asm("feme.cpu.image.gathercmp.2d.offsets.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32
+femeCpuImageGatherCmp2DOffsetsV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Dref,
+    int32_t OffsetX0, int32_t OffsetY0, int32_t OffsetX1, int32_t OffsetY1,
+    int32_t OffsetX2, int32_t OffsetY2, int32_t OffsetX3, int32_t OffsetY3,
+    _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img.Format);
+  FemeRTGatherOffsetsSupport S = femeRTComputeGatherOffsetsSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX0, OffsetY0, OffsetX1, OffsetY1,
+      OffsetX2, OffsetY2, OffsetX3, OffsetY3);
+  FemeRTv4f32 Result;
+  for (int I = 0; I != 4; ++I) {
+    FemeRTv4f32 T =
+        femeRTFetchTexel2D(&Img, /*Level=*/0, /*Layer=*/0, S.X[I], S.Y[I],
+                          /*Sample=*/0, S.Border[I], Samp.BorderColor,
+                          /*ApplySwizzle=*/0);
+    Result[I] = femeRTApplyCompare(Samp.CompareFunc, Dref, T[0], IsFixedPointDepth);
+  }
+  return Result;
+}
+
 // `feme.cpu.image.gather.2d.v4f32` (roadmap L7g): `Plain2D`
 // non-depth-comparison gather -- SPIR-V's `OpImageGather`, HLSL's
 // `Texture2D::Gather{,Red,Green,Blue,Alpha}()`. Structurally identical to
@@ -7828,6 +7876,53 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageGatherCmpArray2DV4F32(
       femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0], IsFixedPointDepth);
   Result[3] =
       femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0], IsFixedPointDepth);
+  return Result;
+}
+
+// `feme.cpu.image.gathercmp.array2d.offsets.v4f32` (roadmap L202(a)):
+// the `Array2D` counterpart of `femeCpuImageGatherCmp2DOffsetsV4F32`
+// above, adding `ArrayLayer` the same way
+// `femeCpuImageGatherArray2DOffsetsV4F32` does to
+// `femeCpuImageGather2DOffsetsV4F32`.
+FemeRTv4f32 femeCpuImageGatherCmpArray2DOffsetsV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Dref, int32_t OffsetX0, int32_t OffsetY0,
+    int32_t OffsetX1, int32_t OffsetY1, int32_t OffsetX2, int32_t OffsetY2,
+    int32_t OffsetX3, int32_t OffsetY3,
+    _Bool Mask) asm("feme.cpu.image.gathercmp.array2d.offsets.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32
+femeCpuImageGatherCmpArray2DOffsetsV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
+    float ArrayLayer, float Dref, int32_t OffsetX0, int32_t OffsetY0,
+    int32_t OffsetX1, int32_t OffsetY1, int32_t OffsetX2, int32_t OffsetY2,
+    int32_t OffsetX3, int32_t OffsetY3, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  _Bool IsFixedPointDepth = femeRTIsFixedPointDepthFormat(Img.Format);
+  uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
+  FemeRTGatherOffsetsSupport S = femeRTComputeGatherOffsetsSupport(
+      &Img, U, V, &Samp, /*Level=*/0, OffsetX0, OffsetY0, OffsetX1, OffsetY1,
+      OffsetX2, OffsetY2, OffsetX3, OffsetY3);
+  FemeRTv4f32 Result;
+  for (int I = 0; I != 4; ++I) {
+    FemeRTv4f32 T =
+        femeRTFetchTexel2D(&Img, /*Level=*/0, Layer, S.X[I], S.Y[I],
+                          /*Sample=*/0, S.Border[I], Samp.BorderColor,
+                          /*ApplySwizzle=*/0);
+    Result[I] = femeRTApplyCompare(Samp.CompareFunc, Dref, T[0], IsFixedPointDepth);
+  }
   return Result;
 }
 

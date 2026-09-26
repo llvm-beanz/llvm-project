@@ -1956,12 +1956,20 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                       // work (roadmap L7d).
       if (CI->getArgOperand(0) != &Handle)
         return false;
+      // Roadmap L202(a): mirrors `isGatherIntrinsic`'s own identical
+      // `ConstOffsets` (plural) widening just below -- a real
+      // `dEQP-VK.glsl.texture_gather.graphics.offsets.*` repro exercises
+      // `OpImageDrefGather` with this exact flattened 8-wide shape the
+      // same way an ordinary (non-dref) gather already did.
+      Value *GatherOffset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
+      bool HasOffsetsVector =
+          Shape != ImageShape::Cube && isGatherOffsetsVector(GatherOffset);
       if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth, /*Float=*/true) ||
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
-          !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
-                             Shape, /*AllowArray2D=*/true,
-                             /*AllowPlain1DArray1D=*/false,
-                             /*AllowNonConstant=*/true) ||
+          !(HasOffsetsVector ||
+            isSupportedOffset(GatherOffset, Shape, /*AllowArray2D=*/true,
+                              /*AllowPlain1DArray1D=*/false,
+                              /*AllowNonConstant=*/true)) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
@@ -4491,18 +4499,44 @@ void lowerImageAccesses(
                                         C0, C1, C2, Dref, Mask, CI->getName());
         } else {
           Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
-          Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
-          Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
-          if (Shape == ImageShape::Array2D) {
-            Value *ArrayLayer =
-                Builder.CreateExtractElement(Coord, uint64_t{2});
-            NewCall = createGatherCmpArray2D(
-                Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
-                Dref, OffsetX, OffsetY, Mask, CI->getName());
+          // Roadmap L202(a): mirrors `isGatherIntrinsic`'s own identical
+          // `ConstOffsets` (plural) dispatch just below -- see that
+          // branch's own doc for why these are 4 independent taps, not
+          // four bilinear corners.
+          if (isGatherOffsetsVector(Offset)) {
+            Value *OffsetLanes[8];
+            for (unsigned I = 0; I != 8; ++I)
+              OffsetLanes[I] =
+                  Builder.CreateExtractElement(Offset, uint64_t{I});
+            if (Shape == ImageShape::Array2D) {
+              Value *ArrayLayer =
+                  Builder.CreateExtractElement(Coord, uint64_t{2});
+              NewCall = createGatherCmpArray2DOffsets(
+                  Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
+                  Dref, OffsetLanes[0], OffsetLanes[1], OffsetLanes[2],
+                  OffsetLanes[3], OffsetLanes[4], OffsetLanes[5],
+                  OffsetLanes[6], OffsetLanes[7], Mask, CI->getName());
+            } else {
+              NewCall = createGatherCmp2DOffsets(
+                  Builder, Env, ImageIndex, SamplerIndex, C0, C1, Dref,
+                  OffsetLanes[0], OffsetLanes[1], OffsetLanes[2],
+                  OffsetLanes[3], OffsetLanes[4], OffsetLanes[5],
+                  OffsetLanes[6], OffsetLanes[7], Mask, CI->getName());
+            }
           } else {
-            NewCall = createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex,
-                                        C0, C1, Dref, OffsetX, OffsetY, Mask,
-                                        CI->getName());
+            Value *OffsetX = Builder.CreateExtractElement(Offset, uint64_t{0});
+            Value *OffsetY = Builder.CreateExtractElement(Offset, uint64_t{1});
+            if (Shape == ImageShape::Array2D) {
+              Value *ArrayLayer =
+                  Builder.CreateExtractElement(Coord, uint64_t{2});
+              NewCall = createGatherCmpArray2D(
+                  Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
+                  Dref, OffsetX, OffsetY, Mask, CI->getName());
+            } else {
+              NewCall = createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex,
+                                          C0, C1, Dref, OffsetX, OffsetY, Mask,
+                                          CI->getName());
+            }
           }
         }
         CI->replaceAllUsesWith(NewCall);
