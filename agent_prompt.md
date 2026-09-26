@@ -58,34 +58,37 @@ file.
 
 # Request
 
-The previous session ended without completing any work. Any intermediate
-products are stashed and may be restored with `git stash pop`.
-
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **L205** (chain-with-phi branch generalization in `EntryWrapper.cpp`,
-   50 cases, `memory_model.shared.16bit.*`): fully scoped by a prior
-   session (see roadmap row), not started. Estimate: half a day to a
-   full day -- three coordinated changes to `BranchShape`/
-   `matchBranchShape`/`buildWrapperForBranch`. Highest-value remaining
-   item with a clear scope.
+1. **L207** (19 newly-surfaced `Counter value incorrect` cases in
+   `memory_model.shared.16bit.*`): the natural next pickup, since L205
+   just exposed it. Start with `FEME_DUMP_IR=1` on
+   `nested_structs.2` (already reduced this session, dump saved
+   nowhere permanent -- regenerate via `feme/.instructions.md`'s
+   recipe) and compare against a passing sibling case's own dump to
+   find what's structurally different. Estimate: 30-60 minutes to
+   localize, unknown after that.
 2. **L201(d)** (mesh/tessellation f16 I/O correctness, 120 cases):
-   "Result does not match reference," no pixel detail yet. Needs
-   `--deqp-log-images=enable` or a hand-built repro first. Estimate: 1
-   hour just to get a first real diagnostic, unknown after that.
-3. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms two
-   sessions ago, neither started. Lower case count than (d)/L205.
+   tried `--deqp-log-images=enable` this session on
+   `mesh_shader.ext.in_out.with_f16.permutation_0.mesh_only` -- got a
+   real fail location (`vktMeshShaderInOutTestsEXT.cpp:1590`) but not
+   yet the actual expected-vs-actual pixel/value diff. Estimate:
+   30-60 more minutes to get that diff, unknown after that.
+3. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms three
+   sessions ago, neither started. Lower case count than (d)/L207.
 4. `input_output_float_32_to_16`'s own 100 `_rtz`-rounding-mode failures
-   (noted, not investigated, two sessions running now): worth a 10-minute
-   look to confirm it isn't already tracked before opening a new row.
+   (noted, not investigated, three sessions running now): worth a
+   10-minute look to confirm it isn't already tracked before opening a
+   new row.
 5. A full/broad CTS re-run is overdue (last one: 2026-09-26). This
-   session only reran `16bit_storage.*` (2431 cases), not the full
-   48,307-case list. Once L205 closes, that's a natural trigger point --
-   or do it now, since two fix rounds (L202, L206) have landed since the
-   last full run and might have surfaced more incidental passes.
-6. Not yet done this session: `check-hlsl-feme-vk` against the
-   offload-test-suite `feme` branch (`/home/dev/dev/offload-test-suite`),
-   carried over unstarted from two sessions ago. Estimate: 15-30 minutes
-   if the branch still builds cleanly -- worth doing before the next
-   dxc-shape-sensitive fix, not just after.
+   session only reran `memory_model.shared.16bit.*` (70 cases), not the
+   full 48,307-case list. Three fix rounds (L202, L206, L205) have
+   landed since the last full run.
+6. Not yet done: `check-hlsl-feme-vk` against the offload-test-suite
+   `feme` branch (`/home/dev/dev/offload-test-suite`), carried over
+   unstarted from three sessions ago. Estimate: 15-30 minutes if the
+   branch still builds cleanly.
+7. `stash@{1}` (unfinished L197-line `Linearize.cpp` work, see above):
+   worth inspecting/finishing or discarding on purpose next time L197 is
+   picked up, rather than leaving it stashed indefinitely.
