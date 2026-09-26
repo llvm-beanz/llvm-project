@@ -1138,6 +1138,67 @@ TEST(SPIRVToLLVMTest, NonOffsetStructTightlyPacksVec3MemberSize) {
   EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
 }
 
+// (Roadmap L207) A `Workgroup` (shared-memory) struct member whose
+// declared layout is representable (no `RowMajor`/`MatrixStride`
+// padding at all) still needs its `mat4x3` member's own *column*
+// vectors tightened (`getTightMatrixType`), exactly like an ordinary
+// array-of-vec3 member already does, whenever storing/loading the
+// *whole* matrix value directly via `spirv.AccessChain` +
+// `spirv.Store`/`spirv.Load` (as opposed to a per-column
+// access/store/load, which other, pre-existing patterns already
+// handle correctly). Before this fix, a whole-matrix `spirv.Store`
+// through a bare `spirv::MatrixType` pointer converted the stored
+// value through the generic, "natural"/ABI-rounded conversion (16
+// bytes/column for a `vec3` column, rounded up from vec3's own real
+// 12-byte tight size), disagreeing with the member's own tightened
+// (12-byte/column) type and overflowing 16 bytes into whatever field
+// followed -- reproducing the real
+// `dEQP-VK.memory_model.shared.16bit.nested_structs.2` CTS failure
+// ("Counter value incorrect" at runtime, despite a clean compile).
+// `TightMatrixStorePattern`/`TightMatrixLoadPattern`
+// (SPIRVToLLVMPatterns.cpp) reconcile the two by reassembling/
+// unwrapping the stored/loaded value through the member's own tight
+// type before the final `llvm.store`/after the `llvm.load`.
+TEST(SPIRVToLLVMTest, WorkgroupWholeMatrixStoreLoadUsesTightColumnType) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @s : "
+      "!spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<3xf32>> [0], "
+      "f16 [48])>, Workgroup> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @s : "
+      "!spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<3xf32>> [0], "
+      "f16 [48])>, Workgroup> "
+      "%1 = spirv.Constant 0 : i32 "
+      "%2 = spirv.AccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<3xf32>> [0], "
+      "f16 [48])>, Workgroup>, i32 -> "
+      "!spirv.ptr<!spirv.matrix<4 x vector<3xf32>>, Workgroup> "
+      "%3 = spirv.Load \"Workgroup\" %2 : !spirv.matrix<4 x vector<3xf32>> "
+      "spirv.Store \"Workgroup\" %2, %3 : !spirv.matrix<4 x vector<3xf32>> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The struct's own trailing `f16` member sits exactly 48 bytes after
+  // the matrix's own start -- 4 tight, 12-byte columns, not 4
+  // ABI-rounded, 16-byte ones (which would place it at byte 64
+  // instead, with no interior padding needed either way since 48 is
+  // already 2-byte aligned).
+  EXPECT_NE(Result.find("struct<packed (array<4 x struct<\"feme.tight_vector"),
+            std::string::npos)
+      << Result;
+  EXPECT_EQ(Result.find("array<12 x i8>"), std::string::npos) << Result;
+  // Both the load and the store go through the tight column type (an
+  // `llvm.load`/`llvm.store` of the `feme.tight_vector`-wrapped array),
+  // not the natural, wider `!llvm.array<4 x vector<3xf32>>` shape.
+  EXPECT_NE(Result.find("llvm.load %3 : !llvm.ptr<3> -> !llvm.array<4 x "
+                        "struct<\"feme.tight_vector"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.store %"), std::string::npos) << Result;
+}
+
 // (Roadmap L107) An `Output`-storage `AccessChain` reaching a padded
 // struct member through *two* outer array dimensions (e.g. a
 // tessellation-control shader's own per-control-point-arrayed loose
