@@ -103752,3 +103752,72 @@ report), (4) this file.
    valid change-of-pace option if bug 5 feels too heavy for a given
    session.
 5. `/tmp` scratch is clean -- nothing left over from this session.
+
+# 2026-09-26 full Vulkan CTS run and conformance re-triage
+
+## Result first
+
+The full 3,244,369-case Vulkan CTS run is complete and every case now has a
+measured outcome. FeMe records 637,801 Pass, 48,307 Fail, 2,558,135
+NotSupported, 47 QualityWarning, 9 InternalError, 68 crashes, 2 timeouts, and
+0 unrun. Against the preceding `L146` verified baseline, 35,022 failures
+resolved and 1,122 appeared, a net improvement of 33,900 failures.
+
+## What I did
+
+1. Confirmed the explicit build-tree ICD reports `FeMe CPU Vulkan Device`;
+   the default system ICD still selects llvmpipe, so both
+   `VK_DRIVER_FILES` and `VK_ICD_FILENAMES` remain essential.
+2. Verified the build is `Release` with assertions and ccache, rebuilt the ICD
+   and dependencies, and ran `check-feme`: 3,352 passed, 3 unsupported, 0
+   failed.
+3. Ran all 54 CTS groups with six workers, crash-tolerant recovery batches,
+   one-case-per-process verification of every ordinary failure, and a final
+   isolated classification of every incomplete QPA record.
+4. Preserved the roughly 11 GB result set under
+   `/home/dev/dev/VK-GL-CTS/run/feme-20260926-full/`, including merged status,
+   verified failures, QPAs, logs, and `abnormal-recheck/classification.tsv`.
+5. Replaced `VulkanCTSReport.md`'s stale historical measurement with the exact
+   current totals, per-group accounting, baseline delta, abnormal outcomes,
+   and conformance assessment.
+6. Re-triaged the unresolved Vulkan roadmap. Existing non-measurement rows
+   remain open unless the new run satisfies their actual acceptance criteria.
+   New L201-L204 rows own the newly exposed f16/16-bit, texture-gather,
+   depth/stencil multisample-copy, and attachment-clear regressions.
+7. Stable-partitioned the C and L tables so completed work precedes unresolved
+   work, without changing dependency order inside either partition.
+8. Corrected inventory source drift by adding the already-advertised
+   `storageInputOutput16` and `shaderFloat16` features to the generator
+   manifest and moving inline-uniform-block/texture-gather notes into manifest
+   inputs. Both generated tables now match the checked-in documents exactly.
+
+## Wins and cautions
+
+- `binding_model.shader_access` drops by 26,288 failures, `renderpasses` by
+  6,273, `ubo` by 713, and all 112 subgroup failures are gone.
+- All 14 previously incomplete subgroup-broadcast cases now complete.
+- The 1,122 new failures are real solo-verified outcomes, not batch pollution.
+  The largest set (696) follows newly advertised narrow-type support, so the
+  feature promises need correctness work rather than being treated as an
+  unrelated CTS fluctuation.
+- `NotSupported` remains 78.85% of the suite. Optional-extension skips and
+  mandatory-core gaps must not be conflated when evaluating conformance.
+
+## Suggested next steps
+
+1. Start with L201: reduce one representative from each f16/16-bit subgroup
+   and decide whether to complete or temporarily withdraw any feature promise
+   that is broader than the implementation.
+2. Triage L202's dynamic-offset texture gathers separately from the already
+   completed constant `Offset`/`ConstOffsets` implementation.
+3. Reduce one core L203 depth/stencil multisample copy before examining its
+   dedicated-allocation and `copy_commands2` twins; they likely share one
+   command-normalization or sample-addressing defect.
+4. Keep the 48,307-case verified-failure list as the next comparison baseline,
+   and rerun affected groups after each fix before another full-suite run.
+
+## Commits
+
+1. `6ba2012d5f98` -- synchronize Vulkan feature and extension inventories.
+2. `2d086eb777f6` -- record the full CTS run and conformance-roadmap triage.
+3. This file is committed separately as required.
