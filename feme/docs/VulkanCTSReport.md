@@ -343,3 +343,48 @@ fixed (`input_output_int_16_to_16`'s remaining `scalar_sint*`/
 +5 new unit tests versus the prior session's 3354/3357 baseline: 4 in
 `SPIRVToLLVMTest.cpp` covering the new metadata channel's collect/attach
 helpers, 1 in `CanonicalizeStageTest.cpp` covering the new `sext` path).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Picked up the top-ranked item from the prior session's own next-steps list:
+roadmap **L205** (`EntryWrapper.cpp`'s branch-shape support for an N-deep
+short-circuit comparison chain reconverging at a phi-bearing merge block,
+`memory_model.shared.16bit.*`), fully scoped by two prior sessions
+(`L201(e)`'s own triage) but not started before now.
+
+- **`memory_model.shared.16bit.*`** (roadmap L205): fixed, via a different
+  code path than originally scoped. Direct instrumentation of
+  `EntryWrapper.cpp`'s `walkLinearChain`/`matchBarrierFreeRegion` (rather
+  than reasoning about the existing code by inspection alone) found the
+  real blocker one layer downstream of where the roadmap row assumed:
+  `matchBranchShape`'s own prefix-order walk already swallows the whole
+  function (chain, phi-bearing merge, and everything after) before ever
+  reaching a `CondBrInst` to classify, so the fix instead targets
+  `EntryWrapper.cpp`'s other branch-shape family --
+  `isLinearChain`/`matchSafeDiamond`, the one `splitAtGroupSyncBarriers`
+  actually uses to region-split a wave body around its own barriers. A new
+  `matchShortCircuitChain` (tried as `isLinearChain`'s fallback right after
+  `matchSafeDiamond`) recognizes the chain-with-phi shape as a private,
+  barrier-free CFG region and splices its blocks unmodified into whatever
+  region contains them -- no new metadata channel, cloning, or
+  uniformity/purity check needed, since `isLinearChain`'s blocks move
+  (rather than being cloned into a wrapper the way `BranchShape` clones a
+  header condition), so the phi and each header's own (possibly per-wave,
+  not group-uniform) condition both survive untouched. Two new unit tests
+  cover the shape and its own barrier-inside-a-link rejection case.
+  A re-run of the full `memory_model.shared.16bit.*` group (70 cases --
+  wider than the roadmap row's own original 50-case estimate) shows
+  **51/70 now Pass, up from 0/70** (every case previously failed to
+  compile at all, with `feme-cpu-wrap-entry: ... has a barrier inside
+  non-linear control flow`). The remaining 19 cases no longer fail to
+  compile -- they now run and produce a wrong result (`Counter value
+  incorrect`), a distinct, previously-invisible runtime-correctness bug
+  this fix's own compile-time success exposed for the first time; split
+  out as new roadmap row L207, not investigated further this session.
+
+Net this session: 51 of the original 48,307 verified failures confirmed
+fixed (`memory_model.shared.16bit.*`'s now-passing cases), 0 regressions
+in `check-feme` (3361/3364 passing, +1 net new unit test versus the prior
+session's 3359/3362 baseline: 2 new tests added for the fix itself, 1
+scratch/throwaway diagnostic test used during root-cause investigation
+removed before committing).
