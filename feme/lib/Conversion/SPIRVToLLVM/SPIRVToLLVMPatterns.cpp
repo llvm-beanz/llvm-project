@@ -10894,6 +10894,112 @@ public:
   }
 };
 
+/// Computes the (Row, Col) cofactor of the square matrix described by
+/// \p Elems (`Elems[Row][Col]`, both 0-based): the determinant of the
+/// minor obtained by deleting row \p Row and column \p Col, negated when
+/// `Row + Col` is odd.
+static mlir::Value
+computeCofactor(mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+               mlir::Type ElementTy,
+               llvm::ArrayRef<llvm::SmallVector<mlir::Value>> Elems,
+               int64_t Row, int64_t Col) {
+  int64_t N = Elems.size();
+  llvm::SmallVector<llvm::SmallVector<mlir::Value>> Minor;
+  Minor.reserve(N - 1);
+  for (int64_t R = 0; R != N; ++R) {
+    if (R == Row)
+      continue;
+    llvm::SmallVector<mlir::Value> MinorRow;
+    MinorRow.reserve(N - 1);
+    for (int64_t C = 0; C != N; ++C) {
+      if (C != Col)
+        MinorRow.push_back(Elems[R][C]);
+    }
+    Minor.push_back(std::move(MinorRow));
+  }
+  mlir::Value MinorDet = computeDeterminant(Rewriter, Loc, ElementTy, Minor);
+  if ((Row + Col) % 2 != 0)
+    return mlir::LLVM::FNegOp::create(Rewriter, Loc, ElementTy, MinorDet);
+  return MinorDet;
+}
+
+/// Builds an `!llvm.array<N x vector<N x ElementTy>>` matrix value (the
+/// same column-major-array-of-column-vectors storage getMatrixElement/
+/// extractColumn read) from \p Elems (`Elems[Row][Col]`, both 0-based,
+/// logical/mathematical indices, not storage order).
+static mlir::Value
+buildMatrixFromElements(mlir::ConversionPatternRewriter &Rewriter,
+                        mlir::Location Loc, mlir::Type ElementTy, int64_t N,
+                        llvm::ArrayRef<llvm::SmallVector<mlir::Value>> Elems) {
+  auto ColumnTy = mlir::VectorType::get({N}, ElementTy);
+  auto ArrTy = mlir::LLVM::LLVMArrayType::get(ColumnTy, N);
+  mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ArrTy);
+  for (int64_t Col = 0; Col != N; ++Col) {
+    mlir::Value Column = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ColumnTy);
+    for (int64_t Row = 0; Row != N; ++Row) {
+      mlir::Value RowIndex =
+          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), Row);
+      Column = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Column,
+                                                   Elems[Row][Col], RowIndex);
+    }
+    Result =
+        mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, Column, Col);
+  }
+  return Result;
+}
+
+/// Converts `spirv.GL.MatrixInverse` (roadmap L201) via the classic
+/// adjugate-over-determinant formula (`Inverse[i][j] = Cofactor(j, i) /
+/// Determinant`, i.e. the adjugate is the cofactor matrix's own
+/// transpose): reuses computeDeterminant/computeCofactor over the
+/// matrix's already-extracted scalar elements, exactly mirroring
+/// GLDeterminantPattern's own pure-arithmetic, no-runtime-callback shape.
+/// Behavior is undefined for a singular matrix per the GLSL.std.450 spec,
+/// so an `FDivOp` by a possibly-zero determinant is not itself a bug.
+class GLMatrixInversePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GLMatrixInverseOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GLMatrixInverseOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GLMatrixInverseOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto MatrixTy = mlir::cast<mlir::spirv::MatrixType>(Op.getMatrix().getType());
+    mlir::Type ElementTy = getTypeConverter()->convertType(MatrixTy.getElementType());
+    if (!ElementTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    int64_t N = MatrixTy.getNumColumns();
+    llvm::SmallVector<llvm::SmallVector<mlir::Value>> Elems(N);
+    for (int64_t R = 0; R != N; ++R) {
+      Elems[R].reserve(N);
+      for (int64_t C = 0; C != N; ++C)
+        Elems[R].push_back(
+            getMatrixElement(Rewriter, Loc, Adaptor.getMatrix(), R, C));
+    }
+    mlir::Value Det = computeDeterminant(Rewriter, Loc, ElementTy, Elems);
+
+    llvm::SmallVector<llvm::SmallVector<mlir::Value>> InverseElems(N);
+    for (int64_t Row = 0; Row != N; ++Row)
+      InverseElems[Row].resize(N);
+    for (int64_t Row = 0; Row != N; ++Row) {
+      for (int64_t Col = 0; Col != N; ++Col) {
+        mlir::Value Cofactor =
+            computeCofactor(Rewriter, Loc, ElementTy, Elems, Row, Col);
+        mlir::Value InverseElem =
+            mlir::LLVM::FDivOp::create(Rewriter, Loc, ElementTy, Cofactor, Det);
+        // Adjugate is the cofactor matrix's own transpose.
+        InverseElems[Col][Row] = InverseElem;
+      }
+    }
+    Rewriter.replaceOp(
+        Op, buildMatrixFromElements(Rewriter, Loc, ElementTy, N, InverseElems));
+    return mlir::success();
+  }
+};
+
 /// (Roadmap L124(k)) Peels however many leading `spirv::ArrayType`/
 /// `spirv::RuntimeArrayType` levels wrap \p Type's own pointee before
 /// reaching a `spirv::StructType`, returning the resulting struct-pointee
@@ -14723,6 +14829,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
       MatrixTimesScalarPattern, TransposePattern, GLDeterminantPattern,
+      GLMatrixInversePattern,
       RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,

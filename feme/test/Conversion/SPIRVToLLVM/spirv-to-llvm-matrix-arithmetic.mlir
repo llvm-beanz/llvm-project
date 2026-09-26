@@ -189,3 +189,41 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
     spirv.ReturnValue %0 : f32
   }
 }
+
+// -----
+
+// `spirv.GL.MatrixInverse` (roadmap L201): adjugate-over-determinant, i.e.
+// `Inverse[i][j] = Cofactor(j, i) / Determinant`. For a 2x2 matrix
+// (element(row,col): a=[0][0], b=[0][1], c=[1][0], d=[1][1]) this is the
+// textbook `1/det * [[d, -b], [-c, a]]` -- each cofactor is itself a
+// (trivial, 1x1) determinant, negated for the two off-diagonal (odd
+// row+col) cofactors, then every element divided by the shared
+// determinant before the result matrix is rebuilt column-by-column.
+
+// CHECK-LABEL: llvm.func @matrix_inverse_2x2
+// CHECK-COUNT-4: llvm.extractelement
+// CHECK: %[[AD:.*]] = llvm.fmul {{.*}} : f32
+// CHECK: %[[BC:.*]] = llvm.fmul {{.*}} : f32
+// CHECK: %[[DET:.*]] = llvm.fsub %[[AD]], %[[BC]] : f32
+// CHECK: %[[INV00:.*]] = llvm.fdiv {{.*}}, %[[DET]] : f32
+// CHECK: %[[NEGC:.*]] = llvm.fneg {{.*}} : f32
+// CHECK: %[[INV10:.*]] = llvm.fdiv %[[NEGC]], %[[DET]] : f32
+// CHECK: %[[NEGB:.*]] = llvm.fneg {{.*}} : f32
+// CHECK: %[[INV01:.*]] = llvm.fdiv %[[NEGB]], %[[DET]] : f32
+// CHECK: %[[INV11:.*]] = llvm.fdiv {{.*}}, %[[DET]] : f32
+// CHECK: %[[RESULT:.*]] = llvm.mlir.poison : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[COL0POISON:.*]] = llvm.mlir.poison : vector<2xf32>
+// CHECK: %[[COL0A:.*]] = llvm.insertelement %[[INV00]], %[[COL0POISON]]
+// CHECK: %[[COL0B:.*]] = llvm.insertelement %[[INV10]], %[[COL0A]]
+// CHECK: %[[RES0:.*]] = llvm.insertvalue %[[COL0B]], %[[RESULT]][0]
+// CHECK: %[[COL1POISON:.*]] = llvm.mlir.poison : vector<2xf32>
+// CHECK: %[[COL1A:.*]] = llvm.insertelement %[[INV01]], %[[COL1POISON]]
+// CHECK: %[[COL1B:.*]] = llvm.insertelement %[[INV11]], %[[COL1A]]
+// CHECK: %[[RES1:.*]] = llvm.insertvalue %[[COL1B]], %[[RES0]][1]
+// CHECK: llvm.return %[[RES1]] : !llvm.array<2 x vector<2xf32>>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
+  spirv.func @matrix_inverse_2x2(%m : !spirv.matrix<2 x vector<2xf32>>) -> !spirv.matrix<2 x vector<2xf32>> "None" {
+    %0 = spirv.GL.MatrixInverse %m : !spirv.matrix<2 x vector<2xf32>>
+    spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
+  }
+}
