@@ -249,3 +249,54 @@ Net this session: 616 of the original 48,307 verified failures confirmed
 fixed (the full `texture_gather` cluster L202/L202(a)/L202(b) tracked), 0
 regressions in `check-feme` (3353/3356 passing, +1 new unit test versus the
 prior session's 3352/3355 baseline).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Continuing from the prior sessions' L201/L202 addenda above. This session
+picked up two of the ranked L201 sub-clusters:
+
+- **`memory_model.shared.16bit.*`** (roadmap L201(e)): triaged only, not
+  fixed -- the prior session's own "likely a duplicate of the milestone-9
+  loop-linearization limitation, closeable in ~10 minutes" hypothesis was
+  found to be wrong. The real repro (`memory_model.shared.16bit.
+  arrays_of_arrays.0`) is not a loop at all; it is a chain of uniform,
+  side-effect-free comparisons short-circuiting into one shared,
+  phi-bearing merge block, a shape `EntryWrapper.cpp`'s `BranchShape`
+  does not recognize. No case-count change (still 50/50 Fail); the real
+  fix is scoped as new roadmap row L205, not started.
+- **`16bit_storage.input_output_int_16_to_16`** (roadmap L201(a)): fixed.
+  The prior session's "no diagnostic text even with
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1`" claim was also found to be wrong --
+  the CTS case path itself had moved (the roadmap's own `compute.float16`
+  prefix no longer exists), and against the correct path
+  (`spirv_assembly.instruction.graphics.16bit_storage.
+  input_output_int_16_to_16.scalar_sint0_frag`) the env var produces a
+  clear diagnostic. Root cause: `StageStorage::buildStageStorage` has no
+  addressable representation for a stage-IO scalar narrower than 32 bits
+  except the pre-existing, separate 16-bit-float "widened half" path.
+  Fixed by mirroring roadmap H6m's `i1`/bool precedent: canonicalize a
+  16-bit integer stage-IO scalar to an ordinary 32-bit element
+  (`CanonicalizeStage.cpp`'s `getComponentType`, with a matching
+  `zext`/`trunc` round-trip in `loadStageIOValue`/`storeStageIOValue`).
+  A re-run of the full 200-case `input_output_int_16_to_16.*` group shows
+  **110/200 now Pass, up from 0/200** (every case previously failed at
+  `vkQueueSubmit` with `VK_ERROR_INITIALIZATION_FAILED`). The remaining 90
+  failures (`scalar_sint*`/`vector_sint*` past the trivially-zero-valued
+  `scalar_sint0`) are a real pixel-value mismatch, not a submission
+  failure -- a distinct, deeper gap (SPIR-V's `OpTypeInt` signedness bit
+  does not survive SPIRVToLLVM conversion, confirmed by diffing byte-
+  identical post-conversion IR between a `sint`- and `uint`-named case
+  sharing the same underlying data) split out as new roadmap row L206,
+  not fixed this session. `input_output_float_32_to_16`'s own 360-case
+  group (part of L201(a)'s original combined 300-case estimate, which
+  undercounted this group's real size) is separately at 260/360 Pass; its
+  100 failures are all `_rtz` (round-toward-zero) rounding-mode cases, a
+  pre-existing, unrelated gap this session did not investigate.
+
+Net this session: 110 of the original 48,307 verified failures confirmed
+fixed (`input_output_int_16_to_16`'s zero-sign-bit and all-unsigned
+cases), 0 regressions in `check-feme` (3354/3357 passing, +1 new unit test
+versus the prior session's 3353/3356 baseline; the discrepancy from the
+prior session's own reported 3353/3356 vs. this session's 3354/3357 totals
+is exactly this session's one new test, `CanonicalizeStageTest.
+CanonicalizesInt16StageIOScalarToA32BitElement`).
