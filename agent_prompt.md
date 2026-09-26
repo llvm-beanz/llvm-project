@@ -61,42 +61,30 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(30-60 min)** Add back *just* the `remapNestedStructMemberIndices`
-   `ArrayType`-branch instrumentation from this session (an unconditional
-   `llvm::errs()` print of whether `ElementType` is a non-power-of-2 vector,
-   right where `ElementType = ArrayTy.getElementType();` is assigned) and
-   rerun `nested_structs.2` alone, without any of the three fix attempts
-   applied. If it fires with `elemIsVec=1`, the array-branch fix from this
-   session is the right location and just needs another look at *why* it
-   didn't change the outcome (maybe the inserted index is off by one, or a
-   second, unrelated bug is stacked on top). If it still doesn't fire, this
-   whole code path is a dead end and something else entirely handles this
-   struct's real conversion -- worth checking `CompositeExtract`/
-   `CompositeInsert` patterns next (`remapNestedStructMemberIndices`'s other
-   two call sites, lines ~3404 and ~4590), and `SIMDize.cpp`/`GroupShared.cpp`
-   for any independent flat-buffer address computation that might bypass all
-   of this MLIR-level machinery for `Workgroup`-storage variables specifically.
-2. **(unknown, follow-on)** Once the real path is confirmed, redo the
-   `ArrayType`-branch fix (already drafted and reamovable from this session's
-   summary above) *in isolation* first, verify `ninja check-feme` alone with
-   just that one change (no stacking with the other two candidate fixes),
-   and only add the other two back if each is independently confirmed to
-   help.
-3. **(10 min)** Investigate why stacking the two earlier-session fixes (offset-
-   branch tightening + `convertArrayTypeIgnoringDecorations`'s stride check)
-   caused a 2-lane vector to get spuriously tight-vector-wrapped in
-   `spirv-to-llvm-array-of-matrix-struct-member.mlir`'s neighborhood -- that
-   regression needs root-causing on its own before either of those two fixes
-   is reapplied, even if L207's real bug turns out to need one of them too.
-4. Carried over, untouched again this session (all from at least two
-   sessions ago): L201(d) (mesh/tessellation f16 I/O, 120 cases, needs
-   `--deqp-log-images=enable` pixel diff), L201(b)/(c) (27+25 cases, reduced
-   to symptoms but not started), `input_output_float_32_to_16`'s own 100
-   `_rtz` failures (still just noted, never checked against existing
-   tracking), the overdue full/broad CTS re-run (last full run: 2026-09-26),
-   and `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
-   (still never run).
-5. `stash@{0}` ("full remaining changes on top of commit1") is still sitting
-   untouched from an earlier session -- still worth a deliberate look
-   (`git stash show -p stash@{0}`) or an explicit `git stash drop` next time
-   L197 or whatever it covers comes up, rather than leaving it indefinitely.
+1. **(5 min)** Check whether `input_output_float_32_to_16`'s `_rtz` cases
+   are still failing at all, now that the full 48,307-case list shows
+   only 2 failures -- if they're gone, cross this off permanently instead
+   of carrying it forward again.
+2. **(15-30 min)** Triage the `check-hlsl-feme-vk` findings above: run
+   each of the 3 failing tests individually with full output, and check
+   whether `array_of_matrices.test`'s `XFAIL` for `Clang`/`DXC` was ever
+   meant to include FeMe, or if this is a genuine new pass worth
+   registering as expected (removing the false-XFAIL) or worth double-
+   checking as a coincidental symptom of something else.
+3. Given the 48,307-case list is now down to 2 (both permanent, by
+   design), **the next full/broad CTS re-run has no urgent trigger
+   anymore** -- the remaining work is entirely in the groups this
+   baseline never covered in the first place (L201(b)/(c)/(d), and
+   whatever `check-hlsl-feme-vk` turns up). Consider whether a *fresh*
+   full-suite sweep (not just the old verified-failure list) is now
+   worth doing from scratch, since the old list's own scope was fixed
+   as of 2026-09-26 and may not reflect cases that have started
+   NotSupported->Fail or similar drift.
+4. L201(d) (mesh/tessellation f16 I/O, 120 cases) is still the largest
+   untouched group with a real, distinct symptom already known
+   ("Result does not match reference," fail location
+   `vktMeshShaderInOutTestsEXT.cpp:1590` from 2 sessions ago) -- highest
+   remaining case count of any carried-over item.
+5. `stash@{0}`/`stash@{1}`: inspect (`git stash show -p stash@{N}`) and
+   either finish or `git stash drop` explicitly, rather than carrying
+   forward a 5th/6th time.
