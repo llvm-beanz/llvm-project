@@ -61,34 +61,42 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **L207** (19 newly-surfaced `Counter value incorrect` cases in
-   `memory_model.shared.16bit.*`): the natural next pickup, since L205
-   just exposed it. Start with `FEME_DUMP_IR=1` on
-   `nested_structs.2` (already reduced this session, dump saved
-   nowhere permanent -- regenerate via `feme/.instructions.md`'s
-   recipe) and compare against a passing sibling case's own dump to
-   find what's structurally different. Estimate: 30-60 minutes to
-   localize, unknown after that.
-2. **L201(d)** (mesh/tessellation f16 I/O correctness, 120 cases):
-   tried `--deqp-log-images=enable` this session on
-   `mesh_shader.ext.in_out.with_f16.permutation_0.mesh_only` -- got a
-   real fail location (`vktMeshShaderInOutTestsEXT.cpp:1590`) but not
-   yet the actual expected-vs-actual pixel/value diff. Estimate:
-   30-60 more minutes to get that diff, unknown after that.
-3. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms three
-   sessions ago, neither started. Lower case count than (d)/L207.
-4. `input_output_float_32_to_16`'s own 100 `_rtz`-rounding-mode failures
-   (noted, not investigated, three sessions running now): worth a
-   10-minute look to confirm it isn't already tracked before opening a
-   new row.
-5. A full/broad CTS re-run is overdue (last one: 2026-09-26). This
-   session only reran `memory_model.shared.16bit.*` (70 cases), not the
-   full 48,307-case list. Three fix rounds (L202, L206, L205) have
-   landed since the last full run.
-6. Not yet done: `check-hlsl-feme-vk` against the offload-test-suite
-   `feme` branch (`/home/dev/dev/offload-test-suite`), carried over
-   unstarted from three sessions ago. Estimate: 15-30 minutes if the
-   branch still builds cleanly.
-7. `stash@{1}` (unfinished L197-line `Linearize.cpp` work, see above):
-   worth inspecting/finishing or discarding on purpose next time L197 is
-   picked up, rather than leaving it stashed indefinitely.
+1. **(30-60 min)** Add back *just* the `remapNestedStructMemberIndices`
+   `ArrayType`-branch instrumentation from this session (an unconditional
+   `llvm::errs()` print of whether `ElementType` is a non-power-of-2 vector,
+   right where `ElementType = ArrayTy.getElementType();` is assigned) and
+   rerun `nested_structs.2` alone, without any of the three fix attempts
+   applied. If it fires with `elemIsVec=1`, the array-branch fix from this
+   session is the right location and just needs another look at *why* it
+   didn't change the outcome (maybe the inserted index is off by one, or a
+   second, unrelated bug is stacked on top). If it still doesn't fire, this
+   whole code path is a dead end and something else entirely handles this
+   struct's real conversion -- worth checking `CompositeExtract`/
+   `CompositeInsert` patterns next (`remapNestedStructMemberIndices`'s other
+   two call sites, lines ~3404 and ~4590), and `SIMDize.cpp`/`GroupShared.cpp`
+   for any independent flat-buffer address computation that might bypass all
+   of this MLIR-level machinery for `Workgroup`-storage variables specifically.
+2. **(unknown, follow-on)** Once the real path is confirmed, redo the
+   `ArrayType`-branch fix (already drafted and reamovable from this session's
+   summary above) *in isolation* first, verify `ninja check-feme` alone with
+   just that one change (no stacking with the other two candidate fixes),
+   and only add the other two back if each is independently confirmed to
+   help.
+3. **(10 min)** Investigate why stacking the two earlier-session fixes (offset-
+   branch tightening + `convertArrayTypeIgnoringDecorations`'s stride check)
+   caused a 2-lane vector to get spuriously tight-vector-wrapped in
+   `spirv-to-llvm-array-of-matrix-struct-member.mlir`'s neighborhood -- that
+   regression needs root-causing on its own before either of those two fixes
+   is reapplied, even if L207's real bug turns out to need one of them too.
+4. Carried over, untouched again this session (all from at least two
+   sessions ago): L201(d) (mesh/tessellation f16 I/O, 120 cases, needs
+   `--deqp-log-images=enable` pixel diff), L201(b)/(c) (27+25 cases, reduced
+   to symptoms but not started), `input_output_float_32_to_16`'s own 100
+   `_rtz` failures (still just noted, never checked against existing
+   tracking), the overdue full/broad CTS re-run (last full run: 2026-09-26),
+   and `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
+   (still never run).
+5. `stash@{0}` ("full remaining changes on top of commit1") is still sitting
+   untouched from an earlier session -- still worth a deliberate look
+   (`git stash show -p stash@{0}`) or an explicit `git stash drop` next time
+   L197 or whatever it covers comes up, rather than leaving it indefinitely.
