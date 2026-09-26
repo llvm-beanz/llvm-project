@@ -1,5 +1,5 @@
 ---
-model: gpt-5.6-sol
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -57,8 +57,16 @@ file.
 
 # Request
 
-Can you please run a full CTS run? Please update the VulkanCTSReport and
-re-triage all the outstanding Roadmap items for Vulkan conformance. Please
-update the roadmap with the remaining identified issues for Vulkan conformance
-and re-sort the tables of outstanding issues so that unresolved issues are on
-the bottom of the tables.
+Can you continue working on the FeMe ICD implementation? The previous session's
+suggested next steps are:
+
+1. Start with L201: reduce one representative from each f16/16-bit subgroup
+   and decide whether to complete or temporarily withdraw any feature promise
+   that is broader than the implementation.
+2. Triage L202's dynamic-offset texture gathers separately from the already
+   completed constant `Offset`/`ConstOffsets` implementation.
+3. Reduce one core L203 depth/stencil multisample copy before examining its
+   dedicated-allocation and `copy_commands2` twins; they likely share one
+   command-normalization or sample-addressing defect.
+4. Keep the 48,307-case verified-failure list as the next comparison baseline,
+   and rerun affected groups after each fix before another full-suite run.
