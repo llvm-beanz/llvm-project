@@ -761,6 +761,69 @@ BasicBlock *matchSafeDiamond(BasicBlock *BB,
   return TrueMerge;
 }
 
+/// Tries to match \p BB's own terminator as the first header of an N-deep
+/// short-circuit chain (roadmap L205): each header is a uniform two-way
+/// `CondBr` whose *false* arm targets one shared merge block common to
+/// every header in the chain, and whose *true* arm targets either the
+/// next header (itself a private, single-predecessor `CondBr` with that
+/// same false-arm merge block) or, for the chain's last link, the merge
+/// block directly (a `br label`, no condition of its own) -- the shape
+/// `dEQP-VK.memory_model.shared.16bit.*`'s source-level `&&`/`||` chains
+/// of per-field equality checks routinely compile to. Unlike
+/// `matchSafeDiamond`, an arm here computes no side effects of its own --
+/// only each header's own condition -- so the shared merge block may
+/// freely have a phi (one incoming value per header, typically the
+/// boolean the whole chain is "short-circuiting" toward): this match, like
+/// `matchSafeDiamond`, only cares about CFG shape and barrier-freedom, not
+/// what the merge block's own phi (if any) combines. On success, returns
+/// the shared merge block, having appended every header but \p BB (i.e.
+/// every "next" link in the chain) to \p Order (and registered in
+/// \p Visited); returns nullptr (leaving \p Order and \p Visited
+/// untouched) if \p BB's terminator is not a `CondBr`, the chain is only
+/// one header deep (a plain `if`, already `matchSafeDiamond`'s shape), or
+/// the chain does not converge this way -- shared by `isLinearChain`'s own
+/// "roadmap L45" diamond case, since a shape like this can never itself
+/// need a region split: with no barrier anywhere inside, it can only ever
+/// land entirely inside whichever single region contains it.
+BasicBlock *matchShortCircuitChain(BasicBlock *BB,
+                                   SmallPtrSetImpl<BasicBlock *> &Visited,
+                                   SmallVectorImpl<BasicBlock *> &Order) {
+  auto *CondBr = dyn_cast<CondBrInst>(BB->getTerminator());
+  if (!CondBr)
+    return nullptr;
+  BasicBlock *Merge = CondBr->getSuccessor(1);
+  BasicBlock *Next = CondBr->getSuccessor(0);
+  SmallVector<BasicBlock *, 4> Chain;
+  while (Next != Merge) {
+    if (Visited.contains(Next) || Next->hasNPredecessorsOrMore(2))
+      return nullptr; // Reachable from elsewhere: not a private chain link.
+    for (Instruction &I : *Next)
+      if (auto *CI = dyn_cast<CallInst>(&I))
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync)
+          return nullptr; // A barrier this shape can't split.
+    Chain.push_back(Next);
+    Instruction *Term = Next->getTerminator();
+    if (auto *UncondBr = dyn_cast<UncondBrInst>(Term)) {
+      if (UncondBr->getSuccessor(0) != Merge)
+        return nullptr; // Not the chain's own closing link.
+      Next = Merge;
+      break;
+    }
+    auto *NextBr = dyn_cast<CondBrInst>(Term);
+    if (!NextBr || NextBr->getSuccessor(1) != Merge)
+      return nullptr; // Not another link sharing the same merge block.
+    Next = NextBr->getSuccessor(0);
+  }
+  if (Chain.empty() || Visited.contains(Merge))
+    return nullptr; // A single plain `if` is `matchSafeDiamond`'s shape.
+  for (BasicBlock *Link : Chain)
+    if (!Visited.insert(Link).second)
+      return nullptr; // A chain link reachable from elsewhere too.
+  Order.append(Chain.begin(), Chain.end());
+  return Merge;
+}
+
 /// Tries to match \p BB's own terminator as the entry to a barrier-free
 /// single-entry/single-exit region: an arbitrary acyclic nest of uniform
 /// branches, none of whose blocks contains a group-sync barrier, all
@@ -939,7 +1002,11 @@ bool isLinearChain(Function &F, SmallVectorImpl<BasicBlock *> &Order) {
       size_t OrderSizeBefore = Order.size();
       BasicBlock *Merge = matchSafeDiamond(BB, Visited, Order);
       if (!Merge)
-        return false; // Not a safe diamond: fall back to diagnosing.
+        // Roadmap L205: not a plain diamond -- try the N-deep
+        // short-circuit chain shape instead before giving up.
+        Merge = matchShortCircuitChain(BB, Visited, Order);
+      if (!Merge)
+        return false; // Not a supported shape: fall back to diagnosing.
       for (size_t I = OrderSizeBefore, E = Order.size(); I != E; ++I)
         OrderIndex[Order[I]] = I;
       BB = Merge;

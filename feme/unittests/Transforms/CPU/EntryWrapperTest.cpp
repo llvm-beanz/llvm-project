@@ -1651,4 +1651,116 @@ TEST(EntryWrapperTest, UnsupportedEntryParameterDiagnosesInsteadOfCrashing) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L205: an N-deep short-circuit chain -- each header's false arm
+// jumps directly to one shared merge block, each header's true arm falls
+// through to the next header (the last falls through to the merge block
+// unconditionally instead) -- with a phi at that merge block combining
+// each header's own condition (the `a && b && c` pattern
+// `dEQP-VK.memory_model.shared.16bit.*`'s per-field equality chains
+// compile down to). `isLinearChain`'s new `matchShortCircuitChain` case
+// must recognize this as a single barrier-free region and land it ahead
+// of the barrier in the same region as the rest of the prefix, rather
+// than diagnosing "a surviving branch not part of a supported loop".
+TEST(EntryWrapperTest, SplitsShortCircuitChainWithMergePhiBeforeBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %c0 = icmp eq i32 %gid, 0
+      br i1 %c0, label %h1, label %exit
+    h1:
+      %c1 = icmp eq i32 %gid, 1
+      br i1 %c1, label %h2, label %exit
+    h2:
+      %c2 = icmp eq i32 %gid, 2
+      br label %exit
+    exit:
+      %val = phi i1 [ %c0, %entry ], [ %c1, %h1 ], [ %c2, %h2 ]
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %ext = zext i1 %val to i32
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  ASSERT_TRUE(M->getFunction("feme_cpu_entry_main"));
+  // The whole chain (every header plus the merge phi) must land in the
+  // first region, ahead of the barrier.
+  Function *Region0 = M->getFunction("main.region0");
+  ASSERT_TRUE(Region0);
+  unsigned NumCondBr = 0;
+  bool FoundPhi = false;
+  for (Instruction &I : instructions(Region0)) {
+    if (isa<CondBrInst>(&I))
+      ++NumCondBr;
+    if (isa<PHINode>(&I))
+      FoundPhi = true;
+  }
+  EXPECT_EQ(NumCondBr, 2u); // entry's and h1's own conditions.
+  EXPECT_TRUE(FoundPhi);
+  Function *Region1 = M->getFunction("main");
+  ASSERT_TRUE(Region1);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap L205: a barrier inside one of the chain's own middle links (not
+// just at the shared merge block) is not this shape's barrier-free
+// region at all -- `matchShortCircuitChain` must decline it (the same as
+// `matchSafeDiamond` already declines a barrier inside one of its own
+// arms), leaving the pre-existing diagnostic in place rather than
+// mis-outlining a region split that does not exist on every execution
+// path.
+TEST(EntryWrapperTest, BarrierInsideShortCircuitChainLinkStillDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %c0 = icmp eq i32 %gid, 0
+      br i1 %c0, label %h1, label %exit
+    h1:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %c1 = icmp eq i32 %gid, 1
+      br i1 %c1, label %h2, label %exit
+    h2:
+      %c2 = icmp eq i32 %gid, 2
+      br label %exit
+    exit:
+      %val = phi i1 [ %c0, %entry ], [ %c1, %h1 ], [ %c2, %h2 ]
+      %ext = zext i1 %val to i32
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  EntryWrapperPass().run(*M, MAM);
+  EXPECT_TRUE(SawError);
+  EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
