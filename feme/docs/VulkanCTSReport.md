@@ -445,3 +445,47 @@ completed and every prior `Fail` was re-verified alone per
 `run_vulkan_cts.py`'s own verification round). Artifacts retained at
 `/tmp/feme-l207-rerun/` (not committed -- see this session's own
 `agent_thoughts.md` entry for the full path and reproduction command).
+
+### `input_output_float_32_to_16`'s 100 `_rtz`-rounding-mode failures (roadmap L208)
+
+Carried over, unfixed, across several prior sessions (this specific
+360-case group was never part of the 2026-09-26 verified-failure list
+above -- it started failing independently, so the full-list rerun's
+"only 2 failures remain" result did not cover it). Picked up as roadmap
+**L208** this session.
+
+Root cause: `spirv.FConvert`'s own per-instruction `FPRoundingMode`
+decoration was silently discarded on a narrowing conversion -- absent a
+dedicated pattern, it always fell through to upstream MLIR's
+`IndirectCastPattern`, always rounding to nearest-even regardless of any
+`RTZ` decoration. Fixed with a new `FConvertRoundingModePattern`
+(`SPIRVToLLVMPatterns.cpp`) implementing round-toward-zero as a
+self-contained integer bit-manipulation algorithm rather than a
+constrained `llvm.experimental.constrained.*` intrinsic: isolated `.ll`
+reproducers this session confirmed a genuine LLVM/AArch64 backend
+correctness gap (a constrained op's own explicit non-default rounding
+mode is silently discarded at codegen time, no `FPCR` manipulation at
+all) -- out of scope to fix in this session, and flagged as a latent risk
+for the pre-existing `FloatControlArithmeticPattern` (F15c) on this same
+host, not yet independently re-verified.
+
+Fixing this exposed a second, independent latent defect in
+`CanonicalizeStage.cpp`: the new pattern's bitcast-terminated result,
+once its sole use is an output store, is a textbook target for
+InstCombine's own "push a bitcast into its one store" canonicalization,
+which mutated the store's value to a same-width integer before
+`CanonicalizeStagePass` ever ran, causing it to mis-route the value
+through `feme.stage.output.store.i32` instead of `.f16` and crash
+`PromoteMemToReg` on a resulting mixed-type shadow alloca. Fixed by
+reconciling a leaf store's value against its own signature element's
+independently-tracked declared type before decomposition.
+
+**Result: `dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.
+input_output_float_32_to_16.*` now 360/360 Pass, up from 260/360** (all
+100 `_rtz` failures fixed, 0 regressions among the 260 previously-passing
+`_rte`/`unspecified_rnd_mode` cases).
+
+Net this session: 100 failures fixed (a previously-untracked group, not
+part of the 48,307-case list), 0 regressions in `check-feme`
+(3365/3368 passing, +2 net new tests versus the prior session's baseline:
+1 new lit test and 1 new unit test for the fix).
