@@ -14041,3 +14041,119 @@ Verification on the actually-shipped (leaf-only) configuration:
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
 to need no change -- an internal `LoopLinearizer` dominance-tracking
 correctness fix, touching no feature bit, limit, or extension surface.
+
+## 2026-09-25 (continued session): L200 (L199 continuation) -- bug 4 (LCSSA-violating dominance corruption) fixed; non-leaf traversal enabled then reverted after a fifth, distinct crash
+
+Device check re-confirmed: `FeMe CPU Vulkan Device`.
+
+Picked up L199's own open item (bug 4: the real, reliably-reproducible
+`formLCSSAImpl` assertion on `cov-nested-loop-large-array-index-using-
+vector-components`). A hand-extracted-and-reassembled SPIR-V repro
+(the technique used for L198's own bugs) did *not* reproduce the same
+pre-linearize IR shape the real pipeline actually produces for this
+shader, so instead added a temporary env-gated dump
+(`FEME_DUMP_IR_PRELINEARIZE` in `Pipeline.cpp`) right before
+`LinearizePass` runs, ran the real CTS case once with it set, and fed
+the captured, exact real pre-linearize IR into a standalone `feme-opt
+--llvm -passes=feme-cpu-linearize` run instead -- this reproduced a
+plain `verifyModule` dominance failure (much faster/easier to inspect
+than the real pipeline's own, much-later LCSSA assertion). `feme-opt`
+itself refuses to print an invalid module by default, so also added
+`FEME_OPT_DUMP_INVALID` to print it anyway on verification failure,
+letting `opt -disable-verify -passes='print<domtree>'` inspect the
+actual dominator-tree relationships and pinpoint the corruption.
+
+Root cause: `peelConstantFlowPredecessors` redirects one of `BB`'s
+constant-valued predecessors to bypass `BB` outright, and repairs every
+downstream use of `BB`'s own `phi`s via `SSAUpdater` -- but left any
+*ordinary*, non-`phi` instruction defined in `BB` with a use outside it
+(e.g. a `%.inv = xor i1 <phi>, true` consuming one of `BB`'s own
+condition `phi`s) completely unrepaired. Once the peel added a second,
+bypassing predecessor edge into one of `BB`'s descendants, `BB` no
+longer necessarily dominated that instruction's own use, corrupting the
+IR (an immediate dominance-verifier failure at the `feme-opt` level; the
+real pipeline's own `formLCSSAImpl` assertion, downstream, was just a
+delayed symptom of the same corruption). Fixed by having
+`peelConstantFlowPredecessors` bail out entirely (leaving `BB`
+untouched) whenever it finds such an escaping non-`phi` value, rather
+than only ever guarding `phi`s -- consistent with this file's
+established "bail rather than guess" style.
+
+With this fourth bug fixed, actually flipped on non-leaf cycle traversal
+for real (removed the `CI.children(C).empty()` guard in
+`linearizeCyclePostOrder` unconditionally) and updated
+`LinearizeTest.LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone`'s
+stale leaf-only expectations to match (`MaskAnyCount == 2u`, a real
+`loop.continue3` condition instead of `outer.break`) -- confirmed this
+is genuine, correct new behavior, not a regression. Verified:
+- `FeMeTransformsCPUTests`: 567/567 clean across 5 consecutive runs,
+  with non-leaf traversal genuinely enabled.
+- `ninja check-feme`: 3352/3355 (0 Failed, 3 pre-existing
+  `Unsupported`), matching baseline.
+- The original bug-4 CTS case
+  (`cov-nested-loop-large-array-index-using-vector-components`) now
+  **Passes** cleanly, with non-leaf traversal enabled.
+
+**But a full `dEQP-VK.graphicsfuzz.*` sweep with non-leaf traversal
+enabled hit a new, fifth, real crash**:
+`dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop` segfaults (a
+real `SIGSEGV`, confirmed via `gdb -batch -ex run -ex bt`, not an
+assertion) -- tens of thousands of frames of self-recursion inside
+`DiamondFlattener::validate`'s own `validate(T, R, Quiet) ||
+validate(Fsucc, R, Quiet)` calls, a genuine stack overflow, immediately
+after printing this same function's own "divergent branch in
+`loop.exit.guard` has no reconvergence point" diagnostic (printed from a
+different, much-deeper recursive call than the one at the top of the
+crashing stack) -- meaning some genuinely-nested shape here drives
+`validate` into runaway recursion instead of the bounded diamond-nesting
+depth it is meant to have. Not yet root-caused: the leading hypothesis
+(untested) is that `isInCycle`/`isLoopControlEdge` -- the same two
+functions L198's own bug 1 already found one staleness bug in -- are
+failing to recognize `loop.exit.guard`'s own branch as a loop control
+edge for this particular shape, causing `validate` to walk around the
+same loop body repeatedly instead of stopping at a `CycleBoundaryBlocks`
+entry as designed.
+
+**Decision**: given this fifth bug, this session's own non-leaf-
+traversal enablement was reverted back out before commit --
+`linearizeCyclePostOrder`'s leaf-only guard is restored, and the unit
+test reverted back to its original leaf-only expectations (comment
+updated to describe bug 4 as fixed and bug 5 as the new, open blocker).
+The bug-4 fix itself (in `peelConstantFlowPredecessors`) is real, safe
+on its own -- it can only ever suppress a peel that would otherwise be
+unsafe, never change behavior for a peel that was already safe -- and
+is committed regardless of bug 5's outcome.
+
+Verification on the actually-shipped (leaf-only + bug-4-fix-only)
+configuration:
+- `FeMeTransformsCPUTests`: 567/567 (5 consecutive runs).
+- `ninja check-feme`: 3352/3355 (0 Failed, 3 pre-existing
+  `Unsupported`), matching baseline exactly.
+- `dEQP-VK.mesh_shader.ext.misc.*`: 71/6/37, matching baseline.
+- Full `dEQP-VK.graphicsfuzz.*` re-sweep, excluding only the 2
+  pre-existing hangs this session independently reconfirmed
+  (`cov-multiple-functions-global-never-change`,
+  `cov-nested-structs-function-set-inner-struct-field-return`; a 3rd,
+  previously-documented exclusion from earlier sessions no longer
+  appears to hang -- an open discrepancy this session did not further
+  investigate): 755 of 757 cases, **676 Pass / 71 Fail / 8
+  NotSupported**. The +1/-1 shift versus the prior 674/72/8-of-754
+  figures is fully explained by that one fewer exclusion (one
+  previously-skipped case is now included and passed); no regressions
+  found. Confirmed the bug-4 case
+  (`cov-nested-loop-large-array-index-using-vector-components`) fails
+  cleanly with a diagnostic in this (leaf-only) configuration, same as
+  before bug 4 was fixed (the fix's benefit is only visible with
+  non-leaf traversal enabled, which remains off).
+- `git clang-format --diff`: clean.
+
+Also kept, as permanent debug tooling (matching this file's own
+established `FEME_DUMP_IR_PRENORM`/`FEME_DUMP_IR_PRESIMD`/`FEME_DUMP_IR`
+convention): `FEME_DUMP_IR_PRELINEARIZE` in `Pipeline.cpp` and
+`FEME_OPT_DUMP_INVALID` in `feme-opt.cpp`, both env-gated and zero-cost
+when unset.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+to need no change -- an internal `LoopLinearizer` dominance-tracking
+correctness fix plus debug tooling, touching no feature bit, limit, or
+extension surface.
