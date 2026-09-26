@@ -3065,6 +3065,28 @@ getStageIOAddressSpace(mlir::spirv::GlobalVariableOp Op) {
   return SC == mlir::spirv::StorageClass::Input ? 7 : 8;
 }
 
+/// (Roadmap L206) Returns true if \p Ty -- an SPIR-V-dialect type, read
+/// before this conversion erases it -- is, or is an array/vector of, a
+/// genuinely *signed* 16-bit integer (`OpTypeInt 16 1`). MLIR's own SPIR-V
+/// deserializer (`Deserializer.cpp`) represents that operand as
+/// `mlir::IntegerType::Signed`, and `OpTypeInt 16 0` (unsigned, or simply
+/// no signedness semantics -- SPIR-V's binary encoding cannot tell those
+/// two apart) as `Signless`, never `Unsigned`; `IntegerType::isSigned()`
+/// is therefore already the exact query this needs. Only descends through
+/// `ArrayType`/`VectorType`, the two wrapper shapes an ordinary,
+/// non-builtin-interface-block stage-IO variable's own declared type can
+/// take -- a struct member's own signedness is a distinct, currently
+/// out-of-scope extension of this same idea (no CTS case in L206's own
+/// scope needs it; see roadmap L206's row for the acknowledged gap).
+bool isSignedInt16LeafType(mlir::Type Ty) {
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Ty))
+    return isSignedInt16LeafType(ArrayTy.getElementType());
+  if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Ty))
+    return isSignedInt16LeafType(VectorTy.getElementType());
+  auto IntTy = mlir::dyn_cast<mlir::IntegerType>(Ty);
+  return IntTy && IntTy.getWidth() == 16 && IntTy.isSigned();
+}
+
 class StageIOGlobalVariablePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
 public:
@@ -3118,6 +3140,14 @@ public:
               buildMemberDecorationsAttr(Struct))
         NewGlobal->setAttr(feme::spirv::getStageIOMemberDecorationsAttrName(),
                            MemberDecorations);
+
+    // Roadmap L206: a plain (non-block) stage-IO variable's own genuinely
+    // signed 16-bit-integer-ness needs to survive to CanonicalizeStage.cpp
+    // -- see isSignedInt16LeafType's own comment and
+    // feme::spirv::getStageIOInt16SignednessAttrName's.
+    if (isSignedInt16LeafType(SrcType.getPointeeType()))
+      NewGlobal->setAttr(feme::spirv::getStageIOInt16SignednessAttrName(),
+                         Rewriter.getUnitAttr());
     return mlir::success();
   }
 };

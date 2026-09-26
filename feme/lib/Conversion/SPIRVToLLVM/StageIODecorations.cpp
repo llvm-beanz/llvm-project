@@ -28,6 +28,20 @@
 // (roadmap H2d) reads to decompose the block into one signature element per
 // member.
 //
+// Roadmap L206 adds a third, narrower channel of the same shape
+// (`feme.spirv.Int16Signed`): unlike a decoration, SPIR-V's `OpTypeInt`
+// `Signedness` operand is a *type* property with no `!spirv.Decorations`-
+// shaped backend encoding at all, and LLVM's own integer types carry no
+// signedness bit to preserve it in either -- so a stage-IO variable's true
+// signed-vs-unsigned 16-bit-integer-ness would otherwise be silently
+// erased by the `spirv` -> `llvm` dialect conversion, the same way it
+// would be lost translating to LLVM IR proper. `CanonicalizeStage.cpp`'s
+// own `storeStageIOValue` needs exactly this one bit back (see its own
+// comment) to widen a genuinely signed 16-bit stage-IO output correctly
+// (`sext`) instead of always defaulting to the bit-preserving-but-
+// numerically-wrong-for-a-negative-value `zext` every other narrow-scalar
+// case here still correctly uses.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
@@ -138,3 +152,29 @@ void feme::spirv::attachStageIOMemberDecorations(
                     llvm::MDNode::get(Ctx, MemberNodes));
   }
 }
+
+llvm::StringRef feme::spirv::getStageIOInt16SignednessAttrName() {
+  return "feme.spirv.int16.signed";
+}
+
+feme::spirv::StageIOInt16SignednessSet
+feme::spirv::collectStageIOInt16Signedness(mlir::Operation *Module) {
+  StageIOInt16SignednessSet Result;
+  Module->walk([&](mlir::LLVM::GlobalOp Global) {
+    if (Global->hasAttr(getStageIOInt16SignednessAttrName()))
+      Result.insert(Global.getSymName());
+  });
+  return Result;
+}
+
+void feme::spirv::attachStageIOInt16Signedness(
+    const StageIOInt16SignednessSet &SignedNames, llvm::Module &LLVMModule) {
+  llvm::LLVMContext &Ctx = LLVMModule.getContext();
+  for (const auto &Entry : SignedNames) {
+    llvm::GlobalVariable *GV = LLVMModule.getGlobalVariable(Entry.getKey());
+    if (!GV)
+      continue;
+    GV->setMetadata("feme.spirv.Int16Signed", llvm::MDNode::get(Ctx, {}));
+  }
+}
+

@@ -35,6 +35,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 
 #include <memory>
 #include <string>
@@ -325,6 +326,50 @@ collectStageIOMemberDecorations(mlir::Operation *Module);
 void attachStageIOMemberDecorations(
     const StageIOMemberDecorationsMap &MemberDecorations,
     llvm::Module &LLVMModule);
+
+/// (Roadmap L206) The name of the `llvm.mlir.global` attribute the stage-IO
+/// global variable pattern (see populateSPIRVToLLVMTargetPatterns) records
+/// a non-builtin `Input`/`Output` variable's *true* SPIR-V-declared
+/// signedness under, for the one case that otherwise-erased signedness bit
+/// still matters: a genuinely `OpTypeInt 16 1`-typed (signed) scalar/
+/// vector/array element (`OpTypeInt 16 0`, unsigned, or any other bit
+/// width, never sets this -- see `isSignedInt16LeafType`'s own comment for
+/// why only this one case is tracked). Present (a `UnitAttr`) only when
+/// true, mirroring `StageIOFlagDecorations`' own boolean-decoration
+/// encoding; absent means "not a signed 16-bit integer", which is also the
+/// correct default for every stage-IO variable this bit does not apply to.
+/// `CanonicalizeStage.cpp`'s `storeStageIOValue` reads the resulting
+/// `!feme.spirv.Int16Signed` metadata (once attached by
+/// `attachStageIOInt16Signedness` below) to choose `sext` over its own
+/// default `zext` when widening such an element's raw 16-bit value to the
+/// 32-bit slot `StageStorage` actually addresses -- see roadmap L206's own
+/// row for the full root-cause narrative (SPIR-V's `OpTypeInt` signedness
+/// operand does not otherwise survive `SPIRVToLLVMPatterns.cpp`'s
+/// conversion at all, since LLVM's own integer types carry no such bit).
+llvm::StringRef getStageIOInt16SignednessAttrName();
+
+/// A non-builtin stage-IO global that is a genuinely signed 16-bit integer
+/// (see getStageIOInt16SignednessAttrName), keyed by the `llvm.mlir.global`'s
+/// symbol name -- a name's mere presence in this set is the whole signal
+/// (there is no "explicitly unsigned" entry, matching the attribute's own
+/// absence-means-false convention).
+using StageIOInt16SignednessSet = llvm::StringSet<>;
+
+/// Collects every `llvm.mlir.global` in \p Module carrying a
+/// getStageIOInt16SignednessAttrName() attribute, keyed by symbol name.
+/// Must run before `mlir::translateModuleToLLVMIR`, the same way
+/// collectStageIODecorations does, and for the same reason.
+StageIOInt16SignednessSet
+collectStageIOInt16Signedness(mlir::Operation *Module);
+
+/// Re-attaches \p SignedNames (from collectStageIOInt16Signedness, run on
+/// the `llvm` dialect module \p LLVMModule was translated from) as an
+/// empty `!feme.spirv.Int16Signed` metadata node (presence alone is the
+/// signal) on the matching `llvm::GlobalVariable`s in \p LLVMModule, looked
+/// up by name. A no-op for any name \p LLVMModule does not declare a
+/// global under.
+void attachStageIOInt16Signedness(const StageIOInt16SignednessSet &SignedNames,
+                                  llvm::Module &LLVMModule);
 
 } // namespace spirv
 } // namespace feme

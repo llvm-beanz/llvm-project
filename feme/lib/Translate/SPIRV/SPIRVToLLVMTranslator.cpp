@@ -49,6 +49,12 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
   feme::spirv::StageIOMemberDecorationsMap MemberDecorations =
       feme::spirv::collectStageIOMemberDecorations(
           LLVMDialectModule->getMLIROperation());
+  // A plain stage-IO variable's own true signed-16-bit-integer-ness (roadmap
+  // L206) survives the same way, under its own attribute -- see
+  // feme::spirv::getStageIOInt16SignednessAttrName.
+  feme::spirv::StageIOInt16SignednessSet Int16SignedNames =
+      feme::spirv::collectStageIOInt16Signedness(
+          LLVMDialectModule->getMLIROperation());
 
   LLVMDialectToLLVMIRTranslator ToLLVMIR;
   llvm::Expected<Module> LLVMIRModule =
@@ -60,6 +66,8 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
                                         LLVMIRModule->getLLVMModule());
   feme::spirv::attachStageIOMemberDecorations(MemberDecorations,
                                               LLVMIRModule->getLLVMModule());
+  feme::spirv::attachStageIOInt16Signedness(Int16SignedNames,
+                                            LLVMIRModule->getLLVMModule());
   return LLVMIRModule;
 }
 

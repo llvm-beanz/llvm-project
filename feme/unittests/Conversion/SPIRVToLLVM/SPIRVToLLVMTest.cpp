@@ -668,6 +668,89 @@ TEST(SPIRVToLLVMTest, AttachStageIOMemberDecorationsIgnoresMissingGlobals) {
   feme::spirv::attachStageIOMemberDecorations(MemberDecorations, LLVMModule);
 }
 
+// Builds a `spirv.module` with one `llvm.mlir.global` named \p Name, marked
+// with getStageIOInt16SignednessAttrName() iff \p IsSigned16 -- the
+// (Roadmap L206) `feme.spirv.Int16Signed` side channel's own
+// collect-side/attach-side test fixture, mirroring
+// buildDecoratedGlobal/buildDecoratedMemberGlobal above.
+mlir::OwningOpRef<mlir::ModuleOp>
+buildInt16SignednessGlobal(mlir::MLIRContext &Ctx, llvm::StringRef Name,
+                           bool IsSigned16) {
+  Ctx.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
+  auto Module = mlir::ModuleOp::create(mlir::UnknownLoc::get(&Ctx));
+  mlir::OpBuilder Builder(Module.getBodyRegion());
+
+  auto Global = mlir::LLVM::GlobalOp::create(
+      Builder, mlir::UnknownLoc::get(&Ctx), Builder.getI16Type(),
+      /*isConstant=*/false, mlir::LLVM::Linkage::External, Name,
+      mlir::Attribute(), /*alignment=*/0, /*addrSpace=*/8);
+  if (IsSigned16)
+    Global->setAttr(feme::spirv::getStageIOInt16SignednessAttrName(),
+                    Builder.getUnitAttr());
+  return mlir::OwningOpRef<mlir::ModuleOp>(Module);
+}
+
+TEST(SPIRVToLLVMTest, CollectStageIOInt16SignednessFindsMarkedGlobal) {
+  mlir::MLIRContext Ctx;
+  mlir::OwningOpRef<mlir::ModuleOp> Module =
+      buildInt16SignednessGlobal(Ctx, "out_var", /*IsSigned16=*/true);
+
+  feme::spirv::StageIOInt16SignednessSet SignedNames =
+      feme::spirv::collectStageIOInt16Signedness(Module.get());
+  EXPECT_TRUE(SignedNames.contains("out_var"));
+}
+
+// A global with no getStageIOInt16SignednessAttrName() attribute at all
+// (e.g. an ordinary, unsigned-or-signless-declared, `i16` stage-IO global)
+// is simply absent from the collected set -- there is no "explicitly
+// unsigned" entry, matching the attribute's own absence-means-false
+// convention (see getStageIOInt16SignednessAttrName's own comment).
+TEST(SPIRVToLLVMTest, CollectStageIOInt16SignednessSkipsUnmarkedGlobal) {
+  mlir::MLIRContext Ctx;
+  mlir::OwningOpRef<mlir::ModuleOp> Module =
+      buildInt16SignednessGlobal(Ctx, "out_var", /*IsSigned16=*/false);
+
+  feme::spirv::StageIOInt16SignednessSet SignedNames =
+      feme::spirv::collectStageIOInt16Signedness(Module.get());
+  EXPECT_FALSE(SignedNames.contains("out_var"));
+}
+
+// attachStageIOInt16Signedness turns a collected name into an empty
+// `!feme.spirv.Int16Signed` metadata node on the matching
+// `llvm::GlobalVariable` -- presence alone is the signal, mirroring
+// `CanonicalizeStage.cpp`'s own `GV->getMetadata(...) != nullptr` check.
+TEST(SPIRVToLLVMTest, AttachStageIOInt16SignednessBuildsMetadata) {
+  mlir::MLIRContext Ctx;
+  mlir::OwningOpRef<mlir::ModuleOp> Module =
+      buildInt16SignednessGlobal(Ctx, "out_var", /*IsSigned16=*/true);
+  feme::spirv::StageIOInt16SignednessSet SignedNames =
+      feme::spirv::collectStageIOInt16Signedness(Module.get());
+
+  llvm::LLVMContext LLVMCtx;
+  llvm::Module LLVMModule("m", LLVMCtx);
+  auto *GV = new llvm::GlobalVariable(
+      LLVMModule, llvm::Type::getInt16Ty(LLVMCtx), /*isConstant=*/false,
+      llvm::GlobalValue::ExternalLinkage, nullptr, "out_var", nullptr,
+      llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/8);
+
+  feme::spirv::attachStageIOInt16Signedness(SignedNames, LLVMModule);
+
+  EXPECT_NE(GV->getMetadata("feme.spirv.Int16Signed"), nullptr);
+}
+
+TEST(SPIRVToLLVMTest, AttachStageIOInt16SignednessIgnoresMissingGlobals) {
+  mlir::MLIRContext Ctx;
+  mlir::OwningOpRef<mlir::ModuleOp> Module =
+      buildInt16SignednessGlobal(Ctx, "no_such_global", /*IsSigned16=*/true);
+  feme::spirv::StageIOInt16SignednessSet SignedNames =
+      feme::spirv::collectStageIOInt16Signedness(Module.get());
+
+  llvm::LLVMContext LLVMCtx;
+  llvm::Module LLVMModule("m", LLVMCtx);
+  // No global named "no_such_global" in this module -- must not crash.
+  feme::spirv::attachStageIOInt16Signedness(SignedNames, LLVMModule);
+}
+
 /// Builds a `spirv.module` with two `spirv.GlobalVariableOp`s sharing both
 /// \p Name and \p Set / \p Binding -- the shape observed from DXC's own
 /// bindless-heap (`ResourceDescriptorHeap`/`SamplerDescriptorHeap`) codegen,
