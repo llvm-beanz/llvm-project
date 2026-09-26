@@ -300,3 +300,46 @@ versus the prior session's 3353/3356 baseline; the discrepancy from the
 prior session's own reported 3353/3356 vs. this session's 3354/3357 totals
 is exactly this session's one new test, `CanonicalizeStageTest.
 CanonicalizesInt16StageIOScalarToA32BitElement`).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+Picked up the top-ranked item from the prior session's own next-steps list:
+roadmap **L206** (SPIR-V `OpTypeInt` signedness preservation through
+SPIRVToLLVM), the remaining 90-case gap the prior session's own
+`input_output_int_16_to_16` fix (L201(a)) split out rather than closed.
+
+- **`16bit_storage.input_output_int_16_to_16`** (roadmap L206): fixed.
+  Added a third FeMe-internal `!feme.spirv.*` metadata side channel
+  (`feme.spirv.Int16Signed`), mirroring `feme.spirv.decorations`/
+  `feme.spirv.MemberDecorations`'s own existing precedent
+  (`StageIODecorations.cpp`): `StageIOGlobalVariablePattern`
+  (`SPIRVToLLVMPatterns.cpp`) now marks a converted stage-IO global's
+  `llvm.mlir.global` when its declared type's leaf scalar is a genuinely
+  signed `OpTypeInt 16 1` (recursing through any array/vector wrapper
+  first), and `SPIRVToLLVMTranslator.cpp`'s existing collect-before/
+  attach-after driver realizes it as real LLVM metadata the same way it
+  already does the other two channels. `CanonicalizeStagePass::run` reads
+  this metadata per stage-IO global while building the entry signature
+  and threads a small `ElementID -> bool` set down through
+  `storeStageIOBlockValue`/`storeStageIOValue` to the one remaining
+  `zext`-only widen that row's own prior fix left in place, so a
+  genuinely signed 16-bit stage-IO output now widens with `sext` instead,
+  per element -- not a pass-wide default flip (the prior session's own
+  experiment, switching every `i16` store to `sext` unconditionally,
+  merely traded the `sint` cases' failures for the `uint` cases',
+  confirming per-element information, not a global default, was the
+  actual missing piece).
+  A re-run of the full 200-case `input_output_int_16_to_16.*` group shows
+  **200/200 Pass, up from 110/200** at the start of this session. A
+  broader re-run of the whole `16bit_storage.*` group (2431 cases) shows
+  zero regressions: the only remaining 100 failures are the pre-existing,
+  unrelated `input_output_float_32_to_16.*_rtz` (round-toward-zero
+  rounding-mode) group, already noted but not investigated by the prior
+  session.
+
+Net this session: 90 of the original 48,307 verified failures confirmed
+fixed (`input_output_int_16_to_16`'s remaining `scalar_sint*`/
+`vector_sint*` cases), 0 regressions in `check-feme` (3359/3362 passing,
++5 new unit tests versus the prior session's 3354/3357 baseline: 4 in
+`SPIRVToLLVMTest.cpp` covering the new metadata channel's collect/attach
+helpers, 1 in `CanonicalizeStageTest.cpp` covering the new `sext` path).

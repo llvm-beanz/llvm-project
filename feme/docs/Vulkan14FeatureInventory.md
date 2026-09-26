@@ -94,7 +94,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `storageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `uniformAndStorageBuffer16BitAccess` | no |  |
 | feature | VK_VERSION_1_1 | `storagePushConstant16` | no |  |
-| feature | VK_VERSION_1_1 | `storageInputOutput16` | yes | roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; roadmap L201(a): 16-bit-*integer* stage I/O is canonicalized the same way (widened to 32 bits at the `CanonicalizeStage.cpp` boundary) as of this session, but a real-data (nonzero, sign-bit-set) round-trip still corrupts under a signed integer color-attachment format -- see roadmap L206 (SPIR-V's `OpTypeInt` signedness bit does not survive SPIRVToLLVM conversion, so this remains only partially correct in practice) |
+| feature | VK_VERSION_1_1 | `storageInputOutput16` | yes | roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; roadmap L201(a): 16-bit-*integer* stage I/O is canonicalized the same way (widened to 32 bits at the `CanonicalizeStage.cpp` boundary); roadmap L206 (done): a stage-IO global's true SPIR-V `OpTypeInt` signedness now survives SPIRVToLLVM conversion as `feme.spirv.Int16Signed` metadata, so a signed 16-bit integer's real-data (nonzero, sign-bit-set) round-trip through a signed integer color-attachment format is correct -- CTS-confirmed, `input_output_int_16_to_16.*` 200/200 |
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |

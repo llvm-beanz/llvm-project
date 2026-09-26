@@ -189,7 +189,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_ycbcr_2plane_444_formats` | Planned (in scope, not implemented) | roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion |
 | `VK_EXT_ycbcr_image_arrays` | Not implemented |  |
 | `VK_EXT_zero_initialize_device_memory` | Not implemented |  |
-| `VK_KHR_16bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_16bit_storage` | Partially implemented | core-promoted into Vulkan 1.1; `storageInputOutput16` (float16 and 16-bit integer stage I/O, including true SPIR-V signedness as of roadmap L206) is CTS-verified working -- `uniformAndStorageBuffer16BitAccess`/`storageBuffer16BitAccess` remain unimplemented (roadmap 1.9.10, K-series) |
 | `VK_KHR_8bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_acceleration_structure` | Planned (in scope, not implemented) | roadmap J4 |
 | `VK_KHR_android_surface` | Not implemented |  |
