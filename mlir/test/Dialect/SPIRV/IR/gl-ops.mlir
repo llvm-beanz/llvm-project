@@ -1707,3 +1707,25 @@ func.func @determinant_mismatched_result(%arg0 : !spirv.matrix<3 x vector<3xf32>
   %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<3xf32>> -> f16
   return
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.GL.MatrixInverse
+//===----------------------------------------------------------------------===//
+
+func.func @matrix_inverse(%arg0 : !spirv.matrix<3 x vector<3xf32>>, %arg1 : !spirv.matrix<2 x vector<2xf16>>) -> () {
+  // CHECK: spirv.GL.MatrixInverse {{%.*}} : !spirv.matrix<3 x vector<3xf32>>
+  %0 = spirv.GL.MatrixInverse %arg0 : !spirv.matrix<3 x vector<3xf32>>
+  // CHECK: spirv.GL.MatrixInverse {{%.*}} : !spirv.matrix<2 x vector<2xf16>>
+  %1 = spirv.GL.MatrixInverse %arg1 : !spirv.matrix<2 x vector<2xf16>>
+  return
+}
+
+// -----
+
+func.func @matrix_inverse_non_square(%arg0 : !spirv.matrix<3 x vector<2xf32>>) -> () {
+  // expected-error @+1 {{matrix must be square, but got 2x3}}
+  %0 = spirv.GL.MatrixInverse %arg0 : !spirv.matrix<3 x vector<2xf32>>
+  return
+}

@@ -499,6 +499,41 @@ def SPIRV_GLDeterminantOp : SPIRV_GLOp<"Determinant", 33, [NoMemoryEffect]> {
 
 // -----
 
+def SPIRV_GLMatrixInverseOp : SPIRV_GLOp<"MatrixInverse", 34,
+    [NoMemoryEffect, SameOperandsAndResultType]> {
+  let summary = "Inverse of a square matrix";
+
+  let description = [{
+    Result is the inverse of Matrix, a square matrix of floating-point
+    components. Behavior is undefined if Matrix is singular (its
+    determinant is zero).
+
+    Result Type must be the same type as Matrix.
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.GL.MatrixInverse %matrix : !spirv.matrix<3 x vector<3xf32>>
+    ```
+  }];
+
+  let arguments = (ins
+    SPIRV_MatrixOf<SPIRV_Float>:$matrix
+  );
+
+  let results = (outs
+    SPIRV_MatrixOf<SPIRV_Float>:$result
+  );
+
+  let assemblyFormat = [{
+    attr-dict $matrix `:` type($matrix)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// -----
+
 def SPIRV_GLLogOp : SPIRV_GLUnaryArithmeticOp<"Log", 28, SPIRV_Float16or32, [AlwaysSpeculatable]> {
   let summary = "Natural logarithm of the operand";
 

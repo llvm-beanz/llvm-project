@@ -257,4 +257,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Int16, 
     %0 = spirv.GL.Determinant %arg0 : !spirv.matrix<3 x vector<3xf32>> -> f32
     spirv.Return
   }
+
+  spirv.func @matrix_inverse(%arg0 : !spirv.matrix<3 x vector<3xf32>>) "None" {
+    // CHECK: {{%.*}} = spirv.GL.MatrixInverse {{%.*}} : !spirv.matrix<3 x vector<3xf32>>
+    %0 = spirv.GL.MatrixInverse %arg0 : !spirv.matrix<3 x vector<3xf32>>
+    spirv.Return
+  }
 }

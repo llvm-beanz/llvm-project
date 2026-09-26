@@ -2624,6 +2624,19 @@ LogicalResult spirv::GLDeterminantOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.GL.MatrixInverse
+//===----------------------------------------------------------------------===//
+
+LogicalResult spirv::GLMatrixInverseOp::verify() {
+  auto matrixType = cast<spirv::MatrixType>(getMatrix().getType());
+  if (matrixType.getNumRows() != matrixType.getNumColumns())
+    return emitOpError("matrix must be square, but got ")
+          << matrixType.getNumRows() << "x" << matrixType.getNumColumns();
+
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.CL.ldexp
 //===----------------------------------------------------------------------===//
 
