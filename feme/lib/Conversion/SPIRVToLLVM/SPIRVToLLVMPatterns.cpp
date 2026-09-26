@@ -10732,6 +10732,51 @@ public:
   }
 };
 
+/// Converts `spirv.OuterProduct` (roadmap L201, GLSL.std.450's
+/// `outerProduct()`): Result Type's column `Col` is `Vector1` scaled by
+/// lane `Col` of `Vector2` (a scalar-times-vector broadcast-and-multiply,
+/// mirroring `MatrixTimesScalarPattern`'s own shape one column at a
+/// time), since the SPIR-V spec defines the outer product's column `Col`
+/// as `Vector1 * Vector2[Col]`.
+class OuterProductPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::OuterProductOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::OuterProductOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::OuterProductOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto ResultArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ResultTy);
+    if (!ResultArrTy)
+      return Rewriter.notifyMatchFailure(Op, "not an LLVM array result");
+    auto ColumnTy =
+        mlir::cast<mlir::VectorType>(ResultArrTy.getElementType());
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Vector1 = Adaptor.getVector1();
+    mlir::Value Vector2 = Adaptor.getVector2();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, ResultArrTy);
+    int64_t NumColumns = ResultArrTy.getNumElements();
+    for (int64_t Col = 0; Col != NumColumns; ++Col) {
+      mlir::Value LaneIndex =
+          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), Col);
+      mlir::Value Lane =
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector2, LaneIndex);
+      mlir::Value Weight = broadcastScalar(Rewriter, Loc, Lane, ColumnTy);
+      mlir::Value Column = mlir::LLVM::FMulOp::create(Rewriter, Loc, ColumnTy,
+                                                      Vector1, Weight);
+      Result =
+          mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result, Column, Col);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Transposes \p Matrix -- an `!llvm.array<NumColumns x vector<NumRows x
 /// T>>` value, i.e. the "natural" (always column-major) representation
 /// MatrixType conversion always builds (see
@@ -14829,7 +14874,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       MatrixCompositeInsertPattern, MatrixTimesVectorPattern,
       VectorTimesMatrixPattern, MatrixTimesMatrixPattern,
       MatrixTimesScalarPattern, TransposePattern, GLDeterminantPattern,
-      GLMatrixInversePattern,
+      GLMatrixInversePattern, OuterProductPattern,
       RowMajorMatrixStorePattern,
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, OffsetStructMemberReorderAccessChainPattern,

@@ -227,3 +227,33 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
     spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
   }
 }
+
+// -----
+
+// `spirv.OuterProduct` (roadmap L201): column `Col` of the result is
+// `Vector1` scaled by the broadcast of lane `Col` of `Vector2` -- the
+// same scalar-broadcast-and-multiply idiom `MatrixTimesScalarPattern`
+// uses, just once per column with a different scalar each time instead
+// of one shared scalar for the whole matrix.
+
+// CHECK-LABEL: llvm.func @outer_product_2x2
+// CHECK: %[[RESULT:.*]] = llvm.mlir.poison : !llvm.array<2 x vector<2xf32>>
+// CHECK: %[[LANE0:.*]] = llvm.extractelement %arg1[%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[SEED0:.*]] = llvm.mlir.poison : vector<2xf32>
+// CHECK: %[[BROADCAST0A:.*]] = llvm.insertelement %[[LANE0]], %[[SEED0]]
+// CHECK: %[[BROADCAST0:.*]] = llvm.shufflevector %[[BROADCAST0A]], %[[SEED0]] [0, 0]
+// CHECK: %[[COL0:.*]] = llvm.fmul %arg0, %[[BROADCAST0]] : vector<2xf32>
+// CHECK: %[[RES0:.*]] = llvm.insertvalue %[[COL0]], %[[RESULT]][0]
+// CHECK: %[[LANE1:.*]] = llvm.extractelement %arg1[%{{.*}} : i32] : vector<2xf32>
+// CHECK: %[[SEED1:.*]] = llvm.mlir.poison : vector<2xf32>
+// CHECK: %[[BROADCAST1A:.*]] = llvm.insertelement %[[LANE1]], %[[SEED1]]
+// CHECK: %[[BROADCAST1:.*]] = llvm.shufflevector %[[BROADCAST1A]], %[[SEED1]] [0, 0]
+// CHECK: %[[COL1:.*]] = llvm.fmul %arg0, %[[BROADCAST1]] : vector<2xf32>
+// CHECK: %[[RES1:.*]] = llvm.insertvalue %[[COL1]], %[[RES0]][1]
+// CHECK: llvm.return %[[RES1]] : !llvm.array<2 x vector<2xf32>>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Matrix], []> {
+  spirv.func @outer_product_2x2(%v1 : vector<2xf32>, %v2 : vector<2xf32>) -> !spirv.matrix<2 x vector<2xf32>> "None" {
+    %0 = spirv.OuterProduct %v1, %v2 : vector<2xf32>, vector<2xf32> -> !spirv.matrix<2 x vector<2xf32>>
+    spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
+  }
+}
