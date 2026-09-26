@@ -5368,6 +5368,43 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // the same way the load path above already does, in place of the
         // ordinary constant `Zero` every other stage-IO store still uses.
         Value *Vertex = Access->Vertex ? Access->Vertex : Zero;
+        // (Roadmap L208) `Val`'s own LLVM type is normally a reliable
+        // stand-in for this element's declared type, but a plain identity
+        // bitcast whose sole use is this store (e.g.
+        // `FConvertRoundingModePattern`'s bit-manipulation-based `f16`
+        // result, materialized as `bitcast i16 %X to half`) is exactly the
+        // shape InstCombine's own "push a bitcast into its one store" fold
+        // canonicalizes away earlier in this pipeline -- rewriting `store
+        // half (bitcast i16 %X to half), ptr` into `store i16 %X, ptr`
+        // (valid, with opaque pointers, since there is no pointee type to
+        // preserve). That leaves `Val` typed `i16` here even though this
+        // element's own signature `ComponentType` is genuinely `Float`,
+        // indistinguishable below from a real 16-bit *integer* leaf
+        // (`storeStageIOValue`'s own same-width `isIntegerTy(16)` widening
+        // path) unless undone first. Restore `Val`'s true float type here,
+        // before either `storeStageIOBlockValue` or its own scalar-leaf
+        // widening ever sees it.
+        if (Access->ElementIDs.size() == 1 &&
+            Val->getType()->getScalarType()->isIntegerTy()) {
+          unsigned ValBits = Val->getType()->getScalarSizeInBits();
+          for (const SignatureElement &Elt : Sig.Elements) {
+            if (Elt.ElementID != Access->ElementIDs[0])
+              continue;
+            if (Elt.ComponentType == SignatureComponentType::Float &&
+                Elt.BitWidth == ValBits) {
+              Type *FloatTy = ValBits == 16   ? B.getHalfTy()
+                              : ValBits == 32 ? B.getFloatTy()
+                              : ValBits == 64 ? B.getDoubleTy()
+                                              : nullptr;
+              if (FloatTy) {
+                if (auto *VecTy = dyn_cast<VectorType>(Val->getType()))
+                  FloatTy = VectorType::get(FloatTy, VecTy);
+                Val = B.CreateBitCast(Val, FloatTy);
+              }
+            }
+            break;
+          }
+        }
         storeStageIOBlockValue(B, Val, Val->getType(), Access->ElementIDs, Row,
                                Component, Vertex, &ShadowValues,
                                SignedInt16ElementIDs);

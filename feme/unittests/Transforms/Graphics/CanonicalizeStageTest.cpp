@@ -1576,6 +1576,66 @@ TEST(CanonicalizeStageTest, RewritesSPIRVArrayOutputStorePerElementByteOffset) {
     EXPECT_TRUE(SeenRows.count(Row)) << "row " << Row;
 }
 
+/// (Roadmap L208) A `half`-typed `Output` global whose own store
+/// instruction's *value* operand is instead typed `i16` -- exactly the
+/// shape InstCombine's own "push a bitcast into its one store" fold
+/// produces from `bitcast i16 %x to half` immediately feeding a store
+/// (`FConvertRoundingModePattern`'s own bit-manipulation-based `f16`
+/// result, once optimized, being the motivating real-world case; see
+/// `SPIRVToLLVMPatterns.cpp`'s own `buildRTZNarrowingConversion` comment) --
+/// still resolves to a signature element whose `ComponentType` reflects the
+/// *global's own* declared type (`Float`/16, from `ValueTy` at signature-
+/// build time, independent of the store's own, possibly-folded value
+/// type), and the mismatched-type store value is reconciled back to `half`
+/// before `storeStageIOValue`'s own scalar-leaf widening ever inspects it --
+/// which otherwise cannot distinguish this from a genuine 16-bit *integer*
+/// leaf and would mis-route it through `feme.stage.output.store.i32`
+/// instead of `.f16`, leaving two different-typed stores to one shadow
+/// alloca that `PromoteMemToReg` then refuses to promote (the crash this
+/// regression test guards against).
+TEST(CanonicalizeStageTest,
+     ReconcilesFoldedBitcastIntegerStoreToDeclaredFloatOutputType) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_f16 = external addrspace(8) global half, !spirv.Decorations !0
+    define void @main(i16 %v) #0 {
+      store i16 %v, ptr addrspace(8) @out_f16
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentType, SignatureComponentType::Float);
+  EXPECT_EQ(Sig->Elements[0].BitWidth, 16u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // The reconciled store calls the `f16` overload directly with the
+    // original `half`-typed value (bitcast back from the folded `i16`),
+    // not `.i32` with a zero-extended widened value the way a genuine
+    // 16-bit *integer* leaf would.
+    EXPECT_TRUE(CI->getCalledFunction()->getName().ends_with(".f16"));
+    EXPECT_TRUE(CI->getArgOperand(3)->getType()->isHalfTy());
+  }
+  EXPECT_EQ(SeenStores, 1u);
+
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+}
+
 /// VectorType>` shape SPIRVToLLVM's `spirv.MatrixType` conversion produces
 /// (see SPIRVToLLVMPatterns.cpp) -- gets a signature element with
 /// `RowCount` set to its column count, and its store decomposes into one
