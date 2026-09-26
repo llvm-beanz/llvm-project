@@ -1392,16 +1392,37 @@ bool isFetchLevelIntrinsic(const CallInst &CI) {
 /// coordinate does not widen its own `ConstOffset` into a vector the way
 /// a depth-comparison sample's `Dref`-widened coordinate does for
 /// `Plain2D`/`Array2D` above.
+///
+/// \p AllowNonConstant (roadmap L202(a)) additionally accepts a
+/// non-constant (ordinary SSA-value) offset meeting the same shape/width/
+/// element-type checks below, for the two gather callers only
+/// (`isGatherCmpIntrinsic`'s and `isGatherIntrinsic`'s own call sites in
+/// `hasOnlySupportedImageUses`). Gather is the only family SPIR-V's own
+/// `ImageGatherExtended` capability permits a genuinely dynamic `Offset`
+/// image operand for at all (`SPIRV_IO_Offset`'s own
+/// `Capability<[SPIRV_C_ImageGatherExtended]>` in `SPIRVBase.td` -- an
+/// ordinary/depth-comparison *sample* only ever legally carries the
+/// compile-time-constant `ConstOffset` bit, never plain `Offset`), so no
+/// other caller ever passes `true` here. The runtime gather entry points
+/// this feeds (`femeCpuImageGather2DV4F32` et al.,
+/// `FeMeRuntimeCPU.c`) already take `OffsetX`/`OffsetY` as ordinary
+/// `int32_t` parameters computed at every invocation -- nothing about the
+/// actual gather-addressing math (`femeRTComputeBilinearSupport`) ever
+/// required the offset to be known at compile time; `isa<Constant>`
+/// here was simply never relaxed for the newer, non-`ConstOffset` shape
+/// this row (L202/L202(a)) adds support for at the dialect-conversion
+/// layer.
 bool isSupportedOffset(const Value *Offset, ImageShape Shape,
                        bool AllowArray2D = false,
-                       bool AllowPlain1DArray1D = false) {
+                       bool AllowPlain1DArray1D = false,
+                       bool AllowNonConstant = false) {
   bool IsPlain3D = Shape == ImageShape::Plain3D;
   bool Is1D = AllowPlain1DArray1D &&
               (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D);
   if (Shape != ImageShape::Plain2D && !IsPlain3D && !Is1D &&
       !(AllowArray2D && Shape == ImageShape::Array2D))
     return isZeroOffset(Offset);
-  if (!isa<Constant>(Offset))
+  if (!AllowNonConstant && !isa<Constant>(Offset))
     return false;
   if (Is1D)
     // Roadmap L66(k): accept a real scalar `i32` `ConstOffset` (the
@@ -1939,7 +1960,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isFloatTy() ||
           !isSupportedOffset(CI->getArgOperand(getDrefSampleOffsetIdx(false)),
                              Shape, /*AllowArray2D=*/true,
-                             /*AllowPlain1DArray1D=*/false) ||
+                             /*AllowPlain1DArray1D=*/false,
+                             /*AllowNonConstant=*/true) ||
           !isV4F32(CI->getType()))
         return false;
       continue;
@@ -2000,7 +2022,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           !CI->getArgOperand(DrefSampleDrefIdx)->getType()->isIntegerTy() ||
           !(HasOffsetsVector ||
             isSupportedOffset(GatherOffset, Shape, /*AllowArray2D=*/true,
-                              /*AllowPlain1DArray1D=*/false)) ||
+                              /*AllowPlain1DArray1D=*/false,
+                              /*AllowNonConstant=*/true)) ||
           (IsInteger ? !isV4I32(CI->getType()) : !isV4F32(CI->getType())))
         return false;
       continue;
