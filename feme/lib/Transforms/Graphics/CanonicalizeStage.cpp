@@ -648,6 +648,29 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
   // narrow the actual value at the same boundary.
   if (Scalar->isIntegerTy(1))
     return {SignatureComponentType::Bool, 32};
+  // (Roadmap L201(a)) A 16-bit integer (SPIR-V's `OpTypeInt 16`, LLVM
+  // `i16`) canonicalizes to an ordinary 32-bit element here, exactly
+  // like the `i1` case just above -- `StageStorage::buildStageStorage`
+  // has no addressable representation for anything but a 4-byte scalar
+  // (aside from the pre-existing, narrower 16-bit-*float* widened case
+  // below, which stays genuinely 16-bit through the signature and is
+  // widened by the wrapper itself instead, see its own comment). Unlike
+  // that float case, there is no existing wrapper-side widening for a
+  // 16-bit integer stage-IO value, so `loadStageIOValue`/
+  // `storeStageIOValue` below widen/narrow it at this same boundary
+  // instead, mirroring `i1`'s own round-trip exactly (a bit-preserving
+  // `zext`/`trunc` pair, not a numeric conversion): a 16-bit integer
+  // stage-IO element's own SPIR-V-declared signedness (`OpTypeInt 16 0`
+  // vs. `OpTypeInt 16 1`) is deliberately irrelevant to this round-trip
+  // (see `vktSpvAsm16bitStorageTests.cpp`'s own
+  // `addGraphics16BitStorageInputOutputInt16To16Group`, whose own
+  // "sint"-named cases still require *bit-exact*, not numeric, pass-
+  // through -- an earlier version of this fix tried `sext` here to match
+  // `SInt`, which broke the sibling `scalar_uint*`/`vector_uint*` cases
+  // instead), so `zext`'s bit-preserving pad and the load side's own
+  // `trunc` are correct here exactly as for `i1`.
+  if (auto *IntTy = dyn_cast<IntegerType>(Scalar); IntTy && IntTy->getBitWidth() == 16)
+    return {SignatureComponentType::SInt, 32};
   if (auto *IntTy = dyn_cast<IntegerType>(Scalar))
     return {SignatureComponentType::SInt, IntTy->getBitWidth()};
   // FeMe's model has no representation for anything else (aggregates,
@@ -1277,14 +1300,14 @@ Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
   if (Shadow)
     return B.CreateLoad(
         Ty, Shadow->getOrCreate(ElementID, Row, Component, Ty, B), Name);
-  // (Roadmap H6m) A `bool` (`i1`) leaf scalar was canonicalized to a
-  // 32-bit element by `getComponentType` above, so the `feme.stage.
-  // input.load` this element actually reads is `i32`-typed; narrow the
-  // loaded value back to `i1` here, at the same boundary, rather than
-  // leaving `Ty`'s two callers (the recursive cases above and
-  // `resolveOffsetWithinElement`'s own single-scalar caller) to each
-  // know about the widening.
-  if (Ty->isIntegerTy(1)) {
+  // (Roadmap H6m, L201(a)) A `bool` (`i1`) or 16-bit integer leaf scalar
+  // was canonicalized to a 32-bit element by `getComponentType` above, so
+  // the `feme.stage.input.load` this element actually reads is
+  // `i32`-typed; narrow the loaded value back down here, at the same
+  // boundary, rather than leaving `Ty`'s two callers (the recursive cases
+  // above and `resolveOffsetWithinElement`'s own single-scalar caller) to
+  // each know about the widening.
+  if (Ty->isIntegerTy(1) || Ty->isIntegerTy(16)) {
     Value *Wide = createStageInputLoad(B, B.getInt32Ty(), ElementID, Row,
                                        Component, Zero, Name);
     return B.CreateTrunc(Wide, Ty);
@@ -1334,16 +1357,28 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
     }
     return;
   }
-  // (Roadmap H6m) The store-side mirror of `loadStageIOValue`'s own `i1`
-  // widening: `getComponentType` canonicalized this leaf's element to a
-  // 32-bit scalar, so the `feme.stage.output.store` this emits must widen
-  // \p Val to match, not store the bare `i1` `StageStorage` has no
-  // addressable representation for. The shadow alloca (read-back within
-  // this same invocation) keeps \p Val's own `i1` type, matching
-  // `loadStageIOValue`'s `Shadow` load above, which is narrowed back down
-  // from `i32` only on the non-shadow (real stage-IO) path.
-  Value *StoredVal =
-      Ty->isIntegerTy(1) ? B.CreateZExt(Val, B.getInt32Ty()) : Val;
+  // (Roadmap H6m, L201(a)) The store-side mirror of `loadStageIOValue`'s
+  // own `i1`/16-bit-integer widening: `getComponentType` canonicalized
+  // this leaf's element to a 32-bit scalar, so the `feme.stage.output.
+  // store` this emits must widen \p Val to match, not store the bare,
+  // narrower value `StageStorage` has no addressable representation for.
+  // `zext` (a bit-preserving pad, not a numeric conversion) round-trips
+  // correctly regardless of the source's true signedness, since the load
+  // side's own `trunc` back down discards exactly those same padding
+  // bits -- and this element's own true SPIR-V signedness (`OpTypeInt 16
+  // 0` vs. `OpTypeInt 16 1`) is erased by the time this LLVM IR only has
+  // a plain, signedness-less `i16` to work with anyway (see
+  // `vktSpvAsm16bitStorageTests.cpp`'s own
+  // `addGraphics16BitStorageInputOutputInt16To16Group`, whose own comment
+  // says exactly this: a "sint"-named case's data must still round-trip
+  // *bit-exact*, "as long as we passed the bits in faithfully", even
+  // though it's `OpTypeInt 16 1`-declared). The shadow alloca (read-back
+  // within this same invocation) keeps \p Val's own narrower type,
+  // matching `loadStageIOValue`'s `Shadow` load above, which is narrowed
+  // back down from `i32` only on the non-shadow (real stage-IO) path.
+  Value *StoredVal = (Ty->isIntegerTy(1) || Ty->isIntegerTy(16))
+                         ? B.CreateZExt(Val, B.getInt32Ty())
+                         : Val;
   createStageOutputStore(B, ElementID, Row, Component, StoredVal, Zero);
   if (Shadow)
     B.CreateStore(Val, Shadow->getOrCreate(ElementID, Row, Component, Ty, B));

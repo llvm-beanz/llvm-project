@@ -4417,6 +4417,101 @@ TEST(CanonicalizeStageTest,
             static_cast<uint32_t>(cpu::StageLayoutScalarKind::Bool));
 }
 
+/// (Roadmap L201(a)) A 16-bit scalar integer (SPIR-V's `OpTypeInt 16`,
+/// LLVM `i16`) stage-IO input/output canonicalizes to a 32-bit element the
+/// same way `i1` does just above, rather than surviving to
+/// `StageStorage::buildStageStorage` at its true 16-bit width (which
+/// previously errored `"stage element 0 has a 16-bit scalar; only 32-bit
+/// (or, for a float, 16-bit widened) elements are implemented yet"`,
+/// exactly the message a real CTS run of
+/// `dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.
+/// input_output_int_16_to_16.scalar_sint0_frag` hit before this fix): the
+/// reflected `SignatureElement` is `{SInt, 32}`, the emitted
+/// `feme.stage.output.store`'s value operand is the `i16` zero-extended
+/// to `i32` -- deliberately bit-preserving, not numeric, regardless of
+/// this element's own `SignatureComponentType::SInt` tag: this same CTS
+/// group's own `scalar_sint*` cases are declared `OpTypeInt 16 1` yet
+/// (per that source file's own comment) still require bit-exact, not
+/// numeric, round-tripping, so a numeric `sext` here is wrong (an
+/// earlier version of this fix tried it, which broke the sibling
+/// `scalar_uint*`/`vector_uint*` cases that share this same
+/// `SignatureComponentType::SInt` tag instead) -- and the mirrored
+/// `feme.stage.input.load` truncated back down to `i16`, and
+/// `buildStageStorage` now succeeds building storage for it instead of
+/// erroring.
+TEST(CanonicalizeStageTest,
+     CanonicalizesInt16StageIOScalarToA32BitElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_var = external addrspace(7) constant i16, !spirv.Decorations !0
+    @out_var = external addrspace(8) global i16, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load i16, ptr addrspace(7) @in_var
+      store i16 %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 30, i32 0}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  EXPECT_EQ(Sig->Elements[0].ComponentType, SignatureComponentType::SInt);
+  EXPECT_EQ(Sig->Elements[0].BitWidth, 32u);
+  EXPECT_EQ(Sig->Elements[1].ComponentType, SignatureComponentType::SInt);
+  EXPECT_EQ(Sig->Elements[1].BitWidth, 32u);
+
+  unsigned SeenLoads = 0, SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    if (Kind == StageOpKind::InputLoad) {
+      ++SeenLoads;
+      EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+    }
+    if (Kind == StageOpKind::OutputStore) {
+      ++SeenStores;
+      Value *StoredVal = CI->getArgOperand(3);
+      EXPECT_TRUE(StoredVal->getType()->isIntegerTy(32));
+      auto *ZExt = dyn_cast<ZExtInst>(StoredVal);
+      ASSERT_TRUE(ZExt);
+      EXPECT_TRUE(ZExt->getOperand(0)->getType()->isIntegerTy(16));
+    }
+  }
+  EXPECT_EQ(SeenLoads, 1u);
+  EXPECT_EQ(SeenStores, 1u);
+  // The load's own `i32` result is truncated back down to `i16` before
+  // any other use sees it (`main`'s own `store i16 %v, ...` did not
+  // change shape, only what feeds it).
+  bool SawTruncToI16 = false;
+  for (Instruction &I : instructions(F))
+    if (auto *T = dyn_cast<TruncInst>(&I))
+      if (T->getDestTy()->isIntegerTy(16))
+        SawTruncToI16 = true;
+  EXPECT_TRUE(SawTruncToI16);
+
+  // `StageStorage::buildStageStorage` -- previously erroring "stage
+  // element N has a 16-bit scalar; only 32-bit (or, for a float, 16-bit
+  // widened) elements are implemented yet" on this exact signature -- now
+  // succeeds for both directions, confirming the fix all the way through
+  // the boundary this row's own scope covers.
+  Expected<StageStorage> InStorage = buildStageStorage(
+      *Sig, SignatureDirection::Input, /*InvocationCount=*/4);
+  ASSERT_THAT_EXPECTED(InStorage, Succeeded());
+  Expected<StageStorage> OutStorage = buildStageStorage(
+      *Sig, SignatureDirection::Output, /*InvocationCount=*/4);
+  ASSERT_THAT_EXPECTED(OutStorage, Succeeded());
+}
+
 /// through `TaskPayloadGlobalVariablePattern`'s own address-space-14 global
 /// import shape (roadmap H6h) -- canonicalizes into
 /// `feme.stage.task.payload.store` by its resolved constant byte offset,
