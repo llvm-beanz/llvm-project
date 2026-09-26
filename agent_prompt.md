@@ -61,27 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **L201(e)** (50 memory-model cases): cross-reference against the
-   existing milestone-9 barrier-linearization row before opening new work
-   -- likely a known duplicate. Estimate: 10 minutes. Cheapest win
-   available, still untouched from 2 sessions ago.
-2. **L201(a)** (`16bit_storage.input_output_*`, 300 cases): generic
-   `VK_ERROR_INITIALIZATION_FAILED` with no diagnostic text even with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` -- needs a `gdb` session or
-   submission-path instrumentation to get a real error before any fix is
-   possible. Estimate: 1-2 hours just to get a real error message, unknown
-   after that. Highest case count of any remaining open L201 row.
-3. **L201(d)** (mesh-shader/tessellation f16 I/O correctness, 120 cases
-   combined): "Result does not match reference" with no pixel-diff detail
-   -- needs `--deqp-log-images=enable` or a hand-built repro with
-   known-good values to even start. Estimate: 1 hour to get first real
-   diagnostic.
-4. **L201(b)/(c)** (27 + 25 cases): both reduced to distinct symptoms
-   (`feme-cpu-wrap-patch-constant` unknown-signature-element for (b);
-   unreduced composite-op cluster for (c)) but neither started. Lower
-   priority than (a)/(d) purely on case count.
-5. A full/broad CTS re-run has not been done since the 2026-09-26
-   baseline -- only targeted case-list reruns. Once L201's remaining rows
-   are closed, a fresh full run would re-baseline the verified-failure
-   count and might surface newly-fixed incidental cases the same way this
-   session's L202 rerun did.
+1. **L206** (signedness-preservation through SPIRVToLLVM, ~90 cases): the
+   only unstarted item with a fully diagnosed root cause and a concrete
+   scope (preserve `OpTypeInt`'s `Signedness` bit as `!feme.spirv.*`
+   metadata through `SPIRVToLLVMPatterns.cpp`, teach `CanonicalizeStage.
+   cpp` to pick `zext`/`sext` per element). Estimate: half a day -- the
+   design is clear, but it's a new metadata channel through a conversion
+   pass, not a two-line patch.
+2. **L205** (chain-with-phi branch generalization, 50 cases): scoped in
+   detail last session, still not started. Estimate: half a day to a
+   full day (`EntryWrapper.cpp`'s `BranchShape`/`matchBranchShape`/
+   `buildWrapperForBranch`, three coordinated changes).
+3. **L201(d)** (mesh/tessellation f16 I/O, 120 cases): "Result does not
+   match reference," no pixel detail yet. Needs
+   `--deqp-log-images=enable` or a hand-built repro first. Estimate: 1
+   hour just to get a first real diagnostic, unknown after that.
+4. **L201(b)/(c)** (27 + 25 cases): reduced to distinct symptoms last
+   session, neither started. Lower case count than (d)/L205/L206.
+5. `input_output_float_32_to_16`'s own 100 `_rtz`-rounding-mode failures
+   (found this session, not investigated): a pre-existing, separate gap,
+   not part of L201(a)'s own scope. Worth a 10-minute look to confirm
+   whether it's tracked anywhere before opening a new row.
+6. A full/broad CTS re-run is still overdue (last one: 2026-09-26). Once
+   L205/L206 close, that's the natural trigger point.
