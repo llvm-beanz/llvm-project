@@ -1234,3 +1234,87 @@ No Vulkan feature/extension advertisement changed (a pure correctness
 fix within the existing `tessellationShader` feature's own
 implementation), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap L223: hull-shader barrier-split alloca-capture bug (verifier crash + dangling pointer)
+
+Root-caused and fixed the long-standing, previously-untriaged
+`llvm.lifetime.start/end can only be used on alloca or poison`
+verifier crash on hlsl-sourced tessellation-control shaders (first
+observed several sessions ago at
+`dEQP-VK.tessellation.winding.default_domain.hlsl_quads_ccw`, later
+also blocking `fractional_spacing.hlsl_{even,odd}` once `L218`
+unblocked pipeline creation far enough to reach it). This had halted
+the whole `tessellation.*` batch at the same point across many
+sessions, treated as unrelated background noise.
+
+Two stacked root causes, both inside
+`splitTessellationControlEntry`'s roadmap-H4c "captured SSA value"
+mechanism (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`):
+
+1. `feme::cpu::InlineHelperFunctionsPass` inlines an HLSL hull
+   shader's separate patch-constant function (`PCF()`, called via
+   `OpFunctionCall` in glslang's own raw SPIR-V -- confirmed via a
+   temporary SPIR-V disassembly dump added directly to VK-GL-CTS's own
+   `vkShaderToSpirV.cpp`, reverted after use, that these `.hlsl_*`
+   cases are compiled by glslang's built-in HLSL frontend, not DXC)
+   into the shared entry function. LLVM's standard `InlineFunction`
+   inliner utility hoists that inlined callee's own local `alloca`
+   (HLSL's `HS_CONSTANT_OUT output;`) into the *caller's* entry block,
+   which ends up on the control-point side of the later barrier split,
+   even though every real use of it -- the GEPs/stores building the
+   struct, the final reload, and its `llvm.lifetime.start`/`.end`
+   markers -- remains entirely on the patch-constant side. H4c's
+   generic "route the captured value's address through a synthetic
+   global" clone step then blindly rewrites every operand referencing
+   that alloca, including the lifetime markers, producing a marker
+   whose operand is a reloaded pointer rather than a real
+   `alloca`/`poison` -- rejected outright by `llvm::verifyModule`.
+2. Fixing only the lifetime-marker symptom (erasing any post-split
+   marker left pointing at a non-`alloca`/`poison` value -- always
+   sound, since a lifetime marker is only ever an optimization hint)
+   surfaced a second, deeper bug: H4c's global-routing design was only
+   ever intended for ordinary scalar/vector SSA-value captures
+   (verified against `SplitsHullEntryThreadingCapturedSSAValue`'s own
+   doc comment/test), never a `ptr`-typed capture pointing at stack
+   memory -- routing such a pointer's *address* through a global and
+   dereferencing it from `main.patchconstant` (a separately-invoked
+   function, never inlined back into `main`, confirmed via
+   `FEME_DUMP_IR`) reads through `main`'s own already-unwound stack
+   frame, a dangling-pointer bug (observed as a SIGSEGV in
+   unsymbolicated JIT code once the lifetime-marker crash alone was
+   fixed).
+
+Real fix: when a captured value is an `AllocaInst` whose uses are all
+confined to the barrier-split region, clone the alloca directly into
+the patch-constant phase (real, independent local storage, no dangling
+access) instead of routing its address through a global at all; kept
+the lifetime-marker-erasing fix as a defensive fallback for any other
+capture shape not covered by the alloca-cloning path. New unit test
+`CanonicalizeStageTest.SplitsHullEntryCloningCapturedAlloca` (verified
+via stash A/B testing to fail without the fix, pass with it).
+
+CTS-confirmed:
+
+- `dEQP-VK.tessellation.fractional_spacing.hlsl_{even,odd}` and all 48
+  `dEQP-VK.tessellation.winding.*.hlsl_*` cases: now **Pass** (were a
+  hard crash before, halting the whole batch).
+- The full 1114-case `dEQP-VK.tessellation.*` mustpass sample
+  (`external/vulkancts/mustpass/main/vk-default/tessellation.txt`) now
+  runs to completion with **0 crashes**: **520/1114 Pass, 156 Fail,
+  438 Not supported** -- the 156 failures matching the pre-existing,
+  already-tracked baseline exactly (same `invariance`,
+  `user_defined_io`, `primitive_discard`, `shader_input_output`,
+  `misc_draw`, `tesscoord`, `common_edge`, `matrix_multiplication`,
+  and `geometry_interaction` groups noted in prior reports) -- **0
+  regressions, 0 newly broken**. This is the first time the full
+  1114-case mustpass list (rather than a hand-picked 1088-case
+  sample excluding the crashing cases) has run to completion.
+
+`ninja check-feme`: 3383/3386 passed (0 failed, 3 pre-existing
+unsupported, +1 net new unit test).
+
+No Vulkan feature/extension advertisement changed (a pure internal-
+compiler correctness fix inside the tessellation-control barrier-split
+lowering, touching no feature/extension surface), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
