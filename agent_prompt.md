@@ -61,27 +61,29 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** Root-cause and fix `L226`
-   (`user_defined_io`, 27 cases). Full repro command is in the `L226` roadmap
-   row: `deqp-vk
-   --deqp-case=dEQP-VK.tessellation.user_defined_io.per_patch_block.vertex_io_array_size_implicit.triangles`
-   against this session's locally-built `deqp-vk`/`libfeme_vulkan.so`. Start by
-   dumping the imported LLVM IR for that one case and finding the specific
-   unresolved `spirv_var_N` global; then trace which `CanonicalizeStage.cpp`
-   classification helper should claim it. This is the largest untriaged group
-   and now has a concrete repro + hypothesis, unlike last session's "unknown
-   effort" note.
-2. **(30-45 minutes)** Reconfigure the main `llvm-project` build with `clang` +
-   the `offload-test-suite` external project wired in, then run
-   `check-hlsl-feme-vk` at least once this environment to re-establish that
-   baseline (448 Passed / 32 XFAIL / 200 Unsupported / 0 unexpected last
-   confirmed, but not reconfirmed in this fresh checkout).
-3. **(a few hours)** The broader-than-tessellation CTS re-run
-   (`api`/`pipeline`/`shader_render`/`synchronization`) is now three sessions
-   overdue. `deqp-vk` is built and ready in this environment
-   (`/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk`);
-   this just needs a dedicated time slot using the same
-   `feme/utils/run_vulkan_cts.py` harness.
-4. Two real `git stash push/pop` pairs used this session, both for L225's own
-   before/after CTS measurement; both popped immediately after each measurement,
-   nothing left stashed.
+1. **(a few hours, dedicated session)** Root-cause `L228(a)`, the
+   `timeline_semaphore` cluster (210 of the 416 sampled failures, the single
+   largest signal this session found) -- start from `queueSubmit`'s own
+   `VK_ERROR_INITIALIZATION_FAILED` and trace into `feme/lib/Vulkan/`'s
+   queue-submission path to confirm whether `VK_KHR_timeline_semaphore` is
+   genuinely wired up at all.
+2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(e)` and
+   root-cause it the same way `L226` was this session: reproduce with a direct
+   `offloader`/`deqp-vk` invocation outside the batch harness first, then trace
+   into `CanonicalizeStage.cpp`/`SPIRVToLLVMPatterns.cpp`/`feme/lib/Vulkan/` as
+   the error message points. `L227(a)` (the SPIR-V dialect legalization crash on
+   `Workgroup`-storage `spirv.Store`) is the most structurally interesting -- a
+   hard legalization failure, not a silent wrong-value bug, so likely has the
+   smallest, most localized fix.
+3. **(30-45 minutes)** `L227(e)` is probably the fastest win in the whole list:
+   confirm `Feature/PushConstant/array_of_matrices.test` passes reliably (run it
+   3-5 times back to back, ruling out flakiness) then remove/narrow its stale
+   `XFAIL: Clang`/`XFAIL: DXC` markers directly on `offload-test-suite`'s own
+   `feme` branch (a self-contained fix in that separate repo, not
+   `llvm-project`).
+4. **(a few hours)** `L228(b)`/`L228(c)` (compressed-format blits, MSAA
+   multi-layer clears) are the next two largest clusters (90 and 57 sampled
+   failures) once the timeline-semaphore one above is either fixed or scoped
+   out.
+5. One real `git stash push`/`pop` pair used this session (both for the new L226
+   unit test's own pre-fix-fails/post-fix-passes A/B), popped immediately after.
