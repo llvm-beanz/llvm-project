@@ -183,12 +183,18 @@ Error checkImagePair(Image *Src, Image *Dst, const char *What) {
   return Error::success();
 }
 
-/// Whether \p Offsets describes a region this driver can address: a
-/// nonzero extent on X and Y (their sign selects mirroring, handled by the
-/// caller) and no 3D depth range beyond one slice.
+/// Whether \p Offsets describes a region this driver can address: nonzero
+/// extents on X, Y, and Z (their sign selects mirroring on that axis,
+/// handled by the caller). A real Vulkan region's Z range is always
+/// exactly one slice for a 2D/2D-array image (`vkCmdBlitImage`'s own
+/// VUIDs require `srcOffsets[0].z`/`[1].z` to be `0`/`1`) and only ever
+/// spans more than one for a genuine `VK_IMAGE_TYPE_3D` image's own depth
+/// (roadmap L228(g)) -- `Image::depth()` itself is always `1` for a
+/// non-3D image (`VkImageCreateInfo::extent.depth` must be, per spec), so
+/// no separate image-type check is needed here.
 bool isSimpleRegion(const VkOffset3D Offsets[2]) {
   return Offsets[1].x != Offsets[0].x && Offsets[1].y != Offsets[0].y &&
-         Offsets[1].z - Offsets[0].z == 1;
+         Offsets[1].z != Offsets[0].z;
 }
 
 } // namespace
@@ -717,7 +723,8 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     if (!isSimpleRegion(Region.srcOffsets) ||
         !isSimpleRegion(Region.dstOffsets))
       return createStringError(inconvertibleErrorCode(),
-                               "a multi-slice blit region is not implemented");
+                               "a degenerate (zero-extent) blit region is "
+                               "not implemented");
     uint32_t SrcLevel = Region.srcSubresource.mipLevel;
     uint32_t DstLevel = Region.dstSubresource.mipLevel;
     if (SrcLevel >= Src->mipLevels() || DstLevel >= Dst->mipLevels())
@@ -733,19 +740,31 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     // texel's write.
     uint32_t SrcLevelWidth = std::max(1u, Src->width() >> SrcLevel);
     uint32_t SrcLevelHeight = std::max(1u, Src->height() >> SrcLevel);
+    // (Roadmap L228(g)) Only ever greater than 1 for a genuine
+    // `VK_IMAGE_TYPE_3D` source/destination -- `Image::depth()` is always
+    // 1 otherwise (see `isSimpleRegion`'s comment above).
+    uint32_t SrcLevelDepth = std::max(1u, Src->depth() >> SrcLevel);
     // Signed corner-to-corner extents: a negative one mirrors that axis
     // ("Blits" in feme/docs/FeMeVulkanDesign.md), matching Vulkan's own
     // "opposite corners flip the region" rule.
     int64_t SrcX0 = Region.srcOffsets[0].x, SrcX1 = Region.srcOffsets[1].x;
     int64_t SrcY0 = Region.srcOffsets[0].y, SrcY1 = Region.srcOffsets[1].y;
+    int64_t SrcZ0 = Region.srcOffsets[0].z, SrcZ1 = Region.srcOffsets[1].z;
     int64_t DstX0 = Region.dstOffsets[0].x, DstX1 = Region.dstOffsets[1].x;
     int64_t DstY0 = Region.dstOffsets[0].y, DstY1 = Region.dstOffsets[1].y;
+    int64_t DstZ0 = Region.dstOffsets[0].z, DstZ1 = Region.dstOffsets[1].z;
     int64_t SrcMinX = std::min(SrcX0, SrcX1), SrcMaxX = std::max(SrcX0, SrcX1);
     int64_t SrcMinY = std::min(SrcY0, SrcY1), SrcMaxY = std::max(SrcY0, SrcY1);
+    int64_t SrcMinZ = std::min(SrcZ0, SrcZ1), SrcMaxZ = std::max(SrcZ0, SrcZ1);
     uint32_t DstWidth = uint32_t(std::abs(DstX1 - DstX0));
     uint32_t DstHeight = uint32_t(std::abs(DstY1 - DstY0));
+    // (Roadmap L228(g)) Always 1 for a 2D/2D-array region (real Vulkan
+    // requires it); only a genuine 3D region's own depth range can be
+    // greater.
+    uint32_t DstDepth = uint32_t(std::abs(DstZ1 - DstZ0));
     int64_t DstStepX = DstX1 >= DstX0 ? 1 : -1;
     int64_t DstStepY = DstY1 >= DstY0 ? 1 : -1;
+    int64_t DstStepZ = DstZ1 >= DstZ0 ? 1 : -1;
     uint32_t LayerCount =
         std::min(Src->resolvedLayerCount(Region.srcSubresource.baseArrayLayer,
                                          Region.srcSubresource.layerCount),
@@ -755,140 +774,176 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
       uint32_t SrcLayer = Region.srcSubresource.baseArrayLayer + Layer;
       uint32_t DstLayer = Region.dstSubresource.baseArrayLayer + Layer;
-      for (uint32_t Y = 0; Y != DstHeight; ++Y) {
-        for (uint32_t X = 0; X != DstWidth; ++X) {
-          // Interpolate the destination texel's fraction across [0, 1] of
-          // the destination rectangle, then find the source-space position
-          // that same fraction names between the source rectangle's own
-          // two (possibly reversed) corners -- one formula for every
-          // combination of mirrored/unmirrored source and destination.
-          double Tx = (X + 0.5) / DstWidth;
-          double Ty = (Y + 0.5) / DstHeight;
-          double U = SrcX0 + Tx * (SrcX1 - SrcX0);
-          double V = SrcY0 + Ty * (SrcY1 - SrcY0);
-          int64_t DstX = DstX0 + int64_t(X) * DstStepX;
-          int64_t DstY = DstY0 + int64_t(Y) * DstStepY;
-          void *DstTexel = Dst->texelPointer(DstLevel, DstLayer, uint32_t(DstX),
-                                             uint32_t(DstY),
-                                             uint32_t(Region.dstOffsets[0].z));
-          // Roadmap E16: a destination coordinate outside the image's
-          // declared extent discards this texel's write rather than
-          // faulting through a null pointer.
-          if (!DstTexel)
-            continue;
+      // (Roadmap L228(g)) `LayerCount` is always 1 whenever `DstDepth`
+      // could ever be greater than 1 (a 3D image's own subresource is
+      // always `baseArrayLayer=0`/`layerCount=1`, per spec), so nesting
+      // this loop inside the layer loop never iterates both dimensions at
+      // once in practice -- it is written this way only so the same code
+      // handles a 2D-array region (`DstDepth == 1`, `LayerCount > 1`) and
+      // a 3D region (`DstDepth > 1`, `LayerCount == 1`) uniformly.
+      for (uint32_t Z = 0; Z != DstDepth; ++Z) {
+        double Tz = (Z + 0.5) / DstDepth;
+        double W = SrcZ0 + Tz * (SrcZ1 - SrcZ0);
+        int64_t DstZ = DstZ0 + int64_t(Z) * DstStepZ;
+        for (uint32_t Y = 0; Y != DstHeight; ++Y) {
+          for (uint32_t X = 0; X != DstWidth; ++X) {
+            // Interpolate the destination texel's fraction across [0, 1]
+            // of the destination rectangle, then find the source-space
+            // position that same fraction names between the source
+            // rectangle's own two (possibly reversed) corners -- one
+            // formula for every combination of mirrored/unmirrored source
+            // and destination.
+            double Tx = (X + 0.5) / DstWidth;
+            double Ty = (Y + 0.5) / DstHeight;
+            double U = SrcX0 + Tx * (SrcX1 - SrcX0);
+            double V = SrcY0 + Ty * (SrcY1 - SrcY0);
+            int64_t DstX = DstX0 + int64_t(X) * DstStepX;
+            int64_t DstY = DstY0 + int64_t(Y) * DstStepY;
+            void *DstTexel = Dst->texelPointer(
+                DstLevel, DstLayer, uint32_t(DstX), uint32_t(DstY),
+                uint32_t(DstZ));
+            // Roadmap E16: a destination coordinate outside the image's
+            // declared extent discards this texel's write rather than
+            // faulting through a null pointer.
+            if (!DstTexel)
+              continue;
 
-          auto srcTexel = [&](int64_t SX, int64_t SY) {
-            SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
-            SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
-            // Roadmap E16: clamp again into the mip's own declared extent,
-            // so a source rectangle naming out-of-bounds coordinates still
-            // reads a defined (edge-clamped) texel instead of faulting.
-            SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
-            SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
-            return Src->texelPointer(SrcLevel, SrcLayer, uint32_t(SX),
-                                     uint32_t(SY),
-                                     uint32_t(Region.srcOffsets[0].z));
-          };
+            auto srcTexel = [&](int64_t SX, int64_t SY, int64_t SZ) {
+              SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
+              SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+              SZ = std::clamp<int64_t>(SZ, SrcMinZ, SrcMaxZ - 1);
+              // Roadmap E16: clamp again into the mip's own declared
+              // extent, so a source rectangle naming out-of-bounds
+              // coordinates still reads a defined (edge-clamped) texel
+              // instead of faulting.
+              SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
+              SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
+              SZ = std::clamp<int64_t>(SZ, 0, int64_t(SrcLevelDepth) - 1);
+              return Src->texelPointer(SrcLevel, SrcLayer, uint32_t(SX),
+                                       uint32_t(SY), uint32_t(SZ));
+            };
 
-          // Unpacks the source texel at (\p SX, \p SY) (clamped into the
-          // source rectangle) into a normalized color: through
-          // `feme::vulkan::decodeASTCBlock` and then `R8G8B8A8_UNORM`'s
-          // own unpack case when `SrcCompressed` (roadmap E22's only
-          // caller of `decodeASTCBlock` -- a copy never decodes, it
-          // reinterprets whole blocks verbatim; see `runCopyImage`'s
-          // comment), or through the ordinary per-format unpack table
-          // otherwise.
-          auto srcColor = [&](int64_t SX, int64_t SY,
-                              std::array<double, 4> &Out) -> Error {
-            SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
-            SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
-            // Roadmap E16: same additional clamp into the mip's own
-            // declared extent as `srcTexel` above.
-            SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
-            SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
-            if (!SrcCompressed)
+            // Unpacks the source texel at (\p SX, \p SY, \p SZ) (clamped
+            // into the source rectangle) into a normalized color: through
+            // `feme::vulkan::decodeASTCBlock` and then `R8G8B8A8_UNORM`'s
+            // own unpack case when `SrcCompressed` (roadmap E22's only
+            // caller of `decodeASTCBlock` -- a copy never decodes, it
+            // reinterprets whole blocks verbatim; see `runCopyImage`'s
+            // comment), or through the ordinary per-format unpack table
+            // otherwise.
+            auto srcColor = [&](int64_t SX, int64_t SY, int64_t SZ,
+                                std::array<double, 4> &Out) -> Error {
+              SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
+              SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+              SZ = std::clamp<int64_t>(SZ, SrcMinZ, SrcMaxZ - 1);
+              // Roadmap E16: same additional clamp into the mip's own
+              // declared extent as `srcTexel` above.
+              SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
+              SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
+              SZ = std::clamp<int64_t>(SZ, 0, int64_t(SrcLevelDepth) - 1);
+              if (!SrcCompressed)
+                return feme::graphics::unpackColor(
+                    Src->format(),
+                    ArrayRef<uint8_t>(
+                        static_cast<const uint8_t *>(Src->texelPointer(
+                            SrcLevel, SrcLayer, uint32_t(SX), uint32_t(SY),
+                            uint32_t(SZ))),
+                        SrcTexelSize),
+                    Out);
+              uint32_t TX = uint32_t(SX), TY = uint32_t(SY);
+              uint32_t BlockX = TX / SrcBlockW, BlockY = TY / SrcBlockH;
+              const auto *Block = static_cast<const uint8_t *>(
+                  Src->blockPointer(SrcLevel, SrcLayer, BlockX, BlockY,
+                                    uint32_t(SZ)));
+              // (Roadmap H8o) A BC source decodes through `decodeBCBlock`
+              // into whichever already-runtime-supported `ResourceFormat`
+              // its own sub-family maps to (`SrcBCTarget`); (roadmap H8j)
+              // an ETC2/EAC source likewise through `decodeETC2FormatBlock`
+              // (`SrcETC2Target`); an ASTC source always decodes through
+              // `decodeASTCBlock` into RGBA8.
+              feme::cpu::ResourceFormat DecodedFormat =
+                  feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
+              uint32_t DecodedBytesPerTexel = 4;
+              if (SrcIsBC) {
+                decodeBCBlock(Src->format(), Block, DecodeBuf.data());
+                DecodedFormat = SrcBCTarget.Format;
+                DecodedBytesPerTexel = SrcBCTarget.BytesPerTexel;
+              } else if (SrcIsETC2) {
+                decodeETC2FormatBlock(Src->format(), Block, DecodeBuf.data());
+                DecodedFormat = SrcETC2Target.Format;
+                DecodedBytesPerTexel = SrcETC2Target.BytesPerTexel;
+              } else {
+                decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
+              }
+              uint32_t InBlockX = TX % SrcBlockW, InBlockY = TY % SrcBlockH;
+              const uint8_t *Texel =
+                  &DecodeBuf[(size_t(InBlockY) * SrcBlockW + InBlockX) *
+                            DecodedBytesPerTexel];
               return feme::graphics::unpackColor(
-                  Src->format(),
-                  ArrayRef<uint8_t>(
-                      static_cast<const uint8_t *>(Src->texelPointer(
-                          SrcLevel, SrcLayer, uint32_t(SX), uint32_t(SY),
-                          uint32_t(Region.srcOffsets[0].z))),
-                      SrcTexelSize),
+                  DecodedFormat, ArrayRef<uint8_t>(Texel, DecodedBytesPerTexel),
                   Out);
-            uint32_t TX = uint32_t(SX), TY = uint32_t(SY);
-            uint32_t BlockX = TX / SrcBlockW, BlockY = TY / SrcBlockH;
-            const auto *Block = static_cast<const uint8_t *>(
-                Src->blockPointer(SrcLevel, SrcLayer, BlockX, BlockY,
-                                  uint32_t(Region.srcOffsets[0].z)));
-            // (Roadmap H8o) A BC source decodes through `decodeBCBlock`
-            // into whichever already-runtime-supported `ResourceFormat`
-            // its own sub-family maps to (`SrcBCTarget`); (roadmap H8j)
-            // an ETC2/EAC source likewise through `decodeETC2FormatBlock`
-            // (`SrcETC2Target`); an ASTC source always decodes through
-            // `decodeASTCBlock` into RGBA8.
-            feme::cpu::ResourceFormat DecodedFormat =
-                feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
-            uint32_t DecodedBytesPerTexel = 4;
-            if (SrcIsBC) {
-              decodeBCBlock(Src->format(), Block, DecodeBuf.data());
-              DecodedFormat = SrcBCTarget.Format;
-              DecodedBytesPerTexel = SrcBCTarget.BytesPerTexel;
-            } else if (SrcIsETC2) {
-              decodeETC2FormatBlock(Src->format(), Block, DecodeBuf.data());
-              DecodedFormat = SrcETC2Target.Format;
-              DecodedBytesPerTexel = SrcETC2Target.BytesPerTexel;
-            } else {
-              decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
-            }
-            uint32_t InBlockX = TX % SrcBlockW, InBlockY = TY % SrcBlockH;
-            const uint8_t *Texel =
-                &DecodeBuf[(size_t(InBlockY) * SrcBlockW + InBlockX) *
-                          DecodedBytesPerTexel];
-            return feme::graphics::unpackColor(
-                DecodedFormat, ArrayRef<uint8_t>(Texel, DecodedBytesPerTexel),
-                Out);
-          };
+            };
 
-          if (Filter == VK_FILTER_NEAREST) {
-            if (SameFormat) {
-              std::memcpy(DstTexel, srcTexel(int64_t(U), int64_t(V)),
-                          SrcTexelSize);
+            if (Filter == VK_FILTER_NEAREST) {
+              if (SameFormat) {
+                std::memcpy(DstTexel,
+                            srcTexel(int64_t(U), int64_t(V), int64_t(W)),
+                            SrcTexelSize);
+                continue;
+              }
+              std::array<double, 4> Sample{};
+              if (Error E =
+                      srcColor(int64_t(U), int64_t(V), int64_t(W), Sample))
+                return E;
+              MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
+                                           DstTexelSize);
+              if (Error E = feme::graphics::packClearColor(Dst->format(),
+                                                           Sample, Out))
+                return E;
               continue;
             }
-            std::array<double, 4> Sample{};
-            if (Error E = srcColor(int64_t(U), int64_t(V), Sample))
-              return E;
+
+            // Trilinear (roadmap L228(g) generalized the pre-existing
+            // bilinear X/Y-only case to a third, Z axis): unpack the
+            // eight neighbors (four per Z-plane, following the same
+            // scheme the original four-neighbor X/Y case used), weight
+            // them, repack into the destination's own format. A 2D/
+            // 2D-array region's own `W` is always an integer plus exactly
+            // 0.5 (`DstDepth == 1` forces `Tz == 0.5` and `SrcZ0 == SrcZ1
+            // - 1`), so `WZ` collapses to `0` and this reduces to the
+            // original bilinear case's four-neighbor result exactly (the
+            // `Z0 + 1` neighbor's own weight is always `0` in that case).
+            double FX = U - 0.5, FY = V - 0.5, FZ = W - 0.5;
+            int64_t X0 = int64_t(std::floor(FX)), Y0 = int64_t(std::floor(FY)),
+                    Z0 = int64_t(std::floor(FZ));
+            double WX = FX - X0, WY = FY - Y0, WZ = FZ - Z0;
+            std::array<double, 4> Accum{};
+            const std::tuple<int64_t, int64_t, int64_t> Neighbors[8] = {
+                {X0, Y0, Z0},         {X0 + 1, Y0, Z0},
+                {X0, Y0 + 1, Z0},     {X0 + 1, Y0 + 1, Z0},
+                {X0, Y0, Z0 + 1},     {X0 + 1, Y0, Z0 + 1},
+                {X0, Y0 + 1, Z0 + 1}, {X0 + 1, Y0 + 1, Z0 + 1}};
+            const double Weights[8] = {
+                (1 - WX) * (1 - WY) * (1 - WZ), WX * (1 - WY) * (1 - WZ),
+                (1 - WX) * WY * (1 - WZ),       WX * WY * (1 - WZ),
+                (1 - WX) * (1 - WY) * WZ,       WX * (1 - WY) * WZ,
+                (1 - WX) * WY * WZ,             WX * WY * WZ};
+            for (unsigned N = 0; N != 8; ++N) {
+              std::array<double, 4> Sample{};
+              if (Error E =
+                      srcColor(std::get<0>(Neighbors[N]),
+                              std::get<1>(Neighbors[N]),
+                              std::get<2>(Neighbors[N]), Sample))
+                return E;
+              for (unsigned C = 0; C != 4; ++C)
+                Accum[C] += Sample[C] * Weights[N];
+            }
             MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
                                          DstTexelSize);
             if (Error E =
-                    feme::graphics::packClearColor(Dst->format(), Sample, Out))
+                    feme::graphics::packClearColor(Dst->format(), Accum, Out))
               return E;
-            continue;
           }
-
-          // Bilinear: unpack the four neighbors, weight them, repack into
-          // the destination's own format.
-          double FX = U - 0.5, FY = V - 0.5;
-          int64_t X0 = int64_t(std::floor(FX)), Y0 = int64_t(std::floor(FY));
-          double WX = FX - X0, WY = FY - Y0;
-          std::array<double, 4> Accum{};
-          const std::pair<int64_t, int64_t> Neighbors[4] = {
-              {X0, Y0}, {X0 + 1, Y0}, {X0, Y0 + 1}, {X0 + 1, Y0 + 1}};
-          const double Weights[4] = {(1 - WX) * (1 - WY), WX * (1 - WY),
-                                     (1 - WX) * WY, WX * WY};
-          for (unsigned N = 0; N != 4; ++N) {
-            std::array<double, 4> Sample{};
-            if (Error E = srcColor(Neighbors[N].first, Neighbors[N].second,
-                                   Sample))
-              return E;
-            for (unsigned C = 0; C != 4; ++C)
-              Accum[C] += Sample[C] * Weights[N];
-          }
-          MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
-                                       DstTexelSize);
-          if (Error E =
-                  feme::graphics::packClearColor(Dst->format(), Accum, Out))
-            return E;
         }
       }
     }
