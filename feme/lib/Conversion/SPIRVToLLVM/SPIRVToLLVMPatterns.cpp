@@ -12004,6 +12004,34 @@ public:
     if (!MatrixTy)
       return Rewriter.notifyMatchFailure(Op, "not a whole-matrix store");
 
+    // `Function`-storage matrix locals (roadmap L211, reduced from
+    // `offload-test-suite`'s own `Basic/Matrix/matrix_splat_cast.test`)
+    // have no declared byte layout to reconcile at all -- unlike a
+    // buffer/block member, whose own `Offset`/`MatrixStride` decoration
+    // this pattern's tightening exists to satisfy, a Function-storage
+    // local's own pointee is declared purely by
+    // `AggregateInitializedVariablePattern` (or upstream's own
+    // `VariableOp` pattern for the uninitialized case), both of which use
+    // the ordinary "natural" `spirv::MatrixType` conversion (this class's
+    // own file comment's "ABI-rounded" shape) for the alloca itself, with
+    // no tightening of their own. Tightening only the *store* here, while
+    // every dynamically-indexed element read (`spirv.AccessChain` into
+    // `A[row][col]`) still falls through to MLIR's own generic
+    // `AccessChainPattern` -- which computes its own GEP against that same
+    // untightened, natural alloca type -- corrupts every element whose
+    // tight-vs-natural byte offset actually differs (reduced from
+    // `matrix_splat_cast.test`'s own `float2x3`, where only the last
+    // element's read straddles into memory neither store ever wrote).
+    // Skipping the tightening for `Function` storage instead leaves the
+    // alloca, this store, and every `AccessChain` read agreeing on the one
+    // (natural) layout throughout -- exactly the layout upstream's own
+    // pattern already assumes.
+    if (PointerType.getStorageClass() == mlir::spirv::StorageClass::Function)
+      return Rewriter.notifyMatchFailure(
+          Op, "Function-storage pointee has no declared tight layout to "
+              "reconcile with; the natural conversion already matches its "
+              "own alloca and every AccessChain read");
+
     if (auto AccessChain =
             Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
       if (getMatrixWholeAccess(AccessChain))
@@ -12065,6 +12093,19 @@ public:
         mlir::dyn_cast<mlir::spirv::MatrixType>(PointerType.getPointeeType());
     if (!MatrixTy)
       return Rewriter.notifyMatchFailure(Op, "not a whole-matrix load");
+
+    // See `TightMatrixStorePattern`'s own identical check's comment
+    // (roadmap L211): a `Function`-storage pointee's own alloca is never
+    // tightened (`AggregateInitializedVariablePattern`/upstream's own
+    // `VariableOp` pattern both declare it with the plain natural
+    // conversion), so loading it back through the tightened type here
+    // would just as wrongly disagree with that alloca's own real layout
+    // as the store side did.
+    if (PointerType.getStorageClass() == mlir::spirv::StorageClass::Function)
+      return Rewriter.notifyMatchFailure(
+          Op, "Function-storage pointee has no declared tight layout to "
+              "reconcile with; the natural conversion already matches its "
+              "own alloca and every AccessChain read");
 
     if (auto AccessChain =
             Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
