@@ -191,6 +191,21 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
   return V;
 }
 
+/// (Roadmap L201(d)) The store-side half of every other stage wrapper's
+/// own `widenForStageStorageStore`/`stageStorageLoadType` pair (see e.g.
+/// `GeometryWrapper.cpp`): a mesh entry point has no ordinary stage-IO
+/// *input* store to mirror this against (a mesh output is never read back
+/// by the entry point itself), so only the store-side widen is needed
+/// here. Widens \p Val to `float` if it is `half`-typed, so every write to
+/// `VertexOutputs`/`PrimitiveOutputs` is a genuine `float32` value,
+/// matching `StageStorage::buildStageStorage`'s own choice to always
+/// allocate a 16-bit-float element's storage as a full 4-byte slot.
+Value *widenForStageStorageStore(IRBuilder<> &Builder, Value *Val) {
+  return Val->getType()->isHalfTy()
+             ? Builder.CreateFPExt(Val, Type::getFloatTy(Builder.getContext()))
+             : Val;
+}
+
 /// Finds \p F's own `wave_index` parameter (named by
 /// `feme::cpu::SIMDizePass`, see `SIMDize.cpp`'s `Env.WaveIndex->setName`):
 /// this wave's index within its shader entry's group, used by
@@ -310,6 +325,20 @@ void lowerMeshOutputStore(CallInst &CI, const SignatureElement &Elt,
     Value *Addr = computeMeshOutputAddress(Builder, Layout, Base, Elt.ElementID,
                                            Elt, Row, Component, ClampedSlot);
     Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    // (Roadmap L201(d)) Mirror every other stage wrapper's own
+    // `widenForStageStorageStore` (`GeometryWrapper.cpp`/`FragmentWrapper.
+    // cpp`/etc.): a 16-bit `half` leaf must be widened to a genuine
+    // `float32` before this store, matching `StageStorage::
+    // buildStageStorage`'s own choice to always allocate (and address,
+    // via `Layout`'s 4-byte-per-component strides) a 16-bit-float
+    // element's storage as a full 4-byte `float` slot. Without this, a
+    // `half`-typed store here wrote only 2 of the slot's 4 bytes, leaving
+    // the other 2 as whatever they were before (typically zero) --
+    // `StageStorage::readFloat`'s later reinterpretation of the full 4
+    // bytes as one IEEE-754 float32 then produced a numerically
+    // unrelated value, not the intended `half`-precision result widened
+    // to `float`.
+    LaneVal = widenForStageStorageStore(Builder, LaneVal);
     if (!(MaskConst && MaskConst->isOne())) {
       Value *OldVal = Builder.CreateLoad(LaneVal->getType(), Addr);
       LaneVal = Builder.CreateSelect(Mask, LaneVal, OldVal);
