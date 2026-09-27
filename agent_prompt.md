@@ -61,26 +61,20 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(20-30 min, start here)** Build a numeric diagnostic: dump
-   `vert_f32d3_flat_4`'s interpolated value (`.x` component is enough) and its
-   independently-computed min/max bounds into the output color, scaled/clamped
-   for the 8-bit UNORM format, across the full 8x8 render. Look for "wildly
-   unrelated value" (indexing/addressing bug in FeMe's SPIR-V-to-LLVM lowering
-   of per-invocation output/input array access chains) vs. "just outside the
-   boundary by a small amount" (precision bug in domain-point/barycentric-weight
-   generation).
-2. **(unknown, depends on #1)** Once the failure class is known, read
-   `HullWrapper.cpp`/`DomainWrapper.cpp` (and whatever shared
-   access-chain-normalization code they funnel through) for an indexing bug
-   specific to per-vertex-array location counts around 13-29, or look at FeMe's
-   software tessellator's own tess-coordinate generation if #1 points to
-   precision instead.
-3. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to distinct
-   symptoms," never started, carried over many sessions now.
-4. A full/broad CTS re-run is overdue (last full run: 2026-09-26). Worth doing
-   once L216 (or a solid chunk of it) lands, for one consolidated before/after
-   instead of piecemeal reruns.
-5. `check-hlsl-feme-vk` parallel-worker flakiness was tentatively attributed to
-   L211 last session (unproven, circumstantial) -- if it ever reproduces again,
-   it needs its own from-scratch root-causing.
-6. No git stashes this session (confirmed empty both repos).
+1. **(unknown, start here)** L216: numeric (not pass/fail) diagnostic dump of
+   `vert_f32d3_flat_4`'s interpolated value vs. its own min/max bounds across
+   the full tess-coordinate range -- see top of this entry.
+2. **(unknown)** `dEQP-VK.tessellation.tesscoord.*` (18/18
+   `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation) -- brand new,
+   untriaged, found by accident this session while chasing L216.
+3. **(unknown)** L201(c) (25 cases) -- still just "reduced to distinct
+   symptoms," never started, carried over many sessions.
+4. A full/broad CTS re-run is overdue (last one: 2026-09-26;
+   L205/L206/L208/L210-L214/L217 have all landed since). Worth doing once L216
+   or a solid next chunk lands.
+5. Pre-existing, confirmed-unrelated crash in
+   `dEQP-VK.tessellation.winding.default_domain.hlsl_quads_ccw`
+   (`llvm.lifetime.start/end can only be used on alloca or poison`, sometimes a
+   segfault) halts the whole `tessellation.*` batch at the same point regardless
+   of this session's changes -- worth a dedicated roadmap row and root-causing
+   session if not already tracked.
