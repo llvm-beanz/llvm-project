@@ -12,17 +12,19 @@
 #include "feme/Core/StageOps.h"
 #include "feme/Graphics/StageStorage.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
-#include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Testing/Support/Error.h"
@@ -3375,6 +3377,99 @@ TEST(CanonicalizeStageTest, SplitsHullEntryThreadingCapturedSSAValue) {
         EXPECT_EQ(OpI->getFunction(), PatchConstant)
             << "patch-constant phase must not reference any value still "
                "defined in the control-point phase";
+}
+
+/// (Roadmap L223) A captured value that is (through the inliner's own
+/// well-known convention of hoisting every inlined callee's static
+/// `alloca` into the *caller's* entry block) an `alloca` whose every real
+/// use -- the GEP/store that builds it up, the final whole-value reload,
+/// and the `llvm.lifetime.start`/`.end` markers bracketing it -- lies
+/// entirely on the patch-constant side of the barrier must NOT be routed
+/// through a synthetic global the way `SplitsHullEntryThreadingCaptured
+/// SSAValue` above's ordinary SSA-value capture is: that mechanism has
+/// the patch-constant phase (a function invoked separately by the CPU
+/// runtime, never inlined back into the control-point phase) dereference
+/// a pointer into the control-point phase's own already-unwound stack
+/// frame -- a dangling-pointer bug -- and, before that, produced an
+/// entirely invalid `llvm.lifetime.start/end` marker on the reloaded
+/// pointer value (rejected by `llvm::verifyModule`, since only a real
+/// `alloca`/`poison` may be marked). Instead, the alloca itself must be
+/// cloned directly into the patch-constant phase (real, independent stack
+/// storage, no dangling access, and no synthetic global at all), leaving
+/// its lifetime markers pointing at a real local alloca in the same
+/// function they execute in.
+TEST(CanonicalizeStageTest, SplitsHullEntryCloningCapturedAlloca) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    define void @main() #0 {
+    entry:
+      %output = alloca float
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      call void @llvm.lifetime.start.p0(ptr %output)
+      store float 2.000000e+00, ptr %output
+      %reloaded = load float, ptr %output
+      call void @llvm.lifetime.end.p0(ptr %output)
+      store float %reloaded, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    declare void @llvm.lifetime.start.p0(ptr)
+    declare void @llvm.lifetime.end.p0(ptr)
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  // The whole module remains well-formed: no invalid lifetime-marker
+  // operand, no other verifier violation introduced by the split.
+  std::string VerifyErrors;
+  raw_string_ostream VerifyOS(VerifyErrors);
+  EXPECT_FALSE(verifyModule(*M, &VerifyOS)) << VerifyErrors;
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // No synthetic capture global was created for the alloca: unlike the
+  // ordinary-SSA-value capture case, this one is handled by cloning, not
+  // by global-routing, so the patch-constant phase gains no extra
+  // stage-IO element beyond its own real `TessLevelOuter` write.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+
+  // The patch-constant phase owns a real, independent local `alloca` of
+  // its own -- not a reload of any pointer defined in the control-point
+  // phase.
+  const AllocaInst *ClonedAlloca = nullptr;
+  for (Instruction &I : instructions(PatchConstant))
+    if (auto *AI = dyn_cast<AllocaInst>(&I))
+      ClonedAlloca = AI;
+  ASSERT_TRUE(ClonedAlloca);
+
+  for (Instruction &I : instructions(PatchConstant)) {
+    for (Value *Op : I.operands())
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        EXPECT_EQ(OpI->getFunction(), PatchConstant)
+            << "patch-constant phase must not reference any value still "
+               "defined in the control-point phase";
+    // Any lifetime marker retained by the split must reference the real,
+    // locally-cloned alloca -- never a value from another function.
+    if (auto *II = dyn_cast<IntrinsicInst>(&I))
+      if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+          II->getIntrinsicID() == Intrinsic::lifetime_end)
+        EXPECT_EQ(II->getArgOperand(0)->stripPointerCasts(), ClonedAlloca);
+  }
+
+  // The control-point phase never had, and still has no, ordinary
+  // stage-IO signature of its own for this shape (its only content was
+  // the hoisted alloca and the barrier, both consumed by the split).
+  EXPECT_FALSE(dxil::getEntrySignature(*ControlPoint).has_value());
 }
 
 /// (Roadmap H4f) A no-barrier tessellation-control entry point whose only

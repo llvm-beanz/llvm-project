@@ -28,6 +28,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
@@ -3113,6 +3114,47 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
     IRBuilder<> CaptureBuilder(CaptureEntry);
     unsigned NextLocation = computeNextSyntheticLocation(*F.getParent());
     for (Instruction *V : Captured) {
+      // (Roadmap L223) An inlined callee's own local `alloca` -- e.g. the
+      // `output` local an HLSL hull shader's patch-constant function
+      // (`HS_CONSTANT_OUT output; output.field = ...; return output;`)
+      // builds up before returning it by value -- is hoisted into \p F's
+      // *entry* block by whatever earlier pass inlined that callee
+      // (`feme::cpu::InlineHelperFunctionsPass`, matching LLVM's own
+      // `InlineFunction` convention of hoisting every inlined static
+      // `alloca` to the caller's entry rather than leaving it at the call
+      // site), even though every real use of it -- the GEPs/stores that
+      // build the struct, the final whole-struct reload, and any
+      // `llvm.lifetime.start`/`.end` bracketing it -- remains entirely
+      // within \p Region. The generic "route the captured value's own
+      // address through a global" mechanism below is unsound for exactly
+      // this shape: it has \p PatchConstantPhase (a *different* call --
+      // dispatched separately by the CPU runtime once control-point
+      // outputs become visible, never inlined back into \p F) dereference
+      // a pointer into \p F's own stack frame, which has already
+      // unwound by the time that separate call happens (a real, if rare,
+      // segfault -- \p F and \p PatchConstantPhase are never the same
+      // physical activation), and it also once produced an entirely
+      // invalid `llvm.lifetime.start/end` marker on that reloaded pointer
+      // (rejected by `llvm::verifyModule`, since only a real `alloca` or
+      // `poison` may be marked). Since the alloca's own storage need not
+      // outlive this split at all here -- nothing outside \p Region ever
+      // reads or writes it -- clone a fresh, independent `alloca` directly
+      // into \p PatchConstantPhase instead of routing its address through
+      // a global; every cloned use inside \p Region already gets
+      // redirected to it via \p VMap, exactly like any other value this
+      // loop maps.
+      if (auto *AI = dyn_cast<AllocaInst>(V);
+          AI && all_of(AI->users(), [&](User *U) {
+            auto *UI = dyn_cast<Instruction>(U);
+            return UI && Region.contains(UI->getParent());
+          })) {
+        Instruction *Clone = AI->clone();
+        Clone->setName(AI->getName());
+        Clone->insertInto(CaptureEntry, CaptureEntry->end());
+        VMap[V] = Clone;
+        continue;
+      }
+
       Type *Ty = V->getType();
       unsigned Location = NextLocation++;
       MDNode *Decoration = createLocationDecoration(F.getContext(), Location);
@@ -3162,6 +3204,39 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
     BasicBlock *Cloned = cast<BasicBlock>(VMap[BB]);
     for (Instruction &I : *Cloned)
       RemapInstruction(&I, VMap, RF_NoModuleLevelChanges);
+  }
+
+  // (Roadmap L223) A `llvm.lifetime.start`/`llvm.lifetime.end` marker
+  // bracketing one of \p Captured's own values (e.g. an `alloca` that an
+  // earlier inlining pass hoisted into \p F's entry block, whose logical
+  // scope -- the inlined callee's own body -- happens to fall entirely
+  // within this region, as HLSL's own hull-shader "patch constant
+  // function" lowering produces for a local aggregate like `HS_CONSTANT_
+  // OUT output;`) has its pointer operand rewritten by the
+  // `RemapInstruction` loop just above like any other operand -- but
+  // unlike an ordinary value, a lifetime marker's operand must remain a
+  // real `alloca` (or `poison`) in *this* function for the marker to mean
+  // anything at all; `VMap`'s reload of the captured value's own address
+  // out of `@<entry>.patchconst.capture.N` is neither (verified,
+  // `llvm::verifyModule` rejects it outright: "llvm.lifetime.start/end
+  // can only be used on alloca or poison"). Erasing the (now-meaningless)
+  // marker instead of cloning it forward is always sound -- a lifetime
+  // marker is only ever an optimization hint, never required for
+  // correctness -- and no more expensive than leaving a real one in
+  // place, since the captured value's own address is never itself an
+  // `alloca` this function owns the stack slot of.
+  for (BasicBlock *BB : OrderedRegion) {
+    BasicBlock *Cloned = cast<BasicBlock>(VMap[BB]);
+    for (Instruction &I : make_early_inc_range(*Cloned)) {
+      auto *II = dyn_cast<IntrinsicInst>(&I);
+      if (!II || (II->getIntrinsicID() != Intrinsic::lifetime_start &&
+                  II->getIntrinsicID() != Intrinsic::lifetime_end))
+        continue;
+      Value *Ptr = II->getArgOperand(0)->stripPointerCasts();
+      if (isa<AllocaInst>(Ptr) || isa<PoisonValue>(Ptr))
+        continue;
+      II->eraseFromParent();
+    }
   }
 
   // The captures block (if any) is the function's real entry; branch it
