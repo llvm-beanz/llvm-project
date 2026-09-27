@@ -81,6 +81,43 @@ protected:
     return Result;
   }
 
+  /// (Roadmap L228(g)) A `VK_IMAGE_TYPE_3D` peer of `createImage` above --
+  /// real Vulkan requires a 3D image's own `arrayLayers` to be `1`, so
+  /// `Depth` is this type's only "how many slices" dimension (see
+  /// `Image::texelPointer`'s own `ArrayLayer + Z` combined addressing).
+  VkImage createImage3D(uint32_t Width, uint32_t Height, uint32_t Depth,
+                        VkFormat Format) {
+    VkImageCreateInfo Info{};
+    Info.imageType = VK_IMAGE_TYPE_3D;
+    Info.format = Format;
+    Info.extent = {Width, Height, Depth};
+    Info.mipLevels = 1;
+    Info.arrayLayers = 1;
+    Info.samples = VK_SAMPLE_COUNT_1_BIT;
+    Info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VkImage Img = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateImage(Device, &Info, nullptr, &Img), VK_SUCCESS);
+    VkMemoryRequirements Reqs{};
+    vkGetImageMemoryRequirements(Device, Img, &Reqs);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Reqs.size;
+    VkDeviceMemory Memory = VK_NULL_HANDLE;
+    EXPECT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+              VK_SUCCESS);
+    EXPECT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+    Allocations.push_back(Memory);
+    return Img;
+  }
+
+  static std::array<uint8_t, 4> texel3D(VkImage Img, uint32_t X, uint32_t Y,
+                                        uint32_t Z) {
+    const void *Ptr = fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, Z);
+    std::array<uint8_t, 4> Result{};
+    std::memcpy(Result.data(), Ptr, 4);
+    return Result;
+  }
+
   VkInstance Instance = VK_NULL_HANDLE;
   VkPhysicalDevice Physical = VK_NULL_HANDLE;
   VkDevice Device = VK_NULL_HANDLE;
@@ -266,6 +303,100 @@ TEST_F(ImageOpsTest, BlitsWithRemainingArrayLayers) {
       for (uint32_t X = 0; X != 2; ++X)
         EXPECT_EQ(texel(Dst, X, Y, /*Sample=*/0, Layer)[0],
                   texel(Src, X, Y, /*Sample=*/0, Layer + 1)[0]);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// (Roadmap L228(g)) `dEQP-VK.synchronization2.op.*.timeline_semaphore.*`'s
+/// own `image_64x64x8_*` cases blit a real `VK_IMAGE_TYPE_3D` image's
+/// *entire* depth in one `VkImageBlit` region (mirroring the resource
+/// into/out of a same-size "staging" image; see
+/// `vktSynchronizationOperation.cpp`'s `makeBlitRegion`) -- a region whose
+/// `srcOffsets[1].z - srcOffsets[0].z` is greater than 1 used to be
+/// rejected outright (`isSimpleRegion`'s old comment). A same-size,
+/// same-format, `VK_FILTER_NEAREST` 3D blit is a per-slice identity copy:
+/// every destination slice should read back the matching source slice's
+/// own texels unchanged.
+TEST_F(ImageOpsTest, BlitsWholeDepthOfA3DImage) {
+  VkImage Src = createImage3D(2, 2, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage3D(2, 2, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  for (uint32_t Z = 0; Z != 4; ++Z)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X) {
+        uint8_t Value = uint8_t(0x10 * (Z * 4 + Y * 2 + X));
+        std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+        std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, X, Y, Z),
+                    Texel.data(), 4);
+      }
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {2, 2, 4};
+  Region.dstOffsets[1] = {2, 2, 4};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Z = 0; Z != 4; ++Z)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X)
+        EXPECT_EQ(texel3D(Dst, X, Y, Z), texel3D(Src, X, Y, Z));
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// A mirrored 3D blit (`srcOffsets` running from the last Z slice down to
+/// the first, the same "opposite corners flip the region" rule
+/// `MirrorsBlitRegion` already covers for X/Y) reverses the slice order.
+TEST_F(ImageOpsTest, MirrorsBlitRegionAlongZ) {
+  VkImage Src = createImage3D(1, 1, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage3D(1, 1, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  std::array<uint8_t, 4> Front{0x00, 0x00, 0x00, 0xFF};
+  std::array<uint8_t, 4> Back{0xFF, 0xFF, 0xFF, 0xFF};
+  std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, 0, 0, 0),
+              Front.data(), 4);
+  std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, 0, 0, 1), Back.data(),
+              4);
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  // A mirrored source along Z: srcOffsets run from (1, 1, 2) down to
+  // (0, 0, 0).
+  Region.srcOffsets[0] = {1, 1, 2};
+  Region.srcOffsets[1] = {0, 0, 0};
+  Region.dstOffsets[1] = {1, 1, 2};
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+
+  // The mirrored blit flips the slice order: the source's white back
+  // slice now lands on the destination's front, and vice versa.
+  EXPECT_EQ(texel3D(Dst, 0, 0, 0)[0], 0xFF);
+  EXPECT_EQ(texel3D(Dst, 0, 0, 1)[0], 0x00);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// A degenerate (zero-extent) region on any axis, including Z, is still
+/// rejected -- `isSimpleRegion`'s relaxation for L228(g) only ever
+/// widened which nonzero-Z-extent regions are accepted, not whether a
+/// zero one is.
+TEST_F(ImageOpsTest, RejectsDegenerateZExtentBlitRegion) {
+  VkImage Src = createImage3D(1, 1, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage3D(1, 1, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {1, 1, 0}; // Zero Z extent.
+  Region.dstOffsets[1] = {1, 1, 2};
+
+  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                               Region, VK_FILTER_NEAREST);
+  EXPECT_TRUE(static_cast<bool>(E));
+  llvm::consumeError(std::move(E));
 
   vkDestroyImage(Device, Src, nullptr);
   vkDestroyImage(Device, Dst, nullptr);
