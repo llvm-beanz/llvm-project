@@ -61,32 +61,22 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** The overdue full/broad Vulkan CTS re-run: this
-   session and the last several have only ever compared the
-   1088-case `tessellation.*` sample (plus, previously, the
-   29451-case `draw.*` group once). The full `vk-default` mustpass
-   list is genuinely large (~3.7M lines across 196 group files) --
-   running the whole thing in one sitting is likely multi-hour+.
-   Worth either budgeting a dedicated session for it, or picking a
-   handful of the largest/most-central groups (`api`, `pipeline`,
-   `shader_render`, `synchronization`) as a wider-than-tessellation
-   but still bounded sample.
-2. **(unknown)** No specific tessellation failures are known to
-   remain untriaged right now -- the remaining 156/1088 failures in
-   the `tessellation.*` sample are all pre-existing, already-tracked
-   groups (`invariance`, `user_defined_io`, `primitive_discard`,
-   `shader_input_output`, `misc_draw`, `tesscoord`,
-   `common_edge`, `matrix_multiplication`, `geometry_interaction`) --
-   worth picking one of these next if continuing tessellation work,
-   `user_defined_io` (27 cases) or `primitive_discard` (24 cases) look
-   like the next-largest untriaged chunks.
-3. The pre-existing `llvm.lifetime.start/end can only be used on
-   alloca or poison` crash on hlsl-sourced tessellation-control
-   shaders (confirmed again this session, unrelated, halts the
-   `tessellation.*` batch at `fractional_spacing.hlsl_{even,odd}` and
-   every `winding.*.hlsl_*` case) still has no dedicated roadmap row --
-   worth adding one and root-causing it properly instead of treating
-   it as background noise every session.
-4. No git stashes to clean up this session (one `git stash`
-   push/pop pair used mid-session purely to A/B-test the fix against
-   its own new unit test, popped back immediately after).
+1. **(a few hours, dedicated session)** Root-cause `L225`. Isolate the
+   exact inside/outside tessellation-level combination
+   `quads_equal_spacing_{ccw,cw}` exercises (`--deqp-log-images=enable`
+   or a point-count diagnostic dump), then compare FeMe's generated
+   point/triangle count against the spec's closed-form lattice-size
+   formula for that combination — same method `L220`/`L221` used.
+2. **(unknown)** Continue tessellation triage: `user_defined_io` (27
+   cases) and `shader_input_output`/`misc_draw`/`common_edge`/
+   `matrix_multiplication`/`geometry_interaction` groups in the
+   136-case residual failure list are still untriaged. Pick
+   `user_defined_io` next — it's the largest untriaged chunk.
+3. **(a few hours)** The broader-than-tessellation CTS re-run is still
+   overdue (last real broad sample was the one-off 29451-case `draw.*`
+   group, several sessions back). Worth a dedicated session on `api`/
+   `pipeline`/`shader_render`/`synchronization` once `L225` or
+   `user_defined_io` lands.
+4. No git stashes this session (used inline `false &&` short-circuit
+   for L223's A/B test since it's a large function; used real
+   `git stash push/pop` for L224's, popped immediately after).
