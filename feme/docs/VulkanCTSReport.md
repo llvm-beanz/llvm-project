@@ -1714,3 +1714,113 @@ correctness fix to already-advertised functionality, like `L225`/
 
 See `L228(g)`/`L228(h)` on the roadmap for the two newly-discovered,
 distinct follow-up bugs this verification pass surfaced.
+
+## Roadmap L228(g): 3D (multi-slice) blit region rejection -- root-caused and fixed
+
+Discovered while verifying `L228(a)`'s own fix: 98 cases in the
+`timeline_semaphore` mustpass sample kept failing even with the new
+genuine blocking wait in place --
+`dEQP-VK.synchronization2.op.single_queue.timeline_semaphore.*.image_64x64x8_r32_sfloat_specialized_access_flag`,
+every one a `write_*_read_*` pairing exercising a 3D
+(`64x64x8`) `r32_sfloat` image specifically (2D images and other
+formats in the same otherwise-identical `op.single_queue.
+timeline_semaphore.*` group all pass).
+
+Reproduced directly (no batch harness):
+`deqp-vk --deqp-case='dEQP-VK.synchronization2.op.single_queue.timeline_semaphore.write_image_geometry_read_blit_image.image_64x64x8_r32_sfloat_specialized_access_flag'`
+confirmed the failure: `Fail
+(synchronizationWrapper->queueSubmit(queue, VK_NULL_HANDLE):
+VK_ERROR_INITIALIZATION_FAILED at
+vktSynchronizationOperationSingleQueueTests.cpp:699)`.
+
+Key diagnostic step: **timed the failure**. It completed in ~0.6s, not
+the full `TimelineWaitSafetyNetTimeoutNs` (5s) `L228(a)`'s own safety
+net would take for a genuinely-unmet wait, matching a *passing* 2D
+case's own timing exactly. This meant the failure was not a
+timeline-semaphore issue at all, but an immediate failure somewhere in
+`vkQueueSubmit`'s own synchronous, in-process command execution
+(`feme/lib/Vulkan/Sync.cpp`'s `executeCommandBuffers`, called before
+`vkQueueSubmit2` returns -- confirmed FeMe's synchronous execution
+model has no separate "GPU work" deferral step at all).
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (an existing, previously
+underused diagnostic env var checked in `feme/lib/Vulkan/
+Diagnostics.cpp`) surfaced the real underlying error on re-run:
+`vkQueueSubmit: a multi-slice blit region is not implemented`, from
+`feme/lib/Vulkan/ImageOps.cpp:720` inside `runBlitImage`'s per-region
+loop.
+
+Root cause: `isSimpleRegion` (`ImageOps.cpp`, shared only by
+`runBlitImage`) required a `VkImageBlit` region's Z extent to be
+exactly one slice (`Offsets[1].z - Offsets[0].z == 1`), unconditionally
+rejecting anything wider. `vktSynchronizationOperation.cpp`'s own
+`makeBlitRegion`/`BlitImplementation` (the CTS's shared
+`read_blit_image`/`write_blit_image` operation) always blits a
+resource's *entire* extent in one region (mirroring it into/out of a
+same-size "staging" image, always `VK_FILTER_NEAREST`, no scaling) --
+for a 3D `64x64x8` image, this single region necessarily spans all 8
+Z-slices, triggering the rejection every time.
+
+Fix: relaxed `isSimpleRegion` to require only a nonzero Z extent
+(matching its pre-existing nonzero X/Y extent checks) rather than
+exactly one slice -- a real Vulkan region's Z range is always exactly
+one slice for a 2D/2D-array image already (`vkCmdBlitImage`'s own
+VUIDs require it), so this only ever widens acceptance for a genuine
+3D image's own depth, never loosens validation for the 2D/2D-array
+case. Generalized `runBlitImage`'s existing per-Layer/Y/X nested
+interpolation loop with a new Z dimension, following the exact same
+fractional-interpolation formula (`T = (index + 0.5) / extent`)
+already used for X/Y, with the same out-of-bounds clamping (roadmap
+E16) extended to the Z axis. Every `texelPointer`/`blockPointer` call
+site that previously hardcoded `Region.srcOffsets[0].z`/
+`dstOffsets[0].z` now uses the per-Z-iteration computed value instead.
+The pre-existing bilinear filter path was extended to full trilinear
+(8 neighbors instead of 4) rather than left nearest-only for Z, since
+the existing code's regularity made this a mechanical extension; a
+2D/2D-array region's own Z weight always collapses to exactly 0 (its
+`Tz` is always `0.5` and its `SrcZ0`/`SrcZ1` always exactly one slice
+apart), so this is behavior-preserving for every pre-existing non-3D
+case -- confirmed by `ninja check-feme`'s 0 regressions below.
+
+New unit tests (`ImageOpsTest.cpp`):
+- `BlitsWholeDepthOfA3DImage`: a same-size, same-format, nearest blit
+  spanning a 3D image's entire depth in one region (the exact shape
+  the fixed CTS cases exercise) is a per-slice identity copy.
+- `MirrorsBlitRegionAlongZ`: the Z-axis peer of the pre-existing
+  `MirrorsBlitRegion` (X/Y) test -- opposite-corner Z offsets reverse
+  the slice order.
+- `RejectsDegenerateZExtentBlitRegion`: confirms the relaxation only
+  widened which nonzero-Z-extent regions are accepted, not whether a
+  zero-extent (degenerate) one is still rejected.
+
+`ninja check-feme`: 3333/3394 discovered tests passed (61 pre-existing
+Unsupported), 0 regressions, +3 net new unit tests.
+
+CTS-confirmed:
+- The originally-reported case now **Pass**es.
+- A full re-run of every mustpass-derived `timeline_semaphore` case
+  naming `image_64x64x8` across `synchronization.txt`/
+  `synchronization2.txt` (4578 cases -- a superset of the original
+  98-case sample, covering `single_queue`/`other_queue`/
+  `cross_instance` variants together) via `run_vulkan_cts.py`: **958
+  Pass, 400 Fail, 3220 Not supported**. **0** of the 400 remaining
+  failures are `op.single_queue`/`op.other_queue`/`cross_instance`
+  cases of this bug's own shape -- the cluster fully clears with no
+  regressions.
+- The same run's 400 remaining failures split cleanly into two other,
+  unrelated, previously-scoped-or-newly-found groups: 200 in
+  `one_to_n` (already tracked, `L228(h)`) and 200 in a
+  not-yet-tracked `wait_before_signal` group (new, `L228(i)`), both
+  the same "genuinely never signaled" shape, not this bug's
+  "immediate command-execution failure" shape.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- this is a correctness fix to `vkCmdBlitImage`'s already-
+implemented, already-advertised functionality (a general image-
+operation gap, not scoped to synchronization at all, despite
+surfacing via that CTS group), like `L225`/`L226`/`L228(a)`, not a new
+feature landing or a caveat being lifted.
+
+See `L228(i)` on the roadmap for the newly-discovered
+`wait_before_signal` follow-up cluster this verification pass
+surfaced.
