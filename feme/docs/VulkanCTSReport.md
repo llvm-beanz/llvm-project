@@ -682,3 +682,89 @@ tests.
 Net this session: 1 real bug fixed (inside FeMe), 5 lit tests updated,
 1 new unit test added. `ninja check-feme`: 3367/3370 passing, 3
 pre-existing Unsupported, 0 regressions.
+
+### Roadmap L201(d): mesh-shader f16 stage-I/O correctness (mesh half done; tessellation split to L215)
+
+`dEQP-VK.mesh_shader.ext.in_out.with_f16.*` (80 cases) was failing with
+a silent "Result does not match reference" and no further QPA detail
+at default verbosity. `--deqp-log-images=enable` showed the *entire*
+rendered image wrong (all-black vs. all-blue), not a rounding-boundary
+diff, ruling out a subtle precision issue and pointing at a systemic
+data-corruption bug. A temporary, uncommitted local diagnostic patch to
+`vktMeshShaderInOutTestsEXT.cpp` (reverted before every real CTS run;
+never committed) encoded which of the fragment shader's many `good_*`
+per-variable checks failed first into the output color, localizing the
+first failure to `vert_f16d1_inter_0`, a smooth-interpolated f16 scalar
+vertex varying.
+
+**Bug 1 (fixed inside FeMe):** `MeshOutputWrapper.cpp` (mesh-shader
+per-vertex/per-primitive output stores) was the only stage wrapper of
+six (`DomainWrapper`/`FragmentWrapper`/`GeometryWrapper`/`HullWrapper`/
+`PatchConstantWrapper`/`VertexWrapper`.cpp all have this) missing a
+`widenForStageStorageStore` helper. It stored a shader's raw `half`
+value directly, writing only 2 of `StageStorage`'s always-4-byte-per-
+element slot; the other 2 stale bytes were then reinterpreted as part
+of an IEEE-754 float32 by `StageStorage::readFloat`, producing
+numerically unrelated garbage rather than a rounding error -- matching
+the all-black-vs-all-blue symptom exactly. Fixed by adding the missing
+helper and calling it in `lowerMeshOutputStore`, mirroring
+`GeometryWrapper.cpp`'s `lowerGeometryOutputStore`. This alone raised
+`with_f16.*` from 0/80 to 22/80.
+
+**Bug 2 (found and fixed, but *not* a FeMe bug -- an upstream VK-GL-CTS
+test-authoring bug):** the remaining 58 failures persisted across
+several different interface variables and permutations. Repeating the
+diagnostic-patch technique on `permutation_9.mesh_only` (still failing
+after bug 1's fix) isolated the failure to `good_prim_f16d2_flat_0`, a
+per-primitive, flat, *exact-equality* check. Dumping the raw actual-vs-
+expected `float` bit patterns (via `floatBitsToUint`, again through a
+temporary, uncommitted local patch) showed the low byte of the expected
+value (read from `ppd.prim_f16d2_flat_0[N]`, an SSBO) was consistently
+*non-zero* even though the underlying test data (`tcu::Vec2(1211,
+1212)`) is a small integer pair, exactly representable in float16 (and
+therefore should widen back to float32 with an all-zero low mantissa
+byte) -- meaning the fragment shader was reading a *completely
+different* field than the one the host wrote. Confirmed via `spirv-
+dis`'s `OpMemberDecorate ... Offset` on a standalone reduced shader:
+the shader's own std430-computed offset for `prim_f16d2_flat_0` is byte
+480, while the C++ `PerPrimitiveData` mirror struct (assuming its
+tightly-packed, un-padded field sizes) places that same field at byte
+432 -- a 48-byte divergence, exactly the accumulated slack from the
+three `tcu::Vec3`-array fields (`prim_f64d3_flat_{0,1}`, `prim_f32d3_
+flat_{0,1}`, `prim_f16d3_flat_{0,1}`) declared earlier in the same
+SSBO. GLSL/SPIR-V std430 gives `vec3`/`ivec3` a 16-byte per-element
+base alignment even inside arrays, but `tcu::Vec3`/`tcu::IVec3` are
+plain 12-byte packed types with no such padding -- so every field
+declared *after* any vec3/ivec3 array in either `PerVertexData` or
+`PerPrimitiveData` was silently misaligned relative to what the
+fragment shader actually reads back, for both mirror structs, across
+this entire test file.
+
+Fixed **directly in the VK-GL-CTS checkout, as its own commit
+(`c6783de17`), independent of any FeMe/llvm-project change**: added
+`Std430Vec3`/`Std430IVec3` wrapper types (12-byte value + 4 bytes of
+explicit trailing padding, with an implicit converting constructor and
+conversion operator so every existing `tcu::Vec3(...)`/`tcu::IVec3(...)`
+assignment call site needed no other change) and applied them to all 9
+affected array-of-vec3/ivec3 fields across both mirror structs.
+
+CTS-confirmed: `dEQP-VK.mesh_shader.ext.in_out.with_f16.*` is now
+80/80 (up from 22/80 after bug 1 alone, 0/80 before either fix). The
+full `dEQP-VK.mesh_shader.ext.in_out.*` group (560 cases, covering
+every advertised/unadvertised bit-width combination) is 0 failed, 400
+correctly `NotSupported` (unadvertised `shaderInt64`/`shaderFloat64`),
+160/160 passed of the supported cases -- no regressions.
+
+The tessellation half of the original L201(d) row (`tess_io.max_in_out.
+with_f16.*`, 40 cases) reproduces in a different CTS source file
+(`vktTessellationMaxIOTests.cpp`) and is still 40/80 failing after both
+fixes above (a 50% failure rate, not the 100%-then-0% pattern the mesh-
+shader half showed), so it needs its own independent root-cause; split
+out as new roadmap row L215 rather than assumed-fixed by either change
+here.
+
+`ninja check-feme`: 3367/3370 passing, 3 pre-existing Unsupported, 0
+regressions (the FeMe-side fix here is `MeshOutputWrapper.cpp` only;
+no new FeMe unit test was added specifically for this row since its
+correctness is fully covered by the CTS group above, which now passes
+end-to-end through the real CPU JIT path).
