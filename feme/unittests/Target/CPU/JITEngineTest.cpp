@@ -17,6 +17,8 @@
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
+#include <array>
+#include <cmath>
 #include <vector>
 
 using namespace feme;
@@ -322,3 +324,112 @@ TEST(JITEngineTest, RunsShaderMixingTraditionalAndDynamicResources) {
 }
 
 } // namespace
+
+// (Roadmap L214) End-to-end confirmation, through the real ORC JIT and this
+// host's real TargetMachine (the exact codegen path FeMe's own CPU runtime
+// uses in production, unlike a standalone `llc` reproducer), that the
+// `llvm.get.rounding`/`llvm.set.rounding` + `dynamic`-mode constrained
+// intrinsic pattern `FloatControlArithmeticPattern`
+// (SPIRVToLLVMPatterns.cpp) now emits for a non-default rounding mode
+// actually produces round-toward-zero *results*, not merely round-toward-
+// zero-looking *IR* (which every Conversion/SPIRVToLLVM lit test already
+// checks, but none of them execute anything). `A = 1.0f`, `B = 3 * 2^-25`
+// (0.75 ULP above 1.0f, chosen so plain IEEE round-to-nearest-even and
+// round-toward-zero provably disagree, unlike an exact-tie case where both
+// directions coincide): `A + B` rounds to `0x3f800001` under the default
+// round-to-nearest-even (confirmed with a standalone `fesetround`
+// reproducer while writing this test) and to `0x3f800000` under
+// round-toward-zero. Before this session's L214 fix, this exact IR shape
+// (a *static* `towardzero`-mode constrained intrinsic) silently produced
+// the round-to-nearest-even bit pattern on this host's AArch64 backend
+// instead -- this test would have failed against that code.
+TEST(JITEngineTest, RoundingModeRTZArithmeticProducesTowardZeroBits) {
+  Context Ctx;
+  SMDiagnostic Err;
+  // `A`/`B` are loaded from an input raw buffer (heap index 0), not baked in
+  // as literal-constant `fadd` operands: LLVM's own optimizer can (and, in
+  // FeMe's real pipeline, does) constant-fold a *static*-rounding-mode
+  // constrained intrinsic call whose operands are both compile-time
+  // constants using its own, always-correct, backend-independent constant
+  // folder (`ConstantFoldConstrainedFPCall`) -- which would silently mask
+  // exactly the runtime-codegen bug this test exists to catch. Routing `A`/
+  // `B` through a runtime buffer load instead forces the `fadd` to survive
+  // as a genuine, unfoldable runtime operation, so this test actually
+  // exercises real JIT-compiled backend codegen, not the optimizer's own
+  // (already-correct) constant folder.
+  constexpr char ShaderIR[] = R"(
+    define void @main() #0 {
+      %in = call target("dx.RawBuffer", i8, 1, 0)
+          @llvm.dx.resource.handlefromheap(i32 0)
+      %out = call target("dx.RawBuffer", i8, 1, 0)
+          @llvm.dx.resource.handlefromheap(i32 1)
+      %aLoaded = call {float, i1} @llvm.dx.resource.load.rawbuffer(
+          target("dx.RawBuffer", i8, 1, 0) %in, i32 0, i32 4)
+      %a = extractvalue {float, i1} %aLoaded, 0
+      %bLoaded = call {float, i1} @llvm.dx.resource.load.rawbuffer(
+          target("dx.RawBuffer", i8, 1, 0) %in, i32 4, i32 4)
+      %b = extractvalue {float, i1} %bLoaded, 0
+      %old = call i32 @llvm.get.rounding()
+      call void @llvm.set.rounding(i32 0)
+      %sum = call float @llvm.experimental.constrained.fadd.f32(
+          float %a, float %b,
+          metadata !"round.dynamic", metadata !"fpexcept.ignore")
+      call void @llvm.set.rounding(i32 %old)
+      %bits = bitcast float %sum to i32
+      call void @llvm.dx.resource.store.rawbuffer.i32(
+          target("dx.RawBuffer", i8, 1, 0) %out, i32 0, i32 poison, i32 %bits)
+      ret void
+    }
+    declare target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32)
+    declare {float, i1} @llvm.dx.resource.load.rawbuffer(
+        target("dx.RawBuffer", i8, 1, 0), i32, i32)
+    declare void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+    declare i32 @llvm.get.rounding()
+    declare void @llvm.set.rounding(i32)
+    declare float @llvm.experimental.constrained.fadd.f32(float, float, metadata, metadata)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="1,1,1" strictfp }
+  )";
+  auto LLVMMod = parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << "parse error: " << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+
+  JITOptions Opts;
+  Opts.WaveSize = 4;
+  Expected<std::unique_ptr<JITEngine>> Engine =
+      JITEngine::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Engine, Succeeded());
+
+  // `A = 1.0f`, `B = 3 * 2^-25` (0.75 ULP above 1.0f): chosen so plain IEEE
+  // round-to-nearest-even and round-toward-zero provably disagree (unlike
+  // an exact-tie case, where both directions coincide). `A + B` rounds to
+  // `0x3f800001` under the default round-to-nearest-even (confirmed with a
+  // standalone `fesetround` reproducer while writing this test) and to
+  // `0x3f800000` under round-toward-zero.
+  std::vector<float> InputBuffer = {1.0f, 3.0f * std::ldexp(1.0f, -25)};
+  FemeDescriptor InDesc{};
+  InDesc.Data = InputBuffer.data();
+  InDesc.SizeInBytes = InputBuffer.size() * sizeof(float);
+  InDesc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  InDesc.Flags = 0; // SRV: read-only.
+
+  std::vector<int32_t> OutputBuffer(1, -1);
+  FemeDescriptor OutDesc{};
+  OutDesc.Data = OutputBuffer.data();
+  OutDesc.SizeInBytes = OutputBuffer.size() * sizeof(int32_t);
+  OutDesc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  OutDesc.Flags = FEME_DESCRIPTOR_UAV;
+
+  std::array<FemeDescriptor, 2> Heap = {InDesc, OutDesc};
+  DispatchResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(Heap);
+
+  ASSERT_THAT_ERROR((*Engine)->dispatch(Resources, {1, 1, 1}), Succeeded());
+
+  EXPECT_EQ(static_cast<uint32_t>(OutputBuffer[0]), 0x3f800000u)
+      << "expected the round-toward-zero bit pattern (0x3f800000); got the "
+         "round-to-nearest-even one instead if this is 0x3f800001, meaning "
+         "the dynamic-rounding-mode FPCR fix regressed";
+}
