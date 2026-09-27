@@ -936,3 +936,89 @@ No Vulkan feature/extension advertisement changed as part of this fix
 (purely a correctness fix within the existing `tessellationShader`
 feature's own implementation), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update for it.
+
+## Roadmap L218/L219: viewport-state and quad-unsubdivided fixes
+
+Both found via a fresh, previously-untriaged `dEQP-VK.tessellation.
+tesscoord.*` reproduction (12 of 18 test cases; the group was 0/18 before
+`L218` due to an outright pipeline-creation blocker).
+
+**L218** -- `vkCreateGraphicsPipelines` unconditionally rejected a null
+`pViewportState`, even though the spec (`VUID-VkGraphicsPipelineCreateInfo
+-rasterizerDiscardEnable-00750`) allows omitting it once rasterization is
+statically disabled; every `tesscoord.*` case builds exactly this
+rasterization-disabled, fragment-stage-less pipeline shape via its own
+shared `GraphicsPipelineBuilder`. Fixed by having `translateViewportState`
+consult `Out.Raster.DiscardEnable` (already resolved by the always-earlier
+`translateRasterState` call) and accept a null `pViewportState` only when
+that value is statically true (a dynamically-disabled pipeline still
+requires a real one, since the static value can't be known at creation
+time) -- `Executor.cpp`'s own `RasterState::DiscardEnable` already
+short-circuits every consumer of `Out.Viewports`/`Out.Scissors` first, so
+leaving both empty in the disabled case is safe.
+
+- `dEQP-VK.tessellation.*` (excluding hlsl-sourced cases, which now reach
+  a separate, already-documented, confirmed-pre-existing crash --
+  `llvm.lifetime.start/end can only be used on alloca or poison`, A/B
+  stash-verified identical before/after this fix, just reached earlier
+  now that this row's own blocker is gone): **359/1088 Pass** (was
+  236/1088) -- **123 newly-fixed cases, 0 regressions** (byte-for-byte
+  QPA `StatusCode` diff against a stashed pre-fix rebuild).
+- `dEQP-VK.draw.*` (29451-case broader regression sample, unrelated
+  pipeline shapes): byte-for-byte identical both runs (3256 Pass / 2 Fail
+  / 26193 Not supported) -- 0 regressions.
+
+**L219** -- `tessellateQuad`'s general inset+bridge path forced at least
+one interior lattice line per axis even when both inside factors round to
+1 (no subdivision should occur at all), spuriously emitting a 4-point
+interior core (`(0.25,0.25)` etc.) for a fully-unsubdivided quad -- the
+quad-domain analog of `tessellateTriangle`'s own pre-existing
+fully-unsubdivided special case (H7x). Fixed with a matching early-return
+for quads. Confirmed fixed at the sub-case level (`quads_equal_spacing`'s
+`inner:{1,1},outer:{1,1,1,1}` sub-case no longer emits the 4 spurious
+points) -- but this alone does not flip any top-level `tesscoord.*` test
+to Pass, since every other sub-case within the same parent test still
+fails on a separate, larger-scope bug -- see `L220` below, and the
+roadmap row of the same name.
+
+New tests: `GraphicsPipelineTest.AcceptsNullViewportStateWhenRasterization
+StaticallyDisabled`/`.RejectsNullViewportStateWhenRasterizerDiscardIsOnly
+Dynamic` (L218); `TessellatorTest.QuadFullyUnsubdividedFactorEmitsTwoReal
+Triangles` (L219).
+
+`ninja check-feme`: 3372/3375 passed (0 failed, 3 pre-existing
+Unsupported), +3 net new tests, 0 regressions.
+
+No Vulkan feature/extension advertisement changed for either fix (both
+are pure valid-usage/correctness fixes within existing feature surface),
+so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
+
+## Roadmap L220: tessellator interior-point-generation algorithm mismatch (finding only, not yet fixed)
+
+While investigating why 12/18 `tesscoord.*` cases still fail after
+`L218`/`L219`, fetched the real Vulkan spec text (`Vulkan-Docs/chapters/
+tessellation.adoc`) and compared it line-by-line against `Tessellator.
+cpp`'s own implementation. Conclusion: FeMe's tessellator does not
+implement the same *algorithm* the spec (and dEQP's own reference
+generator) requires for interior domain-point generation -- not a
+rounding/off-by-one bug, a different algorithm entirely producing a
+different point *set*.
+
+Confirmed via a direct repro (`dEQP-VK.tessellation.tesscoord.
+triangles_equal_spacing`, `inner: {63}, outer: {15, 42, 10}`): FeMe
+generates 2147 domain coordinates where the reference expects 2950, and
+individual points differ by far more than the test's own 0.01 epsilon
+(e.g. reference `(0.978836, 0.010582, 0.010582)` vs. FeMe's nearest
+`(0.989744, 0.0051282, 0.0051282)`).
+
+Full technical writeup, including the spec's own quoted algorithm text
+and a concrete rewrite plan, is in the roadmap under `L220`. Likely the
+true unifying root cause of `L216`'s own still-open per-vertex TCS/TES
+corruption too (not yet confirmed by direct comparison). Not attempted
+this session -- a real rewrite of both `tessellateQuad`'s and
+`tessellateTriangle`'s interior-generation logic is a substantial,
+regression-risky undertaking better scoped as its own dedicated future
+session(s).
+
+No CTS re-run performed for this row (no code changed).
