@@ -11,6 +11,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <string>
@@ -329,28 +330,36 @@ TEST(TessellatorTest, TriangleSharedEdgeVerticesMatchAcrossPatches) {
 }
 
 TEST(TessellatorTest, QuadDomainGeneratesTheAnalyticGridSize) {
+  // Roadmap L221: the real spec algorithm, exercised here with inside
+  // factors `{4, 5}` (`M = 4`, `N = 5`, per `tessellateQuad`'s own `m`/`n`
+  // naming) chosen so neither axis degenerates (`M != 2 && N != 2`),
+  // landing squarely in the general grid-and-bridge case. Uniform unit
+  // edge factors give a 4-vertex outer boundary ring (one vertex per
+  // edge); the surviving interior grid spans u-index `1..N - 1` and
+  // v-index `1..M - 1` (an `(N - 1) x (M - 1)` grid of points), of which
+  // only the strictly-interior cells (u-index `1..N - 2`, v-index
+  // `1..M - 2`) are triangulated directly -- the grid's own outermost
+  // ring of cells is discarded and re-bridged to the real outer boundary
+  // instead.
+  const uint32_t M = 4, N = 5;
   TessFactors Factors;
-  Factors.Inside = {2.0f, 3.0f};
+  Factors.Inside = {static_cast<float>(M), static_cast<float>(N)};
   Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
   TessellatedPatch Patch =
       tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
                  TessOutputPrimitive::TriangleCcw, Factors);
-  // Uniform unit edge factors give a 4-vertex outer boundary ring (one
-  // vertex per edge); the inset core lattice's own division count is one
-  // less than each Inside factor's whole-axis segment count (roadmap
-  // L82: an inside factor of `N` implies `N - 1` strictly-interior
-  // lattice lines, since the core is always inset strictly within the
-  // boundary and never touches it) -- a 1x2 grid here, whose own ring has
-  // `2 * (1 + 2)` vertices -- see Tessellator.cpp's
-  // `appendQuadBoundaryRing`/`bridgeRingsByEdge`.
-  const uint32_t Nu = 1, Nv = 2;
   const uint32_t OuterRingSize = 4;
-  const uint32_t CoreRingSize = 2 * (Nu + Nv);
-  EXPECT_EQ(Patch.Points.size(), OuterRingSize + (Nu + 1) * (Nv + 1));
-  // `Nu * Nv` interior cells (2 triangles each), plus one bridging
-  // triangle per outer/core ring vertex.
+  const uint32_t GridPoints = (N - 1) * (M - 1);
+  const uint32_t InteriorCells = (N - 2) * (M - 2);
+  // The interior grid's own boundary ring has `2 * ((N - 2) + (M - 2))`
+  // vertices (its own u-edges have `N - 2` points each, its own v-edges
+  // have `M - 2` points each); bridging it to the outer ring emits one
+  // triangle per combined vertex on both rings (see `bridgeEdge`'s own
+  // comment).
+  const uint32_t InnerRingSize = 2 * ((N - 2) + (M - 2));
+  EXPECT_EQ(Patch.Points.size(), OuterRingSize + GridPoints);
   EXPECT_EQ(Patch.Indices.size(),
-            3 * (Nu * Nv * 2 + OuterRingSize + CoreRingSize));
+            3 * (InteriorCells * 2 + OuterRingSize + InnerRingSize));
   for (const DomainPoint &P : Patch.Points) {
     EXPECT_GE(P.U, 0.0f);
     EXPECT_LE(P.U, 1.0f);
@@ -360,15 +369,17 @@ TEST(TessellatorTest, QuadDomainGeneratesTheAnalyticGridSize) {
 }
 
 TEST(TessellatorTest, QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords) {
-  // Roadmap L82 regression: when the inside factors exactly match the
+  // Roadmap L82/L221: when the inside factors exactly match the
   // (uniform) edge factors -- the common `DomainSystemValues.test`/
-  // `QuadDomainTessellation.test` shape, all factors == 2 -- the interior
-  // core lattice must land on exactly-representable dyadic fractions
-  // (0.25/0.75), not a spurious extra interior ring landing on
-  // non-dyadic fractions like 1/6 that cannot be represented exactly in
-  // `float32` (see Tessellator.cpp's `tessellateQuad` for the full
-  // rationale). Every core (non-boundary) point's U and V must be one of
-  // exactly {0.25, 0.75} bit-for-bit.
+  // `QuadDomainTessellation.test` shape, all factors == 2 -- both axes
+  // are degenerate (`M == 2 && N == 2` per the real spec algorithm), so
+  // the entire interior collapses to the single, exactly-representable
+  // center point `(0.5, 0.5)`, not a spurious extra interior ring landing
+  // on non-dyadic fractions like `1/6` that cannot be represented exactly
+  // in `float32` (the original roadmap L82 bug this regression guards
+  // against; the real spec algorithm implemented for L221 is immune to
+  // it by construction, since every point it ever generates is an exact
+  // fraction `i / N` or `j / M`).
   TessFactors Factors;
   Factors.Inside = {2.0f, 2.0f};
   Factors.Edges = {2.0f, 2.0f, 2.0f, 2.0f};
@@ -378,12 +389,12 @@ TEST(TessellatorTest, QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords) {
   bool FoundInterior = false;
   for (const DomainPoint &P : Patch.Points) {
     // Boundary-ring points sit at U/V == 0, 0.5, or 1; only inspect the
-    // strictly-interior core points this regression cares about.
+    // strictly-interior center point this regression cares about.
     if (P.U == 0.0f || P.U == 1.0f || P.V == 0.0f || P.V == 1.0f)
       continue;
     FoundInterior = true;
-    EXPECT_TRUE(P.U == 0.25f || P.U == 0.75f) << "U = " << P.U;
-    EXPECT_TRUE(P.V == 0.25f || P.V == 0.75f) << "V = " << P.V;
+    EXPECT_EQ(P.U, 0.5f);
+    EXPECT_EQ(P.V, 0.5f);
   }
   EXPECT_TRUE(FoundInterior);
 }
@@ -615,6 +626,35 @@ TEST(TessellatorTest, QuadTessellationIsCrackFreeAtEveryFactor) {
   }
 }
 
+// Roadmap L221: sweeps both inside factors independently (each 1..12,
+// covering the fully-unsubdivided fast path, the epsilon-bump at exactly
+// 1, both single-axis-degenerate cases, the both-degenerate case, and the
+// general grid-and-bridge case) crossed with both `Integer` and
+// `FractionalOdd` partitioning (whose own epsilon-bump only ever applies
+// at inside factor 1, mirroring the triangle domain's analogous sweep).
+TEST(TessellatorTest, QuadTessellationIsCrackFreeAcrossManyInsideFactors) {
+  for (TessPartitioning Partitioning :
+       {TessPartitioning::Integer, TessPartitioning::FractionalOdd}) {
+    for (uint32_t InsideM = 1; InsideM <= 12; ++InsideM) {
+      for (uint32_t InsideN = 1; InsideN <= 12; ++InsideN) {
+        TessFactors Factors;
+        Factors.Inside = {static_cast<float>(InsideM),
+                          static_cast<float>(InsideN)};
+        Factors.Edges = {3.0f, 5.0f, 7.0f, 2.0f};
+        TessellatedPatch Patch =
+            tessellate(TessellatorDomain::Quad, Partitioning,
+                       TessOutputPrimitive::TriangleCcw, Factors);
+        ASSERT_FALSE(Patch.Indices.empty())
+            << "inside " << InsideM << "," << InsideN << " partitioning "
+            << static_cast<int>(Partitioning);
+        EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "")
+            << "inside " << InsideM << "," << InsideN << " partitioning "
+            << static_cast<int>(Partitioning);
+      }
+    }
+  }
+}
+
 TEST(TessellatorTest, QuadTessellationIsCrackFreeWithUnequalEdgeFactors) {
   TessFactors Factors;
   Factors.Inside = {6.0f, 3.0f};
@@ -623,6 +663,96 @@ TEST(TessellatorTest, QuadTessellationIsCrackFreeWithUnequalEdgeFactors) {
       tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
                  TessOutputPrimitive::TriangleCcw, Factors);
   ASSERT_FALSE(Patch.Indices.empty());
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
+}
+
+TEST(TessellatorTest, QuadAlignedInnerAndOuterFactorsGiveUnitGridTriangles) {
+  // Roadmap L221 regression (found via `dEQP-VK.tessellation.
+  // geometry_interaction.scatter.geometry_scatter_primitives`, an actual
+  // Vulkan CTS conformance test): when every outer edge factor exactly
+  // matches the corresponding inner axis's own segment count -- the
+  // common "uniform level" case, e.g. every `SV_Tess*Factor` set to the
+  // same value from a single shader constant -- the interior grid's own
+  // boundary ring (`InnerRing`) is *not* a same-span concentric shrink
+  // of the true outer boundary the way the triangle domain's inset core
+  // is: it is a strictly narrower `[1 / N, (N - 1) / N]`-ish sub-interval
+  // of the outer ring's full `[0, 1]` corner-to-corner span (per the
+  // spec: the outer rectangle's own edge subdivision is discarded and
+  // replaced, while the inner rectangle's is retained as-is). Bridging
+  // these two rings by raw index/edge-length ratio (as if they spanned
+  // the same interval) bunches the extra outer vertices unevenly, most
+  // visibly producing one oversized, non-unit-cell triangle pair at each
+  // of the 4 corners instead of a plain, uniform grid. Every triangle
+  // here must therefore be an exact `1 x 1`-grid-cell (regular diagonal
+  // split), even along the outermost ring bridging the true edge to the
+  // interior grid.
+  const uint32_t Level = 5;
+  TessFactors Factors;
+  Factors.Inside = {static_cast<float>(Level), static_cast<float>(Level)};
+  Factors.Edges = {static_cast<float>(Level), static_cast<float>(Level),
+                   static_cast<float>(Level), static_cast<float>(Level)};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  ASSERT_EQ(Patch.Indices.size(), 3u * 2 * Level * Level);
+  for (size_t I = 0; I + 2 < Patch.Indices.size(); I += 3) {
+    const DomainPoint &A = Patch.Points[Patch.Indices[I]];
+    const DomainPoint &B = Patch.Points[Patch.Indices[I + 1]];
+    const DomainPoint &C = Patch.Points[Patch.Indices[I + 2]];
+    float MinU = std::min({A.U, B.U, C.U}), MaxU = std::max({A.U, B.U, C.U});
+    float MinV = std::min({A.V, B.V, C.V}), MaxV = std::max({A.V, B.V, C.V});
+    EXPECT_NEAR((MaxU - MinU) * Level, 1.0f, 1e-4f) << "triangle " << I / 3;
+    EXPECT_NEAR((MaxV - MinV) * Level, 1.0f, 1e-4f) << "triangle " << I / 3;
+  }
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
+}
+
+TEST(TessellatorTest, QuadSingleAxisDegenerateInsideFactorGivesInteriorLine) {
+  // Roadmap L221: when exactly one axis's clamped inner tessellation
+  // level is 2 (`N == 2` here, the "u-degenerate" case, `M == 5 != 2`),
+  // the interior collapses to a line of `M - 1` points at the lone
+  // interior u-grid-index (`u == 0.5`), rather than a 2D grid or a single
+  // point.
+  TessFactors Factors;
+  Factors.Inside = {5.0f, 2.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  const uint32_t M = 5;
+  uint32_t InteriorCount = 0;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U == 0.0f || P.U == 1.0f || P.V == 0.0f || P.V == 1.0f)
+      continue;
+    ++InteriorCount;
+    EXPECT_EQ(P.U, 0.5f);
+    EXPECT_GT(P.V, 0.0f);
+    EXPECT_LT(P.V, 1.0f);
+  }
+  EXPECT_EQ(InteriorCount, M - 1);
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
+}
+
+TEST(TessellatorTest, QuadOtherAxisDegenerateInsideFactorGivesInteriorLine) {
+  // Mirror of the above with `u`/`v` (and `Inside[0]`/`Inside[1]`)
+  // swapped (`M == 2`, the "v-degenerate" case, `N == 5 != 2`).
+  TessFactors Factors;
+  Factors.Inside = {2.0f, 5.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  const uint32_t N = 5;
+  uint32_t InteriorCount = 0;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U == 0.0f || P.U == 1.0f || P.V == 0.0f || P.V == 1.0f)
+      continue;
+    ++InteriorCount;
+    EXPECT_EQ(P.V, 0.5f);
+    EXPECT_GT(P.U, 0.0f);
+    EXPECT_LT(P.U, 1.0f);
+  }
+  EXPECT_EQ(InteriorCount, N - 1);
   EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
 }
 

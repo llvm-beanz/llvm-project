@@ -48,10 +48,23 @@
 // derivation). `bridgeRingsByEdge` is reused unchanged for every ring-to-
 // ring annulus fill.
 //
-// The quad domain (`tessellateQuad`) still uses the older, simpler
-// "uniform inset lattice + bridge" approach described above, which does
-// not reproduce the spec's own quad interior algorithm -- tracked as
-// roadmap `L221`, not yet done.
+// (Roadmap L221) The quad domain's own interior is likewise no longer a
+// single uniformly-inset lattice: `tessellateQuad` now generates the exact
+// interior point set the Vulkan/GLSL spec's own "Quad Tessellation"
+// algorithm requires -- a regular `(N - 1) x (M - 1)` grid (`M`/`N` the
+// clamped, epsilon-bumped first/second inner tessellation levels, governing
+// the v-axis/u-axis segment counts respectively), of which only the cells
+// not adjacent to an outer edge are triangulated directly, with the
+// remaining annulus bridged to the real, independently-subdivided outer
+// boundary exactly as the triangle domain's own rings are. When either axis
+// clamps to exactly 2 segments the interior grid degenerates to a single
+// line of points (one axis fixed at 0.5); when both do, it degenerates to
+// the single center point `(0.5, 0.5)`, each handled as its own explicit
+// case (see `tessellateQuad`'s own comments in Tessellator.cpp for the
+// full derivation, including the `bridgeEdge`/`fanEdgeToPoint` single-edge
+// helpers factored out of `bridgeRingsByEdge`/`fanRingToPoint` so the
+// degenerate cases' own non-ring-shaped interior can still reuse the same
+// per-edge bridging/fanning logic).
 //
 //===----------------------------------------------------------------------===//
 

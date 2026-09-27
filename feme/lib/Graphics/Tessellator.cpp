@@ -65,40 +65,92 @@ using RingEdges = llvm::SmallVector<llvm::SmallVector<uint32_t, 8>, 4>;
 /// always advancing whichever edge's next vertex comes first. Emits
 /// exactly `Outer[e].size() + Inner[e].size()` triangles for each edge
 /// `e`.
-void bridgeRingsByEdge(TessellatedPatch &Patch, const RingEdges &Outer,
-                       const RingEdges &Inner, bool Cw) {
+/// Bridges one outer boundary edge (\p OuterEdge, whose own trailing/
+/// shared corner with the next outer edge is \p OuterNextCorner) to one
+/// inner boundary edge (\p InnerEdge, whose own trailing corner is
+/// \p InnerNextCorner) with a triangulated strip, always advancing
+/// whichever edge's next vertex comes first. This is the per-edge body
+/// `bridgeRingsByEdge` applies to every edge of two whole rings in
+/// lockstep; factored out so a caller bridging a single edge against a
+/// shape that isn't a well-formed multi-edge ring of its own (e.g.
+/// `tessellateQuad`'s own axis-degenerate inner "line", which has no
+/// well-defined per-edge corner lookups a `RingEdges` assumes) can supply
+/// each edge's own trailing corner explicitly instead.
+///
+/// By default (\p Position null) both edges are walked by proportional
+/// arc length (index / edge length): this assumes \p OuterEdge and
+/// \p InnerEdge span the *same* corner-to-corner interval (true of
+/// concentric same-shape rings, e.g. the triangle domain's inset core,
+/// where every ring's own edge really does run corner to corner, just at
+/// a smaller scale). \p Position overrides this with each vertex's real
+/// geometric position, monotonically increasing from this edge's own
+/// starting corner (0) towards its trailing corner (1): required for
+/// `tessellateQuad`'s general-case bridge, where the "inner" ring is the
+/// interior grid's own boundary, a strictly *narrower* sub-interval of
+/// the outer edge's full `[0, 1]` corner-to-corner span (per the spec's
+/// "discard the outer rectangle edge subdivision, retain the inner
+/// rectangle's" quad algorithm) rather than a same-span concentric
+/// shrink -- arc-length-by-index would otherwise stretch the inner
+/// edge's narrower span across the full `[0, 1]` proportion range,
+/// under-counting how many outer vertices really sit before the inner
+/// ring's own first vertex and bunching the excess into one oversized
+/// triangle at each corner instead of spreading it evenly.
+void bridgeEdge(TessellatedPatch &Patch, llvm::ArrayRef<uint32_t> OuterEdge,
+                uint32_t OuterNextCorner, llvm::ArrayRef<uint32_t> InnerEdge,
+                uint32_t InnerNextCorner, bool Cw,
+                llvm::function_ref<float(uint32_t)> Position = nullptr) {
+  size_t Mo = OuterEdge.size();
+  size_t Mi = InnerEdge.size();
+  size_t I = 0, J = 0;
+  // Each step advances exactly one ring by one vertex and emits the
+  // triangle spanning that step and the *other* ring's current vertex.
+  // Once a ring is exhausted its "current vertex" is the shared corner
+  // the next edge starts at, not a wrap back to this edge's own first
+  // vertex: the annulus being triangulated runs from one shared corner
+  // pair to the next, so wrapping would fold the last triangles of every
+  // edge back across the strip and leave a crack behind them.
+  while (I < Mo || J < Mi) {
+    uint32_t OuterAt = I < Mo ? OuterEdge[I] : OuterNextCorner;
+    uint32_t InnerAt = J < Mi ? InnerEdge[J] : InnerNextCorner;
+    bool AdvanceOuter;
+    if (J >= Mi)
+      AdvanceOuter = true;
+    else if (I >= Mo)
+      AdvanceOuter = false;
+    else if (Position)
+      AdvanceOuter = Position(OuterEdge[I]) <= Position(InnerEdge[J]);
+    else
+      AdvanceOuter = static_cast<double>(I + 1) / Mo <=
+                     static_cast<double>(J + 1) / Mi;
+    if (AdvanceOuter) {
+      uint32_t OuterNext = (I + 1 < Mo) ? OuterEdge[I + 1] : OuterNextCorner;
+      appendTriangle(Patch, OuterAt, OuterNext, InnerAt, Cw);
+      ++I;
+      continue;
+    }
+    uint32_t InnerNext = (J + 1 < Mi) ? InnerEdge[J + 1] : InnerNextCorner;
+    appendTriangle(Patch, InnerAt, OuterAt, InnerNext, Cw);
+    ++J;
+  }
+}
+
+void bridgeRingsByEdge(
+    TessellatedPatch &Patch, const RingEdges &Outer, const RingEdges &Inner,
+    bool Cw,
+    llvm::function_ref<float(size_t Edge, uint32_t PointIdx)> Position =
+        nullptr) {
   assert(Outer.size() == Inner.size() &&
          "bridged rings must have matching edge counts");
   size_t NumEdges = Outer.size();
   for (size_t E = 0; E != NumEdges; ++E) {
-    llvm::ArrayRef<uint32_t> OuterEdge = Outer[E];
-    llvm::ArrayRef<uint32_t> InnerEdge = Inner[E];
-    uint32_t OuterNextCorner = Outer[(E + 1) % NumEdges].front();
-    uint32_t InnerNextCorner = Inner[(E + 1) % NumEdges].front();
-    size_t Mo = OuterEdge.size();
-    size_t Mi = InnerEdge.size();
-    size_t I = 0, J = 0;
-    // Each step advances exactly one ring by one vertex and emits the
-    // triangle spanning that step and the *other* ring's current vertex.
-    // Once a ring is exhausted its "current vertex" is the shared corner
-    // the next edge starts at, not a wrap back to this edge's own first
-    // vertex: the annulus being triangulated runs from one shared corner
-    // pair to the next, so wrapping would fold the last triangles of every
-    // edge back across the strip and leave a crack behind them.
-    while (I < Mo || J < Mi) {
-      uint32_t OuterAt = I < Mo ? OuterEdge[I] : OuterNextCorner;
-      uint32_t InnerAt = J < Mi ? InnerEdge[J] : InnerNextCorner;
-      if (J >= Mi || (I < Mo && static_cast<double>(I + 1) / Mo <=
-                                    static_cast<double>(J + 1) / Mi)) {
-        uint32_t OuterNext = (I + 1 < Mo) ? OuterEdge[I + 1] : OuterNextCorner;
-        appendTriangle(Patch, OuterAt, OuterNext, InnerAt, Cw);
-        ++I;
-        continue;
-      }
-      uint32_t InnerNext = (J + 1 < Mi) ? InnerEdge[J + 1] : InnerNextCorner;
-      appendTriangle(Patch, InnerAt, OuterAt, InnerNext, Cw);
-      ++J;
-    }
+    auto EdgePositionFn = [&Position, E](uint32_t Idx) {
+      return Position(E, Idx);
+    };
+    llvm::function_ref<float(uint32_t)> EdgePosition =
+        Position ? llvm::function_ref<float(uint32_t)>(EdgePositionFn)
+                 : llvm::function_ref<float(uint32_t)>();
+    bridgeEdge(Patch, Outer[E], Outer[(E + 1) % NumEdges].front(), Inner[E],
+              Inner[(E + 1) % NumEdges].front(), Cw, EdgePosition);
   }
 }
 
@@ -175,6 +227,27 @@ RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
   return Edges;
 }
 
+/// Fans one boundary edge (\p Edge, whose own trailing/shared corner with
+/// the next edge in its ring is \p NextCorner) to a single, already-
+/// appended \p Center point, emitting one triangle per boundary segment.
+/// This is the per-edge body `fanRingToPoint` applies to every edge of a
+/// whole ring; factored out so a caller fanning a single edge against a
+/// shape that isn't a well-formed multi-edge ring of its own (e.g.
+/// `tessellateQuad`'s own axis-degenerate inner "line", see `bridgeEdge`'s
+/// own comment) can supply that edge's own trailing corner explicitly
+/// instead. Each triangle's winding matches `bridgeEdge`'s own "advance
+/// the outer ring" case exactly (the same `(A, B, Center)` operand order),
+/// so a fan appended after bridging \p Edge's own ring to its outer
+/// neighbor stays crack-free.
+void fanEdgeToPoint(TessellatedPatch &Patch, llvm::ArrayRef<uint32_t> Edge,
+                    uint32_t NextCorner, uint32_t Center, bool Cw) {
+  for (size_t I = 0; I < Edge.size(); ++I) {
+    uint32_t A = Edge[I];
+    uint32_t B = (I + 1 < Edge.size()) ? Edge[I + 1] : NextCorner;
+    appendTriangle(Patch, A, B, Center, Cw);
+  }
+}
+
 /// Fans every vertex of \p Ring's own boundary (walked corner to corner,
 /// same convention `bridgeRingsByEdge` uses) to a single, already-appended
 /// \p Center point, emitting one triangle per boundary segment -- the
@@ -185,23 +258,13 @@ RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
 /// point count rather than assuming exactly six, since the same rule also
 /// covers the "first (and only) inner triangle is degenerate" case, which
 /// fans the real, independently-subdivided outer boundary directly instead
-/// of a uniform six-vertex ring). Each triangle's winding matches
-/// `bridgeRingsByEdge`'s own "advance the outer ring" case exactly (the
-/// same `(OuterAt, OuterNext, InnerAt)` operand order, with \p Center
-/// standing in for a fully degenerate inner ring), so a fan appended after
-/// bridging \p Ring to its own outer neighbor stays crack-free.
+/// of a uniform six-vertex ring).
 void fanRingToPoint(TessellatedPatch &Patch, const RingEdges &Ring,
                     uint32_t Center, bool Cw) {
   size_t NumEdges = Ring.size();
-  for (size_t E = 0; E != NumEdges; ++E) {
-    llvm::ArrayRef<uint32_t> Edge = Ring[E];
-    uint32_t NextCorner = Ring[(E + 1) % NumEdges].front();
-    for (size_t I = 0; I < Edge.size(); ++I) {
-      uint32_t A = Edge[I];
-      uint32_t B = (I + 1 < Edge.size()) ? Edge[I + 1] : NextCorner;
-      appendTriangle(Patch, A, B, Center, Cw);
-    }
-  }
+  for (size_t E = 0; E != NumEdges; ++E)
+    fanEdgeToPoint(Patch, Ring[E], Ring[(E + 1) % NumEdges].front(), Center,
+                  Cw);
 }
 
 /// Appends a quad domain's per-edge boundary ring (no interior) to
@@ -461,75 +524,167 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
       Patch.Indices.clear();
     return Patch;
   }
-  // (Roadmap L82.) `computeSegmentCount` returns the number of segments
-  // spanning the *whole* `[0, 1]` axis (matching its use for edges, above,
-  // where the boundary ring legitimately needs a point at every one of
-  // those segment endpoints, including `0`/`1` themselves). The interior
-  // core lattice built below is different: it is always inset strictly
-  // *within* the boundary (see the `Margin` comment below) and never
-  // touches it, so its own division count is the number of strictly
-  // *interior* grid lines the inside tessellation factor implies -- one
-  // fewer than the whole-axis segment count (an inside factor of `N`
-  // divides the axis into `N` segments, leaving `N - 1` interior lattice
-  // lines, exactly as for the boundary edges' own segment endpoints).
-  // Using the whole-axis segment count directly here (the pre-fix
-  // behavior) generated a spurious *extra* interior ring: for the common
-  // `Inside == Edges == 2` case this produced core lattice points at
-  // `U/V == 1/6, 1/2, 5/6` instead of the correct `U/V == 0.25, 0.75`,
-  // introducing a non-dyadic (`1/6`) fraction that cannot be represented
-  // exactly in `float32` -- an unrecoverable 1-ULP error, no matter how
-  // precisely the rest of the pipeline computes with it. Clamping to a
-  // minimum of `1` preserves the existing degenerate single-ring behavior
-  // when the inside factor is already at its own minimum of `1`.
-  uint32_t Nu = std::max(
-      1u,
-      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) -
-          1);
-  uint32_t Nv = std::max(
-      1u,
-      computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) -
-          1);
+  // (Roadmap L221) Real spec algorithm ("Quad Tessellation"): the u = 0
+  // and u = 1 edges (each varying over v) are temporarily subdivided into
+  // `M` segments from the first inside factor; the v = 0 and v = 1 edges
+  // (each varying over u) are temporarily subdivided into `N` segments
+  // from the second inside factor. Joining corresponding points across
+  // these two temporary subdivisions produces a regular `(N + 1) x
+  // (M + 1)` grid of `[0, 1]^2`; every grid cell *not* adjacent to an
+  // outer edge (i.e. whose own 4 corners all have a u-grid-index strictly
+  // between `0` and `N` and a v-grid-index strictly between `0` and `M`)
+  // is decomposed into a triangle pair, and the remaining area between
+  // that surviving interior cell block and the outer boundary (which
+  // discards this temporary subdivision entirely, using the real,
+  // independent outer tessellation levels instead, exactly like every
+  // other bridge in this file) is filled by `bridgeEdge`/`fanEdgeToPoint`.
+  // Per spec, "if either clamped inner tessellation level is one, that
+  // tessellation level is treated as though it was originally specified
+  // as `1 + epsilon`" -- applied per axis, since the fully-unsubdivided
+  // fast path above already covers the one case (both `M == 1` and
+  // `N == 1`, alongside every outer edge also `== 1`) where neither axis
+  // would need the bump.
+  uint32_t M =
+      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
+  uint32_t N =
+      computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor);
+  if (M == 1)
+    M = Partitioning == TessPartitioning::FractionalOdd ? 3 : 2;
+  if (N == 1)
+    N = Partitioning == TessPartitioning::FractionalOdd ? 3 : 2;
 
   TessellatedPatch Patch;
   RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);
 
-  // Inset the uniform interior core strictly within `[0, 1]^2`, the same
-  // way the triangle domain insets its own core toward the centroid: the
-  // margin shrinks toward 0 as `Nu`/`Nv` grow, but is always strictly
-  // positive, so the core never touches the outer boundary.
-  float MarginU = 0.5f / static_cast<float>(Nu + 1);
-  float MarginV = 0.5f / static_cast<float>(Nv + 1);
-  std::vector<std::vector<uint32_t>> Index(Nu + 1,
-                                           std::vector<uint32_t>(Nv + 1));
-  for (uint32_t I = 0; I <= Nu; ++I) {
-    for (uint32_t J = 0; J <= Nv; ++J) {
-      Index[I][J] = static_cast<uint32_t>(Patch.Points.size());
-      float U = MarginU + (1.0f - 2.0f * MarginU) * static_cast<float>(I) / Nu;
-      float V = MarginV + (1.0f - 2.0f * MarginV) * static_cast<float>(J) / Nv;
-      Patch.Points.push_back({U, V, 0.0f});
+  // Per spec, "if either `m` or `n` is two, the inner rectangle is
+  // degenerate, and one or both of the rectangle's edges consist of a
+  // single point": the interior grid range on that axis (grid index `1`
+  // through `axis - 1`) collapses to the single index `1`.
+  bool UDegenerate = N == 2;
+  bool VDegenerate = M == 2;
+  if (UDegenerate && VDegenerate) {
+    // Both axes degenerate: the whole interior grid collapses to the
+    // single point at its own center, exactly like the triangle domain's
+    // own inside-factor-two case -- fan the entire outer boundary to it.
+    uint32_t Center = static_cast<uint32_t>(Patch.Points.size());
+    Patch.Points.push_back({0.5f, 0.5f, 0.0f});
+    fanRingToPoint(Patch, OuterRing, Center, Cw);
+  } else if (UDegenerate) {
+    // Only the u axis degenerates (`N == 2`): the surviving interior
+    // structure is a single line of points varying over v at the lone
+    // interior u-grid-index (u == 0.5). Per spec, "the area near the
+    // corresponding outer edges is filled by connecting each vertex on
+    // the outer edge with the single vertex making up the inner edge":
+    // the u == 0/u == 1 outer edges (which also vary over v) bridge to
+    // this whole line, while the v == 0/v == 1 outer edges (which vary
+    // over u, now degenerate) each fan entirely to one of the line's own
+    // two endpoints.
+    llvm::SmallVector<uint32_t, 8> Line;
+    for (uint32_t J = 1; J <= M - 1; ++J) {
+      Line.push_back(static_cast<uint32_t>(Patch.Points.size()));
+      Patch.Points.push_back({0.5f, static_cast<float>(J) / M, 0.0f});
     }
-  }
-  for (uint32_t I = 0; I < Nu; ++I) {
-    for (uint32_t J = 0; J < Nv; ++J) {
-      uint32_t A = Index[I][J];
-      uint32_t B = Index[I + 1][J];
-      uint32_t C = Index[I + 1][J + 1];
-      uint32_t D = Index[I][J + 1];
-      appendTriangle(Patch, A, B, C, Cw);
-      appendTriangle(Patch, A, C, D, Cw);
+    // Each bridged edge, per `RingEdges`'s own convention, must exclude
+    // its own trailing/shared corner (passed separately as the explicit
+    // `...NextCorner` argument): `Line`'s own two endpoints play that
+    // role for the two edges that meet there (also reused below as the
+    // two fan centers), so the line itself contributes only its
+    // `Line.size() - 1` strictly-interior points to either bridge.
+    llvm::ArrayRef<uint32_t> LineButLast(Line.begin(), Line.end() - 1);
+    llvm::SmallVector<uint32_t, 8> ReverseLine(llvm::reverse(Line));
+    llvm::ArrayRef<uint32_t> ReverseLineButLast(ReverseLine.begin(),
+                                               ReverseLine.end() - 1);
+    bridgeEdge(Patch, OuterRing[1], OuterRing[2].front(), LineButLast,
+              Line.back(), Cw);
+    bridgeEdge(Patch, OuterRing[3], OuterRing[0].front(), ReverseLineButLast,
+              Line.front(), Cw);
+    fanEdgeToPoint(Patch, OuterRing[0], OuterRing[1].front(), Line.front(),
+                  Cw);
+    fanEdgeToPoint(Patch, OuterRing[2], OuterRing[3].front(), Line.back(),
+                  Cw);
+  } else if (VDegenerate) {
+    // Only the v axis degenerates (`M == 2`): the mirror image of the
+    // `UDegenerate` case above, with u/v (and the corresponding outer
+    // edge pairs) swapped.
+    llvm::SmallVector<uint32_t, 8> Line;
+    for (uint32_t I = 1; I <= N - 1; ++I) {
+      Line.push_back(static_cast<uint32_t>(Patch.Points.size()));
+      Patch.Points.push_back({static_cast<float>(I) / N, 0.5f, 0.0f});
     }
+    llvm::ArrayRef<uint32_t> LineButLast(Line.begin(), Line.end() - 1);
+    llvm::SmallVector<uint32_t, 8> ReverseLine(llvm::reverse(Line));
+    llvm::ArrayRef<uint32_t> ReverseLineButLast(ReverseLine.begin(),
+                                               ReverseLine.end() - 1);
+    bridgeEdge(Patch, OuterRing[0], OuterRing[1].front(), LineButLast,
+              Line.back(), Cw);
+    bridgeEdge(Patch, OuterRing[2], OuterRing[3].front(), ReverseLineButLast,
+              Line.front(), Cw);
+    fanEdgeToPoint(Patch, OuterRing[1], OuterRing[2].front(), Line.back(),
+                  Cw);
+    fanEdgeToPoint(Patch, OuterRing[3], OuterRing[0].front(), Line.front(),
+                  Cw);
+  } else {
+    // Neither axis degenerates: build the full `(N - 1) x (M - 1)`
+    // interior grid (u-grid-index `1..N - 1`, v-grid-index `1..M - 1`),
+    // triangulate every cell strictly inside it (index `1..N - 2` /
+    // `1..M - 2` -- the "not adjacent to an outer edge" cells, discarding
+    // exactly the grid's own outermost ring of cells, per spec), and
+    // bridge the outer boundary to that interior grid's own boundary ring
+    // (walked in the same per-edge/per-corner convention every other ring
+    // in this file uses).
+    std::vector<std::vector<uint32_t>> Grid(
+        N, std::vector<uint32_t>(M, ~0u));
+    for (uint32_t I = 1; I <= N - 1; ++I) {
+      for (uint32_t J = 1; J <= M - 1; ++J) {
+        Grid[I][J] = static_cast<uint32_t>(Patch.Points.size());
+        Patch.Points.push_back(
+            {static_cast<float>(I) / N, static_cast<float>(J) / M, 0.0f});
+      }
+    }
+    for (uint32_t I = 1; I <= N - 2; ++I) {
+      for (uint32_t J = 1; J <= M - 2; ++J) {
+        uint32_t A = Grid[I][J], B = Grid[I + 1][J], C = Grid[I + 1][J + 1],
+                 D = Grid[I][J + 1];
+        appendTriangle(Patch, A, B, C, Cw);
+        appendTriangle(Patch, A, C, D, Cw);
+      }
+    }
+    RingEdges InnerRing(4);
+    for (uint32_t I = 1; I <= N - 2; ++I)
+      InnerRing[0].push_back(Grid[I][1]);
+    for (uint32_t J = 1; J <= M - 2; ++J)
+      InnerRing[1].push_back(Grid[N - 1][J]);
+    for (uint32_t I = N - 1; I >= 2; --I)
+      InnerRing[2].push_back(Grid[I][M - 1]);
+    for (uint32_t J = M - 1; J >= 2; --J)
+      InnerRing[3].push_back(Grid[1][J]);
+    // The outer ring's own edges span the true `[0, 1]` corner-to-corner
+    // domain, but the interior grid's boundary (`InnerRing`) is a
+    // strictly *narrower* `[1 / N, (N - 1) / N]`-ish sub-interval of that
+    // same span (per the spec: the outer rectangle's own edge subdivision
+    // is discarded and replaced, while the inner rectangle's retains the
+    // grid's own spacing) -- not a same-span concentric shrink like the
+    // triangle domain's inset core. Bridging by raw index/edge-length
+    // ratio would wrongly assume both edges cover the same `[0, 1]` span,
+    // so pass each vertex's real geometric position (still monotonically
+    // increasing from 0 at this edge's own starting corner to 1 at its
+    // trailing corner, matching the direction `appendQuadBoundaryRing`
+    // walks each edge in) instead.
+    bridgeRingsByEdge(Patch, OuterRing, InnerRing, Cw,
+                      [&Patch](size_t Edge, uint32_t Idx) {
+                        const DomainPoint &P = Patch.Points[Idx];
+                        switch (Edge) {
+                        case 0:
+                          return P.U;
+                        case 1:
+                          return P.V;
+                        case 2:
+                          return 1.0f - P.U;
+                        default:
+                          return 1.0f - P.V;
+                        }
+                      });
   }
-
-  RingEdges CoreRing(4);
-  for (uint32_t I = 0; I < Nu; ++I)
-    CoreRing[0].push_back(Index[I][0]);
-  for (uint32_t J = 0; J < Nv; ++J)
-    CoreRing[1].push_back(Index[Nu][J]);
-  for (uint32_t I = Nu; I > 0; --I)
-    CoreRing[2].push_back(Index[I][Nv]);
-  for (uint32_t J = Nv; J > 0; --J)
-    CoreRing[3].push_back(Index[0][J]);
-  bridgeRingsByEdge(Patch, OuterRing, CoreRing, Cw);
 
   if (OutputPrimitive == TessOutputPrimitive::Point)
     Patch.Indices.clear();
