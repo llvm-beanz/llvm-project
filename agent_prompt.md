@@ -61,23 +61,32 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, available)** `check-hlsl-feme-vk` against the
-   `offload-test-suite` `feme` branch -- flagged as available in the
-   standing instructions for several sessions running, never actually
-   run this session either. Worth trying at least once to see if it
-   still reproduces the parallel-worker flakiness noted a few sessions
-   back (never root-caused).
-2. **(unknown)** No specific quad/triangle tessellation failures are
-   known to remain untriaged right now -- `L216`
-   (`tess_io.max_in_out.with_f16.*`) was hypothesized several sessions
-   back to be quad-domain-specific and should be **re-tested now that
-   `L221` has landed**, since it was blocked on exactly this rewrite.
-3. **(unknown)** A full/broad CTS re-run (not just the 1088-case
-   `tessellation.*` sample) is overdue -- last one flagged as overdue
-   for several sessions running, `L205`/`L206`/`L208`/`L210`-`L221`/
-   `L222`/`L201(c)` have all landed since the last one mentioned in
-   these notes (2026-09-26). Worth doing once `L216` is re-checked, to
-   get one consolidated before/after picture.
-4. No git stashes to clean up this session (temporary debug harnesses
-   under `/tmp/` were compiled standalone against `libFeMeGraphics.a`
-   and cleaned up at session end, never touched the working tree).
+1. **(a few hours)** The overdue full/broad Vulkan CTS re-run: this
+   session and the last several have only ever compared the
+   1088-case `tessellation.*` sample (plus, previously, the
+   29451-case `draw.*` group once). The full `vk-default` mustpass
+   list is genuinely large (~3.7M lines across 196 group files) --
+   running the whole thing in one sitting is likely multi-hour+.
+   Worth either budgeting a dedicated session for it, or picking a
+   handful of the largest/most-central groups (`api`, `pipeline`,
+   `shader_render`, `synchronization`) as a wider-than-tessellation
+   but still bounded sample.
+2. **(unknown)** No specific tessellation failures are known to
+   remain untriaged right now -- the remaining 156/1088 failures in
+   the `tessellation.*` sample are all pre-existing, already-tracked
+   groups (`invariance`, `user_defined_io`, `primitive_discard`,
+   `shader_input_output`, `misc_draw`, `tesscoord`,
+   `common_edge`, `matrix_multiplication`, `geometry_interaction`) --
+   worth picking one of these next if continuing tessellation work,
+   `user_defined_io` (27 cases) or `primitive_discard` (24 cases) look
+   like the next-largest untriaged chunks.
+3. The pre-existing `llvm.lifetime.start/end can only be used on
+   alloca or poison` crash on hlsl-sourced tessellation-control
+   shaders (confirmed again this session, unrelated, halts the
+   `tessellation.*` batch at `fractional_spacing.hlsl_{even,odd}` and
+   every `winding.*.hlsl_*` case) still has no dedicated roadmap row --
+   worth adding one and root-causing it properly instead of treating
+   it as background noise every session.
+4. No git stashes to clean up this session (one `git stash`
+   push/pop pair used mid-session purely to A/B-test the fix against
+   its own new unit test, popped back immediately after).
