@@ -714,15 +714,23 @@ uint32_t feme::graphics::computeSegmentCount(float Factor,
     if (N % 2 == 0)
       ++N;
     break;
-  case TessPartitioning::FractionalEven:
-    if (Clamped <= 1.0f) {
-      N = 1;
-      break;
-    }
-    N = Ceil;
+  case TessPartitioning::FractionalEven: {
+    // (Roadmap-worthy correctness fix, found this session while verifying
+    // roadmap L221 against the real CTS.) Per the Vulkan/GLSL
+    // tessellation spec's own "Tessellator Spacing" section,
+    // `SpacingFractionalEven`'s clamp range is `[2, maxLevel]`, not
+    // `[1, maxLevel]` like every other partitioning mode -- a factor at
+    // or below `1` still rounds up to `2` segments (an un-subdivided
+    // edge, i.e. `N == 1`, cannot happen under fractional-even spacing at
+    // all), not `1` (a single point, wrongly collapsing the edge). The
+    // shared `Clamped` value above uses every mode's common `[1,
+    // maxLevel]` floor, so re-clamp to `2` here before rounding.
+    float EvenClamped = std::max(2.0f, Clamped);
+    N = static_cast<uint32_t>(std::ceil(EvenClamped));
     if (N % 2 != 0)
       ++N;
     break;
+  }
   }
   return std::min(N, MaxTessFactor);
 }

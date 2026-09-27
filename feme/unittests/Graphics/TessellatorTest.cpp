@@ -44,8 +44,15 @@ TEST(TessellatorTest, FractionalOddPartitioningIsAlwaysOdd) {
   EXPECT_EQ(computeSegmentCount(2.0f, TessPartitioning::FractionalOdd), 3u);
 }
 
-TEST(TessellatorTest, FractionalEvenPartitioningIsAlwaysEvenOrOne) {
-  EXPECT_EQ(computeSegmentCount(1.0f, TessPartitioning::FractionalEven), 1u);
+TEST(TessellatorTest, FractionalEvenPartitioningIsAlwaysEvenAndAtLeastTwo) {
+  // Per the Vulkan/GLSL spec's own "Tessellator Spacing" section,
+  // `SpacingFractionalEven` clamps to `[2, maxLevel]` (a stricter minimum
+  // than every other partitioning mode's own `[1, maxLevel]`), so it can
+  // never collapse an edge to an un-subdivided single point (a segment
+  // count of 1) the way `Integer`/`FractionalOdd` do at `Factor <= 1`.
+  for (float F = 0.0f; F <= 1.0f; F += 0.5f)
+    EXPECT_EQ(computeSegmentCount(F, TessPartitioning::FractionalEven), 2u)
+        << "factor " << F;
   for (float F = 1.5f; F <= 9.0f; F += 0.5f)
     EXPECT_EQ(computeSegmentCount(F, TessPartitioning::FractionalEven) % 2, 0u)
         << "factor " << F;

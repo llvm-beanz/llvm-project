@@ -170,16 +170,22 @@ struct TessellatedPatch {
   std::vector<uint32_t> Indices;
 };
 
-/// Rounds \p Factor (clamped to `[1, MaxTessFactor]`) into an integer
-/// segment count per \p Partitioning's rule:
+/// Rounds \p Factor into an integer segment count per \p Partitioning's
+/// rule (each first clamps \p Factor to its own range, per the Vulkan/GLSL
+/// spec's "Tessellator Spacing" section):
 ///
-///  - `Integer`: the ceiling of \p Factor.
-///  - `Pow2`: the smallest power of two at least the ceiling of \p Factor.
-///  - `FractionalOdd`: the smallest odd integer at least the ceiling of
-///    \p Factor (1 when `Factor <= 1`).
-///  - `FractionalEven`: the smallest even integer at least the ceiling of
-///    \p Factor (1 -- not 2 -- when `Factor <= 1`, collapsing the edge to a
-///    point exactly as `FractionalOdd`/`Integer` do at that boundary).
+///  - `Integer`: \p Factor clamped to `[1, MaxTessFactor]`, then the
+///    ceiling.
+///  - `Pow2`: \p Factor clamped to `[1, MaxTessFactor]`, then the smallest
+///    power of two at least the ceiling.
+///  - `FractionalOdd`: \p Factor clamped to `[1, MaxTessFactor]`, then the
+///    smallest odd integer at least the ceiling (1 when `Factor <= 1`).
+///  - `FractionalEven`: \p Factor clamped to `[2, MaxTessFactor]` -- a
+///    stricter minimum than every other mode's own `[1, MaxTessFactor]`,
+///    per spec -- then the smallest even integer at least the ceiling
+///    (always `>= 2`; `FractionalEven` can never collapse an edge to an
+///    un-subdivided single point the way `Integer`/`FractionalOdd` do at
+///    `Factor <= 1`).
 ///
 /// This is FeMe's own normalized rounding rule (see the file comment's
 /// scope note): it matches each partitioning mode's qualitative shape --
