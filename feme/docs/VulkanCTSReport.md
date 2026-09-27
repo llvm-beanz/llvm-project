@@ -1063,3 +1063,34 @@ No Vulkan feature/extension advertisement changed (a pure correctness
 fix within the existing `tessellationShader` feature's own
 implementation), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap L201(c): floating-point-source narrowing vector bitcast in SIMDize
+
+Closes out roadmap `L201(c)` (`opcompositeinsert`/`opcompositeextract`/
+`opvectorinsertdynamic`/`opvectorextractdynamic`/`opcompositeconstruct`,
+25 cases carried over many sessions as "not yet reduced"). Reducing one
+representative from each opcode shape found 19/25 already passing
+(fixed incidentally by earlier sessions' generic tessellation-control
+work); the remaining 6 (`opcompositeinsert`/`opvectorinsertdynamic` on
+`v4f16`, `frag`/`vert` only) were a genuine `SIMDize.cpp` gap: a
+narrowing `bitcast <4 x half> to <2 x i32>` with a floating-point
+*source* element type, a shape `isVectorNarrowingBitCast` (built for a
+different, all-integer roadmap `L134h` case) didn't recognize. See
+`Roadmap.md`'s `L201(c)` row for the full technical detail.
+
+CTS-confirmed:
+- The 6 previously-failing `opcompositeinsert.v4f16_{frag,vert}` and
+  `opvectorinsertdynamic.v4f16_{frag,vert}` cases: **6/6 Pass** (was
+  0/6).
+- `dEQP-VK.spirv_assembly.instruction.graphics.float16.*` (2135 cases,
+  the full float16 group all 5 opcode shapes belong to): **0 failed**
+  (1995 Pass, 140 pre-existing unrelated Not Supported).
+- `dEQP-VK.tessellation.tess_io.max_in_out.with_f16.*` (`L216`'s own
+  repro, 80 cases): unaffected, 40/80 Pass both before and after.
+
+`ninja check-feme`: 3377/3380 passed (0 failed, 3 pre-existing
+Unsupported), +1 net new `SIMDizeTest.cpp` case.
+
+No Vulkan feature/extension advertisement changed, so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
