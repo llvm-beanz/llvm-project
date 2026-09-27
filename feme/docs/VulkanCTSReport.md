@@ -1441,3 +1441,100 @@ No Vulkan feature/extension advertisement changed (a pure internal
 correctness fix inside the tessellator's fast-path condition, touching
 no feature/extension surface), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap L226: `user_defined_io` JIT-link failure -- root-caused and fixed
+
+All `dEQP-VK.tessellation.user_defined_io.*` cases (the roadmap's
+original "27 cases" undercounted the group's real mustpass size -- it
+is actually 54) failed identically with
+`vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` from
+a JIT link error, `"Symbols not found: [ spirv_var_N ]"`. This session
+built `deqp-vk` locally (source unchanged from the Scope section
+above) and reproduced
+`per_patch_block.vertex_io_array_size_implicit.triangles` end-to-end
+*outside* `deqp-vk`: the failing TCS's own SPIR-V was extracted from
+the case's QPA log (`--deqp-log-filename=...`'s own
+`<SpirVAssemblySource>` section), reassembled with `spirv-as`, then
+run through `feme-translate`'s own `--import-spirv`/`--spirv-to-llvmir`
+pipeline to get raw (pre-`CanonicalizeStage`) LLVM IR, and through
+`feme-opt --llvm -passes=feme-graphics-canonicalize-stage` to get the
+canonicalized IR `libfeme_vulkan.so` actually JITs.
+
+Diffing the two IR dumps: every stage-IO global access converted
+cleanly into a `feme.stage.*` call *except one* -- a doubly-dynamic
+`tcBlock.blockSa[i].z[j]` access (a genuine multi-member nested
+struct's own array member, itself indexed dynamically, inside *that*
+member's own array field, also indexed dynamically -- exactly the
+shape roadmap `H115`/`H117`/`H118` document as already supported by
+`getDynamicRowIndexedAccess`) -- left as a raw, unconverted
+`getelementptr`/`store` pair into the still-`external` global, an
+unresolvable symbol at JIT-link time.
+
+Root cause: `collectDynamicRowTerms`'s constant-index `StructType`
+branch computes its own flattened leaf index (`IDStart`, later
+reported as `DynamicRowIndexedAccess::Member`) by summing
+`getStageIOLeafElementCount` over *every* struct member preceding the
+one actually selected -- including any synthetic `[N x i8]`
+alignment-gap pad field (roadmap L105) `layOutStructIfOffsetsMatch`
+inserts between real, SPIR-V-declared members to keep the LLVM
+struct's own natural layout matching SPIR-V's explicit `Offset`
+decorations. Every *other* `IDStart`-accumulation loop in this file
+(`resolveOffsetWithinElement`'s, `resolveNestedStageIOField`'s) already
+skips a pad field first via `isStageIOPadField` -- this one, alone, did
+not. `TheBlock`'s own layout (`{ S blockS; float blockFa[3]; <pad>; S
+blockSa[2]; float blockF; <pad>; }`) has exactly one such pad
+immediately before `blockSa`, and `blockSa`'s own inner struct `S` has
+a second one before its own `y` member -- so reaching `z` (`S`'s third
+real member) accumulated two bogus extra leaf counts, pushing
+`Dyn->Member` two past its correct value and out of
+`ElementIDs[GV]`'s real bounds. This tripped `resolveStageIOAccess`'s
+own bounds check (`Dyn->Member >= It->second.size()`), which silently
+bails (returns `std::nullopt`) rather than asserting -- exactly why
+the access was left unconverted instead of failing loudly at compile
+time.
+
+Fix: skip `isStageIOPadField` members in `collectDynamicRowTerms`'s
+`IDStart` accumulation loop, matching every other such loop in the
+file. New test: `CanonicalizeStageTest.
+SkipsSyntheticPadFieldPrecedingArrayOfNestedStructMember` (a `patch
+out`-shaped block with a leading real scalar member, forcing a pad
+before its own array-of-nested-struct member; confirmed to fail with
+the pre-fix off-by-N `IDStart` -- caught a *different* leaf element's
+`ElementID` than the one actually stored to -- before the fix, pass
+after).
+
+Verification (both runs against the same locally-built `deqp-vk` and
+the same 1114-case `tessellation.*` mustpass case list, using
+`feme/utils/run_vulkan_cts.py`, one worker's solo re-verification pass
+included):
+
+- The 3 originally-reproduced cases
+  (`per_patch_block`/`per_patch_block_array`/`per_vertex_block`, each
+  `.vertex_io_array_size_implicit`/`.vertex_io_array_size_spec_min`)
+  independently confirmed **Pass** via direct `deqp-vk
+  --deqp-case=...` runs (not just the batch harness).
+- The full 54-case `dEQP-VK.tessellation.user_defined_io.*` group:
+  **54/54 Pass, 0 Fail** (direct `deqp-vk
+  --deqp-case='dEQP-VK.tessellation.user_defined_io.*'` run).
+- The full 1114-case `tessellation.*` mustpass sample goes from
+  `L225`'s **545/1114 Pass, 131 Fail** baseline to **572/1114 Pass,
+  104 Fail** (still 438 Not supported, still **0 crashes**) -- a clean
+  `+27`/`-27` delta.
+- The verified failure list's remaining 104 cases group entirely into
+  the pre-existing, already-documented residual groups
+  (`invariance.outer_edge_symmetry` (36), `invariance.
+  outer_edge_index_independence` (24), `shader_input_output` (15),
+  `misc_draw` (15), `tesscoord` (6), `common_edge` (3),
+  `matrix_multiplication` (2), `invariance.inner_triangle_set` (2),
+  `geometry_interaction.passthrough` (1)) -- zero `user_defined_io`
+  cases remain, and zero new failures were introduced anywhere else in
+  the suite.
+
+`ninja check-feme`: 3328/3389 passed (0 failed, 61 unsupported, +1 net
+new unit test).
+
+No Vulkan feature/extension advertisement changed (a pure internal
+correctness fix inside a stage-IO global's own flattened-leaf-index
+bookkeeping, touching no feature/extension surface), so
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+update.
