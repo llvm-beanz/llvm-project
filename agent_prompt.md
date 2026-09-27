@@ -61,23 +61,23 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, start here)** Pick either `L209` (`log(0)` -> `nan`) or
-   `L210` (byte-address 16-bit offset-8 store/load returns 0) and root-
-   cause it -- both are small, already-isolated, standalone-reproducible
-   `offload-test-suite` tests, no further triage needed before diving in.
-2. **(30-60 min)** Investigate the `check-hlsl-feme-vk` parallel-worker
-   flakiness (3 tests fail under default parallelism, a different 12
-   fail under `-j1`, all pass individually) -- likely a shared-resource
-   contention bug in FeMe's own CPU Vulkan implementation under
-   concurrent command-buffer submission, which could itself be a hidden
-   correctness bug worth its own roadmap row once localized.
-3. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
-   largest still-untouched group, already has a real fail location from
-   two sessions ago (`vktMeshShaderInOutTestsEXT.cpp:1590`) but no
-   pixel-level diff yet.
-4. **(10 min)** Confirm/deny the F15c AArch64-constrained-intrinsic risk
-   flagged in the L208 roadmap row -- a quick `.ll` reproducer using one
-   of `FloatControlArithmeticPattern`'s 5 ops with an explicit non-
-   default rounding mode would confirm or rule this out fast.
-5. L201(b)/(c) (27+25 cases): lowest case count of the remaining L201
-   sub-items, still just "reduced to distinct symptoms," not started.
+1. **(15-30 min)** Triage `array_of_matrices.test`'s XPASS: confirm
+   whether it was already passing before this session (almost certainly
+   yes, given it's an unrelated code path), then either register it as
+   an expected pass (remove/adjust the `Clang`/`DXC` XFAIL if it was
+   never meant to gate FeMe) or leave a comment explaining why FeMe
+   passes where `Clang`/`DXC` don't.
+2. **(30-60 min)** `check-hlsl-feme-vk` parallel-worker flakiness --
+   pick one flaky-under-`-j1`-only test, run it repeatedly alone vs.
+   under contention, and see whether a shared global/static or a
+   filesystem/temp-file collision in FeMe's own CPU Vulkan runtime is the
+   cause. Carried over five sessions now; worth just doing it next time
+   rather than deferring again.
+3. **(unknown, start here if flakiness above is deferred again)** Pick
+   `L210` (byte-address 16-bit offset-8 store/load) -- small, already
+   isolated, standalone-reproducible, no further triage needed.
+4. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
+   largest remaining untouched group, has a partial fail location
+   already (`vktMeshShaderInOutTestsEXT.cpp:1590`).
+5. **(10 min)** F15c AArch64-constrained-intrinsic re-verification --
+   quick, bounded, still not done after being flagged twice.
