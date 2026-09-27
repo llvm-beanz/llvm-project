@@ -15,6 +15,9 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Error.h"
 
+#include <chrono>
+#include <thread>
+
 using namespace feme::vulkan;
 using namespace llvm;
 
@@ -31,14 +34,48 @@ struct SemaphoreOp {
   uint64_t Value;
 };
 
-/// Consumes every wait in \p Waits, in order, returning the first failure
-/// (see `Sync.h`'s file comment: a legally-ordered wait's semaphore is
-/// already signaled by the time this synchronous ICD sees it -- an
-/// unsignaled one is a real application ordering error).
+/// (Roadmap L228) The longest this ICD ever genuinely blocks a thread on
+/// one unmet timeline-semaphore wait, regardless of what the caller asked
+/// for (including `vkWaitSemaphores`'s own literal `UINT64_MAX` "wait
+/// forever" sentinel -- see `applyWaitSafetyNet` below): generous enough
+/// for any real cross-thread `HostCopyThread`-style dependency (see
+/// `Sync.h`'s file comment) to complete -- this ICD has no real device
+/// latency at all, so such a dependency is actually satisfied in well
+/// under a millisecond in practice (`SyncTest.cpp`'s own
+/// `*BlocksUntilHostSignal*` tests use an artificial 200ms delay purely to
+/// make the blocking observable, two full orders of magnitude below this
+/// bound) -- but bounded so that some other, unrelated FeMe bug that
+/// genuinely never signals the awaited value (rather than a real
+/// application ordering error) turns into this call eventually
+/// failing/timing out instead of hanging the calling process -- and,
+/// transitively, any batch test harness driving many cases through one
+/// process, or this project's own negative unit tests -- forever. Real GPU
+/// drivers have hardware TDR (timeout-detection-and-recovery) for exactly
+/// this scenario; this is this software driver's equivalent safety net,
+/// not a claim that the underlying dependency is expected to take this
+/// long.
+constexpr uint64_t TimelineWaitSafetyNetTimeoutNs = 5'000'000'000ULL;
+
+/// Clamps a caller-supplied timeout (as passed to `vkQueueSubmit`'s
+/// implicit, unparameterized wait or to `vkWaitSemaphores`'s explicit \p
+/// timeout parameter, either of which may legally be `UINT64_MAX`) to
+/// `TimelineWaitSafetyNetTimeoutNs` above.
+uint64_t applyWaitSafetyNet(uint64_t RequestedTimeoutNs) {
+  return std::min(RequestedTimeoutNs, TimelineWaitSafetyNetTimeoutNs);
+}
+
+/// Consumes every wait in \p Waits, in order. A binary semaphore's wait is
+/// still the instantaneous, non-blocking check `Sync.h`'s file comment
+/// describes (a legally-ordered one is already signaled by the time this
+/// synchronous ICD sees it -- an unsignaled one is a real application
+/// ordering error, reported immediately). A timeline semaphore's wait
+/// (roadmap L228) genuinely blocks the calling thread via
+/// `Semaphore::waitTimeline`, since a real, concurrently running host
+/// thread's own `vkSignalSemaphore` call may not have happened yet.
 VkResult consumeWaits(ArrayRef<SemaphoreOp> Waits) {
   for (const SemaphoreOp &Op : Waits) {
     if (Op.Sem->isTimeline()) {
-      if (Op.Sem->timelineValue() < Op.Value)
+      if (!Op.Sem->waitTimeline(Op.Value, TimelineWaitSafetyNetTimeoutNs))
         return VK_ERROR_INITIALIZATION_FAILED;
       continue;
     }
@@ -279,19 +316,74 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreCounterValue(VkDevice,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo *pWaitInfo, uint64_t) {
-  // See the file comment: every semaphore this could observe is already in
-  // its final state, so the wait either succeeds immediately or times out
-  // immediately -- there is nothing to actually wait for.
-  bool WaitAll = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) == 0;
-  bool Any = false, All = true;
-  for (uint32_t I = 0; I != pWaitInfo->semaphoreCount; ++I) {
-    bool Satisfied = fromHandle<Semaphore>(pWaitInfo->pSemaphores[I])
-                         ->timelineValue() >= pWaitInfo->pValues[I];
-    Any |= Satisfied;
-    All &= Satisfied;
+vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo *pWaitInfo,
+                 uint64_t timeout) {
+  // (Roadmap L228) Unlike the file's previous instantaneous check (see
+  // `Sync.h`'s file comment), this genuinely blocks: a real, concurrently
+  // running host thread's own `vkSignalSemaphore` call may not have
+  // happened yet (`dEQP-VK.synchronization.timeline_semaphore.host_host.*`
+  // exercises exactly this -- one host thread waiting here for another
+  // host thread's own later `vkSignalSemaphore` call, no device work
+  // involved at all).
+  //
+  // `applyWaitSafetyNet` clamps even a literal `UINT64_MAX` ("wait
+  // forever") \p timeout to a bounded internal ceiling: some other,
+  // unrelated FeMe bug that never actually signals the awaited value
+  // would otherwise hang this call (and the whole process) forever rather
+  // than surfacing as this call's own ordinary, spec-legal `VK_TIMEOUT`
+  // return.
+  timeout = applyWaitSafetyNet(timeout);
+
+  // A single semaphore is the common case (and the only one where
+  // `VK_SEMAPHORE_WAIT_ANY_BIT` and the default all-of behavior are
+  // indistinguishable), so it blocks directly on that one semaphore's own
+  // condition variable rather than the coarser multi-semaphore handling
+  // below.
+  if (pWaitInfo->semaphoreCount == 1) {
+    bool Reached = fromHandle<Semaphore>(pWaitInfo->pSemaphores[0])
+                       ->waitTimeline(pWaitInfo->pValues[0], timeout);
+    return Reached ? VK_SUCCESS : VK_TIMEOUT;
   }
-  return (WaitAll ? All : Any) ? VK_SUCCESS : VK_TIMEOUT;
+
+
+  bool WaitAll = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) == 0;
+  if (WaitAll) {
+    // Blocking on each semaphore in turn is equivalent to waiting for all
+    // of them together (a signaled timeline counter never un-signals), so
+    // long as each one's own share of the overall \p timeout is tracked
+    // rather than re-applying the full budget to every semaphore in turn.
+    auto Deadline = std::chrono::steady_clock::now() +
+                    std::chrono::nanoseconds(timeout);
+    for (uint32_t I = 0; I != pWaitInfo->semaphoreCount; ++I) {
+      uint64_t Remaining =
+          timeout == UINT64_MAX
+              ? UINT64_MAX
+              : static_cast<uint64_t>(std::max<int64_t>(
+                    0, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           Deadline - std::chrono::steady_clock::now())
+                           .count()));
+      if (!fromHandle<Semaphore>(pWaitInfo->pSemaphores[I])
+               ->waitTimeline(pWaitInfo->pValues[I], Remaining))
+        return VK_TIMEOUT;
+    }
+    return VK_SUCCESS;
+  }
+
+  // `VK_SEMAPHORE_WAIT_ANY_BIT`: succeeds as soon as *any one* semaphore
+  // reaches its target -- blocking on an arbitrary one first could wait
+  // long past a different one's own, earlier completion, so this polls
+  // all of them with a short retry interval instead.
+  auto Deadline =
+      std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout);
+  while (true) {
+    for (uint32_t I = 0; I != pWaitInfo->semaphoreCount; ++I)
+      if (fromHandle<Semaphore>(pWaitInfo->pSemaphores[I])
+              ->waitTimeline(pWaitInfo->pValues[I], 0))
+        return VK_SUCCESS;
+    if (timeout != UINT64_MAX && std::chrono::steady_clock::now() >= Deadline)
+      return VK_TIMEOUT;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

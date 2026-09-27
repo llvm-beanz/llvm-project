@@ -18,26 +18,46 @@
 // final state by the time any of `vkGetFenceStatus`/`vkWaitForFences`/
 // `vkQueueWaitIdle`/`vkDeviceWaitIdle` could observe it, so none of those
 // ever actually block -- there is nothing left to wait for. The same is
-// true of a semaphore: since there is only ever one queue and submission
-// order is program order, a `vkQueueSubmit` that waits on a semaphore can
-// only observe one signaled by a submission that has *already completed*
-// by the time this ICD sees the wait -- signaling and waiting are never
-// truly concurrent here. A wait whose semaphore is not yet signaled is
-// therefore a real application ordering error, not something this driver's
-// execution model can ever resolve by waiting longer; `vkQueueSubmit`
-// reports it as `VK_ERROR_INITIALIZATION_FAILED` instead of one of
-// Vulkan's own deadlock-only failure modes, since no deadlock detection
-// timer exists to produce those. The host wait functions
-// (`vkWaitSemaphores`/`vkGetSemaphoreCounterValue`/`vkSignalSemaphore`) are
-// unaffected by this: they only ever observe already-resolved state, for
-// the same reason.
+// true of a *binary* semaphore: core Vulkan gives it no host-facing
+// signal entry point at all, so since there is only ever one queue and
+// submission order is program order, a `vkQueueSubmit` that waits on one
+// can only ever observe a signal from a submission that has *already
+// completed* by the time this ICD sees the wait -- signaling and waiting
+// are never truly concurrent for a binary semaphore here. A binary wait
+// whose semaphore is not yet signaled is therefore a real application
+// ordering error, reported as `VK_ERROR_INITIALIZATION_FAILED`.
+//
+// (Roadmap L228) A *timeline* semaphore is different: `vkSignalSemaphore`
+// is a genuine host-side entry point a real, independent application
+// thread can call concurrently with another thread's blocked-on-it
+// `vkQueueSubmit`/`vkWaitSemaphores` call (`dEQP-VK.synchronization.
+// timeline_semaphore.device_host.*`'s own `HostCopyThread` does exactly
+// this: it waits on the semaphore reaching a device-signaled value, then
+// signals a further value the *next* `vkQueueSubmit` call blocks on, from
+// a real, separate `std::thread`/`de::Thread`). Treating this exactly
+// like a binary semaphore's instantaneous, non-blocking check -- as this
+// file's first implementation did -- is wrong on two counts: it reports
+// the still-common case as a spurious ordering-error failure instead of
+// genuinely waiting for the other thread to catch up, and unguarded
+// concurrent reads/writes of the same counter from two real host threads
+// (the submitting thread's read, the signaling thread's write) is a data
+// race regardless of which value either observes. `Semaphore` therefore
+// keeps its counter behind a mutex and condition variable for a timeline
+// semaphore specifically (matching "Queues, Scheduling, and
+// Synchronization"'s own original "monotonically changing state under a
+// mutex and condition variable" design), and `vkQueueSubmit`/
+// `vkQueueSubmit2`/`vkWaitSemaphores` genuinely block on it rather than
+// checking once and failing.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_SYNC_H
 #define FEME_LIB_VULKAN_SYNC_H
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 
 namespace feme::vulkan {
 
@@ -87,7 +107,9 @@ public:
 
   bool isTimeline() const { return Timeline; }
 
-  /// Binary semaphores only: whether this is currently signaled.
+  /// Binary semaphores only: whether this is currently signaled. Never
+  /// touched by more than one thread at a time (see the file comment), so
+  /// unlike the timeline members below, no lock is needed.
   bool isBinarySignaled() const { return Value != 0; }
   /// Binary semaphores only: signals it (`vkQueueSubmit`'s signal
   /// operation).
@@ -102,17 +124,49 @@ public:
   }
 
   /// Timeline semaphores only: the current counter value
-  /// (`vkGetSemaphoreCounterValue`).
-  uint64_t timelineValue() const { return Value; }
+  /// (`vkGetSemaphoreCounterValue`). Locked (see the file comment: a real
+  /// host thread can be concurrently updating `Value` via
+  /// `signalTimeline`/`waitTimeline` below).
+  uint64_t timelineValue() const {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    return Value;
+  }
   /// Timeline semaphores only: sets the counter to \p NewValue
-  /// (`vkSignalSemaphore`/`vkQueueSubmit`'s signal operation). The caller
-  /// is responsible for the specification's monotonically-increasing
+  /// (`vkSignalSemaphore`/`vkQueueSubmit`'s signal operation) and wakes
+  /// every thread currently blocked in `waitTimeline` below. The caller is
+  /// responsible for the specification's monotonically-increasing
   /// requirement; this class enforces no ordering of its own.
-  void signalTimeline(uint64_t NewValue) { Value = NewValue; }
+  void signalTimeline(uint64_t NewValue) {
+    {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      Value = NewValue;
+    }
+    CV.notify_all();
+  }
+  /// Timeline semaphores only: blocks the calling thread until this
+  /// semaphore's counter reaches or exceeds \p TargetValue (signaled by
+  /// this same thread's own already-completed prior work, or by a genuine
+  /// concurrent `signalTimeline` call from another real host thread -- see
+  /// the file comment's `HostCopyThread` example) or until \p TimeoutNs
+  /// nanoseconds elapse, whichever comes first. \p TimeoutNs of
+  /// `UINT64_MAX` (matching `vkWaitSemaphores`'s own "wait forever"
+  /// sentinel) waits with no time limit at all. Returns whether the
+  /// target was actually reached (false only on a genuine timeout).
+  bool waitTimeline(uint64_t TargetValue, uint64_t TimeoutNs) const {
+    std::unique_lock<std::mutex> Lock(Mutex);
+    auto Reached = [&] { return Value >= TargetValue; };
+    if (TimeoutNs == UINT64_MAX) {
+      CV.wait(Lock, Reached);
+      return true;
+    }
+    return CV.wait_for(Lock, std::chrono::nanoseconds(TimeoutNs), Reached);
+  }
 
 private:
   bool Timeline;
   uint64_t Value;
+  mutable std::mutex Mutex;
+  mutable std::condition_variable CV;
 };
 
 } // namespace feme::vulkan
