@@ -25,16 +25,33 @@
 // domains place their boundary vertices from each edge's own outer factor
 // (so two adjacent patches that agree on a shared edge's factor produce
 // identical vertices along it, regardless of their other edges' or their
-// interior's factors), then bridge that boundary ring to a uniformly
-// subdivided interior "core" -- inset strictly inside the boundary, hence
-// never itself a cross-patch cracking concern -- with a standard
-// concentric-ring triangulation that walks both rings by proportional arc
-// length, always advancing whichever ring's next vertex comes first (see
-// `bridgeRings` in Tessellator.cpp). This deliberately does not reproduce
-// either API's exact hardware fractional-vertex placement or its
-// multi-ring interior falloff (FeMe's own normalized rule, as with
-// `computeSegmentCount`) -- only the boundary-matching property a
-// crack-free completion test observes.
+// interior's factors), then bridge that boundary ring to an interior "core"
+// -- inset strictly inside the boundary, hence never itself a cross-patch
+// cracking concern -- with a standard concentric-ring triangulation that
+// walks both rings by proportional arc length, always advancing whichever
+// ring's next vertex comes first (see `bridgeRingsByEdge` in
+// Tessellator.cpp).
+//
+// (Roadmap L220) The triangle domain's own interior is no longer a single
+// uniformly-subdivided core: `tessellateTriangle` now generates the exact
+// interior point *set* the Vulkan/GLSL spec's own "Triangle Tessellation"
+// concentric-ring algorithm requires -- a recursion of successively-
+// shrinking equilateral rings, each one's own per-edge segment count
+// exactly 2 less than the previous, terminating at either an
+// un-subdivided single triangle (segment count 3) or a degenerate single
+// point at the centroid (segment count 2, fanned from the previous ring's
+// own boundary vertices). Each ring reduces to a closed-form homothety
+// (uniform scale toward the barycentric centroid) composed multiplicatively
+// across the recursion, rather than real per-ring perpendicular-projection
+// geometry (see `appendTriangleRingBoundary`/`fanRingToPoint` and
+// `tessellateTriangle`'s own comments in Tessellator.cpp for the full
+// derivation). `bridgeRingsByEdge` is reused unchanged for every ring-to-
+// ring annulus fill.
+//
+// The quad domain (`tessellateQuad`) still uses the older, simpler
+// "uniform inset lattice + bridge" approach described above, which does
+// not reproduce the spec's own quad interior algorithm -- tracked as
+// roadmap `L221`, not yet done.
 //
 //===----------------------------------------------------------------------===//
 
