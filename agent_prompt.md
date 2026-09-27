@@ -61,19 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** Root-cause `L228(g)` (the 3D-image timeline-signal bug, 98
-   CTS cases): compare a passing 2D `op.single_queue.timeline_semaphore` case's
-   generated device work against a failing 3D one (e.g. via a direct SPIR-V/IR
-   dump) to see whether the write op itself silently fails for 3D images, or the
-   signal step is skipped/misordered specifically for that shape.
-2. **(a few hours, likely a bigger design question)** Root-cause `L228(h)` (the
-   `one_to_n` fan-out group, currently 100% failing): start by reading
-   `one_to_n`'s own test-instance class in
-   `vktSynchronizationTimelineSemaphoreTests.cpp` (~line 2356) to confirm the
-   exact multi-waiter shape before assuming this needs real multi-queue support.
-3. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)` (still open,
+1. **(a full dedicated session, likely the biggest single item left)** Design
+   and implement async `vkQueueSubmit` for `L228(h)`/`L228(i)`: write a short
+   design note in `FeMeVulkanDesign.md` proposing a worker-thread-per-`VkQueue`
+   (or shared pool) model first, then implement it in `Sync.cpp` so
+   `vkQueueSubmit`/`vkQueueSubmit2` return immediately without blocking on an
+   unmet wait, with `vkQueueWaitIdle`/`vkDeviceWaitIdle`/fence-wait blocking on
+   that queued work instead. Confirm whether `Sync.h`'s existing `Semaphore`
+   mutex/condvar (from `L228(a)`) is enough for the needed cross-thread state,
+   and think carefully about whether the CPU executor's image/buffer/pipeline
+   state is safe to touch from a background thread concurrently with further API
+   calls on the caller's own thread.
+2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)` (still open,
    unchanged since last session) or `L228(b)`/`(c)` (compressed-format blits,
    MSAA multi-layer clears) -- whichever fits the next session's time budget.
-4. **(30-45 minutes)** Re-run this session's own 3217-case `timeline_semaphore`
-   sample (or a fresh, wider one) after `L228(g)` lands to confirm that cluster
-   fully clears with no new regressions.
+3. **(a few hours)** `L228(e)`/`L228(f)`: the broader-than-tessellation CTS
+   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is still overdue
+   -- this session's own work stayed scoped to the `timeline_semaphore` cluster
+   only.
+4. **(quick, at the very start of the next session)** Re-check
+   `offload-test-suite`'s local `feme` branch before trusting
+   `check-hlsl-feme-vk` exists -- `git log --oneline feme -3` should show
+   `adf0fc1` at the tip; if it's back at `main`'s own tip, `git reset --hard
+   adf0fc1` restores it (no re-cherry-pick needed, the commit is still there).
