@@ -69,7 +69,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DenormFlushToZer
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
 // CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
 // CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
-// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %[[A]], %[[B]] towardzero ignore : f32
+// CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
+// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %[[A]], %[[B]] dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 // CHECK: llvm.select {{.*}}, %[[SUM]] : i1, f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DenormFlushToZero, RoundingModeRTZ], []> {
   spirv.func @denorm_flush_to_zero_and_rounding_mode_rtz(%a: f32, %b: f32) -> (f32) "None" {

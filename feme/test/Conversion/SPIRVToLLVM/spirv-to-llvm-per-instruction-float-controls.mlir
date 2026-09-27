@@ -11,11 +11,25 @@
 // additive mechanism (ordinary LLVM fast-math flags), not another
 // constrained-intrinsics consumer.
 
+// (Roadmap L214) Every non-default rounding-mode direction below (`RTZ`/
+// `RTP`/`RTN`) is checked as a `llvm.get.rounding`/`llvm.set.rounding`
+// pair bracketing a `dynamic`-mode constrained intrinsic, not a *static*
+// rounding-mode attribute directly on the intrinsic: an isolated `.ll`
+// reproducer confirmed this host's AArch64 backend silently drops a
+// static non-default rounding mode with zero `FPCR` manipulation at all,
+// the same class of bug roadmap L208 found and fixed for `FConvert`
+// specifically. See spirv-to-llvm-rounding-mode-rtz.mlir's own comment
+// for the full explanation.
+
 // A per-instruction `FPRoundingMode` decoration applies with no
 // whole-entry-point execution mode declared at all.
 // CHECK-LABEL: llvm.func @rtz_decoration
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
-// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} towardzero ignore : f32
+// CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
+// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @rtz_decoration(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_rounding_mode = #spirv.fp_rounding_mode<RTZ>} : f32
@@ -31,8 +45,16 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // (roadmap F15a) has no way to express at all, round-trip through the same
 // constrained-intrinsics lowering.
 // CHECK-LABEL: llvm.func @rtp_rtn_decorations
-// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} upward ignore : f32
-// CHECK: llvm.intr.experimental.constrained.fsub %{{.*}}, %{{.*}} downward ignore : f32
+// CHECK: %[[OLD0:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTP:.*]] = llvm.mlir.constant(2 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTP]])
+// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD0]])
+// CHECK: %[[OLD1:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTN:.*]] = llvm.mlir.constant(3 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTN]])
+// CHECK: llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD1]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @rtp_rtn_decorations(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_rounding_mode = #spirv.fp_rounding_mode<RTP>} : f32
@@ -58,7 +80,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
 // CHECK: %[[SUM:.*]] = llvm.fadd %{{.*}}, %{{.*}} : f32
 // CHECK-NOT: fp_rounding_mode
-// CHECK: llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} towardzero ignore : f32
+// CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
+// CHECK: llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, RoundingModeRTZ], []> {
   spirv.func @rte_override(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_rounding_mode = #spirv.fp_rounding_mode<RTE>} : f32
@@ -111,8 +137,12 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // (`LLVM_ConstrainedIntr`, `LLVMIntrinsicOps.td`, `requiresFastmath=0`) --
 // a deliberate, narrow scoping decision, not an oversight.
 // CHECK-LABEL: llvm.func @rounding_and_fast_math_same_instruction
-// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} towardzero ignore : f32
+// CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
+// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
 // CHECK-NOT: fastmath
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @rounding_and_fast_math_same_instruction(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_rounding_mode = #spirv.fp_rounding_mode<RTZ>,
@@ -133,7 +163,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // constrained intrinsic.
 // CHECK-LABEL: llvm.func @flush_and_per_instruction_rounding
 // CHECK: "llvm.intr.is.fpclass"
-// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} upward ignore : f32
+// CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
+// CHECK: %[[RTP:.*]] = llvm.mlir.constant(2 : i32) : i32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTP]])
+// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 // CHECK: "llvm.intr.is.fpclass"
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DenormFlushToZero], []> {
   spirv.func @flush_and_per_instruction_rounding(%a: f32, %b: f32) -> (f32) "None" {

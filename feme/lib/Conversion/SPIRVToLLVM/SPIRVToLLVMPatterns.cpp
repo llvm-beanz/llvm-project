@@ -403,6 +403,17 @@ mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
       .getResults();
 }
 
+/// Emits a call to \p Intrinsic with \p Args, for a void-returning
+/// intrinsic (e.g. `llvm.set.rounding`) -- the sibling of
+/// createIntrinsicCall above, which always expects a single result.
+void createVoidIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
+                             mlir::Location Loc, llvm::StringRef Intrinsic,
+                             mlir::ValueRange Args) {
+  mlir::LLVM::CallIntrinsicOp::create(
+      Rewriter, Loc, mlir::StringAttr::get(Rewriter.getContext(), Intrinsic),
+      Args);
+}
+
 /// Converts `spirv.Switch` to `llvm.switch`, which MLIR has no pattern for
 /// at all (see the "`spirv.Switch` op is not supported at the moment" note
 /// in `mlir::populateSPIRVToLLVMConversionPatterns`'s structured-loop
@@ -14479,12 +14490,55 @@ public:
 
     mlir::Value Result;
     if (NeedsConstrainedOp) {
+      // (Roadmap L214) A *static*, non-default `RoundingModeAttr` (e.g.
+      // `TowardZero` directly) on this constrained intrinsic is silently
+      // discarded by this host's AArch64 backend: an isolated `.ll`
+      // reproducer (`llc -mtriple=aarch64-linux-gnu` on
+      // `llvm.experimental.constrained.fadd.f32` with an explicit
+      // `metadata !"round.towardzero"`, at both `-O0` and `-O2`) lowers to
+      // a plain `fadd s0, s0, s1` with zero `FPCR` manipulation of any
+      // kind -- the same backend gap roadmap L208 found and worked around
+      // for `FConvert` specifically (see buildRTZNarrowingConversion's own
+      // comment), just never checked for these five arithmetic ops first.
+      //
+      // Fixed here with a different, much smaller strategy than L208's
+      // from-scratch bit manipulation: `llvm.get.rounding`/
+      // `llvm.set.rounding` (the same pair `fesetround`/`fegetround`
+      // themselves would lower to) plus the constrained intrinsic's own
+      // *dynamic* rounding mode, `round.dynamic` -- confirmed via the same
+      // kind of isolated `.ll` reproducer to correctly emit real `mrs`/
+      // `msr FPCR` register manipulation bracketing an ordinary hardware
+      // `fadd`/`fcvt`, and confirmed *not* to be constant-folded away even
+      // at `-O3` with two literal-constant operands (the exact failure
+      // mode a plain, unconstrained op would be vulnerable to under the
+      // optimizer's default "everything rounds to nearest" assumption).
+      // `round.dynamic` tells the backend "whatever the hardware's rounding
+      // mode is right now" rather than a specific compile-time-known mode,
+      // which is exactly why it survives where a static mode's own
+      // constant-folding/codegen legalization does not: the backend has no
+      // static value to (incorrectly) assume or discard, so it has no
+      // choice but to honor whatever `FPCR` state the `llvm.set.rounding`
+      // call just established. This generalizes uniformly across all
+      // three non-default directions (`TowardZero`/`TowardPositive`/
+      // `TowardNegative`) and all three of this pattern's own instantiated
+      // widths (`f16`/`f32`/`f64`) with no per-width/per-op code at all,
+      // unlike L208's own narrower, width-specific bit-manipulation
+      // approach.
       mlir::MLIRContext *Ctx = Rewriter.getContext();
-      auto RoundingAttr = mlir::LLVM::RoundingModeAttr::get(Ctx, *Rounding);
+      mlir::Type I32Ty = Rewriter.getI32Type();
+      mlir::Value OldMode =
+          createIntrinsicCall(Rewriter, Loc, "llvm.get.rounding", I32Ty, {});
+      mlir::Value NewMode = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, I32Ty, static_cast<int64_t>(*Rounding));
+      createVoidIntrinsicCall(Rewriter, Loc, "llvm.set.rounding", {NewMode});
+      auto DynamicRoundingAttr = mlir::LLVM::RoundingModeAttr::get(
+          Ctx, mlir::LLVM::RoundingMode::Dynamic);
       auto ExceptionBehavior = mlir::LLVM::FPExceptionBehaviorAttr::get(
           Ctx, mlir::LLVM::FPExceptionBehavior::Ignore);
-      Result = ConstrainedIntrOp::create(Rewriter, Loc, DstType, Lhs, Rhs,
-                                         RoundingAttr, ExceptionBehavior);
+      Result =
+          ConstrainedIntrOp::create(Rewriter, Loc, DstType, Lhs, Rhs,
+                                    DynamicRoundingAttr, ExceptionBehavior);
+      createVoidIntrinsicCall(Rewriter, Loc, "llvm.set.rounding", {OldMode});
     } else if (FastMath != mlir::LLVM::FastmathFlags::none) {
       auto FastMathAttr =
           mlir::LLVM::FastmathFlagsAttr::get(Rewriter.getContext(), FastMath);
