@@ -1318,3 +1318,82 @@ compiler correctness fix inside the tessellation-control barrier-split
 lowering, touching no feature/extension surface), so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L224: inside tessellation factor spuriously culled triangle/quad patches
+
+`dEQP-VK.tessellation.primitive_discard.*`'s 24 `useLessThanOneInner
+Levels=true` failures (both triangles and quads) were found while
+triaging the residual `tessellation.*` failure baseline once `L223`
+unblocked a full-sample run.
+
+Per the Vulkan/GLSL tessellation spec's primitive-discard rule, only
+the **outer edge** tessellation factors ever discard a whole patch
+when any is non-positive; a non-positive **inside** (interior) factor
+is never a discard condition -- it is simply clamped up to 1 like any
+other partitioning mode's ordinary minimum clamp. `tessellateIsoline`
+was already correct (only ever checks the 2 outer edge factors, no
+`Inside` involvement at all), which is why every `isolines_*`
+`primitive_discard` sub-case already passed both before and after this
+fix -- a useful cross-check confirming the bug was domain-specific to
+triangle/quad, not systemic.
+
+`tessellateTriangle`/`tessellateQuad` (`Tessellator.cpp`) incorrectly
+folded `Factors.Inside[...]` into the same `anyFactorCullsPatch` array
+as the outer edges, so a patch was spuriously discarded whenever only
+its inside factor was invalid (e.g. `-0.42`/`0.0`) even with fully
+valid outer levels -- exactly the shape `useLessThanOneInnerLevels=
+true` constructs. Fixed both call sites to only pass `Edges` (outer
+factors) to `anyFactorCullsPatch`; updated `anyFactorCullsPatch`'s own
+doc comment and the `TessFactors` struct's doc comment (`Tessellator.
+h`) to state explicitly that only outer factors cull.
+
+New unit test: `TessellatorTest.
+NonPositiveInsideFactorAloneDoesNotCullTriangleOrQuad` (confirmed via
+`git stash` A/B testing to fail without the fix, pass with it).
+
+CTS-confirmed:
+
+- `dEQP-VK.tessellation.primitive_discard.*` goes from 20/44 to
+  **40/44 Pass** (24 newly-fixed cases, 0 regressions).
+- The full 1114-case `dEQP-VK.tessellation.*` mustpass sample goes
+  from **520/1114 Pass, 156 Fail, 438 Not supported** to **540/1114
+  Pass, 136 Fail, 438 Not supported** -- exactly the expected
+  +20 Pass/-20 Fail delta, **0 crashes**, **0 regressions** (every
+  previously-Pass case remains Pass; only previously-Fail cases moved
+  to Pass).
+- The residual 4 `quads_equal_spacing_{ccw,cw}[_point_mode]` cases
+  that remained failing after this fix are a distinct, smaller,
+  not-yet-root-caused bug -- see `L225`.
+
+`ninja check-feme`: 3384/3387 passed (0 failed, 3 pre-existing
+unsupported, +1 net new unit test).
+
+No Vulkan feature/extension advertisement changed (a pure internal
+correctness fix inside the tessellator's primitive-discard check,
+touching no feature/extension surface), so `Vulkan14FeatureInventory.
+md`/`VulkanExtensionInventory.md` need no update.
+
+## Roadmap L225: residual `quads_equal_spacing` vertex undercount (not yet root-caused)
+
+`dEQP-VK.tessellation.primitive_discard.quads_equal_spacing_{ccw,cw}
+[_point_mode]` (4 cases) still fail after `L224`'s fix, with "expected
+254 vertices from shader invocations, but got only 250" -- a small
+(4-vertex) undercount, isolated specifically to `quads_equal_spacing`
+(`SpacingEqual`/`Integer` partitioning): not seen in any
+`quads_fractional_{even,odd}_spacing_*` sub-case, and not seen in any
+triangle sub-case either, so it is not a repeat of `L224`'s own
+inside-factor bug (already fixed and CTS-confirmed above) nor a
+generic quad-domain regression from the `L221` rewrite (which passes
+its own full crack-free/analytic-lattice-size regression suite).
+
+Likely a rare degenerate-axis edge case specific to integer
+partitioning's own rounding in `tessellateQuad`'s `L221`-era
+interior-grid-plus-bridged-outer-edge algorithm. Not yet root-caused
+this session (found only while verifying `L224`, out of scope/budget
+to pursue further); needs a dedicated reduction session following the
+same methodology `L220`/`L221` used: isolate the exact inside/outside
+tessellation-level combination this test actually exercises, then
+compare FeMe's own generated point/triangle count against the spec's
+closed-form lattice-size formula for that exact combination.
+
+Tracked as a `todo` roadmap row (`L225`), not yet fixed.
