@@ -1154,3 +1154,83 @@ No Vulkan feature/extension advertisement changed (a pure correctness
 fix within the existing `tessellationShader` feature's own
 implementation), so `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md` need no update.
+
+## Roadmap L216: TCS same-invocation patch-output read-back fix
+
+Closes out roadmap `L216`, open since the `L215`/`L216` split several
+sessions ago. Two prior working theories (a shared root cause with the
+`L220`/`L221` tessellator-algorithm rewrites, and an earlier
+`gl_TessCoord[1]`-never-read theory) were both re-checked and
+disproven this session before the real root cause was found.
+
+Every `dEQP-VK.tessellation.tess_io.max_in_out.*` case fixes its
+tessellation levels at exactly `1.0` (fully un-subdivided), so the
+tessellator's own geometry/algorithm was provably irrelevant to this
+failure regardless of which one generated it -- confirmed empirically
+once `L221` landed and the failure count didn't move (still exactly
+40/80 `with_f16` cases failing). The actual failure was isolated to
+the 4 `tcs_patch_writes_reads_*` sub-variants specifically by trimming
+the CTS's own variable-permutation count down to one variable per
+type/bit-width/dimension in a local, uncommitted VK-GL-CTS repro
+build (reverted after use, never committed): every `tcs_vert_*`
+sub-variant already passed, while every `tcs_patch_*` one still failed
+100% of the time regardless of variable count or type. Dumping the
+generated GLSL confirmed each `tcs_patch_writes_reads_*` case writes a
+`patch out` variable from an SSBO read keyed by `gl_PrimitiveID`, then
+immediately reads that same variable back within the same invocation
+to compare it against the source buffer -- legal, spec-defined
+GLSL/SPIR-V (only a *different* invocation's own patch-output write is
+undefined without a barrier).
+
+Root cause: `splitBarrierlessTessellationControlEntry`'s mixed-
+frequency handling (roadmap H9c) clones a barrierless, mixed
+control-point/patch-constant tessellation-control entry into two
+per-frequency-pruned functions via `pruneStageIOStoresByFrequency`,
+which erases every stage-IO *store* that does not belong to its own
+clone's frequency. This is correct for the stores themselves, but left
+the same-invocation read-back *load* of a pruned patch-output global
+behind in the control-point clone, now reading a global that clone no
+longer writes at all -- silently wrong data, not a crash, which is why
+this went unnoticed across multiple prior sessions' `gl_TessCoord`-
+and tessellator-focused investigations.
+
+Fix (`feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`): before
+erasing a pruned store, forward its stored value to every load of the
+exact same pointer that it dominates, using a `DominatorTree` over the
+clone being pruned. New unit test:
+`CanonicalizeStageTest.NoBarrierMixedFrequencyEntryForwardsSameInvocationPatchReadBack`
+(confirmed to fail with the expected pre-fix symptom -- the patch
+store surviving unpruned -- via A/B stash testing against the fix).
+
+CTS-confirmed:
+
+- `dEQP-VK.tessellation.tess_io.max_in_out.*` (full 560-case sweep
+  across every bit-width group, `32_bits_only` through `all_types`):
+  **0 Failed** (was 40/80 Fail in the `with_f16` group alone; the
+  other 480 cases in the full sweep are correctly `NotSupported` for
+  optional 64-bit integer/float features on this device, not
+  failures).
+- `dEQP-VK.tessellation.*` (excluding hlsl-sourced/crashing cases,
+  1088-case sample, same methodology as every prior session's report):
+  **494/1088 Pass** (was 414/1088) -- **80 newly-fixed cases** (all in
+  `tess_io.max_in_out.with_f16.*`), **0 regressions** (the same
+  pre-existing 156-case failure set from `invariance`,
+  `user_defined_io`, `primitive_discard`, `shader_input_output`,
+  `misc_draw`, `tesscoord`, `common_edge`, `matrix_multiplication`, and
+  `geometry_interaction` remains, all already tracked or pending
+  triage under other roadmap rows).
+- The pre-existing, unrelated `llvm.lifetime.start/end can only be
+  used on alloca or poison` crash on hlsl-sourced tessellation-control
+  shaders (first seen at `winding.default_domain.hlsl_quads_ccw`,
+  this session first hit earlier at `fractional_spacing.hlsl_even`)
+  still halts the `tessellation.*` batch at the same points regardless
+  of this fix -- confirmed via the same chunked-resume methodology
+  prior sessions used, not a regression.
+
+`ninja check-feme`: 3382/3385 passed (0 failed, 3 pre-existing
+unsupported, +1 net new unit test).
+
+No Vulkan feature/extension advertisement changed (a pure correctness
+fix within the existing `tessellationShader` feature's own
+implementation), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
