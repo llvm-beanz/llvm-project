@@ -61,26 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, start here)** L215: tessellation half of the old
-   L201(d) group (`tess_io.max_in_out.with_f16.*`, 40/80 still
-   failing). First check whether `vktTessellationMaxIOTests.cpp` has
-   the *same* std430-vec3-array-padding bug just fixed for mesh shaders
-   (quick `grep -n "Vec3\|IVec3"` over its own host-mirror struct(s),
-   cross-checked with `spirv-dis`'s `OpMemberDecorate ... Offset` the
-   same way) before assuming it's a new, different bug. If ruled out,
-   fall back to the `--deqp-log-images=enable` diagnostic-patch
-   technique above.
-2. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to
-   distinct symptoms," never started, carried over many sessions now.
-3. A full/broad CTS re-run is overdue (last full run: 2026-09-26;
-   L205/L206/L208/L210-L214 have all landed since, plus this session's
-   L201(d) mesh fix). Worth doing once L215 (or at least a next chunk
-   of it) is also resolved, to get one consolidated before/after
-   picture rather than re-running piecemeal after every single fix.
-4. `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
-   -- flagged as available in the standing instructions, its own
-   parallel-worker flakiness was investigated a few sessions back but
-   never fully root-caused; still worth returning to if L201(b)/(c)/
-   L215 are all exhausted first.
-5. No git stashes to clean up this session (already confirmed empty).
-
+1. **(20-30 min, start here)** Build a numeric diagnostic: dump
+   `vert_f32d3_flat_4`'s interpolated value (`.x` component is enough) and its
+   independently-computed min/max bounds into the output color, scaled/clamped
+   for the 8-bit UNORM format, across the full 8x8 render. Look for "wildly
+   unrelated value" (indexing/addressing bug in FeMe's SPIR-V-to-LLVM lowering
+   of per-invocation output/input array access chains) vs. "just outside the
+   boundary by a small amount" (precision bug in domain-point/barycentric-weight
+   generation).
+2. **(unknown, depends on #1)** Once the failure class is known, read
+   `HullWrapper.cpp`/`DomainWrapper.cpp` (and whatever shared
+   access-chain-normalization code they funnel through) for an indexing bug
+   specific to per-vertex-array location counts around 13-29, or look at FeMe's
+   software tessellator's own tess-coordinate generation if #1 points to
+   precision instead.
+3. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to distinct
+   symptoms," never started, carried over many sessions now.
+4. A full/broad CTS re-run is overdue (last full run: 2026-09-26). Worth doing
+   once L216 (or a solid chunk of it) lands, for one consolidated before/after
+   instead of piecemeal reruns.
+5. `check-hlsl-feme-vk` parallel-worker flakiness was tentatively attributed to
+   L211 last session (unproven, circumstantial) -- if it ever reproduces again,
+   it needs its own from-scratch root-causing.
+6. No git stashes this session (confirmed empty both repos).
