@@ -302,6 +302,35 @@ TEST(TessellatorTest, QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords) {
   EXPECT_TRUE(FoundInterior);
 }
 
+TEST(TessellatorTest, QuadFullyUnsubdividedFactorEmitsTwoRealTriangles) {
+  // Roadmap L219 regression: mirrors
+  // `TriangleFullyUnsubdividedFactorEmitsOneRealTriangle` for the quad
+  // domain. When both inside factors round down to their own minimum of
+  // 1 segment (which per the Vulkan/GLSL tessellation spec can only
+  // happen alongside every outer edge also degenerating to 1 segment),
+  // the quad needs exactly its own 4 real corners and no synthesized
+  // interior core -- not the 4 spurious `(0.25, 0.25)`-style interior
+  // points the general inset+bridge path's own `Nu`/`Nv` minimum-1 clamp
+  // used to force even here.
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 1.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  ASSERT_EQ(Patch.Points.size(), 4u);
+  ASSERT_EQ(Patch.Indices.size(), 6u);
+  auto HasCorner = [&](float U, float V) {
+    return llvm::any_of(Patch.Points, [&](const DomainPoint &P) {
+      return std::abs(P.U - U) < Epsilon && std::abs(P.V - V) < Epsilon;
+    });
+  };
+  EXPECT_TRUE(HasCorner(0.0f, 0.0f));
+  EXPECT_TRUE(HasCorner(1.0f, 0.0f));
+  EXPECT_TRUE(HasCorner(1.0f, 1.0f));
+  EXPECT_TRUE(HasCorner(0.0f, 1.0f));
+}
+
 TEST(TessellatorTest, QuadWindingIsConsistentAcrossEveryTriangle) {
   TessFactors Factors;
   Factors.Inside = {3.0f, 4.0f};

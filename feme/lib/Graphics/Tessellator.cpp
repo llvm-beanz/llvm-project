@@ -347,6 +347,38 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
       computeSegmentCount(Factors.Edges[1], Partitioning, MaxTessFactor);
   uint32_t Ev1 =
       computeSegmentCount(Factors.Edges[3], Partitioning, MaxTessFactor);
+  // (roadmap L219) When both inside factors round down to their own
+  // minimum of 1 segment (no interior subdivision along either axis), the
+  // quad domain needs no separate interior core at all -- mirroring
+  // `tessellateTriangle`'s own fully-unsubdivided special case above.
+  // Per the Vulkan/GLSL tessellation spec (matched by dEQP's own
+  // `generateReferenceTessCoords` precondition assert, which requires
+  // `inner[0] == 1 && inner[1] == 1` to imply *every* outer edge is also
+  // 1), this can only happen alongside every outer edge also degenerating
+  // to a single segment, so `OuterRing` already holds exactly the 4 quad
+  // corners with no other boundary points to bridge to. The general
+  // inset+bridge path below unconditionally forced at least one interior
+  // ring even here (`Nu`/`Nv`'s own `max(1u, ...)` clamp, needed to avoid
+  // a divide-by-zero in the general case), spuriously synthesizing 4
+  // extra interior points at `(0.25, 0.25)`/`(0.25, 0.75)`/`(0.75, 0.25)`/
+  // `(0.75, 0.75)` that a real tessellator's own equal-spacing algorithm
+  // never produces at this tessellation level -- found via a real
+  // `dEQP-VK.tessellation.tesscoord.quads_equal_spacing` reproduction
+  // (`inner: { 1, 1 }, outer: { 1, 1, 1, 1 }`).
+  if (computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) ==
+          1 &&
+      computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) ==
+          1) {
+    TessellatedPatch Patch;
+    RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);
+    uint32_t P0 = OuterRing[0][0], P1 = OuterRing[1][0], P2 = OuterRing[2][0],
+             P3 = OuterRing[3][0];
+    appendTriangle(Patch, P0, P1, P2, Cw);
+    appendTriangle(Patch, P0, P2, P3, Cw);
+    if (OutputPrimitive == TessOutputPrimitive::Point)
+      Patch.Indices.clear();
+    return Patch;
+  }
   // (Roadmap L82.) `computeSegmentCount` returns the number of segments
   // spanning the *whole* `[0, 1]` axis (matching its use for edges, above,
   // where the boundary ring legitimately needs a point at every one of
