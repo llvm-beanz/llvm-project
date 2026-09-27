@@ -489,3 +489,54 @@ Net this session: 100 failures fixed (a previously-untracked group, not
 part of the 48,307-case list), 0 regressions in `check-feme`
 (3365/3368 passing, +2 net new tests versus the prior session's baseline:
 1 new lit test and 1 new unit test for the fix).
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+### Roadmap L211: `Function`-storage local matrix dynamic element reads
+
+Found via `offload-test-suite`'s `feme` branch (`check-hlsl-feme-vk`), not
+the deqp-vk suite: a `Function`-storage local matrix variable's
+dynamically-indexed element reads (`A[row][col]`) returned wrong data for
+elements past the first row whenever the matrix's column width wasn't a
+power of two (e.g. `float2x3`). Root cause: `TightMatrixStorePattern`/
+`TightMatrixLoadPattern` (roadmap L207/L208, `SPIRVToLLVMPatterns.cpp`)
+matched unconditionally on any bare-matrix-pointee store/load regardless
+of storage class, tightening a `Function`-storage local's whole-matrix
+store/load even though that local's own `alloca` (and every dynamically-
+indexed `AccessChain` read of it, via MLIR's own generic, unmodified
+pattern) always uses the plain, untightened, "natural" conversion --
+disagreeing on every row after the first. Fixed by skipping the
+tightening in both patterns whenever the pointee's storage class is
+`Function`; `Workgroup` (L207/L208's own case) is untouched.
+
+Reduced from and confirmed fixing `offload-test-suite`'s
+`Basic/Matrix/matrix_splat_cast.test` and
+`Feature/CBuffer/Matrix/LayoutKeyword/transpose.test` (both now Pass; the
+suite's 3 stable failures drop to 1, `WaveOps/WaveActiveMax.test`, XFAIL'd
+for `FeMe` separately as a pre-existing spec-ambiguity edge case, not a
+FeMe bug -- see that test's own updated comment).
+
+Since this bug's own repro shape (a *local* matrix variable dynamically
+indexed) has no direct deqp-vk equivalent in the 48,307-case verified-
+failure list (that list's own 2 remaining failures, both pre-existing and
+by design, are unrelated -- see the "Full re-run" section above), ran the
+full `dEQP-VK.glsl.matrix.*` group (1,764 cases -- every GLSL local-
+variable matrix arithmetic/indexing/transpose case, including several
+`dynamic.*` sub-groups that index a local matrix at runtime, the closest
+available first-class deqp-vk analog to this bug's own repro shape)
+through `feme/utils/run_vulkan_cts.py` as a regression check for this
+fix specifically.
+
+**Result: 1,764/1,764 Pass, 0 regressions, 0 newly-fixed deqp-vk cases**
+(this bug's own repro shape -- `Function`-storage local matrices with a
+non-power-of-2 column count *and* a runtime, not compile-time-constant,
+row/column index -- does not appear to be independently exercised by this
+particular deqp-vk group; `check-hlsl-feme-vk`'s own two now-passing
+tests above remain the only direct confirmation of the fix). Artifacts
+retained at `/tmp/feme-l211-cts/` (not committed).
+
+Net this session: 2 `offload-test-suite` `check-hlsl-feme-vk` failures
+fixed (down from 3 stable failures to 1, the separately-triaged
+`WaveActiveMax.test` XFAIL), 0 regressions in `check-feme` (3369/3372
+passing, +1 net new lit test versus the prior baseline) or in the
+targeted 1,764-case `dEQP-VK.glsl.matrix.*` deqp-vk re-run.
