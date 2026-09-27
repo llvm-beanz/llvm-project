@@ -6201,6 +6201,108 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenStores, 1u);
 }
 
+/// (Roadmap L226) The real shape `ThreadsDoublyDynamicIndexIntoArrayOf
+/// NestedStructMemberOutputStore` above missed: a `patch out` interface
+/// block declared with one or more *preceding* real members before its
+/// own array-of-genuine-multi-member-nested-struct one (e.g. `dEQP-VK.
+/// tessellation.user_defined_io.per_patch_block`'s own `TheBlock { S
+/// blockS; float blockFa[3]; S blockSa[2]; float blockF; } tcBlock;`,
+/// confirmed against a real `feme-translate`-imported CTS SPIR-V dump),
+/// forcing `layOutStructIfOffsetsMatch` to insert a synthetic `[N x i8]`
+/// alignment-gap pad field (roadmap L105) between the preceding member
+/// and `blockSa` to keep the LLVM struct's own natural layout matching
+/// SPIR-V's explicit `Offset` decorations. Before this fix,
+/// `collectDynamicRowTerms`'s own constant-index `StructType` branch
+/// summed `getStageIOLeafElementCount` over *every* preceding member,
+/// including any such synthetic pad field, unlike every other `IDStart`
+/// accumulation loop in this file (`resolveOffsetWithinElement`,
+/// `resolveNestedStageIOField`), which all skip a pad field via
+/// `isStageIOPadField` first -- silently counting the pad as though it
+/// contributed one real leaf `SignatureElement`, so `Dyn->Member` (the
+/// flattened leaf index `collectDynamicRowTerms` reports) came out one
+/// too high for every pad field preceding the selected member. This
+/// pushed `Dyn->Member` out of `ElementIDs[GV]`'s real bounds whenever a
+/// preceding pad was present, tripping `resolveStageIOAccess`'s own
+/// bounds check (`Dyn->Member >= It->second.size()`) and leaving the
+/// whole access unconverted -- an unresolvable `external` SPIR-V-derived
+/// global at JIT-link time (`LLJIT`'s own "Symbols not found: [
+/// spirv_var_N ]"), the `dEQP-VK.tessellation.user_defined_io.*` group's
+/// own 27-case failure. Fixed by skipping `isStageIOPadField` members the
+/// same way as every other `IDStart` loop in this file already does.
+TEST(CanonicalizeStageTest,
+     SkipsSyntheticPadFieldPrecedingArrayOfNestedStructMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global <{ float, [4 x i8], [2 x { i32, i32, [2 x float] }], float }>, !spirv.Decorations !2, !feme.spirv.MemberDecorations !10
+
+    define void @main(i32 %i, i32 %j, float %v) #0 {
+      %p = getelementptr inbounds <{ float, [4 x i8], [2 x { i32, i32, [2 x float] }], float }>, ptr addrspace(8) @block, i32 0, i32 2, i32 %i, i32 2, i32 %j
+      store float %v, ptr addrspace(8) %p
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="hull" }
+
+    !0 = !{i32 36, i32 0}
+    !1 = !{i32 37, i32 20}
+    !2 = !{!0, !1}
+    !3 = !{i32 35, i32 0}
+    !4 = !{!3}
+    !5 = !{i32 0, !4}
+    !6 = !{i32 35, i32 16}
+    !7 = !{!6}
+    !8 = !{i32 1, !7}
+    !9 = !{i32 35, i32 48}
+    !10 = !{!5, !8, !9}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+  Argument *JArg = F->getArg(1);
+  Argument *VArg = F->getArg(2);
+
+  // No raw store against `@block` (nor any leftover dead `GEP` into it)
+  // survives.
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_NE(SI->getPointerOperand()->stripPointerCasts(),
+                M->getGlobalVariable("block"));
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      EXPECT_NE(GEP->getPointerOperand()->stripPointerCasts(),
+                M->getGlobalVariable("block"));
+  }
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  // Five leaf elements: the leading scalar `float` (the pad field itself
+  // contributes none), the array-of-struct member's own `x`/`y`/`z`, and
+  // the trailing scalar `float`.
+  ASSERT_EQ(Sig->Elements.size(), 5u);
+  EXPECT_EQ(Sig->Elements[3].RowCount, 4u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // The pad-skip fix's whole point: without it, this `ElementID`
+    // would have been one `SignatureElement` too high (colliding with
+    // the trailing scalar `float`'s own ID, or out of bounds entirely),
+    // rather than `z`'s own real ID.
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+              Sig->Elements[3].ElementID);
+    Value *Row = CI->getArgOperand(1);
+    EXPECT_FALSE(isa<Constant>(Row));
+    EXPECT_TRUE(usesArgTransitively(Row, IArg));
+    EXPECT_TRUE(usesArgTransitively(Row, JArg));
+    EXPECT_EQ(CI->getArgOperand(3), VArg);
+  }
+  EXPECT_EQ(SeenStores, 1u);
+}
+
 /// (Roadmap H118) A Hull entry's own per-invocation `Output` interface
 /// block (e.g. `dEQP-VK.tessellation.user_defined_io.per_vertex_block`'s
 /// own `out PerVertexBlock { vec4 a; float b; } outBlock[];`, indexed by

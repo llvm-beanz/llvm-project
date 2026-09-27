@@ -2193,8 +2193,31 @@ std::optional<uint32_t> collectDynamicRowTerms(
     if (auto *ST = dyn_cast<StructType>(Ty)) {
       if (I >= ST->getNumElements())
         return std::nullopt;
-      for (unsigned J = 0; J != I; ++J)
+      // (Roadmap L226) Same generalized pad-skip as
+      // `resolveOffsetWithinElement`'s/`resolveNestedStageIOField`'s own
+      // `IDStart` loops -- a block (or a genuine multi-member nested
+      // struct) can carry its own synthetic `[N x i8]` alignment-gap pad
+      // field, which contributes no `ElementIDs` entry at all, so must
+      // not be counted as a leaf here either (previously it always was,
+      // making `IDStart` -- and thus the final `Member` index this
+      // function ultimately reports -- wrongly too large by one for
+      // every pad field preceding the selected member, exactly the shape
+      // `dEQP-VK.tessellation.user_defined_io.*`'s `patch out` interface
+      // blocks hit: a genuine multi-member nested-struct array member
+      // (`blockSa`) reached only after a manual alignment pad, itself
+      // containing another manual alignment pad before its own doubly-
+      // dynamic-indexed array member (`z`), each miscounted pad silently
+      // pushing `IDStart` out of `ElementIDs[GV]`'s real bounds and so
+      // failing `resolveStageIOAccess`'s own bounds check, leaving the
+      // access unconverted and the stage-IO global's storage undefined
+      // at JIT link time).
+      for (unsigned J = 0; J != I; ++J) {
+        if (isStageIOPadField(ST->getElementType(J)))
+          continue;
         IDStart += getStageIOLeafElementCount(ST->getElementType(J));
+      }
+      assert(!isStageIOPadField(ST->getElementType(I)) &&
+            "load/store into a stage-IO block's own synthetic pad field");
       return collectDynamicRowTerms(ST->getElementType(I), It, End, IDStart,
                                     Terms, DynamicComponent);
     }
