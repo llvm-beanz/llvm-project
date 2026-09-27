@@ -1094,3 +1094,63 @@ Unsupported), +1 net new `SIMDizeTest.cpp` case.
 No Vulkan feature/extension advertisement changed, so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L221/L222: real quad-domain tessellation algorithm + FractionalEven clamp fix
+
+Closes out roadmap `L221` (the quad-domain half of `L220`'s tessellator
+rewrite) and a follow-on fix split out as `L222`, both found and
+verified while implementing/checking `L221` against the real CTS.
+
+`L221` rewrote `tessellateQuad`'s interior generation to follow the
+spec's real algorithm literally: a full `(N - 1) x (M - 1)` interior
+grid from the inner tessellation levels, triangulating only the
+strictly-interior cells and discarding the grid's own outermost ring;
+the true outer edges independently re-subdivided using the four outer
+tessellation levels; and the true outer boundary bridged to the
+interior grid's own retained boundary ring. All 4 `m`/`n`-degenerate
+combinations are handled explicitly. A genuine bridging bug (uneven
+"corner bunching" whenever inner and outer factors were aligned) was
+found via CTS and fixed by giving `bridgeEdge`/`bridgeRingsByEdge` an
+optional real-geometric-position override for the merge-order decision.
+
+`L222` fixed a separate, pre-existing `computeSegmentCount` bug:
+`SpacingFractionalEven` was clamping to `[1, maxLevel]` like every
+other partitioning mode instead of the spec's own stricter `[2,
+maxLevel]`, previously masked by the old quad algorithm's imprecise
+margin-based inset formula (which always over-produced triangles
+relative to the strict reference count).
+
+`ninja check-feme`: 3381/3384 passed (0 failed, 3 pre-existing
+Unsupported), +2 net new `TessellatorTest.cpp` cases
+(`QuadAlignedInnerAndOuterFactorsGiveUnitGridTriangles`,
+`QuadSingleAxisDegenerateInsideFactorGivesInteriorLine`/
+`QuadOtherAxisDegenerateInsideFactorGivesInteriorLine` were already
+counted against the `L221`-only baseline), 0 regressions. Every
+pre-existing quad-domain `TessellatorTest.cpp` case (winding,
+shared-edge, crack-free, point-mode) passes unchanged against the new
+algorithm.
+
+CTS-confirmed (`dEQP-VK.tessellation.*`, excluding hlsl-sourced cases,
+1088-case sample, byte-for-byte QPA `StatusCode` diff against the
+pre-`L220`/`L221` baseline used in the `L220` report above):
+**414/1088 Pass** (was 386/1088) -- **28 newly-fixed cases, 0
+regressions**. Newly-fixed groups: `fractional_spacing.glsl_even`;
+`geometry_interaction.limits.*` (all 3); `geometry_interaction.scatter.
+{geometry_scatter_instances,geometry_scatter_layers}`;
+`invariance.{inner_triangle_set,outer_edge_division,outer_triangle_set,
+primitive_set,triangle_set}.*fractional_even_spacing*`;
+`misc_draw.fill_cover_quads_{equal,fractional_odd}_spacing_draw{,
+_indirect}`.
+
+`geometry_interaction.scatter.geometry_scatter_primitives` (found
+regressed mid-session between the `L221` rewrite alone and the
+combined `L221`+`L222` fix; root-caused to `L221`'s own corner-bunching
+bridging bug, fixed within the same `L221` commit alongside its
+dedicated `QuadAlignedInnerAndOuterFactorsGiveUnitGridTriangles`
+regression test) is included in the final 414/1088, with 0 net
+regressions against the pre-`L220` baseline.
+
+No Vulkan feature/extension advertisement changed (a pure correctness
+fix within the existing `tessellationShader` feature's own
+implementation), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
