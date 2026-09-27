@@ -540,3 +540,107 @@ fixed (down from 3 stable failures to 1, the separately-triaged
 `WaveActiveMax.test` XFAIL), 0 regressions in `check-feme` (3369/3372
 passing, +1 net new lit test versus the prior baseline) or in the
 targeted 1,764-case `dEQP-VK.glsl.matrix.*` deqp-vk re-run.
+
+### Roadmap L212/L213: `array_of_matrices.test` stale XPASS; parallel-worker flakiness
+
+Neither of these is a deqp-vk case -- both are `offload-test-suite`'s own
+`check-hlsl-feme-vk` suite findings, carried over from several prior
+sessions' next-steps lists.
+
+`Feature/PushConstant/array_of_matrices.test`'s `XFAIL: DXC` (citing
+upstream `microsoft/DirectXShaderCompiler#8080`) turned out to be stale:
+that issue's own repro never uses `-fvk-use-dx-layout`, which this test
+always has, so its scope never covered this test's exact configuration.
+Confirmed by manually compiling the test's HLSL and inspecting the
+resulting SPIR-V's own `MatrixStride`/`ArrayStride`/`RowMajor`
+decorations, which are internally consistent with the test's own
+push-constant offsets. Fixed by removing the stale `XFAIL: DXC` (replaced
+with an explanatory comment); `XFAIL: Clang` (a distinct, still-valid
+gap) untouched. `check-hlsl-feme-vk` (680 tests) now shows 0 Unexpectedly
+Passed.
+
+The parallel-worker flakiness (3 tests failing under default parallelism,
+a different 12 under `-j1`, all passing individually) did not reproduce
+across 8+ reruns spanning worker counts 1-96. Circumstantially attributed
+to the same session's L211 fix (reading uninitialized stack memory
+produces scheduling-dependent "random" values, which look like
+contention-driven flakiness); not independently root-caused, since no
+prior session recorded the specific failing test names to cross-check
+against.
+
+Net this session (both items): 0 code changes beyond the one-line XFAIL
+removal above; `check-hlsl-feme-vk` (680 tests) stable at 0 Failed / 0
+Unexpectedly Passed across all reruns.
+
+### Roadmap L210: `ByteAddressBuffer`/`RWByteAddressBuffer` 16-bit sub-dword access -- fixed outside FeMe
+
+A prior session's roadmap entry claimed `RWByteAddressBuffer::
+Store<uint16_t>`/`Load<uint16_t>` returned 0 specifically at a non-zero
+byte offset (8), found "via `check-hlsl-feme-vk`". Neither half of that
+claim held up: the test (`Tools/Offloader/ByteAddress-16bit.test`)
+requires `Int16` (`REQUIRES: Int16`), which this device does not
+currently advertise (`shaderInt16 = false`), so it has never actually run
+as part of the gated `check-hlsl-feme-vk` target -- it stays
+`Unsupported`. Reproduced instead by running the test's own pipeline
+directly through `%offloader`, bypassing the lit `REQUIRES` gate; once
+reproduced this way, **both** the byte-offset-0 case and the byte-
+offset-8 case returned 0, not just offset 8.
+
+Root cause: **not a FeMe bug.** DXC's own SPIR-V codegen for any
+sub-32-bit `ByteAddressBuffer::Load<T>`/`Store<T>` always reads/read-
+modify-writes the whole containing 4-byte dword via a `RuntimeArray<uint>`
+access chain, regardless of `T`'s real width. When a raw buffer's
+declared byte size (derived here from a `UInt16`-formatted CPU-side
+element count -- 1 element/2 bytes for `In0`, 5 elements/10 bytes for
+`In1`) is not itself a multiple of 4, the dword covering the buffer's
+last/only element extends past its declared end, and every conformant
+Vulkan device must bounds-check that access against the descriptor's
+declared byte range and reject it -- exactly the D3D/Vulkan robustness
+contract FeMe's own CPU-backed device honors (return 0 for an
+out-of-bounds read, drop an out-of-bounds write). The D3D12 backend
+already rounds a raw buffer's device allocation up to the next multiple
+of 4 for exactly this reason (see its own `createBuffer`'s "Raw
+Resources" comment); the Vulkan backend never did.
+
+Fixed entirely in `offload-test-suite`'s own Vulkan backend
+(`lib/API/VK/Device.cpp`'s `createResource`/`createBuffer`), mirroring
+DX12's own rounding -- **no FeMe subdirectory files were touched**, per
+this project's policy of fixing issues found outside FeMe in a
+self-contained, non-FeMe commit. Verified: `ByteAddress-16bit.test`'s
+pipeline, run directly through `%offloader` bypassing the `REQUIRES:
+Int16` gate, now round-trips correctly at both offsets (previously both
+returned 0). `check-hlsl-feme-vk` (680 tests) unaffected -- still 0
+Failed; the fixed test itself remains `Unsupported` until `shaderInt16`
+is separately implemented (an unrelated, pre-existing feature gap, not
+reopened by this fix). No FeMe feature/extension inventory change: this
+fix does not touch, and is not gated by, `shaderInt16`/16-bit storage.
+
+Net this session: 1 real bug fixed (outside FeMe, in
+`offload-test-suite`), 0 regressions in `check-hlsl-feme-vk` (680 tests,
+0 Failed both before and after) or `check-feme` (3366/3369 passing, 3
+pre-existing Unsupported, 0 regressions -- no feme-side code was changed
+this session, so this is a stability re-confirmation, not a fix
+verification).
+
+### Roadmap L214: confirmed AArch64 constrained-intrinsic rounding-mode risk (not yet fixed)
+
+Not a deqp-vk run: a bounded, isolated `.ll` reproducer following up on
+F15c's own previously-flagged, unverified risk. `llc -mtriple=
+aarch64-linux-gnu` (this tree's own build) lowers
+`llvm.experimental.constrained.fadd.f32(..., metadata
+!"round.towardzero", ...)` to a plain `fadd s0, s0, s1` at both `-O0` and
+`-O2` -- the default-rounding instruction, with no `FPCR` manipulation of
+any kind. This confirms `FloatControlArithmeticPattern` (F15c/F15a/F15b)
+silently produces round-to-nearest-even results instead of the requested
+rounding mode on this host's AArch64 backend, whenever a real shader
+requests a non-default per-instruction `FPRoundingMode` or whole-entry-
+point `RoundingModeRTZ`. No existing CTS run in this project's tracked
+history has caught this; presumed to be test-input luck (RTZ/RTE
+numerically coincide for the values exercised), not evidence of absence.
+Not fixed this session -- confirmed only, per the bounded verification
+task; the fix shape (a from-scratch bit-manipulation algorithm per
+op/rounding-mode, mirroring L208's own `buildRTZNarrowingConversion`) is
+real follow-on work, tracked as roadmap L214.
+
+Net this session: 0 code changes (confirmation only); no CTS re-run
+needed (no shader-visible behavior changed).
