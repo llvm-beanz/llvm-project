@@ -1022,3 +1022,44 @@ regression-risky undertaking better scoped as its own dedicated future
 session(s).
 
 No CTS re-run performed for this row (no code changed).
+
+## Roadmap L220: triangle-domain concentric-ring tessellator rewrite
+
+Implements the Vulkan/GLSL spec's real "Triangle Tessellation" algorithm
+(concentric, successively-shrinking equilateral rings, each ring's own
+per-edge segment count exactly 2 less than the previous, terminating at
+either an un-subdivided single triangle or a degenerate centroid point)
+in place of the previous single inset-toward-centroid core `tessellateQuad`
+and `tessellateTriangle` both used -- see `Roadmap.md`'s `L220` row for the
+full technical derivation (including the closed-form homothety proof that
+avoids needing real per-ring perpendicular-projection geometry in code).
+This session only rewrote the **triangle** domain; the quad domain (`L221`)
+is unchanged.
+
+`ninja check-feme`: 3376/3379 passed (0 failed, 3 pre-existing
+Unsupported), +4 net new `TessellatorTest.cpp` cases, 0 regressions.
+Every pre-existing triangle-domain `TessellatorTest.cpp` case (winding,
+shared-edge, crack-free) passes unchanged against the new algorithm.
+
+CTS-confirmed:
+- `dEQP-VK.tessellation.tesscoord.triangles_*` (6 cases): **6/6 Pass**
+  (was 0/6) -- the `isolines_*` (6/6, unaffected) and `quads_*` (0/6,
+  unchanged, `L221`) groups make up the remaining 12/18 of the full
+  `tesscoord.*` group.
+- `dEQP-VK.tessellation.*` (excluding hlsl-sourced cases, 1088-case
+  sample): **386/1088 Pass** (was 359/1088) -- **27 newly-fixed cases,
+  0 regressions** (byte-for-byte QPA `StatusCode` diff against a stashed
+  pre-fix rebuild). Newly-fixed groups: `invariance.{inner_triangle_set,
+  outer_edge_division,outer_triangle_set,primitive_set,triangle_set}.
+  triangles_*`, `misc_draw.fill_{cover,overlap}_triangles_*`,
+  `tesscoord.triangles_*`.
+- `dEQP-VK.tessellation.tess_io.max_in_out.with_f16.*` (the original
+  `L216` repro, 80 cases): **unaffected, 40/80 Pass both before and
+  after** -- confirms `L216`'s own failure is specific to the **quad**
+  domain, not triangle, so it needs `L221`'s own quad rewrite before it
+  can be re-attempted.
+
+No Vulkan feature/extension advertisement changed (a pure correctness
+fix within the existing `tessellationShader` feature's own
+implementation), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
