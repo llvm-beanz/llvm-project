@@ -61,20 +61,28 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(start here)** `L220`: implement the spec's real concentric-ring
-   algorithm for `tessellateTriangle` first (single inner level,
-   simpler than the quad case, full algorithm text already quoted in
-   the roadmap row) -- a multi-hour rewrite, not a quick fix. Add exact
-   analytic-point-set unit tests before touching the quad domain.
-2. Re-verify every existing crack-free/winding/shared-edge
-   `TessellatorTest.cpp` case still holds under the new algorithm --
-   those properties were derived against the old inset design, not
-   guaranteed to transfer.
-3. Once triangles are rewritten and verified, revisit `L216` -- strong
-   hypothesis it shares this same root cause.
-4. `L201(c)` (25 cases) -- still just "reduced to distinct symptoms,"
-   never started, carried over many sessions.
-5. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/
-   L206/L208/L210-L214/L217/L218/L219 have all landed since). Worth
-   doing once `L220`'s triangle rewrite lands, for one consolidated
-   picture.
+1. **(start here, multi-hour)** `L221`: the quad-domain half of the
+   same tessellator-algorithm rewrite. Spec's real approach: build a
+   full regular grid across the *whole* domain from the inner
+   tessellation levels, discard its outer ring, independently
+   re-subdivide the *true* outer edges from the outer levels, then
+   bridge the two -- unlike the triangle domain, no recursive ring
+   structure, but 4 distinct `m`/`n`-degenerate-axis combinations to
+   handle explicitly. Full breakdown already written into the roadmap
+   `L221` row (spec citations, suggested implementation order,
+   verification plan) -- follow the same rigorous methodology `L220`
+   used: exact analytic unit tests validated against real output, full
+   crack-free/winding regression sweep, real CTS before/after QPA
+   diff.
+2. Once `L221` lands, revisit `L216` (`tess_io.max_in_out.with_f16.*`,
+   confirmed this session to be quad-domain-specific, not
+   triangle-domain) -- strong hypothesis it shares this same root
+   cause.
+3. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/
+   L206/L208/L210-L214/L217/L218/L219/L220/L201(c) have all landed
+   since). Worth doing once `L221` lands, for one consolidated
+   before/after picture rather than piecemeal reruns.
+4. `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
+   -- still available per the standing instructions, not touched
+   again this session.
+5. No git stashes this session (confirmed empty).
