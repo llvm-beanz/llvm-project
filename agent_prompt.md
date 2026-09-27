@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 1ebfe39e-5f48-4c14-810b-08a0301888a7
 ---
 # Initial Guidelines
 
@@ -60,22 +61,27 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** Root-cause `L225`. Isolate the
-   exact inside/outside tessellation-level combination
-   `quads_equal_spacing_{ccw,cw}` exercises (`--deqp-log-images=enable`
-   or a point-count diagnostic dump), then compare FeMe's generated
-   point/triangle count against the spec's closed-form lattice-size
-   formula for that combination — same method `L220`/`L221` used.
-2. **(unknown)** Continue tessellation triage: `user_defined_io` (27
-   cases) and `shader_input_output`/`misc_draw`/`common_edge`/
-   `matrix_multiplication`/`geometry_interaction` groups in the
-   136-case residual failure list are still untriaged. Pick
-   `user_defined_io` next — it's the largest untriaged chunk.
-3. **(a few hours)** The broader-than-tessellation CTS re-run is still
-   overdue (last real broad sample was the one-off 29451-case `draw.*`
-   group, several sessions back). Worth a dedicated session on `api`/
-   `pipeline`/`shader_render`/`synchronization` once `L225` or
-   `user_defined_io` lands.
-4. No git stashes this session (used inline `false &&` short-circuit
-   for L223's A/B test since it's a large function; used real
-   `git stash push/pop` for L224's, popped immediately after).
+1. **(a few hours, dedicated session)** Root-cause and fix `L226`
+   (`user_defined_io`, 27 cases). Full repro command is in the `L226` roadmap
+   row: `deqp-vk
+   --deqp-case=dEQP-VK.tessellation.user_defined_io.per_patch_block.vertex_io_array_size_implicit.triangles`
+   against this session's locally-built `deqp-vk`/`libfeme_vulkan.so`. Start by
+   dumping the imported LLVM IR for that one case and finding the specific
+   unresolved `spirv_var_N` global; then trace which `CanonicalizeStage.cpp`
+   classification helper should claim it. This is the largest untriaged group
+   and now has a concrete repro + hypothesis, unlike last session's "unknown
+   effort" note.
+2. **(30-45 minutes)** Reconfigure the main `llvm-project` build with `clang` +
+   the `offload-test-suite` external project wired in, then run
+   `check-hlsl-feme-vk` at least once this environment to re-establish that
+   baseline (448 Passed / 32 XFAIL / 200 Unsupported / 0 unexpected last
+   confirmed, but not reconfirmed in this fresh checkout).
+3. **(a few hours)** The broader-than-tessellation CTS re-run
+   (`api`/`pipeline`/`shader_render`/`synchronization`) is now three sessions
+   overdue. `deqp-vk` is built and ready in this environment
+   (`/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk`);
+   this just needs a dedicated time slot using the same
+   `feme/utils/run_vulkan_cts.py` harness.
+4. Two real `git stash push/pop` pairs used this session, both for L225's own
+   before/after CTS measurement; both popped immediately after each measurement,
+   nothing left stashed.
