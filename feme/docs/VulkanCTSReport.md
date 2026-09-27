@@ -768,3 +768,69 @@ regressions (the FeMe-side fix here is `MeshOutputWrapper.cpp` only;
 no new FeMe unit test was added specifically for this row since its
 correctness is fully covered by the CTS group above, which now passes
 end-to-end through the real CPU JIT path).
+
+### Roadmap L215/L216: tessellation "max IO" f16/32-bit stage-I/O correctness (not root-caused; scope corrected)
+
+Continued investigation of the tessellation half of the original
+L201(d) row (`dEQP-VK.tessellation.tess_io.max_in_out.with_f16.*`, 40/80
+failing). Ruled out a repeat of the mesh-shader bug's exact cause:
+`vktTessellationMaxIOTests.cpp` never uses fixed C++ mirror structs for
+its per-vertex/per-patch host buffers (it uses raw `std::vector<uint8_t>`
+plus a hand-written `IfaceVar::getBindingSize`/`initBinding` pair), and
+that hand-written packer already implements std430 vec3/vec4-array
+stride alignment correctly -- so the exact bug found for mesh shaders
+does not apply here.
+
+Imaged one reduced case (`with_f16.permutation_9.tcs_vert_writes_tes_
+reads`, `--deqp-log-images=enable`): unlike the mesh-shader bug's
+all-wrong image, the Result showed a mix of correct and incorrect
+colors blended smoothly across the render -- i.e. some per-vertex
+`good_*` checks pass and others fail within the same primitive, a
+qualitatively different (partial, not total) failure pattern. Confirmed
+the write-only sibling (`..._tes_na`, no TES-side check) passes,
+narrowing the bug to the TCS-output -> TES-input per-vertex varying
+interpolation/check path specifically.
+
+A temporary, uncommitted VK-GL-CTS-side diagnostic patch (reverted
+before any final run) encoded the smallest-indexed failing `good_*`
+check into the output color, cross-referenced against a
+`makeShaders()`-side variable-name dump. Findings:
+
+- The failing variables are **not exclusively f16** -- observed
+  failures include f32/i32 as well as f16, VEC3 and VEC4, flat and
+  interpolated. Independently confirmed by running the
+  **`32_bits_only`** tessellation group (zero 16/64-bit types at all):
+  **50/80 failing**, similar to `with_f16`'s 40/80. This means the bug
+  is not f16-specific; the original L215 framing was too narrow, and
+  the roadmap row has been corrected (superseded by a new row, L216,
+  covering both groups).
+- A second diagnostic pass distinguished the real (post-device-limit-
+  trim) shader's variable list (13 vars for this permutation, confirmed
+  via `vulkaninfo`'s real `maxTessellationEvaluationInputComponents=64`)
+  from the mock/compile-time list (29 vars, from the test's hardcoded
+  128-component mock constants) -- the two-phase trim behaves as
+  designed, it was not itself a factor.
+- Per-pixel analysis of the failing-check-index dump showed a
+  **concentric-ring pattern keyed to screen/tess-coordinate position**:
+  the failing check index varies smoothly with position (not a fixed
+  "these locations are always broken" set), and two f16 VEC4
+  interpolated variables at different location indices never fail at
+  all in the sampled image. Since `gl_Position` -- interpolated via the
+  exact same `INTERP_QUAD_VAR` bilinear macro as every per-vertex
+  varying -- always renders correctly (the image is not globally
+  corrupted), a wrong-corner-order/wrong-`gl_TessCoord` theory is ruled
+  out; whatever is wrong must be per-(TCS-output-location,
+  per-invocation-corner) in the TCS->TES interface-passing path, not a
+  single broken location or a single broken bit-width.
+
+Root cause not yet found. See roadmap row L216 for the narrowed next
+steps (numeric, not just pass/fail, dumps of one failing variable's
+interpolated value vs. its independently-computed min/max bounds across
+the tess-coordinate range, to distinguish an addressing/indexing bug
+from a precision bug in domain-point generation).
+
+No FeMe source files were changed this session. The two temporary
+diagnostic patches to `vktTessellationMaxIOTests.cpp` were reverted
+(`git checkout --`) before ending the session; nothing was committed to
+the VK-GL-CTS checkout. `ninja check-feme` was not rerun since no
+FeMe-side code changed.
