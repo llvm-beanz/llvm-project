@@ -61,25 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown)** L214: generalize L208's `buildRTZNarrowingConversion`
-   bit-manipulation approach from `FConvert` to
-   `FloatControlArithmeticPattern`'s 5 binary ops (`FAdd`/`FSub`/`FMul`/
-   `FDiv`/`FRem`), across whichever of RTZ/RTP/RTN each op's own
-   decoration or entry-point execution mode can request. This is now
-   the highest-priority open item (P1, confirmed live correctness bug)
-   this session found.
-2. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
-   still the largest untouched group with a known partial fail location
-   (`vktMeshShaderInOutTestsEXT.cpp:1590`), carried over 4+ sessions
-   now without being started.
-3. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to
-   distinct symptoms," never started.
-4. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/L206/
-   L208/L211 have all landed since). This session did not do one --
-   no FeMe-side code changed (L210/L212/L213 were all outside-FeMe or
-   test-only; L214 is confirm-only), so there was nothing new to
-   verify against the deqp-vk suite specifically.
-5. `stash@{0}`/`stash@{1}` (old, unfinished work, carried over 3+
-   sessions per earlier entries in this file) -- still sitting there.
-   Worth an explicit `git stash show -p stash@{N}` and a decision
-   (finish or `git stash drop`) rather than continuing to defer.
+1. **(unknown, start here)** L215: tessellation half of the old
+   L201(d) group (`tess_io.max_in_out.with_f16.*`, 40/80 still
+   failing). First check whether `vktTessellationMaxIOTests.cpp` has
+   the *same* std430-vec3-array-padding bug just fixed for mesh shaders
+   (quick `grep -n "Vec3\|IVec3"` over its own host-mirror struct(s),
+   cross-checked with `spirv-dis`'s `OpMemberDecorate ... Offset` the
+   same way) before assuming it's a new, different bug. If ruled out,
+   fall back to the `--deqp-log-images=enable` diagnostic-patch
+   technique above.
+2. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to
+   distinct symptoms," never started, carried over many sessions now.
+3. A full/broad CTS re-run is overdue (last full run: 2026-09-26;
+   L205/L206/L208/L210-L214 have all landed since, plus this session's
+   L201(d) mesh fix). Worth doing once L215 (or at least a next chunk
+   of it) is also resolved, to get one consolidated before/after
+   picture rather than re-running piecemeal after every single fix.
+4. `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
+   -- flagged as available in the standing instructions, its own
+   parallel-worker flakiness was investigated a few sessions back but
+   never fully root-caused; still worth returning to if L201(b)/(c)/
+   L215 are all exhausted first.
+5. No git stashes to clean up this session (already confirmed empty).
+
