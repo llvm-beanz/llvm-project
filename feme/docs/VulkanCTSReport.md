@@ -1824,3 +1824,87 @@ feature landing or a caveat being lifted.
 See `L228(i)` on the roadmap for the newly-discovered
 `wait_before_signal` follow-up cluster this verification pass
 surfaced.
+
+## Roadmap L228(h)/L228(i): shared root cause identified (not yet fixed) -- synchronous `vkQueueSubmit` cannot support submit-before-signal chains
+
+Both `L228(h)` (`one_to_n`, 200 cases across `synchronization.txt`/
+`synchronization2.txt`) and `L228(i)` (`wait_before_signal`, 200 cases)
+were investigated this session while re-verifying `L228(g)`'s own fix
+against the full `image_64x64x8` `timeline_semaphore` case list.
+**Root cause identified for both; not yet fixed** -- this is a design
+question, not a small patch (see the roadmap rows' own detail).
+
+Reproduced directly (no batch harness):
+`deqp-vk --deqp-case='dEQP-VK.synchronization.timeline_semaphore.one_to_n.write_blit_image_read_blit_image.image_128_r32_uint'`
+confirmed `Fail
+(synchronizationWrapper->queueSubmit(iter.queue, VK_NULL_HANDLE):
+VK_ERROR_INITIALIZATION_FAILED at
+vktSynchronizationTimelineSemaphoreTests.cpp:2155)`, timed at ~5.0s
+(matching `L228(a)`'s `TimelineWaitSafetyNetTimeoutNs` bound exactly,
+not an immediate-failure shape like `L228(g)`'s own ~0.6s).
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` printed nothing extra for this
+case -- confirming the failure genuinely originates from the safety
+net itself (a real unmet wait), not a separate internal error being
+misreported as the same Vulkan error code.
+
+Reading `OneToNTestInstance::iterate()` (`vktSynchronizationTimelineSemaphoreTests.cpp`,
+~line 2155-2230) and `WaitBeforeSignalTestInstance::iterate()`
+(~line 1650-1680) side by side shows both share the exact same
+submission ordering: every command buffer in the chain (the initial
+write, every fan-out copy, every read) is recorded and **submitted up
+front**, each one waiting on a timeline value that only a **host-side
+`hostSignal()` call issued after every one of those submits** will
+ever satisfy, followed by a final `vkDeviceWaitIdle`. This is a
+legitimate, spec-conformant Vulkan idiom: a real driver's own
+`vkQueueSubmit` never blocks synchronously on an unmet wait inside
+the call -- it queues the work and returns immediately, deferring
+actual execution asynchronously until the wait condition is later
+satisfied by *any* later call (from any thread), which is exactly
+what lets an application safely issue a whole dependent submission
+chain before finally releasing it with one host signal.
+
+FeMe's `vkQueueSubmit`/`vkQueueSubmit2` (`feme/lib/Vulkan/Sync.cpp`)
+instead blocks synchronously *inside* the call itself -- `consumeWaits`
+(now genuinely blocking, since `L228(a)`) followed immediately by
+`executeCommandBuffers`, both before the call returns. For this
+specific submission ordering, the very first `submit()` call (the
+write operation, waiting on the test's own `m_hostTimelineValue`)
+blocks the calling thread indefinitely, since the only call that could
+ever satisfy that wait (`hostSignal()`) is later in that same thread's
+own program order and can now never execute -- a genuine, unavoidable
+deadlock under FeMe's current model, resolved only by `L228(a)`'s own
+5-second safety-net timeout kicking in and failing the case instead of
+hanging the whole test process forever.
+
+This is **not** two separate bugs: both groups reproduce the identical
+"submit a chain, release with one signal after" idiom, just with
+different graph shapes (`one_to_n`'s fan-out to multiple queues vs.
+`wait_before_signal`'s single linear chain) -- neither the fan-out
+shape nor multi-queue support specifically is the actual blocker, as
+the original `L228(h)` roadmap entry had speculated before this
+session's investigation.
+
+**Not fixed this session.** This needs a genuine architectural change
+to `vkQueueSubmit`'s own execution model -- deferring each
+submission's wait+execute+signal to a background worker (e.g., one per
+`VkQueue`, or a shared pool) so the call itself can return immediately
+without blocking on an unmet wait, with `vkQueueWaitIdle`/
+`vkDeviceWaitIdle`/fence-wait genuinely blocking until that queued work
+later completes -- a materially larger change than any other `L228`
+sub-item fixed so far, touching the whole submission path and needing
+careful thought about whether the CPU executor's own state (images,
+buffers, pipelines) is safe to touch from a background thread
+concurrently with the calling thread's further API calls. Recommend a
+dedicated future session start with a short design note in
+`FeMeVulkanDesign.md` proposing the worker-thread-per-queue model
+*before* writing any implementation code, and confirm whether
+`Sync.h`'s existing `Semaphore` mutex/condvar (added for `L228(a)`) is
+sufficient for the cross-thread state this would need or requires its
+own extension.
+
+No code changed for this investigation -- `ninja check-feme` not
+re-run for this entry (root-causing/documentation only).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+(no code landed; `VK_KHR_timeline_semaphore` remains listed as
+implemented, this is a known-gap note added to the roadmap, not an
+inventory-level claim change).
