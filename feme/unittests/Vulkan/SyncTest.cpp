@@ -23,6 +23,9 @@
 
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <thread>
+
 using namespace feme::vulkan;
 
 namespace {
@@ -282,6 +285,103 @@ TEST_F(SyncTest, TimelineSemaphoreAcrossQueueSubmit) {
   ASSERT_EQ(vkGetSemaphoreCounterValue(Device, Sem, &Value), VK_SUCCESS);
   EXPECT_EQ(Value, SignalValue);
 
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+// Roadmap L228(a): `vkWaitSemaphores` must genuinely block a real host
+// thread until a *different* real host thread's own, later
+// `vkSignalSemaphore` call reaches the awaited value -- not merely
+// succeed if the value already happens to be met at the moment of the
+// call (`TimelineSemaphoreHostSignalAndWait` above only covers the
+// same-thread, already-resolved case). This mirrors
+// `dEQP-VK.synchronization.timeline_semaphore.device_host.*`'s own
+// `HostCopyThread`, which relies on exactly this real cross-thread
+// blocking.
+TEST_F(SyncTest, TimelineSemaphoreWaitBlocksUntilHostSignal) {
+  VkSemaphoreTypeCreateInfo TypeInfo{};
+  TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  TypeInfo.initialValue = 0;
+  VkSemaphoreCreateInfo SemInfo{};
+  SemInfo.pNext = &TypeInfo;
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  constexpr auto SignalDelay = std::chrono::milliseconds(200);
+  std::thread Signaler([&] {
+    std::this_thread::sleep_for(SignalDelay);
+    VkSemaphoreSignalInfo SignalInfo{};
+    SignalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO;
+    SignalInfo.semaphore = Sem;
+    SignalInfo.value = 1;
+    EXPECT_EQ(vkSignalSemaphore(Device, &SignalInfo), VK_SUCCESS);
+  });
+
+  uint64_t WaitValue = 1;
+  VkSemaphoreWaitInfo WaitInfo{};
+  WaitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+  WaitInfo.semaphoreCount = 1;
+  WaitInfo.pSemaphores = &Sem;
+  WaitInfo.pValues = &WaitValue;
+
+  auto Start = std::chrono::steady_clock::now();
+  EXPECT_EQ(vkWaitSemaphores(Device, &WaitInfo, UINT64_MAX), VK_SUCCESS);
+  auto Elapsed = std::chrono::steady_clock::now() - Start;
+  // A non-blocking (pre-fix) implementation would return instantly,
+  // failing this check well before `SignalDelay` elapses.
+  EXPECT_GE(Elapsed, SignalDelay);
+
+  Signaler.join();
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+// Roadmap L228(a): the same real cross-thread dependency as
+// `TimelineSemaphoreWaitBlocksUntilHostSignal` above, but observed through
+// `vkQueueSubmit`'s own implicit wait rather than the explicit
+// `vkWaitSemaphores` entry point -- this is the exact shape of the
+// originally-reported bug (`vkQueueSubmit` returning
+// `VK_ERROR_INITIALIZATION_FAILED` instead of blocking for a real,
+// concurrently-running host thread's later signal).
+TEST_F(SyncTest, QueueSubmitBlocksUntilHostSignalsTimelineSemaphore) {
+  VkSemaphoreTypeCreateInfo TypeInfo{};
+  TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  TypeInfo.initialValue = 0;
+  VkSemaphoreCreateInfo SemInfo{};
+  SemInfo.pNext = &TypeInfo;
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  constexpr auto SignalDelay = std::chrono::milliseconds(200);
+  std::thread Signaler([&] {
+    std::this_thread::sleep_for(SignalDelay);
+    VkSemaphoreSignalInfo SignalInfo{};
+    SignalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO;
+    SignalInfo.semaphore = Sem;
+    SignalInfo.value = 1;
+    EXPECT_EQ(vkSignalSemaphore(Device, &SignalInfo), VK_SUCCESS);
+  });
+
+  uint64_t WaitValue = 1;
+  VkTimelineSemaphoreSubmitInfo TimelineInfo{};
+  TimelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+  TimelineInfo.waitSemaphoreValueCount = 1;
+  TimelineInfo.pWaitSemaphoreValues = &WaitValue;
+  VkSubmitInfo Submit{};
+  Submit.pNext = &TimelineInfo;
+  Submit.waitSemaphoreCount = 1;
+  Submit.pWaitSemaphores = &Sem;
+  VkPipelineStageFlags WaitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+  Submit.pWaitDstStageMask = &WaitStage;
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &CmdBuf;
+
+  auto Start = std::chrono::steady_clock::now();
+  EXPECT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+  auto Elapsed = std::chrono::steady_clock::now() - Start;
+  EXPECT_GE(Elapsed, SignalDelay);
+
+  Signaler.join();
   vkDestroySemaphore(Device, Sem, nullptr);
 }
 
