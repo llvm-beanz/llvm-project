@@ -103,6 +103,25 @@ TEST(TessellatorTest, IsolinePointModeGeneratesNoIndices) {
   EXPECT_TRUE(Patch.Indices.empty());
 }
 
+// (Roadmap L220) Verifies the spec's own concentric-ring point/triangle
+// counts for one worked example (edge and inside factor 4, so the first
+// ring's own resolution `N0` is 4): manually derived by walking
+// `tessellateTriangle`'s own ring recursion (Tessellator.cpp's own
+// comments on `appendTriangleRingBoundary`/`fanRingToPoint` describe the
+// same steps), then cross-checked against the function's actual output.
+//
+//  - Ring 0 (the real outer boundary): 3 edges of 4 points each, 12
+//    points total.
+//  - `N0 == 4` is neither the point-degenerate (`== 2`) nor
+//    not-further-subdivided (`== 3`) terminal case, so ring 1's own
+//    resolution is `N0 - 2 == 2`: 3 edges of 2 points each, 6 points
+//    total. Bridging ring 0 to ring 1 emits `12 + 6 == 18` triangles (one
+//    per point on either ring, per `bridgeRingsByEdge`'s own comment).
+//  - Ring 1's own resolution (2) *is* the point-degenerate case: instead
+//    of a ring 2, a single centroid point is added (1 point) and ring 1's
+//    own 6 boundary points are fanned to it, emitting 6 more triangles.
+//
+// Total: `12 + 6 + 1 == 19` points, `18 + 6 == 24` triangles (72 indices).
 TEST(TessellatorTest, TriangleDomainGeneratesTheAnalyticLatticeSize) {
   TessFactors Factors;
   Factors.Inside = {4.0f, 0.0f};
@@ -110,16 +129,8 @@ TEST(TessellatorTest, TriangleDomainGeneratesTheAnalyticLatticeSize) {
   TessellatedPatch Patch =
       tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
                  TessOutputPrimitive::TriangleCcw, Factors);
-  // Uniform factors mean the per-edge outer boundary (`M` vertices, one
-  // ring vertex per edge segment) and the inset uniform core (resolution
-  // `N`, per `computeSegmentCount`) agree on `N` -- see Tessellator.cpp's
-  // `bridgeRings`/`appendTriangleLattice`.
-  const uint32_t N = 4;
-  const uint32_t M = 3 * N;
-  EXPECT_EQ(Patch.Points.size(), M + (N + 1) * (N + 2) / 2);
-  // `N * N` core triangles, plus `M + 3 * N` bridging triangles (one per
-  // outer/core ring vertex).
-  EXPECT_EQ(Patch.Indices.size(), 3 * (N * N + M + 3 * N));
+  EXPECT_EQ(Patch.Points.size(), 19u);
+  EXPECT_EQ(Patch.Indices.size(), 3 * 24u);
   for (const DomainPoint &P : Patch.Points) {
     EXPECT_NEAR(P.U + P.V + P.W, 1.0f, Epsilon);
     EXPECT_GE(P.U, -Epsilon);
@@ -128,10 +139,85 @@ TEST(TessellatorTest, TriangleDomainGeneratesTheAnalyticLatticeSize) {
   }
 }
 
-// (Roadmap H7x) At the fully unsubdivided factor (every edge and the
-// interior both at 1 segment), `tessellateTriangle` must emit the real,
-// single triangle directly -- not the general inset/bridge path's usual
-// 7-triangle core+annulus split, which spuriously shrinks two of the
+// (Roadmap L220) `N0 == 2` (inside factor 2): the spec's own "outermost
+// inner triangle is degenerate" case reached directly from the real outer
+// boundary, with no intermediate ring at all -- every one of the outer
+// boundary's own points fans straight to a single centroid point, and
+// there is exactly one such point in the whole patch (not one per would-be
+// ring, since there is only ever one ring here).
+TEST(TessellatorTest, TriangleInsideFactorTwoFansOuterBoundaryToOneCenterPoint) {
+  TessFactors Factors;
+  Factors.Inside = {2.0f, 0.0f};
+  Factors.Edges = {3.0f, 4.0f, 5.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // Outer boundary: 3 + 4 + 5 == 12 points. Plus exactly one center point.
+  EXPECT_EQ(Patch.Points.size(), 13u);
+  // One fan triangle per outer boundary point/segment.
+  EXPECT_EQ(Patch.Indices.size(), 3 * 12u);
+  int CenterCount = llvm::count_if(Patch.Points, [](const DomainPoint &P) {
+    constexpr float Third = 1.0f / 3.0f;
+    return std::abs(P.U - Third) < Epsilon && std::abs(P.V - Third) < Epsilon;
+  });
+  EXPECT_EQ(CenterCount, 1);
+}
+
+// (Roadmap L220) `N0 == 3` (inside factor 3): the spec's own "edges of the
+// inner triangle are not subdivided" case -- a single small triangle is
+// bridged directly to the real outer boundary, with no further rings and
+// no center point at all.
+TEST(TessellatorTest, TriangleInsideFactorThreeBridgesToOneUnsubdividedInnerTriangle) {
+  TessFactors Factors;
+  Factors.Inside = {3.0f, 0.0f};
+  Factors.Edges = {3.0f, 4.0f, 5.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // Outer boundary (12 points) + the inner triangle's own 3 corners.
+  EXPECT_EQ(Patch.Points.size(), 15u);
+  // Bridge triangles (12 + 3) plus the one real inner triangle itself.
+  EXPECT_EQ(Patch.Indices.size(), 3 * 16u);
+  int CenterCount = llvm::count_if(Patch.Points, [](const DomainPoint &P) {
+    constexpr float Third = 1.0f / 3.0f;
+    return std::abs(P.U - Third) < Epsilon && std::abs(P.V - Third) < Epsilon;
+  });
+  EXPECT_EQ(CenterCount, 0);
+}
+
+// (Roadmap L220) The spec's own "treated as though it were originally
+// specified as 1 + epsilon" rule: an inside factor of exactly 1 combined
+// with at least one outer edge factor greater than 1 must still produce a
+// (degenerate, `SpacingEqual`/`SpacingFractionalEven`, or 3-segment,
+// `SpacingFractionalOdd`) interior ring, not the fully-unsubdivided
+// single-triangle fast path above (which only applies when *every* edge
+// and the inside factor are all exactly 1).
+TEST(TessellatorTest, TriangleInsideFactorOneWithSubdividedEdgeGetsEpsilonBump) {
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 0.0f};
+  Factors.Edges = {2.0f, 1.0f, 1.0f, 0.0f};
+  TessellatedPatch Equal =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // Outer boundary (2 + 1 + 1 == 4 points) fanned to one center point
+  // (the `SpacingEqual`/`Integer` epsilon bump resolves to `N0 == 2`).
+  EXPECT_EQ(Equal.Points.size(), 5u);
+  EXPECT_EQ(Equal.Indices.size(), 3 * 4u);
+
+  TessellatedPatch FractionalOdd = tessellate(
+      TessellatorDomain::Triangle, TessPartitioning::FractionalOdd,
+      TessOutputPrimitive::TriangleCcw, Factors);
+  // The `SpacingFractionalOdd` epsilon bump instead resolves to `N0 == 3`:
+  // a real, un-subdivided inner triangle (3 corners), no center point.
+  // `FractionalOdd`'s own rounding rule also rounds the edge factor of 2
+  // up to 3 (the smallest odd integer at least 2), so the outer boundary
+  // itself has `3 + 1 + 1 == 5` points here, not the `Integer`-rounded
+  // case's 4.
+  EXPECT_EQ(FractionalOdd.Points.size(), 5u + 3u);
+  EXPECT_EQ(FractionalOdd.Indices.size(), 3 * (5u + 3u + 1u));
+}
+
+
 // patch's own three corners toward the centroid. That inset is invisible
 // to affine position/varying interpolation, but not to
 // `gl_CullDistance`'s whole-*primitive* culling rule: a synthetic
@@ -484,6 +570,35 @@ TEST(TessellatorTest, TriangleTessellationIsCrackFreeWithUnequalEdgeFactors) {
                  TessOutputPrimitive::TriangleCcw, Factors);
   ASSERT_FALSE(Patch.Indices.empty());
   EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Triangle), "");
+}
+
+// (Roadmap L220) Sweeps every inside factor from 1 to 24 against a fixed
+// set of unequal outer edge factors, exercising both concentric-ring
+// termination cases (point-degenerate at an even `N0`, un-subdivided
+// single triangle at an odd one) and every ring-recursion depth in
+// between (an inside factor of 24 recurses through 11 full rings before
+// terminating), plus both `SpacingEqual` (`Integer` here) and
+// `SpacingFractionalOdd` partitioning, whose own epsilon-bump rule (see
+// `TriangleInsideFactorOneWithSubdividedEdgeGetsEpsilonBump`) only ever
+// applies here at inside factor 1.
+TEST(TessellatorTest, TriangleTessellationIsCrackFreeAcrossManyInsideFactors) {
+  for (TessPartitioning Partitioning :
+       {TessPartitioning::Integer, TessPartitioning::FractionalOdd}) {
+    for (uint32_t Inside = 1; Inside <= 24; ++Inside) {
+      TessFactors Factors;
+      Factors.Inside = {static_cast<float>(Inside), 0.0f};
+      Factors.Edges = {3.0f, 5.0f, 7.0f, 0.0f};
+      TessellatedPatch Patch =
+          tessellate(TessellatorDomain::Triangle, Partitioning,
+                     TessOutputPrimitive::TriangleCcw, Factors);
+      ASSERT_FALSE(Patch.Indices.empty())
+          << "inside factor " << Inside << " partitioning "
+          << static_cast<int>(Partitioning);
+      EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Triangle), "")
+          << "inside factor " << Inside << " partitioning "
+          << static_cast<int>(Partitioning);
+    }
+  }
 }
 
 TEST(TessellatorTest, QuadTessellationIsCrackFreeAtEveryFactor) {

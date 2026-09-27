@@ -102,57 +102,6 @@ void bridgeRingsByEdge(TessellatedPatch &Patch, const RingEdges &Outer,
   }
 }
 
-/// Appends a uniform triangle-domain lattice of resolution \p N
-/// (barycentric coordinates `(i, j, k) / N`) to \p Patch, passing each raw
-/// lattice point through \p Transform before storing it (the identity for
-/// a standalone full-size triangle domain, or an inset-toward-centroid
-/// transform for the crack-free core an outer per-edge boundary bridges
-/// to -- see Tessellator.h). `Cw` selects the emitted triangles' winding.
-/// Returns the lattice's own CCW outer-boundary ring (see `RingEdges`),
-/// split at the same three corners `appendTriangleBoundaryRing` uses: a
-/// caller that does not bridge a separate outer boundary can also use this
-/// directly as the whole patch's boundary.
-RingEdges
-appendTriangleLattice(TessellatedPatch &Patch, uint32_t N, bool Cw,
-                      llvm::function_ref<DomainPoint(DomainPoint)> Transform) {
-  // Row `r` (0 at one corner, N at the opposite edge) holds `N - r + 1`
-  // points; point (r, c) has barycentric coordinates
-  // (N - r - c, c, r) / N.
-  std::vector<std::vector<uint32_t>> RowStart(N + 1);
-  for (uint32_t R = 0; R <= N; ++R) {
-    for (uint32_t C = 0; C + R <= N; ++C) {
-      RowStart[R].push_back(static_cast<uint32_t>(Patch.Points.size()));
-      float I = static_cast<float>(N - R - C);
-      float J = static_cast<float>(C);
-      float K = static_cast<float>(R);
-      Patch.Points.push_back(Transform({I / N, J / N, K / N}));
-    }
-  }
-  for (uint32_t R = 0; R < N; ++R) {
-    for (uint32_t C = 0; C + R < N; ++C) {
-      uint32_t A = RowStart[R][C];
-      uint32_t B = RowStart[R][C + 1];
-      uint32_t D = RowStart[R + 1][C];
-      appendTriangle(Patch, A, B, D, Cw);
-      // The "upward" triangle at this cell exists whenever a fourth lattice
-      // point closes it on the next row.
-      if (C + R + 1 < N) {
-        uint32_t E = RowStart[R + 1][C + 1];
-        appendTriangle(Patch, B, E, D, Cw);
-      }
-    }
-  }
-
-  RingEdges Edges(3);
-  for (uint32_t C = 0; C < N; ++C)
-    Edges[0].push_back(RowStart[0][C]);
-  for (uint32_t R = 0; R < N; ++R)
-    Edges[1].push_back(RowStart[R][N - R]);
-  for (uint32_t R = N; R > 0; --R)
-    Edges[2].push_back(RowStart[R][0]);
-  return Edges;
-}
-
 /// Appends a triangle domain's per-edge boundary ring (no interior) to
 /// \p Patch: \p E01/\p E12/\p E20 are the segment counts (each edge's own
 /// `computeSegmentCount` result) for the `P0->P1`, `P1->P2`, `P2->P0`
@@ -179,6 +128,80 @@ RingEdges appendTriangleBoundaryRing(TessellatedPatch &Patch, uint32_t E01,
     AddPoint(2, T, 0.0f, 1.0f - T);
   }
   return Edges;
+}
+
+/// Appends one concentric inner triangle's own boundary ring (see the
+/// Vulkan/GLSL spec's "Triangle Tessellation" section: a set of concentric
+/// equilateral triangles, each one inset from the previous by a uniform
+/// "perpendicular projection" corner construction) to \p Patch, at
+/// uniform per-edge resolution \p Resolution and homothety scale
+/// \p Scale, both already resolved by the caller (`tessellateTriangle`'s
+/// own concentric-ring loop, which derives \p Scale as the cumulative
+/// product of each ring's own `(1 - 2 / n)` shrink factor -- the closed
+/// form the spec's own corner-projection construction reduces to, since
+/// composing several homotheties centered on the same point (the
+/// triangle's centroid) is itself a homothety with the product scale).
+/// \p Scale is always in `(0, 1)`, so the ring is always strictly inset
+/// from the true, unscaled reference triangle. No interior triangles are
+/// generated here: every concentric ring's own interior is filled either
+/// by bridging to the next ring inward (`bridgeRingsByEdge`) or, for the
+/// two terminal cases the spec describes, directly by `tessellateTriangle`
+/// itself (a single triangle when \p Resolution is 1, a center-point fan
+/// via `fanRingToPoint` when a further ring would be degenerate). Returns
+/// the CCW ring (see `RingEdges`), in the same per-edge/per-corner
+/// convention `appendTriangleBoundaryRing` uses.
+RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
+                                     uint32_t Resolution, float Scale) {
+  constexpr float Third = 1.0f / 3.0f;
+  RingEdges Edges(3);
+  auto AddPoint = [&](unsigned Edge, float U, float V, float W) {
+    Edges[Edge].push_back(static_cast<uint32_t>(Patch.Points.size()));
+    Patch.Points.push_back({Third + Scale * (U - Third),
+                            Third + Scale * (V - Third),
+                            Third + Scale * (W - Third)});
+  };
+  for (uint32_t K = 0; K < Resolution; ++K) {
+    float T = static_cast<float>(K) / Resolution;
+    AddPoint(0, 1.0f - T, T, 0.0f);
+  }
+  for (uint32_t K = 0; K < Resolution; ++K) {
+    float T = static_cast<float>(K) / Resolution;
+    AddPoint(1, 0.0f, 1.0f - T, T);
+  }
+  for (uint32_t K = 0; K < Resolution; ++K) {
+    float T = static_cast<float>(K) / Resolution;
+    AddPoint(2, T, 0.0f, 1.0f - T);
+  }
+  return Edges;
+}
+
+/// Fans every vertex of \p Ring's own boundary (walked corner to corner,
+/// same convention `bridgeRingsByEdge` uses) to a single, already-appended
+/// \p Center point, emitting one triangle per boundary segment -- the
+/// spec's own degenerate-inner-ring rule ("If the innermost triangle is
+/// degenerate (i.e., a point), the triangle containing it is subdivided
+/// into six triangles by connecting each of the six vertices on that
+/// triangle with the center point", generalized here to \p Ring's own
+/// point count rather than assuming exactly six, since the same rule also
+/// covers the "first (and only) inner triangle is degenerate" case, which
+/// fans the real, independently-subdivided outer boundary directly instead
+/// of a uniform six-vertex ring). Each triangle's winding matches
+/// `bridgeRingsByEdge`'s own "advance the outer ring" case exactly (the
+/// same `(OuterAt, OuterNext, InnerAt)` operand order, with \p Center
+/// standing in for a fully degenerate inner ring), so a fan appended after
+/// bridging \p Ring to its own outer neighbor stays crack-free.
+void fanRingToPoint(TessellatedPatch &Patch, const RingEdges &Ring,
+                    uint32_t Center, bool Cw) {
+  size_t NumEdges = Ring.size();
+  for (size_t E = 0; E != NumEdges; ++E) {
+    llvm::ArrayRef<uint32_t> Edge = Ring[E];
+    uint32_t NextCorner = Ring[(E + 1) % NumEdges].front();
+    for (size_t I = 0; I < Edge.size(); ++I) {
+      uint32_t A = Edge[I];
+      uint32_t B = (I + 1 < Edge.size()) ? Edge[I + 1] : NextCorner;
+      appendTriangle(Patch, A, B, Center, Cw);
+    }
+  }
 }
 
 /// Appends a quad domain's per-edge boundary ring (no interior) to
@@ -304,21 +327,80 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
     return Patch;
   }
 
+  // (Roadmap L220) This implements the Vulkan/GLSL spec's own "Triangle
+  // Tessellation" algorithm literally -- a set of concentric equilateral
+  // triangles shrinking toward the centroid, each one's own per-edge
+  // resolution derived from the *previous* ring's by subtracting 2 -- not
+  // the single inset-toward-centroid uniform core an earlier version of
+  // this function used (see git history/roadmap L220 for that approach's
+  // own now-fixed non-conformance). `computeSegmentCount`'s ordinary
+  // rounding rule directly gives the first ring's own resolution, *except*
+  // when the inside factor rounds to exactly 1 while some outer edge does
+  // not (the `E01 == 1 && ... && N == 1` case just above already covers
+  // the case where every one of those *also* rounds to 1): the spec's own
+  // "1 + epsilon" rule then applies, since a bare `N == 1` here would
+  // otherwise mean "no interior subdivision at all" even though the outer
+  // boundary itself is subdivided -- an invalid, edge-touching interior
+  // ring the spec explicitly disallows. `SpacingFractionalOdd` resolves
+  // that epsilon to a 3-segment ring (matching its own odd-rounding rule);
+  // every other partitioning (including `Pow2`, a Direct3D-only mode with
+  // no equivalent spec text of its own) resolves it to 2 segments, `Pow2`'s
+  // own smallest-representable-power-of-two-above-1 value.
+  uint32_t N0;
+  if (N == 1)
+    N0 = Partitioning == TessPartitioning::FractionalOdd ? 3 : 2;
+  else
+    N0 = N;
+
   TessellatedPatch Patch;
   RingEdges OuterRing = appendTriangleBoundaryRing(Patch, E01, E12, E20);
-  // Inset the uniform interior core strictly within the outer boundary --
-  // never touching it -- by blending each lattice point toward the
-  // centroid. The blend factor approaches 1 (no inset) as N grows, but is
-  // always strictly less than 1, so a corner point (whose smallest
-  // barycentric component is 0) still maps to a strictly positive one.
-  float Alpha = 1.0f - 1.0f / static_cast<float>(N + 2);
-  auto Inset = [Alpha](DomainPoint P) -> DomainPoint {
-    constexpr float Third = 1.0f / 3.0f;
-    return {Third + Alpha * (P.U - Third), Third + Alpha * (P.V - Third),
-            Third + Alpha * (P.W - Third)};
-  };
-  RingEdges CoreRing = appendTriangleLattice(Patch, N, Cw, Inset);
-  bridgeRingsByEdge(Patch, OuterRing, CoreRing, Cw);
+
+  // Walks the concentric-ring sequence the spec describes: `CurrentN` is
+  // the resolution used to build the *next* ring from `PrevRing` (starting
+  // at the real outer boundary, using `N0` from the inside factor); each
+  // ring's own resolution then becomes the next iteration's `CurrentN`,
+  // exactly matching the spec's own recursive "using the generated
+  // triangle as an outer triangle" step. `CumulativeScale` is the closed
+  // form of the spec's per-corner "perpendicular projection" construction
+  // (see `appendTriangleRingBoundary`'s own comment): composing each
+  // ring's own homothety-toward-centroid transform is itself a homothety
+  // with the product of their individual `(1 - 2 / CurrentN)` scale
+  // factors.
+  RingEdges PrevRing = OuterRing;
+  uint32_t CurrentN = N0;
+  float CumulativeScale = 1.0f;
+  for (;;) {
+    CumulativeScale *= 1.0f - 2.0f / static_cast<float>(CurrentN);
+    if (CurrentN == 2) {
+      // The next ring is degenerate -- a single point at the centroid
+      // (`CumulativeScale` is exactly 0 here, so every ring built from it
+      // would collapse to the centroid regardless of its own resolution).
+      // Per spec, `PrevRing`'s own boundary (the real outer boundary
+      // itself, when this is reached directly from `N0 == 2`, or an
+      // already-built concentric ring's own six-vertex boundary when
+      // reached after at least one full ring) is fanned directly to this
+      // point instead of ever materializing that degenerate ring.
+      uint32_t Center = static_cast<uint32_t>(Patch.Points.size());
+      constexpr float Third = 1.0f / 3.0f;
+      Patch.Points.push_back({Third, Third, Third});
+      fanRingToPoint(Patch, PrevRing, Center, Cw);
+      break;
+    }
+    // Resolution 1 (`CurrentN == 3`) is the spec's own "edges of the inner
+    // triangle are not subdivided" terminal case: a single, un-subdivided
+    // triangle, added to the output directly rather than bridged to a
+    // still-smaller ring.
+    uint32_t Resolution = CurrentN == 3 ? 1 : CurrentN - 2;
+    RingEdges NewRing =
+        appendTriangleRingBoundary(Patch, Resolution, CumulativeScale);
+    bridgeRingsByEdge(Patch, PrevRing, NewRing, Cw);
+    if (Resolution == 1) {
+      appendTriangle(Patch, NewRing[0][0], NewRing[1][0], NewRing[2][0], Cw);
+      break;
+    }
+    PrevRing = NewRing;
+    CurrentN = Resolution;
+  }
 
   if (OutputPrimitive == TessOutputPrimitive::Point)
     Patch.Indices.clear();
