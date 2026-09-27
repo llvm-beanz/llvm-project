@@ -503,28 +503,51 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
       computeSegmentCount(Factors.Edges[1], Partitioning, MaxTessFactor);
   uint32_t Ev1 =
       computeSegmentCount(Factors.Edges[3], Partitioning, MaxTessFactor);
-  // (roadmap L219) When both inside factors round down to their own
-  // minimum of 1 segment (no interior subdivision along either axis), the
-  // quad domain needs no separate interior core at all -- mirroring
-  // `tessellateTriangle`'s own fully-unsubdivided special case above.
-  // Per the Vulkan/GLSL tessellation spec (matched by dEQP's own
-  // `generateReferenceTessCoords` precondition assert, which requires
-  // `inner[0] == 1 && inner[1] == 1` to imply *every* outer edge is also
-  // 1), this can only happen alongside every outer edge also degenerating
-  // to a single segment, so `OuterRing` already holds exactly the 4 quad
-  // corners with no other boundary points to bridge to. The general
-  // inset+bridge path below unconditionally forced at least one interior
-  // ring even here (`Nu`/`Nv`'s own `max(1u, ...)` clamp, needed to avoid
-  // a divide-by-zero in the general case), spuriously synthesizing 4
-  // extra interior points at `(0.25, 0.25)`/`(0.25, 0.75)`/`(0.75, 0.25)`/
-  // `(0.75, 0.75)` that a real tessellator's own equal-spacing algorithm
-  // never produces at this tessellation level -- found via a real
+  // (roadmap L219, corrected for L225) When both inside factors round
+  // down to their own minimum of 1 segment *and* every outer edge also
+  // degenerates to a single segment, the quad domain needs no separate
+  // interior core at all -- mirroring `tessellateTriangle`'s own
+  // fully-unsubdivided special case above. `OuterRing` then already holds
+  // exactly the 4 quad corners with no other boundary points to bridge
+  // to. The general inset+bridge path below unconditionally forced at
+  // least one interior ring even here (`Nu`/`Nv`'s own `max(1u, ...)`
+  // clamp, needed to avoid a divide-by-zero in the general case),
+  // spuriously synthesizing 4 extra interior points at `(0.25, 0.25)`/
+  // `(0.25, 0.75)`/`(0.75, 0.25)`/`(0.75, 0.75)` that a real
+  // tessellator's own equal-spacing algorithm never produces at this
+  // tessellation level -- found via a real
   // `dEQP-VK.tessellation.tesscoord.quads_equal_spacing` reproduction
   // (`inner: { 1, 1 }, outer: { 1, 1, 1, 1 }`).
+  //
+  // (Roadmap L225) The prior version of this comment claimed both inside
+  // factors rounding to 1 could *only* happen alongside every outer edge
+  // also being 1, citing a "dEQP `generateReferenceTessCoords`
+  // precondition assert" that does not actually exist: dEQP's own
+  // reference (`generateReferenceQuadTessCoords`/
+  // `referenceQuadNonPointModePrimitiveCount` in
+  // `vktTessellationUtil.cpp`) explicitly handles `inner0 == 1 &&
+  // inner1 == 1` with one or more outer edges `!= 1` by bumping *both*
+  // inside factors to 2 (3 for fractional-odd) and falling through to
+  // the ordinary general-case formula with the real (unbumped) outer
+  // factors -- it only takes this all-corners shortcut when every outer
+  // edge is *also* exactly 1. `dEQP-VK.tessellation.primitive_discard`'s
+  // random per-patch levels reach exactly this gap (both inside factors
+  // <= 1, at least one outer edge > 1): this fast path wrongly emitted
+  // only `OuterRing`'s own points (correct for the outer boundary, but
+  // missing the interior grid's own single degenerate-to-a-point vertex
+  // the general path would have added), undercounting by 1 vertex per
+  // such patch (`quads_equal_spacing_{ccw,cw}`: 4 such patches out of
+  // 729, "expected 254 vertices ... got only 250"). Fixed by requiring
+  // every outer edge to also be a single segment before taking this
+  // shortcut; every other combination now falls through to the general
+  // `M`/`N` path below, which already handles arbitrary outer edges
+  // alongside a degenerate (bumped-to-2) interior axis correctly (see
+  // `UDegenerate`/`VDegenerate` below).
   if (computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) ==
           1 &&
       computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) ==
-          1) {
+          1 &&
+      Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1) {
     TessellatedPatch Patch;
     RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);
     uint32_t P0 = OuterRing[0][0], P1 = OuterRing[1][0], P2 = OuterRing[2][0],

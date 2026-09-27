@@ -458,13 +458,14 @@ TEST(TessellatorTest, QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords) {
 TEST(TessellatorTest, QuadFullyUnsubdividedFactorEmitsTwoRealTriangles) {
   // Roadmap L219 regression: mirrors
   // `TriangleFullyUnsubdividedFactorEmitsOneRealTriangle` for the quad
-  // domain. When both inside factors round down to their own minimum of
-  // 1 segment (which per the Vulkan/GLSL tessellation spec can only
-  // happen alongside every outer edge also degenerating to 1 segment),
-  // the quad needs exactly its own 4 real corners and no synthesized
-  // interior core -- not the 4 spurious `(0.25, 0.25)`-style interior
-  // points the general inset+bridge path's own `Nu`/`Nv` minimum-1 clamp
-  // used to force even here.
+  // domain. When both inside factors *and* every outer edge round down to
+  // their own minimum of 1 segment, the quad needs exactly its own 4 real
+  // corners and no synthesized interior core -- not the 4 spurious
+  // `(0.25, 0.25)`-style interior points the general inset+bridge path's
+  // own `Nu`/`Nv` minimum-1 clamp used to force even here. (See
+  // `QuadDegenerateInsideFactorsWithSubdividedOuterEdgeAddsInteriorPoint`
+  // below, roadmap L225, for the case where the inside factors alone
+  // degenerate to 1 but the outer edges do not.)
   TessFactors Factors;
   Factors.Inside = {1.0f, 1.0f};
   Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -482,6 +483,53 @@ TEST(TessellatorTest, QuadFullyUnsubdividedFactorEmitsTwoRealTriangles) {
   EXPECT_TRUE(HasCorner(1.0f, 0.0f));
   EXPECT_TRUE(HasCorner(1.0f, 1.0f));
   EXPECT_TRUE(HasCorner(0.0f, 1.0f));
+}
+
+TEST(TessellatorTest,
+    QuadDegenerateInsideFactorsWithSubdividedOuterEdgeAddsInteriorPoint) {
+  // Roadmap L225 regression. `tessellateQuad`'s fully-unsubdivided fast
+  // path (see `QuadFullyUnsubdividedFactorEmitsTwoRealTriangles` above)
+  // used to trigger whenever both inside factors alone rounded down to
+  // their own minimum of 1 segment, on the mistaken assumption that this
+  // could only happen alongside every outer edge also being 1 segment.
+  // dEQP's own reference (`generateReferenceQuadTessCoords`/
+  // `referenceQuadNonPointModePrimitiveCount` in
+  // `vktTessellationUtil.cpp`) proves that assumption false: it only
+  // takes its own equivalent shortcut when *every* outer edge is also 1,
+  // and otherwise bumps both inside factors to 2 (3 for fractional-odd)
+  // and falls through to the ordinary formula with the real, unbumped
+  // outer edges -- which for two-degenerate-axes yields exactly one
+  // interior point at the patch center alongside the (unsubdivided-only
+  // on this axis) outer boundary. This is exactly the shape
+  // `dEQP-VK.tessellation.primitive_discard.quads_equal_spacing_{ccw,cw}`
+  // hit (both inside factors <= 1, at least one outer edge > 1): FeMe's
+  // over-eager fast path used to emit only the (correctly subdivided)
+  // outer boundary points and no interior point at all, undercounting by
+  // 1 vertex per such patch (4 patches out of 729 in that CTS case,
+  // "expected 254 vertices ... got only 250"). Fixed by requiring every
+  // outer edge to also be 1 segment before taking the fast path; this
+  // case (one outer edge subdivided into 3 segments, both inside factors
+  // degenerate) must now take the general `M == 2 && N == 2` path
+  // instead, which fans the whole outer boundary to a single center
+  // point.
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 1.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 3.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                TessOutputPrimitive::TriangleCcw, Factors);
+  // 3 real corners (Edges[0], Edges[1], Edges[2] all 1 segment) + 3
+  // points along the subdivided `Edges[3]` edge + 1 interior center
+  // point, matching dEQP's own reference formula
+  // (`outer0 + outer1 + outer2 + outer3 + (inner0 - 1) * (inner1 - 1)`
+  // with both inner factors bumped to 2): `1 + 1 + 1 + 3 + 1 == 7`.
+  EXPECT_EQ(Patch.Points.size(), 7u);
+  bool FoundCenter = false;
+  for (const DomainPoint &P : Patch.Points) {
+    if (std::abs(P.U - 0.5f) < Epsilon && std::abs(P.V - 0.5f) < Epsilon)
+      FoundCenter = true;
+  }
+  EXPECT_TRUE(FoundCenter);
 }
 
 TEST(TessellatorTest, QuadWindingIsConsistentAcrossEveryTriangle) {
