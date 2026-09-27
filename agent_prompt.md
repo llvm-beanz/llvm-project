@@ -61,29 +61,19 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** Root-cause `L228(a)`, the
-   `timeline_semaphore` cluster (210 of the 416 sampled failures, the single
-   largest signal this session found) -- start from `queueSubmit`'s own
-   `VK_ERROR_INITIALIZATION_FAILED` and trace into `feme/lib/Vulkan/`'s
-   queue-submission path to confirm whether `VK_KHR_timeline_semaphore` is
-   genuinely wired up at all.
-2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(e)` and
-   root-cause it the same way `L226` was this session: reproduce with a direct
-   `offloader`/`deqp-vk` invocation outside the batch harness first, then trace
-   into `CanonicalizeStage.cpp`/`SPIRVToLLVMPatterns.cpp`/`feme/lib/Vulkan/` as
-   the error message points. `L227(a)` (the SPIR-V dialect legalization crash on
-   `Workgroup`-storage `spirv.Store`) is the most structurally interesting -- a
-   hard legalization failure, not a silent wrong-value bug, so likely has the
-   smallest, most localized fix.
-3. **(30-45 minutes)** `L227(e)` is probably the fastest win in the whole list:
-   confirm `Feature/PushConstant/array_of_matrices.test` passes reliably (run it
-   3-5 times back to back, ruling out flakiness) then remove/narrow its stale
-   `XFAIL: Clang`/`XFAIL: DXC` markers directly on `offload-test-suite`'s own
-   `feme` branch (a self-contained fix in that separate repo, not
-   `llvm-project`).
-4. **(a few hours)** `L228(b)`/`L228(c)` (compressed-format blits, MSAA
-   multi-layer clears) are the next two largest clusters (90 and 57 sampled
-   failures) once the timeline-semaphore one above is either fixed or scoped
-   out.
-5. One real `git stash push`/`pop` pair used this session (both for the new L226
-   unit test's own pre-fix-fails/post-fix-passes A/B), popped immediately after.
+1. **(a few hours)** Root-cause `L228(g)` (the 3D-image timeline-signal bug, 98
+   CTS cases): compare a passing 2D `op.single_queue.timeline_semaphore` case's
+   generated device work against a failing 3D one (e.g. via a direct SPIR-V/IR
+   dump) to see whether the write op itself silently fails for 3D images, or the
+   signal step is skipped/misordered specifically for that shape.
+2. **(a few hours, likely a bigger design question)** Root-cause `L228(h)` (the
+   `one_to_n` fan-out group, currently 100% failing): start by reading
+   `one_to_n`'s own test-instance class in
+   `vktSynchronizationTimelineSemaphoreTests.cpp` (~line 2356) to confirm the
+   exact multi-waiter shape before assuming this needs real multi-queue support.
+3. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)` (still open,
+   unchanged since last session) or `L228(b)`/`(c)` (compressed-format blits,
+   MSAA multi-layer clears) -- whichever fits the next session's time budget.
+4. **(30-45 minutes)** Re-run this session's own 3217-case `timeline_semaphore`
+   sample (or a fresh, wider one) after `L228(g)` lands to confirm that cluster
+   fully clears with no new regressions.
