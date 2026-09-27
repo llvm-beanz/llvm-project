@@ -61,23 +61,25 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(15-30 min)** Triage `array_of_matrices.test`'s XPASS: confirm
-   whether it was already passing before this session (almost certainly
-   yes, given it's an unrelated code path), then either register it as
-   an expected pass (remove/adjust the `Clang`/`DXC` XFAIL if it was
-   never meant to gate FeMe) or leave a comment explaining why FeMe
-   passes where `Clang`/`DXC` don't.
-2. **(30-60 min)** `check-hlsl-feme-vk` parallel-worker flakiness --
-   pick one flaky-under-`-j1`-only test, run it repeatedly alone vs.
-   under contention, and see whether a shared global/static or a
-   filesystem/temp-file collision in FeMe's own CPU Vulkan runtime is the
-   cause. Carried over five sessions now; worth just doing it next time
-   rather than deferring again.
-3. **(unknown, start here if flakiness above is deferred again)** Pick
-   `L210` (byte-address 16-bit offset-8 store/load) -- small, already
-   isolated, standalone-reproducible, no further triage needed.
-4. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
-   largest remaining untouched group, has a partial fail location
-   already (`vktMeshShaderInOutTestsEXT.cpp:1590`).
-5. **(10 min)** F15c AArch64-constrained-intrinsic re-verification --
-   quick, bounded, still not done after being flagged twice.
+1. **(unknown)** L214: generalize L208's `buildRTZNarrowingConversion`
+   bit-manipulation approach from `FConvert` to
+   `FloatControlArithmeticPattern`'s 5 binary ops (`FAdd`/`FSub`/`FMul`/
+   `FDiv`/`FRem`), across whichever of RTZ/RTP/RTN each op's own
+   decoration or entry-point execution mode can request. This is now
+   the highest-priority open item (P1, confirmed live correctness bug)
+   this session found.
+2. **(unknown)** L201(d) (mesh/tessellation f16 I/O, 120 cases) --
+   still the largest untouched group with a known partial fail location
+   (`vktMeshShaderInOutTestsEXT.cpp:1590`), carried over 4+ sessions
+   now without being started.
+3. **(unknown)** L201(b)/(c) (27+25 cases) -- still just "reduced to
+   distinct symptoms," never started.
+4. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/L206/
+   L208/L211 have all landed since). This session did not do one --
+   no FeMe-side code changed (L210/L212/L213 were all outside-FeMe or
+   test-only; L214 is confirm-only), so there was nothing new to
+   verify against the deqp-vk suite specifically.
+5. `stash@{0}`/`stash@{1}` (old, unfinished work, carried over 3+
+   sessions per earlier entries in this file) -- still sitting there.
+   Worth an explicit `git stash show -p stash@{N}` and a decision
+   (finish or `git stash drop`) rather than continuing to defer.
