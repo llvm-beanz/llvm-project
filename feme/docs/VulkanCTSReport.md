@@ -1538,3 +1538,68 @@ correctness fix inside a stage-IO global's own flattened-leaf-index
 bookkeeping, touching no feature/extension surface), so
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
 update.
+
+## Roadmap L228: broader-than-tessellation CTS sample (api/pipeline/synchronization)
+
+Ran the broader CTS sample flagged as overdue across several prior
+sessions: no full `api`/`pipeline`/`synchronization` mustpass run has
+been attempted so far (those lists total hundreds of thousands of
+cases combined -- `api.txt` alone is 267501 cases -- too large for a
+single session), so this session instead drew a fixed-seed, stratified
+random sample: 3000 cases each from `api.txt`, `synchronization.txt`,
+`synchronization2.txt`, and every file under `pipeline/monolithic/`
+(~12000 cases total, deduplicated to 11996 after 4 cases appeared in
+more than one source list). `shader_render` has no standalone mustpass
+list under `external/vulkancts/mustpass/main/vk-default/` -- its cases
+are folded into another group's file not yet identified -- so it was
+not separately sampled this round (see `L228(f)`).
+
+Run via `feme/utils/run_vulkan_cts.py` against the same locally-built
+`deqp-vk` used throughout this session, one worker's solo
+re-verification pass included:
+
+- **3696/11996 Pass, 416 Fail, 7884 Not supported.**
+- Grouping the verified failure list by test group:
+  `synchronization.timeline_semaphore` (105) +
+  `synchronization2.timeline_semaphore` (105) = **210**, by far the
+  largest single cluster; `api.copy_and_blit` (90); `api.image_clearing`
+  (57); `synchronization.op` (13) + `synchronization2.op` (23) = 36;
+  `api.info` (10); `pipeline.monolithic.sampler.border_swizzle` (8);
+  a handful of one-off `pipeline.monolithic.*` cases (5).
+- Spot-checked one failure from each of the three largest clusters
+  (single-case-deep only, not root-caused):
+  - `api.copy_and_blit.copy_commands2.blit_image.all_formats.color.2d.
+    astc_12x10_srgb_block.a8b8g8r8_srgb_pack32.general_general_linear`:
+    `Fail (Result image is incorrect)` -- an ASTC-compressed-source
+    blit producing wrong pixels.
+  - `synchronization.timeline_semaphore.device_host.write_blit_image_
+    read_blit_image.image_128x128_r16_uint`: `Fail
+    (synchronizationWrapper->queueSubmit(queue, VK_NULL_HANDLE):
+    VK_ERROR_INITIALIZATION_FAILED at
+    vktSynchronizationTimelineSemaphoreTests.cpp:1055)` -- fails at
+    submission itself, consistent with the 210-case cluster size
+    reflecting a broad feature gap rather than one narrow edge case.
+  - `api.image_clearing.core.clear_color_attachment.multiple_layers.
+    a1r5g5b5_unorm_pack16_200x180_clamp_input_sample_count_4`: `Fail
+    (Color value mismatch! ... Color:(0, 0, 0, 0))` -- an MSAA
+    (`sample_count_4`) multi-array-layer clear reads back all-zero
+    instead of the cleared color.
+
+Filed as roadmap `L228` with sub-items `L228(a)`-`(f)` for the next
+session(s): one per failure cluster to root-cause independently
+(`(a)` timeline semaphores, `(b)` compressed-format blits, `(c)` MSAA
+multi-layer clears, `(d)` the two smaller clusters), plus `(e)`
+re-running this same fixed-seed sample after any fix lands to confirm
+real-world impact, and `(f)` widening this sample's coverage (only
+~4.5% of `api.txt` and a smaller fraction of `pipeline` were sampled;
+`shader_render` entirely unsampled) in a future session.
+
+`ninja check-feme`: not re-run for this session's `L228` work -- a
+pure CTS-sampling exercise, no `feme/` source touched.
+
+No Vulkan feature/extension advertisement changed by this row itself
+(no code changed), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update from this row alone; a fix
+landing under one of the `L228(a)`-`(d)` sub-items may need one (e.g.
+if `timeline_semaphore` support turns out to need a fresh feature-
+advertisement fix rather than a bug in an already-advertised path).
