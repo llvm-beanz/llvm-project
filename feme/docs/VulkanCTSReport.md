@@ -1373,27 +1373,71 @@ correctness fix inside the tessellator's primitive-discard check,
 touching no feature/extension surface), so `Vulkan14FeatureInventory.
 md`/`VulkanExtensionInventory.md` need no update.
 
-## Roadmap L225: residual `quads_equal_spacing` vertex undercount (not yet root-caused)
+## Roadmap L225: `quads_equal_spacing` vertex undercount -- root-caused and fixed
 
 `dEQP-VK.tessellation.primitive_discard.quads_equal_spacing_{ccw,cw}
-[_point_mode]` (4 cases) still fail after `L224`'s fix, with "expected
-254 vertices from shader invocations, but got only 250" -- a small
-(4-vertex) undercount, isolated specifically to `quads_equal_spacing`
-(`SpacingEqual`/`Integer` partitioning): not seen in any
-`quads_fractional_{even,odd}_spacing_*` sub-case, and not seen in any
-triangle sub-case either, so it is not a repeat of `L224`'s own
-inside-factor bug (already fixed and CTS-confirmed above) nor a
-generic quad-domain regression from the `L221` rewrite (which passes
-its own full crack-free/analytic-lattice-size regression suite).
+[_point_mode]` (4 cases) still failed after `L224`'s fix, with
+"expected 254 vertices from shader invocations, but got only 250".
+This session built `deqp-vk` locally (source at
+`/home/dev/dev/VK-GL-CTS`, revision unchanged from the Scope section
+above) and reproduced the exact case, then read dEQP's own reference
+implementation (`generateReferenceQuadTessCoords`/
+`referenceQuadNonPointModePrimitiveCount` in
+`vktTessellationUtil.cpp`) rather than re-deriving the closed-form
+formula from scratch.
 
-Likely a rare degenerate-axis edge case specific to integer
-partitioning's own rounding in `tessellateQuad`'s `L221`-era
-interior-grid-plus-bridged-outer-edge algorithm. Not yet root-caused
-this session (found only while verifying `L224`, out of scope/budget
-to pursue further); needs a dedicated reduction session following the
-same methodology `L220`/`L221` used: isolate the exact inside/outside
-tessellation-level combination this test actually exercises, then
-compare FeMe's own generated point/triangle count against the spec's
-closed-form lattice-size formula for that exact combination.
+Root cause: `tessellateQuad`'s `L219` fully-unsubdivided fast path
+fired whenever *both inside factors alone* rounded down to 1 segment,
+on the (now-corrected) comment's mistaken belief that this could only
+happen alongside every outer edge also being 1, attributed to a
+nonexistent dEQP "precondition assert". dEQP's own reference proves
+this false: it only takes its equivalent shortcut when every outer
+edge is *also* exactly 1; otherwise it bumps both inside factors to 2
+(3 for fractional-odd) and falls through to the ordinary formula with
+the real, unbumped outer edges -- which for a two-degenerate-axes quad
+still contributes exactly 1 interior center point.
+`primitive_discard`'s per-patch random levels reach exactly this gap
+(both inside factors `<= 1`, at least one outer edge `> 1`): the
+over-eager fast path emitted only the outer boundary's own points and
+no interior point at all, undercounting by 1 vertex per such patch (4
+of the case's 729 patches hit it, matching "expected 254 ... got only
+250" exactly).
 
-Tracked as a `todo` roadmap row (`L225`), not yet fixed.
+Fix: require every outer edge to also compute to 1 segment
+(`Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1`) before taking the fast
+path, matching dEQP's reference condition exactly. Every other
+combination now falls through to the already-correct general `M`/`N`
+path, whose `M == 2 && N == 2` branch already fans the real outer
+boundary to a single center point regardless of the outer edges' own
+subdivision. New test:
+`TessellatorTest.QuadDegenerateInsideFactorsWithSubdividedOuterEdgeAddsInteriorPoint`
+(inside `{1, 1}`, outer edges `{1, 1, 1, 3}`, expects `7` points
+including the center).
+
+Verification (both runs against the same locally-built `deqp-vk` and
+the same 1114-case `tessellation.*` mustpass case list, using
+`feme/utils/run_vulkan_cts.py`, one worker's solo re-verification pass
+included):
+
+- Before the fix (confirmed via `git stash`): **540/1114 Pass, 136
+  Fail, 438 Not supported, 0 crashes** -- exactly reproducing the
+  `L224` baseline above.
+- After the fix: **545/1114 Pass, 131 Fail, 438 Not supported, 0
+  crashes**.
+- A line-by-line diff of the two runs' solo-verified failure lists
+  confirms exactly 5 cases flipped Fail to Pass and 0 cases changed
+  any other way: the 4 `primitive_discard.quads_equal_spacing_{ccw,cw}
+  [_point_mode]` cases plus `invariance.inner_triangle_set.
+  quads_equal_spacing` (a fifth case hitting the identical
+  inside-factors-degenerate-but-outer-edges-not shape).
+- All 4 individual `primitive_discard.quads_equal_spacing_*` cases
+  independently confirmed **Pass** via a direct `deqp-vk
+  --deqp-case=...` run (not just the batch harness).
+
+`ninja check-feme`: 3327/3388 passed (0 failed, 61 unsupported, +1 net
+new unit test).
+
+No Vulkan feature/extension advertisement changed (a pure internal
+correctness fix inside the tessellator's fast-path condition, touching
+no feature/extension surface), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update.
