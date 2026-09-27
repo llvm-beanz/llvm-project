@@ -61,20 +61,20 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, start here)** L216: numeric (not pass/fail) diagnostic dump of
-   `vert_f32d3_flat_4`'s interpolated value vs. its own min/max bounds across
-   the full tess-coordinate range -- see top of this entry.
-2. **(unknown)** `dEQP-VK.tessellation.tesscoord.*` (18/18
-   `VK_ERROR_INITIALIZATION_FAILED` at pipeline creation) -- brand new,
-   untriaged, found by accident this session while chasing L216.
-3. **(unknown)** L201(c) (25 cases) -- still just "reduced to distinct
-   symptoms," never started, carried over many sessions.
-4. A full/broad CTS re-run is overdue (last one: 2026-09-26;
-   L205/L206/L208/L210-L214/L217 have all landed since). Worth doing once L216
-   or a solid next chunk lands.
-5. Pre-existing, confirmed-unrelated crash in
-   `dEQP-VK.tessellation.winding.default_domain.hlsl_quads_ccw`
-   (`llvm.lifetime.start/end can only be used on alloca or poison`, sometimes a
-   segfault) halts the whole `tessellation.*` batch at the same point regardless
-   of this session's changes -- worth a dedicated roadmap row and root-causing
-   session if not already tracked.
+1. **(start here)** `L220`: implement the spec's real concentric-ring
+   algorithm for `tessellateTriangle` first (single inner level,
+   simpler than the quad case, full algorithm text already quoted in
+   the roadmap row) -- a multi-hour rewrite, not a quick fix. Add exact
+   analytic-point-set unit tests before touching the quad domain.
+2. Re-verify every existing crack-free/winding/shared-edge
+   `TessellatorTest.cpp` case still holds under the new algorithm --
+   those properties were derived against the old inset design, not
+   guaranteed to transfer.
+3. Once triangles are rewritten and verified, revisit `L216` -- strong
+   hypothesis it shares this same root cause.
+4. `L201(c)` (25 cases) -- still just "reduced to distinct symptoms,"
+   never started, carried over many sessions.
+5. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/
+   L206/L208/L210-L214/L217/L218/L219 have all landed since). Worth
+   doing once `L220`'s triangle rewrite lands, for one consolidated
+   picture.
