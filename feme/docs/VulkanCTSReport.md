@@ -1603,3 +1603,114 @@ No Vulkan feature/extension advertisement changed by this row itself
 landing under one of the `L228(a)`-`(d)` sub-items may need one (e.g.
 if `timeline_semaphore` support turns out to need a fresh feature-
 advertisement fix rather than a bug in an already-advertised path).
+
+## Roadmap L228(a): `timeline_semaphore` non-blocking-wait bug -- root-caused and fixed
+
+The largest single cluster from `L228`'s own sample (210 of 416
+sampled failures): `dEQP-VK.synchronization.timeline_semaphore.*`/
+`dEQP-VK.synchronization2.timeline_semaphore.*` cases failing at
+`vkQueueSubmit`/`vkQueueSubmit2` with `VK_ERROR_INITIALIZATION_FAILED`.
+
+Reproduced directly (no batch harness):
+`deqp-vk --deqp-case='dEQP-VK.synchronization.timeline_semaphore.device_host.write_blit_image_read_blit_image.image_128x128_r16_uint'`
+confirmed the failure at `queueSubmit`.
+`vktSynchronizationTimelineSemaphoreTests.cpp`'s `DeviceHostTestInstance`/
+`HostCopyThread` classes were read to understand the test's own
+structure: a real background `de::Thread` (`HostCopyThread`) calls
+`vkWaitSemaphores`/`vkSignalSemaphore` (genuine host entry points)
+concurrently with the main thread's own batched `vkQueueSubmit2` call,
+chaining 12 device/host write-read iterations through one timeline
+semaphore.
+
+Root cause: `feme/lib/Vulkan/Sync.cpp`'s `consumeWaits` helper (shared
+by `vkQueueSubmit`/`vkQueueSubmit2`) and `vkWaitSemaphores` both did an
+instantaneous, non-blocking check of a timeline semaphore's counter
+(`Op.Sem->timelineValue() < Op.Value`) instead of genuinely blocking
+until another thread signals it. `Sync.h`'s own file comment claimed
+"signaling and waiting are never truly concurrent" for *all*
+semaphores -- true for binary semaphores (core Vulkan gives them no
+host-facing signal/wait API at all) but false for timeline semaphores,
+which *can* be host-signaled/waited via `vkSignalSemaphore`/
+`vkWaitSemaphores` from a genuinely independent thread. `Semaphore`'s
+own `Value` field (`Sync.h`) also had no thread-safety at all -- a
+real data race between the host thread and the queue-submitting
+thread. This also matches `FeMeVulkanDesign.md`'s original design
+intent ("Synchronization objects use monotonically changing state
+under a mutex and condition variable") -- the non-blocking
+implementation was itself an undocumented deviation from the design
+doc, which this fix restores conformance with (for timeline semaphores
+specifically; binary semaphores/fences/events correctly keep the
+simpler, non-blocking treatment, since they have no host-signal API at
+all -- see the design doc's own newly-added clarifying paragraph).
+
+Fix: added a `std::mutex`/`std::condition_variable` to `Semaphore` and
+a new `waitTimeline(TargetValue, TimeoutNs)` method that genuinely
+blocks (`signalTimeline` now locks the mutex, updates the value, then
+`notify_all`s); `consumeWaits`'s timeline branch and `vkWaitSemaphores`
+both now call it instead of the old instant check.
+
+A genuine blocking wait exposed a second, distinct problem while
+verifying the fix: destroying a semaphore whose condition variable a
+real thread is still blocked on can hang the entire process forever if
+some *other*, unrelated bug ever genuinely fails to signal the awaited
+value -- confirmed via a real hang plus a `gdb` thread-apply-all-bt
+dump on `dEQP-VK...device_host...image_64x64x8_r32_sfloat` (a distinct,
+pre-existing 3D-image bug, not something this fix introduced -- see
+`L228(g)` below). Added a bounded safety-net timeout
+(`TimelineWaitSafetyNetTimeoutNs`, 5 seconds) applied even to
+`vkWaitSemaphores`'s own literal `UINT64_MAX` ("wait forever") caller
+value, so any such case now fails fast with `VK_TIMEOUT`/
+`VK_ERROR_INITIALIZATION_FAILED` instead of hanging forever -- this
+software driver's analogue of a real GPU driver's hardware TDR
+(timeout-detection-and-recovery). Real signals in this driver land in
+well under a millisecond in practice; `SyncTest.cpp`'s own new tests
+use an artificial 200ms delay purely to make the blocking observable,
+two full orders of magnitude below the 5s safety-net bound, so the
+bound does not meaningfully slow down any real, successful wait.
+
+New unit tests (`feme/unittests/Vulkan/SyncTest.cpp`):
+`TimelineSemaphoreWaitBlocksUntilHostSignal` and
+`QueueSubmitBlocksUntilHostSignalsTimelineSemaphore`, both spawning a
+real background `std::thread` that sleeps 200ms before signaling, then
+asserting the waiting call's own elapsed wall-clock time is at least
+that long -- confirmed to fail (return instantly, i.e. wrongly) before
+the fix and pass (genuinely block) after it. The pre-existing
+`QueueSubmit2TimelineSemaphoreSignalThenWait` negative test (submits a
+wait on a value nothing ever signals, expecting
+`VK_ERROR_INITIALIZATION_FAILED`) now legitimately takes the full
+safety-net bound to fail -- this is why the bound was tuned down from
+an initially-chosen 30s to 5s, keeping the unit test suite fast while
+remaining enormously generous relative to this driver's real,
+sub-millisecond signal latencies.
+
+CTS-confirmed:
+
+- The originally-reported case now **Pass**es.
+- The full mustpass-derived `timeline_semaphore` group
+  (`synchronization.txt` + `synchronization2.txt`, 3217 cases, via
+  `run_vulkan_cts.py` with 12 parallel workers) goes to **1579 Pass,
+  98 Fail, 1540 Not supported** (the 1540 `Not supported` cases are the
+  pre-existing external-memory/`cross_instance` cases this environment
+  doesn't support, unrelated to this fix). The 98 remaining failures
+  are **all** `synchronization2.op.single_queue.timeline_semaphore.*.
+  image_64x64x8_r32_sfloat_specialized_access_flag` -- a single,
+  distinct 3D-image bug (see `L228(g)` below), not a residual
+  timing/threading gap.
+- A separate, non-mustpass `one_to_n` test group (fan-out to multiple
+  queues/waiters, not part of this session's or the original `L228`
+  sample's 416-case cluster) was discovered to fail **every single
+  case**, each one taking the full 5s safety-net bound -- a third,
+  structurally distinct bug (see `L228(h)` below), not fixed by this
+  change.
+
+`ninja check-feme`: 3330/3391 discovered tests passed (61 pre-existing
+Unsupported), 0 regressions, +2 net new unit tests.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update
+needed -- `VK_KHR_timeline_semaphore` was already listed as
+"Implemented (core, not advertised by name)" in both; this is a
+correctness fix to already-advertised functionality, like `L225`/
+`L226`, not a new feature landing or a caveat being lifted.
+
+See `L228(g)`/`L228(h)` on the roadmap for the two newly-discovered,
+distinct follow-up bugs this verification pass surfaced.

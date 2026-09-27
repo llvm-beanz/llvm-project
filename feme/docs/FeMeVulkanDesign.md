@@ -1879,6 +1879,30 @@ The queue executor waits without holding object-global locks needed by another
 queue to signal. Device loss is latched once: subsequent queue/device operations
 return `VK_ERROR_DEVICE_LOST`, and all pending host waits are awakened.
 
+Only timeline semaphores actually need the mutex/condition-variable machinery
+above: core Vulkan gives fences, binary semaphores, and events no host-facing
+signal API at all, so under this driver's single-queue synchronous execution
+model they can only ever be signaled by a prior, already-completed submission
+in program order -- an unprotected, non-blocking check suffices and stays
+correct. A timeline semaphore, by contrast, can genuinely be signaled by a real,
+independently running host thread via `vkSignalSemaphore`/`vkWaitSemaphores`
+concurrently with a different thread blocked inside `vkQueueSubmit` -- the
+scenario `dEQP-VK.synchronization.timeline_semaphore.device_host.*` exercises,
+and Roadmap `L228(a)`'s own fix.
+
+A genuinely unbounded host wait on a timeline semaphore is, in principle,
+correct per the Vulkan spec (`vkWaitSemaphores`'s `UINT64_MAX` timeout means
+"wait forever," and `vkQueueSubmit` takes no timeout parameter at all). In
+practice this driver clamps every such wait to a bounded internal safety-net
+timeout regardless of the caller's own requested timeout, so that some other,
+unrelated bug that never actually signals the awaited value fails that one
+call with an ordinary, spec-legal `VK_TIMEOUT`/`VK_ERROR_INITIALIZATION_FAILED`
+instead of hanging the calling process (and, transitively, any test harness or
+CI job driving many cases through one process) forever. This is this software
+driver's analogue of a real GPU driver's hardware TDR
+(timeout-detection-and-recovery), not a claim that a real dependency should
+ever take that long to resolve.
+
 ## Pipeline Cache
 
 The first cache may be process-local and store compiled kernels by a strong key
