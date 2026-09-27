@@ -622,25 +622,63 @@ pre-existing Unsupported, 0 regressions -- no feme-side code was changed
 this session, so this is a stability re-confirmation, not a fix
 verification).
 
-### Roadmap L214: confirmed AArch64 constrained-intrinsic rounding-mode risk (not yet fixed)
+### Roadmap L214: AArch64 constrained-intrinsic rounding-mode fix for FloatControlArithmeticPattern
 
-Not a deqp-vk run: a bounded, isolated `.ll` reproducer following up on
-F15c's own previously-flagged, unverified risk. `llc -mtriple=
-aarch64-linux-gnu` (this tree's own build) lowers
-`llvm.experimental.constrained.fadd.f32(..., metadata
-!"round.towardzero", ...)` to a plain `fadd s0, s0, s1` at both `-O0` and
-`-O2` -- the default-rounding instruction, with no `FPCR` manipulation of
-any kind. This confirms `FloatControlArithmeticPattern` (F15c/F15a/F15b)
-silently produces round-to-nearest-even results instead of the requested
-rounding mode on this host's AArch64 backend, whenever a real shader
-requests a non-default per-instruction `FPRoundingMode` or whole-entry-
-point `RoundingModeRTZ`. No existing CTS run in this project's tracked
-history has caught this; presumed to be test-input luck (RTZ/RTE
-numerically coincide for the values exercised), not evidence of absence.
-Not fixed this session -- confirmed only, per the bounded verification
-task; the fix shape (a from-scratch bit-manipulation algorithm per
-op/rounding-mode, mirroring L208's own `buildRTZNarrowingConversion`) is
-real follow-on work, tracked as roadmap L214.
+Follow-up to the previously-flagged, unverified AArch64 risk (F15c/
+L208): `FloatControlArithmeticPattern`'s 5 binary ops (`FAdd`/`FSub`/
+`FMul`/`FDiv`/`FRem`) lowered a non-default rounding-mode request to a
+constrained LLVM intrinsic carrying a *static* rounding-mode metadata
+operand (e.g. `"round.towardzero"`), which this host's AArch64 backend
+silently drops at codegen time, producing an ordinary default-rounded
+(round-to-nearest-even) instruction with zero `FPCR` manipulation.
 
-Net this session: 0 code changes (confirmation only); no CTS re-run
-needed (no shader-visible behavior changed).
+Fixed by bracketing the constrained intrinsic with
+`llvm.get.rounding()`/`llvm.set.rounding(i32)` and switching its
+rounding-mode metadata operand to `"round.dynamic"` instead of a static
+mode -- this reliably produces real `FPCR` read/modify/write codegen on
+AArch64 (confirmed via isolated `.ll` + `llc` reproducers at both `-O0`
+and `-O2`), and is never eligible for compile-time constant folding
+(unlike a static-mode op), so it cannot silently mask a regression the
+way the original bug's own test coverage gap did. `FRem` does not
+semantically need this (IEEE-754 remainder has no rounding step) but
+the fix applies uniformly across all 5 ops for simplicity; it is a
+correctness-preserving no-op for `FRem`.
+
+A subtlety worth recording: an initial version of this session's new
+end-to-end JIT test used two literal-constant `fadd` operands, and
+that version *still passed* even against the old, unfixed, static-mode
+code -- because LLVM's own IR-level optimizer constant-folds a
+static-mode constrained intrinsic call via
+`ConstantFoldConstrainedFPCall` whenever both operands are compile-time
+constants, using its own always-correct, backend-independent folder,
+completely bypassing the buggy runtime-codegen path this fix targets.
+This is very likely also why no CTS case in this project's tracked
+history ever caught the original bug: it's plausible relevant test
+inputs are frequently effectively constant-folded at the IR level
+before ever reaching the buggy codegen path. The final test instead
+routes both operands through a runtime raw-buffer load, which cannot be
+constant-folded; confirmed (by temporarily reverting the fix) that this
+version does correctly fail against the old, unfixed code.
+
+`llvm.set.rounding` cannot be legalized by LLVM's SPIR-V backend
+(`unable to legalize instruction: G_SET_ROUNDING`), so the two
+`Target/`-level lit tests that previously round-tripped generated LLVM
+IR back through the real SPIR-V backend as a cross-check now stop at
+the `--spirv-to-llvmir` stage and FileCheck the LLVM IR directly
+instead; this round-trip was a test-only internal-consistency check,
+unrelated to FeMe's real CPU JIT execution path (which targets the
+host machine directly via ORC's `detectHost()`, never the SPIR-V
+backend), so narrowing it is a test-design adjustment, not a loss of
+functional coverage.
+
+Not a deqp-vk run: no existing `float_controls`/`float_controls2` CTS
+case is known to numerically distinguish RTZ/RTP/RTN from RTE for this
+specific bug (see above), so there is no targeted CTS group to re-run
+for this fix specifically; correctness is instead verified via the new
+end-to-end JIT unit test (`JITEngineTest.
+RoundingModeRTZArithmeticProducesTowardZeroBits`) and the 5 updated lit
+tests.
+
+Net this session: 1 real bug fixed (inside FeMe), 5 lit tests updated,
+1 new unit test added. `ninja check-feme`: 3367/3370 passing, 3
+pre-existing Unsupported, 0 regressions.
