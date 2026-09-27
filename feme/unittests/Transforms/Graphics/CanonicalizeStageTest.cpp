@@ -2912,6 +2912,106 @@ TEST(
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap L216) A genuine GLSL/SPIR-V `patch out` variable may be
+/// legally read back within the *same* invocation that just wrote it --
+/// only a *different* invocation's own write is undefined without a
+/// group-sync barrier -- and `dEQP-VK.tessellation.tess_io.max_in_out`'s
+/// own TCS-side self-check shaders do exactly this: write a patch output,
+/// then immediately compare it against the value just stored, feeding the
+/// result into an ordinary per-vertex output write. Before this row's own
+/// fix, `pruneStageIOStoresByFrequency` erased the patch-frequency store
+/// from the control-point clone (as shape (3) above requires) but left
+/// the same-invocation read-back load behind untouched -- that load's
+/// target global was never written in this clone anymore, so it silently
+/// read whatever was left over instead of the value the vertex-frequency
+/// output actually depends on (100% failure, all ten
+/// `tess_io.max_in_out.*.tcs_patch_writes_reads_*` permutations, found via
+/// a from-scratch IR trace after ruling out every tessellator-geometry and
+/// `gl_TessCoord` theory prior sessions had carried forward). Now that the
+/// pruned store's value is forwarded to every dominated load of the exact
+/// same pointer before the store itself is erased, the control-point
+/// clone's own vertex-frequency output store keeps depending on the real,
+/// just-written value instead of an uninitialized read of a global this
+/// clone no longer writes at all.
+TEST(CanonicalizeStageTest,
+    NoBarrierMixedFrequencyEntryForwardsSameInvocationPatchReadBack) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @patch_val = external addrspace(8) global float, !spirv.Decorations !0
+    @tess_outer = external addrspace(8) global [4 x float], !spirv.Decorations !1
+    @out_color = external addrspace(8) global float, !spirv.Decorations !2
+    define void @main() #0 {
+      store float 4.000000e+00, ptr addrspace(8) @patch_val
+      %tp = getelementptr inbounds [4 x float], ptr addrspace(8) @tess_outer, i32 0, i32 0
+      store float 4.000000e+00, ptr addrspace(8) %tp
+      %rb = load float, ptr addrspace(8) @patch_val
+      store float %rb, ptr addrspace(8) @out_color
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!4, !5}
+    !1 = !{!6}
+    !2 = !{!7}
+    !4 = !{i32 30, i32 0}
+    !5 = !{i32 15}
+    !6 = !{i32 11, i32 11}
+    !7 = !{i32 30, i32 1}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // No dangling read of the now-unwritten `patch_val` global survives in
+  // the control-point clone -- neither as a raw `LoadInst` nor as a
+  // `feme.stage.input.load` stage-op call: the store that used to feed it
+  // was forwarded directly into the `out_color` store's own value, then
+  // erased, and constant-folding the compare made the erstwhile load
+  // itself unnecessary too.
+  for (Instruction &I : instructions(*ControlPoint)) {
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      ASSERT_NE(LI->getPointerOperand(), M->getNamedGlobal("patch_val"));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (CI && isStageOpCall(*CI, &Kind))
+      ASSERT_NE(Kind, StageOpKind::InputLoad);
+  }
+
+  // The control-point phase keeps only its own `out_color` write, whose
+  // stored value is the forwarded constant the (now-erased) `patch_val`
+  // store fed it -- not a load of anything.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 1u);
+  EXPECT_EQ(CPSig->Elements[0].Direction, SignatureDirection::Output);
+  EXPECT_EQ(CPSig->Elements[0].Location, 1u);
+  CallInst *OutColorStore = nullptr;
+  for (Instruction &I : instructions(*ControlPoint)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (CI && isStageOpCall(*CI, &Kind) && Kind == StageOpKind::OutputStore)
+      OutColorStore = CI;
+  }
+  ASSERT_TRUE(OutColorStore);
+  auto *Stored = dyn_cast<ConstantFP>(OutColorStore->getArgOperand(3));
+  ASSERT_TRUE(Stored);
+  EXPECT_TRUE(Stored->isExactlyValue(4.0));
+
+  // The patch-constant phase keeps both patch-frequency writes (the
+  // user-defined `patch_val` and the built-in `TessLevelOuter`).
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 2u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].Location, 0u);
+  EXPECT_EQ(PCSig->Elements[1].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[1].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
+}
+
 /// (Roadmap H121) `classifyTessControlOutputStoreFrequency`'s own
 /// per-store scan must recognize a store into a user-defined,
 /// `patch`-qualified interface-block member (e.g. GLSL's own `patch out

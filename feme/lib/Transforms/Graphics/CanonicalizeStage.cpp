@@ -2871,10 +2871,30 @@ void pruneDeadStageInputLoads(Function &Fn) {
 /// produces for a mixed-frequency, no-barrier entry -- ends up producing
 /// only the stage-IO writes that belong to its own phase. A store this
 /// cannot resolve as a stage-IO global at all is conservatively left
-/// alone. (Roadmap L217) `pruneDeadStageInputLoads` then sweeps up
-/// whatever became genuinely dead as a result -- see its own comment for
-/// why a `feme.stage.input.load` call in particular cannot be left behind
-/// as ordinary dead code the way everything else safely can.
+/// alone. (Roadmap L216) A GLSL/SPIR-V `patch out` variable may be
+/// legally read back within the *same* invocation that just wrote it
+/// (only a *different* invocation's own write is undefined without a
+/// barrier) -- `dEQP-VK.tessellation.tess_io.max_in_out`'s own TCS-side
+/// self-check shaders do exactly this, writing a patch output and
+/// immediately comparing it against the value just stored. Erasing only
+/// the store side of that pattern here, as this function did before this
+/// fix, leaves the read-back load in \p Fn (this store's target global
+/// is never a per-invocation value \p Fn's own phase produces, so the
+/// load itself is not itself patch-vs-vertex-classified and so was never
+/// pruned) reading whatever was left over in the never-written global
+/// instead of the value \p Fn's own vertex-frequency computation
+/// actually depends on -- silently wrong output, not a crash, so this
+/// went unnoticed until traced via a numeric before/after comparison.
+/// Forwarding the erased store's value to every load of the exact same
+/// pointer that it dominates, before erasing it, keeps this same-
+/// invocation read-after-write pattern correct in the pruned clone
+/// without having to keep the store itself around (which would wrongly
+/// resurface as a spurious stage-IO output once `classifySPIRVElement`
+/// re-examines this phase's surviving stores). (Roadmap L217)
+/// `pruneDeadStageInputLoads` then sweeps up whatever became genuinely
+/// dead as a result -- see its own comment for why a
+/// `feme.stage.input.load` call in particular cannot be left behind as
+/// ordinary dead code the way everything else safely can.
 void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
   const DataLayout &DL = Fn.getParent()->getDataLayout();
   SmallVector<StoreInst *, 8> ToErase;
@@ -2887,8 +2907,21 @@ void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
     if (IsPatch && *IsPatch != KeepPatch)
       ToErase.push_back(SI);
   }
-  for (StoreInst *SI : ToErase)
+  if (ToErase.empty())
+    return;
+  DominatorTree DT(Fn);
+  for (StoreInst *SI : ToErase) {
+    Value *Ptr = SI->getPointerOperand();
+    Value *Stored = SI->getValueOperand();
+    for (User *U : llvm::make_early_inc_range(Ptr->users())) {
+      auto *LI = dyn_cast<LoadInst>(U);
+      if (!LI || LI->getFunction() != &Fn)
+        continue;
+      if (DT.dominates(SI, LI))
+        LI->replaceAllUsesWith(Stored);
+    }
     SI->eraseFromParent();
+  }
   pruneDeadStageInputLoads(Fn);
 }
 
