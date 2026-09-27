@@ -61,28 +61,23 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(start here, multi-hour)** `L221`: the quad-domain half of the
-   same tessellator-algorithm rewrite. Spec's real approach: build a
-   full regular grid across the *whole* domain from the inner
-   tessellation levels, discard its outer ring, independently
-   re-subdivide the *true* outer edges from the outer levels, then
-   bridge the two -- unlike the triangle domain, no recursive ring
-   structure, but 4 distinct `m`/`n`-degenerate-axis combinations to
-   handle explicitly. Full breakdown already written into the roadmap
-   `L221` row (spec citations, suggested implementation order,
-   verification plan) -- follow the same rigorous methodology `L220`
-   used: exact analytic unit tests validated against real output, full
-   crack-free/winding regression sweep, real CTS before/after QPA
-   diff.
-2. Once `L221` lands, revisit `L216` (`tess_io.max_in_out.with_f16.*`,
-   confirmed this session to be quad-domain-specific, not
-   triangle-domain) -- strong hypothesis it shares this same root
-   cause.
-3. A full/broad CTS re-run is overdue (last one: 2026-09-26; L205/
-   L206/L208/L210-L214/L217/L218/L219/L220/L201(c) have all landed
-   since). Worth doing once `L221` lands, for one consolidated
-   before/after picture rather than piecemeal reruns.
-4. `check-hlsl-feme-vk` against the `offload-test-suite` `feme` branch
-   -- still available per the standing instructions, not touched
-   again this session.
-5. No git stashes this session (confirmed empty).
+1. **(unknown, available)** `check-hlsl-feme-vk` against the
+   `offload-test-suite` `feme` branch -- flagged as available in the
+   standing instructions for several sessions running, never actually
+   run this session either. Worth trying at least once to see if it
+   still reproduces the parallel-worker flakiness noted a few sessions
+   back (never root-caused).
+2. **(unknown)** No specific quad/triangle tessellation failures are
+   known to remain untriaged right now -- `L216`
+   (`tess_io.max_in_out.with_f16.*`) was hypothesized several sessions
+   back to be quad-domain-specific and should be **re-tested now that
+   `L221` has landed**, since it was blocked on exactly this rewrite.
+3. **(unknown)** A full/broad CTS re-run (not just the 1088-case
+   `tessellation.*` sample) is overdue -- last one flagged as overdue
+   for several sessions running, `L205`/`L206`/`L208`/`L210`-`L221`/
+   `L222`/`L201(c)` have all landed since the last one mentioned in
+   these notes (2026-09-26). Worth doing once `L216` is re-checked, to
+   get one consolidated before/after picture.
+4. No git stashes to clean up this session (temporary debug harnesses
+   under `/tmp/` were compiled standalone against `libFeMeGraphics.a`
+   and cleaned up at session end, never touched the working tree).
