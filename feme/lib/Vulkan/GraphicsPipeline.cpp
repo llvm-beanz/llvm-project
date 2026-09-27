@@ -29,11 +29,13 @@
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "feme/Transforms/CPU/InlineHelperFunctions.h"
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
 #include "feme/Transforms/Graphics/UnrollConstantTripCountLoops.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Passes/PassBuilder.h"
 
 #include <deque>
 #include <optional>
@@ -538,7 +540,56 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   // function's comment (Pipeline.h/.cpp; shared with the compute path).
   patchUnboundedResourceRanges(AsLLVMIR->getLLVMModule(), Layout);
 
+  // `InlineHelperFunctionsPass` (below) runs `llvm::AlwaysInlinerPass`,
+  // which -- unlike `UnrollConstantTripCountStageLoopsPass`/
+  // `CanonicalizeStagePass` further down, neither of which queries any
+  // analysis -- requires a `FunctionAnalysisManager` reachable through a
+  // registered `InnerAnalysisManagerProxy`; a bare, unregistered `MAM`
+  // (this function's previous whole approach) asserts the moment it's
+  // asked for one. Registering the full, ordinary analysis set through a
+  // `PassBuilder` up front (mirroring `feme::cpu::runPipeline`'s own,
+  // later, equivalent setup in Target/CPU/Pipeline.cpp) costs nothing
+  // extra for the two passes that never queried anything anyway.
+  PassBuilder PB;
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+  // (Roadmap L217) Must run before `CanonicalizeStagePass` below (not just
+  // relegated to `feme::cpu::runPipeline`'s own, later
+  // `InlineHelperFunctionsPass` invocation) for the same reason
+  // `UnrollConstantTripCountStageLoopsPass` immediately below it must: a
+  // GLSL/glslang-sourced tessellation-control entry whose body mixes
+  // per-vertex and per-patch (`gl_TessLevelOuter`/`Inner`) writes with no
+  // `gl_InvocationID` guard or barrier reaches `CanonicalizeStagePass`'s
+  // own `splitBarrierlessTessellationControlEntry` (roadmap H9c), which
+  // clones that one function into separate control-point/patch-constant
+  // phases and prunes each clone's stage-IO stores down to its own
+  // frequency. A per-vertex-only stage input (e.g. `in_color`) read only
+  // to compute a now-pruned-away per-vertex store becomes genuinely dead
+  // in the patch-constant clone once that store is gone -- *if* the read
+  // and the store are both directly in this one function. But a
+  // GLSL-sourced module routinely still has that read behind a call to a
+  // separate, not-yet-inlined user-defined helper function at this point
+  // (`InlineHelperFunctionsPass`'s own header comment, roadmap L76b) --
+  // `runPipeline`'s later inlining happens only after the split/prune
+  // above has already committed to (and, for the patch-constant clone,
+  // already compiled) a function whose surviving `feme.stage.input.load`
+  // call has no corresponding entry in that phase's own signature, which
+  // fails outright (`feme-cpu-wrap-patch-constant: input load refers to
+  // an unknown signature element`) rather than silently keeping stale
+  // dead code around the way an ordinary same-function dead store's own
+  // leftover address computation does. Inlining every helper function
+  // before the split ensures `pruneStageIOStoresByFrequency`'s own
+  // (roadmap L217) dead-input-load sweep can see straight through to
+  // every load a pruned store used to keep alive, exactly as it already
+  // does for a never-uninlined HLSL/DXIL-sourced module.
+  feme::cpu::InlineHelperFunctionsPass().run(AsLLVMIR->getLLVMModule(), MAM);
   // (Roadmap L128/L128(a)/L128(b)) Must run *before* `CanonicalizeStagePass`
   // below, not after and not deferred to `feme::cpu::runPipeline` -- this
   // is the authoritative signature-building pass for a graphics-pipeline

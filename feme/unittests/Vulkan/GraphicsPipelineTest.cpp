@@ -428,6 +428,62 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
 }
 )mlir";
 
+/// (Roadmap L217) The real shape driving every `dEQP-VK.spirv_assembly.
+/// instruction.graphics.float16.opvectorshuffle.*_tessc` case's own
+/// `feme-cpu-wrap-patch-constant: input load refers to an unknown
+/// signature element` failure at `vkCreateGraphicsPipelines` time: like
+/// `TessControlBarrierlessMixedStoreSource` above, a per-vertex `Position`
+/// write and an unconditional (never `gl_InvocationID`-guarded) `patch`-
+/// decorated tessellation-factor write, with no barrier separating them
+/// -- but here the per-vertex write's own value is computed by a genuine,
+/// not-yet-inlined helper function (`@compute_color`, mirroring a real
+/// GLSL/glslang-sourced module's user-defined function, never fully
+/// inlined by `glslang` the way `dxc` always inlines an HLSL one) that
+/// itself reads an ordinary per-vertex `Input` (`@in_color`) having
+/// nothing to do with the tessellation factor. `splitBarrierlessTessella
+/// tionControlEntry` clones `@main` into a `.patchconstant` sibling and
+/// prunes its own (pruned-away) `Position` store, but -- before this
+/// row's own fix -- `@compute_color`'s call site, and the `feme.stage.
+/// input.load` `@in_color` read inside its own still-shared body, both
+/// survive completely untouched by that per-function pruning pass (it
+/// only ever walks `Fn`'s own instructions, never a callee's), reaching
+/// `PatchConstantWrapper.cpp`'s lowering with a live `feme.stage.input.
+/// load` call whose element the patch-constant phase's own signature
+/// never gave a matching entry (`@in_color` is genuinely control-point-
+/// only). Inlining every helper function before this split
+/// (`feme::vulkan::compileGraphicsPipeline`'s own new, earlier
+/// `InlineHelperFunctionsPass` run) lets `pruneStageIOStoresByFrequency`'s
+/// own dead-input-load sweep see straight through to (and remove) this
+/// now-truly-dead `feme.stage.input.load` once its only consumer's own
+/// store has been pruned away.
+constexpr llvm::StringLiteral TessControlBarrierlessMixedStoreThroughHelperSource =
+    R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Tessellation], []> {
+  spirv.GlobalVariable @out_pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @in_color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Input>
+  spirv.GlobalVariable @invocation_id built_in("InvocationId") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @tess_outer built_in("TessLevelOuter") {patch} : !spirv.ptr<!spirv.array<4xf32>, Output>
+  spirv.func @compute_color() -> vector<4xf32> "None" {
+    %colorp = spirv.mlir.addressof @in_color : !spirv.ptr<vector<4xf32>, Input>
+    %color = spirv.Load "Input" %colorp : vector<4xf32>
+    spirv.ReturnValue %color : vector<4xf32>
+  }
+  spirv.func @main() -> () "None" {
+    %p = spirv.FunctionCall @compute_color() : () -> vector<4xf32>
+    %posp = spirv.mlir.addressof @out_pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %c0 = spirv.Constant 0 : i32
+    %f = spirv.Constant 1.000000e+00 : f32
+    %outerp = spirv.mlir.addressof @tess_outer : !spirv.ptr<!spirv.array<4xf32>, Output>
+    %e0 = spirv.AccessChain %outerp[%c0] : !spirv.ptr<!spirv.array<4xf32>, Output>, i32 -> !spirv.ptr<f32, Output>
+    spirv.Store "Output" %e0, %f : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "TessellationControl" @main, @out_pos, @in_color, @invocation_id, @tess_outer
+  spirv.ExecutionMode @main "OutputVertices", 3
+}
+)mlir";
+
 /// (Roadmap H4h) A genuinely-empty vertex stage -- no stage-IO globals at
 /// all, `void main (void) {}` -- exactly `dEQP-VK.tessellation.winding.*`'s
 /// own real vertex shader, legal whenever a tessellation-evaluation stage
@@ -3478,6 +3534,40 @@ TEST_F(GraphicsPipelineTest,
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule TessControl =
       createModule(TessControlBarrierlessDynamicVertexIndexedMixedStoreSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap L217: a barrierless, mixed control-point/patch-constant
+/// tessellation-control entry whose per-vertex `Position` write is
+/// computed through a not-yet-inlined helper function that itself reads
+/// an ordinary per-vertex `Input`
+/// (`TessControlBarrierlessMixedStoreThroughHelperSource`) must still
+/// compile -- the real shape driving every `dEQP-VK.spirv_assembly.
+/// instruction.graphics.float16.opvectorshuffle.*_tessc` case's own
+/// `feme-cpu-wrap-patch-constant: input load refers to an unknown
+/// signature element` failure before this row's own fix (an earlier
+/// `feme::cpu::InlineHelperFunctionsPass` run, letting
+/// `pruneStageIOStoresByFrequency`'s own dead-input-load sweep see
+/// through the helper call and remove the input load its pruned-away
+/// per-vertex store used to keep alive).
+TEST_F(GraphicsPipelineTest,
+       AcceptsTessellationControlBarrierlessMixedStoreThroughHelper) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl =
+      createModule(TessControlBarrierlessMixedStoreThroughHelperSource);
   VkShaderModule TessEval = createModule(TessEvalSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 

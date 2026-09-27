@@ -139,6 +139,7 @@ add_feme_library(FeMeVulkanCore STATIC
   FeMeGraphics
   FeMeImportSPIRV
   FeMeTargetCPU
+  FeMeTransformsCPU
   FeMeTransformsGraphics
   FeMeTranslateSPIRV
   )
