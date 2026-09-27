@@ -2141,6 +2141,78 @@ TEST(SIMDizeTest, WidensNarrowingVectorBitCastFromBooleanReduction) {
   EXPECT_EQ(ZExtCount, 4u);
 }
 
+TEST(SIMDizeTest, WidensNarrowingVectorBitCastFromFloatSource) {
+  // Roadmap L201(c): an `OpCompositeInsert`/`OpVectorInsertDynamic` on a
+  // 4-lane f16 vector (reduced from a real `dEQP-VK.spirv_assembly.
+  // instruction.graphics.float16.{opcompositeinsert,opvectorinsertdynamic}.
+  // v4f16_{frag,vert}` failure) packs the resulting, per-lane-decomposed
+  // `<4 x half>` back into a pair of 32-bit SPIR-V-ABI slots via `bitcast
+  // <4 x half> to <2 x i32>` -- a *floating-point*-element source,
+  // unlike `WidensNarrowingVectorBitCastFromBooleanReduction`'s all-
+  // integer `<4 x i1>` to `<2 x i2>` shape. `isVectorNarrowingBitCast`
+  // previously required an integer source element type, so this shape's
+  // divergent `<2 x i32>` bitcast result fell through to the generic "no
+  // supported producer" diagnostic; `isVectorNarrowingBitCast` now also
+  // accepts a floating-point source (still requiring an integer
+  // destination, the only shape with a known real-world need), and
+  // `widenVectorNarrowingBitCast` reinterprets each half-typed source
+  // component's bits as an equally-wide integer first (mirroring
+  // `widenVectorToScalarBitCast`'s own float-source handling) before the
+  // usual zext/shift/or recomposition.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %tidh = fptrunc float %tidf to half
+      %tidh1 = fadd half %tidh, 1.000000e+00
+      %tidh2 = fadd half %tidh, 2.000000e+00
+      %tidh3 = fadd half %tidh, 3.000000e+00
+      %a0 = insertelement <4 x half> poison, half %tidh, i32 0
+      %a1 = insertelement <4 x half> %a0, half %tidh1, i32 1
+      %a2 = insertelement <4 x half> %a1, half %tidh2, i32 2
+      %a3 = insertelement <4 x half> %a2, half %tidh3, i32 3
+      %bc = bitcast <4 x half> %a3 to <2 x i32>
+      %ex = extractelement <2 x i32> %bc, i64 0
+      %isz = icmp eq i32 %ex, 0
+      %sel = select i1 %isz, float 1.000000e+00, float 0.000000e+00
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned BitCastToIntCount = 0;
+  unsigned ZExtCount = 0;
+  for (Instruction &I : instructions(F)) {
+    // Never build an illegal vector-of-vector type.
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    // The half-to-i16 reinterpret bitcast(s) `widenVectorNarrowingBitCast`
+    // inserts ahead of each `zext` do survive (unlike the fully-integer
+    // case, which needs no such reinterpret step at all).
+    if (auto *BCI = dyn_cast<BitCastInst>(&I))
+      if (BCI->getDestTy() ==
+          FixedVectorType::get(IntegerType::get(Ctx, 16), 4))
+        ++BitCastToIntCount;
+    if (auto *ZE = dyn_cast<ZExtInst>(&I))
+      if (ZE->getDestTy() == FixedVectorType::get(IntegerType::get(Ctx, 32), 4))
+        ++ZExtCount;
+  }
+  // Both `<2 x i32>` destination components (index 0, which
+  // `extractelement` actually reads, and the otherwise-unused index 1)
+  // are reconstructed up front, each packing 2 source `half` components,
+  // for 4 reinterpret-bitcasts and 4 `zext`s in total.
+  EXPECT_EQ(BitCastToIntCount, 4u);
+  EXPECT_EQ(ZExtCount, 4u);
+}
+
 TEST(SIMDizeTest, DecomposesHomogeneousVectorizableIntrinsicCall) {
   // Roadmap H6g-b-a-i-a-i-b: `llvm.maxnum` (and `llvm.minnum`/`llvm.smin`/
   // `llvm.smax`/...) over an already-decomposed divergent vector operand --

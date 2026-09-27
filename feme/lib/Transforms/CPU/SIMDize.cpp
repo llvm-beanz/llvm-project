@@ -513,13 +513,24 @@ bool isScalarToVectorIntBitCast(const Instruction &I) {
 }
 
 /// Returns true if \p I is a `bitcast` reinterpreting a narrower-element
-/// integer vector as a wider-element one with proportionally fewer
-/// elements (`bitcast <4 x i1> %v to <2 x i2>`) -- the shape a GLSL/SPIR-V-
-/// origin boolean-vector reduction idiom takes (e.g. `any(notEqual(a.xy,
+/// vector as a wider-element one with proportionally fewer elements
+/// (`bitcast <4 x i1> %v to <2 x i2>`) -- the shape a GLSL/SPIR-V-origin
+/// boolean-vector reduction idiom takes (e.g. `any(notEqual(a.xy,
 /// b.xy))`, reduced from a real `dEQP-VK.draw.renderpass.output_location.
 /// array` failure, roadmap L134h): the source's `fcmp`/`icmp` result is
 /// packed pairwise into a smaller vector of wider integers before the one
 /// component actually needed is pulled back out with `extractelement`.
+/// Also covers a narrower-*float*-element source (`bitcast <4 x half> %v
+/// to <2 x i32>`, roadmap L201(c)): the shape an `OpCompositeInsert`/
+/// `OpVectorInsertDynamic` on a 4-lane f16 vector takes on its way into a
+/// pair of 32-bit SPIR-V-ABI slots, reduced from a real
+/// `dEQP-VK.spirv_assembly.instruction.graphics.float16.{opcompositeinsert,
+/// opvectorinsertdynamic}.v4f16_{frag,vert}` failure -- the destination
+/// element type must still be an integer (there is no known real-world
+/// shape needing a float destination yet), but the source's own element
+/// type may be either an integer or a float of the same total width as
+/// today's shorter-integer-source case, since `widenVectorNarrowingBitCast`
+/// only needs each source component's bit pattern, not its type.
 ///
 /// Like `isVectorToScalarIntBitCast`, this is a `CastInst` shape whose
 /// operand has a different element count than its result, so
@@ -535,7 +546,9 @@ bool isVectorNarrowingBitCast(const Instruction &I) {
     return false;
   auto *SrcTy = dyn_cast<FixedVectorType>(BC->getSrcTy());
   auto *DestTy = dyn_cast<FixedVectorType>(BC->getDestTy());
-  if (!SrcTy || !DestTy || !SrcTy->getElementType()->isIntegerTy() ||
+  if (!SrcTy || !DestTy ||
+      !(SrcTy->getElementType()->isIntegerTy() ||
+        SrcTy->getElementType()->isFloatingPointTy()) ||
       !DestTy->getElementType()->isIntegerTy())
     return false;
   unsigned SrcElts = SrcTy->getNumElements();
@@ -4394,6 +4407,13 @@ void FunctionWidener::widenVectorNarrowingBitCast(BitCastInst &BC,
   unsigned Ratio = SrcElts / DestElts;
   unsigned ElemBits = BC.getSrcTy()->getScalarSizeInBits();
   auto *WideElemTy = FixedVectorType::get(DestTy->getElementType(), WaveSize);
+  // (Roadmap L201(c)) A floating-point source element (e.g. `half`) has
+  // no `zext` of its own -- reinterpret each already-widened component's
+  // bit pattern as the equally-wide integer type first, exactly like
+  // `widenVectorToScalarBitCast` already does for its own float-source
+  // case.
+  auto *WideSrcIntTy = FixedVectorType::get(
+      IntegerType::get(BC.getContext(), ElemBits), WaveSize);
   bool IsLittleEndian = NewF->getDataLayout().isLittleEndian();
 
   SmallVector<Value *, 4> DestComponents;
@@ -4401,7 +4421,10 @@ void FunctionWidener::widenVectorNarrowingBitCast(BitCastInst &BC,
     Value *Acc = Constant::getNullValue(WideElemTy);
     for (unsigned R = 0; R != Ratio; ++R) {
       unsigned SrcIdx = D * Ratio + R;
-      Value *Wide = Builder.CreateZExt(SrcComponents[SrcIdx], WideElemTy);
+      Value *SrcComponent = SrcComponents[SrcIdx];
+      if (!SrcComponent->getType()->isIntOrIntVectorTy())
+        SrcComponent = Builder.CreateBitCast(SrcComponent, WideSrcIntTy);
+      Value *Wide = Builder.CreateZExt(SrcComponent, WideElemTy);
       unsigned Shift = (IsLittleEndian ? R : Ratio - 1 - R) * ElemBits;
       if (Shift != 0)
         Wide = Builder.CreateShl(
