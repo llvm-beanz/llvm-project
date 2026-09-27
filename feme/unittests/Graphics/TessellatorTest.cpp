@@ -75,6 +75,55 @@ TEST(TessellatorTest, NonPositiveFactorCullsThePatch) {
   EXPECT_TRUE(Patch.Indices.empty());
 }
 
+/// (Roadmap L224) Per the Vulkan/GLSL tessellation spec's own "Primitive
+/// Discard" rule, only the *outer* edge factors ever cull a whole patch;
+/// a non-positive *inside* factor must never do so on its own (it is
+/// simply clamped up to `1` like any other out-of-range factor, the same
+/// as every other partitioning mode's ordinary minimum) -- for both the
+/// triangle and quad domains, which are the only two with an inside
+/// factor at all. An earlier version of `tessellateTriangle`/
+/// `tessellateQuad` folded the inside factor(s) into the same cull check
+/// as the outer edges, spuriously discarding every patch whose *only*
+/// invalid factor was an inside one -- found via
+/// `dEQP-VK.tessellation.primitive_discard.{triangles,quads}_*` (its
+/// `useLessThanOneInnerLevels` cases construct exactly this shape: valid
+/// outer levels paired with an intentionally out-of-range inside level).
+TEST(TessellatorTest, NonPositiveInsideFactorAloneDoesNotCullTriangleOrQuad) {
+  TessFactors TriFactors;
+  TriFactors.Edges = {3.0f, 3.0f, 3.0f, 0.0f};
+  TriFactors.Inside = {-0.42f, 0.0f};
+  TessellatedPatch TriPatch = tessellate(
+      TessellatorDomain::Triangle, TessPartitioning::Integer,
+      TessOutputPrimitive::TriangleCw, TriFactors);
+  EXPECT_FALSE(TriPatch.Points.empty());
+  EXPECT_FALSE(TriPatch.Indices.empty());
+
+  TessFactors QuadFactors;
+  QuadFactors.Edges = {3.0f, 3.0f, 3.0f, 3.0f};
+  QuadFactors.Inside = {-0.42f, 0.0f};
+  TessellatedPatch QuadPatch = tessellate(
+      TessellatorDomain::Quad, TessPartitioning::Integer,
+      TessOutputPrimitive::TriangleCw, QuadFactors);
+  EXPECT_FALSE(QuadPatch.Points.empty());
+  EXPECT_FALSE(QuadPatch.Indices.empty());
+
+  // A non-positive *outer* edge still culls both domains, unaffected by
+  // this fix -- confirms the two checks were not simply removed outright.
+  TriFactors.Edges[0] = 0.0f;
+  TriFactors.Inside = {3.0f, 3.0f};
+  TessellatedPatch CulledTri =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                TessOutputPrimitive::TriangleCw, TriFactors);
+  EXPECT_TRUE(CulledTri.Points.empty());
+
+  QuadFactors.Edges[0] = 0.0f;
+  QuadFactors.Inside = {3.0f, 3.0f};
+  TessellatedPatch CulledQuad =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                TessOutputPrimitive::TriangleCw, QuadFactors);
+  EXPECT_TRUE(CulledQuad.Points.empty());
+}
+
 /// (Roadmap L24(b)) Renamed from `IsolineGeneratesADensityByDetailGrid`:
 /// `DomainPoint::U`/`V` for an isoline domain are `U` = along-line
 /// (detail) position, `V` = which-line (density) index -- the opposite of

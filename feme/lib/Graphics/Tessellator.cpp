@@ -26,9 +26,11 @@ float clampFactor(float Factor, uint32_t MaxTessFactor) {
 }
 
 /// Whether any of \p Factors is `<= 0`, per `TessFactors`'s degenerate-patch
-/// rule; \p Count is how many of the leading entries in \p Factors matter
-/// for the domain being checked (an isoline reads none of `Inside`, a
-/// triangle reads one, a quad reads two).
+/// rule. (Roadmap L224) Per the Vulkan/GLSL tessellation spec's own
+/// "Primitive Discard" rule, this check only ever applies to *outer* edge
+/// factors -- callers must never pass an inside factor here, regardless of
+/// domain; an inside factor `<= 0` is simply clamped up like any other
+/// out-of-range factor, never a whole-patch discard.
 bool anyFactorCullsPatch(const float *Factors, size_t Count) {
   return std::any_of(Factors, Factors + Count,
                      [](float F) { return F <= 0.0f; });
@@ -338,9 +340,16 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
                                     TessPartitioning Partitioning,
                                     TessOutputPrimitive OutputPrimitive,
                                     uint32_t MaxTessFactor) {
-  std::array<float, 4> All = {Factors.Inside[0], Factors.Edges[0],
-                              Factors.Edges[1], Factors.Edges[2]};
-  if (anyFactorCullsPatch(All.data(), All.size()))
+  // (Roadmap L224) Per the Vulkan/GLSL tessellation spec's own "Primitive
+  // Discard" rule, only the *outer* edge factors ever discard a whole
+  // patch; the inside factor is never consulted for this check at all --
+  // an inside factor `<= 0` is simply clamped up to `1` by
+  // `computeSegmentCount` like any other out-of-range factor, the same as
+  // every other partitioning mode's ordinary minimum. `Factors.Inside[0]`
+  // must not appear here.
+  std::array<float, 3> Outer = {Factors.Edges[0], Factors.Edges[1],
+                                Factors.Edges[2]};
+  if (anyFactorCullsPatch(Outer.data(), Outer.size()))
     return {};
 
   bool Cw = OutputPrimitive == TessOutputPrimitive::TriangleCw;
@@ -474,10 +483,12 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
                                 TessPartitioning Partitioning,
                                 TessOutputPrimitive OutputPrimitive,
                                 uint32_t MaxTessFactor) {
-  std::array<float, 6> All = {Factors.Inside[0], Factors.Inside[1],
-                              Factors.Edges[0],  Factors.Edges[1],
-                              Factors.Edges[2],  Factors.Edges[3]};
-  if (anyFactorCullsPatch(All.data(), All.size()))
+  // (Roadmap L224) As in `tessellateTriangle` above, only the outer edge
+  // factors participate in the whole-patch discard check -- neither
+  // inside factor ever does.
+  std::array<float, 4> Outer = {Factors.Edges[0], Factors.Edges[1],
+                                Factors.Edges[2], Factors.Edges[3]};
+  if (anyFactorCullsPatch(Outer.data(), Outer.size()))
     return {};
 
   bool Cw = OutputPrimitive == TessOutputPrimitive::TriangleCw;

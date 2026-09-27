@@ -134,8 +134,10 @@ constexpr uint32_t DefaultMaxTessFactor = 64;
 ///    `u == 0`/`u == 1` edges, `1`/`3` are the `v == 0`/`v == 1` edges);
 ///    `Inside[0]`/`Inside[1]` are the `u`/`v` interior factors.
 ///
-/// A factor `<= 0` culls the whole patch (produces no output), matching
-/// both APIs' degenerate-patch rule.
+/// An *outer edge* factor `<= 0` culls the whole patch (produces no
+/// output), matching both APIs' degenerate-patch rule; an *inside* factor
+/// `<= 0` never does (Roadmap L224) -- it is simply clamped up to `1`
+/// like any other out-of-range factor.
 struct TessFactors {
   std::array<float, 4> Edges = {1.0f, 1.0f, 1.0f, 1.0f};
   std::array<float, 2> Inside = {1.0f, 1.0f};
