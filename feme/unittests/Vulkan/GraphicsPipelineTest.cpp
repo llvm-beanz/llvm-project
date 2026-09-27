@@ -1174,6 +1174,57 @@ TEST_F(GraphicsPipelineTest, TranslatesRasterizerDiscardState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L218) Per `VUID-VkGraphicsPipelineCreateInfo-
+/// rasterizerDiscardEnable-00750`, `pViewportState` may be entirely null
+/// when rasterization is statically disabled, distinct from the
+/// `TranslatesRasterizerDiscardState` case above (which still supplies a
+/// real `pViewportState`). Found via a real
+/// `dEQP-VK.tessellation.tesscoord.*` reproduction (18/18 cases): its
+/// shared `GraphicsPipelineBuilder` util builds exactly this
+/// rasterization-disabled, `pViewportState == nullptr` pipeline shape for
+/// any pipeline with no fragment stage.
+TEST_F(GraphicsPipelineTest, AcceptsNullViewportStateWhenRasterizationStaticallyDisabled) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  Info.pViewportState = nullptr;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap L218) The pre-existing behavior this fix must not regress:
+/// a null `pViewportState` is still rejected outright whenever
+/// rasterization is *not* statically disabled -- including when it is
+/// only dynamically disabled (`VK_DYNAMIC_STATE_RASTERIZER_DISCARD_
+/// ENABLE`), since the static value is unknowable at pipeline-creation
+/// time in that case.
+TEST_F(GraphicsPipelineTest, RejectsNullViewportStateWhenRasterizerDiscardIsOnlyDynamic) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+  Info.pViewportState = nullptr;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 TEST_F(GraphicsPipelineTest, DynamicRasterizerDiscardOverridesStaticState) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);

@@ -1497,9 +1497,33 @@ Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
 Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
                              const VkPhysicalDeviceLimits &Limits,
                              GraphicsPipelineState &Out) {
-  if (!Info)
+  if (!Info) {
+    // (roadmap L218) Per `VUID-VkGraphicsPipelineCreateInfo-
+    // rasterizerDiscardEnable-00750`, `pViewportState` may be null
+    // entirely -- not just "ignored but still required to point at a
+    // structure" -- whenever rasterization is *statically* disabled
+    // (`translateRasterState`, called just before this by every caller,
+    // already resolved `Out.Raster.DiscardEnable` for the static case;
+    // if `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` is in play instead,
+    // the static value is unknowable here, so this ICD still requires a
+    // real viewport state, matching this function's pre-existing
+    // behavior for that case). There is no viewport/scissor state left to
+    // translate in the disabled case: `Executor.cpp`'s `RasterState::
+    // DiscardEnable` (set from the very `rasterizerDiscardEnable` bit
+    // this depends on) already short-circuits every consumer of
+    // `Out.Viewports`/`Out.Scissors` before they would ever be read, so
+    // leaving both empty here is safe. Found via a real
+    // `dEQP-VK.tessellation.tesscoord.*` reproduction (18/18 cases): its
+    // shared `GraphicsPipelineBuilder` util builds a tessellation-only,
+    // rasterization-disabled pipeline (no fragment stage) with a null
+    // `pViewportState` exactly as the spec allows, which this function
+    // previously rejected unconditionally.
+    if ((Out.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
+        Out.Raster.DiscardEnable)
+      return Error::success();
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs viewport state");
+  }
   // (roadmap C4c) `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/`_SCISSOR_WITH_
   // COUNT`: per `VK_EXT_extended_dynamic_state`, `Info->viewportCount`/
   // `scissorCount` are ignored (not just an initial value) whenever the
