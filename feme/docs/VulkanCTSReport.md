@@ -834,3 +834,105 @@ diagnostic patches to `vktTessellationMaxIOTests.cpp` were reverted
 (`git checkout --`) before ending the session; nothing was committed to
 the VK-GL-CTS checkout. `ninja check-feme` was not rerun since no
 FeMe-side code changed.
+
+## Post-run fixes (this session, against the 2026-09-26 baseline above)
+
+### Roadmap L216: negative-result correction (L215/L216 investigation, not resolved)
+
+Re-verified a prior session's working theory for the still-open L216
+tessellation-control/-evaluation `gl_TessCoord`-interpolation bug --
+that `gl_TessCoord[1]`/the Y component was "never read" by FeMe's own
+lowered IR -- via a fresh, careful, line-by-line `FEME_DUMP_IR_PRENORM=1`
+trace of the same failing case
+(`tess_io.max_in_out.with_f16.permutation_9.tcs_vert_writes_tes_reads`).
+**This claim is disproven**: `feme.stage.input.load`'s own `Component`
+argument correctly alternates 0/1 for `gl_TessCoord[0]`/`[1]`, confirmed
+against both a careful SSA-value trace and real SPIR-V disassembly
+(`--deqp-log-decompiled-spirv=enable`, distinct `OpConstant` operands for
+the two access chains) and a raw occurrence count (85 `Component=0` vs.
+85 `Component=1` calls). `DomainWrapper.cpp`'s `lowerDomainLocation` was
+independently re-read and confirmed correct. Future sessions should not
+re-open this specific lead; see roadmap row L216 for the corrected text
+and remaining open questions (the "totally black" vs. "graded blend"
+symptom split, and an unrelated, incidentally-discovered
+`dEQP-VK.tessellation.tesscoord.*` 18/18 `VK_ERROR_INITIALIZATION_FAILED`
+pipeline-creation failure).
+
+No FeMe source changed as part of this correction (it is a negative
+result only); `ninja check-feme` was not rerun for it alone.
+
+### Roadmap L201(b)/L217: barrierless mixed-frequency TCS entry with an un-inlined helper function
+
+`L201(b)`'s own `float16.opvectorshuffle.*_tessc` (27 cases) repro was
+re-investigated. The `OpVectorShuffle` framing turned out to be a red
+herring: the real SPIR-V for `opvectorshuffle.222_tessc` shows every
+`OpVectorShuffle` op living entirely inside a pure compute/SSBO helper
+function (`test_code`/`sw_fun`), never touching stage IO at all. The
+actual bug is generic to *any* barrierless, mixed control-point/patch-
+constant tessellation-control entry (`gl_TessLevelOuter`/`Inner` written
+unconditionally, no `gl_InvocationID` guard or barrier -- FeMe's own
+`splitBarrierlessTessellationControlEntry` "genuine mix" shape) whose
+per-vertex output is computed via a call to a separate, not-yet-inlined
+GLSL/glslang helper function that itself reads an ordinary per-vertex
+`Input` unrelated to the tessellation factor.
+
+Root cause: `splitBarrierlessTessellationControlEntry` clones the whole
+entry into control-point/patch-constant phases and prunes each clone's
+own stage-IO *stores* by frequency (`pruneStageIOStoresByFrequency`), but
+a helper function's own body is shared, unmodified, between both clones
+(GLSL never guarantees full inlining before this stage the way `dxc`
+always does for HLSL -- roadmap L76b). The patch-constant clone's own
+copy of the (dead, since its only consumer's store was pruned)
+`feme.stage.input.load` call inside that shared helper survives
+completely untouched, and `PatchConstantWrapper.cpp`'s lowering has to
+resolve every such call it finds -- live or not -- against that phase's
+own signature; a per-vertex-only input was never given a matching entry,
+so this leftover, provably-dead load fails outright with
+`feme-cpu-wrap-patch-constant: input load refers to an unknown signature
+element`.
+
+Two-part fix:
+1. `feme::vulkan::compileGraphicsPipeline` (`GraphicsPipeline.cpp`) now
+   runs `feme::cpu::InlineHelperFunctionsPass` before
+   `CanonicalizeStagePass`, so no un-inlined helper-function call
+   boundary survives into the split/prune step (this pass previously
+   only ran later, inside `feme::cpu::runPipeline`, too late to matter
+   for a graphics-pipeline shader's own signature-building pass).
+2. Defense in depth: `pruneStageIOStoresByFrequency` (`CanonicalizeStage.
+   cpp`) now also sweeps up any `feme.stage.input.load` call (and the
+   ordinary dead `insertelement`/`getelementptr` chain that used to feed
+   the pruned store) left with zero uses after a store prune, since that
+   one specific stage-op call is not `readnone` and so is never reached
+   by ordinary dead-code cleanup on its own.
+
+CTS-confirmed:
+- `dEQP-VK.spirv_assembly.instruction.graphics.float16.opvectorshuffle.
+  *_tessc`: **27/27 Pass** (was 0/27).
+- Broader regression sweep, `dEQP-VK.spirv_assembly.instruction.graphics.
+  *_tessc` (2134 cases, same `CanonicalizeStagePass`/`PatchConstantWrapper`
+  code path): **1211/2134 Pass** (was 1159/2134) -- **52 cases newly
+  fixed, 0 regressions** (confirmed via a byte-for-byte QPA `StatusCode`
+  diff against a stashed pre-fix rebuild).
+- `dEQP-VK.tessellation.tess_io.*` (568 cases comparable both ways; a
+  pre-existing, unrelated bug -- `dEQP-VK.tessellation.winding.
+  default_domain.hlsl_quads_ccw` crashing with `llvm.lifetime.start/end
+  can only be used on alloca or poison` / a segfault depending on build,
+  confirmed identical with or without this fix -- truncates the full
+  `tessellation.*` group at the same point regardless): **0 regressions,
+  0 newly fixed** (as expected; this is a different bug, L216, not
+  touched by this fix).
+
+New tests: `GraphicsPipelineTest.AcceptsTessellationControlBarrierlessMixed
+StoreThroughHelper` (end-to-end; confirmed to reproduce the exact real
+`feme-cpu-wrap-patch-constant` error without the fix, and to pass with
+it) and `CanonicalizeStageTest.NoBarrierMixedFrequencyEntryPrunesDeadInput
+LoadFromPatchConstantClone` (isolates the same-function dead-load-removal
+behavior in `pruneStageIOStoresByFrequency`/`pruneDeadStageInputLoads`).
+
+`ninja check-feme`: 3369/3372 passed (0 failed, 3 pre-existing
+Unsupported), +2 net new tests, 0 regressions.
+
+No Vulkan feature/extension advertisement changed as part of this fix
+(purely a correctness fix within the existing `tessellationShader`
+feature's own implementation), so `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` need no update for it.
