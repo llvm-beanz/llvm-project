@@ -2813,6 +2813,57 @@ TessControlOutputFrequencies classifyTessControlOutputs(Function &F) {
   return Result;
 }
 
+/// (Roadmap L217) `pruneStageIOStoresByFrequency` erases a store outright;
+/// the ordinary instructions that used to feed its now-dead `value`
+/// operand (an `insertelement`/`getelementptr` chain building up a
+/// multi-component value, say) are genuinely no-side-effect and always
+/// safe to remove, so this sweep does -- but a `feme.stage.input.load`
+/// call anywhere in that chain is not: unlike the other clone's own
+/// surviving copy of that same load (kept alive by its own still-live
+/// store), this clone's copy is now referenced by nothing at all, yet the
+/// call itself is not marked `readnone` (see `getOrInsertStageOp`'s own
+/// comment -- no stage op carries any function attributes), so
+/// `isInstructionTriviallyDead` alone would refuse to remove it, treating
+/// an unknown-attribute external call as though it might have a side
+/// effect, and leave it behind with zero remaining uses.
+/// `PatchConstantWrapper.cpp`'s own lowering still has to resolve *every*
+/// `feme.stage.input.load` it finds -- live or not -- against \p Fn's own
+/// signature; a per-vertex (never per-patch) input this clone has no
+/// business reading at all (e.g. a `float16.opvectorshuffle.*_tessc`
+/// test's `in_color`, read only to compute the per-vertex output color
+/// this same prune just erased) was never given a patch-constant-
+/// direction signature entry to resolve against in the first place, so
+/// this otherwise-harmless leftover load fails outright with `"input load
+/// refers to an unknown signature element"` (roadmap L217), aborting
+/// pipeline creation for every shader exercising this shape. Special-
+/// casing a zero-use `InputLoad` call as removable too (alongside every
+/// ordinary trivially-dead instruction) closes the gap; any surviving,
+/// still-used address computation is left alone, same as this function's
+/// own pre-L217 reasoning about a dead store's leftovers already assumed.
+void pruneDeadStageInputLoads(Function &Fn) {
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (Instruction &I : llvm::make_early_inc_range(instructions(Fn))) {
+      if (!I.use_empty())
+        continue;
+      if (auto *CI = dyn_cast<CallInst>(&I)) {
+        StageOpKind Kind;
+        if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::InputLoad) {
+          CI->eraseFromParent();
+          Changed = true;
+          continue;
+        }
+      }
+      if (isInstructionTriviallyDead(&I)) {
+        I.eraseFromParent();
+        Changed = true;
+      }
+    }
+  }
+}
+
+
 /// (Roadmap H9c) Erases every address-space-8 stage-IO store in \p Fn
 /// whose own patch-vs-vertex frequency (`classifyTessControlOutputStore
 /// Frequency`) does not match \p KeepPatch, so \p Fn -- one of the two
@@ -2820,10 +2871,10 @@ TessControlOutputFrequencies classifyTessControlOutputs(Function &F) {
 /// produces for a mixed-frequency, no-barrier entry -- ends up producing
 /// only the stage-IO writes that belong to its own phase. A store this
 /// cannot resolve as a stage-IO global at all is conservatively left
-/// alone. The erased store's own address/value computation is left in
-/// place as dead code rather than swept up here too: it has no other
-/// side effect, and every downstream pass in this pipeline already
-/// tolerates ordinary dead code same as any other LLVM IR.
+/// alone. (Roadmap L217) `pruneDeadStageInputLoads` then sweeps up
+/// whatever became genuinely dead as a result -- see its own comment for
+/// why a `feme.stage.input.load` call in particular cannot be left behind
+/// as ordinary dead code the way everything else safely can.
 void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
   const DataLayout &DL = Fn.getParent()->getDataLayout();
   SmallVector<StoreInst *, 8> ToErase;
@@ -2838,6 +2889,7 @@ void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
   }
   for (StoreInst *SI : ToErase)
     SI->eraseFromParent();
+  pruneDeadStageInputLoads(Fn);
 }
 
 /// (Roadmap H4f/H9c) `splitTessellationControlEntry`'s own barrier-based

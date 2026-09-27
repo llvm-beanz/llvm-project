@@ -2790,6 +2790,81 @@ TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
 /// it, as a `PatchOutput` signature element) with the original `main`
 /// pruned down to only its own `out_color` write (an ordinary `Output`
 /// element, its `TessLevelOuter` write removed).
+/// (Roadmap L217) `pruneStageIOStoresByFrequency`'s own dead-input-load
+/// sweep (`pruneDeadStageInputLoads`) must remove a `feme.stage.input.
+/// load` call that becomes genuinely unused once its own only consumer's
+/// store is pruned from a clone -- the real gap behind every `dEQP-VK.
+/// spirv_assembly.instruction.graphics.float16.opvectorshuffle.*_tessc`
+/// case's own `feme-cpu-wrap-patch-constant: input load refers to an
+/// unknown signature element` failure (`GraphicsPipelineTest.Accepts
+/// TessellationControlBarrierlessMixedStoreThroughHelper` reproduces the
+/// full, real, helper-function-mediated shape end to end; this test
+/// isolates the same-function case `pruneDeadStageInputLoads` itself
+/// covers). Before this row's own fix, `pruneStageIOStoresByFrequency`
+/// only ever erased the pruned store itself, deliberately leaving
+/// whatever fed its `value` operand behind as ordinary dead code (see
+/// this function's own header comment) -- correct for a plain arithmetic
+/// chain, but not for a `feme.stage.input.load` call, which is not
+/// `readnone` (no stage op carries any function attributes) and so is
+/// never swept up by ordinary DCE, yet still has to resolve against its
+/// own clone's differently-scoped signature later.
+TEST(CanonicalizeStageTest,
+    NoBarrierMixedFrequencyEntryPrunesDeadInputLoadFromPatchConstantClone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_color = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
+    @out_color = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    @tess_outer = external addrspace(8) global [4 x float], !spirv.Decorations !2
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @in_color
+      store <4 x float> %v, ptr addrspace(8) @out_color
+      %tp = getelementptr inbounds [4 x float], ptr addrspace(8) @tess_outer, i32 0, i32 0
+      store float 4.000000e+00, ptr addrspace(8) %tp
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5}
+    !3 = !{i32 30, i32 1}
+    !4 = !{i32 30, i32 0}
+    !5 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  auto countInputLoads = [](Function &Fn) {
+    unsigned Count = 0;
+    for (Instruction &I : instructions(Fn)) {
+      auto *CI = dyn_cast<CallInst>(&I);
+      StageOpKind Kind;
+      if (CI && isStageOpCall(*CI, &Kind) && Kind == StageOpKind::InputLoad)
+        ++Count;
+    }
+    return Count;
+  };
+
+  // The control-point phase keeps its own live `in_color` read (still
+  // feeding its own surviving `out_color` store) -- one
+  // `feme.stage.input.load` per vector component.
+  EXPECT_EQ(countInputLoads(*ControlPoint), 4u);
+  // The patch-constant phase's own copy of that same read is now
+  // genuinely dead (its only consumer, the `out_color` store, was pruned
+  // from this clone) -- and, unlike an ordinary dead arithmetic chain,
+  // must not be left behind for `PatchConstantWrapper.cpp` to trip over.
+  EXPECT_EQ(countInputLoads(*PatchConstant), 0u);
+
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+}
+
 TEST(
     CanonicalizeStageTest,
     NoBarrierMixedFrequencyEntryWithDynamicVertexIndexedStoreIsSplitAndPruned) {
