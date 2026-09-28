@@ -2954,6 +2954,15 @@ Error executeCommandsInto(
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdNextSubpass outside a render pass "
                                  "instance");
+      // (Roadmap L228(k)) The subpass now ending must resolve any
+      // multisample color attachment into its own resolve target before
+      // `Gfx.Binding` is overwritten below -- see
+      // `resolveSubpassColorAttachments`'s own doc comment for why this
+      // cannot be left to `Executor.cpp`'s per-draw resolve alone (a
+      // subpass with no draw calls, e.g. one that only issues
+      // `vkCmdClearAttachments`, would otherwise never resolve at all).
+      if (Error E = feme::vulkan::resolveSubpassColorAttachments(Gfx.Binding))
+        return E;
       // A subpass boundary is a full join, which this ICD's strictly
       // sequential execution already satisfies; the next subpass's own
       // attachment references simply become the render-target binding.
@@ -2976,6 +2985,11 @@ Error executeCommandsInto(
       break;
     }
     case RecordedCommand::Kind::EndRenderPass:
+      // (Roadmap L228(k)) The last subpass's own resolve, same rationale
+      // as `NextSubpass`'s own above -- `Gfx.Binding` is about to be
+      // discarded below.
+      if (Error E = feme::vulkan::resolveSubpassColorAttachments(Gfx.Binding))
+        return E;
       Gfx.Rendering = false;
       Gfx.Binding = RenderTargetBinding{};
       Gfx.Pass = nullptr;

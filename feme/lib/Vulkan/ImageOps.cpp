@@ -665,6 +665,69 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
   return Error::success();
 }
 
+Error resolveSubpassColorAttachments(const RenderTargetBinding &Binding) {
+  for (const RenderTargetView &Target : Binding.Colors) {
+    if (!Target.View || !Target.ResolveView || Target.SampleCount <= 1)
+      continue;
+    Expected<feme::graphics::AttachmentView> Src =
+        resolveAttachmentView(Target.View);
+    if (!Src)
+      return Src.takeError();
+    Expected<feme::graphics::AttachmentView> Dst =
+        resolveAttachmentView(Target.ResolveView);
+    if (!Dst)
+      return Dst.takeError();
+    Expected<uint32_t> ElemSize =
+        feme::graphics::getFixtureFormatElementSize(Src->Format);
+    if (!ElemSize)
+      return ElemSize.takeError();
+
+    uint32_t LayerCount = std::min(Src->ArrayLayers, Dst->ArrayLayers);
+    for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
+      auto SliceLayer =
+          [](feme::graphics::AttachmentView View,
+             uint32_t Layer) -> feme::graphics::AttachmentView {
+        if (View.Data.empty() || View.ArrayLayers <= 1)
+          return View;
+        uint64_t LayerSizeBytes = View.Data.size() / View.ArrayLayers;
+        uint64_t Offset = feme::graphics::getAttachmentLayerByteOffset(
+            Layer, LayerSizeBytes);
+        View.Data = View.Data.slice(Offset, LayerSizeBytes);
+        View.ArrayLayers = 1;
+        return View;
+      };
+      feme::graphics::AttachmentView SrcLayer = SliceLayer(*Src, Layer);
+      feme::graphics::AttachmentView DstLayer = SliceLayer(*Dst, Layer);
+      for (uint32_t Y = 0; Y != Src->Height; ++Y) {
+        for (uint32_t X = 0; X != Src->Width; ++X) {
+          std::array<double, 4> Sum{};
+          for (uint32_t S = 0; S != Target.SampleCount; ++S) {
+            size_t Off =
+                (((size_t)Y * Src->Width + X) * Target.SampleCount + S) *
+                *ElemSize;
+            std::array<double, 4> Sample{};
+            if (Error E = feme::graphics::unpackColor(
+                    SrcLayer.Format,
+                    ArrayRef(SrcLayer.Data.data() + Off, *ElemSize), Sample))
+              return E;
+            for (unsigned C = 0; C != 4; ++C)
+              Sum[C] += Sample[C];
+          }
+          std::array<double, 4> Avg{};
+          for (unsigned C = 0; C != 4; ++C)
+            Avg[C] = Sum[C] / Target.SampleCount;
+          size_t DstOff = ((size_t)Y * Dst->Width + X) * *ElemSize;
+          if (Error E = feme::graphics::packClearColor(
+                  DstLayer.Format, Avg,
+                  MutableArrayRef(DstLayer.Data.data() + DstOff, *ElemSize)))
+            return E;
+        }
+      }
+    }
+  }
+  return Error::success();
+}
+
 /// The two images a blit names must be bound; a blit, unlike a copy or
 /// resolve, is explicitly permitted to convert between formats.
 Error checkBlitImagePair(Image *Src, Image *Dst) {

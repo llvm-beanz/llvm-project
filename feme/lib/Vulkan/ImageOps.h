@@ -131,6 +131,23 @@ llvm::Error runClearAttachments(const RenderTargetBinding &Binding,
                                 llvm::ArrayRef<VkClearAttachment> Attachments,
                                 llvm::ArrayRef<VkClearRect> Rects);
 
+/// (Roadmap L228(k)) The implicit subpass-end resolve every color
+/// attachment with a non-null `RenderTargetView::ResolveView` must receive
+/// (Vulkan spec: "at the end of a subpass, multisample resolve operations
+/// ... are treated as if it were a color attachment store operation"),
+/// independent of whether the subpass ever recorded a draw call --
+/// `Executor.cpp`'s own resolve (`PreparedDraw::ResolveAttachments`) only
+/// runs as a side effect of `runDraw`, leaving `\p Binding`'s multisample
+/// data unresolved into its single-sample target whenever a subpass's own
+/// commands were all non-draw (e.g. `vkCmdClearAttachments` alone). Called
+/// once per subpass boundary (`vkCmdNextSubpass`/`vkCmdEndRenderPass`) with
+/// that subpass's own `\p Binding`, box-filter-averaging every sample of
+/// each `Colors[I]` with a set `ResolveView` into that view, mirroring
+/// `Executor.cpp`'s own per-draw resolve loop exactly (so a subpass that
+/// did draw simply resolves the same, already-correct data a second time,
+/// which is harmless).
+llvm::Error resolveSubpassColorAttachments(const RenderTargetBinding &Binding);
+
 /// `vkCmdBlitImage`: a scaled copy between two single-sample images of the
 /// same format, with `VK_FILTER_NEAREST` or `VK_FILTER_LINEAR` sampling of
 /// the source region.

@@ -6102,6 +6102,124 @@ TEST_F(DrawTest, ResolvesMultisampleColorDuringRenderPass) {
   vkFreeMemory(Device, MSMemory, nullptr);
 }
 
+/// (Roadmap L228(k)) A render pass instance whose only subpass command is
+/// `vkCmdClearAttachments` (no draw at all) must still resolve its
+/// multisample color attachment into the resolve target at subpass/render-
+/// pass end -- `ResolvesMultisampleColorDuringRenderPass`'s own draw-based
+/// scenario already covered `Executor.cpp`'s per-draw resolve; this covers
+/// the gap that resolve alone left: a subpass with zero draws previously
+/// never resolved at all, leaving the resolve target's pre-existing
+/// (uninitialized/stale) contents untouched.
+TEST_F(DrawTest, ResolvesMultisampleColorAfterClearAttachmentsWithNoDraw) {
+  VkImage MSImage = VK_NULL_HANDLE;
+  VkImageView MSView = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage, MSView, MSMemory,
+                     VK_SAMPLE_COUNT_4_BIT);
+  VkImage ResolveImage = VK_NULL_HANDLE;
+  VkImageView ResolveView = VK_NULL_HANDLE;
+  VkDeviceMemory ResolveMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, ResolveImage, ResolveView, ResolveMemory);
+
+  // Seed the resolve target with a distinct color (green) before the render
+  // pass, standing in for "whatever memory this allocation previously
+  // held" -- the exact scenario a missing resolve would silently pass
+  // through untouched.
+  {
+    VkCommandBufferBeginInfo BeginInfo{};
+    ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+    VkImageSubresourceRange Range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkClearColorValue Seed{{0.0f, 1.0f, 0.0f, 1.0f}};
+    vkCmdClearColorImage(Cmd, ResolveImage, VK_IMAGE_LAYOUT_GENERAL, &Seed, 1,
+                        &Range);
+    ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+    ASSERT_EQ(submit(), VK_SUCCESS);
+  }
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference ResolveRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pResolveAttachments = &ResolveRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {MSView, ResolveView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  VkClearAttachment ClearAtt{};
+  ClearAtt.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ClearAtt.colorAttachment = 0;
+  ClearAtt.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
+  VkClearRect ClearRect{};
+  ClearRect.rect = {{0, 0}, {Extent, Extent}};
+  ClearRect.baseArrayLayer = 0;
+  ClearRect.layerCount = 1;
+  vkCmdClearAttachments(Cmd, 1, &ClearAtt, 1, &ClearRect);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Every sample of every pixel was cleared to the same solid red (never
+  // drawn to), so the resolve target's box-filtered average is exactly
+  // red too -- not the green seed value a missing resolve would have left
+  // in place.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texelOf(ResolveImage, X, Y);
+      EXPECT_EQ(Texel[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, ResolveView, nullptr);
+  vkDestroyImage(Device, ResolveImage, nullptr);
+  vkFreeMemory(Device, ResolveMemory, nullptr);
+  vkDestroyImageView(Device, MSView, nullptr);
+  vkDestroyImage(Device, MSImage, nullptr);
+  vkFreeMemory(Device, MSMemory, nullptr);
+}
+
 /// (Roadmap F8a) The shader-side half of `VK_KHR_dynamic_rendering_local_
 /// read` this milestone closes out: a first draw fills the attachment
 /// solid red (`RedFragmentSource`); without ending the rendering instance,
