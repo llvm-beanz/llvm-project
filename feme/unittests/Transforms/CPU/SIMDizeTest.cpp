@@ -1796,13 +1796,18 @@ TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughDivergentGEP) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 
   unsigned AtomicRMWCount = 0;
-  unsigned ExtractElementCount = 0;
+  unsigned PointerExtractElementCount = 0;
   bool FoundVectorGEP = false;
   for (Instruction &I : instructions(F)) {
     if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
       FoundVectorGEP |= GEP->getType()->isVectorTy();
-    if (isa<ExtractElementInst>(&I))
-      ++ExtractElementCount;
+    // Roadmap L240 also introduces one `extractelement <4 x i1>
+    // %wave_sideeffect_mask, ...` per lane (the value-masking fix) --
+    // only the vector-of-pointers extracts this test actually guards
+    // against should count here.
+    if (auto *EEI = dyn_cast<ExtractElementInst>(&I))
+      if (EEI->getType()->isPointerTy())
+        ++PointerExtractElementCount;
     if (isa<AtomicRMWInst>(&I))
       ++AtomicRMWCount;
     // `@shared`'s address space must be canonicalized away entirely, not
@@ -1811,8 +1816,129 @@ TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughDivergentGEP) {
                  I.getType()->getPointerAddressSpace() == 3);
   }
   EXPECT_TRUE(FoundVectorGEP);
-  EXPECT_EQ(ExtractElementCount, 4u);
+  EXPECT_EQ(PointerExtractElementCount, 4u);
   EXPECT_EQ(AtomicRMWCount, 4u);
+}
+
+// Roadmap L240: a workgroup whose total invocation count isn't a multiple
+// of the SIMD wave width dispatches a final, *partial* wave whose padding
+// lanes are masked off via `%wave_sideeffect_mask`. Before this fix,
+// `widenGroupSharedAtomicRMW` cloned the atomic once per lane with the
+// literal, unmasked value operand for every lane -- silently
+// over-executing groupshared atomics for inactive padding lanes (the
+// `dEQP-VK.pipeline.monolithic.spec_constant.compute.local_size.*`
+// checksum-overcount CTS symptom this closes: expected 105, got 108,
+// exactly a 3-lane over-count in the workgroup's final, partial 4-lane
+// wave). This test confirms each lane's value operand is now masked --
+// `select i1 %lane.mask, i32 <lane-value>, i32 <identity>` -- against
+// `getAtomicRMWIdentity`'s `add`-identity (`0`) before it ever reaches its
+// own `atomicrmw`, mirroring `widenMaskedAtomicRMW`'s pre-existing,
+// identical masking for resource-heap atomics.
+TEST(SIMDizeTest, MasksGroupSharedAtomicRMWAgainstSideEffectMask) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %old = atomicrmw add ptr addrspace(3) @shared, i32 1 monotonic
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned AtomicRMWCount = 0;
+  unsigned MaskedSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+      ++AtomicRMWCount;
+      // The value operand must be a `select` (masked), never the raw
+      // literal `1` directly.
+      auto *Sel = dyn_cast<SelectInst>(RMW->getValOperand());
+      ASSERT_TRUE(Sel);
+      ++MaskedSelectCount;
+      // The `select`'s condition must trace back to
+      // `%wave_sideeffect_mask` (via an `extractelement`), and its
+      // false-value (the masked-off case) must be the `add` identity,
+      // `0` -- not, e.g., the true-value duplicated or some other
+      // placeholder.
+      auto *Cond = dyn_cast<ExtractElementInst>(Sel->getCondition());
+      ASSERT_TRUE(Cond);
+      EXPECT_EQ(Cond->getVectorOperand()->getName(), "wave_sideeffect_mask");
+      auto *FalseVal = dyn_cast<ConstantInt>(Sel->getFalseValue());
+      ASSERT_TRUE(FalseVal);
+      EXPECT_TRUE(FalseVal->isZero());
+      auto *TrueVal = dyn_cast<ConstantInt>(Sel->getTrueValue());
+      ASSERT_TRUE(TrueVal);
+      EXPECT_EQ(TrueVal->getSExtValue(), 1);
+    }
+  }
+  EXPECT_EQ(AtomicRMWCount, 4u);
+  EXPECT_EQ(MaskedSelectCount, 4u);
+}
+
+// Roadmap L240's `cmpxchg` counterpart: unlike `atomicrmw`, a
+// compare-exchange has no natural "identity" value to substitute for a
+// masked-off lane, so `widenGroupSharedAtomicCmpXchg` instead forces a
+// guaranteed mismatch for a masked-off lane -- loading the current value
+// and comparing against its bitwise complement (always different from
+// any integer value) -- so the masked-off lane's `cmpxchg` always takes
+// its "no match, no store" path. This bug class has no known failing CTS
+// case (no sampled `InterlockedCompareExchange` groupshared usage happens
+// to hit a non-wave-size-multiple workgroup), so this test is this fix's
+// only real coverage.
+TEST(SIMDizeTest, MasksGroupSharedAtomicCmpXchgAgainstSideEffectMask) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %pair = cmpxchg ptr addrspace(3) @shared, i32 %tid, i32 42 seq_cst seq_cst
+      %val = extractvalue { i32, i1 } %pair, 0
+      %ok = extractvalue { i32, i1 } %pair, 1
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned CmpXchgCount = 0;
+  unsigned MaskedSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CX = dyn_cast<AtomicCmpXchgInst>(&I)) {
+      ++CmpXchgCount;
+      // The compare operand must be a `select` (masked), never the raw
+      // per-lane `%tid` value directly.
+      auto *Sel = dyn_cast<SelectInst>(CX->getCompareOperand());
+      ASSERT_TRUE(Sel);
+      ++MaskedSelectCount;
+      auto *Cond = dyn_cast<ExtractElementInst>(Sel->getCondition());
+      ASSERT_TRUE(Cond);
+      EXPECT_EQ(Cond->getVectorOperand()->getName(), "wave_sideeffect_mask");
+      // The masked-off (false) value must be a bitwise complement (`xor
+      // -1`) of a freshly loaded current value -- guaranteed to mismatch
+      // any real value, forcing the "no match" path.
+      auto *FalseVal = dyn_cast<Instruction>(Sel->getFalseValue());
+      ASSERT_TRUE(FalseVal);
+      EXPECT_EQ(FalseVal->getOpcode(), Instruction::Xor);
+      auto *Mask = dyn_cast<ConstantInt>(FalseVal->getOperand(1));
+      ASSERT_TRUE(Mask);
+      EXPECT_TRUE(Mask->isMinusOne());
+      EXPECT_TRUE(isa<LoadInst>(FalseVal->getOperand(0)));
+    }
+  }
+  EXPECT_EQ(CmpXchgCount, 4u);
+  EXPECT_EQ(MaskedSelectCount, 4u);
 }
 
 // Roadmap step R23's "masked store at a uniform address" shape: a `store`

@@ -3798,10 +3798,40 @@ void FunctionWidener::widenGroupSharedAtomicRMW(AtomicRMWInst &RMW,
   // genuinely divergent index (widened into a real vector `getelementptr`
   // by `widenGroupSharedGEP` above) still needs one real address
   // extracted per lane.
+  //
+  // (Roadmap L240) Every lane's clone must still be masked against
+  // `Env.SideEffectMask`, exactly like `widenMaskedAtomicRMW`'s own
+  // resource-heap atomic path already is (see that function's comment):
+  // an inactive lane (a padding lane in a workgroup's last wave, when its
+  // total invocation count isn't a multiple of `WaveSize` -- e.g. a
+  // `local_size_{x,y,z}_id`-specialized 105-invocation dispatch's last
+  // wave has only 1 of 4 lanes real) otherwise still executed a real,
+  // unmasked `atomicAdd`, silently over-counting a groupshared accumulator
+  // by one per padding lane (confirmed via
+  // `dEQP-VK.pipeline.monolithic.spec_constant.compute.local_size.*`:
+  // every case whose resolved total invocation count wasn't a multiple of
+  // the default `WaveSize` (4) failed this exact way, while the one case
+  // that was (`xy`, 24) passed). Reuses `getAtomicRMWIdentity`'s existing
+  // no-op substitution (a masked-off lane contributes `Op`'s identity
+  // element instead of its real value operand) rather than real branching,
+  // for the same "widen()'s driver cannot split blocks mid-walk" reason
+  // `widenMaskedAtomicRMW` itself cannot.
   Value *Ptr = RMW.getPointerOperand();
   bool PtrDivergent = Widened.count(Ptr) != 0;
   Value *WidePtr = PtrDivergent ? Widened[Ptr] : nullptr;
   Value *WideVal = getWidened(RMW.getValOperand(), Builder);
+
+  Type *ValTy = RMW.getType();
+  std::optional<Constant *> Identity =
+      getAtomicRMWIdentity(RMW.getOperation(), ValTy);
+  if (!Identity && RMW.getOperation() != AtomicRMWInst::Xchg) {
+    Ctx.emitError("feme-cpu-simdize: function '" + NewF->getName() +
+                  "' has a groupshared atomicrmw '" +
+                  AtomicRMWInst::getOperationName(RMW.getOperation()) +
+                  "' with no maskable identity element (roadmap L240)");
+    HadError = true;
+    return;
+  }
 
   Value *Result =
       PoisonValue::get(FixedVectorType::get(RMW.getType(), WaveSize));
@@ -3812,9 +3842,21 @@ void FunctionWidener::widenGroupSharedAtomicRMW(AtomicRMWInst &RMW,
                          : Ptr;
     Value *LaneVal = Builder.CreateExtractElement(
         WideVal, Builder.getInt32(Lane), "lane.val");
+    Value *LaneMask = Builder.CreateExtractElement(
+        Env.SideEffectMask, Builder.getInt32(Lane), "lane.mask");
+    // `Xchg` has no identity element (any value it writes is observable);
+    // a masked-off lane instead writes back the value already there, via
+    // a plain (non-atomic) load immediately beforehand -- safe only
+    // because dispatch is still sequential, one lane at a time (see
+    // `widenMaskedAtomicRMW`'s own identical comment/caveat).
+    Value *IdentityVal = Identity
+                             ? static_cast<Value *>(*Identity)
+                             : Builder.CreateLoad(ValTy, LanePtr, "lane.old");
+    Value *MaskedVal = Builder.CreateSelect(LaneMask, LaneVal, IdentityVal,
+                                            "lane.val.masked");
     Instruction *Clone = RMW.clone();
     Clone->setOperand(0, LanePtr);
-    Clone->setOperand(1, LaneVal);
+    Clone->setOperand(1, MaskedVal);
     Builder.Insert(Clone, RMW.getName() + ".lane");
     Result = Builder.CreateInsertElement(Result, Clone, Builder.getInt32(Lane));
   }
@@ -3835,6 +3877,19 @@ void FunctionWidener::widenGroupSharedAtomicCmpXchg(AtomicCmpXchgInst &CmpXchg,
   // `WidenedAggregateComponents` instead of collected into one `Widened`
   // vector, mirroring `widenAggregateSelect`/`widenInsertValue`'s own
   // per-leaf storage convention.
+  //
+  // (Roadmap L240) Same masking gap `widenGroupSharedAtomicRMW` had: a
+  // masked-off lane's clone must not modify memory. A `cmpxchg` has no
+  // identity operand the way an `atomicrmw` does, but forcing the
+  // comparison to fail achieves the same no-op: load the current value
+  // and compare against its bitwise complement instead (guaranteed to
+  // differ from the loaded value for any integer width, and HLSL's
+  // groupshared `InterlockedCompareExchange` is only ever integer-typed),
+  // so the masked-off lane's `cmpxchg` always takes its "no match" path --
+  // no store, and its returned "old value" is the value already there.
+  // Safe for the same "dispatch is sequential, not thread-pooled" reason
+  // `widenGroupSharedAtomicRMW`'s own masked `Xchg` load-then-write-back
+  // is.
   Value *Ptr = CmpXchg.getPointerOperand();
   bool PtrDivergent = Widened.count(Ptr) != 0;
   Value *WidePtr = PtrDivergent ? Widened[Ptr] : nullptr;
@@ -3855,9 +3910,15 @@ void FunctionWidener::widenGroupSharedAtomicCmpXchg(AtomicCmpXchgInst &CmpXchg,
         WideCmp, Builder.getInt32(Lane), "lane.cmp");
     Value *LaneNew = Builder.CreateExtractElement(
         WideNew, Builder.getInt32(Lane), "lane.new");
+    Value *LaneMask = Builder.CreateExtractElement(
+        Env.SideEffectMask, Builder.getInt32(Lane), "lane.mask");
+    Value *LoadedVal = Builder.CreateLoad(ValueTy, LanePtr, "lane.old");
+    Value *MismatchedCmp = Builder.CreateNot(LoadedVal, "lane.cmp.mismatch");
+    Value *MaskedCmp = Builder.CreateSelect(LaneMask, LaneCmp, MismatchedCmp,
+                                            "lane.cmp.masked");
     Instruction *Clone = CmpXchg.clone();
     Clone->setOperand(0, LanePtr);
-    Clone->setOperand(1, LaneCmp);
+    Clone->setOperand(1, MaskedCmp);
     Clone->setOperand(2, LaneNew);
     Builder.Insert(Clone, CmpXchg.getName() + ".lane");
     Value *LaneValue = Builder.CreateExtractValue(Clone, 0, "lane.value");

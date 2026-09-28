@@ -17,11 +17,20 @@
 ; step R23, closing the "access through a getelementptr" gap
 ; feme/docs/Roadmap.md's §1.6 recorded).
 
+; Roadmap L240: each lane's value operand is masked against
+; `%wave_sideeffect_mask` (`select i1 %lane.mask, i32 1, i32 0`, using
+; `getAtomicRMWIdentity`'s `add`-identity `0` for a masked-off lane) --
+; without this, a workgroup whose invocation count isn't a multiple of
+; the SIMD wave width would over-execute this `atomicrmw` for the last
+; wave's inactive padding lanes, corrupting the accumulator (see
+; `widenMaskedAtomicRMW`'s identical, pre-existing masking for
+; resource-heap atomics, mirrored here for groupshared ones).
+
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
-; CHECK-COUNT-4: %shared.flat{{[0-9]*}} = getelementptr i8, ptr %wave_groupshared, i64 0
-; CHECK: atomicrmw add ptr %shared.flat{{[0-9]*}}, i32 1 monotonic
+; CHECK-COUNT-4: %lane.mask{{[0-9]*}} = extractelement <4 x i1> %wave_sideeffect_mask, i32 {{[0-9]}}
+; CHECK: atomicrmw add ptr %shared.flat{{[0-9]*}}, i32 %lane.val.masked{{[0-9]*}} monotonic
 define void @main() #0 {
   %old = atomicrmw add ptr addrspace(3) @shared, i32 1 monotonic
   ret void

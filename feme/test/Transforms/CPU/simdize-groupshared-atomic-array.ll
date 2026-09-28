@@ -14,12 +14,19 @@
 ; `insertelement`/`shufflevector` `feme::cpu::rewriteGroupSharedGlobals`
 ; cannot see through.
 
+; Roadmap L240: each lane's value operand is masked against
+; `%wave_sideeffect_mask` (`select i1 %lane.mask, i32 1, i32 0`, using
+; `getAtomicRMWIdentity`'s `add`-identity `0` for a masked-off lane) --
+; see simdize-groupshared-atomic-scalar.ll's comment for the full
+; rationale, identical here.
+
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
 ; CHECK-NOT: addrspace(3)
 ; CHECK: %shared.flat = getelementptr i8, ptr %wave_groupshared, i64 0
 ; CHECK-NEXT: %ptr{{[0-9]*}} = getelementptr inbounds [4 x i32], ptr %shared.flat, i32 0, i32 2
-; CHECK-COUNT-4: atomicrmw add ptr %ptr{{[0-9]*}}, i32 1 monotonic
+; CHECK-COUNT-4: %lane.mask{{[0-9]*}} = extractelement <4 x i1> %wave_sideeffect_mask, i32 {{[0-9]}}
+; CHECK: atomicrmw add ptr %ptr{{[0-9]*}}, i32 %lane.val.masked{{[0-9]*}} monotonic
 define void @main() #0 {
   %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 2
   %old = atomicrmw add ptr addrspace(3) %ptr, i32 1 monotonic
