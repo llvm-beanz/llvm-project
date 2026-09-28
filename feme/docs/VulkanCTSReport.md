@@ -2603,3 +2603,77 @@ convention.
 needed -- this fix corrects existing, already-exposed core-1.0
 pipeline color-blend-state behavior (`logicOpEnable`), it doesn't
 add/remove any advertised feature or extension.
+
+## Roadmap L240: groupshared-atomic partial-wave masking gap -- root-caused and fixed
+
+`dEQP-VK.pipeline.monolithic.spec_constant.compute.local_size.{xyz,z}`
+(2 of `L237`'s own residual cases) failed with `Fail (Values did not
+match)`. Both cases use `layout(local_size_x_id = 1/2/3) in;` (SPIR-V
+`OpExecutionModeId LocalSizeId`), a specialization-constant-driven
+workgroup size -- the initial working theory was that this ICD applies
+a compute shader's declared/default local size rather than honoring
+the specialization-constant override.
+
+That theory turned out to be a red herring. Systematically testing all
+7 `local_size` subcases (`x`=7, `y`=5, `z`=3, `xy`=24, `xz`=27, `yz`=10,
+`xyz`=105 total invocations) found every case whose total invocation
+count was *not* a multiple of the default SIMD `WaveSize` (4) failed
+identically; only `xy` (24, a multiple of 4) passed. The qpa log's own
+byte-offset detail pinpointed the mismatch to the shader's `checksum`
+field (a groupshared `atomicAdd` accumulator) -- not `gl_WorkGroupSize`
+itself, which was written correctly (as `{3,5,7}`) in every case. The
+entire spec-constant/`LocalSizeId`/`gl_WorkGroupSize` resolution chain
+(`GroupSize.cpp`'s `resolveComputeGroupSize`,
+`SpecializationPatch.cpp`'s `patchSpecializationConstants`,
+`SPIRVToLLVMPatterns.cpp`'s `prepareSpecConstants`/
+`ReferenceOfConversionPattern`, `Pipeline.cpp`'s
+`compileComputePipeline`) was confirmed entirely correct.
+
+The real bug: `FunctionWidener::widenGroupSharedAtomicRMW` and
+`widenGroupSharedAtomicCmpXchg` (`SIMDize.cpp`) unconditionally cloned
+a groupshared atomic once per SIMD lane across the *entire* `WaveSize`,
+with no masking against `Env.SideEffectMask` at all -- unlike the
+sibling `widenMaskedAtomicRMW` (resource/buffer atomics), which already
+masks a divergent/inactive lane's value operand using
+`getAtomicRMWIdentity`'s no-op-substitution technique. In a workgroup
+whose total invocation count isn't a multiple of `WaveSize`, the last
+(partial) wave's padding/inactive lanes still executed a real,
+unmasked `atomicAdd`, silently over-counting the groupshared
+accumulator by exactly the padding-lane count (`xyz`: expected 105,
+got 108 -- a 3-lane overcount, matching the 1-real/3-padding split of
+the last 4-lane wave for a 105-invocation dispatch).
+
+Fixed by masking each lane's clone before it executes:
+- `widenGroupSharedAtomicRMW`: `select(LaneMask, LaneVal, IdentityVal)`
+  as the value operand, where `IdentityVal` is `getAtomicRMWIdentity`'s
+  identity constant for the op (or a plain load-then-writeback for
+  `Xchg`, which has no identity element -- safe because dispatch is
+  sequential, not thread-pooled, mirroring `widenMaskedAtomicRMW`'s own
+  `Xchg` handling). Errors out for any other identity-less op.
+- `widenGroupSharedAtomicCmpXchg`: no natural identity exists for a
+  compare-exchange, so a masked-off lane's comparand is instead forced
+  to a guaranteed mismatch -- the bitwise complement of a freshly
+  loaded current value -- so its `cmpxchg` always takes the "no match,
+  no store" path.
+
+`ninja check-feme`: 3359/3359 (61 unsupported, 0 failed, up from
+3357 -- 2 net new unit tests: `MasksGroupSharedAtomicRMWAgainstSideEffectMask`,
+`MasksGroupSharedAtomicCmpXchgAgainstSideEffectMask`). The two
+pre-existing groupshared-`atomicrmw` FileCheck tests
+(`simdize-groupshared-atomic-{scalar,array}.ll`) and one existing unit
+test's `ExtractElementCount` assertion were updated for the new masked
+value-operand IR shape. `check-hlsl-feme-vk`: unchanged, 483 Pass / 32
+XFAIL / 207 Not supported, 0 unexpected failures.
+
+Real CTS: all 7 `local_size` subcases now individually confirmed
+**Pass** (checksums matching exactly, no more overcounts). A full
+`spec_constant.*` re-run (1413 cases) shows **776 Pass, 18 Fail, 619
+Not supported** -- zero `local_size` failures remain; the 18 residual
+failures are an unrelated `composite.matrix.{mat2x3,mat3,mat4x3}`
+cluster (compute + 5 graphics stages), newly discovered by this
+broader re-run and filed as `L242`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a compute-dispatch correctness fix to already-
+implemented core-1.0 behavior (SIMD widening of groupshared atomics
+during CPU codegen), not a new feature or extension landing.
