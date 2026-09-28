@@ -953,7 +953,7 @@ TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
   auto *Graphics = static_cast<GraphicsPipeline *>(Obj);
   EXPECT_EQ(Graphics->colorAttachmentCount(), 1u);
   EXPECT_EQ(Graphics->sampleCount(), 1u);
-  EXPECT_FALSE(Graphics->needsDepthAttachment());
+  EXPECT_FALSE(Graphics->needsDepthAttachment(DynamicGraphicsState{}));
   EXPECT_EQ(Graphics->vertexStage().getStage(), feme::ShaderStage::Vertex);
   EXPECT_EQ(Graphics->fragmentStage().getStage(), feme::ShaderStage::Fragment);
 
@@ -2107,6 +2107,58 @@ TEST_F(GraphicsPipelineTest, DynamicDepthTestEnableToleratesNoDepthAttachment) {
   VkPipeline Pipe = VK_NULL_HANDLE;
   ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
   ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap L250) `needsDepthAttachment`'s own draw-time check must
+/// consult \p Dynamic's actual current value when depth test/write is
+/// dynamic, not merely the fact that it is dynamic -- otherwise a draw
+/// through this same pipeline against a depth-less render target (legal
+/// per `DynamicDepthTestEnableToleratesNoDepthAttachment` above, which
+/// this test's pipeline shape matches exactly) would be spuriously
+/// rejected by `CommandBuffer.cpp`'s `resolveDrawAttachments` even though
+/// the app dynamically disabled both states before the draw, exactly the
+/// `dEQP-VK.pipeline.*.multisample.compatible_render_pass.dynamic` shape
+/// that originally surfaced this gap (a genuine `DeviceLost` at
+/// `vkQueueSubmit`, not a pipeline-creation-time rejection).
+TEST_F(GraphicsPipelineTest, NeedsDepthAttachmentConsultsDynamicValueNotJustDynamism) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+                                 VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+  // `Info.renderPass` (set by `makeCreateInfo`) is the fixture's
+  // depth-less `Pass`.
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+
+  // Both dynamic states left at their default-false value (as if the app
+  // called `vkCmdSetDepthTestEnable(..., VK_FALSE)`/`vkCmdSetDepthWrite
+  // Enable(..., VK_FALSE)` before the draw): no depth attachment needed.
+  DynamicGraphicsState BothDisabled;
+  EXPECT_FALSE(Graphics->needsDepthAttachment(BothDisabled));
+
+  // The app instead enables the dynamic test at draw time: a depth
+  // attachment genuinely is needed now.
+  DynamicGraphicsState TestEnabled;
+  TestEnabled.DepthTestEnable = true;
+  EXPECT_TRUE(Graphics->needsDepthAttachment(TestEnabled));
+
+  DynamicGraphicsState WriteEnabled;
+  WriteEnabled.DepthWriteEnable = true;
+  EXPECT_TRUE(Graphics->needsDepthAttachment(WriteEnabled));
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);

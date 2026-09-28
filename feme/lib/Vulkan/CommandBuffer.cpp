@@ -1876,11 +1876,11 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
                              "but the render target has %zu",
                              Pipeline.colorAttachmentCount(),
                              Gfx.Binding.Colors.size());
-  if (Pipeline.needsDepthAttachment() && !Gfx.Binding.Depth)
+  if (Pipeline.needsDepthAttachment(Gfx.Dynamic) && !Gfx.Binding.Depth)
     return createStringError(inconvertibleErrorCode(),
                              "the bound pipeline tests/writes depth but the "
                              "render target has no depth attachment");
-  if (Pipeline.needsStencilAttachment() && !Gfx.Binding.Stencil)
+  if (Pipeline.needsStencilAttachment(Gfx.Dynamic) && !Gfx.Binding.Stencil)
     return createStringError(inconvertibleErrorCode(),
                              "the bound pipeline tests stencil but the "
                              "render target has no stencil attachment");
