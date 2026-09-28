@@ -3977,3 +3977,69 @@ but a different format -- likely a small, mechanical fix following this
 session's own precedent once confirmed, but not yet triaged past the
 one repro and the matching `FEME_VULKAN_LOG_CREATION_ERRORS=1`
 diagnostic.
+
+## Roadmap L252: `A4R4G4B4_UNORM`/`A4B4G4R4_UNORM` fixture format support -- fixed
+
+Found via `L251`'s own broader `dEQP-VK.api.image_clearing.*` (5200-case)
+re-run: `dEQP-VK.api.image_clearing.core.clear_color_image.1d.linear.
+multiple_layers.a4b4g4r4_unorm_pack16` hit a genuine `DeviceLost`,
+confirmed pre-existing via `git stash` (reproduces identically without
+`L251`'s own fix). `FEME_VULKAN_LOG_CREATION_ERRORS=1` showed the exact
+same error class `L251` found: "image fixture format is not yet
+supported".
+
+`ImageFixture.cpp`'s test-fixture layer had only a diagnostic name
+string for `VK_EXT_4444_formats`'s two formats (`A4R4G4B4_UNORM`/
+`A4B4G4R4_UNORM`, added under roadmap E19 alongside a `bytesPerBlockFor`
+byte-size entry, `Format.cpp`) -- no `getFormatInfo`/`packClearColor`/
+`unpackColor` case, the same gap shape `L251` found and fixed for
+`R10G10B10A2_SINT`.
+
+Fixed both formats together (same underlying gap, both siblings) by
+adding a case to all three functions, mirroring `R4G4B4A4_UNORM`/
+`B4G4R4A4_UNORM`'s own packed-16-bit shape (a single opaque 2-byte word,
+4 bits per component) but with alpha at the MSB, per the Vulkan spec's
+own bit layout for these two formats: `A4R4G4B4_UNORM_PACK16` is
+`A[15:12] R[11:8] G[7:4] B[3:0]`; `A4B4G4R4_UNORM_PACK16` is the same
+with R and B swapped.
+
+New unit tests: `ImageFixtureTest.PacksAndUnpacksA4R4G4B4Unorm`/
+`PacksAndUnpacksA4B4G4R4Unorm`, each a round-trip pack/unpack of a
+4-distinguishable-component color, plus a check that the two formats'
+own R/B swap actually produces a different packed bit pattern for the
+same input (mirroring `PacksAndUnpacksB4G4R4A4Unorm`'s own precedent).
+
+**Verified against the real CTS**:
+- `dEQP-VK.api.image_clearing.core.clear_color_image.
+  *a4b4g4r4_unorm_pack16*` (206 cases): **200 Pass, 0 Fail**, 6 Not
+  supported (unrelated MSAA gaps) -- was a harness-aborting
+  `DeviceLost`.
+- `dEQP-VK.api.image_clearing.core.clear_color_image.
+  *a4r4g4b4_unorm_pack16*` (206 cases, the sibling format, same fix):
+  **200 Pass, 0 Fail**, 6 Not supported.
+- A broader `dEQP-VK.api.image_clearing.*` (45636-case) sweep now
+  completes without aborting -- 22089 Pass, 939 Fail, 22608 Not
+  supported; none of the 939 failures reference either format (all
+  pre-existing, unrelated buckets).
+
+**Build/test verification**:
+- `FeMeGraphicsTests`: 376/376 Passed (+2 net new unit tests).
+- `ninja` (full project): clean.
+- `ninja check-feme`: 3394 Passed, 61 Unsupported, 0 Failed (was
+  3392/61/0).
+- `ninja check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL / 207 Not
+  supported.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- these two formats' `VK_EXT_4444_formats` extension
+  exposure already existed (roadmap E19); this is a transfer-path
+  correctness fix only, no new feature/extension surface.
+
+**New finding, not fixed this session (filed as `L253`)**: a systematic
+audit of every `ResourceFormat` with a name-only fixture-diagnostic
+entry (present in `ImageFixture.cpp`'s diagnostic-name/
+`parseFixtureFormat` functions but missing a `getFormatInfo` case) is
+still not done, despite two independent instances of this exact bug
+class being found and fixed in this session alone (`L251`, `L252`).
+Worth a dedicated pass cross-referencing every `ResourceFormat`
+enumerator against `getFormatInfo`'s own case list before another one
+surfaces as a surprise `DeviceLost` in some future CTS run.
