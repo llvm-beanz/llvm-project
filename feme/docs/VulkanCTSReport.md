@@ -1908,3 +1908,114 @@ re-run for this entry (root-causing/documentation only).
 (no code landed; `VK_KHR_timeline_semaphore` remains listed as
 implemented, this is a known-gap note added to the roadmap, not an
 inventory-level claim change).
+
+## Roadmap L228(h)/L228(i): async `vkQueueSubmit` (`QueueExecutor`-per-`VkQueue`) -- fixed
+
+Implemented the architectural fix the prior `L228(h)`/`L228(i)` entry
+above recommended a dedicated session for: `vkQueueSubmit`/
+`vkQueueSubmit2` no longer execute a submission synchronously inside
+the call. Each `VkQueue` (`Objects.h`) now owns a dedicated
+`QueueExecutor` (`Sync.h`/`Sync.cpp`) -- a worker thread with its own
+FIFO task queue. `vkQueueSubmit`/`vkQueueSubmit2` parse every
+submission's waits/command buffers/signals on the calling thread
+(reading only caller-supplied structs and already-existing objects, so
+this needs no locking), enqueue one task per `VkSubmitInfo`/
+`VkSubmitInfo2` (plus one trailing fence-signal task, if a fence was
+given) onto that queue's `QueueExecutor`, and return `VK_SUCCESS`
+immediately -- never blocking on an unmet wait. `vkQueueWaitIdle`/
+`vkDeviceWaitIdle`/`vkWaitForFences` now genuinely block on that queued
+work instead.
+
+A submission's own failure -- an unmet wait past its bounded safety-net
+timeout, or a command-buffer execution error -- can no longer be
+reported synchronously through a `vkQueueSubmit` call that has already
+returned. This now latches `Device::isLost()` (`Objects.h`) instead,
+exactly the "Device loss is latched once: subsequent queue/device
+operations return `VK_ERROR_DEVICE_LOST`" mechanism
+`FeMeVulkanDesign.md` had already specified as the intended behavior
+for this case, just not yet implemented.
+
+Fixing this exposed two further pre-existing, previously-dormant bugs,
+both fixed in the same session:
+
+1. Every `feme/unittests/Vulkan/` fixture that calls `vkQueueSubmit`
+   had implicitly relied on the retired synchronous model's in-call
+   execution to make its own `VkQueue` handle irrelevant: the *old*
+   `vkQueueSubmit`'s own `queue` parameter was unused entirely, so no
+   fixture had ever needed a genuinely valid handle.
+   `DrawTest.cpp`'s own device fixture created its `VkDevice` with
+   `queueCreateInfoCount == 0` (already spec-invalid, but silently
+   tolerated), so its `vkGetDeviceQueue(Device, 0, 0, &Queue)` call
+   returned `VK_NULL_HANDLE` -- previously harmless, now a genuine
+   null-pointer dereference the instant `vkQueueSubmit` actually
+   dereferences its `queue` argument to find that queue's own
+   `QueueExecutor`. Fixed by giving that fixture a real
+   `VkDeviceQueueCreateInfo` requesting family 0.
+2. ~80 `DrawTest.cpp` test cases call a shared `submit()` helper and
+   then immediately read back rendered pixel data, assuming
+   synchronous completion. Fixed with a single change inside `submit()`
+   itself (an added `vkQueueWaitIdle` call after `vkQueueSubmit`) rather
+   than touching each of the ~80 call sites. 11 `Rejects*`-style tests
+   that asserted a synchronous `VK_ERROR_INITIALIZATION_FAILED` return
+   from `submit()` for a command-buffer-execution-time validation
+   failure (e.g. drawing outside a render pass, an out-of-bounds
+   indirect draw) were updated to expect `VK_ERROR_DEVICE_LOST` instead,
+   matching the new latched-device-loss reporting path (`submit()`
+   itself now returns `vkQueueWaitIdle`'s result).
+
+New/rewritten unit tests in `SyncTest.cpp`:
+`QueueSubmitReturnsPromptlyThenCompletesAfterHostSignal` (replaces the
+old, now behaviorally inverted
+`QueueSubmitBlocksUntilHostSignalsTimelineSemaphore` -- confirms
+`vkQueueSubmit` returns in well under the artificial signal delay, and
+that the real dependency is still honored, just observed later via a
+fence), `TimelineSemaphoreCrossQueueSubmitChainCompletesAfterHostSignal`
+(the actual `one_to_n`/`wait_before_signal`-shaped regression test --
+submits a two-queue dependent chain, wait-before-anything-signals, then
+releases it with one host `vkSignalSemaphore` call, confirming both
+`vkQueueSubmit` calls return promptly and the whole chain later
+completes via `vkQueueWaitIdle` on both queues),
+`SubmitEnqueuesPromptlyThenLatchesDeviceLostOnUnmetBinaryWait`,
+`BinarySemaphoreSecondWaitWithoutNewSignalLatchesDeviceLost`, and the
+`vkQueueSubmit2` counterparts of each (all mirroring the `vkQueueSubmit`
+versions through the `VkSubmitInfo2`/`VkSemaphoreSubmitInfo` shape).
+
+**Build/test:** `ninja check-feme`: 3335/3396 Passed, 61 Unsupported, 0
+regressions. The full 740-case `FeMeVulkanTests` GoogleTest suite
+(`ninja FeMeVulkanTests`) passes with 0 failures (up from 720 tests
+before this session's `SyncTest.cpp`/`DrawTest.cpp` additions).
+
+**CTS-confirmed:**
+
+- `dEQP-VK.synchronization*.one_to_n.*`: **1910/1910 Pass** (was 100%
+  failing before this fix).
+- `dEQP-VK.synchronization*.wait_before_signal.*`: **1910/1910 Pass**
+  (was 100% failing before this fix).
+- A fresh, wider random sample of 3500 cases from the full mustpass
+  `timeline_semaphore` cluster (`synchronization2.txt`, not restricted
+  to `one_to_n`/`wait_before_signal`), run via `run_vulkan_cts.py`:
+  **1178 Pass, 0 Fail, 2322 Not supported** -- confirms no regressions
+  elsewhere in the broader `timeline_semaphore` group from this change.
+- `check-hlsl-feme-vk` (offload-test-suite, `feme` branch at `adf0fc1`):
+  unchanged at 461/722 Pass / 31 XFAIL / 221 Not supported / 9 Fail --
+  no regression from this change.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a correctness/liveness fix to already-advertised
+`VK_KHR_timeline_semaphore`/queue-submission functionality, not a new
+feature landing.
+
+**Known gap disclosed, not fixed this session (tracked as roadmap
+`L228(j)`):** making command-buffer execution genuinely asynchronous
+relative to the calling thread exposed a descriptor-set
+update-after-bind data race that was structurally impossible under the
+old synchronous model: `DescriptorSet` (`Descriptor.h`) has no internal
+locking and returns live `ArrayRef`s from its getters, so
+`vkUpdateDescriptorSets` running on the calling thread can now race
+with a background `QueueExecutor` worker thread still consuming that
+same descriptor set from an earlier submission. Left unfixed (feature
+bits stay `VK_TRUE`, since the sequential update-then-submit pattern
+the CTS and real applications overwhelmingly use is unaffected, and no
+CTS regression was observed) but disclosed in both
+`FeMeVulkanDesign.md`'s "Threading Rules" section and the roadmap for a
+future session.
