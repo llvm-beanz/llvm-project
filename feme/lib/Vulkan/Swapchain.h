@@ -23,21 +23,21 @@
 // destructor is what frees both, mirroring `vkDestroyImage`/`vkFreeMemory`'s
 // combined effect.
 //
-// This ICD's `vkQueueSubmit` already executes every command buffer
-// synchronously on the calling thread (Sync.h's own file comment: a real
-// fence/semaphore is always already in its final state by the time
-// anything could observe it). Acquire/present inherit that same
-// simplification directly: there is no real display and therefore no real
-// presentation latency to model, so `vkAcquireNextImageKHR` signals its
-// semaphore/fence immediately rather than after any real wait, and
-// `vkQueuePresentKHR`'s own wait semaphores are consumed the same way
-// `vkQueueSubmit`'s are -- an unresolved one is a genuine application
-// ordering error (`VK_ERROR_INITIALIZATION_FAILED`), not something this
-// synchronous driver could ever resolve by waiting longer. Out-of-date
-// detection is a deliberate non-goal for a headless surface: there is no
-// real window to resize and so no real event that could ever produce
-// `VK_ERROR_OUT_OF_DATE_KHR` on its own (it is still reported once an
-// application retires a swapchain via `oldSwapchain`, the one source of
+// This ICD's `vkAcquireNextImageKHR` signals its semaphore/fence
+// immediately rather than after any real wait: there is no real display
+// and therefore no real presentation latency to model. `vkQueuePresentKHR`'s
+// own wait semaphores, though, are consumed the same genuinely-blocking way
+// `vkQueueSubmit`'s are (roadmap L228(h)/(i), `Sync.h`'s own file comment):
+// the render work a present waits for may still be executing on its own
+// `VkQueue`'s dedicated worker thread when present is called, so an
+// unresolved wait here is not automatically an application ordering error
+// the way it was under this ICD's original, retired synchronous execution
+// model -- only a wait that is *still* unresolved after `Sync.h`'s own
+// safety-net timeout is treated as one (`VK_ERROR_INITIALIZATION_FAILED`).
+// Out-of-date detection is a deliberate non-goal for a headless surface:
+// there is no real window to resize and so no real event that could ever
+// produce `VK_ERROR_OUT_OF_DATE_KHR` on its own (it is still reported once
+// an application retires a swapchain via `oldSwapchain`, the one source of
 // out-of-dateness this ICD can genuinely produce).
 //
 //===----------------------------------------------------------------------===//

@@ -212,10 +212,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     return timeout == 0 ? VK_NOT_READY : VK_TIMEOUT;
 
   *pImageIndex = *Index;
-  // Every acquired image is immediately ready: this ICD's queue executes
-  // synchronously (Sync.h), so there is no real "GPU still using this
-  // image" latency to wait out -- signal both objects up front, matching
-  // `vkQueueSubmit`'s own synchronous fence/semaphore signaling.
+  // Every acquired image is immediately ready: there is no real "GPU
+  // still using this image" latency to wait out for a headless surface,
+  // so unlike a real submission's own signal (now asynchronous, roadmap
+  // L228(h)/(i)), both objects are signaled up front, immediately.
   if (semaphore != VK_NULL_HANDLE)
     fromHandle<Semaphore>(semaphore)->signalBinary();
   if (fence != VK_NULL_HANDLE)
@@ -241,9 +241,11 @@ vkAcquireNextImage2KHR(VkDevice device,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR *pPresentInfo) {
   // Present's own wait semaphores are consumed the same way
-  // `vkQueueSubmit`'s are (Sync.cpp) -- an unresolved one here is a real
-  // application ordering error, not something this synchronous, single-
-  // queue driver could ever wait out (see Swapchain.h's own comment).
+  // `vkQueueSubmit`'s are (Sync.cpp): `waitAndConsumeBinary` (`Sync.h`)
+  // genuinely blocks (roadmap L228(h)/(i)), since the semaphore signaled
+  // by the render work this present is meant to wait for may still be
+  // executing on that work's own `VkQueue`'s dedicated worker thread by
+  // the time this call is made.
   for (uint32_t I = 0; I != pPresentInfo->waitSemaphoreCount; ++I) {
     if (!fromHandle<Semaphore>(pPresentInfo->pWaitSemaphores[I])
              ->waitAndConsumeBinary())

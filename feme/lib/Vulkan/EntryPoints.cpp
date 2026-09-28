@@ -1508,19 +1508,44 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderInputAttachmentArrayNonUniformIndexing = VK_FALSE;
       Features->shaderUniformTexelBufferArrayNonUniformIndexing = VK_FALSE;
       Features->shaderStorageTexelBufferArrayNonUniformIndexing = VK_FALSE;
-      // (roadmap L12b) `vkQueueSubmit` executes every submission fully
-      // synchronously (see `vkDeviceWaitIdle`'s own comment below), and
-      // command interpretation (`executeCommandsInto`/`runDispatch`/
-      // `buildBoundResources`, `CommandBuffer.cpp`) happens at submission
-      // time, not at record time -- so there is never a real "pending"
-      // window during which a concurrent descriptor update could race with
-      // in-flight use. Any `vkUpdateDescriptorSets` call made any time
-      // before `vkQueueSubmit` returns is guaranteed visible to that
-      // submission, matching this project's existing "vacuously true"
-      // precedent (e.g. `shaderSubgroupExtendedTypes`). Confirmed by a real
-      // dispatch (`CommandBufferTest.cpp`'s
+      // (roadmap L12b) Command interpretation
+      // (`executeCommandsInto`/`runDispatch`/`buildBoundResources`,
+      // `CommandBuffer.cpp`) happens at submission time, not at record
+      // time, and (previously) `vkQueueSubmit` executed every submission
+      // fully synchronously on the calling thread, so there was never a
+      // real "pending" window during which a concurrent descriptor update
+      // could race with in-flight use: any `vkUpdateDescriptorSets` call
+      // made any time before `vkQueueSubmit` returned was guaranteed
+      // visible to that submission, matching this project's existing
+      // "vacuously true" precedent (e.g. `shaderSubgroupExtendedTypes`).
+      // Confirmed by a real dispatch (`CommandBufferTest.cpp`'s
       // `DescriptorUpdatedAfterBindingIsVisibleAtSubmission`) for every
       // descriptor type below that is otherwise genuinely usable today.
+      //
+      // (Roadmap L228(h)/(i), tracked follow-up) `vkQueueSubmit` now
+      // enqueues a submission onto its `VkQueue`'s own dedicated
+      // `QueueExecutor` worker thread and returns immediately (`Sync.h`'s
+      // file comment) -- the actual update-after-bind pattern this
+      // feature bit exists for (an application calling
+      // `vkUpdateDescriptorSets` *after* `vkQueueSubmit` returns, while
+      // that submission may still be executing on its own worker thread)
+      // is now a genuine, if narrow, data race: `DescriptorSet`
+      // (`Descriptor.h`) has no locking of its own, and its
+      // `bindingArray`/`imageBindingArray`/`inlineUniformBlockData`
+      // getters return live `ArrayRef`s into its storage rather than
+      // copies. `DescriptorUpdatedAfterBindingIsVisibleAtSubmission`'s own
+      // update-then-submit ordering is unaffected (still race-free -- the
+      // update fully happens-before the enqueue), so these feature bits
+      // stay `VK_TRUE` rather than regressing a real, tested, and
+      // spec-common usage pattern; only the *concurrent*
+      // update-during-in-flight-submission pattern is newly exposed, and
+      // is not yet covered by a test. Fixing it for real needs
+      // `DescriptorSet`'s storage to be locked (and its getters changed
+      // to return copies rather than live references), a refactor that
+      // touches much of `CommandBuffer.cpp`'s descriptor-consumption code
+      // -- out of scope for the L228(h)/(i) change that introduced this
+      // gap; see the roadmap's own L228(h)/(i) entry for the follow-up
+      // item this is tracked under.
       // `descriptorBindingStorageImageUpdateAfterBind` stays false because
       // storage images are not usable at all yet -- `Format.cpp` never
       // sets `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` on any format, so no
@@ -1531,11 +1556,17 @@ void fillFeatures2Chain(void *pNext) {
       Features->descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
       Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
       Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
-      // (roadmap L12b) Same synchronous-submission reasoning as the
-      // update-after-bind cluster above applies here too.
+      // (roadmap L12b) Same reasoning as the update-after-bind cluster
+      // above applies here too, including its now-tracked
+      // concurrent-in-flight-submission race (roadmap L228(h)/(i)
+      // follow-up) -- `DescriptorSet`'s `std::map`-based storage
+      // (`Descriptor.h`) has no locking, so even an "unused" binding's
+      // update can race with a different, in-flight binding's read at the
+      // container level (e.g. tree rebalancing during insertion).
       // `descriptorBindingUpdateUnusedWhilePending` promises an *unused*
-      // binding may be updated while other bindings are in use -- always
-      // true given there is never a real in-flight window at all.
+      // binding may be updated while other bindings are in use -- true for
+      // every *sequential* update-then-submit ordering, which is all any
+      // existing test exercises.
       // `descriptorBindingPartiallyBound` promises a statically-declared
       // binding may have some invalid/unwritten elements, which
       // `Descriptor.h`'s own zero-fill-on-unwritten behavior already
@@ -2814,11 +2845,17 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetDeviceQueue2(
   *pQueue = toHandle<VkQueue>(Q);
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkDeviceWaitIdle(VkDevice) {
-  // vkQueueSubmit executes every submission synchronously (see Sync.h's
-  // file comment), so every queue is always already idle by the time this
-  // is called.
-  return VK_SUCCESS;
+VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkDeviceWaitIdle(VkDevice device) {
+  // (Roadmap L228(h)/(i)) Drains every queue's own `QueueExecutor`
+  // (`Sync.h`/`Objects.h`) rather than assuming everything is already
+  // idle -- a `VkQueue`'s own worker thread may still be running or
+  // waiting on a submission's own task.
+  Device *Dev = fromHandle<Device>(device);
+  if (Dev->isLost())
+    return VK_ERROR_DEVICE_LOST;
+  if (!Dev->waitIdle())
+    return VK_TIMEOUT;
+  return Dev->isLost() ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
