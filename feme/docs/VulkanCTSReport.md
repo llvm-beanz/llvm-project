@@ -2019,3 +2019,81 @@ the CTS and real applications overwhelmingly use is unaffected, and no
 CTS regression was observed) but disclosed in both
 `FeMeVulkanDesign.md`'s "Threading Rules" section and the roadmap for a
 future session.
+
+## Roadmap L228(j): DescriptorSet locking against concurrent update/dispatch -- fixed
+
+Fixed the descriptor-set update-after-bind data race disclosed above.
+`DescriptorSet` (`Descriptor.h`) now guards the *contents* of its
+per-binding arrays with a `std::mutex` (the map keys themselves are
+fixed for a set's whole lifetime, set once from its immutable
+`DescriptorSetLayout`, so only element contents needed guarding):
+`write`/`writeInlineUniformBlock` lock while mutating, and
+`bindingArray`/`imageBindingArray`/`inlineUniformBlockData` now return
+a snapshot `std::vector<T>` copy taken under the same lock instead of
+a live `llvm::ArrayRef` into storage a concurrent write could still
+mutate afterward.
+
+Building against the new by-value return type surfaced two
+dangling-reference bugs via clang's `-Wdangling-gsl`: one pre-existing
+(`vkUpdateDescriptorSets`'s own `VkCopyDescriptorSet` copy loops
+indexed straight into a temporary `ArrayRef`) and one this change would
+otherwise have newly introduced (`CommandBuffer.cpp`'s
+inline-uniform-block dispatch path pointed a materialized
+`FemeDescriptor`'s `Data` at a now-by-value local that does not
+outlive `buildBoundResources`) -- both fixed, the latter via a new
+`MaterializedBoundResources::InlineUniformBlockStorage` owned-copy
+slot.
+
+New regression test:
+`DescriptorTest.ConcurrentUpdateDescriptorSetsDoesNotRaceWithDispatchRead`
+(a writer thread alternates `vkUpdateDescriptorSets` between two
+fully-defined canonical states while a reader thread snapshots
+`bindingArray`, asserting every read matches one whole state rather
+than a torn mix of both). Verified via a temporary A/B test (locks
+manually disabled, fix otherwise untouched) that this test fails
+reliably (11-20 of 15-20 runs) without the fix and passes reliably
+(20/20) with it; also confirmed clean under Helgrind
+(`valgrind --tool=helgrind`, installed via `apt` for this session, 0
+errors from 0 contexts) as a lighter-weight substitute for a full
+ThreadSanitizer rebuild of this in-tree LLVM+clang toolchain (judged
+too expensive for this session's time budget).
+
+**`ninja check-feme`:** 3336/3397 Passed, 61 Unsupported, **0 Failed**
+(+1 net new unit test over the prior session's 3335/3396). Needed two
+`check-feme` runs during development: the *first* version of the new
+regression test had its own bug (started the reader thread
+concurrently with the writer's very first update, so a heavily loaded
+machine -- `check-feme`'s own 12-way sharding -- could let the
+reader's first iteration observe the constructor's legitimate initial
+`Buf == nullptr` state before any write had landed, misreporting it as
+a torn read); fixed by seeding one synchronous write before starting
+either thread, then re-confirmed 0 Failed across two full re-runs.
+
+**CTS-confirmed:** a 3115-case sample (`binding-model.txt`'s
+`VK_EXT_mutable_descriptor_type` cases excluded, since FeMe does not
+support that unrelated extension -- 3000 remaining `binding-model.txt`
+cases plus all 115 of `descriptor-indexing.txt`) shows **1908 Pass, 0
+Fail, 1207 Not supported**, consistent with `L228`'s own prior
+full-suite `binding_model` baseline (87,669/150,289 Pass). Notably,
+`descriptor-indexing.txt`'s own cases -- and, it turns out, every
+`binding-model.txt` case actually named `update_after_bind` -- are
+exclusively inside the `mutable_descriptor` group and report
+`NotSupported` regardless of this fix (gated on the broader
+`descriptorIndexing` aggregate feature bit, deliberately left
+`VK_FALSE` per roadmap `L12b`, and on `VK_EXT_mutable_descriptor_type`,
+unsupported): this fix has no currently-reachable CTS coverage of its
+own specific race (no mustpass case genuinely exercises
+concurrent-thread descriptor updates), consistent with the disclosed
+gap's own original note that CTS's sequential update-then-submit usage
+was always unaffected either way. This is purely a
+robustness/correctness fix for a genuinely concurrent multi-threaded
+application, verified via the new unit test and Helgrind rather than
+CTS pass/fail deltas.
+
+**`check-hlsl-feme-vk`:** unchanged, 461/722 Pass / 31 XFAIL / 221 Not
+supported / 9 Fail (same known `L227(a)`-`(d)` failures, no new
+regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- feature-bit exposure is unchanged; this is an
+internal-locking correctness fix only, not a new feature landing.
