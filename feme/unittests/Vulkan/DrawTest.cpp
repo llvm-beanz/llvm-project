@@ -8839,6 +8839,131 @@ TEST_F(DrawTest, MultiviewClearAttachmentsClearsEveryViewsOwnLayer) {
   vkFreeMemory(Device, LayeredMemory, nullptr);
 }
 
+/// (Roadmap L228(c)) `vkCmdClearAttachments` over a *non*-multiview,
+/// multi-layer render pass instance must clear every layer named by each
+/// `VkClearRect`'s own `baseArrayLayer`/`layerCount` -- unlike the
+/// multiview case above (where the mask, not the rect, names the layers),
+/// here the rect is the *only* thing naming which layers to clear.
+/// Previously `clearAttachmentRects` ignored the rect's own layer range
+/// entirely outside multiview, hard-coding a single shared iteration at
+/// layer 0 for every rect regardless of what `baseArrayLayer`/`layerCount`
+/// actually named -- exactly what a real `dEQP-VK.api.image_clearing.
+/// core.clear_color_attachment.multiple_layers.*` run surfaced (this row's
+/// own root cause): a clear naming all 3 layers only ever reached layer 0,
+/// leaving layers 1 and 2 at their pre-clear (render-pass load-op) value.
+TEST_F(DrawTest, ClearAttachmentsClearsEveryLayerNamedByItsOwnRect) {
+  constexpr uint32_t LayerCount = 3;
+
+  VkImage LayeredImage = VK_NULL_HANDLE;
+  VkDeviceMemory LayeredMemory = VK_NULL_HANDLE;
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {Extent, Extent, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = LayerCount;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &LayeredImage),
+            VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, LayeredImage, &Reqs);
+  VkMemoryAllocateInfo MemAllocInfo{};
+  MemAllocInfo.allocationSize = Reqs.size;
+  ASSERT_EQ(vkAllocateMemory(Device, &MemAllocInfo, nullptr, &LayeredMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, LayeredImage, LayeredMemory, 0),
+            VK_SUCCESS);
+
+  VkImageView LayeredView = VK_NULL_HANDLE;
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = LayeredImage;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = LayerCount;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &LayeredView),
+            VK_SUCCESS);
+
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &Pass),
+            VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.pAttachments = &LayeredView;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = LayerCount;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb), VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValue{};
+  ClearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = Pass;
+  PassBegin.framebuffer = Fb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 1;
+  PassBegin.pClearValues = &ClearValue;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  // No draw at all: every layer starts black from the render pass's own
+  // load-op clear. A single `vkCmdClearAttachments` rect naming all 3
+  // layers must turn every one of them blue -- a wrong "still black"
+  // result on layers 1/2 is already a sufficient, simple regression
+  // signal for this row's own bug (no need to also draw red first).
+  VkClearAttachment Clear{};
+  Clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  Clear.colorAttachment = 0;
+  Clear.clearValue.color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+  VkClearRect Rect{};
+  Rect.rect = {{0, 0}, {Extent, Extent}};
+  Rect.baseArrayLayer = 0;
+  Rect.layerCount = LayerCount;
+  vkCmdClearAttachments(Cmd, 1, &Clear, 1, &Rect);
+
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Every layer -- not just layer 0 -- is blue: the clear rect's own
+  // `baseArrayLayer`/`layerCount` reached every one of them.
+  const auto *Data =
+      static_cast<const uint8_t *>(fromHandle<Image>(LayeredImage)->data());
+  size_t LayerSizeBytes = (size_t)Extent * Extent * 4;
+  for (uint32_t L = 0; L != LayerCount; ++L) {
+    const uint8_t *Layer = Data + L * LayerSizeBytes;
+    EXPECT_EQ(Layer[2], 0xFF) << "layer " << L << " blue channel";
+    EXPECT_EQ(Layer[0], 0x00) << "layer " << L << " red channel";
+  }
+
+  vkDestroyFramebuffer(Device, Fb, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+  vkDestroyImageView(Device, LayeredView, nullptr);
+  vkDestroyImage(Device, LayeredImage, nullptr);
+  vkFreeMemory(Device, LayeredMemory, nullptr);
+}
+
 /// (Roadmap H2i) A classic, multi-subpass `VkRenderPass` where every
 /// subpass shares one `VK_ATTACHMENT_LOAD_OP_CLEAR` color attachment but
 /// each declares its own, disjoint-or-repeated multiview `viewMask` --

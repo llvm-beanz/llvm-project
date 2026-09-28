@@ -477,14 +477,23 @@ Error runClearDepthStencilImage(Image *Img,
 /// (`RenderTargetBinding::ViewMask`, 0 outside multiview) makes the clear
 /// apply once per set bit, to that bit's own attachment array layer --
 /// exactly the replication `CommandBuffer.cpp`'s own `runDraw` already
-/// applies via `sliceAttachmentLayer`, and precisely because a clear rect's
-/// own `baseArrayLayer`/`layerCount` are relative to the current subpass's
-/// view mask rather than the underlying attachment image's own layers (the
-/// Vulkan spec's "if there is no VkRenderPassMultiviewCreateInfo... clears
-/// baseArrayLayer/layerCount; otherwise clears the views listed in the
-/// mask" `vkCmdClearAttachments` rule). Every non-multiview attachment
-/// (`ViewMask == 0`) is unaffected: the mask normalizes to `1u`, one
-/// iteration at layer 0, matching every call before this milestone.
+/// applies via `sliceAttachmentLayer` -- because each \p Rect's own
+/// `baseArrayLayer`/`layerCount` must both be `0`/`1` under multiview (the
+/// mask, not the rect, names the layers there) per the Vulkan spec's
+/// `vkCmdClearAttachments` rule ("if there is no
+/// `VkRenderPassMultiviewCreateInfo`... clears `baseArrayLayer`/
+/// `layerCount`; otherwise clears the views listed in the mask").
+///
+/// (Roadmap L228(c)) Outside multiview (`ViewMask == 0`), each \p Rect's
+/// own `baseArrayLayer`/`layerCount` instead name the actual attachment
+/// array-layer range *that rect* clears -- previously ignored entirely (a
+/// single shared range was hoisted above the whole rect loop, always
+/// `layer 0` alone), so a `VK_ATTACHMENT_LOAD_OP_CLEAR`-then-
+/// `vkCmdClearAttachments` sequence over more than one layer only ever
+/// touched layer `0`, leaving every other named layer at its pre-clear
+/// (render-pass load-op) value. Each rect can name a different layer
+/// range, so the per-layer iteration is keyed off each rect rather than
+/// the whole call.
 Error clearAttachmentRects(const RenderTargetView &Target,
                           ArrayRef<VkClearRect> Rects, uint32_t ViewMask,
                           llvm::function_ref<Error(MutableArrayRef<uint8_t>)>
@@ -498,25 +507,23 @@ Error clearAttachmentRects(const RenderTargetView &Target,
   if (!ElemSize)
     return ElemSize.takeError();
 
-  for (uint32_t Mask = ViewMask ? ViewMask : 1u, ViewIndex = 0; Mask != 0;
-       ++ViewIndex, Mask >>= 1) {
-    if ((Mask & 1u) == 0)
-      continue;
-    feme::graphics::AttachmentView Sliced = *View;
-    if (!Sliced.Data.empty() && Sliced.ArrayLayers > 1) {
-      uint64_t LayerSizeBytes = Sliced.Data.size() / Sliced.ArrayLayers;
-      uint64_t Offset =
-          feme::graphics::getAttachmentLayerByteOffset(ViewIndex, LayerSizeBytes);
-      Sliced.Data = Sliced.Data.slice(Offset, LayerSizeBytes);
-      Sliced.ArrayLayers = 1;
-    }
-    for (const VkClearRect &Rect : Rects) {
-      uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
-      uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
-      uint32_t MaxX = std::min<uint64_t>(
-          Sliced.Width, uint64_t(MinX) + Rect.rect.extent.width);
-      uint32_t MaxY = std::min<uint64_t>(
-          Sliced.Height, uint64_t(MinY) + Rect.rect.extent.height);
+  for (const VkClearRect &Rect : Rects) {
+    uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
+    uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
+    uint32_t MaxX = std::min<uint64_t>(
+        View->Width, uint64_t(MinX) + Rect.rect.extent.width);
+    uint32_t MaxY = std::min<uint64_t>(
+        View->Height, uint64_t(MinY) + Rect.rect.extent.height);
+
+    auto ClearLayer = [&](uint32_t Layer) -> Error {
+      feme::graphics::AttachmentView Sliced = *View;
+      if (!Sliced.Data.empty() && Sliced.ArrayLayers > 1) {
+        uint64_t LayerSizeBytes = Sliced.Data.size() / Sliced.ArrayLayers;
+        uint64_t Offset =
+            feme::graphics::getAttachmentLayerByteOffset(Layer, LayerSizeBytes);
+        Sliced.Data = Sliced.Data.slice(Offset, LayerSizeBytes);
+        Sliced.ArrayLayers = 1;
+      }
       for (uint32_t Y = MinY; Y < MaxY; ++Y)
         for (uint32_t X = MinX; X < MaxX; ++X)
           for (uint32_t S = 0; S != Target.SampleCount; ++S) {
@@ -527,6 +534,23 @@ Error clearAttachmentRects(const RenderTargetView &Target,
                     Sliced.Data.data() + Offset, *ElemSize)))
               return E;
           }
+      return Error::success();
+    };
+
+    if (ViewMask) {
+      for (uint32_t Mask = ViewMask, ViewIndex = 0; Mask != 0;
+           ++ViewIndex, Mask >>= 1) {
+        if ((Mask & 1u) == 0)
+          continue;
+        if (Error E = ClearLayer(ViewIndex))
+          return E;
+      }
+    } else {
+      for (uint32_t Layer = Rect.baseArrayLayer,
+                    End = Rect.baseArrayLayer + Rect.layerCount;
+           Layer != End; ++Layer)
+        if (Error E = ClearLayer(Layer))
+          return E;
     }
   }
   return Error::success();
