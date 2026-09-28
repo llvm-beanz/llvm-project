@@ -61,27 +61,29 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** `L242`: triage the newly discovered 18-case
-   `spec_constant.*.composite.matrix.{mat2x3,mat3,mat4x3}` cluster (compute + 5
-   graphics stages) -- not yet triaged past the qpa symptom. Start by
-   decompiling one case's SPIR-V (e.g.
-   `spec_constant.compute.composite.matrix.mat2x3`) to find which matrix
-   element(s) actually mismatch.
-2. **(a few hours)** `L238`: `no_position.*`
+1. **(a few hours)** `L238`: `no_position.*`
    vertex-shaders-without-explicit-position stage-interface-matching gap --
-   still open, carried over multiple sessions.
-3. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
-   pipeline-create-flags may need real implementation beyond this one
-   derivative-recreation case.
-4. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
-   -- confirmed format-independent, needs new image-view/addressing code.
-5. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
+   carried over many sessions, still not root-caused past the `vkQueueSubmit`
+   error string (`"vertex stage output -> hull stage input: element 1 has no
+   matching producer element"`).
+2. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
+   pipeline-create-flags -- one derivative-recreation case confirmed, other flag
+   combinations unchecked.
+3. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
+   -- confirmed format-independent, needs new image-view/addressing code, not
+   just a flag-gate widening.
+4. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
    `/6` layer-count fix -- classification-level surgery, unchanged for many
    sessions.
-6. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+5. **(a few hours, still carried over)** Pick one of `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
    sessions now.
-7. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
-   broader-than-tessellation CTS sample further -- `pipeline`'s other sub-suites
-   and `shader_render` remain completely unsampled.
+6. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+   broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
+   `shader_render` remain completely unsampled.
+7. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
+   branch -- confirmed drifting every session (known root cause:
+   `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
+   unconditionally). `git log --oneline feme -3` should show `9351791`; `git
+   reset --hard 9351791` if not.
