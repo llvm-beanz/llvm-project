@@ -4069,3 +4069,66 @@ real gaps that existed (`R10G10B10A2_SINT`; `A4R4G4B4_UNORM`/
 `A4B4G4R4_UNORM`). No code change from this audit; a clean, conclusive
 negative result closes out this recurring "still not done" carry-forward
 item.
+
+## Roadmap L228(k): subpass color attachments never resolved without a draw
+
+Root cause: a render-pass/dynamic-rendering subpass's multisample color
+attachment was only ever resolved into its `pResolveAttachments`/
+`resolveImageView` target as a side effect of `Executor.cpp`'s per-draw
+box-filter-average resolve (`PreparedDraw::ResolveAttachments`). A
+subpass whose only command was `vkCmdClearAttachments` -- no draw at
+all -- never triggered that resolve, so the single-sample resolve
+target kept whatever memory it already held (in practice, frequently a
+prior test case's own leftover clear color from the same allocator
+slot), producing the `(0,0,0,0)`-and-worse garbage readback this
+roadmap row's own filed description first observed.
+
+Fix: `resolveSubpassColorAttachments` (`ImageOps.cpp`), the identical
+box-filter-average resolve `Executor.cpp` already performs per draw,
+called once per subpass boundary from `CommandBuffer.cpp`'s
+`NextSubpass`/`EndRenderPass` handling, against the subpass now ending
+(before its `RenderTargetView` binding is replaced or discarded).
+Covers both classic render passes and `vkCmdBeginRendering`/
+`vkCmdEndRenderingKHR` (the latter records the same internal
+`EndRenderPass` command). A subpass that also issued a draw simply
+resolves the same, already-correct data a second time -- harmless.
+
+New unit test: `DrawTest.ResolvesMultisampleColorAfterClearAttachmentsWithNoDraw`
+seeds the resolve target with a distinct color, clears the multisample
+attachment via `vkCmdClearAttachments` alone (no pipeline/draw at all),
+and confirms the resolve target picks up the cleared color rather than
+the seed. Confirmed via `git stash` A/B to fail (the seed color leaks
+through) without this fix.
+
+Verified against the real Vulkan CTS:
+- `dEQP-VK.api.image_clearing.core.clear_color_attachment.single_layer.
+  *sample_count_4*`: **0 Fail** (136/294 Pass, up from 136 Fail/0 Pass).
+- `dEQP-VK.api.image_clearing.core.clear_color_attachment.*` (5145
+  cases): **0 Fail** (1564 Pass, 3581 NotSupported).
+- `dEQP-VK.api.image_clearing.*` (the full suite, 45636 cases): **0
+  Fail** (23028 Pass, 22608 NotSupported). This also silently absorbed
+  the 939 "pre-existing, unrelated" failures `L252`'s own broader sweep
+  noted last session -- 22089 + 939 == 23028 exactly, confirming they
+  were this same bug all along, not a separate, still-open issue.
+
+`FeMeVulkanTests`: 763/763 (was 762/762, +1 new test).
+`check-feme`: 3395 Passed, 61 Unsupported, 0 Failed (was 3394/61/0).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- a core-1.0 render-pass-resolve correctness fix, no feature-bit or
+extension exposure change.
+
+**Aside, not a regression**: `check-hlsl-feme-vk` now reports 2 new
+failures (`Feature/SpecializationConstant/spec_const_32_bits.test`,
+`WaveOps/WaveActiveMax.test`) and 1 new unexpected pass
+(`Feature/PushConstant/array_of_matrices.test`) versus the prior
+session's own 483/32/207 baseline. Confirmed via `git stash` A/B (this
+row's own fix reverted, rebuilt, re-run) that this reproduces
+identically either way -- caused entirely by the `offload-test-suite`
+`feme` branch itself moving forward (this session's own standing-check
+re-fetch found it had drifted from `9351791` to a new upstream HEAD,
+`854cc3f`, with different test/XFAIL content), not by this row's fix.
+Left untouched -- syncing that branch's own XFAIL list is a
+`offload-test-suite`-side task, out of scope for a FeMe code-fix
+session, and not something this session's standing instructions ask
+for beyond re-syncing the branch pointer itself (already done).
