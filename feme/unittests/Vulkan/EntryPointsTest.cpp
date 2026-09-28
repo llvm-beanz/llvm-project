@@ -22,6 +22,8 @@
 
 #include "gtest/gtest.h"
 
+#include <cstring>
+
 using namespace feme::vulkan;
 
 namespace {
@@ -219,6 +221,95 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesReportsMultisampleFor2DSampled) {
             VK_SUCCESS);
   EXPECT_TRUE(Props.sampleCounts & VK_SAMPLE_COUNT_2_BIT);
   EXPECT_TRUE(Props.sampleCounts & VK_SAMPLE_COUNT_4_BIT);
+}
+
+// (Roadmap L233) `VK_IMAGE_TILING_LINEAR` must always report
+// `VK_SAMPLE_COUNT_1_BIT`, never a wider mask -- unlike the identical
+// `VK_IMAGE_TILING_OPTIMAL` request just above, which does report
+// multisample support for this same format/type/usage. This used to
+// ignore `tiling` entirely and only exclude non-2D types, so a linear 2D
+// image incorrectly inherited the same wide `sampleCounts` mask an
+// optimal 2D image reports (`dEQP-VK.api.info.image_format_properties.
+// 2d.linear.r32_sfloat`'s own "sampleCounts != VK_SAMPLE_COUNT_1_BIT").
+TEST_F(EntryPointsTest, ImageFormatPropertiesReportsSingleSampleForLinear2D) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_EQ(Props.sampleCounts, VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT));
+}
+
+// (Roadmap L233) A cube-compatible 2D image can never be multisampled
+// either (real Vulkan's own `VUID-VkImageCreateInfo-flags-02259`), same
+// class of gap as the linear-tiling case above -- both were previously
+// missed by a gate that only excluded non-2D types.
+TEST_F(EntryPointsTest,
+      ImageFormatPropertiesReportsSingleSampleForCubeCompatible2D) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, &Props),
+            VK_SUCCESS);
+  EXPECT_EQ(Props.sampleCounts, VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT));
+}
+
+// (Roadmap L233) A `VK_IMAGE_TYPE_1D` image's own `height`/`depth` must
+// always be exactly 1 (`VUID-VkImageCreateInfo-imageType-00956`), never
+// `maxImageDimension1D` -- the previous `{MaxExtentXY, MaxExtentXY,
+// MaxDepth}` triple incorrectly set `height` to the same wide value as
+// `width` for every 1D format (`dEQP-VK.api.info.image_format_properties.
+// 1d.*`'s own "Invalid dimensions for 1D image" check, which every 1D
+// case failed).
+TEST_F(EntryPointsTest, ImageFormatProperties1DReportsUnitHeightAndDepth) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_1D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_GT(Props.maxExtent.width, 1u);
+  EXPECT_EQ(Props.maxExtent.height, 1u);
+  EXPECT_EQ(Props.maxExtent.depth, 1u);
+}
+
+// (Roadmap L233) The spec requires `maxResourceSize` to be at least 2^31
+// for every supported combination, regardless of what the real maximal
+// image of that shape would occupy -- a 3D image is capped at
+// `maxImageDimension3D` (256 on this device) on every axis with no array
+// layers to multiply by, so even a comparatively wide format's real
+// dimension-based byte count never reaches 2^31
+// (`dEQP-VK.api.info.image_format_properties.3d.linear.d16_unorm`'s own
+// "maxResourceSize smaller than minimum required size").
+TEST_F(EntryPointsTest, ImageFormatPropertiesReportsMinimumResourceSizeFor3D) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_D16_UNORM, VK_IMAGE_TYPE_3D,
+                VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_GE(Props.maxResourceSize, VkDeviceSize(1) << 31);
+}
+
+// (Roadmap L233) The spec requires every field of `*pImageFormatProperties`
+// to be zero whenever `VK_ERROR_FORMAT_NOT_SUPPORTED` is returned -- this
+// used to leave the caller's own buffer untouched, so a caller (like the
+// CTS itself) that pre-fills its buffer with a recognizable pattern before
+// the call sees that pattern leak straight through on the error path.
+TEST_F(EntryPointsTest, ImageFormatPropertiesZeroesOutputOnFormatNotSupported) {
+  VkImageFormatProperties Props;
+  std::memset(&Props, 0xcd, sizeof(Props));
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_PVRTC1_2BPP_UNORM_BLOCK_IMG,
+                VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_ERROR_FORMAT_NOT_SUPPORTED);
+  EXPECT_EQ(Props.maxExtent.width, 0u);
+  EXPECT_EQ(Props.maxExtent.height, 0u);
+  EXPECT_EQ(Props.maxExtent.depth, 0u);
+  EXPECT_EQ(Props.maxMipLevels, 0u);
+  EXPECT_EQ(Props.maxArrayLayers, 0u);
+  EXPECT_EQ(Props.sampleCounts, VkSampleCountFlags(0));
+  EXPECT_EQ(Props.maxResourceSize, VkDeviceSize(0));
 }
 
 // (Roadmap H8f) A sampled depth format used to intersect the *color*

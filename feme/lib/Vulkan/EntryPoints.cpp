@@ -2599,7 +2599,7 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
 VKAPI_ATTR VkResult VKAPI_CALL
 feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
     VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type,
-    VkImageTiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
+    VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
     VkImageFormatProperties *pImageFormatProperties) {
   // Roadmap E24: this used to unconditionally return
   // `VK_ERROR_FORMAT_NOT_SUPPORTED` for every format/type/usage/flags
@@ -2610,6 +2610,19 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   // command before creating any image at all, of any format.
   const PhysicalDeviceInfo &Info =
       fromHandle<PhysicalDevice>(physicalDevice)->getInfo();
+  // (Roadmap L233) The spec requires every field of `*pImageFormatProperties`
+  // to be zero whenever this command returns `VK_ERROR_FORMAT_NOT_SUPPORTED`
+  // -- zeroing unconditionally up front, before any of the below checks can
+  // return that error, means every one of those early-return sites below
+  // automatically satisfies it without each needing its own zeroing (the
+  // eventual `VK_SUCCESS` path further down overwrites every field anyway,
+  // so this is a no-op on that path). Previously left whatever the caller's
+  // own buffer already held (`dEQP-VK.api.info.image_format_properties.*`'s
+  // own "maxExtent.width != 0"/etc. checks on the
+  // `VK_ERROR_FORMAT_NOT_SUPPORTED` path, most visibly for
+  // `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`-flagged 2D `VK_IMAGE_TILING_LINEAR`
+  // combinations, which this device does not support at all).
+  *pImageFormatProperties = {};
   std::optional<feme::cpu::ResourceFormat> Format = mapVkFormat(format);
   if (!Format)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -2665,51 +2678,79 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
   const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
-  uint32_t MaxExtentXY;
+  // (Roadmap L233) `MaxWidth` is every type's own widest axis; `MaxHeight`/
+  // `MaxDepth` default to 1 and are only widened for the types whose shape
+  // actually has a second/third axis at all -- a 1D image's own `height`
+  // and `depth` are *always* 1 (`VUID-VkImageCreateInfo-imageType-00956`),
+  // never `maxImageDimension1D`, which the previous
+  // `{MaxExtentXY, MaxExtentXY, MaxDepth}` triple below incorrectly
+  // reported for every 1D format/tiling combination
+  // (`dEQP-VK.api.info.image_format_properties.1d.*`'s own "Invalid
+  // dimensions for 1D image" check, which every 1D case failed, not just
+  // the linear-tiling subset a random sample happened to draw).
+  uint32_t MaxWidth;
+  uint32_t MaxHeight = 1;
   uint32_t MaxDepth = 1;
   switch (type) {
   case VK_IMAGE_TYPE_1D:
-    MaxExtentXY = Limits.maxImageDimension1D;
+    MaxWidth = Limits.maxImageDimension1D;
     break;
   case VK_IMAGE_TYPE_2D:
-    MaxExtentXY = (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)
-                      ? Limits.maxImageDimensionCube
-                      : Limits.maxImageDimension2D;
+    MaxWidth = MaxHeight = (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)
+                               ? Limits.maxImageDimensionCube
+                               : Limits.maxImageDimension2D;
     break;
   case VK_IMAGE_TYPE_3D:
-    MaxExtentXY = Limits.maxImageDimension3D;
-    MaxDepth = Limits.maxImageDimension3D;
+    MaxWidth = MaxHeight = MaxDepth = Limits.maxImageDimension3D;
     break;
   default:
     llvm_unreachable("unhandled VkImageType");
   }
 
   VkImageCreateInfo MaxProbe = ShapeProbe;
-  MaxProbe.extent = {MaxExtentXY, MaxExtentXY, MaxDepth};
-  MaxProbe.mipLevels = llvm::Log2_32(std::max(MaxExtentXY, MaxDepth)) + 1;
+  MaxProbe.extent = {MaxWidth, MaxHeight, MaxDepth};
+  MaxProbe.mipLevels =
+      llvm::Log2_32(std::max({MaxWidth, MaxHeight, MaxDepth})) + 1;
   MaxProbe.arrayLayers =
       type == VK_IMAGE_TYPE_3D ? 1 : Limits.maxImageArrayLayers;
   VkSampleCountFlags SampleCounts = supportedSampleCounts(Info, usage, Format);
-  // A multisample image is only ever a single-mip 2D one
-  // (`isValidImageShape`'s own `VUID-VkImageCreateInfo-samples-02257` check
-  // above), but that is a property of *a* multisample image's own shape
-  // (samples > 1 implies mipLevels == 1), not of `MaxProbe`'s unrelated
-  // maximal, non-multisampled mip chain -- checking `MaxProbe.mipLevels`
-  // here instead reported `VK_SAMPLE_COUNT_1_BIT` for essentially every 2D
-  // format (whose maximal image always has more than one mip level),
-  // permanently hiding every wider sample count `supportedSampleCounts`
-  // above already computes correctly (`dEQP-VK.glsl.texture_functions.
-  // query.texturesamples.*`, whose `OpImageQuerySamples` case list assumes
-  // a 2D sampled image can report more than one).
-  if (type != VK_IMAGE_TYPE_2D)
+  // A multisample image is only ever a single-mip, non-cube-compatible,
+  // *optimally*-tiled 2D one (`isValidImageShape`'s own
+  // `VUID-VkImageCreateInfo-samples-02257`/`-flags-02259` checks above,
+  // plus `VUID-VkImageCreateInfo-tiling-04121`, which additionally
+  // disallows `VK_IMAGE_TILING_LINEAR` on a multisample image outright) --
+  // every other type/tiling/flags combination must report exactly
+  // `VK_SAMPLE_COUNT_1_BIT` here regardless of what `supportedSampleCounts`
+  // above would otherwise allow for this format/usage alone
+  // (`dEQP-VK.api.info.image_format_properties.2d.linear.*`'s own
+  // "sampleCounts != VK_SAMPLE_COUNT_1_BIT" check, which every 2D *linear*
+  // case failed since only `type != VK_IMAGE_TYPE_2D` was ever excluded,
+  // never `tiling == VK_IMAGE_TILING_LINEAR` or a cube-compatible 2D
+  // image).
+  if (type != VK_IMAGE_TYPE_2D || tiling != VK_IMAGE_TILING_OPTIMAL ||
+      (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
     SampleCounts = VK_SAMPLE_COUNT_1_BIT;
 
   pImageFormatProperties->maxExtent = MaxProbe.extent;
   pImageFormatProperties->maxMipLevels = MaxProbe.mipLevels;
   pImageFormatProperties->maxArrayLayers = MaxProbe.arrayLayers;
   pImageFormatProperties->sampleCounts = SampleCounts;
+  // The Vulkan spec requires `maxResourceSize` to "be at least 2^31" for
+  // *every* supported format/type/tiling/usage/flags combination,
+  // independent of whatever a real maximal-shape image of this format
+  // would actually occupy -- a `VK_IMAGE_TYPE_3D` image is capped at
+  // `maxImageDimension3D` (256 on this device) on every axis with no
+  // array layers to multiply by (3D images cannot be arrayed,
+  // `VUID-VkImageCreateInfo-imageType-00961`), so even the widest 3D
+  // format this device maps (16 bytes/texel) never reaches 2^31 bytes by
+  // real dimensions alone (`dEQP-VK.api.info.image_format_properties.3d.
+  // linear.d16_unorm`'s own "maxResourceSize smaller than minimum required
+  // size" check) -- `computeImageCreateInfoSize`'s real, dimension-based
+  // answer is still reported whenever it is *larger* than this floor (2D
+  // images with the full `maxImageArrayLayers` multiplier routinely are).
   pImageFormatProperties->maxResourceSize =
-      computeImageCreateInfoSize(MaxProbe, *Format);
+      std::max<VkDeviceSize>(computeImageCreateInfoSize(MaxProbe, *Format),
+                              VkDeviceSize(1) << 31);
   return VK_SUCCESS;
 }
 
