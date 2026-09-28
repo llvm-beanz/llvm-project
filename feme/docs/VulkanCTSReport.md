@@ -2385,3 +2385,68 @@ Clustered the 228 unexpected non-Pass results by top-level group:
 needed -- this is a verification-only sampling run, no source changed
 as part of it (the `L233`/`L234` findings are filed as new roadmap
 items for future sessions to fix, not fixed here).
+
+## Roadmap L233: `vkGetPhysicalDeviceImageFormatProperties` ignoring `VkImageTiling`
+
+Root-caused and fixed all 3 distinct bugs the ignored `VkImageTiling`
+parameter caused, discovered by the previous session's broad
+15000-case sample:
+
+1. `sampleCounts` ignored `tiling`/cube-compatible `flags` entirely,
+   only excluding non-2D `type`s -- fixed by forcing
+   `VK_SAMPLE_COUNT_1_BIT` whenever `tiling != VK_IMAGE_TILING_OPTIMAL`
+   or the image is cube-compatible.
+2. A `VK_IMAGE_TYPE_1D` image's `maxExtent.height` was incorrectly set
+   to the same wide value as `width` -- this affected *every* 1D
+   format/tiling combination, not just linear tiling. Fixed by
+   properly zeroing the unused axes per image type.
+3. `maxResourceSize` was computed purely from real dimensions, but the
+   spec requires at least 2^31 bytes reported for every supported
+   combination -- fixed by clamping to that floor.
+
+Also fixed a related bug found while chasing (1): none of this
+function's `VK_ERROR_FORMAT_NOT_SUPPORTED` early-return paths zeroed
+`*pImageFormatProperties`, violating the spec's "all fields zero on
+this error" requirement.
+
+**Verification**: ran the full 5778-case
+`dEQP-VK.api.info.image_format_properties.*` mustpass list (not a
+sample -- small enough to run in full):
+
+- **Before this session's fix**: only spot-checked individual repros
+  (all failing), full-list numbers not previously gathered.
+- **After**: **3261 Pass, 221 Fail, 2296 NotSupported** (of 5778).
+  Every one of the 221 remaining failures is
+  `VK_ERROR_FORMAT_NOT_SUPPORTED returned for required image parameter
+  combination` for a `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`-flagged,
+  `VK_IMAGE_TILING_OPTIMAL` combination (confirmed by direct
+  inspection of several: `2d.optimal.r8g8b8a8_unorm`,
+  `3d.optimal.r32_sfloat`, etc.) -- a real, separate mutable-format
+  support gap in `isValidImageShape` (`Image.cpp`), unrelated to
+  `VkImageTiling`. Filed as `L235`.
+- Spot-checked all 6 originally-cited repro cases individually --
+  all now Pass:
+  `2d.linear.r32_sfloat`, `1d.linear.bc2_unorm_block`,
+  `1d.linear.d24_unorm_s8_uint`, `3d.linear.d16_unorm`,
+  `1d.linear.r32_sfloat`, `1d.optimal.r32_sfloat` (the last one
+  actually still fails for the same `L235` `MUTABLE_FORMAT_BIT` reason
+  once the tiling bugs above no longer mask it -- included for
+  completeness, not a regression).
+
+`dEQP-VK.api.version_check.entry_points`/
+`dEQP-VK.api.get_device_proc_addr.non_enabled` (the 2 adjacent
+failures from the original broad sample) were checked and confirmed
+**not** to share `L233`'s root cause -- both fail on a distinct,
+unrelated entry-point-exposure gap (missing several Vulkan 1.4 core
+functions from `vkGetDeviceProcAddr`, plus at least one
+disabled-extension function incorrectly exposed). Filed as `L236`.
+
+`check-feme`: 3352/3413 Passed, 61 Unsupported, 0 Failed (+6 net new
+unit tests). `check-hlsl-feme-vk`: 483/722 Pass, 32 XFAIL, 207 Not
+supported, 0 Fail (both unchanged from before this fix -- no
+HLSL/DXC-facing test exercises this query directly).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fix corrects an existing, already-exposed core 1.0
+query's own reported values; it does not change which
+features/extensions this device advertises.
