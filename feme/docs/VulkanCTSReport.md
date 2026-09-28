@@ -2530,3 +2530,76 @@ needed -- both fixes correct existing, already-exposed core-1.0
 behavior (clear-color format coverage, device-lost reporting
 promptness); neither changes which features/extensions this device
 advertises.
+
+## Roadmap L237: `logic_op`/`logic_op_na_formats` genuine DeviceLost -- hardcoded 3-format allowlist
+
+**Symptom**: `L234`'s own 15-case residual sample (regenerated from the
+same surviving `/tmp/broad_cts_l233/sample_15000.txt` fixed-seed draw,
+filtered to the 6 named `pipeline.monolithic.*` groups that weren't
+`sampler.*`, widened to an 84-case candidate set) reported **10
+DeviceLost, 3 Fail, 1 InternalError, 24 NotSupported, 46 Pass** --
+`DeviceLost` dominating was the same symptom class `L234` had just
+fixed, a strong prior for another silently-swallowed error rather than
+a real hang.
+
+**Root cause**: `FEME_VULKAN_LOG_CREATION_ERRORS=1` on a
+`logic_op_na_formats.r16_sfloat.copy_noblend` repro surfaced
+`vkQueueSubmit: logic ops are only implemented for
+R8G8B8A8_UNORM/_UINT/_SINT attachments (mechanical, added on demand)`
+-- `Executor.cpp`'s `mergeColor` hardcoded `LogicOpEnable` to exactly 3
+formats, erroring (device-lost) for anything else. Two distinct
+sub-bugs: (1) `logic_op_na_formats.*`'s whole point -- floating-point/
+sRGB attachments don't support logic ops per spec at all, and must
+silently behave as if blending were disabled, not error; (2)
+`logic_op.*`'s other real integer formats (`R32_UINT`,
+`R32G32_UINT`, `R8_UINT`, ...) need real byte-level logic-op
+application generalized beyond the 1-byte-per-component/4-byte-texel
+assumption implicitly tied to `R8G8B8A8`'s own shape.
+`RenderPass.cpp`'s `isSupportedColorAttachmentFormat` was cross-checked
+as the authoritative list to enumerate the exact float/sRGB exclusion
+set (`R32_FLOAT`, `R32G32_FLOAT`, `R32G32B32_FLOAT`,
+`R32G32B32A32_FLOAT`, `R16G16B16A16_FLOAT`, `R16_FLOAT`,
+`R16G16_FLOAT`, `R11G11B10_FLOAT`, `R8G8B8A8_UNORM_SRGB`,
+`B8G8R8A8_UNORM_SRGB`).
+
+**Fix**: new `formatSupportsLogicOp` predicate (false only for the
+enumerated float/sRGB formats) and `logicOpComponentByteWidth`
+(`std::optional<unsigned>`, 1/2/4 bytes/component for every
+uniform-width, natural-R/G/B/A-memory-order integer/normalized format).
+`mergeColor` restructured: `if (LogicOpEnable &&
+formatSupportsLogicOp(Format))` runs a generalized byte-level op sized
+to the real texel width, gated per-component by `WriteMask`; the
+fallback blend path's gate changed from `if (Blend.BlendEnable)` to
+`if (Blend.BlendEnable && !LogicOpEnable)`, so a `logicOpEnable`-but-
+unsupported-format draw is treated exactly like blend-disabled (per
+spec: enabling logic op always disables blending, regardless of format
+support), not silently blended. Packed (`R10G10B10A2_*`)/
+channel-reordered (`B8G8R8A8_*`, whose `B,G,R,A` memory order doesn't
+match `WriteMask`'s logical `R=0,G=1,B=2,A=3` bit order) formats are
+deliberately left unimplemented -- no CTS case in this sample needs
+either, and both have real, different generalization problems (packed
+sub-byte component boundaries; reordered write-mask-to-byte mapping).
+
+**Verification**: 2 new `ExecutorTest` unit tests
+(`LogicOpXorsOnAFourByteIntegerAttachment` on `R32_UINT`,
+`LogicOpOnAFloatAttachmentBehavesAsBlendDisabled` on
+`R32G32B32A32_FLOAT`). `check-feme`: 3357/3357 (61 unsupported, 0
+failed, up from 3355 -- 2 net new tests). 5 of 6 hand-picked repro
+cases individually confirmed Pass (previously DeviceLost); the 6th
+(`no_position.*`) fails for a distinct, unrelated reason (see `L238`).
+
+Real CTS: the same 84-case candidate sample now reports **54 Pass** (up
+from 46) and **2 DeviceLost** (down from 10, both `no_position.*`,
+confirmed unrelated to this fix).
+
+The remaining 6 residual cases (2 `no_position`, 1 `render_to_image`, 2
+`spec_constant`, 1 `creation_cache_control`) were each root-caused to a
+distinct, non-trivial feature gap -- split off into their own flat
+roadmap entries `L238`-`L241` rather than nested under `L237`, per this
+project's own "avoid nesting milestone letters more than one deep"
+convention.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fix corrects existing, already-exposed core-1.0
+pipeline color-blend-state behavior (`logicOpEnable`), it doesn't
+add/remove any advertised feature or extension.
