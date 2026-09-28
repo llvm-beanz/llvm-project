@@ -3736,3 +3736,46 @@ real fix.
 - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
   change needed -- core-1.0 draw-time attachment-validation
   correctness fix, not a new feature/extension.
+
+## Roadmap L246: `image.mutable.{2d,2d_array}.*` `vkCreateFramebuffer` gap -- already fixed, no change needed
+
+Filed several sessions ago from `L235`'s own verification run as a
+newly-exposed 72-case `dEQP-VK.image.mutable.{2d,2d_array}.*` failure
+at `vkCreateFramebuffer`, predicted to be `isCompatibleAttachmentView`
+(`RenderPass.cpp`) rejecting a view whose format differs from its
+render pass attachment's own declared format for a
+`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`-flagged image.
+
+Re-ran the full `dEQP-VK.image.mutable.*` group this session (10646
+cases, `1d`/`2d`/`2d_array`/`cube`/`cube_array`): **0 Fail** (8484
+Pass, 2162 Not supported for unrelated reasons: `VK_KHR_extended_
+flags` not implemented, or an MSAA sample count this device doesn't
+advertise).
+
+The originally-cited repro case's own MSAA variants
+(`r8g8b8a8_snorm_b8g8r8a8_srgb_draw_copy_resolve_mutable_{color,
+resolve}_att`) are themselves `NotSupported` on this device
+(`VK_SAMPLE_COUNT_1_BIT` is the max available) -- they were never
+actually exercised by the original repro either.
+
+Reading `vktImageMutableTests.cpp`'s `makeRenderPass` explains why
+`isCompatibleAttachmentView`'s exact-format check was never actually a
+problem: the render pass's `VkAttachmentDescription::format` is built
+from `m_caseDef.viewFormat` (the *view's* format), not the base
+image's format, so the attachment description and the framebuffer's
+bound view always agree on format by construction. The
+format-compatible-class mismatch this roadmap row predicted only
+exists between the base image and its view (already handled
+permissively by `vkCreateImageView` since `L235`), never between the
+render pass attachment and the view actually bound to the framebuffer.
+
+No source change made -- this entry was apparently filed from a stale
+or misread repro. Marked done in the roadmap with this session's
+verification.
+
+**Verified against the real CTS**:
+- `dEQP-VK.image.mutable.*` (10646 cases): 8484 Pass, **0 Fail**, 2162
+  Not supported.
+
+**Build/test verification**: no source change, so no rebuild/retest
+was required beyond the CTS verification above.
