@@ -62,27 +62,32 @@ Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
 1. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
-   branch: `git log --oneline feme -3` should show `9351791` at the tip; `git
-   reset --hard 9351791` if it's drifted.
-2. **(1-2 hours)** `L237`: triage the 15 remaining non-`sampler.*`
-   `pipeline.monolithic.*` cases from `L234`'s original sample
-   (`logic_op_na_formats`/`logic_op`/`spec_constant`/`no_position`/`render_to_image`/`creation_cache_control`).
-   Start with `logic_op_na_formats`/`logic_op`'s combined 9-case majority --
-   same naming prefix, plausibly one shared cause.
-3. **(a few hours)** `L235`: mutable-format image support (`isValidImageShape`
-   in `Image.cpp` rejects `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` outright) -- real
-   feature work, not a quick fix, budget a full session.
-4. **(a few hours)** `L236`: missing Vulkan 1.4 core entry points
-   (`vkGetDeviceImageSubresourceLayout`, `vkGetImageSubresourceLayout2`,
-   `vkCmdSetLineStipple`, `vkGetRenderingAreaGranularity`, `KHR` aliases) plus
-   at least one disabled-extension function wrongly exposed via
-   `vkGetDeviceProcAddr`.
-5. **(a few hours, still carried over from multiple prior sessions)** Pick one
-   of `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
-   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears) --
-   unchanged for many sessions now.
-6. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+   branch (drifted a 3rd time this session): `git log --oneline feme -3` should
+   show `9351791` at the tip; `git reset --hard 9351791` if not. Given this has
+   now drifted 3 times across sessions, worth a few minutes at the start of some
+   future session to actually figure out *why* (some other process/cron touching
+   the checkout?) rather than just re-fixing it every time.
+2. **(a few hours)** `L240`: spec-constant-driven `LocalSizeId` for compute
+   dispatch -- smallest-scoped of the 4 new items (2 cases, one clear mechanism
+   once found), good next pick.
+3. **(a few hours)** `L238`: `no_position.*`
+   vertex-shaders-without-explicit-position stage-interface-matching gap -- also
+   fairly contained (2 cases), but the actual validation code path isn't
+   identified yet, unlike `L240`.
+4. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`'s
+   pipeline-create-flags may need real implementation, not just this one
+   derivative-recreation case -- worth checking the extension's other flag
+   combinations while in there.
+5. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
+   -- confirmed format-independent and likely needs new image-view/addressing
+   code, not just a flag-gate widening. Don't underestimate this one going in.
+6. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
+   `/6` layer-count fix -- classification-level surgery, unchanged for many
+   sessions.
+7. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+   `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
+   (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
+   sessions now.
+8. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample further -- `pipeline`'s other sub-suites
-   (`shader-object-*`/`fast-linked-library`/`pipeline-library`/`no-queues`) and
-   `shader_render` (no identified mustpass list yet) remain completely
-   unsampled.
+   and `shader_render` remain completely unsampled.
