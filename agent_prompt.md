@@ -61,20 +61,25 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, unchanged for many sessions)** Pick one of
+1. **(unknown, new roadmap item, ready to pick up)** `L228(k)`: the
+   single-layer-MSAA `(0,0,0,0)` `vkCmdClearAttachments` bug split out
+   this session. Start with `dEQP-VK.api.image_clearing.core.
+   clear_color_attachment.single_layer.*sample_count_4*` at the
+   smallest failing case; check `clearAttachmentRects`'s own sample
+   loop against how the CTS resolves/reads back the MSAA image, or
+   whether FeMe's MSAA barrier/layout-transition handling around the
+   clear has a gap.
+2. **(unknown, new roadmap item, ready to pick up)** `L251`: the
+   `clear_color_image.1d.linear.multiple_layers.a2b10g10r10_sint_
+   pack32` `DeviceLost`. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` first (per `L249`/`L250`'s own
+   now-twice-confirmed lesson) before assuming a runtime-level trace
+   is needed.
+3. **(a few hours, unchanged for many sessions)** Pick one of
    `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
-   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears).
-2. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+   `L228(b)` (compressed-format blits).
+4. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample further -- `shader_render` and
    most of `pipeline`'s other sub-suites remain unsampled at any real
-   scale (this session's own two multisample/depth sweeps, ~103k cases
-   combined, are a start but don't cover those areas).
-3. **(a few hours, still carried over)** `L246`: `dEQP-VK.image.
-   mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer` gap. Filed
-   several sessions ago, still untouched.
-4. **(worth a few minutes, low priority, carried over many sessions)**
-   Audit other FeMe creation-time *and now draw-time* checks for the
-   "over-strict enforcement" pattern (`L241`, now also `L250`) -- two
-   confirmed instances in different code paths (creation-time VUID vs.
-   draw-time attachment-requirement); still no dedicated systematic
-   search done, keeps getting bumped every session.
+   scale. This session's own broader `image_clearing` sweep (5158
+   cases, aborted by `L251`) is a start but far from complete.
