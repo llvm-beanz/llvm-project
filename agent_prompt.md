@@ -61,26 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a full dedicated session, likely the biggest single item left)** Design
-   and implement async `vkQueueSubmit` for `L228(h)`/`L228(i)`: write a short
-   design note in `FeMeVulkanDesign.md` proposing a worker-thread-per-`VkQueue`
-   (or shared pool) model first, then implement it in `Sync.cpp` so
-   `vkQueueSubmit`/`vkQueueSubmit2` return immediately without blocking on an
-   unmet wait, with `vkQueueWaitIdle`/`vkDeviceWaitIdle`/fence-wait blocking on
-   that queued work instead. Confirm whether `Sync.h`'s existing `Semaphore`
-   mutex/condvar (from `L228(a)`) is enough for the needed cross-thread state,
-   and think carefully about whether the CPU executor's image/buffer/pipeline
-   state is safe to touch from a background thread concurrently with further API
-   calls on the caller's own thread.
-2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)` (still open,
-   unchanged since last session) or `L228(b)`/`(c)` (compressed-format blits,
-   MSAA multi-layer clears) -- whichever fits the next session's time budget.
-3. **(a few hours)** `L228(e)`/`L228(f)`: the broader-than-tessellation CTS
-   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is still overdue
-   -- this session's own work stayed scoped to the `timeline_semaphore` cluster
-   only.
+1. **(a few hours, dedicated session)** `L228(j)`: fix the descriptor
+   update-after-bind race disclosed above. Start with a new
+   `DescriptorTest.cpp` test that exercises the race directly (likely
+   needs a thread-sanitizer build to reproduce reliably, not a
+   timing-dependent assertion) before writing the fix. Fix itself:
+   lock `DescriptorSet`'s state, have `CommandBuffer.cpp` read copies
+   instead of live `ArrayRef`s.
+2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)`
+   (still open, unchanged for several sessions now) or `L228(b)`/`(c)`
+   (compressed-format blits, MSAA multi-layer clears) -- whichever fits
+   the next session's time budget.
+3. **(a few hours)** `L228(e)`/`(f)`: the broader-than-tessellation CTS
+   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is now
+   several sessions overdue -- this session's own CTS work stayed
+   scoped to `timeline_semaphore` only (the two target clusters plus a
+   3500-case broader sample of that same cluster, not the wider
+   surface).
 4. **(quick, at the very start of the next session)** Re-check
    `offload-test-suite`'s local `feme` branch before trusting
-   `check-hlsl-feme-vk` exists -- `git log --oneline feme -3` should show
-   `adf0fc1` at the tip; if it's back at `main`'s own tip, `git reset --hard
-   adf0fc1` restores it (no re-cherry-pick needed, the commit is still there).
+   `check-hlsl-feme-vk` exists -- `git log --oneline feme -3` should
+   show `adf0fc1` at the tip (confirmed still there this session); if
+   it's back at `main`'s own tip, `git reset --hard adf0fc1` restores
+   it.
