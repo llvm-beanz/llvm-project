@@ -177,13 +177,58 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsStorageUsage) {
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnsupportedCreateFlags) {
-  // Only `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT` is accepted at all (see
-  // Image.cpp's `isValidImageShape`); sparse binding is out of scope.
+  // Sparse binding remains out of scope (see "V5: Images and sampling"'s
+  // scope) -- unlike `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`/
+  // `_2D_ARRAY_COMPATIBLE_BIT`/`_MUTABLE_FORMAT_BIT`/`_EXTENDED_USAGE_BIT`
+  // (see Image.cpp's `isValidImageShape`), which are all now accepted.
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
                 Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
                 VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT,
                 VK_IMAGE_CREATE_SPARSE_BINDING_BIT, &Props),
+            VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+// Roadmap L235/L244: `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` used to be
+// rejected outright by `isValidImageShape`'s flags gate, so any
+// otherwise-valid format/type/tiling/usage combination failed this query
+// the moment an application declared it wanted a mutable-format image --
+// `dEQP-VK.api.info.image_format_properties.*`'s own 221-case residual (see
+// Roadmap.md's own L235 entry) was exactly this.
+TEST_F(EntryPointsTest, ImageFormatPropertiesAcceptsMutableFormatBit) {
+  VkImageFormatProperties Props{};
+  EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, &Props),
+            VK_SUCCESS);
+}
+
+// Roadmap L244: `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` used to be rejected
+// outright too, for the same reason. Beyond `isValidImageShape`'s own flags
+// gate, this flag also defers the usual usage-vs-format-feature validation
+// entirely (a view created through such an image need not itself use the
+// image's own declared `format` -- only a format-compatible-class one, per
+// `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`'s own semantics -- so the base
+// format/usage combination queried here need not itself support `usage`).
+// `dEQP-VK.image.extended_usage_bit_compatibility.*` queries exactly this
+// for a format (`R32G32B32_UINT`) with zero image-usable format-feature
+// bits of its own (see `ImageFormatPropertiesRejectsUnsupportedUsage`
+// above) but a compatible view format that supports `SAMPLED_BIT`.
+TEST_F(EntryPointsTest, ImageFormatPropertiesExtendedUsageBitDefersUsageCheck) {
+  VkImageFormatProperties Props{};
+  EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R32G32B32_UINT, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_CREATE_EXTENDED_USAGE_BIT, &Props),
+            VK_SUCCESS);
+  // Without the flag, the same combination is still rejected -- confirms
+  // the deferral is scoped to the flag, not a general loosening.
+  VkImageFormatProperties PropsNoFlag{};
+  EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R32G32B32_UINT, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0,
+                &PropsNoFlag),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
@@ -245,7 +290,7 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesReportsSingleSampleForLinear2D) {
 // class of gap as the linear-tiling case above -- both were previously
 // missed by a gate that only excluded non-2D types.
 TEST_F(EntryPointsTest,
-      ImageFormatPropertiesReportsSingleSampleForCubeCompatible2D) {
+       ImageFormatPropertiesReportsSingleSampleForCubeCompatible2D) {
   VkImageFormatProperties Props{};
   ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
                 Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
@@ -319,7 +364,8 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesZeroesOutputOnFormatNotSupported) {
 // layer -- `D16_UNORM` is the one depth format with a real
 // `SAMPLED_IMAGE_BIT` (roadmap H8e), so it is the only one this query
 // itself does not already reject before ever computing `sampleCounts`.
-TEST_F(EntryPointsTest, ImageFormatPropertiesReportsSingleSampleForSampledDepth) {
+TEST_F(EntryPointsTest,
+       ImageFormatPropertiesReportsSingleSampleForSampledDepth) {
   VkImageFormatProperties Props{};
   ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
                 Physical, VK_FORMAT_D16_UNORM, VK_IMAGE_TYPE_2D,
@@ -411,11 +457,12 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
   // siblings already did), so its tiling features now carry
   // `VK_FORMAT_FEATURE_2_STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`
   // (roadmap H19i) too.
-  EXPECT_EQ(Props3.linearTilingFeatures,
-            (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures |
-                VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT |
-                VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
-                VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+  EXPECT_EQ(
+      Props3.linearTilingFeatures,
+      (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures |
+          VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT |
+          VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+          VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
   EXPECT_EQ(
       Props3.optimalTilingFeatures,
       (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures |
@@ -459,9 +506,9 @@ TEST_F(EntryPointsTest,
   Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
   vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_UNDEFINED, &Props2);
   EXPECT_FALSE(Props3.linearTilingFeatures &
-              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+               VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
   EXPECT_FALSE(Props3.optimalTilingFeatures &
-              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+               VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
 }
 
 TEST_F(EntryPointsTest,
@@ -551,8 +598,7 @@ TEST_F(EntryPointsTest,
   VkFormatProperties2 Props2{};
   Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
   Props2.pNext = &Props3;
-  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R16_UNORM,
-                                       &Props2);
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R16_UNORM, &Props2);
   EXPECT_TRUE(Props3.linearTilingFeatures &
               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT);
   EXPECT_TRUE(Props3.linearTilingFeatures &

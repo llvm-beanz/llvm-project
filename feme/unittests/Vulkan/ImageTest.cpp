@@ -1697,6 +1697,30 @@ TEST_F(ImageTest, Rejects2DArrayCompatibleFlagOnNon3DImage) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+// Roadmap L235/L244: `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` and
+// `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` used to be rejected outright by
+// `isValidImageShape`'s flags gate (only `VK_IMAGE_CREATE_CUBE_COMPATIBLE_
+// BIT`/`_2D_ARRAY_COMPATIBLE_BIT` were accepted) -- both are now accepted,
+// together or separately, on an otherwise-ordinary 2D image. Neither flag
+// needs any further behavioral change elsewhere (`vkCreateImageView`
+// already never validates a view's format/usage against the image's own
+// declared format/usage at all -- see `isValidImageShape`'s own comment).
+TEST_F(ImageTest, AcceptsMutableFormatAndExtendedUsageFlags) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.flags =
+      VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  vkDestroyImage(Device, Img, nullptr);
+}
+
 // Roadmap L239: a `VK_IMAGE_TYPE_3D` image created with
 // `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` is accepted (the CTS's
 // `render_to_image.core.3d.*` render-target images all set this flag so a

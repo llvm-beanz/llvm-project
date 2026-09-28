@@ -2565,8 +2565,8 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
   // definition requires the format to be usable as a storage resource
   // *and* declare no format -- it must simply already be usable as one.
   VkFormatFeatureFlags2 StorageWithoutFormatImage =
-      (Format && (formatFeatureFlags(*Format) &
-                  VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+      (Format &&
+       (formatFeatureFlags(*Format) & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
           ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
           : VkFormatFeatureFlags2(0);
@@ -2591,8 +2591,9 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
     Props3->optimalTilingFeatures =
         pFormatProperties->formatProperties.optimalTilingFeatures |
         HostImageTransfer | StorageWithoutFormatImage;
-    Props3->bufferFeatures = pFormatProperties->formatProperties.bufferFeatures |
-                             StorageWithoutFormatBuffer;
+    Props3->bufferFeatures =
+        pFormatProperties->formatProperties.bufferFeatures |
+        StorageWithoutFormatBuffer;
   }
 }
 
@@ -2632,33 +2633,52 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   // `VUID-vkGetPhysicalDeviceImageFormatProperties-usage-parameter`-adjacent
   // rule that an application must not use a format/usage combination this
   // query reported unsupported.
+  //
+  // Roadmap L244: skipped entirely when `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT`
+  // is set -- per spec, that flag defers usage validation to whichever
+  // *view* format an image created this way is actually used through (a
+  // view's own format need not equal, only be format-compatible-class
+  // with, the image's own declared `format`), so the base `format`/`usage`
+  // combination queried here need not itself support `usage` directly.
+  // `dEQP-VK.image.extended_usage_bit_compatibility.*` queries exactly this:
+  // an `imageFormat` whose own features do not support `usage` at all
+  // (e.g. `VK_FORMAT_A2B10G10R10_SINT_PACK32`, no format-feature bits for
+  // `COLOR_ATTACHMENT`/`INPUT_ATTACHMENT` on this device), but which shares
+  // a format-compatible class with some other format that does (here,
+  // `VK_FORMAT_R8G8B8A8_UNORM`) -- expecting `VK_SUCCESS` once
+  // `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` is set, exactly like `vkCreateImage`
+  // itself already defers to a per-view usage check no code path in this
+  // ICD performs at all (see `isValidImageShape`'s own comment on why
+  // accepting this flag needed no further behavioral change elsewhere).
   VkFormatFeatureFlags Features = formatFeatureFlags(*Format);
-  if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  if ((usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  if ((usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  if ((usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
-      !(Features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  // An input attachment reuses the same read-only image-view + layout
-  // record as a sampled color or depth/stencil attachment (see "V5: Images
-  // and sampling"'s status note), so it needs one of those two feature
-  // bits, not a dedicated one of its own.
-  if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
-      !(Features & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if (!(flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)) {
+    if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if ((usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if ((usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    if ((usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+        !(Features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    // An input attachment reuses the same read-only image-view + layout
+    // record as a sampled color or depth/stencil attachment (see "V5:
+    // Images and sampling"'s status note), so it needs one of those two
+    // feature bits, not a dedicated one of its own.
+    if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+        !(Features & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  }
 
   // The shape (flags/type/usage) validated here is otherwise the exact
   // same check `vkCreateImage` itself applies (`isValidImageShape`,
@@ -2748,9 +2768,8 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   // size" check) -- `computeImageCreateInfoSize`'s real, dimension-based
   // answer is still reported whenever it is *larger* than this floor (2D
   // images with the full `maxImageArrayLayers` multiplier routinely are).
-  pImageFormatProperties->maxResourceSize =
-      std::max<VkDeviceSize>(computeImageCreateInfoSize(MaxProbe, *Format),
-                              VkDeviceSize(1) << 31);
+  pImageFormatProperties->maxResourceSize = std::max<VkDeviceSize>(
+      computeImageCreateInfoSize(MaxProbe, *Format), VkDeviceSize(1) << 31);
   return VK_SUCCESS;
 }
 

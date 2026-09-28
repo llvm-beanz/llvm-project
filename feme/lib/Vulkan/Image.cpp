@@ -448,9 +448,23 @@ bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
   // slices as if they were array layers, see `effectiveViewLayerCount`'s
   // own comment), so it is rejected below for any other image type rather
   // than here.
+  // Roadmap L235/L244: `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` (a view may
+  // use any format-compatible-class format, not only the image's own) and
+  // `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` (a view's own usage need not be a
+  // subset of the image's declared usage) are also now accepted -- neither
+  // needs any further behavioral change elsewhere in this ICD:
+  // `vkCreateImageView` already never validates a view's format against
+  // the image's own format at all (any mapped `VkFormat` is accepted
+  // unconditionally, effectively already "mutable" regardless of this
+  // flag), and no draw-time code path validates a view's usage against
+  // `Image::usage()` either (effectively already "extended" regardless of
+  // this flag) -- so accepting both flags at creation time is sufficient,
+  // with no risk of now-silently-wrong behavior for either.
   if (CreateInfo.flags &
       ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT |
-                          VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT))
+                          VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT |
+                          VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                          VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))
     return false;
   if ((CreateInfo.flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT) &&
       CreateInfo.imageType != VK_IMAGE_TYPE_3D)
