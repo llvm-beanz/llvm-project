@@ -390,6 +390,27 @@ supportedSampleCounts(const PhysicalDeviceInfo &Info, VkImageUsageFlags Usage,
   bool HasStencil = Format && isSupportedStencilAttachmentFormat(*Format);
   VkSampleCountFlags Mask = ~VkSampleCountFlags(0);
   bool Constrained = false;
+  // (Roadmap L245) Multisampling is fundamentally a render-target
+  // capability: real hardware only supports creating a multisample image
+  // of a format it can actually render to (a `VK_FORMAT_FEATURE_COLOR_
+  // ATTACHMENT_BIT`/`_DEPTH_STENCIL_ATTACHMENT_BIT`-supporting format),
+  // regardless of which `usage` bits the particular query at hand asks
+  // for -- `dEQP-VK.api.info.image_format_properties{,2}.*` (see
+  // `vktApiFeatureInfo.cpp`'s `getRequiredOptimalTilingSampleCounts`
+  // caller) enforces exactly `VK_SAMPLE_COUNT_1_BIT` for any format
+  // lacking both attachment features, even for a `SAMPLED_BIT`/
+  // `STORAGE_BIT`-only query. Previously this intersected `Usage` against
+  // the per-usage limits below unconditionally, over-reporting up to 8
+  // samples for e.g. a `SAMPLED_BIT`-only `A2B10G10R10_SINT_PACK32` image
+  // (an integer format with no `COLOR_ATTACHMENT`/`INPUT_ATTACHMENT`
+  // feature bits on this device at all) purely because
+  // `sampledImageColorSampleCounts` itself is `1|2|4|8`.
+  if (Format) {
+    VkFormatFeatureFlags Features = formatFeatureFlags(*Format);
+    if (!(Features & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+      return VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT);
+  }
   if (Usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
     if (HasDepth)
       Mask &= Limits.sampledImageDepthSampleCounts;
