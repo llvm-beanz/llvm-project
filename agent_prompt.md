@@ -61,21 +61,16 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, unchanged for many sessions)** Pick one of `L227(d)` (3
+1. **(a few hours, unchanged for many sessions)** `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`
-   (compressed-format blits).
-2. **(unknown, ready to pick up cold)** `L228(k)`: the single-layer-MSAA
-   `(0,0,0,0)` `vkCmdClearAttachments` bug split out a couple sessions ago,
-   still untouched. Start with `dEQP-VK.api.image_clearing.core.
-   clear_color_attachment.single_layer.*sample_count_4*` at the smallest
-   failing case.
-3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the broader-
-   than-tessellation CTS sample further -- `shader_render` and most of
-   `pipeline`'s other sub-suites remain unsampled at any real scale. This
-   session's own 45636-case `image_clearing` sweep is a start but a
-   different area.
-4. **(worth a few minutes, low priority, carried over many sessions)**
-   Audit other FeMe creation-time and draw-time checks for the "over-
-   strict enforcement" pattern (`L241`, `L250`) -- still no dedicated
-   systematic search done, keeps getting bumped every session (unlike the
-   name-only-fixture-format audit, which this session finally closed).
+   (compressed-format blits) -- pick one.
+2. **(a few hours, still overdue)** `L228(e)`/`(f)`: `shader_render`
+   and most of `pipeline`'s other sub-suites remain unsampled at any
+   real scale.
+3. **(unknown, new, needs investigation)** The `offload-test-suite`
+   `854cc3f`-branch `check-hlsl-feme-vk` 2-fail/1-unexpected-pass
+   regression noted above -- diagnose whether it's a real FeMe gap the
+   branch's new tests now exercise, or purely an XFAIL-list drift on
+   the branch's own side.
+4. No git stashes left open this session (all `git stash push`/`pop`
+   pairs used for A/B testing were popped immediately after use).
