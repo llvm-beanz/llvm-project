@@ -2358,11 +2358,23 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       // (`AtomicRMWInst`/`AtomicCmpXchgInst`) only exists over a single-
       // 32-bit-scalar *integer* storage-image format
       // (`R32_SINT`/`R32_UINT`; SPIR-V disallows an atomic against a
-      // float-channel image outright), and only `Plain2D` is implemented
-      // today -- widening to every other `ImageShape` is left as future
-      // work (see Design.md's own H8v note).
+      // float-channel image outright). Roadmap L244 widened this beyond
+      // `Plain2D` alone to also accept `Plain1D`, `Array1D`, `Array2D`
+      // (also covers a plain storage `Cube`, folded into `Array2D` by
+      // `classifyStorageImage2DHandle` above), `StorageCubeArray`
+      // (roadmap L232's genuine cube array), and `Plain3D` -- every shape
+      // `hasOnlySupportedStorageImageUses` classifies today except the
+      // two multisampled ones (`Plain2DMS`/`Array2DMS`), which SPIR-V
+      // itself disallows atomics against entirely (an atomic image
+      // operand must not be multisampled per the spec) and so are never
+      // exercised.
+      bool AtomicShapeSupported =
+          Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
+          Shape == ImageShape::Array1D || Shape == ImageShape::Array2D ||
+          Shape == ImageShape::StorageCubeArray ||
+          Shape == ImageShape::Plain3D;
       if (const auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
-        if (!IsInteger || Shape != ImageShape::Plain2D)
+        if (!IsInteger || !AtomicShapeSupported)
           return false;
         if (RMW->getPointerOperand() != CI ||
             !RMW->getValOperand()->getType()->isIntegerTy(32))
@@ -2384,7 +2396,7 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
         }
       }
       if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(PU)) {
-        if (!IsInteger || Shape != ImageShape::Plain2D)
+        if (!IsInteger || !AtomicShapeSupported)
           return false;
         if (CmpXchg->getPointerOperand() != CI ||
             !CmpXchg->getCompareOperand()->getType()->isIntegerTy(32))
@@ -5313,61 +5325,266 @@ void lowerImageAccesses(
           SI->eraseFromParent();
           continue;
         }
-        // `AtomicRMWInst`/`AtomicCmpXchgInst` (roadmap H8v): the only
-        // storage-image shape reaching either is `Plain2D`
-        // (`hasOnlySupportedStorageImageUses` already rejected every
-        // other shape for these two instruction kinds), so `X`/`Y` are
-        // always meaningful here with no `Array1D`/`Array2D`/`Plain3D`/
-        // multisample coordinate component ever needed.
+        // `AtomicRMWInst`/`AtomicCmpXchgInst` (roadmap L244):
+        // `hasOnlySupportedStorageImageUses` accepts `Plain1D`,
+        // `Array1D`, `Array2D` (also a plain storage `Cube`, folded into
+        // `Array2D` above), `StorageCubeArray` (roadmap L232's genuine
+        // cube array, sharing `Array2D`'s own `(X, Y, C2)` addressing --
+        // `C2` is its already-flattened `layer * 6 + face` value, exactly
+        // like the `StoreInst` branch above), `Plain2D`, and `Plain3D` for
+        // these two instruction kinds -- dispatch on `Shape` the same way
+        // the `StoreInst` branch above does, selecting the matching
+        // `createAtomic*`/`createAtomicCompareExchange*` entry point and
+        // coordinate operands for each.
         if (auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
           IRBuilder<> AtomicBuilder(RMW);
           Value *Val = RMW->getValOperand();
+          AtomicRMWInst::BinOp Op = RMW->getOperation();
+          const Twine &RMWName = RMW->getName();
           CallInst *Old;
-          switch (RMW->getOperation()) {
-          case AtomicRMWInst::Add:
-            Old = createAtomicAdd2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                    Mask, RMW->getName());
+          switch (Shape) {
+          case ImageShape::Plain1D:
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                      Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                      Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                      Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                     Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                      Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                       Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                       Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                       Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin1D(AtomicBuilder, Env, ImageIndex, X, Val,
+                                       Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange1D(AtomicBuilder, Env, ImageIndex, X,
+                                           Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
             break;
-          case AtomicRMWInst::Sub:
-            Old = createAtomicSub2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                    Mask, RMW->getName());
+          case ImageShape::Array1D:
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                          C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin1DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange1DArray(AtomicBuilder, Env, ImageIndex,
+                                                X, C2, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
             break;
-          case AtomicRMWInst::And:
-            Old = createAtomicAnd2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                    Mask, RMW->getName());
+          case ImageShape::Plain2D:
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
+                                     Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin2D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange2D(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
             break;
-          case AtomicRMWInst::Or:
-            Old = createAtomicOr2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                   Mask, RMW->getName());
+          case ImageShape::Array2D:
+          case ImageShape::StorageCubeArray:
+            // Roadmap L232: identical `(x, y, layer)` addressing to
+            // `Array2D` -- see the `StoreInst` branch above for why no
+            // dedicated shape is needed for a genuine cube array here.
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                          Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin2DArray(AtomicBuilder, Env, ImageIndex, X,
+                                            Y, C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange2DArray(AtomicBuilder, Env, ImageIndex,
+                                                X, Y, C2, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
             break;
-          case AtomicRMWInst::Xor:
-            Old = createAtomicXor2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                    Mask, RMW->getName());
-            break;
-          case AtomicRMWInst::Max:
-            Old = createAtomicSMax2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                     Mask, RMW->getName());
-            break;
-          case AtomicRMWInst::Min:
-            Old = createAtomicSMin2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                     Mask, RMW->getName());
-            break;
-          case AtomicRMWInst::UMax:
-            Old = createAtomicUMax2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                     Mask, RMW->getName());
-            break;
-          case AtomicRMWInst::UMin:
-            Old = createAtomicUMin2D(AtomicBuilder, Env, ImageIndex, X, Y, Val,
-                                     Mask, RMW->getName());
-            break;
-          case AtomicRMWInst::Xchg:
-            Old = createAtomicExchange2D(AtomicBuilder, Env, ImageIndex, X, Y,
-                                         Val, Mask, RMW->getName());
+          case ImageShape::Plain3D:
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr3D(AtomicBuilder, Env, ImageIndex, X, Y, C2,
+                                     Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                      C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin3D(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange3D(AtomicBuilder, Env, ImageIndex, X,
+                                           Y, C2, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
             break;
           default:
-            llvm_unreachable(
-                "hasOnlySupportedStorageImageUses only accepts the RMW "
-                "kinds handled above");
+            llvm_unreachable("hasOnlySupportedStorageImageUses only accepts "
+                             "the atomic shapes handled above");
           }
           RMW->replaceAllUsesWith(Old);
           RMW->eraseFromParent();
@@ -5375,10 +5592,43 @@ void lowerImageAccesses(
         }
         if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(PU)) {
           IRBuilder<> AtomicBuilder(CmpXchg);
-          CallInst *Old = createAtomicCompareExchange2D(
-              AtomicBuilder, Env, ImageIndex, X, Y,
-              CmpXchg->getCompareOperand(), CmpXchg->getNewValOperand(), Mask,
-              CmpXchg->getName());
+          Value *Comparator = CmpXchg->getCompareOperand();
+          Value *NewVal = CmpXchg->getNewValOperand();
+          CallInst *Old;
+          switch (Shape) {
+          case ImageShape::Plain1D:
+            Old = createAtomicCompareExchange1D(AtomicBuilder, Env, ImageIndex,
+                                                X, Comparator, NewVal, Mask,
+                                                CmpXchg->getName());
+            break;
+          case ImageShape::Array1D:
+            Old = createAtomicCompareExchange1DArray(
+                AtomicBuilder, Env, ImageIndex, X, C2, Comparator, NewVal,
+                Mask, CmpXchg->getName());
+            break;
+          case ImageShape::Plain2D:
+            Old = createAtomicCompareExchange2D(AtomicBuilder, Env, ImageIndex,
+                                                X, Y, Comparator, NewVal, Mask,
+                                                CmpXchg->getName());
+            break;
+          case ImageShape::Array2D:
+          case ImageShape::StorageCubeArray:
+            // Roadmap L232: identical `(x, y, layer)` addressing to
+            // `Array2D` -- see the `StoreInst`/`AtomicRMWInst` branches'
+            // own doc above for why no dedicated shape is needed here.
+            Old = createAtomicCompareExchange2DArray(
+                AtomicBuilder, Env, ImageIndex, X, Y, C2, Comparator, NewVal,
+                Mask, CmpXchg->getName());
+            break;
+          case ImageShape::Plain3D:
+            Old = createAtomicCompareExchange3D(AtomicBuilder, Env, ImageIndex,
+                                                X, Y, C2, Comparator, NewVal,
+                                                Mask, CmpXchg->getName());
+            break;
+          default:
+            llvm_unreachable("hasOnlySupportedStorageImageUses only accepts "
+                             "the atomic shapes handled above");
+          }
           // `hasOnlySupportedStorageImageUses` already guaranteed every
           // user of `CmpXchg` is an `extractvalue ..., 0` picking out the
           // old value (SPIR-V's own result) -- replace each with the new

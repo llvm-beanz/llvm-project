@@ -256,6 +256,173 @@ TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DCall) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// Roadmap L244: `createAtomicAdd1D`/`matchImageCall` round-trip the plain-1D
+// atomic shape -- a single `U` coordinate, no `V`/`Layer`.
+TEST_F(ImageCallsTest, MatchesAtomicAdd1DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI =
+      createAtomicAdd1D(Builder, Env, Builder.getInt32(3), Builder.getInt32(1),
+                        Builder.getInt32(7), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicAdd1D);
+  EXPECT_EQ(Matched->ImageIndex, Builder.getInt32(3));
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, nullptr);
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(7));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L244: `createAtomicCompareExchange1D`/`matchImageCall` round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange1DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange1D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(0), Builder.getInt32(42), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange1D);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L244: `createAtomicUMax1DArray`/`matchImageCall` round-trip the
+// arrayed-1D atomic shape -- a `(U, Layer)` coordinate pair, no `V`.
+TEST_F(ImageCallsTest, MatchesAtomicUMax1DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicUMax1DArray(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(4),
+      Builder.getInt32(6), Builder.getInt32(9), Builder.getInt1(false));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicUMax1DArray);
+  EXPECT_EQ(Matched->U, Builder.getInt32(4));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(6));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(false));
+}
+
+// Roadmap L244: `createAtomicCompareExchange1DArray`/`matchImageCall`
+// round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange1DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange1DArray(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(3), Builder.getInt32(0), Builder.getInt32(42),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange1DArray);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L244/L232: `createAtomicXor2DArray`/`matchImageCall` round-trip
+// the arrayed-2D atomic shape -- a `(U, V, Layer)` coordinate triple, also
+// exercised by a genuine `StorageCubeArray`'s already-flattened
+// `layer * 6 + face` value (see `SPIRVResourceLowering.cpp`'s own doc),
+// which needs no dedicated `ImageCallKind` of its own.
+TEST_F(ImageCallsTest, MatchesAtomicXor2DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicXor2DArray(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(7),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicXor2DArray);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(3));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(7));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L244: `createAtomicCompareExchange2DArray`/`matchImageCall`
+// round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DArrayCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange2DArray(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(0),
+      Builder.getInt32(42), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange2DArray);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L244: `createAtomicExchange3D`/`matchImageCall` round-trip the
+// plain-3D atomic shape -- a `(U, V, Z)` coordinate triple, never arrayed.
+TEST_F(ImageCallsTest, MatchesAtomicExchange3DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicExchange3D(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(9),
+      Builder.getInt1(false));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicExchange3D);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Z, Builder.getInt32(3));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(false));
+}
+
+// Roadmap L244: `createAtomicCompareExchange3D`/`matchImageCall`
+// round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange3DCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange3D(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(0),
+      Builder.getInt32(42), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange3D);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Z, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 // Roadmap L61(c): `matchImageCall`'s own `Sample1D`/`Sample1DArray` cases
 // hardcoded the pre-fix `arg_size()` (10/11) `createSample1D`/
 // `createSample1DArray` had before this row added a real `Bias`/
