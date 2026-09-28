@@ -274,7 +274,58 @@ TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2Unorm) {
   EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
 }
 
-// Roadmap E5's `VK_FORMAT_A8_UNORM`: a single alpha byte -- the clear
+// (Roadmap L234) `R8G8B8A8_SNORM` (`VK_FORMAT_A8B8G8R8_SNORM_PACK32` maps
+// onto this same `ResourceFormat`, `Format.cpp`): found missing via a real
+// CTS hang (`dEQP-VK.pipeline.monolithic.sampler.border_swizzle.*`
+// clearing an attachment of this format before sampling it) -- see
+// `packClearColor`/`unpackColor`'s own comments in `ImageFixture.cpp`.
+TEST(ImageFixtureTest, PacksAndUnpacksR8G8B8A8SnormNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_SNORM,
+                                   {1.0, -1.0, -0.5, 0.0}, Texel),
+                    Succeeded());
+  EXPECT_EQ(static_cast<int8_t>(Texel[0]), 127);
+  EXPECT_EQ(static_cast<int8_t>(Texel[1]), -127);
+  EXPECT_NEAR(static_cast<int8_t>(Texel[2]), -64, 1);
+  EXPECT_EQ(static_cast<int8_t>(Texel[3]), 0);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8B8A8_SNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], -1.0, 0.01);
+  EXPECT_NEAR(Unpacked[2], -0.5, 0.01);
+  EXPECT_NEAR(Unpacked[3], 0.0, 0.01);
+}
+
+// (Roadmap L234) `R10G10B10A2_SNORM` (`VK_FORMAT_A2B10G10R10_SNORM_PACK32`
+// maps onto this same `ResourceFormat`): the signed sibling of
+// `R10G10B10A2_UNORM` above, same packed-word layout and same real-CTS-
+// hang discovery as `R8G8B8A8_SNORM` above.
+TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2SnormNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_SNORM,
+                                   {1.0, -1.0, 0.0, -1.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ(Word & 0x3FF, 511u);        // R = 1.0
+  EXPECT_EQ((Word >> 10) & 0x3FF, 513u); // G = -1.0 (-511 as 10-bit two's complement)
+  EXPECT_EQ((Word >> 20) & 0x3FF, 0u);   // B = 0.0
+  EXPECT_EQ((Word >> 30) & 0x3, 0x3u);   // A = -1.0 (2-bit two's complement)
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R10G10B10A2_SNORM, Texel,
+                               Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], -1.0, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], -1.0, 0.01);
+}
+
+
 // color's R/G/B components are ignored on pack and read back as `0` on
 // unpack.
 TEST(ImageFixtureTest, PacksAndUnpacksA8Unorm) {

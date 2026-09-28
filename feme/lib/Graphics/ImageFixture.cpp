@@ -274,6 +274,13 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:
     return FormatInfo{1, 4, false};
+  // (Roadmap L234) `R10G10B10A2_SNORM`: same opaque single-packed-4-byte-
+  // word shape as `R10G10B10A2_UNORM`/`_UINT` above -- H19o only added
+  // this format's *name* (for diagnostics) without a `FormatInfo` entry;
+  // needed now that `packClearColor`/`unpackColor` gained real support for
+  // it (found via a real CTS hang, see those functions' own comments).
+  case ResourceFormat::R10G10B10A2_SNORM:
+    return FormatInfo{1, 4, false};
   case ResourceFormat::E5B9G9R9_UFLOAT:
     // (Roadmap H8q) Also packed into a single opaque 4-byte word, the
     // same convention `R11G11B10_FLOAT` above uses -- see
@@ -511,6 +518,38 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
                      << 30) |
                     (Norm(Clear[2]) << 20) | (Norm(Clear[1]) << 10) |
                     Norm(Clear[0]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap L234) `R10G10B10A2_SNORM` (`VK_FORMAT_A2B10G10R10_SNORM_PACK32`
+  // maps onto this same `ResourceFormat`, `Format.cpp`): the signed sibling
+  // of `R10G10B10A2_UNORM` above, same packed-word layout, but each
+  // channel's `[-1, 1]` value rounds to a signed magnitude (511 for the
+  // 10-bit RGB channels, 1 for the 2-bit alpha channel -- the usual
+  // `2^(bits-1)-1` SNORM convention every other format here already
+  // follows, e.g. `R16G16B16A16_SNORM`'s `32767 == 2^15-1` below) before
+  // being masked down to its field's own bit width for two's-complement
+  // packing.
+  if (Format == ResourceFormat::R10G10B10A2_SNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm10 = [](double V) -> uint32_t {
+      int32_t Signed =
+          static_cast<int32_t>(std::lround(std::clamp(V, -1.0, 1.0) * 511.0));
+      return static_cast<uint32_t>(Signed) & 0x3FFu;
+    };
+    auto Norm2 = [](double V) -> uint32_t {
+      int32_t Signed =
+          static_cast<int32_t>(std::lround(std::clamp(V, -1.0, 1.0) * 1.0));
+      return static_cast<uint32_t>(Signed) & 0x3u;
+    };
+    // VK_FORMAT_A2B10G10R10_SNORM_PACK32: from the MSB down, 2 bits of A,
+    // 10 bits of B, 10 bits of G, 10 bits of R.
+    uint32_t Word = (Norm2(Clear[3]) << 30) | (Norm10(Clear[2]) << 20) |
+                    (Norm10(Clear[1]) << 10) | Norm10(Clear[0]);
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
@@ -1076,6 +1115,29 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap L234) `R8G8B8A8_SNORM` (`VK_FORMAT_A8B8G8R8_SNORM_PACK32` maps
+  // onto this same `ResourceFormat`, `Format.cpp`): same `[-1, 1]`,
+  // `2^(bits-1)-1`-scaled convention as `R16G16B16A16_SNORM` below, just
+  // 8 bits per component instead of 16. Found via a real CTS hang:
+  // `dEQP-VK.pipeline.monolithic.sampler.border_swizzle.*` clears an
+  // `R8G8B8A8_SNORM` (or its `A8B8G8R8_SNORM_PACK32`/
+  // `A2B10G10R10_SNORM_PACK32` siblings, the latter -> `R10G10B10A2_SNORM`
+  // above) attachment before sampling it; hitting this function's
+  // fallback "not yet supported" error marked the device lost inside
+  // `vkQueueSubmit`'s deferred `QueueExecutor` task, and -- since
+  // `vkWaitForFences` only checked device-lost once, before starting its
+  // own blocking `Fence::wait` -- that race left the case blocked for
+  // the full `SafetyNetTimeoutNs` (`Sync.h`) before reporting a
+  // misleading `VK_TIMEOUT` instead of `VK_ERROR_DEVICE_LOST`.
+  if (Format == ResourceFormat::R8G8B8A8_SNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double Clamped = std::clamp(Clear[I], -1.0, 1.0);
+      Texel[I] = static_cast<uint8_t>(
+          static_cast<int8_t>(std::lround(Clamped * 127.0)));
+    }
+    return Error::success();
+  }
+
   if (Format == ResourceFormat::B8G8R8A8_UNORM ||
       Format == ResourceFormat::B8G8R8A8_UNORM_SRGB) {
     // Same encoding as `R8G8B8A8_UNORM`, but memory order is B, G, R, A:
@@ -1194,6 +1256,32 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[1] = ((Word >> 10) & 0x3FF) / 1023.0;
     Out[2] = ((Word >> 20) & 0x3FF) / 1023.0;
     Out[3] = ((Word >> 30) & 0x3) / 3.0;
+    return Error::success();
+  }
+
+  // (Roadmap L234) `R10G10B10A2_SNORM`: the inverse of `packClearColor`'s
+  // own special case above -- sign-extend each field from its own bit
+  // width before dividing by that field's `2^(bits-1)-1` scale.
+  if (Format == ResourceFormat::R10G10B10A2_SNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    auto SignExtend10 = [](uint32_t Field) -> double {
+      int32_t Signed = static_cast<int32_t>(Field << 22) >> 22;
+      return std::clamp(Signed / 511.0, -1.0, 1.0);
+    };
+    auto SignExtend2 = [](uint32_t Field) -> double {
+      int32_t Signed = static_cast<int32_t>(Field << 30) >> 30;
+      return std::clamp(static_cast<double>(Signed), -1.0, 1.0);
+    };
+    Out[0] = SignExtend10(Word & 0x3FF);
+    Out[1] = SignExtend10((Word >> 10) & 0x3FF);
+    Out[2] = SignExtend10((Word >> 20) & 0x3FF);
+    Out[3] = SignExtend2((Word >> 30) & 0x3);
     return Error::success();
   }
 
@@ -1816,6 +1904,16 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
       // is never decoded here either -- mirrors `packClearColor`'s own
       // convention above.
       Out[I] = (IsSRGB && I != 3) ? srgbToLinear(V) : V;
+    }
+    return Error::success();
+  }
+
+  // (Roadmap L234) `R8G8B8A8_SNORM`: the inverse of `packClearColor`'s own
+  // branch above.
+  if (Format == ResourceFormat::R8G8B8A8_SNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      auto V = static_cast<int8_t>(Texel[I]);
+      Out[I] = std::clamp(V / 127.0, -1.0, 1.0);
     }
     return Error::success();
   }
