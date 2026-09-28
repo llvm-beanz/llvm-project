@@ -3430,6 +3430,102 @@ public:
   }
 };
 
+/// Converts `spirv.Load`/`spirv.Store` that carry a Vulkan Memory Model
+/// availability/visibility bit (`MakePointerAvailable`, `MakePointerVisible`,
+/// or `NonPrivatePointer`) in their `memory_access` attribute -- e.g. a real
+/// `dEQP-VK.` or `offload-test-suite` case using
+/// `groupshared`/`RWStructuredBuffer` data around an explicit
+/// `Barrier(..., GROUP_SCOPE | GROUP_SYNC)` (roadmap L227(a); `dxc` emits
+/// exactly this shape for a `groupshared`-array write immediately before
+/// such a barrier). Upstream's own `LoadStorePattern`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) only tolerates
+/// `Aligned`/`Volatile`/`Nontemporal`; every other bit -- including these
+/// three Vulkan-Memory-Model-only ones -- is "explicitly marked illegal"
+/// there, failing pipeline creation outright with no fallback.
+///
+/// These three bits ask for a specific cross-invocation
+/// synchronizes-with relationship (the store "makes available" a write for
+/// a later, scoped acquire to "make visible"), which is exactly what
+/// `spirv.ControlBarrier`/`spirv.MemoryBarrier` (see
+/// `ControlBarrierConversionPattern`/its own `spirv.MemoryBarrier`
+/// counterpart above) already provide by lowering to a real
+/// `llvm.spv.*_memory_barrier[_with_group_sync]` intrinsic -- a full fence
+/// across the whole memory scope named in `memory_access`'s own paired
+/// scope operand (also not modeled by MLIR's `SPIRV_LoadOp`/`SPIRV_StoreOp`
+/// ODS at all -- see `SPIRVMemoryOps.td`, only `memory_access`/`alignment`
+/// are represented -- so there is no scope for this pattern to even
+/// distinguish further; every occurrence in practice pairs with a real
+/// barrier already emitting the widest fence this backend has, `all`, so
+/// treating every scope identically here is not a narrowing of what upstream
+/// already guarantees). A plain load/store is therefore already exactly as
+/// available/visible as this bit combination asks for once that separate
+/// fence has run, the same way `Volatile`/`Nontemporal` alone need no
+/// special LLVM-dialect modeling beyond the flags `LLVM::LoadOp`/
+/// `LLVM::StoreOp` already carry.
+///
+/// Registered at `FeMeBenefit` so it wins over upstream's own
+/// `LoadStorePattern` for exactly this bit combination; every other
+/// `memory_access` shape (no vulkan-memory-model bits at all, or a bit
+/// this pattern doesn't itself recognize, e.g. the INTEL alias-scope ones)
+/// falls through to upstream's pattern unchanged, matching this file's
+/// established "match a narrow shape, `notifyMatchFailure` for anything
+/// else, and let the next-lower-priority pattern handle it" convention
+/// (see `BoolVectorLaneStorePattern`'s own comment for another example).
+template <typename SPIRVOp>
+class VulkanMemoryModelLoadStorePattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<mlir::spirv::MemoryAccess> MemoryAccess =
+        Op.getMemoryAccess();
+    if (!MemoryAccess)
+      return Rewriter.notifyMatchFailure(Op, "no memory access to widen");
+
+    constexpr mlir::spirv::MemoryAccess VulkanMemoryModelBits =
+        mlir::spirv::MemoryAccess::MakePointerAvailable |
+        mlir::spirv::MemoryAccess::MakePointerVisible |
+        mlir::spirv::MemoryAccess::NonPrivatePointer;
+    if (!mlir::spirv::bitEnumContainsAny(*MemoryAccess, VulkanMemoryModelBits))
+      return Rewriter.notifyMatchFailure(
+          Op, "no Vulkan Memory Model bit set; defer to upstream's pattern");
+
+    constexpr mlir::spirv::MemoryAccess Supported =
+        mlir::spirv::MemoryAccess::Aligned |
+        mlir::spirv::MemoryAccess::Volatile |
+        mlir::spirv::MemoryAccess::Nontemporal | VulkanMemoryModelBits;
+    if (mlir::spirv::bitEnumContainsAny(*MemoryAccess, ~Supported))
+      return Rewriter.notifyMatchFailure(
+          Op, "an unmodeled bit (e.g. an INTEL alias-scope one) is also set");
+
+    unsigned Alignment = mlir::spirv::bitEnumContainsAll(
+                            *MemoryAccess, mlir::spirv::MemoryAccess::Aligned)
+                            ? *Op.getAlignment()
+                            : 0;
+    bool IsNonTemporal = mlir::spirv::bitEnumContainsAll(
+        *MemoryAccess, mlir::spirv::MemoryAccess::Nontemporal);
+    bool IsVolatile = mlir::spirv::bitEnumContainsAll(
+        *MemoryAccess, mlir::spirv::MemoryAccess::Volatile);
+
+    if constexpr (std::is_same_v<SPIRVOp, mlir::spirv::LoadOp>) {
+      mlir::Type DstType =
+          this->getTypeConverter()->convertType(Op.getType());
+      if (!DstType)
+        return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(
+          Op, DstType, Adaptor.getPtr(), Alignment, IsVolatile, IsNonTemporal);
+    } else {
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(
+          Op, Adaptor.getValue(), Adaptor.getPtr(), Alignment, IsVolatile,
+          IsNonTemporal);
+    }
+    return mlir::success();
+  }
+};
+
 /// Converts a load whose "pointer" operand already converted to the loaded
 /// value itself, which is how the SPIR-V constructs LLVM models as values
 /// rather than as memory (builtin input variables) reach their uses: the load
@@ -15501,7 +15597,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
       VectorExtractDynamicPattern, VectorInsertDynamicPattern,
       BoolVectorLaneAccessChainPattern,
-      BoolVectorLaneLoadPattern, BoolVectorLaneStorePattern>(
+      BoolVectorLaneLoadPattern, BoolVectorLaneStorePattern,
+      VulkanMemoryModelLoadStorePattern<mlir::spirv::LoadOp>,
+      VulkanMemoryModelLoadStorePattern<mlir::spirv::StoreOp>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
                ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
