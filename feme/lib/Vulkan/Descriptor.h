@@ -106,6 +106,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -266,6 +267,29 @@ struct DescriptorImageBinding {
 /// (V5) `DescriptorImageBinding`, or (roadmap E14) a raw byte blob for an
 /// inline uniform block, sized from its `DescriptorSetLayout` at allocation
 /// time. Not dispatchable.
+///
+/// (roadmap L228(j)) `write`/`writeInlineUniformBlock` and
+/// `bindingArray`/`imageBindingArray`/`inlineUniformBlockData` all take
+/// \c Mutex: a real application may legally call `vkUpdateDescriptorSets`
+/// (or push an update through a command buffer) on a set that a
+/// previously submitted, still-running command buffer is concurrently
+/// consuming -- an update-after-bind set (see `VK_EXT_descriptor_indexing`
+/// and this ICD's own advertised `descriptorBindingUpdateAfterBind*`
+/// feature bits) is exactly the case Vulkan defines this for, and
+/// (roadmap L228(h)/(i)) `CommandBuffer.cpp`'s `buildBoundResources` now
+/// genuinely runs on a queue's own background `QueueExecutor` thread,
+/// concurrently with further API calls on the caller's own thread. Every
+/// per-binding array's *identity* (which map keys exist) is fixed for the
+/// whole lifetime of a `DescriptorSet` -- set once, in the constructor,
+/// from its immutable `DescriptorSetLayout` -- so only each array's
+/// *contents* need guarding, not `Bindings`/`ImageBindings`/
+/// `InlineUniformBlockBindings` themselves. The accessors return a copy
+/// taken under \c Mutex rather than an `llvm::ArrayRef` into live storage:
+/// an `ArrayRef` into a vector `write` can concurrently overwrite (even in
+/// place, without resizing) is not a safe thing to hand back once the
+/// lock is released, since a caller reading through it afterward would
+/// race with -- and could observe a torn write from -- the very update
+/// this lock is meant to guard against.
 class DescriptorSet {
 public:
   /// Constructs a set from \p Layout, sizing every binding's array to its
@@ -280,6 +304,15 @@ public:
   explicit DescriptorSet(
       const DescriptorSetLayout &Layout,
       std::optional<uint32_t> VariableDescriptorCount = std::nullopt);
+
+  /// (roadmap F12) Copies \p Other's current bound-array contents into a
+  /// new, independently-locked set -- used by
+  /// `CommandBuffer::getOrCreatePushDescriptorSet` to snapshot a push
+  /// descriptor set's prior state before applying a new push's writes on
+  /// top of it. Takes \p Other's \c Mutex while copying (see the class
+  /// comment) rather than relying on the implicit copy constructor, which
+  /// `std::mutex` not being copyable would delete anyway.
+  DescriptorSet(const DescriptorSet &Other);
 
   const DescriptorSetLayout &getLayout() const { return *Layout; }
 
@@ -314,24 +347,32 @@ public:
   void writeInlineUniformBlock(uint32_t Binding, uint32_t ByteOffset,
                                uint32_t DataSize, const void *Data);
 
-  /// The full declared array for \p Binding, or empty if this set's layout
-  /// declares no such binding.
-  llvm::ArrayRef<DescriptorBufferBinding> bindingArray(uint32_t Binding) const;
+  /// A snapshot copy of the full declared array for \p Binding, taken
+  /// under \c Mutex (see the class comment), or empty if this set's
+  /// layout declares no such binding.
+  std::vector<DescriptorBufferBinding> bindingArray(uint32_t Binding) const;
 
-  /// (V5) The full declared image/sampler array for \p Binding, or empty if
+  /// (V5) A snapshot copy of the full declared image/sampler array for
+  /// \p Binding, taken under \c Mutex (see the class comment), or empty if
   /// this set's layout declares no such binding.
-  llvm::ArrayRef<DescriptorImageBinding>
+  std::vector<DescriptorImageBinding>
   imageBindingArray(uint32_t Binding) const;
 
-  /// (roadmap E14) The full inline uniform block byte blob for \p Binding,
-  /// or empty if this set's layout declares no such binding.
-  llvm::ArrayRef<uint8_t> inlineUniformBlockData(uint32_t Binding) const;
+  /// (roadmap E14) A snapshot copy of the full inline uniform block byte
+  /// blob for \p Binding, taken under \c Mutex (see the class comment), or
+  /// empty if this set's layout declares no such binding.
+  std::vector<uint8_t> inlineUniformBlockData(uint32_t Binding) const;
 
 private:
   const DescriptorSetLayout *Layout;
   std::map<uint32_t, std::vector<DescriptorBufferBinding>> Bindings;
   std::map<uint32_t, std::vector<DescriptorImageBinding>> ImageBindings;
   std::map<uint32_t, std::vector<uint8_t>> InlineUniformBlockBindings;
+  /// (roadmap L228(j)) Guards the *contents* of every vector in
+  /// `Bindings`/`ImageBindings`/`InlineUniformBlockBindings` -- see the
+  /// class comment. `mutable` so a const accessor (`bindingArray` et al.)
+  /// may still lock it.
+  mutable std::mutex Mutex;
 };
 
 /// A `VkDescriptorUpdateTemplate`: the entry list `vkUpdateDescriptorSet

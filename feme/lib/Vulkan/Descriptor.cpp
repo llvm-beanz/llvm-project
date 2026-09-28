@@ -96,6 +96,16 @@ uint32_t DescriptorSetLayout::dynamicOffsetCount() const {
   return Count;
 }
 
+DescriptorSet::DescriptorSet(const DescriptorSet &Other) {
+  std::lock_guard<std::mutex> Lock(Other.Mutex);
+  Layout = Other.Layout;
+  Bindings = Other.Bindings;
+  ImageBindings = Other.ImageBindings;
+  InlineUniformBlockBindings = Other.InlineUniformBlockBindings;
+  // Mutex itself is default-constructed fresh, not copied -- a new
+  // DescriptorSet is a new, independently-lockable object.
+}
+
 DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout,
                              std::optional<uint32_t> VariableDescriptorCount)
     : Layout(&Layout) {
@@ -128,6 +138,7 @@ DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout,
 
 void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
                           VkDeviceSize Offset, VkDeviceSize Range) {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = Bindings.find(Binding);
   if (It == Bindings.end() || ArrayElement >= It->second.size())
     return;
@@ -137,6 +148,7 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
 
 void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
                           BufferView *View) {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = Bindings.find(Binding);
   if (It == Bindings.end() || ArrayElement >= It->second.size())
     return;
@@ -147,6 +159,7 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
 void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
                           ImageView *View, Sampler *Samp,
                           VkImageLayout Layout) {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = ImageBindings.find(Binding);
   if (It == ImageBindings.end() || ArrayElement >= It->second.size())
     return;
@@ -168,6 +181,7 @@ void DescriptorSet::writeInlineUniformBlock(uint32_t Binding,
                                             uint32_t ByteOffset,
                                             uint32_t DataSize,
                                             const void *Data) {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = InlineUniformBlockBindings.find(Binding);
   if (It == InlineUniformBlockBindings.end())
     return;
@@ -177,24 +191,27 @@ void DescriptorSet::writeInlineUniformBlock(uint32_t Binding,
   std::memcpy(Blob.data() + ByteOffset, Data, DataSize);
 }
 
-llvm::ArrayRef<DescriptorBufferBinding>
+std::vector<DescriptorBufferBinding>
 DescriptorSet::bindingArray(uint32_t Binding) const {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = Bindings.find(Binding);
   if (It == Bindings.end())
     return {};
   return It->second;
 }
 
-llvm::ArrayRef<DescriptorImageBinding>
+std::vector<DescriptorImageBinding>
 DescriptorSet::imageBindingArray(uint32_t Binding) const {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = ImageBindings.find(Binding);
   if (It == ImageBindings.end())
     return {};
   return It->second;
 }
 
-llvm::ArrayRef<uint8_t>
+std::vector<uint8_t>
 DescriptorSet::inlineUniformBlockData(uint32_t Binding) const {
+  std::lock_guard<std::mutex> Lock(Mutex);
   auto It = InlineUniformBlockBindings.find(Binding);
   if (It == InlineUniformBlockBindings.end())
     return {};
@@ -571,8 +588,14 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
       if (!DstCursor.normalize(
               [&](uint32_t B) { return Dst->bindingArray(B).size(); }))
         break;
-      const DescriptorBufferBinding &B =
-          Src->bindingArray(SrcCursor.Binding)[SrcCursor.Element];
+      // `bindingArray` now returns a snapshot copy taken under the set's
+      // own lock (see Descriptor.h's `DescriptorSet` class comment), not a
+      // live `ArrayRef` -- store it first rather than indexing straight
+      // into the temporary, which would leave `B` dangling once the
+      // temporary vector is destroyed at the end of that sub-expression.
+      std::vector<DescriptorBufferBinding> SrcArray =
+          Src->bindingArray(SrcCursor.Binding);
+      const DescriptorBufferBinding &B = SrcArray[SrcCursor.Element];
       if (B.View)
         Dst->write(DstCursor.Binding, DstCursor.Element, B.View);
       else
@@ -596,8 +619,9 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
       if (!DstImageCursor.normalize(
               [&](uint32_t B) { return Dst->imageBindingArray(B).size(); }))
         break;
-      const DescriptorImageBinding &B = Src->imageBindingArray(
-          SrcImageCursor.Binding)[SrcImageCursor.Element];
+      std::vector<DescriptorImageBinding> SrcImageArray =
+          Src->imageBindingArray(SrcImageCursor.Binding);
+      const DescriptorImageBinding &B = SrcImageArray[SrcImageCursor.Element];
       Dst->write(DstImageCursor.Binding, DstImageCursor.Element, B.View, B.Samp,
                  B.Layout);
       ++SrcImageCursor.Element;
@@ -625,7 +649,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
             return Dst->inlineUniformBlockData(B).size();
           }))
         break;
-      llvm::ArrayRef<uint8_t> SrcBlob =
+      std::vector<uint8_t> SrcBlob =
           Src->inlineUniformBlockData(SrcInlineCursor.Binding);
       uint32_t DstBlobSize = static_cast<uint32_t>(
           Dst->inlineUniformBlockData(DstInlineCursor.Binding).size());
