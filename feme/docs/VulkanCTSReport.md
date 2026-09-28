@@ -3853,3 +3853,127 @@ session's own `clear_color_attachment` fix.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 -- core-1.0 `vkCmdClearAttachments` correctness fix, no feature-bit or
 extension exposure change.
+
+## Roadmap L251: `clear_color_image` `a2b10g10r10_sint_pack32` `DeviceLost` -- two independent bugs, both fixed
+
+Picked up from the prior session's own `L251` finding (a `DeviceLost` at
+`dEQP-VK.api.image_clearing.core.clear_color_image.1d.linear.
+multiple_layers.a2b10g10r10_sint_pack32`).
+
+**Bug 1 (the crash itself)**: `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+(applying `L249`/`L250`'s own now-thrice-confirmed lesson) surfaced the
+real error immediately: "image fixture format is not yet supported".
+`ImageFixture.cpp`'s test-fixture layer (used by `vkCmdClearColorImage`/
+`vkCmdCopy*`'s own `getFixtureFormatElementSize`/`packClearColor`/
+`unpackColor` call chain) had only a diagnostic *name* string for
+`R10G10B10A2_SINT` -- a documented `H19o` "gap left for later", the same
+shape `L234` already fixed for the `_SNORM` sibling. The separate
+production runtime (`FeMeRuntimeCPU.c`'s
+`femeRTPackR10G10B10A2Sint`/`femeRTUnpackR10G10B10A2Sint`) already has
+full, correct support -- these are two entirely separate code paths for
+the same format, and having a name-only fixture entry without real
+`getFormatInfo` support is a general failure *mode*: any transfer/clear
+operation on such a format crashes the whole harness (a fatal
+`createStringError` propagating up through `vkQueueSubmit`, reported as
+`DeviceLost`), not just failing one test gracefully -- because
+`formatFeatureFlags` (`Format.cpp`) unconditionally reports
+`TRANSFER_SRC`/`TRANSFER_DST` for every recognized format regardless of
+whether the fixture layer can actually handle it.
+
+Fixed by adding a `R10G10B10A2_SINT` case to `getFormatInfo`,
+`packClearColor`, and `unpackColor` (`ImageFixture.cpp`), mirroring the
+existing `R10G10B10A2_UINT`/`_SNORM` siblings with this format's own
+signed range (R/G/B in `[-512, 511]`, A in `[-2, 1]`). Along the way,
+the new unit test caught an incidental bug in the fix itself:
+`static_cast<uint32_t>(negative_double)` is undefined behavior (unlike
+casting a non-negative double to unsigned, or a negative double to a
+*signed* integer type); fixed by routing through a signed `int32_t`
+intermediate first, matching the pattern `R10G10B10A2_SNORM`'s own
+lambdas already use.
+
+New unit test: `ImageFixtureTest.PacksAndUnpacksR10G10B10A2SintNegative`,
+asserting an exact two's-complement round trip.
+
+**Bug 2 (newly unmasked by fixing Bug 1)**: re-running the original
+repro after Bug 1's fix replaced the `DeviceLost` with a normal `Fail`
+-- but widening to the full `dEQP-VK.api.image_clearing.core.
+clear_color_image.*a2b10g10r10_sint_pack32*` case-name filter (103
+cases) showed **100/103 now `Fail`** with an identical symptom: expected
+`Ref:(51, 255, 153, 0)`, actual `Color:(0, 0, 0, 0)` -- i.e. the clear
+appears to write nothing, across every dimensionality/tiling/layer-count
+combination sampled for this format, not just the original repro's own
+narrow shape. Since a new unit test already confirmed `packClearColor`/
+`unpackColor` round-trip correctly in isolation, the bug had to be
+somewhere else in the chain.
+
+Root cause: `ImageOps.cpp`'s `unpackClearColorValue` (converts a
+`VkClearColorValue` into the `ArrayRef<double>` `packClearColor`
+expects, deciding between its `int32`/`uint32`/`float32` union members)
+used `isIntegerColorAttachmentFormat`/
+`isUnsignedIntegerColorAttachmentFormat` (`RuntimeABI.h`) for that
+decision -- predicates deliberately scoped to attachment-capable
+formats only (their own doc comments and every other caller,
+`Executor.cpp`/`Pipeline.h`/`RenderPass.cpp`, specifically need
+"attachment-capable AND integer"). But `vkCmdClearColorImage` clears an
+*arbitrary* image, not just an attachment-capable one, and
+`A2B10G10R10_SINT_PACK32` has no `COLOR_ATTACHMENT_BIT`/
+`INPUT_ATTACHMENT_BIT` feature bits on this device at all -- so it fell
+through to the `float32` branch, reinterpreting the clear value's raw
+signed-integer bits (e.g. `51` as `int32`) as IEEE-754 float bits
+instead, producing a near-zero garbage double that `packClearColor`'s
+signed clamp then rounds to `0`. (`R32G32B32_{UINT,SINT}` share this
+exact same gap for the identical reason -- no attachment support on
+this device either -- though no CTS case for those two happened to
+surface it this session.)
+
+Fixed by adding a new, broader `isIntegerResourceFormat`/
+`isUnsignedIntegerResourceFormat` pair (`RuntimeABI.h`) -- a strict
+superset of the attachment-scoped predicates, additionally covering
+`R10G10B10A2_SINT` and `R32G32B32_{UINT,SINT}` -- and switching
+`unpackClearColorValue` to use the new pair. The attachment-scoped
+predicates themselves are untouched, preserving their own callers'
+narrower meaning.
+
+New unit test:
+`ImageOpsTest.ClearsSignedIntegerNonAttachmentFormatUsingInt32`, a real
+`vkCmdClearColorImage` of an `A2B10G10R10_SINT_PACK32` image (no
+`COLOR_ATTACHMENT_BIT` usage, since the format doesn't support it) with
+negative-range clear values, asserting the exact bit pattern read back.
+
+**Verified against the real CTS**:
+- `dEQP-VK.api.image_clearing.core.clear_color_image.
+  *a2b10g10r10_sint_pack32*` (103 cases): **100 Pass, 0 Fail**, 3 Not
+  supported (unrelated `sample_count_4` MSAA cases this device doesn't
+  advertise) -- was 100 Fail (post-Bug-1-fix) / originally a harness-
+  aborting `DeviceLost`.
+- A broader `dEQP-VK.api.image_clearing.*` (5200-case) re-run aborted
+  partway through on a *different*, pre-existing, unrelated
+  `DeviceLost` at `a4b4g4r4_unorm_pack16` -- confirmed via `git stash`
+  (removing this session's own fix) to reproduce identically either
+  way. `FEME_VULKAN_LOG_CREATION_ERRORS=1` shows the identical error
+  class this session's own Bug 1 fixed ("image fixture format is not
+  yet supported"), i.e. `A4B4G4R4_UNORM_PACK16` likely has the same
+  name-only fixture gap. Filed separately as `L252`, out of this fix's
+  own scope (same root-cause *class*, different format/gap, not yet
+  confirmed or fixed).
+
+**Build/test verification**:
+- `FeMeGraphicsTests`: 374/374 Passed (+1 net new unit test).
+- `FeMeVulkanTests`: 762/762 Passed (+1 net new unit test).
+- `ninja` (full project): 1452/1452, clean.
+- `ninja check-feme`: 3392 Passed, 61 Unsupported, 0 Failed (was
+  3390/61/0).
+- `ninja check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL / 207 Not
+  supported.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- core-1.0 format-fixture and clear-value-decoding
+  correctness fixes, no new feature/extension exposure.
+
+**New finding, not fixed this session (filed as `L252`)**: the
+`a4b4g4r4_unorm_pack16` `DeviceLost` described above, same root-cause
+class as this session's own Bug 1 (a name-only fixture-format entry
+with no real `getFormatInfo`/`packClearColor`/`unpackColor` support)
+but a different format -- likely a small, mechanical fix following this
+session's own precedent once confirmed, but not yet triaged past the
+one repro and the matching `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+diagnostic.
