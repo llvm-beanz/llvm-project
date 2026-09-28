@@ -12068,8 +12068,8 @@ public:
 /// a composite-construct result, an arithmetic result, ...) has no
 /// enclosing struct-member context of its own to be converted
 /// differently -- with the *pointee*'s own declared conversion, which,
-/// for a member whose layout is representable, is always the *tightened*
-/// form `getTightMatrixType` builds (see
+/// for a *struct member* whose layout is representable, is always the
+/// *tightened* form `getTightMatrixType` builds (see
 /// `getTightOrPhysicalMatrixMemberType`'s own comment, and
 /// `convertOffsetStructTypeIgnoringDecorations`'s own per-member loop,
 /// which substitutes that exact tightened type into any *offset-
@@ -12080,12 +12080,22 @@ public:
 /// footprint is only 12 bytes/column, silently overflowing into whatever
 /// field follows in memory (roadmap L207).
 ///
+/// A pointee reached with *no* enclosing struct/`AccessChain` context at
+/// all -- a whole `spirv.GlobalVariable`/`Function`-local matrix declared
+/// directly, not as any struct's member -- has no such declared tight
+/// form to reconcile with in the first place: its own
+/// `spirv.GlobalVariable` conversion (e.g. `WorkgroupGlobalVariablePattern`'s
+/// plain `convertType` call, or whatever generic pattern a bare `Private`-
+/// storage matrix global falls through to) always uses the natural, not
+/// tightened, conversion (see the storage-class/`AccessChain` checks below,
+/// roadmap L211/L242).
+///
 /// `reassembleTightVectorValue` is a no-op whenever the stored value
 /// already exactly matches the pointee's own type (e.g. a value freshly
 /// loaded from another such tight-vector-substituted member), so this is
-/// safe to apply unconditionally to every bare-matrix-pointee store this
-/// pattern reaches, not just a provably mismatching one. Explicitly
-/// defers (via `notifyMatchFailure`) to RowMajorMatrixStorePattern
+/// safe to apply unconditionally to every representable-struct-member
+/// store this pattern reaches, not just a provably mismatching one.
+/// Explicitly defers (via `notifyMatchFailure`) to RowMajorMatrixStorePattern
 /// whenever `getMatrixWholeAccess` itself would match (the physically-
 /// substituted, non-representable case that pattern alone knows how to
 /// lay out), so the two patterns' own match conditions never overlap
@@ -12139,13 +12149,40 @@ public:
               "reconcile with; the natural conversion already matches its "
               "own alloca and every AccessChain read");
 
-    if (auto AccessChain =
-            Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
-      if (getMatrixWholeAccess(AccessChain))
-        return Rewriter.notifyMatchFailure(
-            Op, "physically-substituted store, defer to "
-                "RowMajorMatrixStorePattern");
-    }
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    // (Roadmap L242, reduced from `dEQP-VK.pipeline.monolithic.
+    // spec_constant.*.composite.matrix.*`) A bare `spirv.mlir.addressof`
+    // of a whole matrix-typed `spirv.GlobalVariable` -- no `AccessChain`
+    // at all, unlike a struct/block member reached by navigating one --
+    // has exactly the same "no declared tight layout to reconcile with"
+    // shape `Function` storage's own exemption above already covers, for
+    // any storage class: reaching a struct member through Offset/
+    // MatrixStride decorations always requires a real `AccessChain` (a
+    // bare pointer's own pointee type can never directly be a struct
+    // member's type otherwise), so the *absence* of one here means this
+    // global variable's own declared type is a bare, unwrapped matrix,
+    // not a member of any offset-decorated struct -- and every such
+    // global's own `spirv.GlobalVariable` conversion (e.g.
+    // `WorkgroupGlobalVariablePattern`'s plain `convertType` call, or the
+    // generic pattern a `Private`-storage bare matrix global like this
+    // falls through to) always declares it with the plain, "natural"
+    // conversion, never `getTightMatrixType`'s tightened one. Tightening
+    // only this whole-matrix store while every per-element
+    // `spirv.AccessChain`-based read/write of the very same global still
+    // computes its own GEP against that same natural (untightened) type
+    // is exactly `Function` storage's own bug, just triggered by a bare
+    // `Private`/`Workgroup`-storage global instead of a local alloca.
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(
+          Op, "bare matrix global variable has no declared tight layout to "
+              "reconcile with; its own GlobalVariableOp conversion and "
+              "every AccessChain read already agree on the natural layout");
+
+    if (getMatrixWholeAccess(AccessChain))
+      return Rewriter.notifyMatchFailure(
+          Op, "physically-substituted store, defer to "
+              "RowMajorMatrixStorePattern");
 
     mlir::Type TightTy = getTightMatrixType(MatrixTy, *getTypeConverter());
     if (!TightTy)
@@ -12214,13 +12251,24 @@ public:
               "reconcile with; the natural conversion already matches its "
               "own alloca and every AccessChain read");
 
-    if (auto AccessChain =
-            Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>()) {
-      if (getMatrixWholeAccess(AccessChain))
-        return Rewriter.notifyMatchFailure(
-            Op, "physically-substituted load, defer to "
-                "RowMajorMatrixLoadPattern");
-    }
+    auto AccessChain =
+        Op.getPtr().getDefiningOp<mlir::spirv::AccessChainOp>();
+    // See `TightMatrixStorePattern`'s own identical check's comment
+    // (roadmap L242): a bare `spirv.mlir.addressof` of a whole matrix-typed
+    // `spirv.GlobalVariable` -- no `AccessChain` at all -- has exactly the
+    // same "no declared tight layout to reconcile with" shape `Function`
+    // storage's own exemption above already covers, for any storage
+    // class.
+    if (!AccessChain)
+      return Rewriter.notifyMatchFailure(
+          Op, "bare matrix global variable has no declared tight layout to "
+              "reconcile with; its own GlobalVariableOp conversion and "
+              "every AccessChain read already agree on the natural layout");
+
+    if (getMatrixWholeAccess(AccessChain))
+      return Rewriter.notifyMatchFailure(
+          Op, "physically-substituted load, defer to "
+              "RowMajorMatrixLoadPattern");
 
     mlir::Type TightTy = getTightMatrixType(MatrixTy, *getTypeConverter());
     mlir::Type NaturalTy = getTypeConverter()->convertType(MatrixTy);
