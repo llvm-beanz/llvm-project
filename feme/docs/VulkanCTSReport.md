@@ -3440,3 +3440,76 @@ regressions among the other 9 RMW ops or `compare_exchange`).
   change needed -- this is a core-1.0 image-atomic correctness fix
   (closing a gap in an already-implemented feature), not a new feature
   or extension landing.
+
+## Roadmap L228(e)/(f): widened `dEQP-VK.pipeline.*` fixed-seed sample -- new L248/L249 findings
+
+Sampled `dEQP-VK.pipeline.*` at 1-in-200 (`--deqp-fraction=1,200`, ~5797
+cases), the broader-than-tessellation re-run overdue since several
+prior sessions. Result: **1447 Pass, 1 Fail, 4349 Not supported** --
+the single failure, `dEQP-VK.pipeline.fast_linked_library.depth.
+format.d32_sfloat_s8_uint.depth_test_disabled.depth_write_enabled`,
+led to filing and fixing `L248` (below). A second, unrelated finding
+(`L249`, a genuine `DeviceLost` in a depth-only-subpasses case) was
+also newly surfaced by a follow-up full `depth.*` group re-run and is
+filed separately, untouched this session.
+
+## Roadmap L248: `depth_test_disabled.depth_write_enabled` -- depth writes not gated on the depth test
+
+Widening this session's broader `pipeline.*` sample (see above) found
+one failure: `fast_linked_library.depth.format.d32_sfloat_s8_uint.
+depth_test_disabled.depth_write_enabled`. Re-running the same
+`depth_test_disabled.depth_write_enabled` combination across every
+applicable format found it fails identically for every one (6 Fail:
+`d32_sfloat`, `d32_sfloat_s8_uint`, `d32_sfloat_s8_uint_separate_
+layouts`, and their monolithic-construction equivalents), independent
+of `PipelineConstructionType` (`monolithic` fails identically to
+`fast_linked_library`).
+
+Reading `Executor.cpp`'s `testDepthStencil` found the bug directly:
+the final depth-write step gated only on `Depth.WriteEnable`,
+independent of `Depth.TestEnable`:
+
+```cpp
+if (Depth.WriteEnable) {
+  writeDepth(...);
+}
+```
+
+But the Vulkan spec is explicit that `depthWriteEnable` only takes
+effect *when* `depthTestEnable` is also true -- depth writes are
+always disabled when the depth test itself is disabled, regardless of
+`depthWriteEnable`'s own value. (There is no way to write depth
+without testing it at all; the spec's documented way to get an
+always-passing test that still writes is `depthTestEnable = true` with
+`depthCompareOp = VK_COMPARE_OP_ALWAYS`.) FeMe's implementation
+already defaults `DepthPass` to `true` when `Depth.TestEnable` is
+false (matching "the depth test always passes" correctly), but then
+incorrectly let that always-passing result reach the write step even
+though the test was never actually performed.
+
+Fixed by gating the depth-write call on `Depth.TestEnable &&
+Depth.WriteEnable` instead of `Depth.WriteEnable` alone -- a one-line
+change (plus an explanatory comment) at the exact point identified.
+
+Added a new `ExecutorTest` unit test,
+`DepthTestDisabledSuppressesDepthWriteEvenWhenEnabled`, directly
+alongside the existing `DepthWriteDisabledLeavesAttachmentUnchanged`
+test it mirrors: renders a fragment with `TestEnable = false`,
+`WriteEnable = true`, and confirms the fragment is still shaded (the
+always-passing test lets it through) but the depth attachment is left
+untouched.
+
+**Verified against the real CTS**: the full `dEQP-VK.pipeline.*.depth.
+format.*` group (16860 cases, every construction method x format x
+depth-state combination) now **8433 Pass, 0 Fail**, 8427 Not supported
+-- confirming the fix closes all 6 previously-failing cases with no
+regressions across the rest of the group.
+
+**Build/test verification**:
+- `FeMeGraphicsTests` (`--gtest_filter=*Depth*`): 9/9 pass, including
+  the new test.
+- `ninja check-feme`: 3387 Passed (+1 net new unit test), 61
+  Unsupported, 0 Failed.
+- `ninja check-hlsl-feme-vk`: 483/32/207, unchanged.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- core-1.0 depth-test/depth-write correctness fix.
