@@ -2125,3 +2125,48 @@ go instead).
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed.
+
+## Roadmap L227(a): `Barrier.32.test` SPIR-V legalization + barrier-region-split dead-block fix -- fixed
+
+Two independent bugs fixed together this session (see `Roadmap.md`'s
+`L227(a)` entry for the full root-cause narrative):
+
+1. `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: a new
+   `VulkanMemoryModelLoadStorePattern<SPIRVOp>` widens the
+   memory-access bits `spirv.Load`/`spirv.Store` legalization accepts
+   to include the three Vulkan-Memory-Model-only bits
+   (`MakePointerAvailable`/`MakePointerVisible`/`NonPrivatePointer`)
+   upstream MLIR's own `LoadStorePattern` rejects outright.
+2. `feme/lib/Transforms/CPU/EntryWrapper.cpp`: `splitAtGroupSyncBarriers`
+   now calls `EliminateUnreachableBlocks` on the wave body before
+   `isLinearChain` runs, since `feme::cpu::SIMDizePass`'s own
+   if-conversion can leave a genuinely dead, unreachable `..._crit_edge`
+   block behind that `isLinearChain`'s own sanity check previously
+   (incorrectly) treated as disqualifying.
+
+**`check-hlsl-feme-vk`:** **463/722 Pass, 31 XFAIL, 221 Not supported,
+7 Fail** (previously 462/722 Pass, 8 Fail -- `Barrier.32.test` now
+passes, no new regressions; the remaining 7 are `L227(c)`/`(d)`'s own
+still-unresolved items).
+
+`ninja check-feme`: 3338/3399 Passed, 61 Unsupported, 0 Failed (+1 net
+new test versus the 3337/3398 prior baseline: the new
+`spirv-to-llvm-vulkan-memory-model-load-store.mlir` and
+`entry-wrapper-dead-block-from-simdize.ll` lit tests, net of one file
+each against the prior session's own +1).
+
+Targeted Vulkan CTS sample (this session, since both fixes touch
+compute-shader barrier/region-splitting code broadly, not just this
+one test): `dEQP-VK.compute.pipeline.*barrier*` (2819 cases, every
+`compute.pipeline` case whose name contains "barrier", covering the
+same class of barrier-adjacent workgroup-shared-memory shader this
+session's fix targets). Result: **9 Pass, 2810 Not supported (mostly
+`cooperative_matrix`/other extension-gated cases this device does not
+advertise), 0 Fail, 0 unexpected failures** -- confirms the fix
+introduces no regressions across the broader barrier-adjacent compute
+surface, not just the one directly-fixed test.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- neither fix touches feature-bit exposure; both are
+correctness fixes to existing, already-advertised compute-shader
+lowering paths.
