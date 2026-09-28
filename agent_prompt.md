@@ -61,21 +61,20 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, new roadmap item, ready to pick up)** `L250`:
-   `dEQP-VK.pipeline.fast_linked_library.multisample.
-   compatible_render_pass.dynamic` genuine `DeviceLost`. Start with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` first (this session's own L249
-   lesson), then check whether it's another
-   `synthesizeLinkedGraphicsPipelineCreateInfo`/GPL-linking gap before
-   assuming a new root cause.
-2. **(a few hours, still carried over, unchanged for many sessions)**
-   Pick one of `L227(d)` (3 `Graphics/MeshShaders/*`
-   image-comparison failures) or `L228(b)`/`(c)` (compressed-format
-   blits, MSAA multi-layer clears).
-3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+1. **(a few hours, unchanged for many sessions)** Pick one of
+   `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
+   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears).
+2. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample further -- `shader_render` and
    most of `pipeline`'s other sub-suites remain unsampled at any real
-   scale.
-4. **(a few hours, still carried over)** `L246`: `dEQP-VK.image.
-   mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer` gap.
-   Filed several sessions ago, still untouched.
+   scale (this session's own two multisample/depth sweeps, ~103k cases
+   combined, are a start but don't cover those areas).
+3. **(a few hours, still carried over)** `L246`: `dEQP-VK.image.
+   mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer` gap. Filed
+   several sessions ago, still untouched.
+4. **(worth a few minutes, low priority, carried over many sessions)**
+   Audit other FeMe creation-time *and now draw-time* checks for the
+   "over-strict enforcement" pattern (`L241`, now also `L250`) -- two
+   confirmed instances in different code paths (creation-time VUID vs.
+   draw-time attachment-requirement); still no dedicated systematic
+   search done, keeps getting bumped every session.
