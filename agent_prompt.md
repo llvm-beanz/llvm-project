@@ -61,24 +61,20 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
-   -- confirmed format-independent, needs new image-view/addressing code.
-2. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
-   `/6` layer-count fix -- classification-level surgery, unchanged for many
-   sessions.
-3. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+1. **(a full dedicated session, still overdue)** `L239`:
+   3D-image-as-2D-render-target support -- confirmed format-independent, needs
+   new image-view/addressing code.
+2. **(a few hours, still carried over)** Pick one of `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
    sessions now.
-4. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
    `shader_render` remain completely unsampled.
-5. **(worth a few minutes, low priority)** Audit other FeMe creation-time checks
-   for the same "over-strict VUID enforcement" pattern this session found in
-   `primitiveRestartEnable` handling -- no other instances searched for yet, but
-   the pattern (reject at creation instead of no-op at draw time) may recur.
-6. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
-   branch -- confirmed drifting every session (known root cause:
-   `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
-   unconditionally). `git log --oneline feme -3` should show `9351791`; `git
-   reset --hard 9351791` if not.
+4. **(worth a few minutes, low priority, carried over)** Audit other FeMe
+   creation-time checks for the "over-strict VUID enforcement" pattern `L241`
+   found in `primitiveRestartEnable` handling -- still not searched for.
+5. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
+   branch -- was already correct this session, but keep checking (known root
+   cause: `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
+   unconditionally).
