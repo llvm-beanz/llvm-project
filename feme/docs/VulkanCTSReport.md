@@ -2854,3 +2854,88 @@ the new, correct `VK_SUCCESS`.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- this is a stage-interface/rasterization correctness fix to
 existing core-1.0 behavior, not a new feature or extension landing.
+
+## Roadmap L243: `pipeline.monolithic.no_position.*.ssbo_writes.*` -- side effects dropped/duplicated by the barrierless hull-entry split
+
+`L238`'s own full 300-case `dEQP-VK.pipeline.monolithic.no_position.*`
+re-run left 48 cases failing with `Unexpected SSBO counter value in
+view 0 for the tessellation control shader: got {4,1} but expected 3`
+-- split off rather than folded into `L238`'s fix since it's a
+tessellation-control invocation-count/dispatch bug, not a
+stage-interface-matching gap.
+
+Root cause: `CanonicalizeStage.cpp`'s
+`splitBarrierlessTessellationControlEntry` (the pass synthesizing
+FeMe's HLSL-style two-function hull-stage split for a barrierless,
+GLSL-style single-`main()` entry) only ever reasoned about classified
+stage-IO stores when deciding what each of its two clones -- the
+per-invocation control-point phase and the once-per-patch
+patch-constant phase -- should keep. Any other side effect was
+invisible to that classification: here, an `AtomicRMWInst` (SPIR-V's
+`OpAtomicIAdd`, used by the CTS's own `atomicAdd(ssbo.counters[...],
+1)`, lowers directly to one via `AtomicRMWPattern`
+(`SPIRVToLLVMPatterns.cpp`), never through a `feme.stage.*` call).
+
+Confirmed via the same SPIR-V-decompilation-diff technique `L242`
+established (`--deqp-log-decompiled-spirv=enable`, diffing the real
+compiled TCS SPIR-V for a "got 4" case against a "got 1" case): the
+"got 4"/"got 1" split correlates exactly with whether the TCS also
+writes `gl_Position` (a genuine patch/vertex mix, case name's `c1`
+suffix) or writes only `gl_TessLevelInner/Outer` (patch-frequency
+only, `c0`):
+
+- **"got 1" (`c0`, patch-frequency-only shape):** this shape's
+  existing fast path (`isPatchConstantOnlyEntry`) moves the *whole*
+  entry body, atomic included, into the once-per-patch
+  `.patchconstant` clone alone, replacing the original with a trivial
+  empty `ret void` stub. The atomic then runs once per patch instead
+  of once per invocation: 1, not 3.
+- **"got 4" (`c1`, genuine-mix shape):** this shape's existing
+  frequency-based store pruning (`pruneStageIOStoresByFrequency`)
+  leaves the atomic untouched in *both* clones (it only ever reasons
+  about classified stage-IO stores), so it runs an extra, spurious
+  time on top of its correct once-per-invocation executions: 3
+  correct + 1 spurious = 4.
+
+Fix: two new helpers, `hasNonStageIOSideEffect(Function &F)` (detects
+an `AtomicRMWInst`/`AtomicCmpXchgInst` anywhere, a `StoreInst` whose
+pointer resolves to neither a stage-IO global nor a Function-local
+`AllocaInst` via `getUnderlyingObject`, or a `CallInst` that is
+neither a recognized `feme.stage.*` op nor provably read-only) and
+`pruneNonStageIOSideEffects(Function &Fn)` (erases the same
+instructions it detects, replacing any remaining uses with
+`PoisonValue`, then sweeps up newly-dead `feme.stage.input.load` calls
+via the existing `pruneDeadStageInputLoads`).
+`splitBarrierlessTessellationControlEntry` now computes
+`hasNonStageIOSideEffect(F)` up front and widens its genuine-mix
+branch condition to also trigger whenever it is true (so the
+patch-frequency-only fast path is skipped in favor of a real,
+non-empty control-point clone whenever a side effect is present), and
+that branch now always additionally calls
+`pruneNonStageIOSideEffects(*PatchConstantPhase)` after its existing
+frequency-based pruning -- the control-point clone's own copy of the
+side effect already runs with the correct per-invocation multiplicity,
+so only the patch-constant clone needs it stripped.
+
+Verified against the two hand-picked repro cases directly
+(`ssbo_writes.single_view.v0_c1_e0`/`v0_c0_e0`, both now `Pass`), then
+the full 48-case failure list (all now `Pass`), then the full 300-case
+`no_position.*` group: **156 Pass, 144 NotSupported (multiview +
+tessellation, unchanged), 0 Fail** -- up from 108 Pass / 144
+NotSupported / 48 Fail before this fix, confirmed 0 regressions among
+the 156 now-passing cases via a full status diff against the pre-fix
+sweep.
+
+2 new `CanonicalizeStageTest` unit tests
+(`NoBarrierPatchConstantOnlyEntryWithSideEffectKeepsControlPointClone`,
+`NoBarrierMixedFrequencyEntryWithSideEffectPrunesPatchConstantClone`)
+cover both fixed shapes directly against synthetic IR containing an
+`atomicrmw`.
+
+`ninja check-feme`: 3364 Passed, 61 Unsupported, 0 Failed (+2 net new
+unit tests). `check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL /
+207 Not supported, 0 unexpected failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a tessellation-control-dispatch correctness fix to
+existing core-1.0 behavior, not a new feature or extension landing.

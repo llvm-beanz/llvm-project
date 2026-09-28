@@ -832,6 +832,30 @@ an unpruned per-vertex store surviving into the patch-constant clone
 would have been misclassified, which is exactly the defect roadmap H9c
 found and fixed.
 
+Roadmap L243 closed a further gap in both shapes above: neither
+`isPatchConstantOnlyEntry`'s whole-function clone nor
+`pruneStageIOStoresByFrequency`'s frequency-based store pruning ever
+reasoned about a side effect that is *not* a classified stage-IO store --
+an `AtomicRMWInst`/`AtomicCmpXchgInst` (as SPIR-V's `OpAtomicIAdd` lowers
+to, e.g. a storage-buffer invocation counter), or a store through a
+pointer that resolves to neither a stage-IO global nor a
+function-local `alloca`. Such a side effect must run exactly once per
+real GLSL invocation, same as the entry's own per-vertex stage-IO
+writes, but is invisible to both existing mechanisms: the
+whole-function-clone shape moved it into the once-per-patch clone
+alone (running it once per patch instead of once per invocation), and
+the frequency-pruning shape left it untouched in *both* clones
+(running it an extra, spurious time per invocation). `splitBarrierless
+TessellationControlEntry` now checks a new `hasNonStageIOSideEffect`
+predicate on the original entry before choosing which shape to take:
+the whole-function-clone shape is skipped whenever the predicate is
+true (falling through to the frequency-pruning shape instead, so a
+real, non-empty control-point clone survives to host the side
+effect), and the frequency-pruning shape now additionally calls a new
+`pruneNonStageIOSideEffects` on the patch-constant clone only, since
+the control-point clone's own copy of the side effect already runs
+with the correct once-per-invocation multiplicity.
+
 Roadmap H4c closed this
 row's original remaining gap -- an SSA value defined before the barrier and
 read back after it, the common real shape a per-patch tessellation factor
