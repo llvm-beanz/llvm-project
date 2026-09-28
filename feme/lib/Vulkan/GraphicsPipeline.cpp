@@ -3198,8 +3198,23 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
   for (const GraphicsPipelineLibrary *Lib : Libraries) {
     if (!Result.layout)
       Result.layout = Lib->state().Layout;
-    if (!Result.renderPass)
+    // (roadmap L249) `Subpass` is meaningless without the `RenderPass` it
+    // names, so it must be inherited from the very same library
+    // `RenderPass` was, in the same step -- not merely defaulted from
+    // `CreateInfo.subpass` above, which a pure-link call (no state of its
+    // own) always zero-initializes to `0` regardless of which subpass its
+    // linked libraries actually named. Leaving this unpaired left a
+    // linked pipeline bound to any subpass other than `0` silently
+    // re-resolving `getRenderTargets` against subpass `0`'s own
+    // attachment counts instead
+    // (`dEQP-VK.pipeline.fast_linked_library.depth.depth_only.
+    // subpasses_postpass`'s own genuine `DeviceLost`, a depth-only
+    // subpass 1 pipeline linked against a render pass whose subpass 0 has
+    // a real color attachment).
+    if (!Result.renderPass) {
       Result.renderPass = Lib->state().RenderPass;
+      Result.subpass = Lib->state().Subpass;
+    }
     for (VkDynamicState State : Lib->state().DynamicStates)
       if (llvm::find(Storage.DynamicStates, State) ==
           Storage.DynamicStates.end())

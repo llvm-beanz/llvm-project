@@ -4813,6 +4813,136 @@ TEST_F(GraphicsPipelineTest, LinksAllFourLibraryPartsIntoAnExecutablePipeline) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L249) A linked pipeline bound to a subpass other than `0` must
+/// still resolve `getRenderTargets` against *that* subpass, not subpass
+/// `0`, even though a pure-link call's own `VkGraphicsPipelineCreateInfo`
+/// never names a `subpass` field of its own (every library part supplied
+/// it instead, per the spec's "Multiple Pipeline Creation" table).
+/// `dEQP-VK.pipeline.fast_linked_library.depth.depth_only.
+/// subpasses_postpass`'s own genuine `DeviceLost` was exactly this: each
+/// library part (including the fragment-output-interface one, whose own
+/// zero-attachment `VkPipelineColorBlendStateCreateInfo` correctly
+/// declared no color output) named subpass `1` of a two-subpass render
+/// pass whose subpass `1` has no color attachment at all -- but the
+/// linked pipeline's `renderPass` was inherited from a library while its
+/// `subpass` silently stayed at the pure-link call's own default-
+/// initialized `0`, so `getRenderTargets` resolved subpass `0`'s one
+/// color attachment instead, and every draw through the linked pipeline
+/// failed `resolveDrawAttachments`'s "declared count matches render
+/// target" check and marked the device lost.
+TEST_F(GraphicsPipelineTest, LinksSubpassFromLibraryNotJustRenderPass) {
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_D32_SFLOAT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference DepthRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+  VkSubpassDescription Subpasses[2]{};
+  // Subpass 0: color + depth, matching the failing CTS case's own
+  // `depthColorRefs`-bound first subpass.
+  Subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpasses[0].colorAttachmentCount = 1;
+  Subpasses[0].pColorAttachments = &ColorRef;
+  Subpasses[0].pDepthStencilAttachment = &DepthRef;
+  // Subpass 1: depth only, matching the failing case's own
+  // `depthOnlySubpassRefs`-bound second subpass -- the one the linked
+  // pipeline below actually targets.
+  Subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpasses[1].colorAttachmentCount = 0;
+  Subpasses[1].pDepthStencilAttachment = &DepthRef;
+
+  VkSubpassDependency Dependency{};
+  Dependency.srcSubpass = 0;
+  Dependency.dstSubpass = 1;
+  Dependency.srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                            VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+  Dependency.dstStageMask = Dependency.srcStageMask;
+  Dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+  Dependency.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                             VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 2;
+  PassInfo.pSubpasses = Subpasses;
+  PassInfo.dependencyCount = 1;
+  PassInfo.pDependencies = &Dependency;
+  VkRenderPass TwoSubpassPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &TwoSubpassPass),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(NoColorOutputFragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = TwoSubpassPass;
+  Info.subpass = 1;
+  Blend.attachmentCount = 0;
+  Blend.pAttachments = nullptr;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  // The pure-link call below deliberately supplies neither `renderPass`
+  // nor `subpass` of its own -- exactly `finalPipelineCreateInfo`'s own
+  // zero-initialized shape in the failing CTS case -- so the linked
+  // pipeline's `subpass` can only come from folding in the libraries
+  // above.
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            0u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyRenderPass(Device, TwoSubpassPass, nullptr);
+}
+
 TEST_F(GraphicsPipelineTest, LinksDynamicDepthBiasEnableState) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
