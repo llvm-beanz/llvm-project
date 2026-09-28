@@ -2253,3 +2253,45 @@ the `Plain1D`/`Array1D`/`Plain3D` branches). Filed as new roadmap item
 needed -- this sample re-confirms existing, already-advertised
 functionality plus discovers an existing gap, neither changes
 feature/extension exposure.
+
+## Roadmap L229: `OpImageQueryLod` for `Plain3D`/`CubeArray` -- new 190-case targeted sample, plus `check-hlsl-feme-vk`
+
+Ran `CalculateLevelOfDetail.test` directly via `llvm-lit` against the
+`feme-vk` build-tree config: **now passes** (was the sole remaining
+`check-hlsl-feme-vk` failure before this session). Full
+`check-hlsl-feme-vk`: **483/722 Pass, 32 XFAIL, 207 Not supported, 0
+Fail** (up from 482 Pass/1 Fail).
+
+Ran a targeted 190-case sample (`grep -i "query_lod\|querylod"` over
+`glsl.txt`'s own mustpass list --
+`dEQP-VK.glsl.texture_functions.query.texturequerylod.*`, covering
+every sampler shape/format combination the GLSL query-LOD test group
+exercises) via `run_vulkan_cts.py`.
+
+Result: **120 Pass, 70 Fail**. Every float-channel-sampler case for
+every shape -- including the two this session's own change newly
+supports, `sampler3d_*`/`sampler3d_fixed_*` (10 cases) and
+`samplercubearray_*`/`samplercubearray_fixed_*`/
+`samplercubearrayshadow_*` (24 cases) -- **passes**, confirming the
+`L229` fix generalizes cleanly to the GLSL CTS surface, not just the
+HLSL/DXC surface `CalculateLevelOfDetail.test` originally exercised.
+
+All 70 failures are `isampler*`/`usampler*` (integer-channel sampler)
+variants, spread uniformly across *every* shape in the sample --
+including `isampler2d_*`/`usampler2d_*` and `isamplercube_*`/
+`usamplercube_*`, which have supported float-channel `OpImageQueryLod`
+for several sessions already, well before this session's own `Plain3D`/
+`CubeArray` work. This confirms the failures are a pre-existing,
+uniform, unrelated gap (integer-channel `OpImageQueryLod` support, not
+yet root-caused: unclear whether `hasOnlySupportedImageUses`'s
+`isQueryLodIntrinsic` shape gate implicitly assumes a float-typed
+image, or the runtime-function side has its own separate float-only
+assumption) rather than anything this session's change introduced or
+could have fixed incidentally. Filed as new roadmap item `L231`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this widens an existing, already-advertised lowering
+mechanism (the `QueryLod*` builder family) to two more float-channel
+shapes; it does not change any feature-bit or extension exposure, and
+the newly discovered integer-sampler gap (`L231`) is unfixed, so
+nothing to add or remove from either inventory for it either.
