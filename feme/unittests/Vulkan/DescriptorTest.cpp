@@ -19,6 +19,8 @@
 #include "gtest/gtest.h"
 
 #include <cstring>
+#include <atomic>
+#include <thread>
 
 using namespace feme::vulkan;
 
@@ -223,7 +225,7 @@ TEST_F(DescriptorTest, AllocateUpdateAndReadBackWrite) {
   vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorBufferBinding> Array = S->bindingArray(0);
+  std::vector<DescriptorBufferBinding> Array = S->bindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
   EXPECT_EQ(Array[0].Offset, 16u);
@@ -290,7 +292,7 @@ TEST_F(DescriptorTest, UpdateWithTemplateMatchesDirectWrite) {
   vkUpdateDescriptorSetWithTemplate(Device, Set, Template, &BufInfo);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorBufferBinding> Array = S->bindingArray(0);
+  std::vector<DescriptorBufferBinding> Array = S->bindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
   EXPECT_EQ(Array[0].Offset, 16u);
@@ -452,7 +454,7 @@ TEST_F(DescriptorTest, UniformBufferLayoutAcceptedAndDynamicOffsetCounted) {
   vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorBufferBinding> Array = S->bindingArray(0);
+  std::vector<DescriptorBufferBinding> Array = S->bindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
   EXPECT_EQ(Array[0].Range, 32u);
@@ -502,7 +504,7 @@ TEST_F(DescriptorTest, InputAttachmentWriteAndReadBack) {
   vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  std::vector<DescriptorImageBinding> Array = S->imageBindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfo.imageView));
   EXPECT_EQ(Array[0].Samp, nullptr);
@@ -563,7 +565,7 @@ TEST_F(DescriptorTest, CombinedImageSamplerWriteAndReadBack) {
   vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  std::vector<DescriptorImageBinding> Array = S->imageBindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfo.imageView));
   EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(Samp));
@@ -619,7 +621,7 @@ TEST_F(DescriptorTest, ImmutableSamplerSeedsDescriptorAtAllocationTime) {
   // The sampler half is already populated, before any
   // `vkUpdateDescriptorSets` call at all.
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  std::vector<DescriptorImageBinding> Array = S->imageBindingArray(0);
   ASSERT_EQ(Array.size(), 1u);
   EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(ImmutableSamp));
   EXPECT_EQ(Array[0].View, nullptr);
@@ -695,7 +697,7 @@ TEST_F(DescriptorTest, ImmutableSamplerArraySeedsEachElementIndependently) {
   ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  std::vector<DescriptorImageBinding> Array = S->imageBindingArray(0);
   ASSERT_EQ(Array.size(), 2u);
   EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(ImmutableSamps[0]));
   EXPECT_EQ(Array[1].Samp, fromHandle<Sampler>(ImmutableSamps[1]));
@@ -745,7 +747,7 @@ TEST_F(DescriptorTest, InlineUniformBlockDescriptorTypeIsAccepted) {
   ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  std::vector<uint8_t> Data = S->inlineUniformBlockData(0);
   ASSERT_EQ(Data.size(), 16u);
   EXPECT_TRUE(llvm::all_of(Data, [](uint8_t B) { return B == 0; }));
 
@@ -803,10 +805,10 @@ TEST_F(DescriptorTest, InlineUniformBlockWriteAndReadBack) {
   vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  std::vector<uint8_t> Data = S->inlineUniformBlockData(0);
   ASSERT_EQ(Data.size(), 16u);
-  EXPECT_TRUE(
-      llvm::all_of(Data.take_front(12), [](uint8_t B) { return B == 0; }));
+  EXPECT_TRUE(llvm::all_of(llvm::ArrayRef<uint8_t>(Data).take_front(12),
+                           [](uint8_t B) { return B == 0; }));
   uint32_t Readback;
   std::memcpy(&Readback, Data.data() + 12, sizeof(Readback));
   EXPECT_EQ(Readback, Payload);
@@ -868,7 +870,7 @@ TEST_F(DescriptorTest, InlineUniformBlockUpdateWithTemplateMatchesDirectWrite) {
   vkUpdateDescriptorSetWithTemplate(Device, Set, Template, SrcBuffer);
 
   auto *S = fromHandle<DescriptorSet>(Set);
-  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  std::vector<uint8_t> Data = S->inlineUniformBlockData(0);
   ASSERT_EQ(Data.size(), 8u);
   EXPECT_EQ(std::memcmp(Data.data(), SrcBuffer + 4, 8), 0);
 
@@ -934,7 +936,7 @@ TEST_F(DescriptorTest, InlineUniformBlockCopyBetweenSets) {
   vkUpdateDescriptorSets(Device, 0, nullptr, 1, &Copy);
 
   auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
-  llvm::ArrayRef<uint8_t> Data = Dst->inlineUniformBlockData(0);
+  std::vector<uint8_t> Data = Dst->inlineUniformBlockData(0);
   ASSERT_EQ(Data.size(), 8u);
   uint64_t Readback;
   std::memcpy(&Readback, Data.data(), sizeof(Readback));
@@ -1013,7 +1015,7 @@ TEST_F(DescriptorTest, CopyDescriptorSetSpansConsecutiveBufferBindings) {
 
   auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
   for (uint32_t I = 0; I != 3; ++I) {
-    llvm::ArrayRef<DescriptorBufferBinding> Array = Dst->bindingArray(I);
+    std::vector<DescriptorBufferBinding> Array = Dst->bindingArray(I);
     ASSERT_EQ(Array.size(), 1u);
     EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Bufs[I]));
     EXPECT_EQ(Array[0].Offset, I * 4u);
@@ -1091,7 +1093,7 @@ TEST_F(DescriptorTest, CopyDescriptorSetSpansConsecutiveImageBindings) {
 
   auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
   for (uint32_t I = 0; I != 3; ++I) {
-    llvm::ArrayRef<DescriptorImageBinding> Array = Dst->imageBindingArray(I);
+    std::vector<DescriptorImageBinding> Array = Dst->imageBindingArray(I);
     ASSERT_EQ(Array.size(), 1u);
     EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfos[I].imageView));
     EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(Samp));
@@ -1171,7 +1173,7 @@ TEST_F(DescriptorTest,
 
   auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
   for (uint32_t I = 0; I != 2; ++I) {
-    llvm::ArrayRef<uint8_t> Data = Dst->inlineUniformBlockData(I);
+    std::vector<uint8_t> Data = Dst->inlineUniformBlockData(I);
     ASSERT_EQ(Data.size(), 4u);
     EXPECT_EQ(std::memcmp(Data.data(), Payload + I * 4, 4), 0);
   }
@@ -1409,6 +1411,112 @@ TEST_F(DescriptorTest, GetLayoutSupportReportsMaxVariableDescriptorCount) {
   vkGetDescriptorSetLayoutSupport(Device, &LayoutInfo, &Support);
   EXPECT_EQ(Support.supported, VK_TRUE);
   EXPECT_EQ(CountSupport.maxVariableDescriptorCount, 7u);
+}
+
+// (roadmap L228(j)) Regression test for the descriptor update-after-bind
+// data race the async `vkQueueSubmit` model (roadmap L228(h)/(i)) exposed:
+// a real application may call `vkUpdateDescriptorSets` on a descriptor set
+// from its own thread while a previously submitted command buffer that
+// consumes the very same set is still running on its queue's own
+// background `QueueExecutor` thread (`Sync.h`) -- exactly the case
+// `VK_EXT_descriptor_indexing`'s update-after-bind feature bits (this ICD
+// advertises them, see `FeMeVulkanDesign.md`'s Threading Rules gap note)
+// legalize. `DescriptorSet::write`'s per-element struct assignment is not
+// atomic, so a concurrent `bindingArray` snapshot could observe a *torn*
+// element: some fields from one write, some from another. Exercises
+// `DescriptorSet::write`/`bindingArray` directly (not the full
+// device/queue machinery) to stay fast enough to run in every `check-feme`
+// invocation; also passes cleanly under Helgrind/DRD (no ThreadSanitizer
+// rebuild of this in-tree LLVM+clang toolchain required) -- see
+// `agent_thoughts.md`'s L228(j) entry for how this was verified to
+// actually fail without `DescriptorSet::Mutex`.
+TEST_F(DescriptorTest, ConcurrentUpdateDescriptorSetsDoesNotRaceWithDispatchRead) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout LayoutHandle;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr,
+                                       &LayoutHandle),
+           VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+           VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &LayoutHandle;
+  VkDescriptorSet Set;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  // Two fully-defined "canonical" states -- if a read ever observes a
+  // field from one mixed with a field from the other, that element was
+  // torn, proving the two threads raced without the lock.
+  VkBuffer BufA = createStorageBuffer(64);
+  VkBuffer BufB = createStorageBuffer(128);
+  auto *A = fromHandle<Buffer>(BufA);
+  auto *B = fromHandle<Buffer>(BufB);
+
+  VkDescriptorBufferInfo InfoA{BufA, /*offset=*/16, /*range=*/48};
+  VkDescriptorBufferInfo InfoB{BufB, /*offset=*/32, /*range=*/96};
+  VkWriteDescriptorSet WriteA{};
+  WriteA.dstSet = Set;
+  WriteA.dstBinding = 0;
+  WriteA.descriptorCount = 1;
+  WriteA.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  WriteA.pBufferInfo = &InfoA;
+  VkWriteDescriptorSet WriteB = WriteA;
+  WriteB.pBufferInfo = &InfoB;
+
+  // Seed the set with one write on this (the test's own) thread before
+  // starting the Reader below -- otherwise the Reader's very first
+  // iteration could legitimately observe the constructor's initial
+  // never-written state (`Buf == nullptr`), which matches neither
+  // `MatchesA` nor `MatchesB` and would misreport a real race that has
+  // not actually started yet as a torn read.
+  vkUpdateDescriptorSets(Device, 1, &WriteA, 0, nullptr);
+
+  constexpr int Iterations = 20000;
+  std::atomic<bool> TornReadObserved{false};
+  std::thread Writer([&] {
+    for (int I = 0; I != Iterations; ++I)
+      vkUpdateDescriptorSets(Device, 1, (I & 1) ? &WriteB : &WriteA, 0,
+                             nullptr);
+  });
+  std::thread Reader([&] {
+    auto *S = fromHandle<DescriptorSet>(Set);
+    for (int I = 0; I != Iterations; ++I) {
+      std::vector<DescriptorBufferBinding> Snapshot = S->bindingArray(0);
+      ASSERT_EQ(Snapshot.size(), 1u);
+      const DescriptorBufferBinding &Elt = Snapshot[0];
+      bool MatchesA =
+          Elt.Buf == A && Elt.Offset == 16 && Elt.Range == 48;
+      bool MatchesB =
+          Elt.Buf == B && Elt.Offset == 32 && Elt.Range == 96;
+      if (!MatchesA && !MatchesB)
+        TornReadObserved = true;
+    }
+  });
+  Writer.join();
+  Reader.join();
+
+  EXPECT_FALSE(TornReadObserved)
+      << "observed a torn DescriptorBufferBinding read: a concurrent "
+        "vkUpdateDescriptorSets interleaved with bindingArray -- "
+        "DescriptorSet::Mutex should make every read/write atomic";
+
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, LayoutHandle, nullptr);
 }
 
 } // namespace
