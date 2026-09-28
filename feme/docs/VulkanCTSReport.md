@@ -3606,3 +3606,64 @@ change.
 - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
   change needed -- `VK_EXT_graphics_pipeline_library` linked-pipeline-
   subpass-resolution correctness fix, not a new feature/extension.
+
+## Roadmap L245: `api.info.image_format_properties*` `sampleCounts` over-reporting -- fixed
+
+A pre-existing, 65-case `dEQP-VK.api.info.image_format_properties{,2}.*`
+`Fail (sampleCounts != VK_SAMPLE_COUNT_1_BIT)` bucket (`2d.optimal.*`,
+spanning ASTC and several packed/SINT/SNORM formats), carried over
+several sessions.
+
+Root cause confirmed in `Image.cpp`'s `supportedSampleCounts`: it
+intersected the queried `usage` against this device's per-usage
+sample-count limits (e.g. `sampledImageColorSampleCounts` = `1|2|4|8`)
+unconditionally, regardless of whether the queried *format* could
+actually be rendered to at all. Multisampling is fundamentally a
+render-target capability on real hardware -- a format lacking both
+`VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT` and
+`_DEPTH_STENCIL_ATTACHMENT_BIT` (e.g. `A2B10G10R10_SINT_PACK32`, an
+integer format with neither feature bit on this device) cannot support
+more than 1 sample under any usage. This matches the CTS's own
+`vktApiFeatureInfo.cpp` check exactly (`getRequiredOptimalTilingSample
+Counts`'s caller requires `sampleCounts == VK_SAMPLE_COUNT_1_BIT`
+whenever `supportedFeatures` names neither attachment bit, independent
+of which `usage` the current query combination asks for).
+
+Fixed with a single early return in `supportedSampleCounts`: whenever
+the queried `Format`'s `formatFeatureFlags()` include neither
+`VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT` nor
+`VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT`, the function now
+returns `VK_SAMPLE_COUNT_1_BIT` immediately, before the existing
+per-usage intersection logic below it runs at all.
+
+**Verified against the real CTS**:
+- `dEQP-VK.api.info.image_format_properties{,2}.*` (2372 cases): now
+  **2372 Pass, 0 Fail** (was 65 Fail).
+- `dEQP-VK.image.*` (1-in-50 sample, 8846 cases): 0 Fail, no
+  regressions.
+- `dEQP-VK.pipeline.*multisample*`: surfaced one unrelated,
+  pre-existing `DeviceLost`
+  (`fast_linked_library.multisample.compatible_render_pass.dynamic`),
+  confirmed via `git stash` to reproduce identically without this fix
+  -- filed separately as `L250`, out of this fix's scope.
+
+**Build/test verification**:
+- `ninja check-feme`: 3388 Passed, 61 Unsupported, 0 Failed (no new
+  unit test needed -- `supportedSampleCounts` is a pure function
+  already exercised via `isValidImageShape`'s existing coverage, and
+  this fix's own CTS group is exhaustive).
+- `ninja check-hlsl-feme-vk`: 483/32/207, unchanged.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- core-1.0 `vkGetPhysicalDeviceImageFormatProperties`
+  correctness fix.
+
+## Roadmap L250: new, `multisample.compatible_render_pass.dynamic` `DeviceLost` (untriaged)
+
+Surfaced by `L245`'s own regression sample:
+`dEQP-VK.pipeline.fast_linked_library.multisample.compatible_render_
+pass.dynamic` hits a genuine `DeviceLost`
+(`vk.waitForFences(...): VK_ERROR_DEVICE_LOST` at `vkCmdUtil.cpp:296`),
+aborting the harness run. Confirmed via `git stash` (removing `L245`'s
+`supportedSampleCounts` change) to reproduce identically either way --
+pre-existing, unrelated to `L245`. Not yet triaged past this single
+repro; filed as a new roadmap item for a future session.
