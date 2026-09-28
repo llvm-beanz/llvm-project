@@ -3657,13 +3657,82 @@ per-usage intersection logic below it runs at all.
   change needed -- core-1.0 `vkGetPhysicalDeviceImageFormatProperties`
   correctness fix.
 
-## Roadmap L250: new, `multisample.compatible_render_pass.dynamic` `DeviceLost` (untriaged)
+## Roadmap L250: `multisample.compatible_render_pass.dynamic` `DeviceLost` -- over-strict draw-time attachment check, fixed
 
 Surfaced by `L245`'s own regression sample:
 `dEQP-VK.pipeline.fast_linked_library.multisample.compatible_render_
-pass.dynamic` hits a genuine `DeviceLost`
+pass.dynamic` hit a genuine `DeviceLost`
 (`vk.waitForFences(...): VK_ERROR_DEVICE_LOST` at `vkCmdUtil.cpp:296`),
 aborting the harness run. Confirmed via `git stash` (removing `L245`'s
 `supportedSampleCounts` change) to reproduce identically either way --
-pre-existing, unrelated to `L245`. Not yet triaged past this single
-repro; filed as a new roadmap item for a future session.
+pre-existing, unrelated to `L245`.
+
+Applying the lesson from `L249`, `FEME_VULKAN_LOG_CREATION_ERRORS=1` was
+tried *first* (before any gdb/hang-hunting) and immediately surfaced the
+real diagnostic at `vkQueueSubmit` time: "the bound pipeline tests/writes
+depth but the render target has no depth attachment". Not a hang at all
+-- a fast, synchronous submission-time rejection.
+
+Reading the CTS source
+(`vktPipelineMultisampleTests.cpp`'s `CompatibleRenderPassTestInstance::
+iterate`) confirmed the failing case is spec-legal: the render pass has
+only color+resolve attachments (no depth attachment at all); the
+pipeline is created with `pDepthStencilState = nullptr` and
+`VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE`/`_WRITE_ENABLE` marked dynamic;
+at command-buffer-record time, before the draw, it explicitly calls
+`vkCmdSetDepthTestEnable(cmdBuffer, VK_FALSE)` and
+`vkCmdSetDepthWriteEnable(cmdBuffer, VK_FALSE)` -- so the pipeline
+genuinely does not test/write depth at draw time, and the spec allows
+this exact render-target/pipeline combination.
+
+Root cause: `GraphicsPipeline::needsDepthAttachment()`/
+`needsStencilAttachment()` (`GraphicsPipeline.h`), consulted by
+`CommandBuffer.cpp`'s draw-time `resolveDrawAttachments`, conservatively
+treated *any* dynamic depth-test/write-enable or stencil-test-enable
+state as automatically requiring a depth/stencil attachment, regardless
+of what the dynamic state was actually set to before the draw -- the
+same "over-strict enforcement" bug class `L241` found in
+`primitiveRestartEnable`'s *creation-time* VUID check, but this is a
+distinct *draw-time* attachment-requirement check that `L241`'s own
+audit (scoped to `GraphicsPipeline.cpp`'s creation path) didn't cover.
+The actual current dynamic value was already tracked and available:
+`CommandBuffer.cpp`'s dynamic-state-replay switch already sets
+`Gfx.Dynamic.DepthTestEnable`/`DepthWriteEnable`/`StencilTestEnable` from
+recorded `vkCmdSet*` calls, and `GraphicsPipeline::buildExecutorPipeline`
+already correctly resolves the real depth/stencil state from
+static-vs-dynamic for many other purposes -- just not consulted here.
+
+Fixed by changing `needsDepthAttachment()`/`needsStencilAttachment()`
+to take the current `DynamicGraphicsState` and resolve the actual
+draw-time enable value (the dynamic override when the corresponding bit
+is dynamic, else the pipeline's own static value), mirroring the same
+static-vs-dynamic resolution idiom `buildExecutorPipeline` already uses
+for every other dynamic-state bit (`Cull`, `FrontFace`, `DepthBias`,
+`DepthCompareOp`, `DepthBoundsTestEnable`, `StencilOps`, etc.). New unit
+test `NeedsDepthAttachmentConsultsDynamicValueNotJustDynamism`
+(`GraphicsPipelineTest.cpp`) asserts `needsDepthAttachment` returns
+`false` when the dynamic test/write state is explicitly disabled and
+`true` when explicitly enabled; confirmed it fails when the pre-fix
+logic is temporarily restored (same new signature) and passes with the
+real fix.
+
+**Verified against the real CTS**:
+- `dEQP-VK.pipeline.fast_linked_library.multisample.compatible_render_
+  pass.dynamic`: now **Pass** (was a harness-aborting `DeviceLost`).
+- `dEQP-VK.pipeline.*multisample*` (63561 cases): 1350 Pass, 165 Fail,
+  62046 Not supported -- all 165 failures are pre-existing, unrelated
+  buckets (`sampled_image.*`, `multisample_interpolation.*`,
+  `extended_dynamic_state.after_pipelines.*`); none reference
+  depth/stencil/attachment behavior.
+- `dEQP-VK.pipeline.*.depth.*` (39686 cases): 16914 Pass, **0 Fail**,
+  22772 Not supported.
+
+**Build/test verification**:
+- `FeMeVulkanTests`: 760/760 Passed (was 759/759; +1 net new
+  regression test).
+- `ninja check-feme`: 3389 Passed, 61 Unsupported, 0 Failed.
+- `ninja check-hlsl-feme-vk`: 483 Pass / 32 XFAIL / 207 Not supported,
+  unchanged.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- core-1.0 draw-time attachment-validation
+  correctness fix, not a new feature/extension.
