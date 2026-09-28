@@ -61,31 +61,33 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** Pick one of `L227(c)`/`(d)`
-   (still open, unchanged for several sessions -- `L227(c)`: 3
-   `Feature/Textures/*` pipeline-creation failures + `WaveActiveMax`'s
-   `-inf` edge case; `L227(d)`: 3 `Graphics/MeshShaders/*`
-   image-comparison failures, start with `SimpleTriangle`'s own
-   `imgdiff: error: Failed reading PNG header from file`) or
-   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears)
-   -- whichever fits the next session's time budget. These are the
-   last remaining `check-hlsl-feme-vk` failures plus the largest
-   remaining untriaged/unfixed `L228` clusters.
-2. **(a few hours)** `L228(e)`/`(f)`: the broader-than-tessellation CTS
-   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is now
-   many sessions overdue -- every recent session's CTS work has stayed
-   scoped to whatever cluster/test it was fixing, not this wider,
-   still-mostly-unsampled surface.
-3. **(quick, at the very start of the next session)** Re-check
+1. **(2-4 hours, dedicated session)** `L229`: implement
+   `OpImageQueryLod` for `Plain3D` sampled images
+   (`CalculateLevelOfDetail.test`'s own remaining failure, and the sole
+   remaining `check-hlsl-feme-vk` Fail). Needs real new runtime
+   infrastructure -- a new `ImageCallKind::QueryLod3D`, header
+   declaration, `.cpp` builder, and a 3-axis derivative-based LOD
+   computation (the building blocks already exist via
+   `getOrSynthesizeSample1DDerivatives`, reusable per-axis, see the
+   existing `Plain3D` sampling-lowering code at ~line 3934-3969 of
+   `SPIRVResourceLowering.cpp`). Worth checking `CubeArray`'s identical
+   gap in the same session if time allows.
+2. **(1-2 hours)** `L230`: widen `GetDimensions`/`OpImageQuerySize` for
+   `Cube`/`CubeArray` storage images -- smaller, more self-contained
+   than `L229` since it's a shape-gate-plus-builder problem like this
+   session's own fix, not new derivative math. Good pairing if a
+   session has budget left over after `L229`.
+3. **(a few hours)** The broader-than-tessellation CTS re-run
+   (`api`/`pipeline`/`shader_render`/`synchronization`, `L228(e)`/`(f)`)
+   is now many sessions overdue -- every recent session's CTS work has
+   stayed scoped to whatever cluster/test it was fixing.
+4. **(quick, at the very start of the next session)** Re-check
    `offload-test-suite`'s local `feme` branch before trusting
    `check-hlsl-feme-vk` exists -- it has drifted back to `main`'s tip
-   at least twice across recent sessions (did not this session, but
-   worth the 10-second check regardless). `git log --oneline feme -3`
-   should show `31986d1` at the tip; if not, `git reset --hard 31986d1`
-   restores it.
-4. **(30 minutes, low priority)** Consider adding a permanent,
-   `cl::opt`-gated (not env-var, for discoverability) IR-dump flag to
-   `EntryWrapperPass` (or wherever it would be more broadly useful) --
-   this session's own ad-hoc `getenv("FEME_DEBUG_DUMP_WAVE_BODY")`
-   instrumentation was added and reverted by hand, and would have
-   saved real time if it had already existed going in.
+   at least twice across recent sessions. `git log --oneline feme -3`
+   should show `9351791` at the tip (this session's own commit); if
+   not, `git reset --hard 9351791` restores it.
+5. **(carried over, still open)** Pick one of `L227(d)` (3
+   `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
+   (compressed-format blits, MSAA multi-layer clears) -- whichever fits
+   the next session's time budget.
