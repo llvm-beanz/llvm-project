@@ -61,27 +61,37 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, still carried over)** Pick one of `L227(d)` (3
-   `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
-   (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
-   sessions now.
-2. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+1. **(a few hours, new roadmap item)** `L244`: `dEQP-VK.image.atomic_operations.*`
+   (~864 cases across 9 ops: add/and/compare_exchange/exchange/max/min/or/
+   sub/xor) -- still completely untriaged past the raw count, called out
+   two sessions running now without anyone picking it up. Start with one op
+   (`add`) at the smallest failing case to find the qpa-level symptom before
+   assuming the other 8 share a root cause.
+2. **(a few hours, new roadmap item)** `L246`: newly-exposed
+   `dEQP-VK.image.mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer`
+   gap -- likely `RenderPass.cpp`'s attachment-compatibility check rejecting
+   a format-compatible-class-but-differently-formatted view for a
+   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`-flagged image. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the smallest failing case to find
+   the exact rejecting check.
+3. **(worth 15 minutes, new roadmap item, low priority)** `L245`: pre-existing
+   65-case `sampleCounts` mismatch bucket in `api.info.image_format_properties*`
+   -- likely `Image.cpp`'s `supportedSampleCounts` over-reporting for
+   formats lacking `COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT` feature
+   bits. Quick to isolate (single-usage-bit repro), unclear how quick to fix.
+4. **(a few hours, still carried over, unchanged for many sessions)** Pick
+   one of `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
+   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears).
+5. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
-   `shader_render` remain completely unsampled.
-3. **(worth a few minutes, low priority, carried over)** Audit other FeMe
-   creation-time checks for the "over-strict VUID enforcement" pattern `L241`
-   found in `primitiveRestartEnable` handling -- still not searched for.
-4. **(worth an hour, new this session)** The `dEQP-VK.image.*` 143k-case sweep
-   this session surfaced three sizeable pre-existing failure buckets never yet
-   triaged as their own roadmap items:
-   `extended_usage_bit_compatibility.image_format_properties{,2}` (1320+1320
-   cases), `format_reinterpret.*` (446 * 7 dimension variants),
-   `atomic_operations.*` (~1000+ cases across ops). None investigated this
-   session (out of scope for `L239`) -- worth a dedicated triage session to
-   split into real roadmap items with root causes, since right now they're only
-   known as raw counts from this sweep.
-5. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
-   branch -- confirmed drifting every session (known root cause:
-   `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
-   unconditionally). `git log --oneline feme -3` should show `9351791`; `git
-   reset --hard 9351791` if not.
+   `shader_render` remain completely unsampled by any recent broad sweep.
+6. **(worth a few minutes, low priority, carried over several sessions)**
+   Audit other FeMe creation-time checks for the "over-strict VUID
+   enforcement" pattern `L241` found in `primitiveRestartEnable` handling --
+   still not searched for, keeps getting bumped.
+7. **(quick, start of next session, standing item)** Re-check
+   `offload-test-suite`'s `feme` branch -- confirmed drifting again this
+   session (known root cause: `/opt/llvm-tooling/scripts/agent-setup.sh`
+   resets it to `origin/main` unconditionally every session). `git log
+   --oneline feme -3` should show `9351791`; `git reset --hard 9351791` if
+   not.
