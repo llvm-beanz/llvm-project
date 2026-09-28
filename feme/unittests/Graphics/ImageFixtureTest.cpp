@@ -354,6 +354,50 @@ TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2SintNegative) {
   EXPECT_NEAR(Unpacked[3], -2.0, 0.01);
 }
 
+// (Roadmap L252) `VK_EXT_4444_formats`'s two formats: the same
+// name-only-diagnostic gap `L251` found and fixed for `R10G10B10A2_SINT`
+// above, found via a real CTS `DeviceLost` on the `A4B4G4R4_UNORM_PACK16`
+// sibling (`dEQP-VK.api.image_clearing.core.clear_color_image.1d.linear.
+// multiple_layers.a4b4g4r4_unorm_pack16`).
+TEST(ImageFixtureTest, PacksAndUnpacksA4R4G4B4Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A4R4G4B4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::A4R4G4B4_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.07);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.07);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.07);
+  EXPECT_NEAR(Unpacked[3], 1.0 / 3.0, 0.07);
+}
+
+TEST(ImageFixtureTest, PacksAndUnpacksA4B4G4R4Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A4B4G4R4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::A4B4G4R4_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.07);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.07);
+  EXPECT_NEAR(Unpacked[2], 2.0 / 3.0, 0.07);
+  EXPECT_NEAR(Unpacked[3], 1.0 / 3.0, 0.07);
+
+  // R and B occupy swapped bit positions relative to `A4R4G4B4_UNORM`
+  // above: confirm the packed word itself actually differs for the same
+  // input color.
+  std::array<uint8_t, 2> RTexel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A4R4G4B4_UNORM,
+                                   {1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0}, RTexel),
+                    Succeeded());
+  EXPECT_NE(Texel, RTexel);
+}
+
 
 // color's R/G/B components are ignored on pack and read back as `0` on
 // unpack.

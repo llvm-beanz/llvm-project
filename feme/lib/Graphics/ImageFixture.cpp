@@ -328,6 +328,19 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     // layout, so it is described as one opaque 2-byte "component" here,
     // the same convention `R10G10B10A2_UNORM` above uses.
     return FormatInfo{1, 2, false};
+  // (Roadmap L252) `VK_EXT_4444_formats`'s two formats
+  // (`A4R4G4B4_UNORM`/`A4B4G4R4_UNORM`): the same name-only-diagnostic
+  // gap `L251` found and fixed for `R10G10B10A2_SINT` -- roadmap E19
+  // added `bytesPerBlockFor` (`Format.cpp`) support and a diagnostic
+  // name for both, but never a `FormatInfo`/`packClearColor`/
+  // `unpackColor` case, so any real clear/copy fatally erred instead of
+  // failing gracefully (found via a real CTS `DeviceLost`, `dEQP-VK.api.
+  // image_clearing.core.clear_color_image.1d.linear.multiple_layers.
+  // a4b4g4r4_unorm_pack16`). Packed into a single opaque 2-byte word,
+  // same convention as `A1B5G5R5_UNORM` immediately above.
+  case ResourceFormat::A4R4G4B4_UNORM:
+  case ResourceFormat::A4B4G4R4_UNORM:
+    return FormatInfo{1, 2, false};
   case ResourceFormat::R4G4B4A4_UNORM:
   case ResourceFormat::B4G4R4A4_UNORM:
   case ResourceFormat::R5G6B5_UNORM:
@@ -587,6 +600,33 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
         (static_cast<uint16_t>(std::lround(std::clamp(Clear[3], 0.0, 1.0)))
          << 15) |
         (Norm5(Clear[2]) << 10) | (Norm5(Clear[1]) << 5) | Norm5(Clear[0]));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap L252) `VK_EXT_4444_formats`'s two formats
+  // (`A4R4G4B4_UNORM`/`A4B4G4R4_UNORM`): the same
+  // single-packed-word special case as `A1B5G5R5_UNORM` above, just with
+  // 4 bits per component and alpha at the MSB (see the Vulkan spec's own
+  // "Packed Formats" section). Fixed alongside `L251`'s own
+  // `R10G10B10A2_SINT` fix -- same name-only-diagnostic gap, found via a
+  // real CTS `DeviceLost` on the `A4B4G4R4_UNORM_PACK16` sibling.
+  if (Format == ResourceFormat::A4R4G4B4_UNORM ||
+      Format == ResourceFormat::A4B4G4R4_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm4 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 15.0));
+    };
+    // A4R4G4B4: A[15:12] R[11:8] G[7:4] B[3:0]. A4B4G4R4: the same, with
+    // R and B swapped.
+    unsigned SecondIdx = Format == ResourceFormat::A4R4G4B4_UNORM ? 0 : 2;
+    unsigned FourthIdx = Format == ResourceFormat::A4R4G4B4_UNORM ? 2 : 0;
+    uint16_t Word = static_cast<uint16_t>(
+        (Norm4(Clear[3]) << 12) | (Norm4(Clear[SecondIdx]) << 8) |
+        (Norm4(Clear[1]) << 4) | Norm4(Clear[FourthIdx]));
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
@@ -1349,6 +1389,26 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[1] = ((Word >> 5) & 0x1F) / 31.0;
     Out[2] = ((Word >> 10) & 0x1F) / 31.0;
     Out[3] = ((Word >> 15) & 0x1) / 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap L252) `VK_EXT_4444_formats`'s two formats: the inverse of
+  // `packClearColor`'s special case above.
+  if (Format == ResourceFormat::A4R4G4B4_UNORM ||
+      Format == ResourceFormat::A4B4G4R4_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    unsigned SecondIdx = Format == ResourceFormat::A4R4G4B4_UNORM ? 0 : 2;
+    unsigned FourthIdx = Format == ResourceFormat::A4R4G4B4_UNORM ? 2 : 0;
+    Out[3] = ((Word >> 12) & 0xF) / 15.0;
+    Out[SecondIdx] = ((Word >> 8) & 0xF) / 15.0;
+    Out[1] = ((Word >> 4) & 0xF) / 15.0;
+    Out[FourthIdx] = (Word & 0xF) / 15.0;
     return Error::success();
   }
 
