@@ -61,17 +61,17 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** `L238`: `no_position.*`
-   vertex-shaders-without-explicit-position stage-interface-matching gap --
-   carried over many sessions, still not root-caused past the `vkQueueSubmit`
-   error string (`"vertex stage output -> hull stage input: element 1 has no
-   matching producer element"`).
+1. **(a few hours)** `L243`: newly-exposed 48-case tessellation-control
+   SSBO-counter-mismatch bucket (`got 4/1 but expected 3`) -- not yet triaged
+   past the qpa symptom. Start by comparing expected-vs-actual counts' pattern
+   (looks like an off-by-N tied to invocation count) against how many
+   tessellation-control invocations this ICD dispatches per patch for these
+   cases' configuration.
 2. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
    pipeline-create-flags -- one derivative-recreation case confirmed, other flag
    combinations unchecked.
 3. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
-   -- confirmed format-independent, needs new image-view/addressing code, not
-   just a flag-gate widening.
+   -- confirmed format-independent, needs new image-view/addressing code.
 4. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
    `/6` layer-count fix -- classification-level surgery, unchanged for many
    sessions.
