@@ -34,52 +34,26 @@ struct SemaphoreOp {
   uint64_t Value;
 };
 
-/// (Roadmap L228) The longest this ICD ever genuinely blocks a thread on
-/// one unmet timeline-semaphore wait, regardless of what the caller asked
-/// for (including `vkWaitSemaphores`'s own literal `UINT64_MAX` "wait
-/// forever" sentinel -- see `applyWaitSafetyNet` below): generous enough
-/// for any real cross-thread `HostCopyThread`-style dependency (see
-/// `Sync.h`'s file comment) to complete -- this ICD has no real device
-/// latency at all, so such a dependency is actually satisfied in well
-/// under a millisecond in practice (`SyncTest.cpp`'s own
-/// `*BlocksUntilHostSignal*` tests use an artificial 200ms delay purely to
-/// make the blocking observable, two full orders of magnitude below this
-/// bound) -- but bounded so that some other, unrelated FeMe bug that
-/// genuinely never signals the awaited value (rather than a real
-/// application ordering error) turns into this call eventually
-/// failing/timing out instead of hanging the calling process -- and,
-/// transitively, any batch test harness driving many cases through one
-/// process, or this project's own negative unit tests -- forever. Real GPU
-/// drivers have hardware TDR (timeout-detection-and-recovery) for exactly
-/// this scenario; this is this software driver's equivalent safety net,
-/// not a claim that the underlying dependency is expected to take this
-/// long.
-constexpr uint64_t TimelineWaitSafetyNetTimeoutNs = 5'000'000'000ULL;
-
-/// Clamps a caller-supplied timeout (as passed to `vkQueueSubmit`'s
-/// implicit, unparameterized wait or to `vkWaitSemaphores`'s explicit \p
-/// timeout parameter, either of which may legally be `UINT64_MAX`) to
-/// `TimelineWaitSafetyNetTimeoutNs` above.
+/// Clamps a caller-supplied timeout (as passed to `vkWaitSemaphores`'s
+/// explicit \p timeout parameter, which may legally be `UINT64_MAX`) to
+/// `SafetyNetTimeoutNs` (`Sync.h`).
 uint64_t applyWaitSafetyNet(uint64_t RequestedTimeoutNs) {
-  return std::min(RequestedTimeoutNs, TimelineWaitSafetyNetTimeoutNs);
+  return std::min(RequestedTimeoutNs, SafetyNetTimeoutNs);
 }
 
-/// Consumes every wait in \p Waits, in order. A binary semaphore's wait is
-/// still the instantaneous, non-blocking check `Sync.h`'s file comment
-/// describes (a legally-ordered one is already signaled by the time this
-/// synchronous ICD sees it -- an unsignaled one is a real application
-/// ordering error, reported immediately). A timeline semaphore's wait
-/// (roadmap L228) genuinely blocks the calling thread via
-/// `Semaphore::waitTimeline`, since a real, concurrently running host
-/// thread's own `vkSignalSemaphore` call may not have happened yet.
+/// Consumes every wait in \p Waits, in order: both a timeline semaphore's
+/// wait (`Semaphore::waitTimeline`) and, since roadmap L228(h)/(i), a
+/// binary semaphore's (`Semaphore::waitAndConsumeBinary`) genuinely block
+/// the calling thread (a `QueueExecutor` worker thread, not the host
+/// thread that called `vkQueueSubmit` -- see `Sync.h`'s file comment):
+/// the semaphore being waited on may be signaled by a *different* queue's
+/// own worker thread, running concurrently with this one.
 VkResult consumeWaits(ArrayRef<SemaphoreOp> Waits) {
   for (const SemaphoreOp &Op : Waits) {
-    if (Op.Sem->isTimeline()) {
-      if (!Op.Sem->waitTimeline(Op.Value, TimelineWaitSafetyNetTimeoutNs))
-        return VK_ERROR_INITIALIZATION_FAILED;
-      continue;
-    }
-    if (!Op.Sem->waitAndConsumeBinary())
+    bool Reached = Op.Sem->isTimeline()
+                       ? Op.Sem->waitTimeline(Op.Value, SafetyNetTimeoutNs)
+                       : Op.Sem->waitAndConsumeBinary(SafetyNetTimeoutNs);
+    if (!Reached)
       return VK_ERROR_INITIALIZATION_FAILED;
   }
   return VK_SUCCESS;
@@ -105,6 +79,41 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
     }
   }
   return VK_SUCCESS;
+}
+
+/// (Roadmap L228(h)/(i)) Builds the closure a `QueueExecutor` task runs
+/// for one submission: consume \p Waits, execute \p CmdBufs, then apply
+/// \p Signals -- exactly the work `vkQueueSubmit`'s own loop body used to
+/// do synchronously, now deferred onto the queue's own worker thread. Any
+/// failure latches \p Dev lost (`Device::markLost`) rather than trying to
+/// report it back through the `vkQueueSubmit` call that already returned
+/// by the time this runs.
+std::function<void()> makeSubmissionTask(Device &Dev,
+                                         std::vector<SemaphoreOp> Waits,
+                                         std::vector<CommandBuffer *> CmdBufs,
+                                         std::vector<SemaphoreOp> Signals) {
+  return [&Dev, Waits = std::move(Waits), CmdBufs = std::move(CmdBufs),
+          Signals = std::move(Signals)]() mutable {
+    if (Dev.isLost())
+      return;
+    if (consumeWaits(Waits) != VK_SUCCESS || executeCommandBuffers(CmdBufs) !=
+                                                  VK_SUCCESS) {
+      Dev.markLost();
+      return;
+    }
+    applySignals(Signals);
+  };
+}
+
+/// (Roadmap L228(h)/(i)) Builds the closure that signals \p Fence, run as
+/// its own trailing task on the queue so it stays ordered after every
+/// submission's own task above (including when `submitCount` is `0`,
+/// which the spec says must still signal an already-provided fence).
+std::function<void()> makeFenceSignalTask(Device &Dev, VkFence FenceHandle) {
+  return [&Dev, FenceHandle]() {
+    if (!Dev.isLost())
+      fromHandle<Fence>(FenceHandle)->signal();
+  };
 }
 
 } // namespace
@@ -139,29 +148,77 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice, uint32_t fenceCount,
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice, VkFence fence) {
+VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device,
+                                                VkFence fence) {
+  if (fromHandle<Device>(device)->isLost())
+    return VK_ERROR_DEVICE_LOST;
   return fromHandle<Fence>(fence)->isSignaled() ? VK_SUCCESS : VK_NOT_READY;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice, uint32_t fenceCount,
-                                               const VkFence *pFences,
-                                               VkBool32 waitAll, uint64_t) {
-  // Every fence is already in its final state by the time this is called
-  // (see the file comment's synchronous `vkQueueSubmit` deviation), so
-  // there is nothing to actually wait for: the result is knowable
-  // immediately.
-  bool Any = false, All = true;
-  for (uint32_t I = 0; I != fenceCount; ++I) {
-    bool S = fromHandle<Fence>(pFences[I])->isSignaled();
-    Any |= S;
-    All &= S;
+VKAPI_ATTR VkResult VKAPI_CALL
+vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
+               VkBool32 waitAll, uint64_t timeout) {
+  // (Roadmap L228(h)/(i)) Genuinely blocks: a fence's `QueueExecutor`
+  // task may not have run yet on its own queue's worker thread (see
+  // `Sync.h`'s file comment). `applyWaitSafetyNet` clamps even a literal
+  // `UINT64_MAX` ("wait forever") \p timeout, for the same reason
+  // `vkWaitSemaphores` below does.
+  timeout = applyWaitSafetyNet(timeout);
+  Device *Dev = fromHandle<Device>(device);
+
+  if (waitAll) {
+    auto Deadline = std::chrono::steady_clock::now() +
+                    std::chrono::nanoseconds(timeout);
+    for (uint32_t I = 0; I != fenceCount; ++I) {
+      if (Dev->isLost())
+        return VK_ERROR_DEVICE_LOST;
+      uint64_t Remaining =
+          timeout == UINT64_MAX
+              ? UINT64_MAX
+              : static_cast<uint64_t>(std::max<int64_t>(
+                    0, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           Deadline - std::chrono::steady_clock::now())
+                           .count()));
+      if (!fromHandle<Fence>(pFences[I])->wait(Remaining))
+        return VK_TIMEOUT;
+    }
+    return Dev->isLost() ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
   }
-  return (waitAll ? All : Any) ? VK_SUCCESS : VK_TIMEOUT;
+
+  // `waitAll == VK_FALSE`: succeeds as soon as *any one* fence is
+  // signaled -- blocking on an arbitrary one first could wait long past a
+  // different one's own, earlier completion, so this polls all of them
+  // with a short retry interval instead (matching `vkWaitSemaphores`'s
+  // own `VK_SEMAPHORE_WAIT_ANY_BIT` handling below).
+  auto Deadline =
+      std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout);
+  while (true) {
+    if (Dev->isLost())
+      return VK_ERROR_DEVICE_LOST;
+    for (uint32_t I = 0; I != fenceCount; ++I)
+      if (fromHandle<Fence>(pFences[I])->wait(0))
+        return VK_SUCCESS;
+    if (timeout != UINT64_MAX && std::chrono::steady_clock::now() >= Deadline)
+      return VK_TIMEOUT;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
+                                             uint32_t submitCount,
                                              const VkSubmitInfo *pSubmits,
                                              VkFence fence) {
+  Queue *Q = fromHandle<Queue>(queue);
+  Device &Dev = Q->getDevice();
+  if (Dev.isLost())
+    return VK_ERROR_DEVICE_LOST;
+
+  // (Roadmap L228(h)/(i)) Every submission's own wait/execute/signal work
+  // is now parsed here (reading only caller-supplied structs and
+  // already-existing objects, so safe on the calling thread) but *run* on
+  // `queue`'s own `QueueExecutor` -- see `Sync.h`'s file comment for why
+  // this, rather than running it synchronously right here, is required
+  // for `one_to_n`/`wait_before_signal`-shaped submission chains.
   for (uint32_t I = 0; I != submitCount; ++I) {
     const VkSubmitInfo &Submit = pSubmits[I];
 
@@ -179,11 +236,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
         break;
       }
 
-    // Consume every wait semaphore before executing anything (see "Queues,
-    // Scheduling, and Synchronization"): under this ICD's synchronous
-    // execution model, a legally-ordered wait's semaphore is already
-    // signaled by the time this runs (see Sync.h's file comment) -- an
-    // unsignaled one here is a real application ordering error.
     std::vector<SemaphoreOp> Waits;
     Waits.reserve(Submit.waitSemaphoreCount);
     for (uint32_t J = 0; J != Submit.waitSemaphoreCount; ++J) {
@@ -194,15 +246,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
               : 0;
       Waits.push_back({Sem, Target});
     }
-    if (VkResult R = consumeWaits(Waits); R != VK_SUCCESS)
-      return R;
 
     std::vector<vulkan::CommandBuffer *> CmdBufs;
     CmdBufs.reserve(Submit.commandBufferCount);
     for (uint32_t J = 0; J != Submit.commandBufferCount; ++J)
       CmdBufs.push_back(fromHandle<CommandBuffer>(Submit.pCommandBuffers[J]));
-    if (VkResult R = executeCommandBuffers(CmdBufs); R != VK_SUCCESS)
-      return R;
 
     std::vector<SemaphoreOp> Signals;
     Signals.reserve(Submit.signalSemaphoreCount);
@@ -216,10 +264,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
               : 0;
       Signals.push_back({Sem, NewValue});
     }
-    applySignals(Signals);
+
+    Q->getExecutor().enqueue(makeSubmissionTask(
+        Dev, std::move(Waits), std::move(CmdBufs), std::move(Signals)));
   }
   if (fence)
-    fromHandle<Fence>(fence)->signal();
+    Q->getExecutor().enqueue(makeFenceSignalTask(Dev, fence));
   return VK_SUCCESS;
 }
 
@@ -230,9 +280,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
 // identical `Fence`/`Semaphore`/`CommandBuffer` execution model above --
 // the same "new entrypoint, old backing model" pattern roadmap C7 used for
 // queue families.
-VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue, uint32_t submitCount,
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
+                                              uint32_t submitCount,
                                               const VkSubmitInfo2 *pSubmits,
                                               VkFence fence) {
+  Queue *Q = fromHandle<Queue>(queue);
+  Device &Dev = Q->getDevice();
+  if (Dev.isLost())
+    return VK_ERROR_DEVICE_LOST;
+
   for (uint32_t I = 0; I != submitCount; ++I) {
     const VkSubmitInfo2 &Submit = pSubmits[I];
 
@@ -242,16 +298,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue, uint32_t submitCount,
       const VkSemaphoreSubmitInfo &Info = Submit.pWaitSemaphoreInfos[J];
       Waits.push_back({fromHandle<Semaphore>(Info.semaphore), Info.value});
     }
-    if (VkResult R = consumeWaits(Waits); R != VK_SUCCESS)
-      return R;
 
     std::vector<vulkan::CommandBuffer *> CmdBufs;
     CmdBufs.reserve(Submit.commandBufferInfoCount);
     for (uint32_t J = 0; J != Submit.commandBufferInfoCount; ++J)
       CmdBufs.push_back(fromHandle<CommandBuffer>(
           Submit.pCommandBufferInfos[J].commandBuffer));
-    if (VkResult R = executeCommandBuffers(CmdBufs); R != VK_SUCCESS)
-      return R;
 
     std::vector<SemaphoreOp> Signals;
     Signals.reserve(Submit.signalSemaphoreInfoCount);
@@ -260,17 +312,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue, uint32_t submitCount,
       auto *Sem = fromHandle<Semaphore>(Info.semaphore);
       Signals.push_back({Sem, Sem->isTimeline() ? Info.value : 0});
     }
-    applySignals(Signals);
+
+    Q->getExecutor().enqueue(makeSubmissionTask(
+        Dev, std::move(Waits), std::move(CmdBufs), std::move(Signals)));
   }
   if (fence)
-    fromHandle<Fence>(fence)->signal();
+    Q->getExecutor().enqueue(makeFenceSignalTask(Dev, fence));
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue) {
-  // Every submission already ran to completion synchronously by the time
-  // `vkQueueSubmit` returned (see the file comment).
-  return VK_SUCCESS;
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
+  Queue *Q = fromHandle<Queue>(queue);
+  if (Q->getDevice().isLost())
+    return VK_ERROR_DEVICE_LOST;
+  if (!Q->getExecutor().waitIdle())
+    return VK_TIMEOUT;
+  return Q->getDevice().isLost() ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -318,13 +375,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreCounterValue(VkDevice,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo *pWaitInfo,
                  uint64_t timeout) {
-  // (Roadmap L228) Unlike the file's previous instantaneous check (see
-  // `Sync.h`'s file comment), this genuinely blocks: a real, concurrently
-  // running host thread's own `vkSignalSemaphore` call may not have
-  // happened yet (`dEQP-VK.synchronization.timeline_semaphore.host_host.*`
-  // exercises exactly this -- one host thread waiting here for another
-  // host thread's own later `vkSignalSemaphore` call, no device work
-  // involved at all).
+  // (Roadmap L228) Genuinely blocks: a real, concurrently running host
+  // thread's own `vkSignalSemaphore` call, or a different queue's own
+  // `QueueExecutor` worker thread's own signal (roadmap L228(h)/(i)), may
+  // not have happened yet (`dEQP-VK.synchronization.timeline_semaphore.
+  // host_host.*` exercises exactly this -- one host thread waiting here
+  // for another host thread's own later `vkSignalSemaphore` call, no
+  // device work involved at all).
   //
   // `applyWaitSafetyNet` clamps even a literal `UINT64_MAX` ("wait
   // forever") \p timeout to a bounded internal ceiling: some other,
@@ -428,3 +485,4 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetEvent(VkDevice, VkEvent event) {
 }
 
 } // namespace feme::vulkan
+

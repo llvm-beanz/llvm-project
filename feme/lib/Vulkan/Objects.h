@@ -21,13 +21,16 @@
 #include "Icd.h"
 #include "PhysicalDeviceInfo.h"
 #include "PipelineCache.h"
+#include "Sync.h"
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
 namespace feme::vulkan {
 
 class Instance;
+class Device;
 
 /// One software `VkPhysicalDevice`. Owned by its `Instance` and never
 /// outlives it (Vulkan physical device handles are not destroyed directly).
@@ -44,20 +47,25 @@ private:
   PhysicalDeviceInfo Info;
 };
 
-/// A `VkQueue`. V0 exposes exactly one, on the single compute/transfer queue
-/// family; it carries no submission machinery yet (see V1's "Implement
-/// queue submit, fences, queue/device idle").
+/// A `VkQueue`. Owns its own dedicated `QueueExecutor` worker thread
+/// (roadmap L228(h)/(i)): every `vkQueueSubmit`/`vkQueueSubmit2` task
+/// enqueued to this queue runs there, in submission order, while the
+/// calling host thread returns immediately (see `Sync.h`'s file comment).
 class Queue : public DispatchableBase {
 public:
-  Queue(uint32_t FamilyIndex, uint32_t QueueIndex)
-      : FamilyIndex(FamilyIndex), QueueIndex(QueueIndex) {}
+  Queue(Device &Owner, uint32_t FamilyIndex, uint32_t QueueIndex)
+      : Owner(Owner), FamilyIndex(FamilyIndex), QueueIndex(QueueIndex) {}
 
+  Device &getDevice() const { return Owner; }
   uint32_t getFamilyIndex() const { return FamilyIndex; }
   uint32_t getQueueIndex() const { return QueueIndex; }
+  QueueExecutor &getExecutor() { return Executor; }
 
 private:
+  Device &Owner;
   uint32_t FamilyIndex;
   uint32_t QueueIndex;
+  QueueExecutor Executor;
 };
 
 /// A `VkDevice`. Owns its allocator, its allocation-callbacks-aware
@@ -77,7 +85,7 @@ public:
   bool createQueues(uint32_t FamilyIndex, uint32_t QueueCount) {
     Queues.reserve(QueueCount);
     for (uint32_t I = 0; I < QueueCount; ++I) {
-      auto Q = std::make_unique<Queue>(FamilyIndex, I);
+      auto Q = std::make_unique<Queue>(*this, FamilyIndex, I);
       if (!Q)
         return false;
       Queues.push_back(std::move(Q));
@@ -108,6 +116,30 @@ public:
   /// BIT`, which specifically means the *application's* cache.
   PipelineCache &getImplicitPipelineCache() { return ImplicitCache; }
 
+  /// (Roadmap L228(h)/(i)) Blocks the calling thread until every queue's
+  /// own `QueueExecutor` reports idle (`vkDeviceWaitIdle`). Returns false
+  /// only if some queue's own `waitIdle` timed out (a FeMe bug -- see
+  /// `Sync.h`'s file comment).
+  bool waitIdle() {
+    bool AllIdle = true;
+    for (auto &Q : Queues)
+      AllIdle &= Q->getExecutor().waitIdle();
+    return AllIdle;
+  }
+
+  /// (Roadmap L228(h)/(i)) Latches device loss: called by a
+  /// `QueueExecutor` task that fails (an unmet wait past its own safety
+  /// net, or a command-buffer execution failure) since it cannot report
+  /// that failure back through the `vkQueueSubmit` call that enqueued it,
+  /// which has already returned by the time the task runs. See "Queues,
+  /// Scheduling, and Synchronization"'s "Device loss is latched once".
+  void markLost() { Lost.store(true, std::memory_order_relaxed); }
+  /// Whether `markLost` has ever been called for this device. Checked by
+  /// every synchronization entry point that can legally return
+  /// `VK_ERROR_DEVICE_LOST` (`vkQueueSubmit`/`vkQueueSubmit2`/
+  /// `vkQueueWaitIdle`/`vkDeviceWaitIdle`/`vkWaitForFences`).
+  bool isLost() const { return Lost.load(std::memory_order_relaxed); }
+
 private:
   /// How many artifacts the implicit cache retains per table before
   /// evicting; see `PipelineCache`'s constructor. Sized far above any
@@ -117,10 +149,18 @@ private:
 
   PhysicalDevice &Owner;
   Allocator Alloc;
-  std::vector<std::unique_ptr<Queue>> Queues;
+  std::atomic<bool> Lost{false};
   PipelineCache ImplicitCache{/*InitialKeys=*/{},
                               /*ExternallySynchronized=*/false,
                               ImplicitPipelineCacheMaxEntries};
+  // Declared last: destroyed first, so every `QueueExecutor`'s worker
+  // thread (which may still be running a task that touches `Lost`/
+  // `ImplicitCache` above) is always stopped and joined before those
+  // members are torn down, even if an application destroys this device
+  // without first draining it (real usage must not, but this ordering
+  // costs nothing and avoids a use-after-destroy race if it ever
+  // happens).
+  std::vector<std::unique_ptr<Queue>> Queues;
 };
 
 /// A `VkInstance`. Owns the allocator and the single `PhysicalDevice` this
