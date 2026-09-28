@@ -61,21 +61,22 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
-   pipeline-create-flags -- one derivative-recreation case confirmed, other flag
-   combinations unchecked.
-2. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
+1. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
    -- confirmed format-independent, needs new image-view/addressing code.
-3. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
+2. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
    `/6` layer-count fix -- classification-level surgery, unchanged for many
    sessions.
-4. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+3. **(a few hours, still carried over)** Pick one of `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
    sessions now.
-5. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+4. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
    `shader_render` remain completely unsampled.
+5. **(worth a few minutes, low priority)** Audit other FeMe creation-time checks
+   for the same "over-strict VUID enforcement" pattern this session found in
+   `primitiveRestartEnable` handling -- no other instances searched for yet, but
+   the pattern (reject at creation instead of no-op at draw time) may recur.
 6. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
    branch -- confirmed drifting every session (known root cause:
    `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
