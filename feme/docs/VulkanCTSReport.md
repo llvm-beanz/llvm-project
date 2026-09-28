@@ -3360,3 +3360,83 @@ unit tests, +1 net new lit test).
 needed -- this is a core-1.0 image-atomic correctness fix (widening an
 already-implemented feature's shape coverage), not a new feature or
 extension landing.
+
+## Roadmap L247: `atomic_operations.{inc,dec}.*` -- missing SPIR-V-to-LLVM lowering pattern
+
+`L244`'s own verification run isolated a residual 240-case
+`dEQP-VK.image.atomic_operations.{inc,dec}.*` failure bucket, distinct
+from (and outside the scope of) that session's `Plain2D`-only shape
+gap: every `inc`/`dec` case failed at
+`vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED`, the
+underlying MLIR diagnostic reading `failed to legalize operation
+'spirv.AtomicIIncrement'/'spirv.AtomicIDecrement' that was explicitly
+marked illegal`.
+
+Reading `SPIRVToLLVMPatterns.cpp` confirmed no `AtomicIIncrementOp`/
+`AtomicIDecrementOp` pattern was registered anywhere -- only the 9 RMW
+ops (via a shared `AtomicRMWPattern<...>` template) and
+`AtomicCompareExchangePattern`. The reason turned out to be an operand-
+shape mismatch, not a simple oversight: MLIR's own SPIR-V dialect
+(`SPIRVAtomicOps.td`) defines two distinct base classes.
+`SPIRV_AtomicUpdateWithValueOp` (used by every other RMW op --
+`Add`/`Sub`/`And`/`Or`/`Xor`/`SMax`/`SMin`/`UMax`/`UMin`/`Exchange`)
+has an explicit `value` operand, which `AtomicRMWPattern` forwards
+directly via `Adaptor.getValue()`. `SPIRV_AtomicUpdateOp` (used by
+`AtomicIIncrement`/`AtomicIDecrement` alone) has **no** `value`
+operand at all -- SPIR-V defines these two ops' increment/decrement
+amount as an implicit, fixed 1 -- so `AtomicRMWPattern`'s existing
+template genuinely could not be reused as-is.
+
+Added a new `AtomicIncDecPattern<SPIRVOpTy, BinOp>` template class
+(inserted directly after `AtomicRMWPattern`) that:
+
+1. Converts `Op.getType()` (the op's scalar-integer result type)
+   through the type converter to get the matching LLVM integer type.
+2. Materializes an `LLVM::ConstantOp` with value `1` of that type,
+   using the same `mlir::LLVM::ConstantOp::create(Rewriter, Loc, Type,
+   IntLiteral)` idiom already used throughout this file.
+3. Computes the atomic ordering via the existing
+   `convertAtomicOrdering(Op.getSemantics())` helper (unchanged, shared
+   with every other atomic pattern).
+4. Replaces the op with an ordinary `LLVM::AtomicRMWOp`, using the
+   given `BinOp` (`add` for `AtomicIIncrement`, `sub` for
+   `AtomicIDecrement`), the pointer, the materialized constant `1`,
+   and the ordering.
+
+Because this ultimately emits an ordinary `atomicrmw add`/`sub`,
+**every** downstream layer `L244` widened last session
+(`SPIRVResourceLowering.cpp`'s `hasOnlySupportedStorageImageUses`/
+`lowerImageAccesses`, `ImageCalls.h`/`.cpp`'s `AtomicAdd*`/`AtomicSub*`
+entry points, `FeMeRuntimeCPU.c`'s runtime functions) sees an IR shape
+indistinguishable from an explicit `OpAtomicIAdd`/`OpAtomicISub` with
+`value == 1` -- no new shape support, `ImageCallKind` enum values, or
+runtime functions were needed for this fix, across any of the 6
+storage-image shapes `L244` already covers.
+
+Added a new lit-test block to
+`spirv-to-llvm-image-atomic.mlir` (`@atomic_inc_dec`) confirming both
+ops lower to `llvm.atomicrmw add`/`sub ptr, i32 1` against the same
+texel pointer, alongside the file's existing per-RMW-kind coverage.
+
+**Verified against the real CTS**:
+`dEQP-VK.image.atomic_operations.{inc,dec}.*` (880 cases, every
+shape): **240 Pass, 0 Fail**, 640 Not supported -- fully closing the
+240-case bucket `L244` left behind. Re-sampled the full
+`atomic_operations.*` group (6209 cases, all 12 ops) for regressions:
+**1320 Pass, 0 Fail**, 4889 Not supported (up from `L244`'s 1080 Pass,
+the extra 240 being exactly this fix's newly-passing cases, with no
+regressions among the other 9 RMW ops or `compare_exchange`).
+
+**Build/test verification**:
+- `FeMeConversionSPIRVToLLVMTests` (targeted rebuild): compiles clean,
+  no template/accessor issues with the two open questions from this
+  investigation (`this->getTypeConverter()`, `Op.getType()` both
+  resolved correctly as written).
+- `ninja check-feme`: 3386 Passed (+1 net new lit-test block), 61
+  Unsupported, 0 Failed.
+- `ninja check-hlsl-feme-vk`: 483 Pass / 32 XFAIL / 207 Not supported,
+  0 Fail -- unchanged from baseline, no regression.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- this is a core-1.0 image-atomic correctness fix
+  (closing a gap in an already-implemented feature), not a new feature
+  or extension landing.
