@@ -61,28 +61,22 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours)** `L243`: newly-exposed 48-case tessellation-control
-   SSBO-counter-mismatch bucket (`got 4/1 but expected 3`) -- not yet triaged
-   past the qpa symptom. Start by comparing expected-vs-actual counts' pattern
-   (looks like an off-by-N tied to invocation count) against how many
-   tessellation-control invocations this ICD dispatches per patch for these
-   cases' configuration.
-2. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
+1. **(a few hours)** `L241`: `VK_EXT_pipeline_creation_cache_control`
    pipeline-create-flags -- one derivative-recreation case confirmed, other flag
    combinations unchecked.
-3. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
+2. **(a full dedicated session)** `L239`: 3D-image-as-2D-render-target support
    -- confirmed format-independent, needs new image-view/addressing code.
-4. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
+3. **(a full dedicated session, still overdue)** `L232`: storage `CubeArray`
    `/6` layer-count fix -- classification-level surgery, unchanged for many
    sessions.
-5. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+4. **(a few hours, still carried over)** Pick one of `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
    sessions now.
-6. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+5. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
    `shader_render` remain completely unsampled.
-7. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
+6. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
    branch -- confirmed drifting every session (known root cause:
    `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
    unconditionally). `git log --oneline feme -3` should show `9351791`; `git
