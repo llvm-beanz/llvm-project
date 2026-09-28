@@ -51,6 +51,15 @@ struct LinkedStageElement {
   uint32_t DestFirstComponent = 0;
   uint32_t ComponentCount = 0;
   uint32_t RowCount = 0;
+  /// (roadmap L238) `false` for a consumer *system-value* element (e.g.
+  /// `Position`) whose producer stage never wrote it at all -- legal per
+  /// the Vulkan spec ("Any input value that does not have a matching
+  /// output value is undefined", core spec section 15.1, "Shader
+  /// Interfaces"), not a pipeline-creation or link failure. `SourceXXX`
+  /// are meaningless when this is `false`; `copyLinkedElements` writes a
+  /// deterministic zero instead of reading from the (nonexistent)
+  /// producer element.
+  bool HasProducer = true;
 };
 
 /// Links every \p ConsumerDir element of \p ConsumerSig accepted by
@@ -60,9 +69,15 @@ struct LinkedStageElement {
 ///
 /// \p StageDescription names the pair in diagnostics (e.g. "hull stage
 /// output -> domain stage input"). Returns an `Error` if a consumer element
-/// has no producer counterpart, has no `Location` to match on, or the two
-/// disagree on component count, row count or component type -- each of
-/// which would otherwise be a silently miscopied attribute.
+/// has no `Location` to match on, or the two disagree on component count,
+/// row count or component type -- each of which would otherwise be a
+/// silently miscopied attribute. A *system-value* consumer element (e.g.
+/// `Position`) with no producer counterpart is not an error (roadmap
+/// L238) -- the corresponding `LinkedStageElement::HasProducer` is `false`
+/// instead, since a `gl_PerVertex` builtin's whole point is that writing
+/// it is always optional (see `LinkedStageElement::HasProducer`'s own
+/// comment); an *ordinary*, `Location`-addressed consumer element with no
+/// producer counterpart remains a hard error, unchanged.
 ///
 /// A null \p ConsumerFilter accepts every \p ConsumerDir element.
 llvm::Expected<llvm::SmallVector<LinkedStageElement, 4>> linkStageElements(

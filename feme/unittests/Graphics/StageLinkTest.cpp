@@ -140,6 +140,69 @@ TEST(StageLinkTest, RejectsAConsumerInputWithNoProducer) {
   ASSERT_THAT_ERROR(Links.takeError(), Failed());
 }
 
+// (Roadmap L238) A system-value consumer element (e.g. `SV_Position`)
+// with no matching producer is legal per the Vulkan spec -- "Any input
+// value that does not have a matching output value is undefined" -- so,
+// unlike the ordinary `Location`-addressed case just above
+// (`RejectsAConsumerInputWithNoProducer`), `linkStageElements` must not
+// fail here. Instead it must record a `HasProducer=false` link so
+// `copyLinkedElements` (see `WritesZeroForAProducerlessSystemValueLink`
+// below) knows to synthesize a value rather than dereference a
+// nonexistent producer.
+TEST(StageLinkTest, AcceptsAProducerlessSystemValueConsumer) {
+  EntrySignature Producer;
+  Producer.Elements = {}; // No stage-IO globals at all (roadmap H4h/L238
+                          // `EmptyVertexSource`'s own real shape).
+  EntrySignature Consumer;
+  SignatureElement ConsumedPosition =
+      makeElement(0, SignatureDirection::Input, std::nullopt,
+                  /*ComponentCount=*/4);
+  ConsumedPosition.SystemValue = SignatureSystemValue::Position;
+  Consumer.Elements = {ConsumedPosition};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex stage output -> hull stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+  EXPECT_EQ((*Links)[0].DestElementID, 0u);
+  EXPECT_FALSE((*Links)[0].HasProducer);
+}
+
+// End-to-end companion to the above: confirms `copyLinkedElements` writes
+// a deterministic zero into the destination for a `HasProducer=false`
+// link instead of reading from a (nonexistent) producer invocation.
+TEST(StageLinkTest, WritesZeroForAProducerlessSystemValueLink) {
+  EntrySignature Producer;
+  Producer.Elements = {};
+  EntrySignature Consumer;
+  SignatureElement ConsumedPosition =
+      makeElement(0, SignatureDirection::Input, std::nullopt,
+                  /*ComponentCount=*/4);
+  ConsumedPosition.SystemValue = SignatureSystemValue::Position;
+  Consumer.Elements = {ConsumedPosition};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "vertex stage output -> hull stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+
+  Expected<StageStorage> From = buildStageStorage(
+      Producer, SignatureDirection::Output, /*InvocationCount=*/1);
+  ASSERT_THAT_EXPECTED(From, Succeeded());
+  Expected<StageStorage> To = buildStageStorage(
+      Consumer, SignatureDirection::Input, /*InvocationCount=*/1);
+  ASSERT_THAT_EXPECTED(To, Succeeded());
+  // Poison the destination first so a real write is distinguishable from
+  // an accidental no-op leaving stale data behind.
+  for (uint32_t C = 0; C != 4; ++C)
+    To->writeFloat(0, C, 0, 123.0f);
+
+  copyLinkedElements(*From, *To, *Links, /*InvocationCount=*/1, {});
+  for (uint32_t C = 0; C != 4; ++C)
+    EXPECT_FLOAT_EQ(To->readFloat(0, C, 0), 0.0f);
+}
+
 TEST(StageLinkTest, RejectsAComponentCountMismatch) {
   EntrySignature Producer;
   Producer.Elements = {

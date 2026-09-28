@@ -76,12 +76,29 @@ linkStageElements(const EntrySignature &ProducerSig,
                                Consumer.ElementID);
     const SignatureElement *Producer =
         findProducer(ProducerSig, ProducerDir, Consumer);
-    if (!Producer)
+    if (!Producer) {
+      // (roadmap L238) A *system-value* consumer (e.g. `Position`) with
+      // no producer counterpart is legal, not a link failure: per the
+      // Vulkan spec, "Any input value that does not have a matching
+      // output value is undefined" -- this is precisely `gl_PerVertex`'s
+      // whole point (writing `gl_Position`/`gl_PointSize`/
+      // `gl_ClipDistance`/`gl_CullDistance` is always optional in every
+      // non-final pre-rasterization stage). Record a producer-less link
+      // instead of erroring; `copyLinkedElements` writes a deterministic
+      // zero for it. An ordinary, `Location`-addressed consumer with no
+      // producer remains a hard error below -- unchanged.
+      if (Consumer.SystemValue != SignatureSystemValue::None) {
+        Links.push_back({0, Consumer.ElementID, 0, Consumer.FirstComponent,
+                         Consumer.ComponentCount, effectiveRowCount(Consumer),
+                         /*HasProducer=*/false});
+        continue;
+      }
       return createStringError(inconvertibleErrorCode(),
                                "%s: element %u has no matching producer "
                                "element",
                                StageDescription.str().c_str(),
                                Consumer.ElementID);
+    }
     // (roadmap L94(i)) `VK_KHR_maintenance4` (core since Vulkan 1.3, always
     // implemented here per roadmap E4) explicitly allows a consumer's
     // input variable to declare *fewer* vector components than its
@@ -115,6 +132,18 @@ void copyLinkedElements(const StageStorage &From, StageStorage &To,
          "invocation");
   for (const LinkedStageElement &Link : Links)
     for (uint32_t Invocation = 0; Invocation != InvocationCount; ++Invocation) {
+      // (roadmap L238) A producer-less system-value link
+      // (`LinkedStageElement::HasProducer == false`) has no source
+      // element to read at all -- write a deterministic zero (the
+      // Vulkan spec leaves the actual value undefined) instead of
+      // indexing into `From`.
+      if (!Link.HasProducer) {
+        for (uint32_t Row = 0; Row != Link.RowCount; ++Row)
+          for (uint32_t C = 0; C != Link.ComponentCount; ++C)
+            To.writeRaw(Link.DestElementID, Link.DestFirstComponent + C,
+                        Invocation, 0, Row);
+        continue;
+      }
       uint32_t Source = SourceInvocations.empty()
                             ? Invocation
                             : SourceInvocations[Invocation];
