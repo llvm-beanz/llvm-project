@@ -1275,6 +1275,16 @@ std::optional<SmallVector<Function *, 4>>
 splitAtGroupSyncBarriers(Function *&WaveBody,
                          SmallVectorImpl<RegionBoundary> &Boundaries,
                          StructType *&SpillTyOut) {
+  // Roadmap L229: SIMDizePass's own if-conversion (predicating an
+  // `if`-statement into straight-line masked code rather than a real
+  // branch) can leave genuinely unreachable blocks behind (e.g. a stale
+  // `..._crit_edge` landing pad with "No predecessors" that used to be a
+  // live successor before predication folded its guard away). Such a
+  // block is dead code, not a surviving branch this milestone's
+  // `isLinearChain` needs to reason about -- prune it first so its own
+  // `Order.size() == F.size()` sanity check only counts blocks the live
+  // control flow can actually reach.
+  EliminateUnreachableBlocks(*WaveBody);
   SmallVector<BasicBlock *, 8> Order;
   if (!isLinearChain(*WaveBody, Order)) {
     WaveBody->getContext().emitError(
