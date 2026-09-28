@@ -6126,6 +6126,34 @@ femeRTComputeUnclampedQueryLod1D(const FemeRTImageDescriptor *Img, float DUdX,
   return femeRTFastLog2(Pmax);
 }
 
+// (Roadmap L229) The three-axis counterpart of
+// `femeRTComputeUnclampedQueryLod` above, for a `Plain3D` `OpImageQueryLod`
+// -- the same texel-space "scale factor" construction extended to a
+// third, depth axis, mirroring `femeRTPlanImplicitLod3D`'s own identical
+// widening of `femeRTPlanImplicitLod` for an ordinary implicit-LOD
+// `Plain3D` sample (still isotropic-only, matching that function's own
+// rationale: no real CTS case exercises anisotropic filtering against a
+// volume texture, and Vulkan never defines a meaningfully different
+// anisotropic footprint for a third axis with no screen-space analogue).
+// Unlike `femeRTPlanImplicitLod3D`'s own `0.0f` zero-footprint convention
+// (a fine, if arbitrary, choice for a real sample's mip-level selection),
+// this returns `-infinity` for a zero-footprint input instead, matching
+// `femeRTComputeUnclampedQueryLod`'s own identical `-infinity` rationale.
+__attribute__((always_inline)) static float
+femeRTComputeUnclampedQueryLod3D(const FemeRTImageDescriptor *Img, float DUdX,
+                                 float DUdY, float DVdX, float DVdY,
+                                 float DWdX, float DWdY) {
+  float Ux = DUdX * (float)Img->Width, Uy = DUdY * (float)Img->Width;
+  float Vx = DVdX * (float)Img->Height, Vy = DVdY * (float)Img->Height;
+  float Wx = DWdX * (float)Img->Depth, Wy = DWdY * (float)Img->Depth;
+  float Px = __builtin_sqrtf(Ux * Ux + Vx * Vx + Wx * Wx);
+  float Py = __builtin_sqrtf(Uy * Uy + Vy * Vy + Wy * Wy);
+  float Pmax = Px > Py ? Px : Py;
+  if (Pmax <= 0.0f)
+    return -__builtin_inff();
+  return femeRTFastLog2(Pmax);
+}
+
 // (Roadmap L52e) The clamped "level" `OpImageQueryLod`'s own first
 // (`calculate.lod`) lane reports: \p UnclampedLod (already biased and
 // min/max-clamped by `femeRTComputeClampedLod`, the same as an ordinary
@@ -6257,6 +6285,55 @@ __attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLod1DV2F32(
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
   float UnclampedLod = femeRTComputeUnclampedQueryLod1D(&Img, DUdX, DUdY);
+  // Same `-infinity` no-op `InstructionMinLod`/zero `InstructionBias`
+  // convention `femeCpuImageQueryLod2DV2F32` uses -- see its own doc.
+  float ClampedLod = femeRTComputeClampedLod(UnclampedLod,
+                                             /*UseExplicitLod=*/1, &Samp,
+                                             /*InstructionMinLod=*/-__builtin_inff(),
+                                             /*InstructionBias=*/0.0f);
+  float ClampedLevel = femeRTComputeClampedQueryLevel(&Img, &Samp, ClampedLod);
+  return (FemeRTv2f32){ClampedLevel, UnclampedLod};
+}
+
+// `feme.cpu.image.querylod.3d.v2f32` (roadmap L229): `Plain3D`'s own
+// counterpart of `femeCpuImageQueryLod2DV2F32` above -- HLSL's
+// `Texture3D`'s own `CalculateLevelOfDetail`/
+// `CalculateLevelOfDetailUnclamped` (`OpImageQueryLod` against a
+// `Plain3D`-shaped handle, confirmed via `spirv-dis` to have a genuine
+// 3-component coordinate, unlike `Plain2D`'s/`Plain1D`'s own
+// arrayness-independent formula). Widened to this shape's own third,
+// depth axis: `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY` (via
+// `femeRTComputeUnclampedQueryLod3D`, mirroring
+// `femeRTPlanImplicitLod3D`'s own identical three-axis widening for an
+// ordinary implicit-LOD sample). The `<2 x float>` result's own lane
+// convention (lane 0 clamped level, lane 1 raw unclamped LOD) and the
+// same all-zero `{0.0, 0.0}` inactive-lane/unsampled-image/null-sampler
+// convention are otherwise identical to `femeCpuImageQueryLod2DV2F32`'s
+// own.
+FemeRTv2f32 femeCpuImageQueryLod3DV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DUdX, float DUdY,
+    float DVdX, float DVdY, float DWdX, float DWdY,
+    _Bool Mask) asm("feme.cpu.image.querylod.3d.v2f32");
+
+__attribute__((always_inline)) FemeRTv2f32 femeCpuImageQueryLod3DV2F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float DUdX, float DUdY,
+    float DVdX, float DVdY, float DWdX, float DWdY, _Bool Mask) {
+  FemeRTv2f32 Zero = {0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+
+  float UnclampedLod = femeRTComputeUnclampedQueryLod3D(&Img, DUdX, DUdY, DVdX,
+                                                        DVdY, DWdX, DWdY);
   // Same `-infinity` no-op `InstructionMinLod`/zero `InstructionBias`
   // convention `femeCpuImageQueryLod2DV2F32` uses -- see its own doc.
   float ClampedLod = femeRTComputeClampedLod(UnclampedLod,

@@ -122,6 +122,8 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.querylod.cube.v2f32";
   case ImageCallKind::QueryLod1D:
     return "feme.cpu.image.querylod.1d.v2f32";
+  case ImageCallKind::QueryLod3D:
+    return "feme.cpu.image.querylod.3d.v2f32";
   case ImageCallKind::Sample3D:
     return "feme.cpu.image.sample.3d.v4f32";
   case ImageCallKind::GetDimensions2D:
@@ -680,6 +682,23 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     FTy = FunctionType::get(
         V2F32Ty,
         {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  }
+  case ImageCallKind::QueryLod3D: {
+    // (image_heap, image_heap_count, sampler_heap, sampler_heap_count,
+    //  image_index, sampler_index, dudx, dudy, dvdx, dvdy, dwdx, dwdy,
+    //  mask) -> <2 x float> (roadmap L229): same lane convention as
+    // QueryLod2D, widened with a real third, depth-axis derivative pair
+    // (dwdx/dwdy), mirroring Sample3D's own identical three-axis
+    // widening of Sample2D's two-axis operand shape. Like QueryLod2D/
+    // QueryLod1D, there is no coordinate operand at all, only its
+    // derivatives.
+    Type *V2F32Ty = FixedVectorType::get(F32Ty, 2);
+    FTy = FunctionType::get(
+        V2F32Ty,
+        {PtrTy, I32Ty, PtrTy, I32Ty, I32Ty, I32Ty, F32Ty, F32Ty, F32Ty, F32Ty,
+         F32Ty, F32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
   }
@@ -1934,6 +1953,21 @@ CallInst *feme::cpu::createQueryLod1D(IRBuilderBase &Builder,
       Name);
 }
 
+CallInst *feme::cpu::createQueryLod3D(IRBuilderBase &Builder,
+                                      const ImageCallEnv &Env,
+                                      Value *ImageIndex, Value *SamplerIndex,
+                                      Value *DUdX, Value *DUdY, Value *DVdX,
+                                      Value *DVdY, Value *DWdX, Value *DWdY,
+                                      Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, ImageCallKind::QueryLod3D);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+          Env.SamplerHeapCount, ImageIndex, SamplerIndex, DUdX, DUdY, DVdX,
+          DVdY, DWdX, DWdY, Mask},
+      Name);
+}
+
 CallInst *feme::cpu::createSample3D(
     IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
     Value *SamplerIndex, Value *U, Value *V, Value *W, Value *DUdX,
@@ -2366,6 +2400,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::QueryLod2D,
       ImageCallKind::QueryLodCube,
       ImageCallKind::QueryLod1D,
+      ImageCallKind::QueryLod3D,
       ImageCallKind::Sample3D,
       ImageCallKind::GetDimensions2D,
       ImageCallKind::QuerySizeLod2D,
@@ -2978,6 +3013,23 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.DUdX = CI.getArgOperand(6);
     Result.DUdY = CI.getArgOperand(7);
     Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::QueryLod3D:
+    if (CI.arg_size() != 13)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.Env.SamplerHeap = CI.getArgOperand(2);
+    Result.Env.SamplerHeapCount = CI.getArgOperand(3);
+    Result.ImageIndex = CI.getArgOperand(4);
+    Result.SamplerIndex = CI.getArgOperand(5);
+    Result.DUdX = CI.getArgOperand(6);
+    Result.DUdY = CI.getArgOperand(7);
+    Result.DVdX = CI.getArgOperand(8);
+    Result.DVdY = CI.getArgOperand(9);
+    Result.DWdX = CI.getArgOperand(10);
+    Result.DWdY = CI.getArgOperand(11);
+    Result.Mask = CI.getArgOperand(12);
     break;
   case ImageCallKind::Sample3D:
     if (CI.arg_size() != 23)

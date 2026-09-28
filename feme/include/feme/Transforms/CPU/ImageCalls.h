@@ -421,9 +421,9 @@ enum class ImageCallKind : uint8_t {
   /// from. Scoped to `Plain2D`/`Array2D` (roadmap H124t reuses this same
   /// entry point for `Array2D`, whose own `CalculateLevelOfDetail` has an
   /// identical 2-component coordinate and formula) -- `Cube`/`CubeArray`
-  /// (see `QueryLodCube` immediately below) and `Plain1D`/`Array1D` (see
-  /// `QueryLod1D` below) are covered separately; `Plain3D`'s own
-  /// counterpart remains unstarted follow-on work.
+  /// (see `QueryLodCube` immediately below) and `Plain1D`/`Array1D`/
+  /// `Plain3D` (see `QueryLod1D`/`QueryLod3D` below) are covered
+  /// separately.
   QueryLod2D,
   /// `feme.cpu.image.querylod.cube.v2f32` (roadmap H124u): `Cube`'s own
   /// counterpart of `OpImageQueryLod` (HLSL's `TextureCube::
@@ -442,7 +442,13 @@ enum class ImageCallKind : uint8_t {
   /// (`FeMeRuntimeCPU.c`) for the exact face-selection-then-remap
   /// pipeline. The `<2 x float>` result's own lane convention is
   /// otherwise identical to `QueryLod2D`'s (lane 0 clamped level, lane 1
-  /// raw unclamped LOD).
+  /// raw unclamped LOD). Reused as-is for `CubeArray` (roadmap L229),
+  /// confirmed via a real `dxc -spirv` capture that
+  /// `TextureCubeArray::CalculateLevelOfDetail` compiles to an identical
+  /// `OpImageQueryLod` with the same bare 3-component direction-vector
+  /// coordinate, no array-layer operand of its own -- mirroring
+  /// `QueryLod2D`'s own `Plain2D`/`Array2D` sharing, the array dimension
+  /// plays no part in face selection or the LOD computation here either.
   QueryLodCube,
   /// `feme.cpu.image.querylod.1d.v2f32` (roadmap L194): `Plain1D`'s own
   /// counterpart of `OpImageQueryLod` (HLSL's
@@ -460,8 +466,29 @@ enum class ImageCallKind : uint8_t {
   /// computation here either, same as `QueryLod2D`'s own `Array2D`
   /// case). The `<2 x float>` result's own lane convention is otherwise
   /// identical to `QueryLod2D`'s (lane 0 clamped level, lane 1 raw
-  /// unclamped LOD). `Plain3D` remains unstarted follow-on work.
+  /// unclamped LOD). `Plain3D` is covered separately by `QueryLod3D`
+  /// below.
   QueryLod1D,
+  /// `feme.cpu.image.querylod.3d.v2f32` (roadmap L229): `Plain3D`'s own
+  /// counterpart of `OpImageQueryLod` (HLSL's `Texture3D::
+  /// CalculateLevelOfDetail`/`CalculateLevelOfDetailUnclamped`) -- the
+  /// "unstarted follow-on work" `QueryLod2D`'s own doc named. Unlike
+  /// `QueryLod2D`'s two-axis `(DUdX, DUdY, DVdX, DVdY)` operand pair,
+  /// this takes a real third, depth-axis derivative pair too (`DWdX`/
+  /// `DWdY`), mirroring `Sample3D`'s own identical three-axis derivative
+  /// widening of `Sample2D`'s two-axis one -- confirmed via a real
+  /// `dxc -spirv` capture that `Texture3D::CalculateLevelOfDetail`
+  /// compiles to an `OpImageQueryLod` with a genuine 3-component
+  /// `%v3float` coordinate, the same shape `Cube`'s own direction vector
+  /// has, but (unlike `Cube`) addressed per-axis rather than needing any
+  /// face-selection/remapping step -- so this reuses `Sample3D`'s own
+  /// per-axis derivative-synthesis precedent (three independent calls to
+  /// `getOrSynthesizeSample1DDerivatives`, one per axis), not
+  /// `QueryLodCube`'s own direction-vector-plus-face-selection shape.
+  /// The `<2 x float>` result's own lane convention is otherwise
+  /// identical to `QueryLod2D`'s (lane 0 clamped level, lane 1 raw
+  /// unclamped LOD).
+  QueryLod3D,
   /// `feme.cpu.image.sample.3d.v4f32` (roadmap L66(a), extended with a
   /// real `Bias`/`MinLodClamp` pair by roadmap L67(a) and real `Grad`
   /// support by roadmap L67(b)): the volumetric counterpart of
@@ -1753,6 +1780,22 @@ llvm::CallInst *createQueryLod1D(llvm::IRBuilderBase &Builder,
                                  llvm::Value *SamplerIndex, llvm::Value *DUdX,
                                  llvm::Value *DUdY, llvm::Value *Mask,
                                  const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.querylod.3d.v2f32` call (roadmap L229): see
+/// `ImageCallKind::QueryLod3D`'s own doc for its `<2 x float>` result
+/// shape. \p DUdX/\p DUdY/\p DVdX/\p DVdY/\p DWdX/\p DWdY are the
+/// caller's own per-axis screen-space partial derivatives of the sampled
+/// coordinate's three components -- unlike `createSample3D`, always real
+/// ones (see `getOrSynthesizeSample1DDerivatives`, called once per axis),
+/// never zero constants, since `OpImageQueryLod` has no explicit-LOD form
+/// to fall back to (mirroring `createQueryLod2D`'s own identical
+/// rationale).
+llvm::CallInst *
+createQueryLod3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                 llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                 llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *DVdX,
+                 llvm::Value *DVdY, llvm::Value *DWdX, llvm::Value *DWdY,
+                 llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.3d.v4f32` call (roadmap L66(a),
 /// extended with a real \p Bias/\p MinLodClamp pair by roadmap L67(a) and

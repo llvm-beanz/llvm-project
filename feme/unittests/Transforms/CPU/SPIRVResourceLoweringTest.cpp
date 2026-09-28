@@ -7384,6 +7384,85 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+TEST(SPIRVResourceLoweringTest,
+     LowersPlain3DQueryLodToImageQueryLod3DWithPerAxisDerivatives) {
+  // Roadmap L229: `Plain3D`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `Texture3D`) -- unlike `Cube`'s own
+  // direction-vector-plus-face-selection coordinate above, this op's own
+  // coordinate is a genuine 3-component vector addressed per-axis
+  // (confirmed via a real `dxc -spirv` capture, `%v3float`, U/V/W each
+  // independently differentiable, mirroring `Sample3D`'s own identical
+  // per-axis derivative-synthesis precedent), so this lowers to a
+  // distinct `feme.cpu.image.querylod.3d.v2f32` call carrying three
+  // independent per-axis derivative pairs, rather than reusing
+  // `QueryLodCube`'s (direction-vector) or `QueryLod2D`'s (2-component)
+  // calls.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *QueryLod = findImageCall(*F, "feme.cpu.image.querylod.3d.v2f32");
+  ASSERT_TRUE(QueryLod);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  dudx, dudy, dvdx, dvdy, dwdx, dwdy, mask) -- 13 operands total.
+  EXPECT_EQ(QueryLod->arg_size(), 13u);
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersCubeArrayQueryLodToImageQueryLodCubeSharingCubeFormula) {
+  // Roadmap L229: `CubeArray`'s own `CalculateLevelOfDetail` (an
+  // `OpImageQueryLod` against a `TextureCubeArray`) -- mirroring
+  // `Array2D`'s own sharing of `Plain2D`'s `QueryLod2D` call above, this
+  // op's own coordinate is likewise a bare 3-component direction vector
+  // with no separate array-layer component at all (confirmed via a real
+  // `dxc -spirv` capture -- the array dimension plays no part in face
+  // selection or the LOD computation here either), so this reuses
+  // `QueryLodCube`'s own runtime call and formula unchanged.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<3 x float> %coord) {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 3, 0, 1, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <3 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylod.cube.v2f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 
 // Roadmap L66(e): a real use-after-free, found via CTS re-runs once L66's
 // other sub-items began clearing more pipelines. Two functions each declare
