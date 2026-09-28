@@ -61,20 +61,27 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a full dedicated session, still overdue)** `L239`:
-   3D-image-as-2D-render-target support -- confirmed format-independent, needs
-   new image-view/addressing code.
-2. **(a few hours, still carried over)** Pick one of `L227(d)` (3
+1. **(a few hours, still carried over)** Pick one of `L227(d)` (3
    `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- unchanged for many
    sessions now.
-3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+2. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
    `shader_render` remain completely unsampled.
-4. **(worth a few minutes, low priority, carried over)** Audit other FeMe
+3. **(worth a few minutes, low priority, carried over)** Audit other FeMe
    creation-time checks for the "over-strict VUID enforcement" pattern `L241`
    found in `primitiveRestartEnable` handling -- still not searched for.
+4. **(worth an hour, new this session)** The `dEQP-VK.image.*` 143k-case sweep
+   this session surfaced three sizeable pre-existing failure buckets never yet
+   triaged as their own roadmap items:
+   `extended_usage_bit_compatibility.image_format_properties{,2}` (1320+1320
+   cases), `format_reinterpret.*` (446 * 7 dimension variants),
+   `atomic_operations.*` (~1000+ cases across ops). None investigated this
+   session (out of scope for `L239`) -- worth a dedicated triage session to
+   split into real roadmap items with root causes, since right now they're only
+   known as raw counts from this sweep.
 5. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
-   branch -- was already correct this session, but keep checking (known root
-   cause: `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
-   unconditionally).
+   branch -- confirmed drifting every session (known root cause:
+   `/opt/llvm-tooling/scripts/agent-setup.sh` resets it to `origin/main`
+   unconditionally). `git log --oneline feme -3` should show `9351791`; `git
+   reset --hard 9351791` if not.
