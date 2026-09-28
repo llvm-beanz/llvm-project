@@ -3263,3 +3263,100 @@ needed -- `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` and
 `VkImageCreateFlagBits` enumerants with no dedicated extension or
 `VkPhysicalDeviceFeatures` bit gating them, matching the same rationale
 `L239` documented for `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`.
+
+## Roadmap L244: widen image atomics beyond `Plain2D`
+
+`L239`'s own broad `dEQP-VK.image.*` (143086-case) sanity sweep flagged
+`dEQP-VK.image.atomic_operations.*` (~864 cases across `add`/`and`/
+`compare_exchange`/`exchange`/`max`/`min`/`or`/`sub`/`xor`) as a large,
+never-triaged failure bucket. A single-op repro
+(`atomic_operations.add.*`, 782 cases) found 96 Fail, every one at
+`vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED` --
+breaking down the 96 by dimension: `1d` (16), `1d_array` (16),
+`2d_array` (16), `3d` (16), `cube` (16), `cube_array` (16); `2d` and
+`buffer` were absent (already passing).
+
+Re-running the smallest failing case
+(`add.1d.notransfer.normal_read.normal_img.r32i_end_result`) with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` initially pointed at an
+apparently-unrelated resource handle
+(`unsupported raised operation: ...handlefrombinding...`) -- this
+turned out to be `UnsupportedOps.cpp`'s own "one unsupported op poisons
+every handle in its containing function" behavior, not a hint about
+the actual root cause. Reading `SPIRVResourceLowering.cpp` directly
+found it instead: `hasOnlySupportedStorageImageUses`'s two atomic
+branches (`AtomicRMWInst`/`AtomicCmpXchgInst`) each hard-rejected any
+non-`Plain2D` shape (`if (!IsInteger || Shape != ImageShape::Plain2D)
+return false;`), and `lowerImageAccesses`'s own atomic dispatch switch
+only ever called the `*2D` `create*` wrappers with `(X, Y)`, hardcoded
+for that one shape.
+
+Widened both:
+
+1. `hasOnlySupportedStorageImageUses`'s atomic gate now accepts
+   `Plain1D`, `Array1D`, `Array2D` (also covers a plain storage `Cube`,
+   folded into `Array2D` by `classifyStorageImage2DHandle`),
+   `StorageCubeArray` (`L232`'s genuine cube array, sharing `Array2D`'s
+   own addressing -- its already-flattened `layer * 6 + face` value
+   passes through as an ordinary layer operand, needing no dedicated
+   shape of its own), and `Plain3D`, alongside the pre-existing
+   `Plain2D` -- every non-multisampled storage-image shape this
+   function classifies today. The two multisampled shapes
+   (`Plain2DMS`/`Array2DMS`) remain unreachable by spec, not by
+   omission: SPIR-V disallows an atomic against a multisampled image
+   operand outright.
+2. `lowerImageAccesses`'s atomic dispatch (both the `AtomicRMWInst` and
+   `AtomicCmpXchgInst` branches) now switches on `Shape` the same way
+   the adjacent `StoreInst` dispatch already does, selecting the right
+   `createAtomic*{Shape}` wrapper and coordinate operands (`X` alone
+   for `Plain1D`; `X, Layer` for `Array1D`; `X, Y, Layer` for
+   `Array2D`/`StorageCubeArray`; `X, Y, Z` for `Plain3D`) -- reusing the
+   `X`/`Y`/`C2` values the `StoreInst` branch already computes
+   generically per-shape just above it, with no new coordinate-
+   extraction code needed.
+
+Both changes required a matching amount of boilerplate: 44 new
+`ImageCallKind` enum values, `create*` function declarations/
+definitions, `getImageCallName`/`FunctionType`-registration/
+`matchImageCall` entries (`ImageCalls.h`/`.cpp`), and 44 new
+`femeCpuImageAtomic{Op}{Shape}` runtime entry points plus 4 new
+bounds-checked address helpers (`FeMeRuntimeCPU.c`) -- one set per
+(11 ops) x (4 new shape families) combination.  `matchImageCall`'s own
+`AllKinds` table update matters beyond cosmetics: it is consumed by
+`SIMDize.cpp`'s `FunctionWidener::widenImageCall` for SIMD-lane
+masking, so skipping it would have left the newly-supported atomics
+correctly *executing* but incorrectly *masked* under SIMD widening --
+a silent correctness bug rather than a build/test failure.
+
+**Verified against the real CTS**:
+`dEQP-VK.image.atomic_operations.*` (6209 cases, all 9 targeted RMW ops
+plus `compare_exchange`, across every shape): 1080 Pass, 4889 Not
+supported, **0 Fail** among the targeted ops -- down from the
+96/782-Fail single-op (`add`) repro this investigation started from.
+The group's remaining 240 Fail are entirely
+`atomic_operations.{inc,dec}.*` (`OpAtomicIIncrement`/
+`OpAtomicIDecrement`), confirmed via a full-group re-run and breakdown
+by op/shape to be the *only* two ops among the group's 12 (9 RMW +
+`compare_exchange` + `inc` + `dec`) still failing, and every shape
+fails identically for both -- pointing at a missing SPIR-V-to-MLIR
+lowering pattern for these two dedicated opcodes entirely (no
+`atomicrmw`/`cmpxchg` LLVM-IR equivalent exists for either, unlike
+every other atomic op), not a `SPIRVResourceLowering.cpp`-side shape
+gap like this fix's own. Filed as new roadmap item `L247`.
+
+`dEQP-VK.image.load_store.*` (3446 cases) sampled for regressions: 2346
+Pass, 1100 Not supported, 0 Fail -- unchanged.
+
+8 new `ImageCallsTest.cpp` round-trip unit tests (one representative
+op per new shape, plus `compare_exchange` per shape). 1 new lit test
+(`spirv-resource-lowering-image-atomic-widened.ll`) covering the
+resource-lowering pass's own per-shape dispatch for all 4 newly
+supported shapes (one RMW op, `add`, plus `compare_exchange` each).
+
+`ninja check-feme`: 3386 Passed, 61 Unsupported, 0 Failed (+8 net new
+unit tests, +1 net new lit test).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a core-1.0 image-atomic correctness fix (widening an
+already-implemented feature's shape coverage), not a new feature or
+extension landing.
