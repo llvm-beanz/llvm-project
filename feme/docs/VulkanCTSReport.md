@@ -3779,3 +3779,77 @@ verification.
 
 **Build/test verification**: no source change, so no rebuild/retest
 was required beyond the CTS verification above.
+
+## Roadmap L228(c): api.image_clearing multi-layer vkCmdClearAttachments bug -- fixed
+
+Root-caused and fixed the `api.image_clearing` cluster this session's
+own prior broad sample flagged (57 sampled failures, spot-checked as
+combining `multiple_layers` and `sample_count_4`/MSAA).
+
+Re-ran `dEQP-VK.api.image_clearing.*multiple_layers*sample_count_4*`
+(882 cases): 136 Pass, 272 Fail, 474 Not supported. Every failure
+clustered to `core.clear_color_attachment.multiple_layers.*
+sample_count_4` specifically (`vkCmdClearAttachments`, not the
+dedicated-allocation `clear_color_image` path, which passed at the
+same dimensions). Isolated the two dimensions separately:
+
+- `multiple_layers` **without** MSAA also failed -- not an
+  MSAA-interaction bug, a plain multi-layer `vkCmdClearAttachments`
+  bug.
+- `single_layer` **with** MSAA also failed, but with a different
+  symptom (`(0,0,0,0)`, uninitialized-read-looking) -- a second,
+  independent bug, split out as roadmap `L228(k)` rather than blocking
+  this fix on it.
+
+**Root cause**: `ImageOps.cpp`'s `clearAttachmentRects` hoisted a
+single shared layer-iteration mask (`ViewMask ? ViewMask : 1u`)
+*outside* the whole `VkClearRect` loop. Outside multiview this always
+normalized to exactly one iteration at layer 0, so every clear
+silently dropped layers 1+ regardless of what each rect's own
+`baseArrayLayer`/`layerCount` actually named.
+
+**Fix**: restructured the loop to iterate layers *per-rect*: for
+multiview render passes, the current subpass's view mask still
+determines the layers (unchanged behavior, per spec); for
+non-multiview instances, iterate `[rect.baseArrayLayer,
+rect.baseArrayLayer + rect.layerCount)` directly from that rect. The
+per-layer write loop was extracted into a local `ClearLayer` lambda
+shared by both branches.
+
+New regression test `DrawTest.
+ClearAttachmentsClearsEveryLayerNamedByItsOwnRect`, confirmed via
+`git stash` A/B to fail without the fix (layers 1/2 stay black) and
+pass with it.
+
+**Verified against the real CTS**:
+- `dEQP-VK.api.image_clearing.core.clear_color_attachment.
+  multiple_layers.*` (2499 cases): 621 Pass, **127 Fail** (down from
+  272), 1751 Not supported. All 127 residual failures are exclusively
+  `sample_count_{2,4,8}` MSAA cases (0 non-MSAA multi-layer failures
+  remain) -- confirming the fix resolves every non-MSAA case and
+  isolates the separate `L228(k)` MSAA bug cleanly.
+
+**Build/test verification**:
+- `FeMeVulkanTests`: 761/761 (was 760/760, +1 net new unit test).
+- `check-feme`: 3390 Passed, 61 Unsupported, 0 Failed (was
+  3389/61/0).
+- `check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL / 207 Not
+  supported.
+
+**New finding, not fixed this session (split out as `L228(k)`)**: the
+separate single-layer-MSAA `(0,0,0,0)` clear-attachments bug described
+above.
+
+**New finding, not fixed this session (filed as `L251`)**: while
+re-running a broader `dEQP-VK.api.image_clearing.*` sweep to check for
+regressions beyond the `multiple_layers` group, hit a genuine
+`DeviceLost` at `dEQP-VK.api.image_clearing.core.clear_color_image.
+1d.linear.multiple_layers.a2b10g10r10_sint_pack32` (aborting the
+harness run). Confirmed pre-existing and unrelated to this session's
+own fix (reproduced identically with the fix committed). This is in
+the `clear_color_image` path, a different code path from this
+session's own `clear_color_attachment` fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- core-1.0 `vkCmdClearAttachments` correctness fix, no feature-bit or
+extension exposure change.
