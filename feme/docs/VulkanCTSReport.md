@@ -2097,3 +2097,31 @@ regressions).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- feature-bit exposure is unchanged; this is an
 internal-locking correctness fix only, not a new feature landing.
+
+## Roadmap L227(b): boolean specialization-constant fix (outside FeMe) -- `check-hlsl-feme-vk` baseline updated
+
+No FeMe/Vulkan-CTS-relevant source changed this session (the fix
+landed entirely in `offload-test-suite`'s own `offloader` tool, not
+`feme/` -- see `Roadmap.md`'s `L227(b)` entry for the full root cause).
+Recorded here only because it moves `check-hlsl-feme-vk`'s own
+baseline, which this report has historically tracked alongside Vulkan
+CTS numbers.
+
+`check-hlsl-feme-vk`: **462/722 Pass, 31 XFAIL, 221 Not supported, 8
+Fail** (previously 461/722 Pass, 9 Fail -- `spec_const_32_bits.test`
+now passes, no new regressions; the remaining 8 failures are
+`L227(a)`/`(c)`/`(d)`'s own still-unresolved items).
+
+`ninja check-feme`: 3336/3397 Passed, 61 Unsupported, 0 Failed --
+unchanged, as expected for a fix touching zero `feme/` files.
+
+Targeted Vulkan CTS sample: not re-run this session -- no
+Vulkan-CTS-relevant FeMe code changed, so no new CTS signal is
+expected or needed (a full 150k-plus-case CTS re-run purely to
+reconfirm an already-stable baseline after a change with zero `feme/`
+diff would not be a good use of session time; see `L228(e)`/`(f)`'s
+own still-overdue broader-CTS-re-run note for where that time should
+go instead).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed.
