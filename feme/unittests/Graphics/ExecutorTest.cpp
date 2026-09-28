@@ -3976,6 +3976,192 @@ TEST(ExecutorTest, LogicOpAndsWithExistingColor) {
           << "texel " << I << " channel " << C;
 }
 
+// (Roadmap L237) `mergeColor`'s pre-existing hardcoded logic-op format
+// list (`R8G8B8A8_UNORM/_UINT/_SINT` only) hit a real `dEQP-VK.pipeline.
+// monolithic.logic_op.*` `DeviceLost` for every other integer color
+// format (e.g. `R32_UINT`) -- exercises `logicOpComponentByteWidth`'s
+// generalized 4-byte-per-component path, one of the two widths (the
+// other being 2-byte, `R16G16_UINT`/etc.) the original hardcoded-1-byte
+// case never had to handle.
+TEST(ExecutorTest, LogicOpXorsOnAFourByteIntegerAttachment) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  constexpr char PositionOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  constexpr char UInt1ConstantFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 0, i32 252645135, i32 0)
+      ret void
+    }
+    declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+
+  SignatureElement UOut =
+      makeElement(0, SignatureDirection::Output, 1, /*Location=*/0);
+  UOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {UOut};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, UInt1ConstantFragmentShaderIR, "fs_main", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32_UINT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/true,
+      LogicOp::Xor, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<float, 9> VertexData = {
+      -1.0f, -1.0f, 0.0f, // v0
+      3.0f,  -1.0f, 0.0f, // v1
+      -1.0f, 3.0f,  0.0f, // v2
+  };
+  std::vector<VertexAttribute> Attrs = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 12,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attrs}};
+
+  // 0xFFFFFFFF per texel; XOR with the shader's constant 0x0F0F0F0F
+  // (252645135) leaves exactly 0xF0F0F0F0 (4042322160) in every byte.
+  std::array<uint32_t, 16> Storage;
+  Storage.fill(0xFFFFFFFFu);
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(Storage.data()),
+                      Storage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32_UINT, 4, 4};
+  std::array<AttachmentView, 1> Attach = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_EQ(Storage[I], 0xF0F0F0F0u) << "texel " << I;
+}
+
+// (Roadmap L237) `dEQP-VK.pipeline.monolithic.logic_op_na_formats.*`
+// ("na" = "not applicable") draws to a `logicOpEnable` pipeline whose
+// color attachment is a floating-point format -- per spec, logic ops are
+// simply not applied to such a format (the draw behaves as if blending
+// were disabled instead), not an error. `mergeColor`'s pre-existing
+// hardcoded format list previously rejected this with a real, silent
+// `vkQueueSubmit` failure that latched the whole device lost.
+TEST(ExecutorTest, LogicOpOnAFloatAttachmentBehavesAsBlendDisabled) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32G32B32A32_FLOAT, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/true,
+      LogicOp::And, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+
+  std::array<float, 21> VertexData = {
+      -1.0f, -1.0f, 0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v0
+      3.0f,  -1.0f, 0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v1
+      -1.0f, 3.0f,  0.0f, 0.1f, 0.2f, 0.3f, 0.4f, // v2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::array<float, 16 * 4> AttachmentStorage{};
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(AttachmentStorage.data()),
+                      AttachmentStorage.size() * sizeof(float)),
+      cpu::ResourceFormat::R32G32B32A32_FLOAT, 4, 4};
+  std::array<AttachmentView, 1> Attachments2 = {Color};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachments2;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_FLOAT_EQ(AttachmentStorage[I * 4], 0.1f) << "texel " << I;
+    EXPECT_FLOAT_EQ(AttachmentStorage[I * 4 + 1], 0.2f) << "texel " << I;
+    EXPECT_FLOAT_EQ(AttachmentStorage[I * 4 + 2], 0.3f) << "texel " << I;
+    EXPECT_FLOAT_EQ(AttachmentStorage[I * 4 + 3], 0.4f) << "texel " << I;
+  }
+}
+
 // Roadmap R33: multiple render targets. A fragment shader with two
 // `SV_Target` outputs (element 1, location 0 and element 2, location 1)
 // writes its input color to target 0 and its complement to target 1.

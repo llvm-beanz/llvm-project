@@ -1459,40 +1459,124 @@ blendClampRange(cpu::ResourceFormat Format) {
   }
 }
 
+/// (Roadmap L237) Whether \p Format supports a logic op at all, per spec:
+/// "Logical operations are applied only for signed and unsigned integer
+/// and normalized integer framebuffer color attachments... not applied to
+/// floating-point or sRGB format color attachments." `dEQP-VK.pipeline.
+/// monolithic.logic_op_na_formats.*` ("na" = "not applicable") exercises
+/// exactly this -- a `logicOpEnable` pipeline drawing to one of these
+/// formats must still succeed, simply behaving as if blending were
+/// disabled for that draw (`mergeColor`'s own caller below), not fail.
+/// Every format `RenderPass.cpp`'s own `isSupportedColorAttachmentFormat`
+/// admits is either one of the floats/sRGB formats explicitly excluded
+/// here or a normalized/integer format that does support a logic op, so
+/// this can enumerate the (short) exclusion list rather than needing a
+/// fully-enumerated inclusion table.
+bool formatSupportsLogicOp(cpu::ResourceFormat Format) {
+  switch (Format) {
+  case cpu::ResourceFormat::R32_FLOAT:
+  case cpu::ResourceFormat::R32G32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32_FLOAT:
+  case cpu::ResourceFormat::R32G32B32A32_FLOAT:
+  case cpu::ResourceFormat::R16G16B16A16_FLOAT:
+  case cpu::ResourceFormat::R16_FLOAT:
+  case cpu::ResourceFormat::R16G16_FLOAT:
+  case cpu::ResourceFormat::R11G11B10_FLOAT:
+  case cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case cpu::ResourceFormat::B8G8R8A8_UNORM_SRGB:
+    return false;
+  default:
+    return true;
+  }
+}
+
+/// (Roadmap L237) The uniform per-component byte width `mergeColor`'s
+/// real logic-op implementation below needs to apply `applyLogicOp` at
+/// the right byte granularity -- `std::nullopt` for a packed-bitfield
+/// format (e.g. `R10G10B10A2_*`, whose sub-byte component boundaries
+/// `applyLogicOp`'s own whole-byte operation cannot express) or a
+/// channel-reordered format (e.g. `B8G8R8A8_*`, whose memory byte order
+/// does not match `Blend.WriteMask`'s logical R/G/B/A bit order) -- no
+/// real `logic_op`/`logic_op_na_formats` CTS case exercises either of
+/// those today, so both are left as an explicit "not yet implemented"
+/// error below rather than guessed at. Every format returned here is
+/// already covered by `formatSupportsLogicOp` returning `true`.
+std::optional<unsigned>
+logicOpComponentByteWidth(cpu::ResourceFormat Format) {
+  switch (Format) {
+  case cpu::ResourceFormat::R8_UNORM:
+  case cpu::ResourceFormat::R8_UINT:
+  case cpu::ResourceFormat::R8_SINT:
+  case cpu::ResourceFormat::R8G8_UNORM:
+  case cpu::ResourceFormat::R8G8_UINT:
+  case cpu::ResourceFormat::R8G8_SINT:
+  case cpu::ResourceFormat::R8G8B8A8_UNORM:
+  case cpu::ResourceFormat::R8G8B8A8_UINT:
+  case cpu::ResourceFormat::R8G8B8A8_SINT:
+    return 1;
+  case cpu::ResourceFormat::R16_UINT:
+  case cpu::ResourceFormat::R16_SINT:
+  case cpu::ResourceFormat::R16G16_UINT:
+  case cpu::ResourceFormat::R16G16_SINT:
+  case cpu::ResourceFormat::R16G16B16A16_UNORM:
+  case cpu::ResourceFormat::R16G16B16A16_SNORM:
+  case cpu::ResourceFormat::R16G16B16A16_UINT:
+  case cpu::ResourceFormat::R16G16B16A16_SINT:
+    return 2;
+  case cpu::ResourceFormat::R32_UINT:
+  case cpu::ResourceFormat::R32_SINT:
+  case cpu::ResourceFormat::R32G32_UINT:
+  case cpu::ResourceFormat::R32G32_SINT:
+  case cpu::ResourceFormat::R32G32B32A32_UINT:
+  case cpu::ResourceFormat::R32G32B32A32_SINT:
+    return 4;
+  default:
+    return std::nullopt;
+  }
+}
+
 /// Merges a fragment's new color \p Src into \p Texel (the attachment's
 /// existing texel, read and overwritten in place) per \p Pipeline's blend/
 /// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
 /// takes priority over blending -- matching Vulkan/Direct3D, where
-/// enabling one disables the other -- and is only implemented for 8-bit
-/// unsigned-normalized formats (`R8G8B8A8_*`), the same restriction both
-/// APIs place on which formats support a logic op at all. \p Src1 is the
-/// fragment stage's second color output for a dual-source blend factor
-/// (see `blendColor`'s own comment), or all-zero when the pipeline has
-/// none.
+/// enabling one disables the other. Per spec, a format that does not
+/// support logic ops at all (`formatSupportsLogicOp`) simply behaves as
+/// if blending were disabled instead of erroring (roadmap L237); a
+/// format that does but has no byte-level implementation yet
+/// (`logicOpComponentByteWidth`) still errors, matching this file's usual
+/// "mechanical, added on demand" precedent. \p Src1 is the fragment
+/// stage's second color output for a dual-source blend factor (see
+/// `blendColor`'s own comment), or all-zero when the pipeline has none.
 Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
                  const std::array<float, 4> &BlendConstants,
                  cpu::ResourceFormat Format, const std::array<double, 4> &Src,
                  const std::array<double, 4> &Src1,
                  MutableArrayRef<uint8_t> Texel) {
-  if (LogicOpEnable) {
-    if (Format != cpu::ResourceFormat::R8G8B8A8_UNORM &&
-        Format != cpu::ResourceFormat::R8G8B8A8_UINT &&
-        Format != cpu::ResourceFormat::R8G8B8A8_SINT)
+  if (LogicOpEnable && formatSupportsLogicOp(Format)) {
+    std::optional<unsigned> CompWidth = logicOpComponentByteWidth(Format);
+    if (!CompWidth)
       return createStringError(inconvertibleErrorCode(),
-                               "logic ops are only implemented for "
-                               "R8G8B8A8_UNORM/_UINT/_SINT attachments "
+                               "logic ops are not yet implemented for this "
+                               "packed/channel-reordered color format "
                                "(mechanical, added on demand)");
-    std::array<uint8_t, 4> SrcBytes{};
+    std::array<uint8_t, 16> SrcBytesStorage{};
+    MutableArrayRef<uint8_t> SrcBytes(SrcBytesStorage.data(), Texel.size());
     if (Error E = packClearColor(Format, Src, SrcBytes))
       return E;
-    for (unsigned C = 0; C != 4; ++C)
-      if ((Blend.WriteMask >> C) & 1u)
-        Texel[C] = applyLogicOp(Logic, SrcBytes[C], Texel[C]);
+    unsigned NumComponents = Texel.size() / *CompWidth;
+    for (unsigned C = 0; C != NumComponents; ++C) {
+      if (!((Blend.WriteMask >> C) & 1u))
+        continue;
+      for (unsigned B = 0; B != *CompWidth; ++B) {
+        unsigned Idx = C * *CompWidth + B;
+        Texel[Idx] = applyLogicOp(Logic, SrcBytes[Idx], Texel[Idx]);
+      }
+    }
     return Error::success();
   }
 
   std::array<double, 4> Final = Src;
-  if (Blend.BlendEnable) {
+  if (Blend.BlendEnable && !LogicOpEnable) {
     // (Roadmap H8p) Blending is only defined for a floating-point/
     // normalized color format per spec (an integer format's own
     // `VkFormatFeatureFlags` never advertises `COLOR_ATTACHMENT_BLEND_
