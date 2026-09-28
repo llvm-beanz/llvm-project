@@ -61,25 +61,21 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(unknown, new roadmap item, ready to pick up)** `L228(k)`: the
-   single-layer-MSAA `(0,0,0,0)` `vkCmdClearAttachments` bug split out
-   this session. Start with `dEQP-VK.api.image_clearing.core.
-   clear_color_attachment.single_layer.*sample_count_4*` at the
-   smallest failing case; check `clearAttachmentRects`'s own sample
-   loop against how the CTS resolves/reads back the MSAA image, or
-   whether FeMe's MSAA barrier/layout-transition handling around the
-   clear has a gap.
-2. **(unknown, new roadmap item, ready to pick up)** `L251`: the
-   `clear_color_image.1d.linear.multiple_layers.a2b10g10r10_sint_
-   pack32` `DeviceLost`. Start with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` first (per `L249`/`L250`'s own
-   now-twice-confirmed lesson) before assuming a runtime-level trace
-   is needed.
-3. **(a few hours, unchanged for many sessions)** Pick one of
-   `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
-   `L228(b)` (compressed-format blits).
-4. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
-   broader-than-tessellation CTS sample further -- `shader_render` and
-   most of `pipeline`'s other sub-suites remain unsampled at any real
-   scale. This session's own broader `image_clearing` sweep (5158
-   cases, aborted by `L251`) is a start but far from complete.
+1. **(a few hours, unchanged for many sessions)** Pick one of `L227(d)` (3
+   `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`
+   (compressed-format blits).
+2. **(unknown, ready to pick up cold)** `L228(k)`: the single-layer-MSAA
+   `(0,0,0,0)` `vkCmdClearAttachments` bug split out a couple sessions ago,
+   still untouched. Start with `dEQP-VK.api.image_clearing.core.
+   clear_color_attachment.single_layer.*sample_count_4*` at the smallest
+   failing case.
+3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the broader-
+   than-tessellation CTS sample further -- `shader_render` and most of
+   `pipeline`'s other sub-suites remain unsampled at any real scale. This
+   session's own 45636-case `image_clearing` sweep is a start but a
+   different area.
+4. **(worth a few minutes, low priority, carried over many sessions)**
+   Audit other FeMe creation-time and draw-time checks for the "over-
+   strict enforcement" pattern (`L241`, `L250`) -- still no dedicated
+   systematic search done, keeps getting bumped every session (unlike the
+   name-only-fixture-format audit, which this session finally closed).
