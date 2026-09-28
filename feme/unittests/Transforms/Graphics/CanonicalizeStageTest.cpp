@@ -3525,6 +3525,108 @@ TEST(CanonicalizeStageTest, NoBarrierPatchConstantOnlyEntryIsSplitWhole) {
             SignatureSystemValue::TessFactorEdge);
 }
 
+/// (Roadmap L243) A patch-frequency-only-looking entry (only a
+/// `TessLevelOuter` write, the same shape
+/// `NoBarrierPatchConstantOnlyEntryIsSplitWhole` above exercises) that also
+/// performs a storage-buffer atomic RMW must *not* take that test's
+/// trivial-empty-stub fast path: `dEQP-VK.pipeline.monolithic.no_position
+/// .*.ssbo_writes.*`'s own real-world shape, an `atomicAdd` alongside a
+/// patch-frequency-only stage-IO write, needs its atomic dispatched once
+/// per real control-point invocation, which the trivial stub (executed
+/// per-invocation but with an empty body) cannot provide -- confirmed by a
+/// prior regression (roadmap L243, `got 1 but expected 3`) where this
+/// entry's *whole* body, atomic included, was moved into the once-per-
+/// patch clone alone.
+TEST(CanonicalizeStageTest,
+     NoBarrierPatchConstantOnlyEntryWithSideEffectKeepsControlPointClone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    @counter = external global i32
+    define void @main() #0 {
+      store float 5.000000e+00, ptr addrspace(8) @gl_TessLevelOuter
+      %old = atomicrmw add ptr @counter, i32 1 monotonic
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // Unlike the no-side-effect case, the control-point phase is *not* left
+  // trivial: it must still run its atomic once per real invocation.
+  bool ControlPointHasAtomic =
+      any_of(instructions(*ControlPoint),
+             [](Instruction &I) { return isa<AtomicRMWInst>(I); });
+  EXPECT_TRUE(ControlPointHasAtomic);
+
+  // The patch-constant phase keeps the `TessLevelOuter` write but not the
+  // atomic -- `F`'s own copy already covers it with the correct,
+  // once-per-invocation multiplicity.
+  bool PatchConstantHasAtomic =
+      any_of(instructions(*PatchConstant),
+             [](Instruction &I) { return isa<AtomicRMWInst>(I); });
+  EXPECT_FALSE(PatchConstantHasAtomic);
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+}
+
+/// (Roadmap L243) A genuine mixed-frequency entry (both a patch-frequency
+/// `TessLevelOuter` write and a vertex-frequency `gl_Position` write, the
+/// same shape `NoBarrierMixedFrequencyEntryForwardsSameInvocationPatchRead
+/// Back` above exercises) that also performs a storage-buffer atomic RMW
+/// must keep that atomic in the control-point phase only: before this fix,
+/// this shape's own existing frequency-based store pruning left the atomic
+/// untouched in *both* clones, so it ran twice per invocation-multiplicity
+/// unit (once correctly in the control-point phase, once spuriously in the
+/// once-per-patch clone -- roadmap L243's `got 4 but expected 3`).
+TEST(CanonicalizeStageTest,
+     NoBarrierMixedFrequencyEntryWithSideEffectPrunesPatchConstantClone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    @counter = external global i32
+    define void @main() #0 {
+      store float 5.000000e+00, ptr addrspace(8) @gl_TessLevelOuter
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_out_pos
+      %old = atomicrmw add ptr @counter, i32 1 monotonic
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 11}
+    !3 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  bool ControlPointHasAtomic =
+      any_of(instructions(*ControlPoint),
+             [](Instruction &I) { return isa<AtomicRMWInst>(I); });
+  EXPECT_TRUE(ControlPointHasAtomic);
+
+  bool PatchConstantHasAtomic =
+      any_of(instructions(*PatchConstant),
+             [](Instruction &I) { return isa<AtomicRMWInst>(I); });
+  EXPECT_FALSE(PatchConstantHasAtomic);
+}
+
 /// (Roadmap H4a) `BuiltIn InvocationId` (SPIR-V code 8, `gl_InvocationID`)
 /// maps to `SignatureSystemValue::InvocationID`, and `BuiltIn
 /// PatchVertices` (code 14, `gl_PatchVerticesIn`) to `SignatureSystemValue

@@ -20,6 +20,7 @@
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
@@ -2949,6 +2950,99 @@ void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
   pruneDeadStageInputLoads(Fn);
 }
 
+/// (Roadmap L243) Whether \p F contains a side effect that is neither a
+/// classified stage-IO store (already handled correctly by
+/// `pruneStageIOStoresByFrequency`'s frequency-based deduplication, since
+/// a patch-frequency store is legitimately safe to recompute redundantly
+/// once per invocation or once per patch) nor an ordinary write to a
+/// Function-local scratch variable (an `alloca`, never itself a side
+/// effect visible outside this invocation). This covers an atomic
+/// RMW/compare-exchange on a bound resource (the shape
+/// `dEQP-VK.pipeline.monolithic.no_position.*.ssbo_writes.*`'s own
+/// `atomicAdd(ssbo.counters[...], 1)` takes -- an ordinary
+/// `llvm::AtomicRMWInst`, since `AtomicRMWPattern`
+/// (`SPIRVToLLVMPatterns.cpp`) lowers `OpAtomicIAdd` directly to one, not
+/// through any `feme.stage.*` call), a store through a resource-heap-
+/// derived pointer (an `imageStore`-shaped write, were one to appear
+/// here), or any other call that is neither a recognized `feme.stage.*`
+/// op (`isStageOpCall`) nor provably read-only. GLSL executes a
+/// barrierless tessellation-control entry's *whole* body once per real
+/// control-point invocation, so any such side effect must run exactly
+/// once per real invocation -- unlike a stage-IO store, it cannot safely
+/// be left to run an extra time (or zero times) in whichever of the two
+/// phases `splitBarrierlessTessellationControlEntry` produces does not
+/// happen to match its own invocation multiplicity.
+bool hasNonStageIOSideEffect(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (Instruction &I : instructions(F)) {
+    if (isa<AtomicRMWInst>(&I) || isa<AtomicCmpXchgInst>(&I))
+      return true;
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (getStageIOGlobal(SI->getPointerOperand(), DL, ShaderStage::Hull))
+        continue;
+      if (isa<AllocaInst>(getUnderlyingObject(SI->getPointerOperand())))
+        continue;
+      return true;
+    }
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      if (isStageOpCall(*CI) || CI->onlyReadsMemory())
+        continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+/// (Roadmap L243) Erases every side effect `hasNonStageIOSideEffect` would
+/// find from \p Fn -- used only on the patch-constant-phase clone
+/// `splitBarrierlessTessellationControlEntry` produces, since that side
+/// effect's own single, correct once-per-real-invocation execution
+/// already happens in the control-point-phase clone (this same barrier-
+/// less split's other half, or \p Fn's own pre-clone original in the
+/// once-purely-patch-constant shape): before this fix, a genuine mix left
+/// this side effect in *both* clones (executing it an extra, spurious
+/// time once per patch on top of its correct once-per-invocation
+/// executions -- `got 4 but expected 3` for a 3-output-control-point
+/// patch), while the once-purely-patch-constant shape moved the entry's
+/// *whole* body, side effect included, into this clone alone while
+/// replacing the original with an empty stub (running it only once per
+/// patch instead of once per invocation at all -- `got 1 but expected
+/// 3`). Any value the erased instruction produced is replaced with
+/// `poison` first: unlike an erased stage-IO store's own value (still
+/// computed exactly the same way by the surviving clone, so
+/// `pruneStageIOStoresByFrequency` can forward it to a same-invocation
+/// read-back), a genuine side effect's own result (e.g. an atomic RMW's
+/// prior value) is not something this clone can or should reconstruct.
+void pruneNonStageIOSideEffects(Function &Fn) {
+  const DataLayout &DL = Fn.getParent()->getDataLayout();
+  SmallVector<Instruction *, 8> ToErase;
+  for (Instruction &I : instructions(Fn)) {
+    if (isa<AtomicRMWInst>(&I) || isa<AtomicCmpXchgInst>(&I)) {
+      ToErase.push_back(&I);
+      continue;
+    }
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (getStageIOGlobal(SI->getPointerOperand(), DL, ShaderStage::Hull))
+        continue;
+      if (isa<AllocaInst>(getUnderlyingObject(SI->getPointerOperand())))
+        continue;
+      ToErase.push_back(SI);
+      continue;
+    }
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      if (isStageOpCall(*CI) || CI->onlyReadsMemory())
+        continue;
+      ToErase.push_back(CI);
+    }
+  }
+  for (Instruction *I : ToErase) {
+    if (!I->use_empty())
+      I->replaceAllUsesWith(PoisonValue::get(I->getType()));
+    I->eraseFromParent();
+  }
+  pruneDeadStageInputLoads(Fn);
+}
+
 /// (Roadmap H4f/H9c) `splitTessellationControlEntry`'s own barrier-based
 /// split has nothing to split when \p F has no group-sync barrier at all,
 /// but `compileAndValidateStages` (GraphicsPipeline.cpp) unconditionally
@@ -2956,15 +3050,20 @@ void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
 /// `classifyTessControlOutputs` distinguishes three shapes: (1) no
 /// patch-frequency write at all -- nothing to split out, \p F is left
 /// untouched (`HullStageWithNoBarrierIsNotSplit`); (2) every stage-IO
-/// write is patch-frequency (`isPatchConstantOnlyEntry`) -- \p F is
-/// semantically already "the patch-constant phase", so its whole body is
-/// moved into a new `<entry>.patchconstant` clone, and \p F itself is
-/// replaced with a trivial, empty control-point phase, having no
-/// per-vertex output of its own to produce (roadmap H4f,
+/// write is patch-frequency and \p F has no other side effect
+/// (`isPatchConstantOnlyEntry`, narrowed by roadmap L243's own
+/// `hasNonStageIOSideEffect` check) -- \p F is semantically already "the
+/// patch-constant phase", so its whole body is moved into a new
+/// `<entry>.patchconstant` clone, and \p F itself is replaced with a
+/// trivial, empty control-point phase, having no per-vertex output of
+/// its own to produce (roadmap H4f,
 /// `NoBarrierPatchConstantOnlyEntryIsSplitWhole`); (3) a genuine mix of
-/// patch- and vertex-frequency writes -- only legal (as shapes (1)/(2)
-/// above already are too) when no invocation's own patch- or
-/// vertex-frequency write ever depends on another's, the only
+/// patch- and vertex-frequency writes, *or* (roadmap L243) shape (2)'s
+/// own patch-frequency-only write shape plus some other, non-stage-IO
+/// side effect that still needs its own once-per-invocation dispatch (a
+/// storage-buffer atomic, say) -- only legal (as shapes (1)/(2) above
+/// already are too) when no invocation's own patch- or vertex-frequency
+/// write, or other side effect, ever depends on another's, the only
 /// synchronization a group-sync barrier could otherwise provide, which by
 /// definition cannot happen here since there is none. Unlike shape (2),
 /// simply cloning \p F's whole body into the patch-constant phase and
@@ -2974,20 +3073,28 @@ void pruneStageIOStoresByFrequency(Function &Fn, bool KeepPatch) {
 /// address-space-8 write as a captured cross-barrier value's read-back
 /// (`Direction::Input`, never a store), so an unpruned vertex-frequency
 /// store surviving into the clone is misclassified -- exactly roadmap
-/// H9c's own defect. Instead, both clones are pruned by
-/// `pruneStageIOStoresByFrequency` to keep only the stage-IO writes that
-/// belong to their own phase: \p F keeps only its vertex-frequency
-/// writes (becoming the real control-point phase, still executed once
-/// per control point), and the new clone keeps only the patch-frequency
-/// ones (becoming the real patch-constant phase, conceptually executed
-/// once per patch -- redundantly recomputing whatever inputs it needs
-/// from scratch, same as \p F does for its own, since neither can read
-/// the other's own values without a barrier anyway).
+/// H9c's own defect. Instead, both clones are pruned: \p F keeps only its
+/// vertex-frequency writes (becoming the real control-point phase, still
+/// executed once per control point, so any non-stage-IO side effect of
+/// its own is deliberately left alone), and the new clone keeps only the
+/// patch-frequency stage-IO writes (becoming the real patch-constant
+/// phase, conceptually executed once per patch -- redundantly
+/// recomputing whatever inputs it needs from scratch, same as \p F does
+/// for its own, since neither can read the other's own values without a
+/// barrier anyway) with every non-stage-IO side effect of its own
+/// (roadmap L243's `pruneNonStageIOSideEffects`) removed, since \p F's
+/// own copy already covers it with the correct multiplicity.
 bool splitBarrierlessTessellationControlEntry(Function &F,
                                               Function *&PatchConstantPhase) {
   TessControlOutputFrequencies Freq = classifyTessControlOutputs(F);
   if (!Freq.SawPatchOutput)
     return true;
+
+  // (Roadmap L243) Checked on `F` before any cloning/pruning below --
+  // `hasNonStageIOSideEffect` only needs to see `F`'s own original body,
+  // and `PatchConstantPhase` is still an unpruned, identical copy of it
+  // at this point either way.
+  bool HasSideEffect = hasNonStageIOSideEffect(F);
 
   PatchConstantPhase =
       Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
@@ -3003,11 +3110,17 @@ bool splitBarrierlessTessellationControlEntry(Function &F,
   CloneFunctionInto(PatchConstantPhase, &F, VMap,
                     CloneFunctionChangeType::LocalChangesOnly, Returns);
 
-  if (Freq.SawNonPatchOutput) {
-    // A genuine mix (shape (3) above): prune each clone down to its own
-    // phase's own writes.
+  if (Freq.SawNonPatchOutput || HasSideEffect) {
+    // A genuine mix (shape (3) above), or shape (2)'s own patch-frequency-
+    // only write shape with some other side effect that still needs its
+    // own once-per-invocation dispatch (roadmap L243): prune each clone
+    // down to its own phase's own writes, and additionally strip every
+    // non-stage-IO side effect out of the patch-constant clone -- `F`'s
+    // own copy of it already runs with the correct, once-per-invocation
+    // multiplicity.
     pruneStageIOStoresByFrequency(F, /*KeepPatch=*/false);
     pruneStageIOStoresByFrequency(*PatchConstantPhase, /*KeepPatch=*/true);
+    pruneNonStageIOSideEffects(*PatchConstantPhase);
     return true;
   }
 
