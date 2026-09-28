@@ -3078,3 +3078,90 @@ No design-document deviation -- `FeMeVulkanDesign.md`/`FeMeCPUDesign.md`
 do not document `ImageShape`'s internal enumerators at this level of
 detail (that lives only in `SPIRVResourceLowering.cpp`'s own code
 comments), so there was nothing stale to update there.
+
+## Roadmap L239: 3D-image-as-2D-render-target support (`VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`)
+
+Two sequential bugs blocked `dEQP-VK.pipeline.monolithic.
+render_to_image.core.3d.*`, both root-caused via direct code reading
+plus the real CTS source (`vktPipelineRenderToImageTests.cpp`), not a
+repro-run-first approach:
+
+1. `isValidImageShape`'s (`Image.cpp`) flags gate only ever accepted
+   `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT`, rejecting
+   `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` outright at `vkCreateImage`
+   time (`VK_ERROR_INITIALIZATION_FAILED`, matching this group's
+   documented symptom). Widened the mask to accept both flags, and
+   added a new check that `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`
+   only applies to a `VK_IMAGE_TYPE_3D` image (matching Vulkan spec
+   scope for the flag).
+
+2. Once (1) is fixed, `vkCreateImageView`'s `baseArrayLayer`/
+   `layerCount` resolution and bounds check still compared against
+   `Img->arrayLayers()` (always exactly 1 for a 3D image per
+   `VUID-VkImageCreateInfo-imageType-00961`), rejecting any view whose
+   `baseArrayLayer > 0` -- exactly the pattern this CTS group uses (one
+   `VK_IMAGE_VIEW_TYPE_2D` view per depth slice, `baseArrayLayer` =
+   slice index, confirmed via `vktPipelineRenderToImageTests.cpp`'s own
+   `getImageViewSliceType`/`makeColorSubresourceRange` call). Added a
+   new `effectiveViewLayerCount(const Image &, VkImageViewType)` free
+   function (`Image.h`/`Image.cpp`) that returns `Img.depth()` instead
+   of `Img.arrayLayers()` specifically for a non-`_3D`-typed view of a
+   `VK_IMAGE_TYPE_3D` image, and a new `ImageView::resolvedLayerCount()`
+   convenience method built on it. Wired into `vkCreateImageView`'s own
+   resolution/bounds check, and into `RenderPass.cpp`'s
+   `resolveAttachmentView`/`isCompatibleAttachmentView` (which shared
+   the identical `Img.resolvedLayerCount()`-based bug on the
+   render-target-attachment path).
+
+`Image`'s own texel addressing (`Image::texelPointer`,
+`computeSubresourceLayouts`) already treats a 3D image's depth slices
+identically to array layers via a shared `SlicePitch`-multiplied
+stride, so no new addressing math was needed anywhere -- only
+correcting which count (`ArrayLayers` vs. `Depth`) resolves/bounds a
+view's subresource range when the view's underlying image is 3D.
+`CommandBuffer.cpp`/`ImageOps.cpp`'s own `Image::resolvedLayerCount()`
+call sites are unaffected by design: those APIs address 3D depth via
+`imageOffset.z`/`imageExtent.depth` directly, not `baseArrayLayer`/
+`layerCount`, so they were already correct as-is and were deliberately
+left untouched (a new, `ImageView`-scoped function was added instead of
+modifying the pervasively-used `Image::resolvedLayerCount` itself, to
+avoid any risk of regressing those already-correct call sites).
+
+Real CTS: `dEQP-VK.pipeline.monolithic.render_to_image.core.3d.
+mipmap.*` now **40/40 Pass** (up from all-failing
+`VK_ERROR_INITIALIZATION_FAILED` per the roadmap's own prior
+investigation). The full `render_to_image.*` group (1325 cases): 1245
+Pass, 0 Fail, 80 Not Supported -- no regressions. A broader
+`dEQP-VK.image.*` sanity sweep (143086 cases): 6881 pre-existing
+failures, all in categories unrelated to this fix's narrow 3D-image-
+view scope (`extended_usage_bit_compatibility`, `format_reinterpret`,
+`atomic_operations`) -- none newly introduced by this change.
+
+3 new unit tests in `ImageTest.cpp`
+(`Rejects2DArrayCompatibleFlagOnNon3DImage`,
+`Accepts2DArrayCompatibleFlagOn3DImage`,
+`CreateImageView2DSliceOf3DImageAddressesDepthSlices` -- the last
+covering both `VK_REMAINING_ARRAY_LAYERS` resolution against
+`Img.depth()` and an out-of-range-slice rejection) and 1 new unit test
+in `RenderPassTest.cpp`
+(`ResolveAttachmentViewAcceptsSliceOf3DImage`, confirming a non-zero
+depth slice resolves to the correct byte offset/size as a render-target
+attachment).
+
+`ninja check-feme`: 3374/3435 Passed, 61 Unsupported, 0 Failed (+5 net
+new unit tests over `L232`'s 3370).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a core-1.0 image/image-view shape-validation and
+render-target-attachment-addressing correctness fix, not a new feature
+or extension (`VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` is a core-1.0
+`VkImageCreateFlagBits` enumerant, already implicitly "supported" by
+any conformant `vkCreateImage`; there is no dedicated extension or
+`VkPhysicalDeviceFeatures` bit gating it).
+
+No design-document deviation -- `FeMeVulkanDesign.md`/
+`FeMeGraphicsDesign.md` do not describe `isValidImageShape`'s flags
+mask or `resolveAttachmentView`'s layer-count resolution at a level of
+detail this fix invalidated (both documents describe the general
+image/render-target model, not per-flag validation specifics), so
+there was nothing stale to update there.

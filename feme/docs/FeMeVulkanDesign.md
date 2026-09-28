@@ -2459,6 +2459,29 @@ nothing to do with the geometry stage -- any stage's draw into a 1D/cube
 render target hit it. See "Roadmap H5e-c: measured impact" in
 VulkanCTSReport.md for the full breakdown.
 
+**Status (roadmap L239): a `VK_IMAGE_TYPE_3D` image may be created with
+`VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` and rendered to one depth slice
+at a time through a `VK_IMAGE_VIEW_TYPE_2D`/`_2D_ARRAY` view.** Per spec,
+this flag only applies to a 3D image, and repurposes such a view's
+`baseArrayLayer`/`layerCount` subresource-range fields to address depth
+slices instead of real array layers (a 3D image always has exactly one
+real array layer, `VUID-VkImageCreateInfo-imageType-00961`). A new
+`effectiveViewLayerCount(const Image &, VkImageViewType)` free function
+(`Image.h`/`Image.cpp`) returns `Img.depth()` instead of
+`Img.arrayLayers()` for exactly this case (a non-`_3D`-typed view of a
+`VK_IMAGE_TYPE_3D` image); `vkCreateImageView`'s own `baseArrayLayer`/
+`layerCount` resolution and bounds check, and `resolveAttachmentView`/
+`isCompatibleAttachmentView` (via the new `ImageView::
+resolvedLayerCount()` method built on it), both now resolve/bound against
+this count instead of the image's real (always-1) array-layer count.
+`Image`'s own texel addressing already treats depth slices and array
+layers identically via a shared `SlicePitch`-multiplied stride
+(`Image::texelPointer`'s own comment), so no addressing math changed --
+only which count a view's subresource range resolves against. Found via
+`dEQP-VK.pipeline.monolithic.render_to_image.core.3d.*`, which renders
+into every depth slice of such an image in turn. See "Roadmap L239" in
+VulkanCTSReport.md for the full breakdown.
+
 ### Graphics pipeline state
 
 `vkCreateGraphicsPipelines` compiles each stage through the same flow the
