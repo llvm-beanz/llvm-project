@@ -133,9 +133,10 @@ struct ImageSubresourceLayout {
 /// The info-only counterpart to `Image::subresourceLayout`: \p CreateInfo's
 /// `(MipLevel, ArrayLayer)` subresource layout for \p Format, without
 /// constructing an `Image` -- see `ImageSubresourceLayout`'s own comment.
-ImageSubresourceLayout computeImageCreateInfoSubresourceLayout(
-    const VkImageCreateInfo &CreateInfo, feme::cpu::ResourceFormat Format,
-    uint32_t MipLevel, uint32_t ArrayLayer);
+ImageSubresourceLayout
+computeImageCreateInfoSubresourceLayout(const VkImageCreateInfo &CreateInfo,
+                                        feme::cpu::ResourceFormat Format,
+                                        uint32_t MipLevel, uint32_t ArrayLayer);
 
 /// A `VkImage`. Not dispatchable. Owns the packed subresource layout table
 /// (`feme::cpu::FemeImageSubresourceLayout`, one entry per mip level) its
@@ -287,6 +288,25 @@ private:
   std::vector<VkImageLayout> Layouts;
 };
 
+/// The number of real, addressable "layers" a `VkImageViewType`
+/// \p ViewType view of \p Img resolves `VK_REMAINING_ARRAY_LAYERS`
+/// against, and validates `baseArrayLayer`/`layerCount` bounds against
+/// (roadmap L239). For every dimension but one, this is simply
+/// `Img.arrayLayers()`, same as always. The one exception: a
+/// `VK_IMAGE_VIEW_TYPE_2D`/`_2D_ARRAY` view of a `VK_IMAGE_TYPE_3D` image
+/// (created with `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` -- see
+/// `isValidImageShape`'s own comment) repurposes the view's
+/// `baseArrayLayer`/`layerCount` subresource-range fields to address depth
+/// slices instead, per the Vulkan spec -- a 3D image always has exactly
+/// one real array layer (`VUID-VkImageCreateInfo-imageType-00961`), so
+/// `Img.arrayLayers()` itself would wrongly reject or truncate every
+/// slice past the first. A `VK_IMAGE_VIEW_TYPE_3D` view of the same image
+/// is unaffected (its own `baseArrayLayer`/`layerCount` still address the
+/// (always exactly one) real array layer, not a depth slice -- Vulkan
+/// disallows a `VK_IMAGE_VIEW_TYPE_3D` view from ever being partial across
+/// depth at all).
+uint32_t effectiveViewLayerCount(const Image &Img, VkImageViewType ViewType);
+
 /// A `VkImageView`: an `Image` plus a view type, format, and subresource
 /// range. Not dispatchable.
 class ImageView {
@@ -313,6 +333,16 @@ public:
   /// The `feme::cpu::ImageDimension` this view's `VkImageViewType`
   /// corresponds to.
   feme::cpu::ImageDimension dimension() const;
+
+  /// This view's own `Range.layerCount`, resolved against
+  /// `effectiveViewLayerCount` -- see that function's own comment for why
+  /// this is not always simply `Img->resolvedLayerCount(...)` (roadmap
+  /// L239).
+  uint32_t resolvedLayerCount() const {
+    return Range.layerCount == VK_REMAINING_ARRAY_LAYERS
+               ? effectiveViewLayerCount(*Img, ViewType) - Range.baseArrayLayer
+               : Range.layerCount;
+  }
 
 private:
   Image *Img;

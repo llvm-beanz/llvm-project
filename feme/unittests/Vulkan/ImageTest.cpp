@@ -1126,7 +1126,7 @@ TEST_F(ImageTest, CopyBufferToImageDepthAspectPreservesStencil) {
   Region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
   Region.imageExtent = {2, 2, 1};
   vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
   ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
 
   ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
@@ -1575,7 +1575,8 @@ TEST_F(ImageTest, GetImageSubresourceLayoutMatchesMipChain) {
 
 // Roadmap E29: VK_KHR_maintenance5's pNext-extensible counterpart, for the
 // same live image, must agree with the plain query above.
-TEST_F(ImageTest, GetImageSubresourceLayout2KHRMatchesGetImageSubresourceLayout) {
+TEST_F(ImageTest,
+       GetImageSubresourceLayout2KHRMatchesGetImageSubresourceLayout) {
   VkDeviceMemory Memory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
 
@@ -1647,8 +1648,8 @@ TEST_F(ImageTest, GetImageSubresourceLayoutCoversWholeDepthRangeFor3DImage) {
   vkGetImageSubresourceLayout(Device, Img, &Sub, &Layout);
   EXPECT_EQ(Layout.rowPitch, 16u);
   EXPECT_EQ(Layout.depthPitch, 64u); // One 4x4 slice, 64 bytes.
-  EXPECT_EQ(Layout.arrayPitch, 0u); // Not an array image.
-  EXPECT_EQ(Layout.size, 128u);    // Both depth slices.
+  EXPECT_EQ(Layout.arrayPitch, 0u);  // Not an array image.
+  EXPECT_EQ(Layout.size, 128u);      // Both depth slices.
 
   vkDestroyImage(Device, Img, nullptr);
 }
@@ -1675,6 +1676,112 @@ TEST_F(ImageTest, GetImageSubresourceLayout2KHRFillsHostMemcpySize) {
   EXPECT_EQ(HostMemcpySize.size, Layout2.subresourceLayout.size);
   EXPECT_EQ(HostMemcpySize.size, 64u); // 4x4 texels * 4 bytes (RGBA8).
 
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// Roadmap L239: `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` (per spec) only
+// applies to a `VK_IMAGE_TYPE_3D` image -- rejected on a 2D image.
+TEST_F(ImageTest, Rejects2DArrayCompatibleFlagOnNon3DImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+// Roadmap L239: a `VK_IMAGE_TYPE_3D` image created with
+// `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` is accepted (the CTS's
+// `render_to_image.core.3d.*` render-target images all set this flag so a
+// `VK_IMAGE_VIEW_TYPE_2D` view can address one depth slice as a render
+// target -- see `effectiveViewLayerCount`'s own comment).
+TEST_F(ImageTest, Accepts2DArrayCompatibleFlagOn3DImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_3D;
+  ImageInfo.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 4};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  vkDestroyImage(Device, Img, nullptr);
+}
+
+// Roadmap L239: a `VK_IMAGE_VIEW_TYPE_2D` view of a
+// `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` 3D image addresses depth slices
+// through `baseArrayLayer`/`layerCount`, not real array layers -- a view of
+// the second-to-last slice (`baseArrayLayer = Depth - 2`, `layerCount = 1`)
+// must be accepted even though the image's own `arrayLayers()` is always 1
+// for a 3D image (this was rejected by `vkCreateImageView`'s bounds check
+// before this fix, since it resolved/bounded against `Img->arrayLayers()`
+// instead of the view's own effective depth-slice count).
+TEST_F(ImageTest, CreateImageView2DSliceOf3DImageAddressesDepthSlices) {
+  // `extent.depth` (4) intentionally differs from `arrayLayers` (always 1
+  // for a 3D image): the depth slices, not the array layers, are what a
+  // `VK_IMAGE_VIEW_TYPE_2D` view's `baseArrayLayer`/`layerCount` address.
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_3D;
+  ImageInfo.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 4};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                               /*baseArrayLayer=*/2, /*layerCount=*/1};
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<ImageView>(View)->resolvedLayerCount(), 1u);
+
+  // `VK_REMAINING_ARRAY_LAYERS` resolves against the depth-slice count (4),
+  // not `Img->arrayLayers()` (1).
+  VkImageViewCreateInfo RemainingViewInfo = ViewInfo;
+  RemainingViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+                                        VK_REMAINING_ARRAY_LAYERS};
+  VkImageView RemainingView = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateImageView(Device, &RemainingViewInfo, nullptr, &RemainingView),
+      VK_SUCCESS);
+  EXPECT_EQ(fromHandle<ImageView>(RemainingView)->resolvedLayerCount(), 4u);
+
+  // A `baseArrayLayer` past the last depth slice must still be rejected.
+  VkImageViewCreateInfo OutOfRangeViewInfo = ViewInfo;
+  OutOfRangeViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1,
+                                         /*baseArrayLayer=*/4,
+                                         /*layerCount=*/1};
+  VkImageView OutOfRangeView = VK_NULL_HANDLE;
+  EXPECT_NE(
+      vkCreateImageView(Device, &OutOfRangeViewInfo, nullptr, &OutOfRangeView),
+      VK_SUCCESS);
+
+  vkDestroyImageView(Device, RemainingView, nullptr);
+  vkDestroyImageView(Device, View, nullptr);
   vkDestroyImage(Device, Img, nullptr);
   vkFreeMemory(Device, Memory, nullptr);
 }

@@ -280,9 +280,8 @@ TEST_F(RenderPassTest, CompilesIntegerColorAttachments) {
 // `Framebuffer` combination can now be created against one, mirroring
 // `CompilesRemainingPackedSixteenBitColorAttachments` above.
 TEST_F(RenderPassTest, CompilesNonIntegerColorAttachmentBreadth) {
-  for (VkFormat Format :
-       {VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R16_SFLOAT,
-        VK_FORMAT_R16G16_SFLOAT}) {
+  for (VkFormat Format : {VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM,
+                          VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16G16_SFLOAT}) {
     VkRenderPass Pass = VK_NULL_HANDLE;
     EXPECT_EQ(createSimpleRenderPass(Format, Pass), VK_SUCCESS) << Format;
     vkDestroyRenderPass(Device, Pass, nullptr);
@@ -579,9 +578,9 @@ TEST_F(RenderPassTest, FramebufferAcceptsLayeredAttachmentWithEnoughLayers) {
 /// shape), but `resolveAttachmentView` used to reject any view dimension
 /// other than 2D/2D-array outright, surfacing as an unattributed
 /// `vkQueueSubmit` `VK_ERROR_INITIALIZATION_FAILED` once a geometry stage
-/// actually wrote a `gl_Layer` output into one. Confirms `resolveAttachmentView`
-/// now accepts a 1D-array view and addresses it exactly like a 2D-array one
-/// (one array-layer stride apart, one row tall).
+/// actually wrote a `gl_Layer` output into one. Confirms
+/// `resolveAttachmentView` now accepts a 1D-array view and addresses it exactly
+/// like a 2D-array one (one array-layer stride apart, one row tall).
 TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsOneDArrayView) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_1D;
@@ -599,8 +598,7 @@ TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsOneDArrayView) {
   VkMemoryAllocateInfo AllocInfo{};
   AllocInfo.allocationSize = Reqs.size;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
 
   VkImageViewCreateInfo ViewInfo{};
@@ -615,7 +613,8 @@ TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsOneDArrayView) {
 
   llvm::Expected<feme::graphics::AttachmentView> Resolved =
       resolveAttachmentView(fromHandle<ImageView>(View));
-  ASSERT_TRUE(static_cast<bool>(Resolved)) << llvm::toString(Resolved.takeError());
+  ASSERT_TRUE(static_cast<bool>(Resolved))
+      << llvm::toString(Resolved.takeError());
   EXPECT_EQ(Resolved->Width, 4u);
   EXPECT_EQ(Resolved->Height, 1u);
   EXPECT_EQ(Resolved->ArrayLayers, 3u);
@@ -650,8 +649,7 @@ TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsCubeArrayView) {
   VkMemoryAllocateInfo AllocInfo{};
   AllocInfo.allocationSize = Reqs.size;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
 
   VkImageViewCreateInfo ViewInfo{};
@@ -666,7 +664,8 @@ TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsCubeArrayView) {
 
   llvm::Expected<feme::graphics::AttachmentView> Resolved =
       resolveAttachmentView(fromHandle<ImageView>(View));
-  ASSERT_TRUE(static_cast<bool>(Resolved)) << llvm::toString(Resolved.takeError());
+  ASSERT_TRUE(static_cast<bool>(Resolved))
+      << llvm::toString(Resolved.takeError());
   EXPECT_EQ(Resolved->Width, 4u);
   EXPECT_EQ(Resolved->Height, 4u);
   EXPECT_EQ(Resolved->ArrayLayers, 12u);
@@ -697,8 +696,7 @@ TEST_F(RenderPassTest, ResolveAttachmentViewRejects3DView) {
   VkMemoryAllocateInfo AllocInfo{};
   AllocInfo.allocationSize = Reqs.size;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
 
   VkImageViewCreateInfo ViewInfo{};
@@ -715,6 +713,62 @@ TEST_F(RenderPassTest, ResolveAttachmentViewRejects3DView) {
       resolveAttachmentView(fromHandle<ImageView>(View));
   EXPECT_FALSE(static_cast<bool>(Resolved));
   llvm::consumeError(Resolved.takeError());
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// Roadmap L239: `dEQP-VK.pipeline.monolithic.render_to_image.core.3d.*`
+/// renders to one depth slice of a `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`
+/// 3D image at a time via a `VK_IMAGE_VIEW_TYPE_2D` view whose
+/// `baseArrayLayer` addresses that slice -- `resolveAttachmentView` used to
+/// bound this against `Img.arrayLayers()` (always 1 for a 3D image),
+/// rejecting any slice past the first. Confirms a non-zero-slice view is
+/// now accepted and addresses the correct slice's own byte range.
+TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsSliceOf3DImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_3D;
+  ImageInfo.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 4};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.baseArrayLayer = 2; // Third of four depth slices.
+  ViewInfo.subresourceRange.layerCount = 1;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  llvm::Expected<feme::graphics::AttachmentView> Resolved =
+      resolveAttachmentView(fromHandle<ImageView>(View));
+  ASSERT_TRUE(static_cast<bool>(Resolved))
+      << llvm::toString(Resolved.takeError());
+  EXPECT_EQ(Resolved->Width, 4u);
+  EXPECT_EQ(Resolved->Height, 4u);
+  EXPECT_EQ(Resolved->ArrayLayers, 1u);
+  // Slice 2 of 4, 4x4 RGBA8 (64 bytes/slice): offset 128, one slice long.
+  EXPECT_EQ(Resolved->Data.data(),
+            static_cast<uint8_t *>(fromHandle<Image>(Img)->data()) + 128);
+  EXPECT_EQ(Resolved->Data.size(), 64u);
 
   vkDestroyImageView(Device, View, nullptr);
   vkDestroyImage(Device, Img, nullptr);
@@ -901,7 +955,8 @@ TEST_F(RenderPassTest, GetRenderingAreaGranularityReportsNonZeroGranularity) {
 // full sequence (image, view, layout transition, both granularity queries
 // bracketing a dynamic render pass) for a packed 10-bit-per-component
 // format, the first case in that family this driver actually supports.
-TEST_F(RenderPassTest, DynamicRenderPassGranularitySequenceForPacked10BitFormat) {
+TEST_F(RenderPassTest,
+       DynamicRenderPassGranularitySequenceForPacked10BitFormat) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
   ImageInfo.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
@@ -919,8 +974,7 @@ TEST_F(RenderPassTest, DynamicRenderPassGranularitySequenceForPacked10BitFormat)
   AllocInfo.allocationSize = Reqs.size;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
 
   VkImageViewCreateInfo ViewInfo{};
@@ -933,14 +987,12 @@ TEST_F(RenderPassTest, DynamicRenderPassGranularitySequenceForPacked10BitFormat)
 
   VkCommandPoolCreateInfo PoolInfo{};
   VkCommandPool Pool = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool),
-            VK_SUCCESS);
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
   VkCommandBufferAllocateInfo CmdAllocInfo{};
   CmdAllocInfo.commandPool = Pool;
   CmdAllocInfo.commandBufferCount = 1;
   VkCommandBuffer Cmd = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &Cmd),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &Cmd), VK_SUCCESS);
 
   VkCommandBufferBeginInfo BeginInfo{};
   ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);

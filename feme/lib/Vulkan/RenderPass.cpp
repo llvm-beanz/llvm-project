@@ -202,9 +202,16 @@ resolveAttachmentView(ImageView *View) {
   // starting at `baseArrayLayer`, stored consecutively (layer-major, see
   // `AttachmentView::ArrayLayers`'s own comment) at this mip level's
   // `SlicePitch` stride -- exactly the addressing `getAttachmentLayerByte
-  // Offset` (LayeredRendering.h) assumes.
-  uint32_t LayerCount =
-      Img.resolvedLayerCount(Range.baseArrayLayer, Range.layerCount);
+  // Offset` (LayeredRendering.h) assumes. (Roadmap L239) `View->
+  // resolvedLayerCount()` -- not `Img.resolvedLayerCount(...)` -- since a
+  // `Texture2D`/`Texture2DArray`-dimensioned view of a `VK_IMAGE_TYPE_3D`
+  // image (`VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`) addresses depth
+  // slices through this same `baseArrayLayer`/`layerCount` range, not real
+  // array layers -- see `effectiveViewLayerCount`'s own comment. The
+  // `SlicePitch`-multiplied addressing below already treats a depth slice
+  // and an array layer identically (`Image::texelPointer`'s own doc), so
+  // no further change is needed once this count itself is correct.
+  uint32_t LayerCount = View->resolvedLayerCount();
   if (LayerCount == 0)
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "a render target view has zero array "
@@ -229,9 +236,10 @@ bool isCompatibleAttachmentView(const AttachmentDescription &Attachment,
                                 uint32_t Height, uint32_t Layers) {
   if (!View || !View->image())
     return false;
-  const VkImageSubresourceRange &Range = View->range();
-  uint32_t ViewLayers = View->image()->resolvedLayerCount(
-      Range.baseArrayLayer, Range.layerCount);
+  // Roadmap L239: `View->resolvedLayerCount()` -- see
+  // `resolveAttachmentView`'s own identical comment above for why this is
+  // not `View->image()->resolvedLayerCount(...)`.
+  uint32_t ViewLayers = View->resolvedLayerCount();
   return View->format() == Attachment.Format &&
          View->image()->sampleCount() == Attachment.SampleCount &&
          View->image()->width() >= Width && View->image()->height() >= Height &&
@@ -535,9 +543,8 @@ vkGetRenderAreaGranularity(VkDevice, VkRenderPass, VkExtent2D *pGranularity) {
   pGranularity->height = 1;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkGetRenderingAreaGranularityKHR(VkDevice, const VkRenderingAreaInfo *,
-                                VkExtent2D *pGranularity) {
+VKAPI_ATTR void VKAPI_CALL vkGetRenderingAreaGranularityKHR(
+    VkDevice, const VkRenderingAreaInfo *, VkExtent2D *pGranularity) {
   // Same answer as vkGetRenderAreaGranularity above, for the same reason: a
   // software rasterizer has no tile-alignment requirement, dynamic-rendering
   // or otherwise.

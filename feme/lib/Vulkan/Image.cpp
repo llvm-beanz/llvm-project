@@ -96,8 +96,8 @@ computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
 /// Image.h for the `Size`/`ArrayPitch`/`DepthPitch` rules this implements.
 ImageSubresourceLayout
 computeSubresourceLayout(VkImageType Type, uint32_t Depth,
-                         const FemeImageSubresourceLayout &L,
-                         uint32_t MipLevel, uint32_t ArrayLayer) {
+                         const FemeImageSubresourceLayout &L, uint32_t MipLevel,
+                         uint32_t ArrayLayer) {
   uint32_t LevelDepth =
       Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> MipLevel) : 1;
   VkDeviceSize Size =
@@ -151,7 +151,7 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
   // rather than an out-of-bounds pointer, so callers can discard the write
   // or read back a defined (zero) value instead (see Image.h's comment).
   if (!isInBounds(MipLevel, ArrayLayer, X, Y, Z, /*UnitWidth=*/1,
-                 /*UnitHeight=*/1))
+                  /*UnitHeight=*/1))
     return nullptr;
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
@@ -171,8 +171,8 @@ void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
          "texelPointer for any other one");
   // See texelPointer's comment (roadmap E16): the same out-of-bounds ->
   // null rule applies, in block-grid rather than texel units.
-  if (!isInBounds(MipLevel, ArrayLayer, BlockX, BlockY, Z,
-                 blockWidth(Format), blockHeight(Format)))
+  if (!isInBounds(MipLevel, ArrayLayer, BlockX, BlockY, Z, blockWidth(Format),
+                  blockHeight(Format)))
     return nullptr;
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
@@ -192,7 +192,6 @@ ImageSubresourceLayout Image::subresourceLayout(uint32_t MipLevel,
   return computeSubresourceLayout(Type, Depth, MipLayouts[MipLevel], MipLevel,
                                   ArrayLayer);
 }
-
 
 void Image::setLayout(uint32_t BaseMip, uint32_t MipCount, uint32_t BaseLayer,
                       uint32_t LayerCount, VkImageLayout NewLayout) {
@@ -226,6 +225,13 @@ ImageDimension ImageView::dimension() const {
   default:
     llvm_unreachable("unhandled VkImageViewType");
   }
+}
+
+uint32_t feme::vulkan::effectiveViewLayerCount(const Image &Img,
+                                               VkImageViewType ViewType) {
+  return Img.type() == VK_IMAGE_TYPE_3D && ViewType != VK_IMAGE_VIEW_TYPE_3D
+             ? Img.depth()
+             : Img.arrayLayers();
 }
 
 namespace {
@@ -369,13 +375,13 @@ namespace feme::vulkan {
 /// fields) rather than the correct, tighter mask. A combined
 /// depth+stencil format (`D24_UNORM_S8_UINT`) narrows by *both* limits,
 /// matching the CTS reference algorithm's own `hasDepthComp`/
-/// `hasStencilComp` (not mutually exclusive). `sampledImageIntegerSampleCounts`/
-/// `framebufferIntegerColorSampleCounts` are deliberately not distinguished
-/// from their non-integer counterparts here: this device's own
-/// `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` set every one of those four
-/// fields to the identical `1|2|4|8` mask (no format-specific hardware
-/// limitation exists), so branching on `isIntegerColorAttachmentFormat`
-/// here could not change any reported result.
+/// `hasStencilComp` (not mutually exclusive).
+/// `sampledImageIntegerSampleCounts`/ `framebufferIntegerColorSampleCounts` are
+/// deliberately not distinguished from their non-integer counterparts here:
+/// this device's own `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` set every one
+/// of those four fields to the identical `1|2|4|8` mask (no format-specific
+/// hardware limitation exists), so branching on
+/// `isIntegerColorAttachmentFormat` here could not change any reported result.
 VkSampleCountFlags
 supportedSampleCounts(const PhysicalDeviceInfo &Info, VkImageUsageFlags Usage,
                       std::optional<feme::cpu::ResourceFormat> Format) {
@@ -435,8 +441,19 @@ bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
                        const PhysicalDeviceInfo &Info,
                        std::optional<feme::cpu::ResourceFormat> Format) {
   // No sparse binding (see "V5: Images and sampling"'s scope).
+  // Roadmap L239: `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` is now accepted
+  // alongside the pre-existing `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT` --
+  // Vulkan scopes it to a `VK_IMAGE_TYPE_3D` image only (a
+  // `VK_IMAGE_VIEW_TYPE_2D`/`_2D_ARRAY` view backed by one addresses depth
+  // slices as if they were array layers, see `effectiveViewLayerCount`'s
+  // own comment), so it is rejected below for any other image type rather
+  // than here.
   if (CreateInfo.flags &
-      ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
+      ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT |
+                          VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT))
+    return false;
+  if ((CreateInfo.flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT) &&
+      CreateInfo.imageType != VK_IMAGE_TYPE_3D)
     return false;
   if (!(CreateInfo.samples &
         supportedSampleCounts(Info, CreateInfo.usage, Format)))
@@ -549,9 +566,8 @@ ImageSubresourceLayout computeImageCreateInfoSubresourceLayout(
           static_cast<uint32_t>(CreateInfo.samples), blockWidth(Format),
           blockHeight(Format), bytesPerBlock(Format))
           .first;
-  return computeSubresourceLayout(CreateInfo.imageType,
-                                  CreateInfo.extent.depth, Layouts[MipLevel],
-                                  MipLevel, ArrayLayer);
+  return computeSubresourceLayout(CreateInfo.imageType, CreateInfo.extent.depth,
+                                  Layouts[MipLevel], MipLevel, ArrayLayer);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
@@ -672,8 +688,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
     VkDevice, const VkDeviceImageSubresourceInfo *pInfo,
     VkSubresourceLayout2 *pLayout) {
   const VkImageCreateInfo &CreateInfo = *pInfo->pCreateInfo;
-  const VkImageSubresource &Subresource =
-      pInfo->pSubresource->imageSubresource;
+  const VkImageSubresource &Subresource = pInfo->pSubresource->imageSubresource;
   std::optional<feme::cpu::ResourceFormat> Format =
       mapVkFormat(CreateInfo.format);
   if (!Format) {
@@ -728,17 +743,23 @@ vkCreateImageView(VkDevice, const VkImageViewCreateInfo *pCreateInfo,
   uint32_t LevelCount = Range.levelCount == VK_REMAINING_MIP_LEVELS
                             ? Img->mipLevels() - Range.baseMipLevel
                             : Range.levelCount;
+  // Roadmap L239: `effectiveViewLayerCount` resolves against this view's
+  // own `pCreateInfo->viewType` -- a `VK_IMAGE_VIEW_TYPE_2D`/`_2D_ARRAY`
+  // view of a `VK_IMAGE_TYPE_3D` image addresses depth slices here, not
+  // real array layers (which a 3D image always has exactly one of) -- see
+  // that function's own comment.
+  uint32_t ViewLayers = effectiveViewLayerCount(*Img, pCreateInfo->viewType);
   uint32_t LayerCount = Range.layerCount == VK_REMAINING_ARRAY_LAYERS
-                            ? Img->arrayLayers() - Range.baseArrayLayer
+                            ? ViewLayers - Range.baseArrayLayer
                             : Range.layerCount;
   if (Range.baseMipLevel + LevelCount > Img->mipLevels() ||
-      Range.baseArrayLayer + LayerCount > Img->arrayLayers())
+      Range.baseArrayLayer + LayerCount > ViewLayers)
     return VK_ERROR_INITIALIZATION_FAILED;
 
   Allocator Alloc(pAllocator);
-  ImageView *Obj = Alloc.create<ImageView>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Img, pCreateInfo->viewType, *Format,
-      Range, pCreateInfo->components);
+  ImageView *Obj = Alloc.create<ImageView>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
+                                           Img, pCreateInfo->viewType, *Format,
+                                           Range, pCreateInfo->components);
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pView = toHandle<VkImageView>(Obj);
