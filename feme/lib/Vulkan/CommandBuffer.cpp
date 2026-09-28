@@ -213,6 +213,16 @@ struct MaterializedBoundResources {
   /// field's own comment.
   std::vector<std::vector<feme::cpu::FemeImageSubresourceLayout>>
       ArrayLayerAdjustedMipLayoutStorage;
+
+  /// (roadmap L228(j)) Owned copies of each inline-uniform-block binding's
+  /// byte blob, taken from `DescriptorSet::inlineUniformBlockData`'s own
+  /// snapshot-under-lock return. Needed because that accessor now returns
+  /// a `std::vector<uint8_t>` by value (a lock-protected copy, not a live
+  /// `ArrayRef` into the `DescriptorSet`'s own storage -- see Descriptor.h's
+  /// class comment): a `Kind::Raw` descriptor's `Dst.Data` must point at
+  /// something that outlives `buildBoundResources` itself, so the copy is
+  /// kept here rather than in that function's own local variable.
+  std::vector<std::vector<uint8_t>> InlineUniformBlockStorage;
 };
 
 /// Whether \p Format is one of the 14 `_SRGB` ASTC LDR footprints rather
@@ -834,7 +844,7 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
     for (const DescriptorSetLayoutBinding &BindingDecl : Layout.bindings()) {
       if (isImageDescriptorType(BindingDecl.Type) ||
           isSamplerDescriptorType(BindingDecl.Type)) {
-        llvm::ArrayRef<DescriptorImageBinding> ImageArray =
+        std::vector<DescriptorImageBinding> ImageArray =
             State.Set->imageBindingArray(BindingDecl.Binding);
         if (!ImageArray.empty())
           buildImageAndSamplerBinding(SetIdx, BindingDecl, ImageArray, Result);
@@ -852,14 +862,19 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
       // does, just sourced from the blob directly instead of a bound
       // buffer's own memory.
       if (isInlineUniformBlockDescriptorType(BindingDecl.Type)) {
-        llvm::ArrayRef<uint8_t> Blob =
+        std::vector<uint8_t> Blob =
             State.Set->inlineUniformBlockData(BindingDecl.Binding);
         if (Blob.empty())
           continue;
+        // Keep the snapshot copy alive in `Result` itself (see
+        // `InlineUniformBlockStorage`'s own comment) -- `Dst.Data` below
+        // points into it, not into this function's own local `Blob`.
+        Result.InlineUniformBlockStorage.push_back(std::move(Blob));
+        std::vector<uint8_t> &Owned = Result.InlineUniformBlockStorage.back();
         std::vector<feme::cpu::FemeDescriptor> Descriptors(1);
         feme::cpu::FemeDescriptor &Dst = Descriptors[0];
-        Dst.Data = const_cast<uint8_t *>(Blob.data());
-        Dst.SizeInBytes = Blob.size();
+        Dst.Data = Owned.data();
+        Dst.SizeInBytes = Owned.size();
         Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Raw);
         Dst.Flags = 0; // Always read-only -- see isReadOnlyDescriptorType.
         Result.Storage.push_back(std::move(Descriptors));
@@ -867,7 +882,7 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
             SetIdx, BindingDecl.Binding, Result.Storage.back()});
         continue;
       }
-      llvm::ArrayRef<DescriptorBufferBinding> Array =
+      std::vector<DescriptorBufferBinding> Array =
           State.Set->bindingArray(BindingDecl.Binding);
       bool Dynamic = isDynamicDescriptorType(BindingDecl.Type);
       if (Array.empty())
