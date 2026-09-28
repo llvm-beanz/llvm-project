@@ -3513,3 +3513,96 @@ regressions across the rest of the group.
 - `ninja check-hlsl-feme-vk`: 483/32/207, unchanged.
 - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
   change needed -- core-1.0 depth-test/depth-write correctness fix.
+
+## Roadmap L249: `depth_only.subpasses_postpass` genuine `DeviceLost` -- linked-pipeline subpass not inherited from its library
+
+`dEQP-VK.pipeline.fast_linked_library.depth.depth_only.
+subpasses_postpass` reproduces a genuine `DeviceLost`
+(`vk.waitForFences(...): VK_ERROR_DEVICE_LOST`) in isolation, aborting
+the harness run rather than a normal per-case `Fail`. Since a
+`DeviceLost` surfaces at `vkWaitForFences` time rather than at any
+`vkCreate*`/`vkCmd*` call, qpa-level diffing (this ICD's usual
+diagnostic) does not apply -- a `gdb`-attached run was tried first
+(confirmed the process runs to completion and exits normally within
+seconds, so this is **not** an infinite hang/deadlock), then
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (the actual key that unlocked
+this): it fired immediately with `vkQueueSubmit: the bound pipeline
+has 1 color attachment(s) but the render target has 0`.
+
+That message comes from `resolveDrawAttachments`
+(`CommandBuffer.cpp`), run from inside `executeCommandBuffer` on the
+queue's own worker task (`Sync.cpp`'s `makeSubmissionTask`) -- any
+`Error` there latches `Device::markLost` rather than surfacing back
+through the `vkQueueSubmit` call that already returned, which is why
+the failure only becomes visible at the next `vkWaitForFences` as a
+synchronous (not timed-out) `VK_ERROR_DEVICE_LOST`.
+
+The failing case's render pass (`vktPipelineDepthTests.cpp`'s own
+`SUBPASSES`+`postpass` shape) is a single render pass with two
+subpasses: subpass 0 has both a color and a depth attachment
+reference; subpass 1 -- the one every library part of the
+`depthOnlyPipeline` actually names -- has **only** a depth reference,
+no color attachment at all. `getRenderTargets` (`GraphicsPipeline.cpp`)
+correctly derives a pipeline's declared color-attachment count purely
+from its bound `VkRenderPass`/`subpass` pair's own subpass description
+-- not from `VkPipelineColorBlendStateCreateInfo::attachmentCount` --
+so the bug had to be in *which* subpass the linked pipeline believed
+it was bound to.
+
+Root-caused to `synthesizeLinkedGraphicsPipelineCreateInfo`
+(`GraphicsPipeline.cpp`), which assembles one complete
+`VkGraphicsPipelineCreateInfo` for a `VK_EXT_graphics_pipeline_library`
+pure-link call (a call that supplies no fixed-function state of its
+own, only a chained `VkPipelineLibraryCreateInfoKHR::pLibraries`).
+`Result.renderPass` already had a fallback loop that inherits a
+library's own captured `RenderPass` whenever the link call's own
+`CreateInfo.renderPass` is null -- but `Result.subpass` had no such
+fallback, staying at `CreateInfo.subpass`'s value alone, which a pure
+link call's zero-initialized `VkGraphicsPipelineCreateInfo` always
+leaves at `0`. The linked `depthOnlyPipeline` therefore ended up with
+the *correct* `renderPass` (inherited from a library) paired with the
+*wrong* `subpass` (`0`, subpass 1's actual value silently dropped),
+so `getRenderTargets` resolved subpass 0's one color attachment as
+this pipeline's own declared shape.
+
+Fixed by moving `Result.subpass = Lib->state().Subpass;` into the
+same `if (!Result.renderPass)` branch that inherits `Result.renderPass`
+-- pairing the two exactly the way the file's own
+`foldLinkedLibraryState` (used for the "a library is itself built by
+linking other libraries" case) already pairs `RenderPass`/`Subpass`
+together a few hundred lines up, an idiom this fallback loop should
+have matched from the start.
+
+New unit test `LinksSubpassFromLibraryNotJustRenderPass`
+(`GraphicsPipelineTest.cpp`) reproduces the exact shape at the
+`synthesizeLinkedGraphicsPipelineCreateInfo` level: a two-subpass
+render pass (subpass 0 color+depth, subpass 1 depth-only), all four
+`VK_EXT_graphics_pipeline_library` parts built against subpass 1, then
+linked via a pure-link call supplying neither `renderPass` nor
+`subpass` of its own. Asserts the linked pipeline's
+`colorAttachmentCount() == 0`. Confirmed it fails
+(`VK_ERROR_INITIALIZATION_FAILED`, `resolveDrawAttachments`'s own
+1-vs-0 mismatch surfacing even earlier, at `getRenderTargets`'s
+`maxColorAttachments` check this synthetic repro's tiny device limits
+happen to trip) against the pre-fix code via `git stash`, passes
+after.
+
+**Verified against the real CTS**: `dEQP-VK.pipeline.fast_linked_
+library.depth.depth_only.*` (12 cases, the case's entire group) now
+**12/12 Pass**. A 10-minute-bounded sample of the much larger
+`dEQP-VK.pipeline.fast_linked_library.*` group (7600 cases sampled
+before the time budget cut it off) shows only pre-existing, unrelated
+`blend.dual_source.*` failures (22 cases, a distinct dual-source-blend
+precision issue outside this fix's scope) -- no regressions from this
+change.
+
+**Build/test verification**:
+- `FeMeVulkanTests` (`--gtest_filter=*LinksSubpassFromLibrary*`): 1/1
+  pass (confirmed failing pre-fix via `git stash`).
+- Full `FeMeVulkanTests`: 759/759 pass.
+- `ninja check-feme`: 3388 Passed (+1 net new unit test), 61
+  Unsupported, 0 Failed.
+- `ninja check-hlsl-feme-vk`: 483/32/207, unchanged.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  change needed -- `VK_EXT_graphics_pipeline_library` linked-pipeline-
+  subpass-resolution correctness fix, not a new feature/extension.
