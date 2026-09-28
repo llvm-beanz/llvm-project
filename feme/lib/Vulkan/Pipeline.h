@@ -257,6 +257,17 @@ llvm::Expected<feme::Module> importShaderModule(feme::Context &Ctx,
 /// compilation paths.
 void patchUnboundedResourceRanges(llvm::Module &M, const PipelineLayout &Layout);
 
+/// (roadmap L134(g)/L241) `VK_KHR_maintenance5`'s `VkPipelineCreateFlags2
+/// CreateInfo` (chained onto a pipeline create-info struct's own `pNext`)
+/// widened-flags override -- see its definition in Pipeline.cpp for the
+/// full doc comment. Shared by `vkCreateComputePipelines` (this file's own
+/// `Pipeline.cpp`) and `vkCreateGraphicsPipelines`
+/// (`GraphicsPipeline.cpp`'s own `getEffectivePipelineCreateFlags`
+/// overload, taking a `VkGraphicsPipelineCreateInfo` directly, forwards
+/// here).
+VkPipelineCreateFlags2 resolvePipelineCreateFlags2(VkPipelineCreateFlags Flags,
+                                                   const void *pNext);
+
 /// Builds the `GroupSize.h` override list from \p Info
 /// (`VkSpecializationInfo`), validating every map entry's `(offset, size)`
 /// against the supplied data blob before reading it. Shared by the compute

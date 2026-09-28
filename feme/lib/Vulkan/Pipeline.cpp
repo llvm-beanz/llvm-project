@@ -84,6 +84,37 @@ void clearHostAgnosticMetadata(llvm::Module &M) {
 
 namespace feme::vulkan {
 
+/// (roadmap L134(g)/L241) `VK_KHR_maintenance5`'s `VkPipelineCreateFlags2
+/// CreateInfo` (chained onto a pipeline create-info struct's own `pNext`)
+/// supersedes that same struct's own legacy 32-bit `flags` field whenever
+/// present -- the whole point of the newer, 64-bit `VkPipelineCreateFlags2`
+/// type this extension introduces is to let an application populate the
+/// wider field once `flags` itself runs out of room, with `flags` then
+/// free to hold any legacy-compatible/placeholder value (real CTS
+/// coverage, `dEQP-VK.draw.*.basic_draw.misc.maintenance5`, deliberately
+/// sets `flags` to `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` -- a value that
+/// would otherwise wrongly divert a graphics pipeline into
+/// `vkCreateGraphicsPipelines`'s own pipeline-library branch -- while
+/// chaining the *real* `VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR` via
+/// this struct). Takes \p Flags/\p pNext directly (rather than a specific
+/// `VkGraphicsPipelineCreateInfo`/`VkComputePipelineCreateInfo`) so both
+/// `vkCreateComputePipelines` (this file) and `vkCreateGraphicsPipelines`
+/// (`GraphicsPipeline.cpp`, whose own `getEffectivePipelineCreateFlags`
+/// overload, taking a `VkGraphicsPipelineCreateInfo`, forwards here) share
+/// one implementation.
+/// Returns \p Flags, widened, when no such struct is chained.
+VkPipelineCreateFlags2 resolvePipelineCreateFlags2(VkPipelineCreateFlags Flags,
+                                                   const void *pNext) {
+  for (const auto *Next = static_cast<const VkBaseInStructure *>(pNext); Next;
+       Next = Next->pNext) {
+    if (Next->sType != VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
+      continue;
+    return reinterpret_cast<const VkPipelineCreateFlags2CreateInfo *>(Next)
+        ->flags;
+  }
+  return static_cast<VkPipelineCreateFlags2>(Flags);
+}
+
 /// Builds the `GroupSize.h` override list from \p Info
 /// (`VkSpecializationInfo`), validating every map entry's `(offset, size)`
 /// against the supplied data blob before reading it (see "Error Handling
@@ -723,6 +754,34 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
     const VkComputePipelineCreateInfo &CreateInfo = pCreateInfos[I];
+    // (roadmap L241) `VK_KHR_maintenance5`'s flags2 override, resolved once
+    // per pipeline and used everywhere this iteration would otherwise read
+    // `CreateInfo.flags` directly -- see `resolvePipelineCreateFlags2`'s
+    // own comment.
+    VkPipelineCreateFlags2 EffectiveFlags =
+        resolvePipelineCreateFlags2(CreateInfo.flags, CreateInfo.pNext);
+    // (roadmap L241) `VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT`: this
+    // pipeline's own creation asked that, should it fail, the whole batch
+    // stop immediately rather than continuing on to attempt the remaining
+    // create infos -- a VUID is a validation-layer-only concern, so this
+    // ICD is free to keep going regardless, but the spec requires every
+    // `pPipelines` entry from the failure point onward (this one included)
+    // to be left/set to `VK_NULL_HANDLE` when a caller opts into this
+    // behavior, which plain `continue`, as every other failure path below
+    // already does, would violate for every index after this one (never
+    // written at all, not just left at whatever `pPipelines[I]` already
+    // held). `FailBatch` is called from every one of this iteration's own
+    // failure paths in place of a bare `continue`.
+    auto FailBatch = [&](VkResult FailureResult) -> bool {
+      if (Result == VK_SUCCESS || FailureResult != VK_PIPELINE_COMPILE_REQUIRED)
+        Result = FailureResult;
+      if (EffectiveFlags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT) {
+        for (uint32_t J = I; J != createInfoCount; ++J)
+          pPipelines[J] = VK_NULL_HANDLE;
+        return true;
+      }
+      return false;
+    };
 
     std::optional<PipelineCacheKey> Key;
     if (CreateInfo.layout && CreateInfo.stage.module) {
@@ -762,17 +821,18 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
       // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
       // BIT`: this pipeline missed the cache (or none was given), and the
       // caller asked to be told rather than pay for a real compile here.
-      if (CreateInfo.flags &
-          VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
-        if (Result == VK_SUCCESS)
-          Result = VK_PIPELINE_COMPILE_REQUIRED;
+      if (EffectiveFlags &
+          VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
+        if (FailBatch(VK_PIPELINE_COMPILE_REQUIRED))
+          return Result;
         continue;
       }
       Expected<std::shared_ptr<CachedPipelineArtifact>> Compiled =
           compileComputePipeline(CreateInfo, DeviceInfo);
       if (!Compiled) {
         logCreationFailure(Compiled.takeError(), "vkCreateComputePipelines");
-        Result = VK_ERROR_INITIALIZATION_FAILED;
+        if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))
+          return Result;
         continue;
       }
       Artifact = std::move(*Compiled);
@@ -791,7 +851,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
         CreateInfo.pNext, CreateInfo.stage.pNext);
     if (!Robustness) {
       consumeError(Robustness.takeError());
-      Result = VK_ERROR_INITIALIZATION_FAILED;
+      if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))
+        return Result;
       continue;
     }
 
@@ -803,7 +864,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact, CreateInfo.flags,
         *Robustness);
     if (!Obj) {
-      Result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      if (FailBatch(VK_ERROR_OUT_OF_HOST_MEMORY))
+        return Result;
       continue;
     }
     pPipelines[I] = toHandle<VkPipeline>(Obj);

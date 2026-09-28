@@ -3218,6 +3218,67 @@ TEST_F(GraphicsPipelineTest, FailOnCompileRequiredSucceedsOnceCachePopulated) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L241) `VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT`: a batch
+/// of pipeline create-infos where an earlier entry fails (here, a cache
+/// miss under `FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, with no cache
+/// supplied at all) must leave every entry from that point onward --
+/// including this one -- `VK_NULL_HANDLE`, and the call must return the
+/// first failure's own result without attempting the remaining entries at
+/// all (a compiling third entry, which would otherwise succeed, is used to
+/// confirm this: were it attempted, `Handles[2]` would be non-null).
+TEST_F(GraphicsPipelineTest, BatchEarlyReturnOnFailureNullsRemainingHandles) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Infos[3] = {
+      makeCreateInfo(Vertex, Fragment), makeCreateInfo(Vertex, Fragment),
+      makeCreateInfo(Vertex, Fragment)};
+  Infos[0].flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT |
+                   VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT;
+
+  VkPipeline Handles[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkResult Result = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 3, Infos,
+                                              nullptr, Handles);
+  EXPECT_EQ(Result, VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Handles[0], VK_NULL_HANDLE);
+  EXPECT_EQ(Handles[1], VK_NULL_HANDLE);
+  EXPECT_EQ(Handles[2], VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap L241) The same early-return semantics apply when the flags are
+/// supplied through `VK_KHR_maintenance5`'s chained
+/// `VkPipelineCreateFlags2CreateInfoKHR` rather than the legacy 32-bit
+/// `flags` field (which this test zeroes, mirroring how the CTS's own
+/// `_maintenance5` batch variants populate their create-infos).
+TEST_F(GraphicsPipelineTest,
+      BatchEarlyReturnOnFailureHonorsFlags2Maintenance5) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Infos[2] = {makeCreateInfo(Vertex, Fragment),
+                                          makeCreateInfo(Vertex, Fragment)};
+  VkPipelineCreateFlags2CreateInfoKHR Flags2Info{};
+  Flags2Info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO;
+  Flags2Info.flags =
+      VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT |
+      VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT;
+  Infos[0].flags = 0;
+  Infos[0].pNext = &Flags2Info;
+
+  VkPipeline Handles[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  VkResult Result = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 2, Infos,
+                                              nullptr, Handles);
+  EXPECT_EQ(Result, VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Handles[0], VK_NULL_HANDLE);
+  EXPECT_EQ(Handles[1], VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap F10) `VkPipelineRobustnessCreateInfo` is resolved independently
 /// per stage: the vertex stage's own chained struct is honored for the
 /// vertex stage, the pipeline-level one is the fragment stage's fallback

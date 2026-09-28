@@ -2525,29 +2525,13 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
 
 /// (Roadmap L134(g)) `VK_KHR_maintenance5`'s `VkPipelineCreateFlags2CreateInfo`
 /// (chained onto `VkGraphicsPipelineCreateInfo::pNext`) supersedes that same
-/// struct's own legacy 32-bit `flags` field whenever present -- the whole
-/// point of the newer, 64-bit `VkPipelineCreateFlags2` type this extension
-/// introduces is to let an application populate the wider field once
-/// `flags` itself runs out of room, with `flags` then free to hold any
-/// legacy-compatible/placeholder value (real CTS coverage,
-/// `dEQP-VK.draw.*.basic_draw.misc.maintenance5`, deliberately sets `flags`
-/// to `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` -- a value that would otherwise
-/// wrongly divert this pipeline into `vkCreateGraphicsPipelines`'s own
-/// pipeline-library branch -- while chaining the *real*
-/// `VK_PIPELINE_CREATE_2_ALLOW_DERIVATIVES_BIT_KHR` via this struct).
-/// Returns \p CreateInfo's own `flags`, widened, when no such struct is
-/// chained.
+/// struct's own legacy 32-bit `flags` field whenever present -- see
+/// `feme::vulkan::resolvePipelineCreateFlags2` (Pipeline.h/.cpp, roadmap
+/// L241) this forwards to, shared with `vkCreateComputePipelines`'s own
+/// use of it.
 VkPipelineCreateFlags2
 getEffectivePipelineCreateFlags(const VkGraphicsPipelineCreateInfo &CreateInfo) {
-  for (const auto *Next =
-           static_cast<const VkBaseInStructure *>(CreateInfo.pNext);
-       Next; Next = Next->pNext) {
-    if (Next->sType != VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
-      continue;
-    return reinterpret_cast<const VkPipelineCreateFlags2CreateInfo *>(Next)
-        ->flags;
-  }
-  return static_cast<VkPipelineCreateFlags2>(CreateInfo.flags);
+  return resolvePipelineCreateFlags2(CreateInfo.flags, CreateInfo.pNext);
 }
 
 Expected<std::optional<GraphicsPipelineState>>
@@ -3534,6 +3518,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     // `getEffectivePipelineCreateFlags`'s own comment.
     VkPipelineCreateFlags2 EffectiveFlags =
         getEffectivePipelineCreateFlags(pCreateInfos[I]);
+    // (roadmap L241) `VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT`: see
+    // the identical lambda's own comment in `vkCreateComputePipelines`
+    // (Pipeline.cpp) -- shared behavior, not sharable code, since each
+    // function's own failure sites differ.
+    auto FailBatch = [&](VkResult FailureResult) -> bool {
+      if (Result == VK_SUCCESS || FailureResult != VK_PIPELINE_COMPILE_REQUIRED)
+        Result = FailureResult;
+      if (EffectiveFlags & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT) {
+        for (uint32_t J = I; J != createInfoCount; ++J)
+          pPipelines[J] = VK_NULL_HANDLE;
+        return true;
+      }
+      return false;
+    };
     // (roadmap H29b) `VK_PIPELINE_CREATE_LIBRARY_BIT_KHR` marks this call
     // as creating a `VK_EXT_graphics_pipeline_library` pipeline library
     // rather than a complete, executable pipeline: capture whichever
@@ -3569,7 +3567,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
           captureGraphicsPipelineLibraryState(pCreateInfos[I], LibraryFlags),
           static_cast<VkPipelineCreateFlags>(EffectiveFlags));
       if (!Obj) {
-        Result = VK_ERROR_OUT_OF_HOST_MEMORY;
+        if (FailBatch(VK_ERROR_OUT_OF_HOST_MEMORY))
+          return Result;
         continue;
       }
       pPipelines[I] = toHandle<VkPipeline>(static_cast<Pipeline *>(Obj));
@@ -3613,7 +3612,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
       if (!Synthesized) {
         logCreationFailure(Synthesized.takeError(),
                            "vkCreateGraphicsPipelines");
-        Result = VK_ERROR_INITIALIZATION_FAILED;
+        if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))
+          return Result;
         continue;
       }
       LinkedInfo = *Synthesized;
@@ -3627,7 +3627,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                                 FragmentViewIndexIsDeviceIndex);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
-      Result = VK_ERROR_INITIALIZATION_FAILED;
+      if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))
+        return Result;
       continue;
     }
     if (!*Compiled) {
@@ -3636,8 +3637,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
       // see `compileGraphicsPipeline`'s own comment. Not an error a more
       // severe one (a real compile failure, or out-of-memory below) should
       // ever be masked by.
-      if (Result == VK_SUCCESS)
-        Result = VK_PIPELINE_COMPILE_REQUIRED;
+      if (FailBatch(VK_PIPELINE_COMPILE_REQUIRED))
+        return Result;
       continue;
     }
     // (roadmap E19) `VK_EXT_pipeline_creation_feedback`: one feedback slot
@@ -3648,7 +3649,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled),
         static_cast<VkPipelineCreateFlags>(EffectiveFlags));
     if (!Obj) {
-      Result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      if (FailBatch(VK_ERROR_OUT_OF_HOST_MEMORY))
+        return Result;
       continue;
     }
     pPipelines[I] = toHandle<VkPipeline>(static_cast<Pipeline *>(Obj));

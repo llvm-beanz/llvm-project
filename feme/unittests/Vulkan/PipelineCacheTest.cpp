@@ -643,6 +643,59 @@ TEST_F(PipelineCacheTest, RealFailureOutranksPipelineCompileRequired) {
   EXPECT_EQ(Pipelines[1], VK_NULL_HANDLE);
 }
 
+/// (roadmap L241) `VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT`: a batch
+/// where an earlier entry fails (here, a cache miss under
+/// `FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, with no cache supplied at all)
+/// must leave every entry from that point onward -- including this one --
+/// `VK_NULL_HANDLE`, and return the first failure's own result without
+/// attempting the remaining entries (a third, otherwise-compilable entry
+/// is included to confirm this: were it attempted, `Pipelines[2]` would be
+/// non-null).
+TEST_F(PipelineCacheTest, BatchEarlyReturnOnFailureNullsRemainingHandles) {
+  VkComputePipelineCreateInfo NoCompileInfo = makeCreateInfo();
+  NoCompileInfo.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT |
+                        VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT;
+  VkComputePipelineCreateInfo Normal1 = makeCreateInfo();
+  VkComputePipelineCreateInfo Normal2 = makeCreateInfo();
+
+  VkComputePipelineCreateInfo CreateInfos[] = {NoCompileInfo, Normal1, Normal2};
+  VkPipeline Pipelines[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 3, CreateInfos,
+                                     nullptr, Pipelines),
+            VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Pipelines[0], VK_NULL_HANDLE);
+  EXPECT_EQ(Pipelines[1], VK_NULL_HANDLE);
+  EXPECT_EQ(Pipelines[2], VK_NULL_HANDLE);
+}
+
+/// (roadmap L241) The same early-return semantics apply when the flags are
+/// supplied through `VK_KHR_maintenance5`'s chained
+/// `VkPipelineCreateFlags2CreateInfoKHR` rather than the legacy 32-bit
+/// `flags` field (which this test zeroes, mirroring how the CTS's own
+/// `_maintenance5` batch variant populates its create-infos). This also
+/// exercises `vkCreateComputePipelines`'s own, previously-missing,
+/// consultation of the flags2 override at all (prior to this fix, compute
+/// pipelines only ever read `CreateInfo.flags` directly, always `0` here).
+TEST_F(PipelineCacheTest, BatchEarlyReturnOnFailureHonorsFlags2Maintenance5) {
+  VkPipelineCreateFlags2CreateInfoKHR Flags2Info{};
+  Flags2Info.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO;
+  Flags2Info.flags =
+      VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT |
+      VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT;
+  VkComputePipelineCreateInfo NoCompileInfo = makeCreateInfo();
+  NoCompileInfo.flags = 0;
+  NoCompileInfo.pNext = &Flags2Info;
+  VkComputePipelineCreateInfo Normal = makeCreateInfo();
+
+  VkComputePipelineCreateInfo CreateInfos[] = {NoCompileInfo, Normal};
+  VkPipeline Pipelines[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 2, CreateInfos,
+                                     nullptr, Pipelines),
+            VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Pipelines[0], VK_NULL_HANDLE);
+  EXPECT_EQ(Pipelines[1], VK_NULL_HANDLE);
+}
+
 /// Roadmap L94(g): `VK_EXT_graphics_pipeline_library`'s independent-sets
 /// feature allows an unused descriptor set's layout to be `VK_NULL_HANDLE`
 /// (`VkPipelineLayoutCreateInfo::pSetLayouts[I]`), which `fromHandle` maps
