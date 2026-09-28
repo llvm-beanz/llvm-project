@@ -2170,3 +2170,58 @@ surface, not just the one directly-fixed test.
 needed -- neither fix touches feature-bit exposure; both are
 correctness fixes to existing, already-advertised compute-shader
 lowering paths.
+
+## Roadmap L227(c): storage-image `GetDimensions` widening + `WaveActiveMax` XFAIL -- `check-hlsl-feme-vk` baseline updated
+
+`GetDimensions.test`/`Array.GetDimensions.test`: fixed a shape-gate
+oversight in `feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp` --
+`hasOnlySupportedStorageImageUses` only recognized the bare (Lod-less)
+`GetDimensions` intrinsics DXC emits for a storage image's
+`GetDimensions` for `Plain2D`/`Array2D` shapes, so `RWTexture1D`/
+`RWTexture1DArray`/`RWTexture3D` all failed pipeline creation with
+"unsupported raised operation" (see `Roadmap.md`'s `L227(c)` entry for
+the full root-cause narrative). Widened to also accept `Plain1D`,
+`Array1D`, and `Plain3D`, reusing the existing `createQuerySizeLod1D`/
+`1DArray`/`3D` runtime builders with a synthesized `Lod=0` -- no new
+runtime infrastructure needed. Added 6 new unit tests in
+`SPIRVResourceLoweringTest.cpp` covering the 3 new shapes plus
+regression guards for the pre-existing `Plain2D`/`Array2D` paths and
+the multisampled-image exclusion (none had unit-level coverage
+before).
+
+`WaveActiveMax.test`: root-caused as a genuine semantic mismatch, not
+a FeMe bug -- the test's `NegInfs`/`Mix` expectations assume a
+backend's default subgroup size is large enough to span a `TID.x % 8`
+in/out-of-bounds residue boundary; FeMe's default subgroup size is 4
+(`feme::cpu::MinWaveSize`), the same root cause the test's own
+pre-existing `XFAIL: Lavapipe && host-arm64` line already covers for
+another small-subgroup software Vulkan implementation. Fixed entirely
+outside FeMe, in `offload-test-suite`'s own `feme` branch: added
+`XFAIL: FeMe` with a rationale comment (self-contained, no
+`llvm-project`/`feme/` files touched).
+
+`CalculateLevelOfDetail.test`'s `Plain3D`/`OpImageQueryLod` failure is
+a genuinely unimplemented feature (no `createQueryLod3D` builder
+exists at all), not a shape-gate oversight -- split off as `L229`
+rather than rushed this session.
+
+**`check-hlsl-feme-vk`:** **482/722 Pass, 32 XFAIL, 207 Not supported,
+1 Fail** (previously 480/722 Pass, 31 XFAIL, 207 Not supported, 4
+Fail at this session's start -- `GetDimensions`/`Array.GetDimensions`
+moved from Fail to Pass, `WaveActiveMax` moved from Fail to XFAIL, and
+the sole remaining Fail is `L229`'s own `CalculateLevelOfDetail.test`).
+
+`ninja check-feme`: 3344/3405 Passed, 61 Unsupported, 0 Failed (+6 net
+new unit tests versus the 3338/3399 prior baseline, no regressions).
+
+Targeted Vulkan CTS sample: not run this session -- these fixes are
+entirely DXC/HLSL-intrinsic-facing (`GetDimensions`/`WaveActiveMax`
+lowering, exercised only through `offload-test-suite`'s own
+`check-hlsl-feme-vk` harness, not through `deqp-vk`'s own SPIR-V-ASM
+or GLSL-sourced test cases), so no new Vulkan CTS signal is expected;
+the broader-than-tessellation CTS re-run (`L228(e)`/`(f)`) remains the
+right vehicle for the next dedicated CTS sampling session.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- neither fix touches feature-bit or extension exposure; both
+widen or correct existing, already-advertised lowering paths.
