@@ -2677,3 +2677,89 @@ broader re-run and filed as `L242`.
 needed -- this is a compute-dispatch correctness fix to already-
 implemented core-1.0 behavior (SIMD widening of groupshared atomics
 during CPU codegen), not a new feature or extension landing.
+
+## Roadmap L242: bare non-Function-storage matrix global tightening gap -- root-caused and fixed
+
+The 18-case `dEQP-VK.pipeline.monolithic.spec_constant.*.composite.matrix.{mat2x3,mat3,mat4x3}`
+cluster (`compute` + 5 graphics stages, newly discovered by `L240`'s
+own full `spec_constant.*` re-run) failed with `Fail (Values did not
+match)`. Each case's shader declares 6 `Private`-storage `mat2x3`/
+`mat3`/`mat4x3` global variables, each spec-constant-initialized via a
+whole-matrix `OpStore` of an `OpCompositeConstruct`'d value, then reads
+each matrix's own 6 elements back via a nested (`col`/`row`)
+dynamically-indexed `spirv.AccessChain` loop, summing into an
+accumulator stored to an SSBO. Manually decoding the qpa's own
+expected-vs-actual `<Text>` detail (`struct.unpack`'ing the raw
+mismatch bytes) found every element read back as `0x7fc00000` -- a
+canonical quiet NaN -- while manually verifying the spec-constant math
+itself (with `SpecId 1` overridden to 42.0) confirmed the *expected*
+values were exactly right; only the *matrix storage/access* path was
+broken.
+
+Reproduced standalone (outside the CTS, for faster iteration): the
+qpa's own `--deqp-log-decompiled-spirv=enable` disassembly was
+extracted, reassembled via `spirv-as`, hand-patched to bake in the
+`OpSpecConstant` override, then run through `feme-translate
+--import-spirv` (binary -> `spirv` MLIR dialect) then `feme-translate
+--no-implicit-module --spirv-to-llvmir` (dialect -> real LLVM IR) to
+get fully inspectable output without a full CTS harness run.
+
+Root cause, visible directly in the generated LLVM IR: each `Private`
+matrix global was declared `@spirv_var_13 = private global [2 x <3 x
+float>] undef` (the natural, ABI-rounded/padded conversion, 16 bytes
+per `vec3` column), but the whole-matrix `OpStore` was emitted as a
+tightly-packed, 12-byte-per-column `%feme.tight_vector`-wrapped store
+into that same global -- while every subsequent per-element
+`OpAccessChain`-based read still computed its GEP against the global's
+own natural, 16-byte-per-column declared type. This 16-vs-12-byte
+column-stride mismatch meant every read of column 1 and beyond landed
+on the wrong byte offset -- reading past what the tight store actually
+initialized, onto genuinely uninitialized/poison memory, observed as
+NaN through floating-point propagation.
+
+This is the identical bug `L211` (`TightMatrixStorePattern`/
+`TightMatrixLoadPattern`, `SPIRVToLLVMPatterns.cpp`) already fixed for
+`Function`-storage locals, just triggered by a bare `Private`-storage
+global instead: both patterns' exemption from tightening was keyed on
+`StorageClass::Function` specifically, the wrong discriminator. The
+real, storage-class-independent condition that makes tightening safe
+is whether the pointee is reached through a struct-member
+`spirv.AccessChain` at all -- only an offset-decorated struct member's
+own declared type is ever substituted with the tightened form
+(`convertOffsetStructTypeIgnoringDecorations`); a bare
+`spirv.mlir.addressof` of a directly matrix-typed global/local (no
+wrapping struct) has no such declared tight layout to reconcile with,
+since SPIR-V requires an explicit `AccessChain` to narrow any struct
+pointer down to a member pointer, even a trivial one. Confirmed by
+inspection that `Workgroup` storage has the identical latent gap
+(`WorkgroupGlobalVariablePattern`'s own `matchAndRewrite` uses the
+plain, untightened `convertType` for its declared global type, with no
+matrix-aware branching at all), just never triggered/discovered until
+this session.
+
+Fixed by generalizing both patterns' exemption: skip tightening
+whenever `Op.getPtr()` is not defined by a `spirv::AccessChainOp` at
+all (a bare, non-struct-member whole-matrix pointer), regardless of
+storage class. This subsumes `L211`'s own `Function`-only case (a
+`Function`-storage local's own `Variable` result is itself always such
+a bare pointer) while also covering `Private`/`Workgroup` bare
+globals. New lit test `spirv-to-llvm-matrix-private-whole-store-load.mlir`
+added, covering a bare `Private`-storage matrix global's whole-store/
+load and a subsequent per-element `AccessChain` read, alongside the
+existing `Function`-storage (`L211`) and `Workgroup`-struct-member
+(`L207`) precedent tests.
+
+`ninja check-feme`: 3360/3421 (61 pre-existing unsupported, 0 failed,
++1 net new lit test).
+
+Real CTS: the 18-case `composite.matrix.{mat2x3,mat3,mat4x3}` cluster
+now **18/18 Pass** (was 0/18). A full `pipeline.monolithic.spec_constant.*`
+re-run (1413 cases) shows **794 Pass, 0 Fail, 619 Not supported** --
+zero failures remain in the whole `spec_constant.*` group.
+`check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL / 207 Not
+supported, 0 unexpected failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a matrix-storage-layout correctness fix to existing
+core-1.0 behavior (SPIR-V-to-LLVM matrix global lowering), not a new
+feature or extension landing.
