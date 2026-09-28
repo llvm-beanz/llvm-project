@@ -2763,3 +2763,94 @@ supported, 0 unexpected failures.
 needed -- this is a matrix-storage-layout correctness fix to existing
 core-1.0 behavior (SPIR-V-to-LLVM matrix global lowering), not a new
 feature or extension landing.
+
+## Roadmap L238: `pipeline.monolithic.no_position.*` -- two independent root causes, both fixed
+
+`dEQP-VK.pipeline.monolithic.no_position.*` (300 cases in the
+`vk-default` mustpass list) exercises every subset of the
+vertex/tessellation-control/tessellation-evaluation/geometry stage
+chain either writing or not writing `SV_Position`/`gl_Position` (case
+names encode this with a trailing `0`/`1` per active stage, e.g.
+`v0_c1_e0`). `deqp-vk` has no flag to survive a `DeviceLost` mid-run
+(`--deqp-terminate-on-fail=disable` only covers ordinary `Fail`s), so
+this group was swept via a driver script invoking
+`deqp-vk --deqp-case=<single case>` once per case (300 individual
+~0.2s invocations), capturing each case's Pass/Fail/DeviceLost/
+NotSupported status plus (via `FEME_VULKAN_LOG_CREATION_ERRORS=1`) the
+first internal `vk*:` error string.
+
+Baseline sweep: **144 NotSupported, 66 DeviceLost, 46 Fail, 44 Pass.**
+
+Two genuinely independent bugs were found and fixed, both stemming
+from the same incorrect assumption -- that every pipeline's last
+pre-rasterization stage must write `SV_Position` -- applied in two
+different places:
+
+**(A) Creation-time rejection (34 of the 46 `Fail` cases).**
+`GraphicsPipeline.cpp`'s `validateStageInterfaces` hard-rejected
+`vkCreateGraphicsPipelines` whenever the last pre-rasterization
+stage's signature lacked a 4-component `Position`, with narrow
+exemptions only for `RasterizerDiscardEnable`/`GeometryNeverWrites`.
+Per the Vulkan spec (Shader Interfaces, "Position"): "If the last
+vertex processing stage entry point's interface does not include a
+variable decorated with Position, the position used for
+clipping/rasterization is undefined" -- omitting it entirely is legal,
+not a creation-time error. Fixed by removing the rejection entirely,
+keeping only the "if `Position` exists, it must have exactly 4
+components" malformed-shape check; `Executor.cpp`'s runtime mirror of
+the same check was removed identically, leaving only its pre-existing
+`if (!VSPosition) return Error::success();` early return (previously
+reached only via the two narrow exemptions, now reached
+unconditionally) to skip rasterization gracefully. This is spec-legal,
+not a hack, specifically because `no_position.*`'s own fragment shader
+always writes the exact same color as the render target's own clear
+color regardless of what (if anything) is ever rasterized -- confirmed
+by reading the CTS test source (`vktPipelineNoPositionTests.cpp`)
+directly.
+
+**(B) Draw-time (`vkQueueSubmit`) hard error (66 `DeviceLost` cases).**
+`StageLink.cpp`'s `linkStageElements` hard-errored whenever a consumer
+signature element -- including a system-value one like `Position` --
+had no matching producer element in the previous stage. Per the
+Vulkan spec: "Any input value that does not have a matching output
+value is undefined" -- a producer/consumer mismatch is legal, not a
+link failure. Fixed by adding `LinkedStageElement::HasProducer`
+(default `true`); when no producer is found for a *system-value*
+consumer element specifically, `linkStageElements` now pushes a
+`HasProducer=false` link instead of erroring, and `copyLinkedElements`
+writes a deterministic raw `0` to the destination for such a link
+instead of reading from the (nonexistent) producer. Deliberately
+narrow scope: an ordinary `Location`-addressed consumer with no
+producer remains a hard error, unchanged -- no currently-passing case
+needs the broader relaxation, and this limits the fix's blast radius
+to exactly the failure this session found.
+
+Post-fix sweep: **144 NotSupported (unchanged), 0 DeviceLost, 48 Fail,
+108 Pass.** All 100 `Fail`+`DeviceLost` cases this bug caused are now
+`Pass`; a diff against the baseline sweep confirms 0 regressions among
+the 44 previously-`Pass` cases. The 48 remaining `Fail` cases are all
+`Unexpected SSBO counter value in view 0 for the tessellation control
+shader: got {4,1} but expected 3` -- a separate, pre-existing bug (more
+of these cases are now reachable/exposed since fewer cases device-lost
+before reaching this check; this bucket was 12 cases in the original
+`DeviceLost`-truncated sweep, now fully exposed at 48). Root-caused and
+split off as roadmap `L243`, deliberately out of scope for this fix
+(a tessellation-control invocation-count/dispatch bug, not a
+stage-interface-matching gap).
+
+2 new `StageLinkTest` unit tests
+(`AcceptsAProducerlessSystemValueConsumer`,
+`WritesZeroForAProducerlessSystemValueLink`) cover fix (B) directly
+against synthetic signatures. 1 existing `GraphicsPipelineTest`
+(`RejectsEmptyVertexShaderWithoutTessellation`, which exercised
+exactly fix (A)'s now-relaxed rejection) was renamed
+`AcceptsEmptyVertexShaderWithoutTessellation` and updated to assert
+the new, correct `VK_SUCCESS`.
+
+`ninja check-feme`: 3362/3423 (61 pre-existing Unsupported, 0 Fail,
++2 net new unit tests). `check-hlsl-feme-vk`: unchanged, 483 Pass /
+32 XFAIL / 207 Not supported, 0 unexpected failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a stage-interface/rasterization correctness fix to
+existing core-1.0 behavior, not a new feature or extension landing.

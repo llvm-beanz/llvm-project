@@ -2269,9 +2269,14 @@ block's component stride is a function of its own invocation count). From
 there the pipeline is unchanged: everything downstream of the vertex stage
 reads whichever signature and output block belongs to the *last
 pre-rasterization stage* -- the domain stage when tessellating, the vertex
-stage otherwise -- so on a tessellating pipeline it is the domain stage, not
-the vertex stage, that must write `SV_Position` and every varying the
-fragment stage consumes. The rasterized primitive class comes from the
+stage otherwise -- so on a tessellating pipeline it is the domain stage,
+not the vertex stage, whose own `SV_Position`/varying outputs (if any) the
+fragment stage consumes. (Roadmap L238: writing `SV_Position` is not
+actually mandatory -- the Vulkan spec leaves clip/rasterization position
+merely *undefined*, not a pipeline-creation or draw-time error, whenever
+the last pre-rasterization stage's interface omits it; `Executor.cpp`
+resolves this by skipping rasterization entirely for such a draw.) The
+rasterized primitive class comes from the
 tessellator's `TessOutputPrimitive` rather than from the topology, which on a
 patch-list pipeline says nothing about what reaches the rasterizer, and
 primitive index lists are absolute rather than per-instance-strided, since
