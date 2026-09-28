@@ -352,6 +352,142 @@ enum class ImageCallKind : uint8_t {
   /// value returned is always the pre-op value either way, matching
   /// `OpAtomicCompareExchange`'s own result semantics.
   AtomicCompareExchange2D,
+  /// `feme.cpu.image.atomic.add.1d.i32` (roadmap L244): `OpAtomicIAdd`'s
+  /// counterpart to `AtomicAdd2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicAdd1D,
+  /// `feme.cpu.image.atomic.sub.1d.i32` (roadmap L244): `OpAtomicISub`'s
+  /// counterpart to `AtomicSub2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicSub1D,
+  /// `feme.cpu.image.atomic.and.1d.i32` (roadmap L244): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAnd2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicAnd1D,
+  /// `feme.cpu.image.atomic.or.1d.i32` (roadmap L244): `OpAtomicOr`'s
+  /// counterpart to `AtomicOr2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicOr1D,
+  /// `feme.cpu.image.atomic.xor.1d.i32` (roadmap L244): `OpAtomicXor`'s
+  /// counterpart to `AtomicXor2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicXor1D,
+  /// `feme.cpu.image.atomic.smax.1d.i32` (roadmap L244): `OpAtomicSMax`'s
+  /// counterpart to `AtomicSMax2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicSMax1D,
+  /// `feme.cpu.image.atomic.smin.1d.i32` (roadmap L244): `OpAtomicSMin`'s
+  /// counterpart to `AtomicSMin2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicSMin1D,
+  /// `feme.cpu.image.atomic.umax.1d.i32` (roadmap L244): `OpAtomicUMax`'s
+  /// counterpart to `AtomicUMax2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicUMax1D,
+  /// `feme.cpu.image.atomic.umin.1d.i32` (roadmap L244): `OpAtomicUMin`'s
+  /// counterpart to `AtomicUMin2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicUMin1D,
+  /// `feme.cpu.image.atomic.exchange.1d.i32` (roadmap L244): `OpAtomicExchange`'s
+  /// counterpart to `AtomicExchange2D`, applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicExchange1D,
+  /// `feme.cpu.image.atomic.compare_exchange.1d.i32` (roadmap L244):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
+  /// applied instead to a plain, non-arrayed 1D storage image (roadmap L244).
+  AtomicCompareExchange1D,
+  /// `feme.cpu.image.atomic.add.1darray.i32` (roadmap L244): `OpAtomicIAdd`'s
+  /// counterpart to `AtomicAdd2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicAdd1DArray,
+  /// `feme.cpu.image.atomic.sub.1darray.i32` (roadmap L244): `OpAtomicISub`'s
+  /// counterpart to `AtomicSub2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicSub1DArray,
+  /// `feme.cpu.image.atomic.and.1darray.i32` (roadmap L244): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAnd2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicAnd1DArray,
+  /// `feme.cpu.image.atomic.or.1darray.i32` (roadmap L244): `OpAtomicOr`'s
+  /// counterpart to `AtomicOr2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicOr1DArray,
+  /// `feme.cpu.image.atomic.xor.1darray.i32` (roadmap L244): `OpAtomicXor`'s
+  /// counterpart to `AtomicXor2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicXor1DArray,
+  /// `feme.cpu.image.atomic.smax.1darray.i32` (roadmap L244): `OpAtomicSMax`'s
+  /// counterpart to `AtomicSMax2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicSMax1DArray,
+  /// `feme.cpu.image.atomic.smin.1darray.i32` (roadmap L244): `OpAtomicSMin`'s
+  /// counterpart to `AtomicSMin2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicSMin1DArray,
+  /// `feme.cpu.image.atomic.umax.1darray.i32` (roadmap L244): `OpAtomicUMax`'s
+  /// counterpart to `AtomicUMax2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicUMax1DArray,
+  /// `feme.cpu.image.atomic.umin.1darray.i32` (roadmap L244): `OpAtomicUMin`'s
+  /// counterpart to `AtomicUMin2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicUMin1DArray,
+  /// `feme.cpu.image.atomic.exchange.1darray.i32` (roadmap L244): `OpAtomicExchange`'s
+  /// counterpart to `AtomicExchange2D`, applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicExchange1DArray,
+  /// `feme.cpu.image.atomic.compare_exchange.1darray.i32` (roadmap L244):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
+  /// applied instead to an arrayed 1D storage image (roadmap L244).
+  AtomicCompareExchange1DArray,
+  /// `feme.cpu.image.atomic.add.2darray.i32` (roadmap L244): `OpAtomicIAdd`'s
+  /// counterpart to `AtomicAdd2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicAdd2DArray,
+  /// `feme.cpu.image.atomic.sub.2darray.i32` (roadmap L244): `OpAtomicISub`'s
+  /// counterpart to `AtomicSub2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicSub2DArray,
+  /// `feme.cpu.image.atomic.and.2darray.i32` (roadmap L244): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAnd2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicAnd2DArray,
+  /// `feme.cpu.image.atomic.or.2darray.i32` (roadmap L244): `OpAtomicOr`'s
+  /// counterpart to `AtomicOr2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicOr2DArray,
+  /// `feme.cpu.image.atomic.xor.2darray.i32` (roadmap L244): `OpAtomicXor`'s
+  /// counterpart to `AtomicXor2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicXor2DArray,
+  /// `feme.cpu.image.atomic.smax.2darray.i32` (roadmap L244): `OpAtomicSMax`'s
+  /// counterpart to `AtomicSMax2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicSMax2DArray,
+  /// `feme.cpu.image.atomic.smin.2darray.i32` (roadmap L244): `OpAtomicSMin`'s
+  /// counterpart to `AtomicSMin2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicSMin2DArray,
+  /// `feme.cpu.image.atomic.umax.2darray.i32` (roadmap L244): `OpAtomicUMax`'s
+  /// counterpart to `AtomicUMax2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicUMax2DArray,
+  /// `feme.cpu.image.atomic.umin.2darray.i32` (roadmap L244): `OpAtomicUMin`'s
+  /// counterpart to `AtomicUMin2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicUMin2DArray,
+  /// `feme.cpu.image.atomic.exchange.2darray.i32` (roadmap L244): `OpAtomicExchange`'s
+  /// counterpart to `AtomicExchange2D`, applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicExchange2DArray,
+  /// `feme.cpu.image.atomic.compare_exchange.2darray.i32` (roadmap L244):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
+  /// applied instead to an arrayed 2D storage image, or a genuine storage cube array (roadmap L244/L232).
+  AtomicCompareExchange2DArray,
+  /// `feme.cpu.image.atomic.add.3d.i32` (roadmap L244): `OpAtomicIAdd`'s
+  /// counterpart to `AtomicAdd2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicAdd3D,
+  /// `feme.cpu.image.atomic.sub.3d.i32` (roadmap L244): `OpAtomicISub`'s
+  /// counterpart to `AtomicSub2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicSub3D,
+  /// `feme.cpu.image.atomic.and.3d.i32` (roadmap L244): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAnd2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicAnd3D,
+  /// `feme.cpu.image.atomic.or.3d.i32` (roadmap L244): `OpAtomicOr`'s
+  /// counterpart to `AtomicOr2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicOr3D,
+  /// `feme.cpu.image.atomic.xor.3d.i32` (roadmap L244): `OpAtomicXor`'s
+  /// counterpart to `AtomicXor2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicXor3D,
+  /// `feme.cpu.image.atomic.smax.3d.i32` (roadmap L244): `OpAtomicSMax`'s
+  /// counterpart to `AtomicSMax2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicSMax3D,
+  /// `feme.cpu.image.atomic.smin.3d.i32` (roadmap L244): `OpAtomicSMin`'s
+  /// counterpart to `AtomicSMin2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicSMin3D,
+  /// `feme.cpu.image.atomic.umax.3d.i32` (roadmap L244): `OpAtomicUMax`'s
+  /// counterpart to `AtomicUMax2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicUMax3D,
+  /// `feme.cpu.image.atomic.umin.3d.i32` (roadmap L244): `OpAtomicUMin`'s
+  /// counterpart to `AtomicUMin2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicUMin3D,
+  /// `feme.cpu.image.atomic.exchange.3d.i32` (roadmap L244): `OpAtomicExchange`'s
+  /// counterpart to `AtomicExchange2D`, applied instead to a plain 3D storage image (roadmap L244).
+  AtomicExchange3D,
+  /// `feme.cpu.image.atomic.compare_exchange.3d.i32` (roadmap L244):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
+  /// applied instead to a plain 3D storage image (roadmap L244).
+  AtomicCompareExchange3D,
   /// `feme.cpu.image.samplecmp.2darray.f32` (roadmap L48): the
   /// `Texture2DArray` counterpart of `SampleCmp2D`, adding the same float
   /// array-layer coordinate `Sample2DArray` adds to `Sample2D`.
@@ -2119,6 +2255,139 @@ llvm::CallInst *createAtomicCompareExchange2D(
     llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y,
     llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask,
     const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.1d.i32` call (roadmap L244): the a plain, non-arrayed 1D storage image counterpart of `createAtomicAdd2D`, see its own doc.
+llvm::CallInst *createAtomicAdd1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicSub1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicAnd1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicOr1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicXor1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicSMax1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicSMin1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicUMax1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicUMin1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.1d.i32` call (roadmap L244). See `createAtomicAdd1D`'s own doc.
+llvm::CallInst *createAtomicExchange1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.1d.i32` call (roadmap L244): like `createAtomicAdd1D`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange1D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.1darray.i32` call (roadmap L244): the an arrayed 1D storage image counterpart of `createAtomicAdd2D`, see its own doc.
+llvm::CallInst *createAtomicAdd1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicSub1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicAnd1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicOr1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicXor1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicSMax1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicSMin1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicUMax1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicUMin1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.1darray.i32` call (roadmap L244). See `createAtomicAdd1DArray`'s own doc.
+llvm::CallInst *createAtomicExchange1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.1darray.i32` call (roadmap L244): like `createAtomicAdd1DArray`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange1DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Layer, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.2darray.i32` call (roadmap L244): the an arrayed 2D storage image, or a genuine storage cube array (roadmap L232) counterpart of `createAtomicAdd2D`, see its own doc.
+llvm::CallInst *createAtomicAdd2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicSub2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicAnd2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicOr2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicXor2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicSMax2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicSMin2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicUMax2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicUMin2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.2darray.i32` call (roadmap L244). See `createAtomicAdd2DArray`'s own doc.
+llvm::CallInst *createAtomicExchange2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.2darray.i32` call (roadmap L244): like `createAtomicAdd2DArray`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange2DArray(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.3d.i32` call (roadmap L244): the a plain 3D storage image counterpart of `createAtomicAdd2D`, see its own doc.
+llvm::CallInst *createAtomicAdd3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicSub3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicAnd3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicOr3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicXor3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicSMax3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicSMin3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicUMax3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicUMin3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.3d.i32` call (roadmap L244). See `createAtomicAdd3D`'s own doc.
+llvm::CallInst *createAtomicExchange3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.3d.i32` call (roadmap L244): like `createAtomicAdd3D`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't
