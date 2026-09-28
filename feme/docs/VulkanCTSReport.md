@@ -2295,3 +2295,39 @@ mechanism (the `QueryLod*` builder family) to two more float-channel
 shapes; it does not change any feature-bit or extension exposure, and
 the newly discovered integer-sampler gap (`L231`) is unfixed, so
 nothing to add or remove from either inventory for it either.
+
+## Roadmap L230: `dEQP-VK.image.image_size.*` full mustpass re-run -- plain Cube fixed, CubeArray split off (`L232`)
+
+Ran the full `image/image-size.txt` mustpass list (108 cases) again
+via `run_vulkan_cts.py`, after widening `isGetDimensionsIntrinsic`'s
+shape gate (`hasOnlySupportedStorageImageUses`) to accept `Array2D`
+(the shape a plain, non-arrayed storage `Cube` handle already folds
+into).
+
+Result: **84 Pass, 12 Fail, 12 NotSupported** (up from 72 Pass/24
+Fail/12 NotSupported before this session's `L230` fix). All 12
+`cube.*` cases now **Pass**. A follow-up 772-case
+`dEQP-VK.image.load_store.*cube*` sample confirms **0 regressions**
+to storage-cube image load/store addressing (a separate lowering path
+this fix never touches).
+
+The remaining 12 `cube_array.*` cases still **Fail**, but with a
+*wrong value*, not a rejected pipeline: `classifyStorageImage2DHandle`
+folds a storage `CubeArray` handle into the same `Array2D` shape a
+plain `Cube` folds into, discarding the one bit of information (was
+this handle ever `Dim::Cube`?) needed to know a real arrayed cube's
+own element count must be divided by 6 (the face count) before being
+returned as the layer count `imageSize()` expects.
+`dEQP-VK.image.image_size.cube_array.readonly_1x1x12` confirms this
+directly: expected `(1, 1, 2)`, got `(1, 1, 12)` -- the existing
+`Array2D` `GetDimensions` runtime path returns the correct *raw*
+layer count, it is simply the wrong count for this handle's own
+shape. This needs classification-level surgery (distinguishing
+storage `Cube`/`CubeArray` from `Array2D` without regressing the
+already-passing `Array2D`-based fetch/store lowering these shapes
+currently share) judged too large to rush safely into this same
+session -- split off as new roadmap item `L232`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fixes an existing, already-advertised lowering path for
+one more shape; it does not change feature-bit or extension exposure.
