@@ -6705,6 +6705,192 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.store.3d.v4i32"));
 }
 
+// Roadmap L227(c): a `Plain1D` storage image's own Lod-less
+// `OpImageQuerySize` (`RWTexture1D::GetDimensions(Width)`, DXC's own
+// bare, scalar-result `llvm.spv.resource.getdimensions.x` opcode --
+// confirmed via a real `dxc -spirv` reduction -- rather than
+// `OpImageQuerySizeLod`, since a storage image has no mip-chain concept
+// to select a level from) reuses `QuerySizeLod1D`'s own runtime call with
+// a synthesized constant `Lod = 0`.
+TEST(SPIRVResourceLoweringTest, LowersPlain1DStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %img = call target("spirv.Image", float, 0, 2, 0, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call i32 @llvm.spv.resource.getdimensions.x.timg(
+          target("spirv.Image", float, 0, 2, 0, 0, 2, 1) %img)
+      ret i32 %dims
+    }
+    declare target("spirv.Image", float, 0, 2, 0, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare i32 @llvm.spv.resource.getdimensions.x.timg(
+        target("spirv.Image", float, 0, 2, 0, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.1d.i32"));
+}
+
+// Roadmap L227(c): an `Array1D` storage image's own Lod-less
+// `OpImageQuerySize` (`RWTexture1DArray::GetDimensions(Width, Elements)`,
+// DXC's own `<2 x i32>`-result `llvm.spv.resource.getdimensions.xy`
+// opcode -- confirmed via a real `dxc -spirv` reduction -- the same
+// opcode `Texture2D`'s own bare `GetDimensions(Width, Height)` overload
+// produces, disambiguated only by `ImageShape` here) reuses
+// `QuerySizeLod1DArray`'s own runtime call with a synthesized constant
+// `Lod = 0`.
+TEST(SPIRVResourceLoweringTest, LowersArray1DStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main() {
+      %img = call target("spirv.Image", float, 0, 2, 1, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+          target("spirv.Image", float, 0, 2, 1, 0, 2, 1) %img)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 0, 2, 1, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+        target("spirv.Image", float, 0, 2, 1, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.1darray.v2i32"));
+}
+
+// Roadmap H124s/L227(c): a `Plain3D` storage image's own Lod-less
+// `OpImageQuerySize` (`RWTexture3D::GetDimensions(Width, Height, Depth)`,
+// DXC's own `<3 x i32>`-result `llvm.spv.resource.getdimensions.xyz`
+// opcode -- confirmed via a real `dxc -spirv` reduction -- the same
+// opcode an `Array2D` storage image's `GetDimensions(Width, Height,
+// Elements)` overload already uses, disambiguated only by `ImageShape`
+// here) reuses `QuerySizeLod3D`'s own runtime call with a synthesized
+// constant `Lod = 0`.
+TEST(SPIRVResourceLoweringTest, LowersPlain3DStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main() {
+      %img = call target("spirv.Image", float, 2, 2, 0, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+          target("spirv.Image", float, 2, 2, 0, 0, 2, 1) %img)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 2, 2, 0, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+        target("spirv.Image", float, 2, 2, 0, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.3d.v3i32"));
+}
+
+// Roadmap H124s/L227(c): an `Array2D` storage image's own Lod-less
+// `OpImageQuerySize` still lowers to `QuerySizeLod2DArray`, not
+// `QuerySizeLod3D` -- confirms the `Plain3D`/`Array2D` dispatch added by
+// `LowersPlain3DStorageImageGetDimensions` above did not regress this
+// pre-existing shape (previously only exercised end-to-end via
+// `check-hlsl-feme-vk`, never a dedicated unit test).
+TEST(SPIRVResourceLoweringTest, LowersArray2DStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 2, 1, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+          target("spirv.Image", float, 1, 2, 1, 0, 2, 1) %img)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 2, 1, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+        target("spirv.Image", float, 1, 2, 1, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
+}
+
+// Roadmap L70/L227(c): a `Plain2D` storage image's own Lod-less
+// `OpImageQuerySize` (`RWTexture2D::GetDimensions(Width, Height)`) still
+// lowers to the non-Lod `GetDimensions2D` builder, not
+// `QuerySizeLod1DArray` -- confirms widening `getdimensions.xy`'s shape
+// gate to include `Array1D` (`LowersArray1DStorageImageGetDimensions`
+// above) did not regress this pre-existing shape (also previously only
+// exercised end-to-end via `check-hlsl-feme-vk`).
+TEST(SPIRVResourceLoweringTest, LowersPlain2DStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 2, 0, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+          target("spirv.Image", float, 1, 2, 0, 0, 2, 1) %img)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 2, 0, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+        target("spirv.Image", float, 1, 2, 0, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
+}
+
+// Roadmap L227(c): a multisampled storage image (`Plain2DMS`/`Array2DMS`)
+// still has no `GetDimensions` support of any kind -- confirms this
+// session's widening did not accidentally loosen that pre-existing
+// exclusion (`hasOnlySupportedStorageImageUses` never special-cased
+// `getdimensions.xy`/`.xyz`/`.x` for a multisampled shape either before
+// or after this session's changes; multisample support of any kind
+// remains unstarted follow-on work, see roadmap L73's own `QuerySamples`
+// scope).
+TEST(SPIRVResourceLoweringTest,
+     LeavesPlain2DMSStorageImageGetDimensionsHandleAlone) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 2, 0, 1, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+          target("spirv.Image", float, 1, 2, 0, 1, 2, 1) %img)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 2, 0, 1, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+        target("spirv.Image", float, 1, 2, 0, 1, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M); // Must not crash.
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 // Roadmap H19d: a cube storage image (`Dim == DimCube == 3`) now
 // classifies as `HandleKind::StorageImage2D` with `ImageShape::Array2D`
 // (not a distinct `Cube` shape) -- confirmed via a real CTS shader dump
