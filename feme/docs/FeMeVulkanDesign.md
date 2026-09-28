@@ -2919,24 +2919,26 @@ after submission generally become device loss.
 - Descriptor snapshots and push constants are submission-local.
 - Allocation callbacks are called with the scope and alignment required by the
   Vulkan specification and never while holding unrelated queue locks.
-
-**Known gap (roadmap `L228(h)`/`(i)`'s own follow-up, not yet fixed):**
-`DescriptorSet` (`Descriptor.h`) has no internal locking and its getters
-return live `ArrayRef`s into its own storage rather than copies. Before
-`L228(h)`/`(i)`, `vkQueueSubmit` executed a submission's command buffers
-synchronously in-call, so a descriptor set could never legitimately be
-touched by `vkUpdateDescriptorSets` while a submission using it was
-"in flight" from the driver's own point of view. Now that a submission's
-command buffers execute on a background `QueueExecutor` worker thread after
-`vkQueueSubmit` has already returned, an application that updates an
-`updateAfterBind`-eligible descriptor set concurrently with a still-running
-submission that reads it has a genuine, currently-unguarded data race. The
-`descriptorBindingUniformBufferUpdateAfterBind`-family feature bits are left
-`VK_TRUE` regardless (the sequential update-then-submit pattern the CTS and
-real applications overwhelmingly use is unaffected, and no CTS regression
-was observed), but a full fix -- locking `DescriptorSet`'s state and having
-`CommandBuffer.cpp`'s descriptor-consumption code read copies rather than
-live references -- is deferred past this milestone.
+- (roadmap `L228(j)`, fixed) `DescriptorSet` (`Descriptor.h`) internally locks
+  the *contents* of its per-binding arrays (`Bindings`/`ImageBindings`/
+  `InlineUniformBlockBindings` -- the map keys themselves are fixed for a
+  set's whole lifetime, set once from its immutable `DescriptorSetLayout`, so
+  only element contents need guarding): `write`/`writeInlineUniformBlock`
+  lock while mutating, and `bindingArray`/`imageBindingArray`/
+  `inlineUniformBlockData` return a snapshot copy taken under the same lock
+  rather than a live `ArrayRef` into storage a concurrent write could still
+  mutate afterward. This is what makes the previous bullet's "Descriptor
+  snapshots ... are submission-local" claim actually true now that a
+  submission's command buffers run on a background `QueueExecutor` worker
+  thread (roadmap `L228(h)`/`(i)`) concurrently with further API calls
+  (including `vkUpdateDescriptorSets`) on the caller's own thread --
+  previously, an `updateAfterBind`-eligible descriptor set updated
+  concurrently with a still-running submission that reads it had a genuine
+  data race (a non-atomic per-element struct assignment could be observed
+  torn: some fields from one write, some from another). See
+  `DescriptorTest.cpp`'s `ConcurrentUpdateDescriptorSetsDoesNotRaceWithDispatchRead`
+  for the regression test (verified to reliably fail without this locking
+  and pass clean under Helgrind with it).
 
 ### Optional core 1.0 feature bits
 
