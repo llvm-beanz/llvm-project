@@ -2450,3 +2450,83 @@ HLSL/DXC-facing test exercises this query directly).
 needed -- this fix corrects an existing, already-exposed core 1.0
 query's own reported values; it does not change which
 features/extensions this device advertises.
+
+## Roadmap L234: `pipeline.monolithic.sampler.border_swizzle.*` genuine hang -- missing SNORM clear-color formats
+
+**Symptom**: a fixed-seed (`random.seed(42)`) 3000-case sample of
+`dEQP-VK.pipeline.monolithic.sampler.border_swizzle.*` (105,600 cases
+total; `L234`'s own residual from `L228(e)`/`(f)`'s 41-case
+`pipeline.monolithic.*` broad-sample bucket) reported **517 Pass, 16
+Fail, 12 DeviceLost, 2455 NotSupported**. Every one of the 28
+Fail/DeviceLost cases involved one of exactly 3 formats:
+`r8g8b8a8_snorm`, `a8b8g8r8_snorm_pack32`, `a2b10g10r10_snorm_pack32`
+-- narrowed via targeted single-case reruns to *not* be swizzle-,
+gather-, or graphics/compute-pipeline-specific (every variant of the
+same format hung identically), and confirmed via `1d.optimal`-style
+reduced repro that `r8_snorm`/`r16g16b16a16_snorm` do **not** hang,
+ruling out "all SNORM formats" as the pattern.
+
+**Root cause** (`gdb -p <pid> -batch -ex "thread apply all bt"`
+attached to a live repro mid-hang): every `QueueExecutor`/LLVM-worker
+thread was idle (`pthread_cond_wait`, `Pending == 0`) -- not a real
+infinite loop. The main thread was blocked in `vkWaitForFences`, on a
+fence whose submission had already fully run. Enabling
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (`Diagnostics.h`'s opt-in logger,
+silent by default) surfaced the real error: `vkQueueSubmit: attachment
+clear color is not yet supported for this format` -- `packClearColor`/
+`unpackColor` (`ImageFixture.cpp`) had no branch for `R8G8B8A8_SNORM`
+or `R10G10B10A2_SNORM` (the `ResourceFormat`s the other two CTS-named
+`VkFormat`s map onto via `Format.cpp`'s packed-format aliasing), a gap
+of the same class `H170` fixed for several integer formats several
+sessions ago. Hitting that fallback error inside `vkQueueSubmit`'s
+deferred `QueueExecutor` task (roadmap L228(h)/(i)) marks the device
+lost (`Device::markLost`); the fence-signal task then deliberately
+skips signaling once lost (`makeFenceSignalTask`). A **second**,
+independent bug compounded this into a hang rather than a fast
+failure: `vkWaitForFences`'s `waitAll` path checked `Device::isLost()`
+only once, before blocking on the fence -- so the case's own
+`vkWaitForFences(..., UINT64_MAX)` call still blocked for `Sync.h`'s
+full `SafetyNetTimeoutNs` (5s) before reporting `VK_TIMEOUT`, rather
+than `VK_ERROR_DEVICE_LOST` promptly once the device actually was
+already lost.
+
+**Fix**: two separate commits. (1) Added `R8G8B8A8_SNORM`/
+`R10G10B10A2_SNORM` pack/unpack branches to `ImageFixture.cpp`
+(matching `R16G16B16A16_SNORM`'s per-component `[-1,1]`-scaled
+convention and `R10G10B10A2_UNORM`'s existing packed-word special
+case, respectively), plus a missing `getFormatInfo` entry for
+`R10G10B10A2_SNORM` (`H19o` only ever added this format's diagnostic
+*name*, not a `FormatInfo` shape). (2) Made `vkWaitForFences`'s
+`waitAll` path poll for device loss in `DeviceLostPollSliceNs` (50ms)
+slices instead of checking `isLost()` once.
+
+**Verification**: 8 new unit tests (6 `ImageFixtureTest` pack/unpack
+round-trips, 1 `SyncTest` confirming a device marked lost mid-wait is
+now reported within under a second rather than a full safety-net
+timeout). `check-feme`: 3355/3355 (61 unsupported, 0 failed, up from
+3352/3413 -- 3 net new tests). `FeMeVulkanTests`: 747/747.
+`check-hlsl-feme-vk`: 483/722 Pass, 32 XFAIL, 207 Not supported, 0
+Fail (unchanged, no regressions).
+
+Real CTS: the same fixed-seed 3000-case `border_swizzle` sample now
+reports **545 Pass, 0 Fail, 0 DeviceLost, 2455 NotSupported** (Pass
+count rises by 28, matching the previously-failing/hung case count
+exactly -- the 12 `NotSupported`-vs-something-else delta between runs
+is `custom`-border-color-mode cases, unaffected either way). All 4
+originally-hanging individual repro cases (`r8g8b8a8_snorm.rgba...`,
+`r8g8b8a8_snorm.igba...gather_0...compute`,
+`a8b8g8r8_snorm_pack32.rgba...`, `a2b10g10r10_snorm_pack32.rgba...`)
+individually confirmed to now pass instantly (well under a second
+each, versus the prior ~5s hang-then-fail).
+
+`L234`'s original 41-case sample's 4 smaller, non-`sampler.*` clusters
+(`logic_op_na_formats`/`logic_op`/`spec_constant`/`no_position`/
+`render_to_image`/`creation_cache_control`, 15 cases total) remain
+untriaged -- filed as `L237`, likely an unrelated bug given the
+naming mismatch with `border_swizzle`'s own clear-color gap.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- both fixes correct existing, already-exposed core-1.0
+behavior (clear-color format coverage, device-lost reporting
+promptness); neither changes which features/extensions this device
+advertises.
