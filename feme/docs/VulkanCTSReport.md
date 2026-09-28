@@ -3165,3 +3165,101 @@ mask or `resolveAttachmentView`'s layer-count resolution at a level of
 detail this fix invalidated (both documents describe the general
 image/render-target model, not per-flag validation specifics), so
 there was nothing stale to update there.
+
+## Roadmap L235: `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`/`VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` support
+
+`L239`'s own broader `dEQP-VK.image.*` sanity sweep (143086 cases)
+surfaced two large untriaged failure buckets:
+`extended_usage_bit_compatibility.image_format_properties{,2}` (1320 +
+1320 cases) and `format_reinterpret.*` (~3122 cases across 7 dimension
+variants). A single-case repro
+(`r8g8b8a8_unorm_optimal_color_attachment_bit`,
+`extended_usage_bit_compatibility.image_format_properties`) failed with
+`Fail: view format VK_FORMAT_R8G8B8A8_UNORM`; the real CTS source
+(`vktImageExtendedUsageBitTests.cpp`) shows the test creating an image
+with `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`
+and querying `vkGetPhysicalDeviceImageFormatProperties(2)` for it.
+
+Two sequential bugs, both in the same pre-existing `L235` roadmap
+row's own code region:
+
+1. `isValidImageShape`'s (`Image.cpp`) flags gate only ever accepted
+   `VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT | VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`
+   (the latter from `L239`), rejecting both
+   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` and
+   `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` outright at `vkCreateImage`/
+   `vkGetPhysicalDeviceImageFormatProperties` time -- this row's own
+   long-standing, previously-uninvestigated `todo` entry. Widened the
+   mask to accept both flags. Neither needs any further behavioral
+   change elsewhere: `vkCreateImageView` already never validates a
+   view's format against its image's own declared format at all
+   (effectively already "mutable" regardless of the flag), and no
+   draw-time code path validates a view's usage against
+   `Image::usage()` either (effectively already "extended" regardless
+   of the flag) -- confirmed via the pattern `L239` established for
+   `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` (this ICD is broadly
+   permissive by omission on view/image cross-validation, not
+   over-strict).
+
+2. Fixing (1) alone dropped the `extended_usage_bit_compatibility.*`
+   bucket from 2640 Fail to 172 Fail, not 0: `vkGetPhysicalDeviceImageFormatProperties`'s
+   own usage-vs-format-feature checks (`EntryPoints.cpp`, 6 checks --
+   `SAMPLED`/`STORAGE`/`COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT`/
+   `TRANSFER_SRC`/`TRANSFER_DST`, plus a combined `INPUT_ATTACHMENT`
+   check) ran unconditionally, rejecting a format/usage combination the
+   base format itself has no feature bits for. Per spec,
+   `VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` defers exactly this validation:
+   an image created with it may be used through a different,
+   format-compatible-class view format that *does* support the usage,
+   so the base format/usage combination alone need not. Wrapped all six
+   checks in `if (!(flags & VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))`.
+   `isValidImageShape`'s own unrelated checks (sample counts, mip/
+   array-layer validity, 3D array-layer constraint) were left
+   unconditional -- only the usage-vs-feature matching is a spec-mandated
+   deferral.
+
+Real CTS: `dEQP-VK.image.extended_usage_bit_compatibility.*` (both
+sub-groups, 19872 cases): 2640 Pass, 0 Fail, 17232 Not Supported (up
+from 2640 Fail at session start). `dEQP-VK.image.format_reinterpret.*`
+(5944 cases, targeted re-run): 3296 Pass, 0 Fail, 2648 Not Supported --
+fixed as a full side effect of the same `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`
+acceptance (format-reinterpretation views require it), confirmed
+directly rather than inferred from the broader sweep's regex-based
+bucket counts. `dEQP-VK.api.info.image_format_properties*` (2372
+cases, regression check): 65 Fail, confirmed pre-existing/unrelated via
+`git stash`/rebuild/re-test on a representative case
+(`a2b10g10r10_sint_pack32`) -- filed as new item `L245`.
+
+A broader `dEQP-VK.image.*` re-sweep (143086 cases) after this fix:
+1191 Fail, down from `L239`'s own 6881 -- confirming both targeted
+buckets are fully resolved. The residual buckets are
+`atomic_operations.*` (~864 cases across 9 ops, pre-existing per
+`L239`'s own sweep note, filed as new item `L244`),
+`image.mutable.{2d,2d_array}.*` (72 cases, **newly exposed, not a
+regression** -- confirmed via `git stash`/rebuild/re-test on a
+representative case, `r8g8b8a8_snorm_b8g8r8a8_srgb_draw_copy_resolve`,
+that this group was previously entirely `NotSupported` due to a
+conservative multisample-count report, never reaching the
+`vkCreateFramebuffer VK_ERROR_INITIALIZATION_FAILED` this fix newly
+exposes now that a real mutable-format image can exist -- filed as new
+item `L246`), `store.without_format` (14, pre-existing), and 1 stray
+`depth_stencil_descriptor` case (pre-existing).
+
+4 new unit tests: `EntryPointsTest.cpp`'s
+`ImageFormatPropertiesAcceptsMutableFormatBit` and
+`ImageFormatPropertiesExtendedUsageBitDefersUsageCheck` (the latter
+using `VK_FORMAT_R32G32B32_UINT`, a format with zero image-usable
+format-feature bits per an existing sibling test, to confirm both the
+deferral-with-flag success case and the without-flag rejection case),
+plus `ImageTest.cpp`'s `AcceptsMutableFormatAndExtendedUsageFlags`
+(both flags together on a 2D image via `vkCreateImage`).
+
+`ninja check-feme`: 3377/3438 Passed, 61 Unsupported, 0 Failed (+3 net
+new unit tests over `L243`'s 3374).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` and
+`VK_IMAGE_CREATE_EXTENDED_USAGE_BIT` are both core-1.0
+`VkImageCreateFlagBits` enumerants with no dedicated extension or
+`VkPhysicalDeviceFeatures` bit gating them, matching the same rationale
+`L239` documented for `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`.
