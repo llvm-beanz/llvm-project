@@ -61,37 +61,32 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, new roadmap item)** `L244`: `dEQP-VK.image.atomic_operations.*`
-   (~864 cases across 9 ops: add/and/compare_exchange/exchange/max/min/or/
-   sub/xor) -- still completely untriaged past the raw count, called out
-   two sessions running now without anyone picking it up. Start with one op
-   (`add`) at the smallest failing case to find the qpa-level symptom before
-   assuming the other 8 share a root cause.
-2. **(a few hours, new roadmap item)** `L246`: newly-exposed
-   `dEQP-VK.image.mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer`
-   gap -- likely `RenderPass.cpp`'s attachment-compatibility check rejecting
-   a format-compatible-class-but-differently-formatted view for a
-   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`-flagged image. Start with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the smallest failing case to find
-   the exact rejecting check.
-3. **(worth 15 minutes, new roadmap item, low priority)** `L245`: pre-existing
-   65-case `sampleCounts` mismatch bucket in `api.info.image_format_properties*`
-   -- likely `Image.cpp`'s `supportedSampleCounts` over-reporting for
-   formats lacking `COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT` feature
-   bits. Quick to isolate (single-usage-bit repro), unclear how quick to fix.
-4. **(a few hours, still carried over, unchanged for many sessions)** Pick
-   one of `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
-   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears).
-5. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+1. **(a few hours, new roadmap item, ready to pick up)** `L247`:
+   `dEQP-VK.image.atomic_operations.{inc,dec}.*` (240 cases, every shape).
+   The MLIR diagnostic is `failed to legalize operation
+   'spirv.AtomicIIncrement'/'spirv.AtomicIDecrement' that was explicitly
+   marked illegal` -- unlike the 9 RMW ops (which lower via a shared
+   `AtomicRMWPattern` to LLVM's own `atomicrmw`), these two SPIR-V opcodes
+   look to have **no lowering pattern at all** in
+   `SPIRVToLLVMPatterns.cpp`. Start there: confirm the pattern is really
+   missing, then likely add one that synthesizes `atomicrmw add/sub ptr,
+   i32 1` (reusing every `AtomicAdd*`/`AtomicSub*` entry point this session
+   already added -- no new `SPIRVResourceLowering.cpp`/`ImageCalls`/runtime
+   work needed if so).
+2. **(a few hours, still carried over, unchanged for many sessions)** Pick
+   one of `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures)
+   or `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears).
+3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
    broader-than-tessellation CTS sample -- `pipeline`'s other sub-suites and
    `shader_render` remain completely unsampled by any recent broad sweep.
-6. **(worth a few minutes, low priority, carried over several sessions)**
+4. **(worth 15 minutes, new roadmap item)** `L245`: pre-existing 65-case
+   `sampleCounts` mismatch bucket in `api.info.image_format_properties*` --
+   likely `Image.cpp`'s `supportedSampleCounts` over-reporting. Filed
+   several sessions ago, still untouched.
+5. **(a few hours, new roadmap item)** `L246`: `dEQP-VK.image.mutable.
+   {2d,2d_array}.*` (72 cases) `vkCreateFramebuffer` gap. Filed several
+   sessions ago, still untouched.
+6. **(worth a few minutes, low priority, carried over many sessions)**
    Audit other FeMe creation-time checks for the "over-strict VUID
    enforcement" pattern `L241` found in `primitiveRestartEnable` handling --
-   still not searched for, keeps getting bumped.
-7. **(quick, start of next session, standing item)** Re-check
-   `offload-test-suite`'s `feme` branch -- confirmed drifting again this
-   session (known root cause: `/opt/llvm-tooling/scripts/agent-setup.sh`
-   resets it to `origin/main` unconditionally every session). `git log
-   --oneline feme -3` should show `9351791`; `git reset --hard 9351791` if
-   not.
+   still not searched for, keeps getting bumped every session.
