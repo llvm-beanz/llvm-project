@@ -61,38 +61,28 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** `L233`: root-cause
-   `vkGetPhysicalDeviceImageFormatProperties`'s ignored `VkImageTiling`
-   parameter. Start with the clearest lead --
-   `dEQP-VK.api.info.image_format_properties.2d.linear.r32_sfloat`
-   (`Fail (sampleCounts != VK_SAMPLE_COUNT_1_BIT)`, a one-line fix:
-   force `SampleCounts = VK_SAMPLE_COUNT_1_BIT` whenever
-   `tiling == VK_IMAGE_TILING_LINEAR`) -- before tackling the two
-   harder, not-yet-root-caused leads (`Invalid dimensions for 1D
-   image` on some compressed/depth-stencil 1D-linear formats;
-   `maxResourceSize smaller than minimum required size` on at least
-   one 3D-linear format). Also check whether
-   `dEQP-VK.api.version_check.entry_points`/
-   `dEQP-VK.api.get_device_proc_addr.non_enabled` (2 more failures
-   from the same sample) share a root cause or are unrelated.
-2. **(a few hours, dedicated session)** `L234`: triage 41
-   `pipeline.monolithic.*` failures, starting with the 26-case
-   `sampler.*` majority (largest single group, likely one shared root
-   cause) before the 5 smaller groups
-   (`logic_op_na_formats`/`logic_op`/`spec_constant`/`no_position`/
-   `render_to_image`/`creation_cache_control`).
-3. **(a full dedicated session)** `L232`: the storage `CubeArray`
-   `/6` layer-count fix -- needs classification-level surgery
-   (distinguishing storage `Cube`/`CubeArray` from `Array2D` without
-   regressing their shared, already-passing fetch/store lowering).
-   Not a quick follow-up; budget a real session for it.
-4. **(a few hours)** Pick one of `L227(d)` (3 `Graphics/MeshShaders/*`
-   image-comparison failures) or `L228(b)`/`(c)` (compressed-format
-   blits, MSAA multi-layer clears) -- still open, unchanged for many
-   sessions now, and `L228(b)`/`(c)` were both re-confirmed still
-   active by this session's own broad sample.
-5. **(quick, at the very start of the next session)** Re-check
-   `offload-test-suite`'s local `feme` branch -- no drift this
-   session, but it has drifted at least twice in recent sessions.
-   `git log --oneline feme -3` should show `9351791` at the tip; if
-   not, `git reset --hard 9351791` restores it.
+1. **(quick, start of next session)** Re-check `offload-test-suite`'s `feme`
+   branch: `git log --oneline feme -3` should show `9351791` at the tip; `git
+   reset --hard 9351791` if it's drifted.
+2. **(1-2 hours)** `L237`: triage the 15 remaining non-`sampler.*`
+   `pipeline.monolithic.*` cases from `L234`'s original sample
+   (`logic_op_na_formats`/`logic_op`/`spec_constant`/`no_position`/`render_to_image`/`creation_cache_control`).
+   Start with `logic_op_na_formats`/`logic_op`'s combined 9-case majority --
+   same naming prefix, plausibly one shared cause.
+3. **(a few hours)** `L235`: mutable-format image support (`isValidImageShape`
+   in `Image.cpp` rejects `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` outright) -- real
+   feature work, not a quick fix, budget a full session.
+4. **(a few hours)** `L236`: missing Vulkan 1.4 core entry points
+   (`vkGetDeviceImageSubresourceLayout`, `vkGetImageSubresourceLayout2`,
+   `vkCmdSetLineStipple`, `vkGetRenderingAreaGranularity`, `KHR` aliases) plus
+   at least one disabled-extension function wrongly exposed via
+   `vkGetDeviceProcAddr`.
+5. **(a few hours, still carried over from multiple prior sessions)** Pick one
+   of `L227(d)` (3 `Graphics/MeshShaders/*` image-comparison failures) or
+   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears) --
+   unchanged for many sessions now.
+6. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+   broader-than-tessellation CTS sample further -- `pipeline`'s other sub-suites
+   (`shader-object-*`/`fast-linked-library`/`pipeline-library`/`no-queues`) and
+   `shader_render` (no identified mustpass list yet) remain completely
+   unsampled.
