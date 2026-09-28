@@ -2331,3 +2331,57 @@ session -- split off as new roadmap item `L232`.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- this fixes an existing, already-advertised lowering path for
 one more shape; it does not change feature-bit or extension exposure.
+
+## Roadmap L228(e)/(f): overdue broader-than-tessellation CTS re-run -- new 15000-case fixed-seed sample
+
+Long overdue per several prior sessions' own notes: every recent
+session's CTS work had stayed scoped to whatever cluster/test it was
+fixing, never the wider `api`/`pipeline`/`shader_render`/
+`synchronization` surface `L228(e)`/`(f)` called out. The prior
+session's own saved case list (`/tmp/l227_broad_sample/
+case_list_dedup.txt`) did not survive across sessions (as its own
+caveat predicted), so a fresh sample was drawn instead.
+
+Deduped the full `api.txt` (267,501 cases), `pipeline/monolithic/*.txt`
+(930,948 cases), `synchronization.txt` (64,872), and
+`synchronization2.txt` (81,617) mustpass lists together (879,564
+unique cases after dedup), then drew a fixed-seed
+(`random.seed(20240607)`) 15000-case sample via `run_vulkan_cts.py`.
+
+Result: **5197 Pass, 169 Fail, 58 DeviceLost, 1 InternalError, 9574
+NotSupported** (14999/15000 completed -- 1 case,
+`dEQP-VK.pipeline.monolithic.blend.dual_source.undefined_output.first_not_assigned_dynamic`,
+did not run at all; worth a follow-up isolated rerun to check whether
+this is a genuine hang or a harness fluke, not yet investigated
+further this session).
+
+Clustered the 228 unexpected non-Pass results by top-level group:
+
+- **93 `api.image_clearing`** and **75 `api.copy_and_blit`**: both
+  already-known, still-open clusters (`L228(b)`/`(c)`, unchanged this
+  session) -- this sample re-confirms their continued existence and
+  rough scale, no new triage information gained here.
+- **41 `pipeline.monolithic.*`** (26 `sampler.*`, 5
+  `logic_op_na_formats.*`, 4 `logic_op.*`, 2 `spec_constant.*`, 2
+  `no_position.*`, 1 `render_to_image.*`, 1
+  `creation_cache_control.*`): new, untriaged. Filed as `L234`.
+- **19 `api.info`/`api.version_check`/`api.get_device_proc_addr`**:
+  new. Spot-checked 5 individually: confirmed `vkGetPhysicalDevice
+  ImageFormatProperties` (`EntryPoints.cpp`) ignores its own
+  `VkImageTiling` parameter entirely (the parameter is unnamed in the
+  function signature) -- at least 3 distinct root causes visible
+  already (`sampleCounts` ignoring `tiling` entirely, wrong
+  `maxExtent` for some 1D linear compressed/depth-stencil formats,
+  wrong `maxResourceSize` for at least one 3D linear format); not yet
+  fully root-caused or fixed. Filed as `L233`.
+- The 58 `DeviceLost`/1 `InternalError` results were not further
+  triaged this session -- worth checking in a future session whether
+  they cluster with `copy_and_blit`/`image_clearing` or are their own,
+  more serious issue (a `DeviceLost` is a stronger signal than an
+  ordinary `Fail` and may indicate a crash or hang rather than a wrong
+  answer).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a verification-only sampling run, no source changed
+as part of it (the `L233`/`L234` findings are filed as new roadmap
+items for future sessions to fix, not fixed here).
