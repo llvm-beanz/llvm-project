@@ -1919,21 +1919,27 @@ Error translateFixedFunctionState(
       return createStringError(inconvertibleErrorCode(),
                                "primitive topology %u is not implemented",
                                unsigned(InputAssembly->topology));
-    // (roadmap H5e-b) `Executor.cpp`'s `executeDraws` only honors
-    // `primitiveRestartEnable` for the strip/fan topologies
-    // `topologySupportsPrimitiveRestart` lists (every list topology has no
-    // notion of restarting an assembly in progress in the first place --
-    // `VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
+    // (roadmap H5e-b, narrowed by L241) `Executor.cpp`'s `executeDraws`
+    // only honors `primitiveRestartEnable` for the strip/fan topologies
+    // `topologySupportsPrimitiveRestart` lists -- every list topology has
+    // no notion of restarting an assembly in progress in the first place
+    // (`VUID-VkPipelineInputAssemblyStateCreateInfo-topology-00428`/
     // neighbors, since this ICD does not implement
-    // `VK_EXT_primitive_topology_list_restart`); mirrored here so an
-    // unsupported combination fails at creation, not silently at draw time.
-    if ((Result.DynamicStates & DynamicStatePrimitiveRestartEnable) == 0 &&
-        InputAssembly->primitiveRestartEnable &&
-        !feme::graphics::topologySupportsPrimitiveRestart(*Topology))
-      return createStringError(
-          inconvertibleErrorCode(),
-          "primitiveRestartEnable requires a strip or fan primitive "
-          "topology");
+    // `VK_EXT_primitive_topology_list_restart`). This used to be rejected
+    // outright at creation time instead of silently ignored at draw time,
+    // but a VUID is a validation-layer-only concern, not something a
+    // conformant ICD itself must detect and error on -- the spec leaves an
+    // application that violates one to undefined behavior, of which
+    // `executeDraws`'s own "just don't restart" is a perfectly legal
+    // choice. `dEQP-VK.pipeline.monolithic.creation_cache_control.
+    // graphics_pipelines.*`'s own shared pipeline shape does exactly this
+    // (`primitiveRestartEnable=VK_TRUE` on a `TRIANGLE_LIST` topology,
+    // never gated on `VK_EXT_primitive_topology_list_restart` support) on
+    // an otherwise-unrelated cache-control test, relying on real
+    // conformant drivers accepting it -- this creation-time check was
+    // needlessly turning that into a hard failure. No longer rejected;
+    // `Result.PrimitiveRestartEnable` is simply left as-is; the draw-time
+    // topology check already makes it a no-op wherever it would not apply.
     // (roadmap H4b) A tessellation-enabled pipeline must use
     // `VK_PRIMITIVE_TOPOLOGY_PATCH_LIST` -- it is the only topology the
     // tessellator can patch-assemble from -- and, symmetrically, that

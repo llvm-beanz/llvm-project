@@ -1137,10 +1137,28 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
-  // Primitive restart with a list topology: only strip topologies restart.
+  // Primitive restart with a list topology: the ICD stores the flag as-is
+  // (roadmap L241) since `VUID-VkPipelineInputAssemblyStateCreateInfo-
+  // primitiveRestartEnable-topology-04909` is a validation-layer-only
+  // concern, not something a conformant ICD itself must detect/reject at
+  // creation time -- `AcceptsPrimitiveRestartOnStripAndFanTopologies`
+  // below covers the topologies restart actually applies to; this confirms
+  // creation still succeeds for one it does not, and that the executor
+  // pipeline's own `topologySupportsPrimitiveRestart` check (Executor.cpp)
+  // makes it a safe no-op at draw time rather than a hard failure here.
   Info = makeCreateInfo(Vertex, Fragment);
   InputAssembly.primitiveRestartEnable = VK_TRUE;
-  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(create(Info, Pipe), VK_SUCCESS);
+  if (Pipe != VK_NULL_HANDLE) {
+    auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+    const feme::graphics::GraphicsPipeline Executor =
+        Graphics->buildExecutorPipeline(DynamicGraphicsState{});
+    EXPECT_TRUE(Executor.getPrimitiveRestartEnable());
+    EXPECT_FALSE(feme::graphics::topologySupportsPrimitiveRestart(
+        Executor.getTopology()));
+    vkDestroyPipeline(Device, Pipe, nullptr);
+    Pipe = VK_NULL_HANDLE;
+  }
 
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
@@ -3916,9 +3934,14 @@ TEST_F(GraphicsPipelineTest, AcceptsAdjacencyTopologyWithoutGeometryStage) {
 /// GeometryStage` above already covers the geometry-stage-free
 /// combination; either is legal). Before this fix,
 /// `GraphicsPipeline.cpp`'s creation-time gate rejected every one of
-/// these four with `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic
-/// (`RejectsUnimplementedStateCombinations`'s own default-topology case
-/// above is unaffected: `TriangleList` still correctly rejects restart).
+/// these four with `VK_ERROR_INITIALIZATION_FAILED` and no diagnostic.
+/// (roadmap L241) That same gate has since been removed entirely --
+/// `primitiveRestartEnable` on a list topology is now accepted at
+/// creation too, since the VUID it enforced is a validation-layer-only
+/// concern; see `RejectsUnimplementedStateCombinations`'s own
+/// default-topology case, which now instead confirms creation succeeds
+/// and the executor's draw-time `topologySupportsPrimitiveRestart` check
+/// makes the flag a safe no-op there.
 /// (roadmap H29o) Reflected geometry state -- the input/output primitive
 /// class and `OutputVertices` count read off the compiled module's own
 /// entry point -- must survive a pipeline-cache hit. Reflection needs the
