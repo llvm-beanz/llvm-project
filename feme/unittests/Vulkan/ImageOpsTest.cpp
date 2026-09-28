@@ -168,6 +168,63 @@ TEST_F(ImageOpsTest, ClearsIntegerFormatColorImageUsingUint32) {
   vkDestroyImage(Device, Img, nullptr);
 }
 
+// (Roadmap L251) `A2B10G10R10_SINT_PACK32` has no `COLOR_ATTACHMENT_BIT`
+// feature on this device (so it can't use `createImage`'s helper, which
+// always requests that usage), but `vkCmdClearColorImage` may still
+// legally clear it -- a real CTS run found `unpackClearColorValue`
+// (`ImageOps.cpp`) misreading this format's own signed
+// `VkClearColorValue::int32` payload as `float32` bits instead, because
+// it mistakenly reused `isIntegerColorAttachmentFormat` (scoped to
+// attachment-capable formats only) rather than the broader
+// `isIntegerResourceFormat` to decide which union member to read.
+TEST_F(ImageOpsTest, ClearsSignedIntegerNonAttachmentFormatUsingInt32) {
+  VkImageCreateInfo Info{};
+  Info.imageType = VK_IMAGE_TYPE_2D;
+  Info.format = VK_FORMAT_A2B10G10R10_SINT_PACK32;
+  Info.extent = {2, 2, 1};
+  Info.mipLevels = 1;
+  Info.arrayLayers = 1;
+  Info.samples = VK_SAMPLE_COUNT_1_BIT;
+  Info.usage =
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &Info, nullptr, &Img), VK_SUCCESS);
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+  Allocations.push_back(Memory);
+
+  VkClearColorValue Color{};
+  Color.int32[0] = 51;    // R: 10 bits signed, in [-512, 511].
+  Color.int32[1] = -300;  // G.
+  Color.int32[2] = 153;   // B.
+  Color.int32[3] = -1;    // A: 2 bits signed, in [-2, 1].
+  VkImageSubresourceRange Range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+  ASSERT_FALSE(runClearColorImage(fromHandle<Image>(Img), Color, Range));
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X) {
+      const void *Ptr = fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, 0, 0);
+      uint32_t Bits = 0;
+      std::memcpy(&Bits, Ptr, sizeof(Bits));
+      int32_t R = (static_cast<int32_t>(Bits << 22)) >> 22;
+      int32_t G = (static_cast<int32_t>(Bits << 12)) >> 22;
+      int32_t B = (static_cast<int32_t>(Bits << 2)) >> 22;
+      int32_t A = (static_cast<int32_t>(Bits << 0)) >> 30;
+      EXPECT_EQ(R, 51);
+      EXPECT_EQ(G, -300);
+      EXPECT_EQ(B, 153);
+      EXPECT_EQ(A, -1);
+    }
+
+  vkDestroyImage(Device, Img, nullptr);
+}
+
 TEST_F(ImageOpsTest, RejectsOutOfRangeClearSubresource) {
   VkImage Img = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
   VkClearColorValue Color{};

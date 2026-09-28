@@ -500,6 +500,56 @@ constexpr bool isUnsignedIntegerColorAttachmentFormat(ResourceFormat Format) {
   }
 }
 
+/// Whether \p Format's own texel storage is an integer type (`_UINT`/
+/// `_SINT`), independent of whether it also happens to support
+/// `COLOR_ATTACHMENT_BIT` -- a strict superset of
+/// `isIntegerColorAttachmentFormat`'s own list above, additionally
+/// covering `R10G10B10A2_SINT` and `R32G32B32_{UINT,SINT}` (roadmap
+/// L251: a genuine attachment clear only ever targets an
+/// attachment-capable format already covered by
+/// `isIntegerColorAttachmentFormat`, but `vkCmdClearColorImage` clears an
+/// arbitrary image regardless of attachment support, and a real CTS run
+/// found `unpackClearColorValue`, `ImageOps.cpp`, misreading
+/// `R10G10B10A2_SINT`'s own `VkClearColorValue::int32` payload as
+/// `float32` bits by mistakenly reusing the attachment-scoped predicate
+/// for that decision -- `A2B10G10R10_SINT_PACK32` has no
+/// `COLOR_ATTACHMENT_BIT`/`INPUT_ATTACHMENT_BIT` feature bits on this
+/// device at all, so it was never going to be in
+/// `isIntegerColorAttachmentFormat`'s own list, but it is still a real
+/// integer-typed image any transfer command may legally clear/copy).
+/// Named separately from, not merged into,
+/// `isIntegerColorAttachmentFormat` itself, since that predicate's own
+/// callers (`Executor.cpp`, `Pipeline.h`, `RenderPass.cpp`) all
+/// specifically need "attachment-capable AND integer", not just
+/// "integer" -- widening it in place would silently change their own
+/// meaning too.
+constexpr bool isIntegerResourceFormat(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::R10G10B10A2_SINT:
+  case ResourceFormat::R32G32B32_UINT:
+  case ResourceFormat::R32G32B32_SINT:
+    return true;
+  default:
+    return isIntegerColorAttachmentFormat(Format);
+  }
+}
+
+/// The unsigned-integer half of `isIntegerResourceFormat`'s own formats
+/// above, the same broader-than-attachment-capable relationship
+/// `isIntegerResourceFormat` itself has to
+/// `isIntegerColorAttachmentFormat`. `R10G10B10A2_SINT` is signed (so
+/// stays out of this list, same as its
+/// `isUnsignedIntegerColorAttachmentFormat` sibling above already
+/// excludes it), and `R32G32B32_UINT` is the only additional entry
+/// beyond `isUnsignedIntegerColorAttachmentFormat`'s own list.
+constexpr bool isUnsignedIntegerResourceFormat(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::R32G32B32_UINT:
+    return true;
+  default:
+    return isUnsignedIntegerColorAttachmentFormat(Format);
+  }
+}
 
 /// Bits of `FemeDescriptor::Flags`.
 enum FemeDescriptorFlagBits : uint32_t {

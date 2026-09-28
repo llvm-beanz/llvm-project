@@ -30,8 +30,18 @@ using namespace llvm;
 std::array<double, 4>
 feme::vulkan::unpackClearColorValue(feme::cpu::ResourceFormat Format,
                                     const VkClearColorValue &Color) {
-  if (feme::cpu::isIntegerColorAttachmentFormat(Format)) {
-    if (feme::cpu::isUnsignedIntegerColorAttachmentFormat(Format))
+  // Roadmap L251: use the broader-than-attachment-capable
+  // `isIntegerResourceFormat` here, not `isIntegerColorAttachmentFormat`
+  // -- this function also backs `vkCmdClearColorImage` (`ImageOps.cpp`'s
+  // own `clearColorImageRanges`), which may target any image format,
+  // not just an attachment-capable one. Using the narrower,
+  // attachment-scoped predicate here previously misread
+  // `R10G10B10A2_SINT`'s (and would have misread `R32G32B32_{UINT,
+  // SINT}`'s) `VkClearColorValue::int32`/`uint32` payload as `float32`
+  // bits instead, since none of those three formats support
+  // `COLOR_ATTACHMENT_BIT` on this device.
+  if (feme::cpu::isIntegerResourceFormat(Format)) {
+    if (feme::cpu::isUnsignedIntegerResourceFormat(Format))
       return {static_cast<double>(Color.uint32[0]),
               static_cast<double>(Color.uint32[1]),
               static_cast<double>(Color.uint32[2]),
