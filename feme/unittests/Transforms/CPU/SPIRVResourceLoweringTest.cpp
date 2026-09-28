@@ -6891,6 +6891,40 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+// Roadmap L230: a plain (non-arrayed) storage `Cube` handle -- `Dim ==
+// DimCube == 3`, `Arrayed == 0` -- classifies as `ImageShape::Array2D`
+// (`classifyStorageImage2DHandle` folds `Cube` into `Array2D`, see its
+// own doc), and its own `imageSize(imageCube)` needs no face count
+// (always 6), so its codegen emits the same 2-component
+// `getdimensions.xy` opcode a plain 2D image's own bare `GetDimensions`
+// overload uses -- confirming widening that intrinsic's shape gate to
+// include `Array2D` (alongside the pre-existing `Plain2D`/`Array1D`)
+// correctly reuses `createGetDimensions2D` unchanged for this shape,
+// closing the `dEQP-VK.image.image_size.cube.*` CTS failures this
+// session discovered and root-caused.
+TEST(SPIRVResourceLoweringTest, LowersCubeStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main() {
+      %img = call target("spirv.Image", float, 3, 0, 0, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+          target("spirv.Image", float, 3, 0, 0, 0, 2, 1) %img)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 3, 0, 0, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+        target("spirv.Image", float, 3, 0, 0, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
+}
+
 // Roadmap H19d: a cube storage image (`Dim == DimCube == 3`) now
 // classifies as `HandleKind::StorageImage2D` with `ImageShape::Array2D`
 // (not a distinct `Cube` shape) -- confirmed via a real CTS shader dump

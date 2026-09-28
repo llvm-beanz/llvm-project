@@ -2193,8 +2193,8 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     if (!CI)
       return false;
 
-    // Roadmap L70/L227(c): a `Plain2D` or `Array1D` storage image's own
-    // `imageSize()` query (`OpImageQuerySize`) -- see
+    // Roadmap L70/L227(c)/L230: a `Plain2D` or `Array1D` storage image's
+    // own `imageSize()` query (`OpImageQuerySize`) -- see
     // `hasOnlySupportedImageUses`'s own identical check for why `Plain2D`
     // is accepted here; `Array1D` was added alongside it since
     // `RWTexture1DArray::GetDimensions(Width, Elements)` (no mip
@@ -2203,9 +2203,21 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     // lowering switch below) -- confirmed via a real `dxc -spirv`
     // reduction that it is the same `getdimensions.xy` opcode
     // `Texture2D`'s own bare `GetDimensions(Width, Height)` overload
-    // produces, disambiguated only by `Shape` here.
+    // produces, disambiguated only by `Shape` here. `Array2D` was added
+    // for roadmap `L230`: `classifyStorageImage2DHandle` folds a
+    // non-arrayed storage `Cube` handle into this same `Array2D` shape
+    // (see its own doc), and a plain cube's own `imageSize(imageCube)`
+    // needs no face count (always 6), so its codegen emits this same
+    // 2-component `getdimensions.xy` opcode, not the 3-component
+    // `getdimensions.xyz` a genuine arrayed 2D image's own `imageSize()`
+    // always uses instead (which needs the real element/layer count --
+    // see `isGetDimensions3Intrinsic` below) -- so accepting `Array2D`
+    // here can never accidentally also accept a real array image's own
+    // 2-component-result use, since a real array image's `imageSize()`
+    // never produces one.
     if (isGetDimensionsIntrinsic(*CI)) {
-      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array1D)
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array1D &&
+          Shape != ImageShape::Array2D)
         return false;
       continue;
     }
@@ -4821,7 +4833,7 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L70/L227(c): `OpImageQuerySize`
+      // Roadmap L70/L227(c)/L230: `OpImageQuerySize`
       // (`isGetDimensionsIntrinsic`, `llvm.spv.resource.getdimensions.xy`)
       // against a plain 2D image, or (storage images only,
       // `hasOnlySupportedStorageImageUses` already restricted this shape
@@ -4835,7 +4847,14 @@ void lowerImageAccesses(
       // `Array1D` case reuses `QuerySizeLod1DArray`'s own runtime call
       // with a synthesized constant `Lod = 0`, since a storage image has
       // exactly one mip level and its formula for that level is
-      // otherwise identical.
+      // otherwise identical. The `else` branch also now covers a plain
+      // (non-arrayed) storage `Cube` handle (roadmap `L230`,
+      // `classifyStorageImage2DHandle` folds it into this same `Array2D`
+      // `Shape` -- see `hasOnlySupportedStorageImageUses`'s own updated
+      // doc above): reusing `createGetDimensions2D` unchanged is already
+      // correct for it, since `imageSize(imageCube)`'s own 2-component
+      // result is identical in shape to a plain 2D image's, needing no
+      // face-count/array-layer component at all.
       if (isGetDimensionsIntrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         CallInst *NewCall;
