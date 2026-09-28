@@ -325,6 +325,35 @@ TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2SnormNegative) {
   EXPECT_NEAR(Unpacked[3], -1.0, 0.01);
 }
 
+// (Roadmap L251) `R10G10B10A2_SINT` (`VK_FORMAT_A2B10G10R10_SINT_PACK32`
+// maps onto this same `ResourceFormat`): same packed-word layout as
+// `R10G10B10A2_SNORM` above, but each field holds its raw signed integer
+// reference value (R/G/B in `[-512, 511]`, A in `[-2, 1]`) rather than a
+// normalized `[-1, 1]` fraction -- found via a real CTS `DeviceLost`,
+// `dEQP-VK.api.image_clearing.core.clear_color_image.1d.linear.
+// multiple_layers.a2b10g10r10_sint_pack32`.
+TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2SintNegative) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_SINT,
+                                   {511.0, -512.0, 0.0, -2.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ(Word & 0x3FF, 511u);          // R = 511
+  EXPECT_EQ((Word >> 10) & 0x3FF, 512u);  // G = -512 (as 10-bit two's complement)
+  EXPECT_EQ((Word >> 20) & 0x3FF, 0u);    // B = 0
+  EXPECT_EQ((Word >> 30) & 0x3, 0x2u);    // A = -2 (2-bit two's complement)
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R10G10B10A2_SINT, Texel,
+                               Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 511.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], -512.0, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], -2.0, 0.01);
+}
+
 
 // color's R/G/B components are ignored on pack and read back as `0` on
 // unpack.

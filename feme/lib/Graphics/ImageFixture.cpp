@@ -281,6 +281,23 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   // it (found via a real CTS hang, see those functions' own comments).
   case ResourceFormat::R10G10B10A2_SNORM:
     return FormatInfo{1, 4, false};
+  // (Roadmap L251) `R10G10B10A2_SINT`: same opaque single-packed-4-byte-
+  // word shape as `R10G10B10A2_UNORM`/`_UINT`/`_SNORM` above -- H19o only
+  // added this format's *name* (for diagnostics) without a `FormatInfo`
+  // entry, exactly the gap `L234` already closed for `_SNORM`; needed
+  // now that `packClearColor`/`unpackColor` gained real support for it
+  // below (found via a real CTS `DeviceLost`, `dEQP-VK.api.
+  // image_clearing.core.clear_color_image.1d.linear.multiple_layers.
+  // a2b10g10r10_sint_pack32`: this format already has a real
+  // `femeRTUnpackR10G10B10A2Sint`/`femeRTPackR10G10B10A2Sint` pair in
+  // the production shader-sampling runtime, `FeMeRuntimeCPU.c` -- only
+  // this test-fixture layer, reached by `vkCmdClearColorImage`'s own
+  // `getFixtureFormatElementSize`/`packClearColor` call chain, was
+  // missing support, previously hitting `getFormatInfo`'s `default` case
+  // and turning a normal transfer-usage clear into an unrecoverable
+  // fatal error instead of a `VkResult` failure or a graceful clear).
+  case ResourceFormat::R10G10B10A2_SINT:
+    return FormatInfo{1, 4, false};
   case ResourceFormat::E5B9G9R9_UFLOAT:
     // (Roadmap H8q) Also packed into a single opaque 4-byte word, the
     // same convention `R11G11B10_FLOAT` above uses -- see
@@ -1039,6 +1056,39 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  // (Roadmap L251) `R10G10B10A2_SINT`: the signed-integer sibling of
+  // `R10G10B10A2_UINT` above -- same packed-word layout and each field
+  // still holds its raw integer reference value, just over a signed
+  // range (R/G/B in `[-512, 511]`, A in `[-2, 1]`) rather than `_UINT`'s
+  // unsigned one. A direct `static_cast<uint32_t>` of a negative `double`
+  // is undefined behavior (unlike `_UINT`'s own unsigned-range clamp
+  // above), so this clamps/rounds through a signed `int32_t` first --
+  // the same two-step conversion `R10G10B10A2_SNORM`'s own `Norm10`/
+  // `Norm2` lambdas above already use -- before reinterpreting as
+  // unsigned and masking down to each field's own bit width (truncating
+  // a two's-complement value to its field width produces the same bit
+  // pattern regardless of signedness, the same
+  // `femeRTPackR10G10B10A2Sint` == `femeRTPackR10G10B10A2Uint`
+  // precedent `FeMeRuntimeCPU.c`'s own pack side already relies on).
+  if (Format == ResourceFormat::R10G10B10A2_SINT) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Comp10 = [](double V) -> uint32_t {
+      int32_t Signed = static_cast<int32_t>(std::clamp(V, -512.0, 511.0));
+      return static_cast<uint32_t>(Signed) & 0x3FFu;
+    };
+    auto Comp2 = [](double V) -> uint32_t {
+      int32_t Signed = static_cast<int32_t>(std::clamp(V, -2.0, 1.0));
+      return static_cast<uint32_t>(Signed) & 0x3u;
+    };
+    uint32_t Word = (Comp2(Clear[3]) << 30) | (Comp10(Clear[2]) << 20) |
+                    (Comp10(Clear[1]) << 10) | Comp10(Clear[0]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
   // (Roadmap H8q) `E5B9G9R9_UFLOAT`: a single packed 32-bit word, the
   // same "one opaque word, still a 4-logical-component clear color"
   // convention `R10G10B10A2_UNORM`'s own special case above uses, but
@@ -1782,6 +1832,34 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[1] = (Word >> 10) & 0x3FF;
     Out[2] = (Word >> 20) & 0x3FF;
     Out[3] = (Word >> 30) & 0x3u;
+    return Error::success();
+  }
+
+  // (Roadmap L251) `R10G10B10A2_SINT`: the inverse of `packClearColor`'s
+  // own raw-integer special case above -- unlike `R10G10B10A2_SNORM`'s
+  // own unpack (which divides by each field's scale after sign-
+  // extending), this reads each field's raw signed integer value
+  // directly (R/G/B in `[-512, 511]`, A in `[-2, 1]`), the same
+  // sign-extend-without-scaling shape `femeRTUnpackR10G10B10A2Sint`
+  // (`FeMeRuntimeCPU.c`) already uses for the production sampling path.
+  if (Format == ResourceFormat::R10G10B10A2_SINT) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    auto SignExtend10 = [](uint32_t Field) -> double {
+      return static_cast<double>(static_cast<int32_t>(Field << 22) >> 22);
+    };
+    auto SignExtend2 = [](uint32_t Field) -> double {
+      return static_cast<double>(static_cast<int32_t>(Field << 30) >> 30);
+    };
+    Out[0] = SignExtend10(Word & 0x3FF);
+    Out[1] = SignExtend10((Word >> 10) & 0x3FF);
+    Out[2] = SignExtend10((Word >> 20) & 0x3FF);
+    Out[3] = SignExtend2((Word >> 30) & 0x3);
     return Error::success();
   }
 
