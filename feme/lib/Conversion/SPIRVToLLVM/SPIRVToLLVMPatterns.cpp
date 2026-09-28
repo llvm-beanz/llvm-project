@@ -8560,6 +8560,42 @@ public:
   }
 };
 
+/// Converts an `AtomicUpdateOp`-shaped `spirv.AtomicIIncrement`/
+/// `spirv.AtomicIDecrement` (roadmap L247) into an `llvm.atomicrmw` of the
+/// given `BinOp` kind against a materialized integer-typed `1` -- unlike
+/// `AtomicRMWPattern`'s own `AtomicUpdateWithValueOp` shape, `AtomicUpdateOp`
+/// has no `value` operand at all (SPIR-V defines the increment/decrement
+/// amount as an implicit, fixed 1, not an explicit operand), so there is no
+/// `Adaptor.getValue()` to forward here. Reuses every existing
+/// `AtomicAdd*`/`AtomicSub*` `SPIRVResourceLowering.cpp`/`ImageCalls`/
+/// runtime entry point roadmap L244 already widened across every storage-
+/// image shape: those layers only ever see the resulting `atomicrmw add`/
+/// `sub`, indistinguishable from an explicit `OpAtomicIAdd`/`OpAtomicISub`
+/// whose `value` happens to be 1.
+template <typename SPIRVOpTy, mlir::LLVM::AtomicBinOp BinOp>
+class AtomicIncDecPattern : public mlir::SPIRVToLLVMConversion<SPIRVOpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<SPIRVOpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::LLVM::AtomicOrdering Ordering =
+        convertAtomicOrdering(Op.getSemantics());
+    mlir::Value One =
+        mlir::LLVM::ConstantOp::create(Rewriter, Op.getLoc(), ResultType, 1);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::AtomicRMWOp>(
+        Op, BinOp, Adaptor.getPointer(), One, Ordering);
+    return mlir::success();
+  }
+};
+
+
 /// Converts `spirv.AtomicCompareExchange` into an `llvm.cmpxchg` plus the
 /// `extractvalue` picking out the *old* value -- SPIR-V's own result is
 /// always the value that was in memory before the swap, whether or not the
@@ -15564,6 +15600,13 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                        mlir::LLVM::AtomicBinOp::umin>,
       AtomicRMWPattern<mlir::spirv::AtomicExchangeOp,
                        mlir::LLVM::AtomicBinOp::xchg>,
+      // Roadmap L247: `AtomicIIncrement`/`AtomicIDecrement` have no
+      // `AtomicRMWPattern`-compatible `value` operand -- see
+      // `AtomicIncDecPattern`'s own doc.
+      AtomicIncDecPattern<mlir::spirv::AtomicIIncrementOp,
+                          mlir::LLVM::AtomicBinOp::add>,
+      AtomicIncDecPattern<mlir::spirv::AtomicIDecrementOp,
+                          mlir::LLVM::AtomicBinOp::sub>,
       BitFieldInsertPattern, BitFieldSExtractPattern, BitFieldUExtractPattern,
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,

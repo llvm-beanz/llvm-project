@@ -84,6 +84,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// -----
+
+// Roadmap L247: `spirv.AtomicIIncrement`/`spirv.AtomicIDecrement` have no
+// `value` operand at all (SPIR-V defines each as an implicit +1/-1) --
+// confirm each converts into an `llvm.atomicrmw add`/`sub` against a
+// materialized `i32 1`, indistinguishable downstream from an explicit
+// `spirv.AtomicIAdd`/`AtomicISub` whose value happens to be 1.
+
+// CHECK-LABEL: llvm.func @atomic_inc_dec
+// CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"
+// CHECK: %[[ONE_INC:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.atomicrmw add %[[PTR]], %[[ONE_INC]] seq_cst : !llvm.ptr, i32
+// CHECK: %[[ONE_DEC:.*]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: llvm.atomicrmw sub %[[PTR]], %[[ONE_DEC]] seq_cst : !llvm.ptr, i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>
+  spirv.func @atomic_inc_dec(%coord : vector<2xi32>) -> i32 "None" {
+    %zero = spirv.Constant 0 : i32
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>
+    %1 = spirv.ImageTexelPointer %0, %coord, %zero : !spirv.ptr<!spirv.image<i32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, R32i>, UniformConstant>, vector<2xi32>, i32 -> !spirv.ptr<i32, Image>
+    %2 = spirv.AtomicIIncrement <Device> <None> %1 : !spirv.ptr<i32, Image>
+    %3 = spirv.AtomicIDecrement <Device> <None> %1 : !spirv.ptr<i32, Image>
+    spirv.ReturnValue %3 : i32
+  }
+}
+
+// -----
+
 // Roadmap H19g's own multisampled-2D `Sample` widening applies to
 // `ImageTexelPointer`'s coordinate the same way it already applies to
 // `ImageRead`/`ImageWrite` (spirv-to-llvm-image-access-multisample.mlir).
