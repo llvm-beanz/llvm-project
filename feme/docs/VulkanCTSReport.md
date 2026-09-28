@@ -3028,3 +3028,53 @@ unit tests over `L243`'s 3364).
 needed -- both `VK_EXT_pipeline_creation_cache_control` and
 `VK_KHR_maintenance5` were already advertised; this is a correctness fix
 to existing flag/behavior handling, not a new extension landing.
+
+## Roadmap L232: storage `CubeArray` `GetDimensions` `/6` fix -- closes `L230`'s remaining gap
+
+Added `ImageShape::StorageCubeArray`, distinct from `Array2D` purely so
+`GetDimensions`/`imageSize()` can apply the same `/6` face-count
+correction the *sampled*-image `CubeArray` shape already gets --
+`classifyStorageImage2DHandle` now splits a storage `Dim::Cube` handle
+on `Arrayed` (a plain, non-arrayed cube still folds into `Array2D`
+unchanged, since its element count is always exactly 6). Both
+`GetDimensions`-family lowering sites (`isGetDimensions3Intrinsic`'s
+bare query, `isQuerySizeLodCall`'s explicit-Lod query) now route
+`StorageCubeArray` to the existing `createQuerySizeLodCubeArray`
+builder/`femeCpuImageGetDimensionsLodCubeArrayV3I32` runtime call
+already used for the sampled-image case -- no new runtime division
+logic was needed at all, just correct routing to already-correct,
+already-existing machinery. Every storage fetch/store-addressing
+switch site in `lowerImageAccesses` (the coordinate-width calculation,
+the coordinate-assembly ternary, and the `Load`/`Store` switches) also
+gained an identical `StorageCubeArray` case alongside `Array2D`'s own,
+confirming the addressing really is unchanged (a genuine cube array's
+"layer" coordinate component is simply an already-flattened `layer * 6
++ face` value, same as before this fix).
+
+Real CTS: `dEQP-VK.image.image_size.cube_array.*` now **12/12 Pass**
+(up from 0/12 Pass -- all 12 previously failed with a wrong,
+undivided value, e.g. `readonly_1x1x12` returned `(1, 1, 12)` instead
+of the expected `(1, 1, 2)`). A follow-up 772-case
+`dEQP-VK.image.load_store.*cube*` regression sample matches `L230`'s
+own prior baseline exactly (648 Pass, 0 Fail, 124 NotSupported) --
+confirming zero regressions to the already-passing storage-cube
+load/store addressing this fix's new switch cases touch.
+
+2 new unit tests: `SPIRVResourceLoweringTest.
+LowersCubeArrayStorageImageGetDimensions` (bare, Lod-less query) and
+`LowersCubeArrayStorageImageQuerySizeLod` (explicit-Lod query), both
+confirming a genuine storage cube-array handle now reaches
+`createQuerySizeLodCubeArray` rather than the previous, wrong
+`createQuerySizeLod2DArray`/`createQuerySizeLod2D` dispatch.
+
+`ninja check-feme`: 3370 Passed, 61 Unsupported, 0 Failed (+2 net new
+unit tests over `L241`'s 3368).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is a core-1.0 `imageSize()`/`GetDimensions` correctness
+fix, not a new feature or extension.
+
+No design-document deviation -- `FeMeVulkanDesign.md`/`FeMeCPUDesign.md`
+do not document `ImageShape`'s internal enumerators at this level of
+detail (that lives only in `SPIRVResourceLowering.cpp`'s own code
+comments), so there was nothing stale to update there.
