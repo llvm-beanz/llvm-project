@@ -3662,21 +3662,26 @@ TEST_F(GraphicsPipelineTest, AcceptsTessellationPipelineWithEmptyVertexShader) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap H4h: without a tessellation-evaluation stage, an empty vertex
-/// shader is still rejected -- the ordinary vertex -> fragment pipeline has
-/// no other producer of a rasterizer-visible position, so the pre-existing
-/// `SV_Position` requirement on the vertex stage is unaffected by this
-/// milestone's tessellation-specific relaxation.
-TEST_F(GraphicsPipelineTest, RejectsEmptyVertexShaderWithoutTessellation) {
+/// Roadmap L238: without a tessellation-evaluation stage, an empty vertex
+/// shader (no stage-IO globals at all, so it writes no `SV_Position`) is
+/// still accepted -- the Vulkan spec only leaves the clip/rasterization
+/// position *undefined* when the last pre-rasterization stage's interface
+/// omits it (Shader Interfaces, "Position"), it does not make pipeline
+/// creation fail. This was previously (incorrectly) rejected with "vertex
+/// stage does not write a 4-component SV_Position output"; the executor's
+/// own `RasterizePrimitives` already resolves the "undefined position"
+/// case by rasterizing nothing for the pipeline's draws, exactly like
+/// `dEQP-VK.pipeline.monolithic.no_position.*`'s own real shape.
+TEST_F(GraphicsPipelineTest, AcceptsEmptyVertexShaderWithoutTessellation) {
   VkShaderModule Vertex = createModule(EmptyVertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
 
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
 
   VkPipeline Handle = VK_NULL_HANDLE;
-  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
-  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
 
+  vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }

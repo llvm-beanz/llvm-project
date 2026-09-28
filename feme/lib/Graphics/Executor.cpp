@@ -2051,11 +2051,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // per-primitive output at all -- e.g. the `properties.*_payload_size`/
   // `*_shared_memory_size` CTS cases' `SetMeshOutputsEXT(0, 0)`-only
   // bodies, which only ever write to a bound storage buffer) can never
-  // contribute a single vertex to the rasterizer, exactly like
-  // `GSEmitsWithoutAttributes` above -- but, unlike that early return,
-  // this must *not* itself skip the mesh (and, if bound, task) stage's
-  // own dispatch below: a mesh entry can have side effects (that same
-  // storage-buffer write) that must still run on every dispatched
+  // contribute a single vertex to the rasterizer, exactly like a geometry
+  // stage that emits real primitives but writes no per-vertex attributes
+  // on any of them (see the comment just above) -- but, unlike that early
+  // return, this must *not* itself skip the mesh (and, if bound, task)
+  // stage's own dispatch below: a mesh entry can have side effects (that
+  // same storage-buffer write) that must still run on every dispatched
   // invocation even though nothing it does ever reaches the rasterizer.
   // This was previously handled by an unconditional early
   // `return Error::success()` here, which happened to be correct only by
@@ -2068,7 +2069,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // every one of its invocations' writes is the root cause of
   // `dEQP-VK.mesh_shader.ext.properties.*_payload_size`/
   // `*_shared_memory_size`'s "Unexpected shared memory result: 0".
-  bool MeshEmitsWithoutAttributes = MeshSig && MeshSig->Elements.empty();
 
   const SignatureElement *VSPosition = findElement(
       RasterSig, SignatureDirection::Output, SignatureSystemValue::Position);
@@ -2131,26 +2131,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // rasterize with, so `RasterizePrimitives` bails out immediately after
   // counting rather than dereferencing a null `VSPosition`.
   //
-  // (Roadmap H101b) A `rasterizerDiscardEnable` pipeline (`RasterState::
-  // DiscardEnable`) never reaches clipping/rasterization at all --
-  // `RasterizePrimitives` itself already bails out immediately whenever
-  // either `!VSPosition` or `DiscardEnable` is true (see its own two
-  // early returns just above its `vertexAt` lambda) -- so requiring a
-  // `SV_Position` output here, before this function even gets that far,
-  // is unnecessarily strict for such a pipeline. A pure `VK_EXT_
-  // transform_feedback`-capture pipeline legally has no fragment stage
-  // and no `gl_Position` write at all (its last pre-rasterization stage,
-  // often a geometry entry, only writes the captured varying block) --
-  // exactly `dEQP-VK.transform_feedback.fuzz.random_geometry.
-  // all_instance_array.75`'s own shape, confirmed via a real `deqp-vk`
-  // run with `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
-  bool GSEmitsWithoutAttributes = GSSig && GSSig->Elements.empty();
-  if (!VSPosition && !GSEmitsWithoutAttributes && !MeshEmitsWithoutAttributes &&
-      !Pipeline.getRasterState().DiscardEnable)
-    return createStringError(inconvertibleErrorCode(),
-                             "the last pre-rasterization stage does not "
-                             "write an SV_Position output; the executor "
-                             "cannot clip/rasterize without one");
+  // (roadmap L238) That same graceful `RasterizePrimitives`-side bail-out
+  // (`if (!VSPosition) return Error::success();`, just above its
+  // `vertexAt` lambda) now runs for *any* pipeline missing `SV_Position`
+  // entirely, not just these two special cases: per the Vulkan spec,
+  // omitting the last pre-rasterization stage's `SV_Position`/
+  // `gl_Position` output is always legal (the position used for
+  // clipping/rasterization is simply undefined), so there is no longer a
+  // hard error here at all -- only a genuinely malformed one (written,
+  // but the wrong component count) still is, below. `dEQP-VK.pipeline.
+  // monolithic.no_position.*`'s own real shape (any subset of the
+  // pre-rasterization chain may legally omit writing position) is exactly
+  // this case: its own fragment shader always outputs the same color as
+  // the render target's clear color regardless of whether -- or where --
+  // any triangle is ever rasterized, so this executor's own choice to
+  // rasterize nothing at all for such a pipeline (rather than committing
+  // to a compliant but unnecessary substitute position value) is a
+  // legal, if arbitrary, resolution of that "undefined" language.
   if (VSPosition && VSPosition->ComponentCount != 4)
     return createStringError(inconvertibleErrorCode(),
                              "SV_Position output must have 4 components");
@@ -2658,13 +2655,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                          : AbsPointIndices.size())
               : AbsTriIndices.size() + AbsLineIndices.size();
 
-    // (roadmap H21d) No `VSPosition` means the last pre-rasterization
-    // stage is a geometry stage that emits real primitives but writes no
-    // per-vertex attributes at all (see the `GSEmitsWithoutAttributes`
-    // relaxation above) -- there is no meaningful clip-space position to
-    // transform or bin with, so every one of this call's own primitives
-    // has already been counted above and contributes no pixels, exactly
-    // as if it clipped away entirely.
+    // (roadmap H21d, widened by roadmap L238) No `VSPosition` means the
+    // last pre-rasterization stage never wrote `SV_Position`/
+    // `gl_Position` at all -- legal per the Vulkan spec for any pipeline
+    // (see `validateStageInterfaces`'s own updated comment,
+    // `GraphicsPipeline.cpp`), not just the geometry-emits-without-
+    // attributes/mesh-emits-without-attributes special cases this early
+    // return originally covered -- there is no meaningful clip-space
+    // position to transform or bin with, so every one of this call's own
+    // primitives has already been counted above and contributes no
+    // pixels, exactly as if it clipped away entirely.
     if (!VSPosition)
       return Error::success();
 

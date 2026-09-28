@@ -690,30 +690,23 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// runs after tessellation, and its own emitted vertices -- not the domain
 /// stage's per-domain-point ones -- are what `Executor::executeDraws`
 /// (roadmap H5d) actually clips/interpolates/rasterizes.
-/// \p RasterizerDiscardEnable (roadmap H101b) is the pipeline's own
-/// `rasterizerDiscardEnable` (`translateRasterState`'s `RasterState::
-/// DiscardEnable`): when `true`, nothing this pipeline draws ever reaches
-/// the rasterizer, clipper, or viewport transform at all -- there is no
-/// real position for any stage to compute -- so the `SV_Position`
-/// requirement below is skipped entirely, the same way \p FragmentStage
-/// being `nullptr` already skips every fragment-side check further down.
-/// A pure transform-feedback-capture pipeline (e.g.
-/// `dEQP-VK.transform_feedback.fuzz.random_geometry.*`'s own geometry-only
-/// shape: a geometry entry that only writes a captured varying block, no
-/// `gl_Position`, paired with no fragment shader at all) sets exactly this
-/// combination, confirmed via a real `deqp-vk` run with
-/// `FEME_VULKAN_LOG_CREATION_ERRORS=1` against
-/// `all_instance_array.75` (the CTS's own `makeGraphicsPipeline` helper
-/// sets `rasterizerDiscardEnable = (fragmentShaderModule == VK_NULL_
-/// HANDLE)`, so this pipeline's own creation info already asked for
-/// exactly this).
+///
+/// (roadmap L238) This function no longer takes a `RasterizerDiscardEnable`
+/// parameter: the "does every pre-rasterization chain write `SV_Position`"
+/// requirement it used to gate (skipped for a `rasterizerDiscardEnable`
+/// pipeline, which never reaches the rasterizer at all -- a pure
+/// `VK_EXT_transform_feedback`-capture pipeline, e.g. `dEQP-VK.
+/// transform_feedback.fuzz.random_geometry.all_instance_array.75`, sets
+/// exactly this combination) no longer exists at all: omitting
+/// `SV_Position`/`gl_Position` entirely is legal per the Vulkan spec for
+/// any pipeline, `rasterizerDiscardEnable` or not (see the comment on
+/// `Position`'s own check below).
 Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                               const feme::cpu::CompiledStage *FragmentStage,
                               const feme::cpu::CompiledStage *DomainStage,
                               const feme::cpu::CompiledStage *GeometryStage,
                               llvm::ArrayRef<AttachmentFormat> ColorAttachments,
-                              llvm::ArrayRef<VertexInputAttribute> Attributes,
-                              bool RasterizerDiscardEnable) {
+                              llvm::ArrayRef<VertexInputAttribute> Attributes) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
@@ -750,18 +743,36 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
   // `EndPrimitive`) has no output signature to speak of: SPIR-V only lists
   // an entry point's *used* interface variables, so an unwritten
   // `gl_Position` simply never appears at all -- `PositionSig.Elements` is
-  // empty, not just missing `Position`. Nothing is ever rasterized from
-  // such a stage regardless of whether it wrote a position, so this is
-  // legal, unlike a geometry stage that writes some other output (a
-  // varying) but genuinely forgets `gl_Position`, which is still rejected
-  // below.
+  // empty, not just missing `Position`.
   bool GeometryNeverWrites = GeometryStage && PositionSig.Elements.empty();
-  if (!RasterizerDiscardEnable && !GeometryNeverWrites &&
-      (!Position || Position->ComponentCount != 4))
+  // (roadmap L238) The last pre-rasterization stage not writing
+  // `SV_Position`/`gl_Position` at all is legal per the Vulkan spec ("If
+  // the last vertex processing stage shader entry point's interface does
+  // not include a variable decorated with Position, the ... position ...
+  // are undefined for each vertex" -- core spec section 15.1, "Shader
+  // Interfaces") -- not a pipeline-creation failure, unlike this session's
+  // prior narrower `GeometryNeverWrites`/`RasterizerDiscardEnable`-gated
+  // exemptions, which only covered the two cases this ICD's own executor
+  // previously knew how to skip rasterizing gracefully at draw time
+  // without dereferencing a null position (`Executor.cpp`'s
+  // `RasterizePrimitives`, `if (!VSPosition) return Error::success();`).
+  // That same graceful skip now runs unconditionally whenever `Position`
+  // is absent, not just for those two -- `dEQP-VK.pipeline.monolithic.
+  // no_position.*`'s own real shape (any subset of the pre-rasterization
+  // chain may legally omit writing position; its own fragment shader
+  // always outputs the same color as the render target's clear color
+  // regardless, so no rasterized pixel, however placed, ever changes the
+  // final image, and the test only additionally checks per-stage
+  // invocation counts via SSBO atomics -- unaffected by whether this
+  // stage's own output ever reaches the rasterizer). A *malformed*
+  // `Position` -- one genuinely written, but with the wrong component
+  // count -- remains a hard creation-time error below: unlike an entirely
+  // absent one, the executor has no graceful fallback for that shape at
+  // all.
+  if (Position && Position->ComponentCount != 4)
     return createStringError(
         inconvertibleErrorCode(),
-        "%s stage does not write a 4-component "
-        "SV_Position output",
+        "%s stage's SV_Position output must have 4 components",
         GeometryStage ? "geometry"
                       : (DomainStage ? "tessellation evaluation" : "vertex"));
 
@@ -2482,7 +2493,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
             GeometryStageCompiled.get(), ColorAttachments,
-            VertexAttributes, RasterizerDiscardEnable))
+            VertexAttributes))
       return std::move(E);
   }
 
