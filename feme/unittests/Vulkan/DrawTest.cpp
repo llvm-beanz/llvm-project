@@ -815,7 +815,18 @@ protected:
     uint32_t Count = 1;
     ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
               VK_SUCCESS);
+    // (Roadmap L228(h)/(i)) A real `VkQueue` object -- not merely an
+    // ignored parameter, as it was before this change -- backs every
+    // `vkGetDeviceQueue` handle now, so (as the spec has always required)
+    // family 0 must actually be requested here.
+    float Priority = 1.0f;
+    VkDeviceQueueCreateInfo QueueInfo{};
+    QueueInfo.queueFamilyIndex = 0;
+    QueueInfo.queueCount = 1;
+    QueueInfo.pQueuePriorities = &Priority;
     VkDeviceCreateInfo DevInfo{};
+    DevInfo.queueCreateInfoCount = 1;
+    DevInfo.pQueueCreateInfos = &QueueInfo;
     ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
     vkGetDeviceQueue(Device, 0, 0, &Queue);
 
@@ -1097,7 +1108,14 @@ protected:
     VkSubmitInfo Submit{};
     Submit.commandBufferCount = 1;
     Submit.pCommandBuffers = &Cmd;
-    return vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE);
+    VkResult Result = vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE);
+    if (Result != VK_SUCCESS)
+      return Result;
+    // (Roadmap L228(h)/(i)) `vkQueueSubmit` no longer executes the
+    // command buffer synchronously in-call -- every caller below reads
+    // back rendered results immediately afterward, so wait for the
+    // queue's own background worker thread to actually finish first.
+    return vkQueueWaitIdle(Queue);
   }
 
   /// Texel (X, Y) of \p Img, as four bytes -- any 4-byte-per-texel color
@@ -2132,7 +2150,7 @@ TEST_F(DrawTest, RejectsIndexRangeBeyondBindIndexBuffer2Size) {
   vkCmdDrawIndexed(Cmd, 3, 1, 0, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyBuffer(Device, IndexBuffer, nullptr);
   vkFreeMemory(Device, IndexMemory, nullptr);
@@ -2203,7 +2221,7 @@ TEST_F(DrawTest, RejectsIndexedDrawWithNoIndexBufferBoundAtAll) {
   vkCmdDrawIndexed(Cmd, 0, 1, 0, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -2840,7 +2858,7 @@ TEST_F(DrawTest, RejectsDrawOutsideRenderPass) {
   ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
   vkCmdDraw(Cmd, 3, 1, 0, 0);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 }
 
 /// An indirect draw reads its `VkDrawIndirectCommand` from a bound buffer,
@@ -2930,7 +2948,7 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
   vkCmdDrawIndirect(Cmd, Indirect, 0, 2, sizeof(VkDrawIndirectCommand));
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkResetCommandBuffer(Cmd, 0);
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
@@ -2938,7 +2956,7 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
   vkCmdDrawIndirect(Cmd, Indirect, 0, 1, 4);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyBuffer(Device, Indirect, nullptr);
   vkFreeMemory(Device, Memory, nullptr);
@@ -3058,7 +3076,7 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectMeshTasksDraw) {
                                 sizeof(VkDrawMeshTasksIndirectCommandEXT));
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyBuffer(Device, Indirect, nullptr);
   vkFreeMemory(Device, Memory, nullptr);
@@ -3122,7 +3140,7 @@ TEST_F(DrawTest, DrawMeshTasksRejectsANonMeshPipeline) {
   vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -3137,7 +3155,7 @@ TEST_F(DrawTest, DrawMeshTasksWithoutBoundPipelineFails) {
   vkCmdDrawMeshTasksEXT(Cmd, 1, 1, 1);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 }
 
 /// An indexed draw whose index range overruns its bound index buffer is
@@ -3157,7 +3175,7 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
   vkCmdDrawIndexed(Cmd, 6, 1, 0, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyBuffer(Device, IndexBuffer, nullptr);
   vkFreeMemory(Device, Memory, nullptr);
@@ -5509,7 +5527,7 @@ TEST_F(DrawTest, RenderingAttachmentLocationsRejectedOutsideDynamicRendering) {
   vkCmdDraw(Cmd, 3, 1, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -5556,7 +5574,7 @@ TEST_F(DrawTest, RenderingAttachmentLocationsRejectsMismatchedCount) {
   vkCmdDraw(Cmd, 3, 1, 0, 0);
   vkCmdEndRenderingKHR(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
@@ -5663,7 +5681,7 @@ TEST_F(DrawTest, RenderingAttachmentLocationsRejectsDuplicateMapping) {
   vkCmdDraw(Cmd, 3, 1, 0, 0);
   vkCmdEndRenderingKHR(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
