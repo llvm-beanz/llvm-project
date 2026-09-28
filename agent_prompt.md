@@ -61,27 +61,21 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, new roadmap item, ready to pick up)** `L249`:
-   `dEQP-VK.pipeline.fast_linked_library.depth.depth_only.
-   subpasses_postpass` genuine `DeviceLost`. Start with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` or a debug build to find where
-   execution actually stalls/faults before the fence-wait timeout --
-   this is a hang/crash, not a wrong-value bug, so standard qpa-level
-   diffing won't help; needs a runtime-level trace.
+1. **(unknown, new roadmap item, ready to pick up)** `L250`:
+   `dEQP-VK.pipeline.fast_linked_library.multisample.
+   compatible_render_pass.dynamic` genuine `DeviceLost`. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` first (this session's own L249
+   lesson), then check whether it's another
+   `synthesizeLinkedGraphicsPipelineCreateInfo`/GPL-linking gap before
+   assuming a new root cause.
 2. **(a few hours, still carried over, unchanged for many sessions)**
    Pick one of `L227(d)` (3 `Graphics/MeshShaders/*`
    image-comparison failures) or `L228(b)`/`(c)` (compressed-format
    blits, MSAA multi-layer clears).
-3. **(a few hours, partially addressed this session, still open)**
-   `L228(e)`/`(f)`: this session's own 1-in-200 `pipeline.*` sample
-   (~5797 cases) is a real start, but `shader_render` and most of
-   `pipeline`'s other sub-suites (only `depth.*` was deep-dived) remain
-   unsampled at any real scale -- worth a dedicated wider pass.
-4. **(worth 15 minutes, new roadmap item, carried over)** `L245`:
-   pre-existing 65-case `sampleCounts` mismatch bucket in
-   `api.info.image_format_properties*`. Filed several sessions ago,
-   still untouched.
-5. **(a few hours, new roadmap item, carried over)** `L246`:
-   `dEQP-VK.image.mutable.{2d,2d_array}.*` (72 cases)
-   `vkCreateFramebuffer` gap. Filed several sessions ago, still
-   untouched.
+3. **(a few hours, still overdue)** `L228(e)`/`(f)`: widen the
+   broader-than-tessellation CTS sample further -- `shader_render` and
+   most of `pipeline`'s other sub-suites remain unsampled at any real
+   scale.
+4. **(a few hours, still carried over)** `L246`: `dEQP-VK.image.
+   mutable.{2d,2d_array}.*` (72 cases) `vkCreateFramebuffer` gap.
+   Filed several sessions ago, still untouched.
