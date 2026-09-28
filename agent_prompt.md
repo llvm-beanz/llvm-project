@@ -61,26 +61,30 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** `L228(j)`: fix the descriptor
-   update-after-bind race disclosed above. Start with a new
-   `DescriptorTest.cpp` test that exercises the race directly (likely
-   needs a thread-sanitizer build to reproduce reliably, not a
-   timing-dependent assertion) before writing the fix. Fix itself:
-   lock `DescriptorSet`'s state, have `CommandBuffer.cpp` read copies
-   instead of live `ArrayRef`s.
-2. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)`
-   (still open, unchanged for several sessions now) or `L228(b)`/`(c)`
+1. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)`
+   (still open, unchanged for several sessions) or `L228(b)`/`(c)`
    (compressed-format blits, MSAA multi-layer clears) -- whichever fits
-   the next session's time budget.
-3. **(a few hours)** `L228(e)`/`(f)`: the broader-than-tessellation CTS
-   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is now
-   several sessions overdue -- this session's own CTS work stayed
-   scoped to `timeline_semaphore` only (the two target clusters plus a
-   3500-case broader sample of that same cluster, not the wider
-   surface).
-4. **(quick, at the very start of the next session)** Re-check
+   the next session's time budget. These are the largest remaining
+   untriaged/unfixed clusters from the original broad `L228` sample.
+2. **(a few hours)** The broader-than-tessellation CTS re-run
+   (`api`/`pipeline`/`shader_render`/`synchronization`) is now several
+   sessions overdue -- every recent session's CTS work has stayed
+   scoped to whatever cluster it was fixing (`timeline_semaphore`,
+   `binding_model`), not the wider, still-mostly-unsampled surface
+   `L228(e)`/`(f)` call out.
+3. **(quick, at the very start of the next session)** Re-check
    `offload-test-suite`'s local `feme` branch before trusting
-   `check-hlsl-feme-vk` exists -- `git log --oneline feme -3` should
-   show `adf0fc1` at the tip (confirmed still there this session); if
-   it's back at `main`'s own tip, `git reset --hard adf0fc1` restores
-   it.
+   `check-hlsl-feme-vk` exists -- it has now drifted back to `main`'s
+   tip at least twice across recent sessions. `git log --oneline feme
+   -3` should show `adf0fc1` at the tip; if not, `git reset --hard
+   adf0fc1` restores it (no re-cherry-pick needed).
+4. **(optional, no urgency)** Now that `L228(j)`'s fix has landed with
+   0 CTS coverage of its own race, it might be worth a future session
+   writing a *second*, more end-to-end regression test that goes
+   through a real `VkQueue`/`QueueExecutor` submission racing a real
+   `vkUpdateDescriptorSets` (rather than calling `DescriptorSet`'s
+   methods directly), to also guard against a future refactor of the
+   `QueueExecutor`/`CommandBuffer` dispatch path reintroducing the same
+   class of bug in a different shape. Not urgent -- the current test
+   already gives strong, fast-running coverage of the actual race
+   condition itself.
