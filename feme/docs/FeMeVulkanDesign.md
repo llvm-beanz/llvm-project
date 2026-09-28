@@ -1831,11 +1831,21 @@ unimplemented, deferred to roadmap F12's `pushDescriptor` groundwork.
 
 ## Queues, Scheduling, and Synchronization
 
-Each `VkQueue` is an ordered stream. The first implementation may use one
-dedicated executor thread per queue, or execute submissions synchronously in
-`vkQueueSubmit`; the dedicated executor is preferred because Vulkan fences and
-semaphores should not require the submitting application thread to perform all
-work.
+Each `VkQueue` is an ordered stream. (Roadmap `L228(h)`/`L228(i)`) Each queue
+owns a dedicated `QueueExecutor` worker thread (`Sync.h`/`Sync.cpp`,
+`Objects.h`'s `Queue`): `vkQueueSubmit`/`vkQueueSubmit2` parse each
+submission's waits/command buffers/signals on the calling thread (reading only
+caller-supplied structs and already-existing objects, so this is safe without
+touching shared mutable state), enqueue one task per `VkSubmitInfo`/
+`VkSubmitInfo2` onto that queue's own worker thread, and return immediately --
+never blocking the calling thread on an unmet wait. This is required, not
+merely preferred: a submission chain shaped like
+`dEQP-VK.synchronization*.timeline_semaphore.{one_to_n,wait_before_signal}`
+submits a whole dependent chain up front across one or more queues, releasing
+it later with a single host `vkSignalSemaphore` call from the same thread that
+issued every `vkQueueSubmit` in the chain. A driver whose `vkQueueSubmit`
+blocks in-call on an unmet wait can never reach that releasing call and
+deadlocks outright.
 
 Within a dispatch, independent workgroups can run on the device worker pool.
 Each workgroup receives private groupshared storage. Commands before and after
@@ -1844,12 +1854,18 @@ the dispatch remain ordered according to the queue and barrier model.
 The scheduling layers are therefore:
 
 ```text
-queue order
+queue order (each queue's own QueueExecutor worker thread, FIFO)
   -> submission order
     -> command-buffer order
       -> command order
         -> parallel workgroups within one dispatch
 ```
+
+A single queue's own worker thread processes its FIFO task queue strictly in
+order, so any submission sequence that only ever uses one `VkQueue` observes
+bit-for-bit identical ordering to a synchronous implementation -- only genuinely
+multi-queue scenarios, where two independent worker threads run concurrently,
+are behaviorally new versus the retired synchronous-execution model.
 
 For the initial coherent host-memory device, many cache operations collapse to
 compiler fences and task dependencies, but Vulkan execution dependencies still
@@ -1877,31 +1893,42 @@ condition variable:
 
 The queue executor waits without holding object-global locks needed by another
 queue to signal. Device loss is latched once: subsequent queue/device operations
-return `VK_ERROR_DEVICE_LOST`, and all pending host waits are awakened.
+return `VK_ERROR_DEVICE_LOST`, and all pending host waits are awakened (in
+practice, "awakened" means each blocked wait's own bounded safety-net timeout,
+below, eventually re-checks `isLost()` -- there is no separate immediate
+broadcast-wake channel, judged an acceptable simplification since the safety
+net already bounds every wait's worst-case latency).
 
-Only timeline semaphores actually need the mutex/condition-variable machinery
-above: core Vulkan gives fences, binary semaphores, and events no host-facing
-signal API at all, so under this driver's single-queue synchronous execution
-model they can only ever be signaled by a prior, already-completed submission
-in program order -- an unprotected, non-blocking check suffices and stays
-correct. A timeline semaphore, by contrast, can genuinely be signaled by a real,
-independently running host thread via `vkSignalSemaphore`/`vkWaitSemaphores`
-concurrently with a different thread blocked inside `vkQueueSubmit` -- the
-scenario `dEQP-VK.synchronization.timeline_semaphore.device_host.*` exercises,
-and Roadmap `L228(a)`'s own fix.
+Every synchronization primitive's own state (`Fence`/`Semaphore`, both the
+binary and timeline sides) is now genuinely mutex/condition-variable
+protected, not only timeline semaphores: since `L228(h)`/`(i)`, a binary
+semaphore or fence can legitimately be signaled by one queue's worker thread
+while a different queue's worker thread (or the host, via
+`vkWaitForFences`/`vkSignalSemaphore`) blocks waiting on it -- the same
+genuine cross-thread race that `L228(a)` first required a timeline
+semaphore's own wait/signal pair to handle correctly. A `vkQueueSubmit` that
+enqueues a task and returns before that task's own waits are satisfied means
+even same-queue-looking waits may now resolve from a different OS thread than
+the one that issued them.
 
 A genuinely unbounded host wait on a timeline semaphore is, in principle,
 correct per the Vulkan spec (`vkWaitSemaphores`'s `UINT64_MAX` timeout means
 "wait forever," and `vkQueueSubmit` takes no timeout parameter at all). In
-practice this driver clamps every such wait to a bounded internal safety-net
-timeout regardless of the caller's own requested timeout, so that some other,
-unrelated bug that never actually signals the awaited value fails that one
-call with an ordinary, spec-legal `VK_TIMEOUT`/`VK_ERROR_INITIALIZATION_FAILED`
-instead of hanging the calling process (and, transitively, any test harness or
-CI job driving many cases through one process) forever. This is this software
-driver's analogue of a real GPU driver's hardware TDR
-(timeout-detection-and-recovery), not a claim that a real dependency should
-ever take that long to resolve.
+practice this driver clamps every such wait -- now including a binary
+semaphore's own wait and a fence's own host-visible wait, not only a timeline
+semaphore's -- to a bounded internal safety-net timeout regardless of the
+caller's own requested timeout, so that some other, unrelated bug that never
+actually signals the awaited value fails that one call with an ordinary,
+spec-legal `VK_TIMEOUT`/latched `VK_ERROR_DEVICE_LOST` instead of hanging the
+calling process (and, transitively, any test harness or CI job driving many
+cases through one process) forever. This is this software driver's analogue of
+a real GPU driver's hardware TDR (timeout-detection-and-recovery), not a claim
+that a real dependency should ever take that long to resolve.
+`QueueExecutor::waitIdle` (backing `vkQueueWaitIdle`/`vkDeviceWaitIdle`) uses a
+deliberately longer bound (`QueueIdleSafetyNetTimeoutNs`, four times a single
+task's own internal safety net) so it always comfortably outlasts any one
+task's own worst-case internal wait, rather than racing it.
+
 
 ## Pipeline Cache
 
@@ -2892,6 +2919,24 @@ after submission generally become device loss.
 - Descriptor snapshots and push constants are submission-local.
 - Allocation callbacks are called with the scope and alignment required by the
   Vulkan specification and never while holding unrelated queue locks.
+
+**Known gap (roadmap `L228(h)`/`(i)`'s own follow-up, not yet fixed):**
+`DescriptorSet` (`Descriptor.h`) has no internal locking and its getters
+return live `ArrayRef`s into its own storage rather than copies. Before
+`L228(h)`/`(i)`, `vkQueueSubmit` executed a submission's command buffers
+synchronously in-call, so a descriptor set could never legitimately be
+touched by `vkUpdateDescriptorSets` while a submission using it was
+"in flight" from the driver's own point of view. Now that a submission's
+command buffers execute on a background `QueueExecutor` worker thread after
+`vkQueueSubmit` has already returned, an application that updates an
+`updateAfterBind`-eligible descriptor set concurrently with a still-running
+submission that reads it has a genuine, currently-unguarded data race. The
+`descriptorBindingUniformBufferUpdateAfterBind`-family feature bits are left
+`VK_TRUE` regardless (the sequential update-then-submit pattern the CTS and
+real applications overwhelmingly use is unaffected, and no CTS regression
+was observed), but a full fix -- locking `DescriptorSet`'s state and having
+`CommandBuffer.cpp`'s descriptor-consumption code read copies rather than
+live references -- is deferred past this milestone.
 
 ### Optional core 1.0 feature bits
 
