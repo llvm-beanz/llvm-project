@@ -4043,3 +4043,29 @@ class being found and fixed in this session alone (`L251`, `L252`).
 Worth a dedicated pass cross-referencing every `ResourceFormat`
 enumerator against `getFormatInfo`'s own case list before another one
 surfaces as a surprise `DeviceLost` in some future CTS run.
+
+## Roadmap L253: systematic name-only-fixture-format audit -- clean result, no further gaps
+
+Carried forward from `L241`/`L251`/`L252`'s own repeated "still not
+done" note: cross-referenced every `ResourceFormat` enumerator (133
+total, `RuntimeABI.h`) against `ImageFixture.cpp`'s `getFormatInfo`
+switch's own case list.
+
+Every enumerator not covered by an explicit `getFormatInfo` case turned
+out to be a block-compressed format (every `BC*`/`ASTC_*`/`ETC2_*`/
+`EAC_*` entry, ~69 formats) -- and this is correct, not a gap:
+`vkCmdClearColorImage` is spec-illegal on a block-compressed image
+(`VUID-vkCmdClearColorImage-image-01545`), so `getFormatInfo`'s
+`default:` case is genuinely unreachable for these formats via that
+command. `ImageOps.cpp`'s copy paths (`runCopyBufferToImage`/
+`runCopyImageToBuffer`/`runCopyImage`) already dispatch block-compressed
+formats through their own dedicated `isBlockCompressedFormat`-gated
+byte-block-copy logic (confirmed via those functions' own call sites),
+never reaching `ImageFixture.cpp`'s texel/clear-color table at all.
+
+Every non-compressed `ResourceFormat` enumerator now has a real
+`getFormatInfo` case -- `L251`/`L252` (this session) closed the only two
+real gaps that existed (`R10G10B10A2_SINT`; `A4R4G4B4_UNORM`/
+`A4B4G4R4_UNORM`). No code change from this audit; a clean, conclusive
+negative result closes out this recurring "still not done" carry-forward
+item.
