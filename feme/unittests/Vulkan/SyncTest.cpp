@@ -254,6 +254,45 @@ TEST_F(SyncTest, SubmitEnqueuesPromptlyThenLatchesDeviceLostOnUnmetBinaryWait) {
   vkDestroySemaphore(Device, Sem, nullptr);
 }
 
+// Roadmap L234: `vkWaitForFences`'s `waitAll == VK_TRUE` path used to
+// check `Device::isLost()` only once, before starting to block on a
+// fence -- so if the device were latched lost *during* that block, this
+// call would still block for the fence's own full remaining timeout
+// (which the lost device's fence-signal task now deliberately skips
+// satisfying, `makeFenceSignalTask`) before reporting a misleading
+// `VK_TIMEOUT` -- rather than `VK_ERROR_DEVICE_LOST`, promptly, once the
+// loss actually happened. Marks the device lost directly (`Objects.h`'s
+// `fromHandle<Device>`, already included by this file) from a background
+// thread partway through a `vkWaitForFences(..., UINT64_MAX)` call,
+// rather than via a genuinely-unmet wait racing `Sync.h`'s own
+// `SafetyNetTimeoutNs` (which -- since both that internal wait and this
+// call's own timeout clamp to the very same constant -- resolves their
+// relative order by incidental scheduling, not this fix, and so cannot
+// deterministically exercise the mid-wait-detection path this test means
+// to cover).
+TEST_F(SyncTest, WaitForFencesReportsDeviceLostPromptlyNotAfterFullTimeout) {
+  VkFenceCreateInfo FenceInfo{};
+  VkFence Fence = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFence(Device, &FenceInfo, nullptr, &Fence), VK_SUCCESS);
+
+  std::thread MarkLost([this] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    fromHandle<feme::vulkan::Device>(Device)->markLost();
+  });
+
+  auto Start = std::chrono::steady_clock::now();
+  EXPECT_EQ(vkWaitForFences(Device, 1, &Fence, VK_TRUE, UINT64_MAX),
+            VK_ERROR_DEVICE_LOST);
+  auto Elapsed = std::chrono::steady_clock::now() - Start;
+  // Well under `Sync.h`'s `SafetyNetTimeoutNs` (5s) -- just the ~200ms
+  // delay above plus at most one `DeviceLostPollSliceNs` (50ms) more for
+  // this call's own polling loop to notice.
+  EXPECT_LT(Elapsed, std::chrono::seconds(1));
+
+  MarkLost.join();
+  vkDestroyFence(Device, Fence, nullptr);
+}
+
 TEST_F(SyncTest, BinarySemaphoreSignalThenWaitSucceeds) {
   VkSemaphoreCreateInfo SemInfo{};
   VkSemaphore Sem = VK_NULL_HANDLE;

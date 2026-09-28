@@ -170,17 +170,37 @@ vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
     auto Deadline = std::chrono::steady_clock::now() +
                     std::chrono::nanoseconds(timeout);
     for (uint32_t I = 0; I != fenceCount; ++I) {
-      if (Dev->isLost())
-        return VK_ERROR_DEVICE_LOST;
-      uint64_t Remaining =
-          timeout == UINT64_MAX
-              ? UINT64_MAX
-              : static_cast<uint64_t>(std::max<int64_t>(
-                    0, std::chrono::duration_cast<std::chrono::nanoseconds>(
-                           Deadline - std::chrono::steady_clock::now())
-                           .count()));
-      if (!fromHandle<Fence>(pFences[I])->wait(Remaining))
-        return VK_TIMEOUT;
+      Fence *F = fromHandle<Fence>(pFences[I]);
+      // (Roadmap L234) Poll in `DeviceLostPollSliceNs` slices rather than
+      // one single wait for the whole remaining timeout: device loss can
+      // be latched by another queue's worker thread at any point during
+      // this wait (see `DeviceLostPollSliceNs`'s own comment,
+      // `Sync.h`), and checking `isLost()` only once, before the wait
+      // starts, would let that race report a misleading `VK_TIMEOUT`
+      // long after the device was actually already lost.
+      while (true) {
+        if (Dev->isLost())
+          return VK_ERROR_DEVICE_LOST;
+        uint64_t Remaining =
+            timeout == UINT64_MAX
+                ? UINT64_MAX
+                : static_cast<uint64_t>(std::max<int64_t>(
+                      0,
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          Deadline - std::chrono::steady_clock::now())
+                          .count()));
+        if (Remaining == 0)
+          return VK_TIMEOUT;
+        uint64_t Slice = std::min(Remaining, DeviceLostPollSliceNs);
+        if (F->wait(Slice))
+          break; // Signaled; move on to the next fence.
+        // That slice's own wait timed out (either a real, whole-remainder
+        // timeout, or just this poll granularity's own slice boundary) --
+        // loop back to the top either way, so a device lost *during* that
+        // slice is still caught by this loop's own `isLost()` check before
+        // concluding it was a genuine `VK_TIMEOUT` (the `Remaining == 0`
+        // check above, next iteration).
+      }
     }
     return Dev->isLost() ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
   }

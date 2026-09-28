@@ -88,6 +88,16 @@ constexpr uint64_t SafetyNetTimeoutNs = 5'000'000'000ULL;
 /// not the same value.
 constexpr uint64_t QueueIdleSafetyNetTimeoutNs = 4 * SafetyNetTimeoutNs;
 
+/// (Roadmap L234) The longest `vkWaitForFences`'s `waitAll == VK_TRUE`
+/// path ever blocks on one fence's own `Fence::wait` before re-checking
+/// `Device::isLost()` -- device loss can be latched by a *different*
+/// queue's `QueueExecutor` worker thread at any point during that wait
+/// (e.g. its own submission task's `consumeWaits` giving up after its own
+/// `SafetyNetTimeoutNs`), and checking only once, before the wait starts,
+/// let that race delay `VK_ERROR_DEVICE_LOST` behind a full, separate
+/// `SafetyNetTimeoutNs`-long `VK_TIMEOUT` instead.
+constexpr uint64_t DeviceLostPollSliceNs = 50'000'000ULL;
+
 /// A `VkFence`: host synchronization state. Signaled by a `QueueExecutor`
 /// task running on a `VkQueue`'s own worker thread, observed by
 /// `vkGetFenceStatus`/`vkWaitForFences`/`vkQueueWaitIdle`/
