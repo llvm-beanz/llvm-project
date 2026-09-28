@@ -4438,11 +4438,15 @@ instance) rather than its vertex index. Primitive restart
 topology (`VK_PRIMITIVE_TOPOLOGY_LINE_STRIP`/`TRIANGLE_STRIP`/
 `TRIANGLE_FAN`, and, since roadmap H5d's geometry-stage chaining, the two
 `*_STRIP_WITH_ADJACENCY` topologies too -- `feme::graphics::
-topologySupportsPrimitiveRestart` is the single source of truth both
-`GraphicsPipeline.cpp`'s creation-time gate and `Executor.cpp`'s own
-`RestartEnabled` condition share, roadmap H5e-b) -- a list topology
-combined with restart still fails at creation, matching real Vulkan's own
-requirement of an unadvertised extension for that combination: the
+topologySupportsPrimitiveRestart` is the single source of truth
+`Executor.cpp`'s own `RestartEnabled` condition consults, roadmap H5e-b)
+-- a list topology combined with restart is accepted at creation (roadmap
+L241: the corresponding VUID is a validation-layer-only concern, not an
+ICD's to reject, and real conformant drivers accept it since the
+combination invokes undefined, not forbidden, behavior absent
+`VK_EXT_primitive_topology_list_restart`) and simply never restarts at
+draw time, matching real Vulkan's own requirement of an unadvertised
+extension for that combination: the
 executor's index fetch recognizes the index type's all-1-bits value,
 excludes that lane from the vertex-attribute fetch (it is not a real
 vertex, and its raw index is not a valid array offset), and splits

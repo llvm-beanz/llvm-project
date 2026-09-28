@@ -2939,3 +2939,92 @@ unit tests). `check-hlsl-feme-vk`: unchanged, 483 Pass / 32 XFAIL /
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- this is a tessellation-control-dispatch correctness fix to
 existing core-1.0 behavior, not a new feature or extension landing.
+
+## Roadmap L241: `creation_cache_control.*` -- wrong root-cause guess, two real (plus one incidental) fixes
+
+The original roadmap entry guessed `duplicate_single_recreate_derivative`'s
+`VK_ERROR_INITIALIZATION_FAILED` was caused by unimplemented
+`VK_EXT_pipeline_creation_cache_control` `VkPipelineCreateFlagBits`
+handling. Direct reproduction with `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+immediately showed a completely unrelated cause:
+`primitiveRestartEnable requires a strip or fan primitive topology` -- a
+defensive, roadmap-H5e-b-era creation-time check in
+`GraphicsPipeline.cpp` rejecting `primitiveRestartEnable=VK_TRUE`
+combined with a list topology. The CTS's own shared `graphics_pipelines.*`
+pipeline template (`vktPipelineCreationCacheControlTests.cpp`'s
+`IA_STATE`) hardcodes exactly this combination
+(`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST` +
+`primitiveRestartEnable=VK_TRUE`) for every one of its 9 subtests,
+without ever gating on `VK_EXT_primitive_topology_list_restart` support.
+
+Confirmed via `vk.xml` that `VkPhysicalDevicePrimitiveTopologyListRestart
+FeaturesEXT` is an extension-only struct (not part of core
+`VkPhysicalDeviceVulkan14Features`), and that the VUID this check enforced
+(`VUID-VkPipelineInputAssemblyStateCreateInfo-primitiveRestartEnable-
+topology-04909`) is a validation-layer-only concern: an application that
+violates it invokes undefined, not driver-rejectable, behavior. FeMe's
+own draw-time path (`Executor.cpp`'s `executeDraws`, gated on
+`topologySupportsPrimitiveRestart`) already silently no-ops the flag for
+an unsupported topology, so the creation-time rejection was strictly
+stricter than the spec requires and broke this otherwise-unrelated test.
+Removed it; `Result.PrimitiveRestartEnable` is simply left as-is.
+
+Re-running the full 18-case `dEQP-VK.pipeline.monolithic.creation_cache_
+control.*` group (9 `graphics_pipelines` + 9 `compute_pipelines`) after
+this fix alone: 14/18 pass (up from 7/18), but the remaining 4 --
+`batch_pipelines_early_return`/`_maintenance5`, both `graphics_pipelines`
+and `compute_pipelines` -- still fail with `pipelines[1] is not
+VK_NULL_HANDLE after a explicit early return index`. This is a second,
+genuine, previously-unimplemented gap:
+`VK_PIPELINE_CREATE_EARLY_RETURN_ON_FAILURE_BIT` had zero references
+anywhere in FeMe's codebase. Per spec: when a pipeline in a batch
+(`vkCreateGraphicsPipelines`/`vkCreateComputePipelines`) with this bit set
+fails to create, the driver must stop processing the rest of the batch
+immediately, and every remaining `pPipelines` entry -- from the failure
+point onward, inclusive -- must be `VK_NULL_HANDLE`.
+
+Fix: a per-call `FailBatch` lambda (bool-returning, since a lambda cannot
+`return` out of its enclosing function) added to each of
+`vkCreateGraphicsPipelines`'s and `vkCreateComputePipelines`'s own batch
+loops, wired into every existing failure/`continue` site. `FailBatch`
+preserves the pre-existing precedence rule that a soft
+`VK_PIPELINE_COMPILE_REQUIRED` must never mask an already-set, more
+severe result, and additionally nulls every remaining `pPipelines` entry
+and signals an immediate `return` when the early-return bit is set on a
+failure.
+
+While investigating, discovered a third, related, previously-unnoticed
+gap: `vkCreateComputePipelines` never consulted `VK_KHR_maintenance5`'s
+`VkPipelineCreateFlags2CreateInfo` override at all -- only
+`vkCreateGraphicsPipelines` did, via a file-local (not exported)
+`getEffectivePipelineCreateFlags` helper. This meant the `_maintenance5`
+variant of this same test would have failed doubly for compute pipelines,
+and `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` itself was
+unreachable via the flags2 path for compute pipelines (it always read the
+raw, always-`0`-when-flags2-is-used `CreateInfo.flags`). Fixed by
+extracting a new, shared `feme::vulkan::resolvePipelineCreateFlags2(Flags,
+pNext)` (`Pipeline.h`/`.cpp`), with the graphics-only overload now simply
+forwarding to it.
+
+Real CTS: the full 18-case `creation_cache_control.*` group now passes
+18/18 (up from an original, never-cleanly-measured baseline; the two
+intermediate points gathered this session were 7/18 pre-fix and 14/18
+after the primitiveRestartEnable fix alone).
+
+7 new/updated unit tests: `GraphicsPipelineTest.
+RejectsUnimplementedStateCombinations`'s primitive-restart sub-case now
+expects `VK_SUCCESS` (plus an executor-level no-op assertion) instead of
+the removed rejection; `AcceptsPrimitiveRestartOnStripAndFanTopologies`'s
+stale cross-reference comment corrected; 2 new
+`GraphicsPipelineTest.BatchEarlyReturnOnFailure*` tests (legacy flags and
+flags2/maintenance5 variants); 2 new
+`PipelineCacheTest.BatchEarlyReturnOnFailure*` tests (same, for compute
+pipelines).
+
+`ninja check-feme`: 3368 Passed, 61 Unsupported, 0 Failed (+7 net new
+unit tests over `L243`'s 3364).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- both `VK_EXT_pipeline_creation_cache_control` and
+`VK_KHR_maintenance5` were already advertised; this is a correctness fix
+to existing flag/behavior handling, not a new extension landing.
