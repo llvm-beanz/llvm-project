@@ -1113,7 +1113,7 @@ TEST(SPIRVResourceLoweringTest, LowersUniformTexelBufferToTypedLoadOnly) {
 }
 
 TEST(SPIRVResourceLoweringTest,
-    LowersUniformTexelBufferGetDimensionsToTypedCall) {
+     LowersUniformTexelBufferGetDimensionsToTypedCall) {
   // Roadmap H144: `Buffer<T>::GetDimensions(uint)` on a uniform (read-only)
   // texel buffer lowers to a bare `llvm.spv.resource.getdimensions.x` call
   // directly on the handle -- no `getpointer` indirection at all, unlike
@@ -3590,8 +3590,7 @@ TEST(SPIRVResourceLoweringTest, LowersGatherCmpToImageGatherCmp) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *GatherCmp =
-      findImageCall(*F, "feme.cpu.image.gathercmp.2d.v4f32");
+  CallInst *GatherCmp = findImageCall(*F, "feme.cpu.image.gathercmp.2d.v4f32");
   ASSERT_TRUE(GatherCmp);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
   //  u, v, dref, offset_x, offset_y, mask).
@@ -3631,8 +3630,7 @@ TEST(SPIRVResourceLoweringTest,
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  CallInst *GatherCmp =
-      findImageCall(*F, "feme.cpu.image.gathercmp.2d.v4f32");
+  CallInst *GatherCmp = findImageCall(*F, "feme.cpu.image.gathercmp.2d.v4f32");
   ASSERT_TRUE(GatherCmp);
   EXPECT_EQ(cast<ConstantInt>(GatherCmp->getArgOperand(9))->getSExtValue(), 1);
   EXPECT_EQ(cast<ConstantInt>(GatherCmp->getArgOperand(10))->getSExtValue(),
@@ -3837,8 +3835,7 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(cast<ConstantInt>(Gather->getArgOperand(10))->getSExtValue(), -1);
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersGatherConstOffsetsToImageGatherOffsets) {
+TEST(SPIRVResourceLoweringTest, LowersGatherConstOffsetsToImageGatherOffsets) {
   // Roadmap L125(n): a `spv_resource_gather` carrying the 8-wide
   // flattened `ConstOffsets` shape `ImageGatherPattern` (roadmap L125(m))
   // produces -- 4 independent `(X, Y)` pairs, one per gathered corner --
@@ -4963,8 +4960,7 @@ TEST(SPIRVResourceLoweringTest, LeavesASampleCmpWithNonSpecCoordWidthAlone) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersAPlain1DSampleCmpWithUnpaddedCoordWidth) {
+TEST(SPIRVResourceLoweringTest, LowersAPlain1DSampleCmpWithUnpaddedCoordWidth) {
   // Roadmap L193: a real `dxc`-compiled `Texture1D::SampleCmp` repro
   // (`Feature/Textures/SampleCmp.test`'s own `Tex1D`) confirmed `dxc`'s
   // own Coordinate operand for this shape really is a bare scalar
@@ -5691,8 +5687,7 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersIntegerSampledImage3DToImageSampleV4I32) {
+TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImage3DToImageSampleV4I32) {
   // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against
   // a `Plain3D` integer-channel (`usampler3D`/`isampler3D`) sampled image
   // is legal SPIR-V (restricted, per the Vulkan spec, to `NEAREST`
@@ -5738,7 +5733,6 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(12))->getSExtValue(), 2);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
 }
-
 
 TEST(SPIRVResourceLoweringTest,
      LowersImplicitLodIntegerSampledImage2DArrayToImageSampleV4I32) {
@@ -5944,8 +5938,7 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
 }
 
-TEST(SPIRVResourceLoweringTest,
-     LowersIntegerSampledImage1DToImageSampleV4I32) {
+TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImage1DToImageSampleV4I32) {
   // Roadmap L125(b): an *explicit*-LOD `OpImageSampleExplicitLod` against a
   // `Plain1D` integer-channel (`usampler1D`/`isampler1D`) sampled image is
   // legal SPIR-V (restricted, per the Vulkan spec, to `NEAREST` filtering)
@@ -6828,6 +6821,73 @@ TEST(SPIRVResourceLoweringTest, LowersArray2DStorageImageGetDimensions) {
       findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
 }
 
+// Roadmap L232: a genuinely *arrayed* storage `Cube` handle (`Dim ==
+// DimCube == 3`, `Arrayed == 1`) now classifies as its own
+// `ImageShape::StorageCubeArray` (not folded into `Array2D`, unlike a
+// plain non-arrayed storage cube -- see `LowersCubeStorageImageGetDimensions`
+// above), so its bare, Lod-less `imageSize(imageCubeArray)`
+// (`isGetDimensions3Intrinsic`) reuses `QuerySizeLodCubeArray`'s own
+// runtime call -- the same `/6` face-count-dividing builder a *sampled*
+// cube array's `GetDimensions` already used -- rather than
+// `QuerySizeLod2DArray`, which would wrongly return the raw, undivided
+// `6 * CubeCount` layer count instead of `CubeCount` itself (the
+// `dEQP-VK.image.image_size.cube_array.*` regression this row fixes).
+TEST(SPIRVResourceLoweringTest, LowersCubeArrayStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main() {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+          target("spirv.Image", float, 3, 0, 1, 0, 2, 1) %img)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+        target("spirv.Image", float, 3, 0, 1, 0, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.cubearray.v3i32"));
+  EXPECT_FALSE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
+}
+
+// Roadmap L232: an explicit-Lod `OpImageQuerySizeLod` against the same
+// storage cube-array shape (`isQuerySizeLodCall`, mirroring
+// `LowersArray2DQuerySizeLod`'s own coverage of the ordinary-`Array2D`
+// case) also reuses `QuerySizeLodCubeArray` -- confirming the switch's
+// new `StorageCubeArray` case is reached instead of falling through to
+// the `default:` arm (`QuerySizeLod2D`, a wrong 2-component result).
+TEST(SPIRVResourceLoweringTest, LowersCubeArrayStorageImageQuerySizeLod) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main(i32 %lod) {
+      %img = call target("spirv.Image", float, 3, 0, 1, 0, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @"feme.query.size_lod.0"(
+          target("spirv.Image", float, 3, 0, 1, 0, 2, 1) %img, i32 %lod)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 3, 0, 1, 0, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @"feme.query.size_lod.0"(
+        target("spirv.Image", float, 3, 0, 1, 0, 2, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(
+      findImageCall(*F, "feme.cpu.image.getdimensions.lod.cubearray.v3i32"));
+}
+
 // Roadmap L70/L227(c): a `Plain2D` storage image's own Lod-less
 // `OpImageQuerySize` (`RWTexture2D::GetDimensions(Width, Height)`) still
 // lowers to the non-Lod `GetDimensions2D` builder, not
@@ -7496,7 +7556,6 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylod.cube.v2f32"));
   EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
-
 
 // Roadmap L66(e): a real use-after-free, found via CTS re-runs once L66's
 // other sub-items began clearing more pipelines. Two functions each declare

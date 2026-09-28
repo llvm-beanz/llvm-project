@@ -179,6 +179,22 @@ enum class ImageShape {
   /// disallows a multisampled `Dim::Cube`/`Dim::3D` image outright, unlike
   /// `Dim::2D`, which both `Plain2DMS`/`Array2DMS` cover).
   Array2DMS,
+  /// A storage `TextureCubeArray` (roadmap L232, `HandleKind::StorageImage2D`
+  /// only -- no sampled-image counterpart needs this: a sampled cube array
+  /// keeps its own distinct `CubeArray` shape above). Fetch/store
+  /// addressing is structurally identical to `Array2D`'s own `(x, y,
+  /// layer)` triple (`classifyStorageImage2DHandle`'s own doc), so this
+  /// exists purely to carry the one extra bit of information `Array2D`
+  /// itself cannot: that the raw array-layer count read off the
+  /// descriptor is really `6 * CubeCount` and needs dividing by 6 before
+  /// `GetDimensions`/`imageSize()` returns it as an element count -- see
+  /// `isGetDimensions3Intrinsic`'s and `isQuerySizeLodCall`'s own lowering
+  /// below, both of which route this shape to the same
+  /// `createQuerySizeLodCubeArray` builder already used for a *sampled*
+  /// cube array's own identical `/6` correction. A plain, non-arrayed
+  /// storage `Cube` handle still folds into `Array2D` unchanged (its own
+  /// element count is always exactly 6, needing no division).
+  StorageCubeArray,
 };
 
 /// Whether \p Shape addresses a discrete array layer as the last component
@@ -682,26 +698,40 @@ classifySampledImage2DHandle(const CallInst &Handle) {
 /// entirely -- see Roadmap.md's H19g breakdown).
 ///
 /// Unlike the sampled-image classifier above, a storage cube/cube-array
-/// handle maps to `ImageShape::Array2D` here, *not* a distinct
-/// `Cube`/`CubeArray` shape: a filtered cube *sample* addresses its texel
-/// by a 3-component direction vector that a real cube-face-selection
-/// algorithm resolves (`createSampleCube`'s own scope), but a storage cube
-/// image's `imageLoad`/`imageStore` (GLSL's `imageCube`/`imageCubeArray`)
-/// addresses its texel by an ordinary `(x, y, face)` (or, for
-/// `imageCubeArray`, an already-flattened `layer * 6 + face`) triple --
-/// structurally identical to `Array2D`'s own `(x, y, layer)` triple, and
-/// consistent with this project's existing "a cube(array) view is purely a
-/// view-level convention over consecutive array layers" treatment
-/// (`CommandBuffer.cpp`'s `materializeImageDescriptor`, roadmap H7b).
-/// Confirmed via a real CTS shader dump
-/// (`dEQP-VK.image.load_store.with_format.cube.r32_uint`): `imageStore(...,
-/// pos, imageLoad(u_image0, ivec3(63-pos.x, pos.y, pos.z)))` where `pos.z`
-/// is a bare face index, not a direction-vector component. So `Dim`/
-/// `Arrayed` map directly to `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/
-/// `Plain3D`, with `Dim::Cube` folded into the `Array2D`/`Plain2D` branch
-/// alongside `Dim::2D` rather than needing its own case; `Arrayed` is
-/// meaningful for `Dim::1D`/`Dim::2D`/`Dim::Cube` here (SPIR-V disallows an
-/// arrayed `Dim::3D` image outright).
+/// handle's fetch/store addressing maps to the same shape as `Array2D`
+/// here, *not* a distinct sampled-style `Cube`/`CubeArray` shape: a
+/// filtered cube *sample* addresses its texel by a 3-component direction
+/// vector that a real cube-face-selection algorithm resolves
+/// (`createSampleCube`'s own scope), but a storage cube image's
+/// `imageLoad`/`imageStore` (GLSL's `imageCube`/`imageCubeArray`) addresses
+/// its texel by an ordinary `(x, y, face)` (or, for `imageCubeArray`, an
+/// already-flattened `layer * 6 + face`) triple -- structurally identical
+/// to `Array2D`'s own `(x, y, layer)` triple, and consistent with this
+/// project's existing "a cube(array) view is purely a view-level
+/// convention over consecutive array layers" treatment (`CommandBuffer.cpp`'s
+/// `materializeImageDescriptor`, roadmap H7b). Confirmed via a real CTS
+/// shader dump (`dEQP-VK.image.load_store.with_format.cube.r32_uint`):
+/// `imageStore(..., pos, imageLoad(u_image0, ivec3(63-pos.x, pos.y,
+/// pos.z)))` where `pos.z` is a bare face index, not a direction-vector
+/// component.
+///
+/// A genuinely *arrayed* storage cube (`imageCubeArray`) does still need
+/// its own distinct `ImageShape::StorageCubeArray` (roadmap L232), though,
+/// despite sharing `Array2D`'s addressing: its raw array-layer count (read
+/// straight off the descriptor) is `6 * CubeCount`, not `CubeCount` itself,
+/// so `GetDimensions`/`imageSize()` needs to know it was really a cube
+/// array to divide by 6 before returning an element count -- an
+/// indistinguishable-from-`Array2D` shape would silently return the wrong,
+/// undivided count instead (roadmap L232's own regression). A plain,
+/// non-arrayed storage `Cube` has no such correction to make (its element
+/// count is always exactly 6), so it still folds into the ordinary
+/// `Array2D` shape unchanged. So `Dim`/`Arrayed` map directly to
+/// `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`/`StorageCubeArray`,
+/// with a non-arrayed `Dim::Cube` folded into the `Array2D`/`Plain2D`
+/// branch alongside `Dim::2D` and an arrayed `Dim::Cube` given its own
+/// `StorageCubeArray` shape instead; `Arrayed` is meaningful for
+/// `Dim::1D`/`Dim::2D`/`Dim::Cube` here (SPIR-V disallows an arrayed
+/// `Dim::3D` image outright).
 ///
 /// An arrayed 1D handle (roadmap H19e) maps to its own `ImageShape::Array1D`
 /// -- distinct from `Array2D`'s 3-component `(x, y, layer)` coordinate --
@@ -748,8 +778,14 @@ classifyStorageImage2DHandle(const CallInst &Handle) {
     // component, even when `Arrayed == 0` (a plain, non-array cube still
     // has 6 faces to select between) -- unlike `Dim::2D`, where `Arrayed`
     // itself is what turns a 2-component coordinate into a 3-component
-    // one, `Dim::Cube` always needs the 3-component `Array2D` shape.
-    Shape = ImageShape::Array2D;
+    // one, `Dim::Cube` always needs the 3-component addressing `Array2D`
+    // already has. Roadmap L232: `Arrayed` still matters here, though --
+    // not for addressing width (identical either way), but so
+    // `GetDimensions`/`imageSize()` can apply the `/6` face-count
+    // correction a genuine cube array's own element count needs and a
+    // plain cube's fixed-6-faces count must never get (see
+    // `ImageShape::StorageCubeArray`'s own doc).
+    Shape = Arrayed ? ImageShape::StorageCubeArray : ImageShape::Array2D;
   else if (MS)
     Shape = Arrayed ? ImageShape::Array2DMS : ImageShape::Plain2DMS; // H19g/m.
   else
@@ -1626,8 +1662,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
              Shape != ImageShape::CubeArray) ||
             HasMinLodClamp || HasBias || HasGrad)
           return false;
-        unsigned OffsetIdx =
-            getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
+        unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
         if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth,
                       /*Float=*/true) ||
             !isSupportedOffset(CI->getArgOperand(OffsetIdx), Shape,
@@ -2084,9 +2119,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
           (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
            Shape == ImageShape::Plain3D)
               ? 3
-          : (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D)
-              ? 1
-              : 2;
+          : (Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D) ? 1
+                                                                           : 2;
       if (!isCoordN(CI->getArgOperand(2), QueryLodCoordWidth, /*Float=*/true) ||
           !CI->getType()->isFloatTy())
         return false;
@@ -2171,11 +2205,13 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 /// `load_store` shader pattern reads and writes the same binding (a
 /// copy-shader idiom), unlike every other pointer-use check in this file,
 /// which does not need to consider that. \p Shape is `Plain1D`, `Array1D`,
-/// `Plain2D`, `Array2D`, `Plain3D`, `Plain2DMS`, or `Array2DMS` --
-/// `classifyStorageImage2DHandle` never returns `Cube`/`CubeArray` for a
-/// storage image today (a storage cube handle's own `Array2D` shape is
-/// indistinguishable from an ordinary 2D array's here, roadmap H19d) --
-/// and selects the coordinate width exactly like
+/// `Plain2D`, `Array2D`, `Plain3D`, `Plain2DMS`, `Array2DMS`, or (roadmap
+/// L232) `StorageCubeArray` -- `classifyStorageImage2DHandle` never
+/// returns the sampled-only `Cube`/`CubeArray` shapes for a storage image
+/// today (a plain storage cube handle's own `Array2D` shape is
+/// indistinguishable from an ordinary 2D array's here, roadmap H19d; a
+/// genuinely arrayed one gets its own `StorageCubeArray` instead, roadmap
+/// L232) -- and selects the coordinate width exactly like
 /// `hasOnlySupportedImageUses`'s own `FetchCoordWidth`. `Array1D`'s
 /// 2-component `(x, layer)` coordinate happens to share its width with
 /// `Plain2D`'s `(x, y)`, so both fall into the same `else` branch below.
@@ -2185,7 +2221,8 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       Shape == ImageShape::Plain1D     ? 1
       : Shape == ImageShape::Array2DMS ? 4
       : (Shape == ImageShape::Array2D || Shape == ImageShape::Plain3D ||
-         Shape == ImageShape::Plain2DMS)
+         Shape == ImageShape::Plain2DMS ||
+         Shape == ImageShape::StorageCubeArray)
           ? 3
           : 2;
   for (const User *U : Handle.users()) {
@@ -2241,27 +2278,33 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap H124s/L227(c): an `Array2D` or `Plain3D` storage image's
-    // own Lod-less `OpImageQuerySize` (`isGetDimensions3Intrinsic`) --
-    // see its own doc for why a storage image's `GetDimensions` lowers to
-    // this bare 3-component opcode rather than `OpImageQuerySizeLod`.
-    // `RWTexture3D::GetDimensions(Width, Height, Depth)` (`Plain3D`) was
-    // the "unstarted follow-on work" that doc names; added alongside
-    // `Array2D` here since both share the identical `<3 x i32>`-result
-    // opcode shape, just dispatching to a different runtime builder (see
-    // the matching lowering switch below).
+    // Roadmap H124s/L227(c)/L232: an `Array2D`, `Plain3D`, or
+    // `StorageCubeArray` storage image's own Lod-less `OpImageQuerySize`
+    // (`isGetDimensions3Intrinsic`) -- see its own doc for why a storage
+    // image's `GetDimensions` lowers to this bare 3-component opcode
+    // rather than `OpImageQuerySizeLod`. `RWTexture3D::GetDimensions(Width,
+    // Height, Depth)` (`Plain3D`) was the "unstarted follow-on work" that
+    // doc names; added alongside `Array2D` here since both share the
+    // identical `<3 x i32>`-result opcode shape, just dispatching to a
+    // different runtime builder (see the matching lowering switch below).
+    // `StorageCubeArray` (roadmap L232) shares that same opcode shape too
+    // -- `imageCubeArray::imageSize()` returns `(Width, Height, Elements)`,
+    // just needing the `/6` face-count division `createQuerySizeLodCubeArray`
+    // already applies for the sampled-image case.
     if (isGetDimensions3Intrinsic(*CI)) {
-      if (Shape != ImageShape::Array2D && Shape != ImageShape::Plain3D)
+      if (Shape != ImageShape::Array2D && Shape != ImageShape::Plain3D &&
+          Shape != ImageShape::StorageCubeArray)
         return false;
       continue;
     }
 
-    // Roadmap L72(d)/L75: `OpImageQuerySizeLod` against a storage image --
-    // see `hasOnlySupportedImageUses`'s own identical check for this
-    // opcode's shape scoping and operand convention (a storage handle
-    // never classifies as `Cube`/`CubeArray` -- `classifyStorageImage2DHandle`
-    // folds those into `Array2D` -- so only `Plain2DMS`/`Array2DMS`
-    // need excluding here, never `Cube`/`CubeArray` specifically).
+    // Roadmap L72(d)/L75/L232: `OpImageQuerySizeLod` against a storage
+    // image -- see `hasOnlySupportedImageUses`'s own identical check for
+    // this opcode's shape scoping and operand convention (a storage
+    // handle never classifies as the sampled-only `Cube`/`CubeArray` --
+    // `classifyStorageImage2DHandle` folds a plain cube into `Array2D`
+    // and an arrayed one into its own `StorageCubeArray` -- so only
+    // `Plain2DMS`/`Array2DMS` need excluding here).
     if (isQuerySizeLodCall(*CI)) {
       if (CI->getArgOperand(0) != &Handle)
         return false;
@@ -2467,7 +2510,8 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
         }
         if (IsTexel
                 ? !isSupportedTexelElementType(SI->getValueOperand()->getType())
-                : !isSupportedRawElementType(SI->getValueOperand()->getType())) {
+                : !isSupportedRawElementType(
+                      SI->getValueOperand()->getType())) {
           logNormalizationRejection("store of unsupported element type", SI);
           return false;
         }
@@ -2539,8 +2583,7 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
           return false; // Already logged by the recursive call.
         continue;
       }
-    logNormalizationRejection("pointer used by an unrecognized instruction",
-                             U);
+    logNormalizationRejection("pointer used by an unrecognized instruction", U);
     return false;
   }
   return true;
@@ -2605,10 +2648,9 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   // `lowerRawPointerUses` below already lowers such a GEP chain
   // generically (keyed on the GEP's own resolved offset, not `Kind`) with
   // no `UniformArray`-specific code needed at all.
-  bool AllowGEPs = Kind == HandleKind::Storage ||
-                   Kind == HandleKind::StorageStruct ||
-                   Kind == HandleKind::Uniform ||
-                   Kind == HandleKind::UniformArray;
+  bool AllowGEPs =
+      Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct ||
+      Kind == HandleKind::Uniform || Kind == HandleKind::UniformArray;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   for (const User *U : Handle.users()) {
     // (Roadmap H144) A typed buffer's own bare `getdimensions.x` call is
@@ -2655,8 +2697,7 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
           "getpointer index is not a compile-time constant", GetPtr);
       return false;
     }
-    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs,
-                                     DL))
+    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs, DL))
       return false; // Already logged by hasOnlySupportedPointerUses.
   }
   return true;
@@ -3429,8 +3470,8 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
       if (auto *DimsCI = dyn_cast<CallInst>(U);
           DimsCI && isGetDimensions1Intrinsic(*DimsCI)) {
         IRBuilder<> Builder(DimsCI);
-        CallInst *Dims = createGetDimensionsTyped(
-            Builder, Env, DescriptorIndex, Mask, DimsCI->getName());
+        CallInst *Dims = createGetDimensionsTyped(Builder, Env, DescriptorIndex,
+                                                  Mask, DimsCI->getName());
         DimsCI->replaceAllUsesWith(Dims);
         DimsCI->eraseFromParent();
         continue;
@@ -3454,7 +3495,8 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
     // ordinary IR arithmetic around it), since an unbound descriptor's
     // `SizeInBytes` reads as `0` and naive post-hoc subtraction would
     // wrap around to a huge value instead of staying `0`.
-    if (BH.Kind == HandleKind::Storage || BH.Kind == HandleKind::StorageStruct) {
+    if (BH.Kind == HandleKind::Storage ||
+        BH.Kind == HandleKind::StorageStruct) {
       if (auto *LenCI = dyn_cast<CallInst>(U);
           LenCI && isGetArrayLengthIntrinsic(*LenCI)) {
         IRBuilder<> Builder(LenCI);
@@ -3468,10 +3510,9 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
           auto *ArrTy =
               cast<ArrayType>(BH.ElementStruct->getElementType(LastIdx));
           const StructLayout *SL = DL.getStructLayout(BH.ElementStruct);
-          Stride =
-              ConstantInt::get(I64Ty, DL.getTypeStoreSize(ArrTy->getElementType()));
-          PrefixOffset =
-              ConstantInt::get(I64Ty, SL->getElementOffset(LastIdx));
+          Stride = ConstantInt::get(
+              I64Ty, DL.getTypeStoreSize(ArrTy->getElementType()));
+          PrefixOffset = ConstantInt::get(I64Ty, SL->getElementOffset(LastIdx));
         }
         CallInst *Len =
             createGetDimensionsRaw(Builder, Env, DescriptorIndex, Stride,
@@ -3713,8 +3754,8 @@ void lowerImageAccesses(
             Value *IntOffset = CI->getArgOperand(
                 getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
             CallInst *NewSampleI32Call =
-                createSample1DI32(Builder, Env, ImageIndex, SamplerIndex,
-                                  Coord, Lod, IntOffset, Mask, CI->getName());
+                createSample1DI32(Builder, Env, ImageIndex, SamplerIndex, Coord,
+                                  Lod, IntOffset, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -3785,9 +3826,8 @@ void lowerImageAccesses(
             Value *IntOffsetZ =
                 Builder.CreateExtractElement(IntOffset, uint64_t{2});
             CallInst *NewSampleI32Call = createSample3DI32(
-                Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW,
-                Lod, IntOffsetX, IntOffsetY, IntOffsetZ, Mask,
-                CI->getName());
+                Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW, Lod,
+                IntOffsetX, IntOffsetY, IntOffsetZ, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -4224,6 +4264,15 @@ void lowerImageAccesses(
           // through this switch at all.
           llvm_unreachable(
               "no sampled-image shape produces Plain2DMS/Array2DMS");
+        case ImageShape::StorageCubeArray:
+          // Roadmap L232: this shape only ever classifies a storage-image
+          // handle (`classifyStorageImage2DHandle`'s own scope) -- a
+          // storage image never has a sample-intrinsic user at all
+          // (`hasOnlySupportedImageUses`, the function that accepts a
+          // handle into this switch in the first place, only ever runs
+          // against a *sampled*-image handle).
+          llvm_unreachable(
+              "StorageCubeArray never reaches a sampled-image intrinsic");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
@@ -4275,11 +4324,11 @@ void lowerImageAccesses(
         // synthesizing a meaningless extraction from a value that is not
         // a vector to begin with.
         Value *C0 = Coord->getType()->isVectorTy()
-                       ? Builder.CreateExtractElement(Coord, uint64_t{0})
-                       : Coord;
+                        ? Builder.CreateExtractElement(Coord, uint64_t{0})
+                        : Coord;
         Value *C1 = Coord->getType()->isVectorTy()
-                       ? Builder.CreateExtractElement(Coord, uint64_t{1})
-                       : nullptr;
+                        ? Builder.CreateExtractElement(Coord, uint64_t{1})
+                        : nullptr;
         Value *Lod = DrefHasLevel ? CI->getArgOperand(DrefSampleLevelIdx)
                                   : ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *ExplicitLodFlag = Builder.getInt1(DrefExplicitLod);
@@ -4500,6 +4549,12 @@ void lowerImageAccesses(
           llvm_unreachable(
               "hasOnlySupportedImageUses should have rejected a dref "
               "sample against this shape");
+        case ImageShape::StorageCubeArray:
+          // Roadmap L232: same reasoning as the ordinary-sample switch's
+          // own identical new case above -- a storage image never reaches
+          // a dref/depth-comparison sample intrinsic at all.
+          llvm_unreachable(
+              "StorageCubeArray never reaches a sampled-image intrinsic");
         }
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
@@ -4586,9 +4641,9 @@ void lowerImageAccesses(
                   Builder, Env, ImageIndex, SamplerIndex, C0, C1, ArrayLayer,
                   Dref, OffsetX, OffsetY, Mask, CI->getName());
             } else {
-              NewCall = createGatherCmp2D(Builder, Env, ImageIndex, SamplerIndex,
-                                          C0, C1, Dref, OffsetX, OffsetY, Mask,
-                                          CI->getName());
+              NewCall = createGatherCmp2D(Builder, Env, ImageIndex,
+                                          SamplerIndex, C0, C1, Dref, OffsetX,
+                                          OffsetY, Mask, CI->getName());
             }
           }
         }
@@ -4641,13 +4696,13 @@ void lowerImageAccesses(
         CallInst *NewCall;
         if (Shape == ImageShape::Cube) {
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
-          NewCall = ResultIsInteger
-                        ? createGatherCubeI32(Builder, Env, ImageIndex,
-                                             SamplerIndex, C0, C1, C2,
-                                             Component, Mask, CI->getName())
-                        : createGatherCube(Builder, Env, ImageIndex,
-                                           SamplerIndex, C0, C1, C2, Component,
-                                           Mask, CI->getName());
+          NewCall =
+              ResultIsInteger
+                  ? createGatherCubeI32(Builder, Env, ImageIndex, SamplerIndex,
+                                        C0, C1, C2, Component, Mask,
+                                        CI->getName())
+                  : createGatherCube(Builder, Env, ImageIndex, SamplerIndex, C0,
+                                     C1, C2, Component, Mask, CI->getName());
         } else {
           Value *Offset = CI->getArgOperand(getDrefSampleOffsetIdx(false));
           if (isGatherOffsetsVector(Offset)) {
@@ -4697,23 +4752,22 @@ void lowerImageAccesses(
               NewCall =
                   ResultIsInteger
                       ? createGatherArray2DI32(Builder, Env, ImageIndex,
-                                              SamplerIndex, C0, C1, ArrayLayer,
-                                              Component, OffsetX, OffsetY, Mask,
-                                              CI->getName())
+                                               SamplerIndex, C0, C1, ArrayLayer,
+                                               Component, OffsetX, OffsetY,
+                                               Mask, CI->getName())
                       : createGatherArray2D(Builder, Env, ImageIndex,
-                                           SamplerIndex, C0, C1, ArrayLayer,
-                                           Component, OffsetX, OffsetY, Mask,
-                                           CI->getName());
-            } else {
-              NewCall = ResultIsInteger
-                            ? createGather2DI32(Builder, Env, ImageIndex,
-                                               SamplerIndex, C0, C1, Component,
-                                               OffsetX, OffsetY, Mask,
-                                               CI->getName())
-                            : createGather2D(Builder, Env, ImageIndex,
-                                            SamplerIndex, C0, C1, Component,
-                                            OffsetX, OffsetY, Mask,
+                                            SamplerIndex, C0, C1, ArrayLayer,
+                                            Component, OffsetX, OffsetY, Mask,
                                             CI->getName());
+            } else {
+              NewCall =
+                  ResultIsInteger
+                      ? createGather2DI32(Builder, Env, ImageIndex,
+                                          SamplerIndex, C0, C1, Component,
+                                          OffsetX, OffsetY, Mask, CI->getName())
+                      : createGather2D(Builder, Env, ImageIndex, SamplerIndex,
+                                       C0, C1, Component, OffsetX, OffsetY,
+                                       Mask, CI->getName());
             }
           }
         }
@@ -4860,9 +4914,8 @@ void lowerImageAccesses(
         CallInst *NewCall;
         if (Shape == ImageShape::Array1D) {
           Value *ZeroLod = Builder.getInt32(0);
-          NewCall = createQuerySizeLod1DArray(Builder, Env, ImageIndex,
-                                              ZeroLod, Mask,
-                                              "getdimensions1darray");
+          NewCall = createQuerySizeLod1DArray(Builder, Env, ImageIndex, ZeroLod,
+                                              Mask, "getdimensions1darray");
         } else {
           NewCall = createGetDimensions2D(Builder, Env, ImageIndex, Mask,
                                           "getdimensions2d");
@@ -4881,28 +4934,36 @@ void lowerImageAccesses(
       if (isGetDimensions1Intrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         Value *ZeroLod = Builder.getInt32(0);
-        CallInst *NewCall = createQuerySizeLod1D(Builder, Env, ImageIndex,
-                                                  ZeroLod, Mask,
-                                                  "getdimensions1d");
+        CallInst *NewCall = createQuerySizeLod1D(
+            Builder, Env, ImageIndex, ZeroLod, Mask, "getdimensions1d");
         CI->replaceAllUsesWith(NewCall);
         CI->eraseFromParent();
         continue;
       }
 
-      // Roadmap H124s/L227(c): `OpImageQuerySize` against an `Array2D` or
-      // `Plain3D` storage image (`isGetDimensions3Intrinsic`,
-      // `hasOnlySupportedStorageImageUses` already restricted this branch
-      // to those two shapes) -- reuses `QuerySizeLod2DArray`'s/
-      // `QuerySizeLod3D`'s own runtime call with a synthesized constant
-      // `Lod = 0`, since a storage image has exactly one mip level and
-      // its formula for that level is otherwise identical.
+      // Roadmap H124s/L227(c)/L232: `OpImageQuerySize` against an
+      // `Array2D`, `Plain3D`, or `StorageCubeArray` storage image
+      // (`isGetDimensions3Intrinsic`, `hasOnlySupportedStorageImageUses`
+      // already restricted this branch to those three shapes) -- reuses
+      // `QuerySizeLod2DArray`'s/`QuerySizeLod3D`'s/`QuerySizeLodCubeArray`'s
+      // own runtime call with a synthesized constant `Lod = 0`, since a
+      // storage image has exactly one mip level and its formula for that
+      // level is otherwise identical. `StorageCubeArray` reuses the same
+      // `createQuerySizeLodCubeArray` builder already used for a
+      // *sampled* cube array's own identical `/6` face-count division
+      // (see `ImageShape::StorageCubeArray`'s own doc) -- the runtime
+      // entry point reads `ArrayLayers` off the descriptor generically,
+      // with no sampled-vs-storage distinction of its own.
       if (isGetDimensions3Intrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         Value *ZeroLod = Builder.getInt32(0);
         CallInst *NewCall =
             Shape == ImageShape::Plain3D
-                ? createQuerySizeLod3D(Builder, Env, ImageIndex, ZeroLod,
-                                       Mask, "getdimensions3d")
+                ? createQuerySizeLod3D(Builder, Env, ImageIndex, ZeroLod, Mask,
+                                       "getdimensions3d")
+            : Shape == ImageShape::StorageCubeArray
+                ? createQuerySizeLodCubeArray(Builder, Env, ImageIndex, ZeroLod,
+                                              Mask, "getdimensionscubearray")
                 : createQuerySizeLod2DArray(Builder, Env, ImageIndex, ZeroLod,
                                             Mask, "getdimensions2darray");
         CI->replaceAllUsesWith(NewCall);
@@ -4945,6 +5006,11 @@ void lowerImageAccesses(
                                          "querysizelod3d");
           break;
         case ImageShape::CubeArray:
+        case ImageShape::StorageCubeArray:
+          // Roadmap L232: a genuine storage cube-array handle reuses the
+          // exact same `/6`-dividing builder already used for the
+          // sampled-image `CubeArray` case above it -- see
+          // `ImageShape::StorageCubeArray`'s own doc.
           NewCall = createQuerySizeLodCubeArray(Builder, Env, ImageIndex, Lod,
                                                 Mask, "querysizelodcubearray");
           break;
@@ -5141,7 +5207,8 @@ void lowerImageAccesses(
           Shape == ImageShape::Array1D
               ? Builder.CreateExtractElement(Coord, uint64_t{1})
           : (Shape == ImageShape::Array2D || Shape == ImageShape::Plain3D ||
-             Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS)
+             Shape == ImageShape::Plain2DMS || Shape == ImageShape::Array2DMS ||
+             Shape == ImageShape::StorageCubeArray)
               ? Builder.CreateExtractElement(Coord, uint64_t{2})
               : nullptr;
       // `Array2DMS`'s own 4th coordinate component (roadmap H19m): the
@@ -5193,6 +5260,12 @@ void lowerImageAccesses(
               createStore2D(StoreBuilder, Env, ImageIndex, X, Y, Texel, Mask);
             break;
           case ImageShape::Array2D:
+          case ImageShape::StorageCubeArray:
+            // Roadmap L232: identical `(x, y, layer)` store addressing to
+            // `Array2D` -- `C2` is the already-flattened `layer * 6 +
+            // face` value for a genuine cube array here (see
+            // `ImageShape::StorageCubeArray`'s own doc), needing no
+            // dedicated runtime entry point of its own.
             if (IsInteger)
               createStore2DArrayI32(StoreBuilder, Env, ImageIndex, X, Y, C2,
                                     Texel, Mask);
@@ -5368,6 +5441,9 @@ void lowerImageAccesses(
                                             LI->getName());
           break;
         case ImageShape::Array2D:
+        case ImageShape::StorageCubeArray:
+          // Roadmap L232: identical `(x, y, layer)` load addressing to
+          // `Array2D` -- see the matching store-side case's own doc.
           Loaded = IsInteger
                        ? createLoad2DArrayI32(LoadBuilder, Env, ImageIndex, X,
                                               Y, C2, LoadBuilder.getInt32(0),
