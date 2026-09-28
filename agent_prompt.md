@@ -61,30 +61,31 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session)** Pick one of `L227(a)`-`(d)`
-   (still open, unchanged for several sessions) or `L228(b)`/`(c)`
-   (compressed-format blits, MSAA multi-layer clears) -- whichever fits
-   the next session's time budget. These are the largest remaining
-   untriaged/unfixed clusters from the original broad `L228` sample.
-2. **(a few hours)** The broader-than-tessellation CTS re-run
-   (`api`/`pipeline`/`shader_render`/`synchronization`) is now several
-   sessions overdue -- every recent session's CTS work has stayed
-   scoped to whatever cluster it was fixing (`timeline_semaphore`,
-   `binding_model`), not the wider, still-mostly-unsampled surface
-   `L228(e)`/`(f)` call out.
+1. **(a few hours, dedicated session)** Pick one of `L227(c)`/`(d)`
+   (still open, unchanged for several sessions -- `L227(c)`: 3
+   `Feature/Textures/*` pipeline-creation failures + `WaveActiveMax`'s
+   `-inf` edge case; `L227(d)`: 3 `Graphics/MeshShaders/*`
+   image-comparison failures, start with `SimpleTriangle`'s own
+   `imgdiff: error: Failed reading PNG header from file`) or
+   `L228(b)`/`(c)` (compressed-format blits, MSAA multi-layer clears)
+   -- whichever fits the next session's time budget. These are the
+   last remaining `check-hlsl-feme-vk` failures plus the largest
+   remaining untriaged/unfixed `L228` clusters.
+2. **(a few hours)** `L228(e)`/`(f)`: the broader-than-tessellation CTS
+   re-run (`api`/`pipeline`/`shader_render`/`synchronization`) is now
+   many sessions overdue -- every recent session's CTS work has stayed
+   scoped to whatever cluster/test it was fixing, not this wider,
+   still-mostly-unsampled surface.
 3. **(quick, at the very start of the next session)** Re-check
    `offload-test-suite`'s local `feme` branch before trusting
-   `check-hlsl-feme-vk` exists -- it has now drifted back to `main`'s
-   tip at least twice across recent sessions. `git log --oneline feme
-   -3` should show `adf0fc1` at the tip; if not, `git reset --hard
-   adf0fc1` restores it (no re-cherry-pick needed).
-4. **(optional, no urgency)** Now that `L228(j)`'s fix has landed with
-   0 CTS coverage of its own race, it might be worth a future session
-   writing a *second*, more end-to-end regression test that goes
-   through a real `VkQueue`/`QueueExecutor` submission racing a real
-   `vkUpdateDescriptorSets` (rather than calling `DescriptorSet`'s
-   methods directly), to also guard against a future refactor of the
-   `QueueExecutor`/`CommandBuffer` dispatch path reintroducing the same
-   class of bug in a different shape. Not urgent -- the current test
-   already gives strong, fast-running coverage of the actual race
-   condition itself.
+   `check-hlsl-feme-vk` exists -- it has drifted back to `main`'s tip
+   at least twice across recent sessions (did not this session, but
+   worth the 10-second check regardless). `git log --oneline feme -3`
+   should show `31986d1` at the tip; if not, `git reset --hard 31986d1`
+   restores it.
+4. **(30 minutes, low priority)** Consider adding a permanent,
+   `cl::opt`-gated (not env-var, for discoverability) IR-dump flag to
+   `EntryWrapperPass` (or wherever it would be more broadly useful) --
+   this session's own ad-hoc `getenv("FEME_DEBUG_DUMP_WAVE_BODY")`
+   instrumentation was added and reverted by hand, and would have
+   saved real time if it had already existed going in.
