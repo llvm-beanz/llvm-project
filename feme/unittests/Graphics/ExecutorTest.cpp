@@ -2792,6 +2792,40 @@ TEST(ExecutorTest, DepthWriteDisabledLeavesAttachmentUnchanged) {
   }
 }
 
+// Roadmap L248: per the Vulkan spec, `depthWriteEnable` only takes effect
+// when `depthTestEnable` is also true -- depth writes are always disabled
+// when the depth test itself is disabled, regardless of `depthWriteEnable`
+// (`dEQP-VK.pipeline.*.depth.format.*.depth_test_disabled.
+// depth_write_enabled`'s own shape).
+TEST(ExecutorTest, DepthTestDisabledSuppressesDepthWriteEvenWhenEnabled) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = false;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Less;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // With the depth test disabled, the fragment always "passes" and is
+    // shaded...
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    // ...but no depth write occurs, since `depthWriteEnable` is only
+    // honored when `depthTestEnable` is true.
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 1.0f) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
   Context Ctx;
   DepthState Depth;

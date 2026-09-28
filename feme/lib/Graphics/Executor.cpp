@@ -1206,7 +1206,14 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
   if (Stencil.TestEnable)
     if (Error E = applyFace(Face.PassOp))
       return std::move(E);
-  if (Depth.WriteEnable) {
+  // (roadmap L248) Per the Vulkan spec, `depthWriteEnable` only controls
+  // depth writes *when* `depthTestEnable` is true -- depth writes are
+  // always disabled when the depth test itself is disabled, regardless of
+  // `depthWriteEnable`'s own value (there is no way to write depth without
+  // testing it; `VK_COMPARE_OP_ALWAYS` with `depthTestEnable` true is the
+  // spec's documented way to get an always-passing test that still
+  // writes).
+  if (Depth.TestEnable && Depth.WriteEnable) {
     if (Error E =
             writeDepth(DepthAttachment, SampleCount, PX, PY, Sample, NewDepth))
       return std::move(E);
