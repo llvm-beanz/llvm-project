@@ -2225,3 +2225,31 @@ right vehicle for the next dedicated CTS sampling session.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- neither fix touches feature-bit or extension exposure; both
 widen or correct existing, already-advertised lowering paths.
+
+## Roadmap L227(c): targeted `dEQP-VK.image.image_size.*` CTS sample -- confirms fix, discovers pre-existing Cube/CubeArray gap (`L230`)
+
+Ran the full `image/image-size.txt` mustpass list (108 cases,
+`dEQP-VK.image.image_size.*` -- GLSL/SPIR-V-ASM `imageSize()` queries
+against every storage-image shape, the same `OpImageQuerySize` family
+`L227(c)`'s `GetDimensions` fix widened) via `run_vulkan_cts.py`.
+
+Result: **72 Pass, 24 Fail, 12 NotSupported**. All `1d`/`1d_array`/
+`2d`/`2d_array`/`3d`/`buffer` cases (72 total) **Pass** or are
+correctly `NotSupported` (the `3d.*_2d_view_*` sub-cases, a distinct,
+unrelated 2D-view-of-a-3D-image feature this device does not support)
+-- confirms the `L227(c)` fix generalizes cleanly to the GLSL/SPIR-V-ASM
+CTS surface, not just the HLSL/DXC surface `GetDimensions.test`/
+`Array.GetDimensions.test` originally exercised, with no regressions.
+
+All 24 `cube`/`cube_array` cases **Fail**. Confirmed this is a
+pre-existing gap, not a regression from this session's own change:
+`hasOnlySupportedStorageImageUses`'s `isGetDimensionsIntrinsic`/
+`isGetDimensions3Intrinsic` branches never accepted `Cube`/`CubeArray`
+shapes, before or after this session's edits (the edits only touched
+the `Plain1D`/`Array1D`/`Plain3D` branches). Filed as new roadmap item
+`L230`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this sample re-confirms existing, already-advertised
+functionality plus discovers an existing gap, neither changes
+feature/extension exposure.
