@@ -4158,3 +4158,60 @@ anyway per standing instructions:
 -- this is a test-harness/host-scheduling robustness fix (an
 environment-variable override for an internal safety-net timeout), not
 a feature-bit or extension exposure change.
+
+## L256/L257/L258: `dEQP-VK.glsl.*` sweep -- `ShadowValueMap` dynamic-`Component` crash fix
+
+This session's `L228(f)`-driven widening of the broader-than-tessellation
+CTS sample picked `dEQP-VK.glsl.*` (28,420 cases) as the modern
+replacement for the historical "shader_render" module referenced
+throughout `L228` (this CTS build,
+`vulkan-cts-1.4.6.2-525-g880f31a2bd9cd0659f84f3f80dafd07f2e693f6d`, has
+no top-level `shader_render` group at all -- confirmed via a full,
+unfiltered case-list grep of every top-level group name).
+
+The full sweep aborted partway through (8,956/28,420 cases run) when
+`deqp-vk` itself `SIGABRT`ed on
+`dEQP-VK.glsl.indexing.varying_array.vec2_dynamic_loop_write_dynamic_loop_read`
+-- a genuine compiler-internals crash (`ShadowValueMap::getOrCreate`,
+`CanonicalizeStage.cpp`), not a rendering bug. See `Roadmap.md`'s `L256`
+for the full root-cause writeup and fix (`ShadowValueMap` generalized to
+tolerate a dynamic `Component` as well as a dynamic `Row`, since
+`resolveStageIOAccess`'s doubly-dynamic-indexed-access handling -- `L138`
+-- can produce either independently).
+
+Verified against the real Vulkan CTS:
+- `dEQP-VK.glsl.indexing.varying_array.vec2_dynamic_loop_write_dynamic_loop_read`
+  (the originally-crashing single case): no longer crashes `deqp-vk` --
+  now reaches rendering and comparison (`Fail (Image mismatch)`, a
+  separate, unresolved correctness bug, see below).
+- `dEQP-VK.glsl.indexing.varying_array.*dynamic*` (48 cases, every
+  `vec2`/`vec4` write/read combination involving at least one dynamic
+  array or component index): **no crashes**, but **0/48 Pass** -- every
+  case fails on `Fail (Image mismatch)`. Filed as new roadmap row `L257`
+  (not yet investigated -- the crash fix only changes whether the
+  process survives, not whether the dynamic-component read-back value
+  itself is correct).
+
+`FeMeTransformsGraphicsTests`: new unit test
+`CanonicalizeStageTest.OutputReadBackResolvesThroughDynamicComponentByteGEP`
+reproduces the exact constant-`Row`/dynamic-`Component` shape (confirmed
+via a temporary `git stash` of just the fix to crash identically
+pre-fix, pass post-fix).
+`check-feme`: 3,402 Passed (+1 net new unit test), 61 Unsupported, 0
+Failed (was 3,401/61/0).
+`check-hlsl-feme-vk`: 448 Pass / 32 XFAIL / 200 Not supported / 0 Fail,
+unchanged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- a compiler-internals (stage-IO canonicalization) crash fix, not a
+feature-bit or extension exposure change.
+
+**Not attempted this session** (filed as new roadmap rows for a future
+session): `L257` (the 48-case `Fail (Image mismatch)` correctness bug
+uncovered by this fix) and `L258` (the ~7% `Fail` cluster the partial
+8,956-case pre-crash sample found in `dEQP-VK.glsl.builtin.function`
+(395 fails), `dEQP-VK.glsl.440.linkage` (49), `dEQP-VK.glsl.
+conversions.matrix_to_matrix` (20), `dEQP-VK.glsl.builtin_var.
+fragdepth` (18), and a long tail of `atomic_operations.*` -- a future
+session should re-run the full 28,420-case sweep now that it no longer
+aborts partway, then triage the largest cluster first).
