@@ -1362,6 +1362,74 @@ TEST(SPIRVToLLVMTest, PlainVectorLaneCompositeExtractStillLegalizes) {
   EXPECT_NE(Result.find("llvm.extractelement"), std::string::npos) << Result;
 }
 
+// (Roadmap L268) `spirv.IAddCarry`'s no-`Offset` two-member result
+// struct's own type conversion substitutes a `feme.tight_vector` marker
+// struct for each `vector<3xi32>` member (see
+// `layOutStructIfOffsetsMatch`'s own `!Type.hasOffset()` branch -- this
+// applies unconditionally, including here, to a purely transient SSA
+// aggregate that is never actually laid out in memory), but upstream
+// MLIR's own generic `ArithmeticWithOverflowPattern` builds the result by
+// `insertvalue`-ing the intrinsic's raw, un-substituted `vector<3xi32>`
+// results directly -- the exact
+// `'llvm.insertvalue' op Type mismatch: cannot insert 'vector<3xi32>' into
+// '!llvm.struct<packed (struct<"feme.tight_vector", ...`
+// MLIR verifier failure `dEQP-VK.glsl.builtin.function.integer.uaddcarry.
+// {compute,fragment,vertex}.uvec3*` hit before this fix.
+// TightVectorArithmeticWithOverflowPattern (registered at `FeMeBenefit`,
+// above upstream's own default-benefit registration) supersedes it for
+// every shape and routes both computed fields through
+// reassembleTightVectorValue before the final `insertvalue`s.
+TEST(SPIRVToLLVMTest, IAddCarryUVec3ReassemblesTightVectorMembers) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%a : vector<3xi32>, %b : vector<3xi32>) -> () "
+      "\"None\" { "
+      "%r = spirv.IAddCarry %a, %b : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "%sum = spirv.CompositeExtract %r[0 : i32] : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "%carry = spirv.CompositeExtract %r[1 : i32] : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.intr.uadd.with.overflow"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
+  // No leftover unresolved cast from either the write-side reassembly or
+  // the later CompositeExtract's own tight-vector unwrap.
+  EXPECT_EQ(Result.find("unrealized_conversion_cast"), std::string::npos)
+      << Result;
+}
+
+// (Roadmap L268) `spirv.UMulExtended`'s counterpart of the test above --
+// same root cause (`vector<3xi32>` members reassembled into
+// `feme.tight_vector` form), same fix
+// (TightVectorMulExtendedPattern), different upstream pattern
+// (`MulExtendedPattern`, a widen-multiply-then-split sequence with no
+// `with.overflow` intrinsic involved at all -- see that pattern's own
+// comment). Regression guard for
+// `dEQP-VK.glsl.builtin.function.integer.umulextended.*.uvec3*`.
+TEST(SPIRVToLLVMTest, UMulExtendedUVec3ReassemblesTightVectorMembers) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%a : vector<3xi32>, %b : vector<3xi32>) -> () "
+      "\"None\" { "
+      "%r = spirv.UMulExtended %a, %b : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "%lo = spirv.CompositeExtract %r[0 : i32] : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "%hi = spirv.CompositeExtract %r[1 : i32] : "
+      "!spirv.struct<(vector<3xi32>, vector<3xi32>)> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.mul"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("unrealized_conversion_cast"), std::string::npos)
+      << Result;
+}
+
 // (Roadmap L184) A regression guard for the `opcompositeextract.
 // struct16arr3` crash this session root-caused and fixed:
 // `CompositeExtractMemberReorderPattern`'s pre-fix version only ever

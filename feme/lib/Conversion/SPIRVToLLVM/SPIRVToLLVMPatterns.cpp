@@ -10472,6 +10472,177 @@ mlir::Value unwrapTightVectorValue(mlir::Value Value, mlir::Type TargetType,
   return Result;
 }
 
+/// (Roadmap L268) Inserts \p Field into \p Result at \p Op's own declared
+/// member index \p DeclaredIndex, reassembling it into whatever
+/// `feme.tight_vector`-substituted shape that member's own *physical*
+/// field type requires first (via reassembleTightVectorValue) whenever the
+/// two disagree -- the same "declared index -> physical index, plus any
+/// needed tight-vector wrap" pairing `CompositeConstructPattern::
+/// convertStruct` already applies per constituent, factored out here so
+/// `TightVectorArithmeticWithOverflowPattern`/`TightVectorMulExtendedPattern`
+/// below can reuse it verbatim for their own two-member result structs.
+mlir::Value insertReassembledStructMember(
+    mlir::spirv::StructType StructTy, unsigned DeclaredIndex, mlir::Value Field,
+    mlir::Value Result, const mlir::TypeConverter &Converter,
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc) {
+  auto LLVMStructTy = mlir::cast<mlir::LLVM::LLVMStructType>(Result.getType());
+  unsigned PhysicalIndex =
+      getStructMemberPhysicalIndex(StructTy, DeclaredIndex, Converter);
+  mlir::Type FieldTy = LLVMStructTy.getBody()[PhysicalIndex];
+  if (Field.getType() != FieldTy)
+    Field = reassembleTightVectorValue(Field, FieldTy, Rewriter, Loc);
+  return mlir::LLVM::InsertValueOp::create(
+      Rewriter, Loc, Result, Field,
+      llvm::ArrayRef<int64_t>{static_cast<int64_t>(PhysicalIndex)});
+}
+
+/// (Roadmap L268) Overrides upstream's own generic
+/// `ArithmeticWithOverflowPattern` (`spirv.IAddCarry`/`ISubBorrow`) for
+/// exactly the shape that pattern's own unconditional, unchecked
+/// `InsertValueOp`s cannot handle: a 3-component vector (`uvec3`/`ivec3`)
+/// operand. `getTypeConverter()->convertType(Op.getType())` -- the result
+/// struct's own *physical* converted type -- substitutes a
+/// `feme.tight_vector` marker struct for any 3-lane member (see
+/// `layOutStructIfOffsetsMatch`'s own `!Type.hasOffset()` branch and
+/// `substituteTightVectorMembersIfNeeded`'s comment for why: a raw
+/// `vector<3xiN>`'s own alloc size is ambiguous across `DataLayout`s), but
+/// upstream's own pattern inserts the intrinsic's raw, un-substituted
+/// `vector<3xiN>` result/overflow fields directly, producing exactly the
+/// `'llvm.insertvalue' op Type mismatch: cannot insert 'vector<3xi32>'
+/// into '!llvm.struct<packed (struct<"feme.tight_vector", ...>, ...)>'`
+/// MLIR verifier failure this fixes (found via
+/// `dEQP-VK.glsl.builtin.function.integer.{uaddcarry,usubborrow}.uvec3_*`).
+/// Registered at `FeMeBenefit`, above upstream's own pattern (registered
+/// at the default benefit), so it wins for every width/shape; a 2- or
+/// 4-lane (or scalar) operand reassembles as a no-op
+/// (reassembleTightVectorValue's own `Constituent.getType() == FieldTy`
+/// early-out), so this is not merely a 3-lane-only special case needing its own
+/// separate dispatch.
+template <typename SPIRVOp, typename LLVMOp>
+class TightVectorArithmeticWithOverflowPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type OperandType = Adaptor.getOperand1().getType();
+    mlir::Type OverflowType = Rewriter.getI1Type();
+    if (auto VecType = mlir::dyn_cast<mlir::VectorType>(OperandType))
+      OverflowType = mlir::VectorType::get(VecType.getShape(), OverflowType);
+
+    mlir::Type IntrTy = mlir::LLVM::LLVMStructType::getLiteral(
+        Rewriter.getContext(), {OperandType, OverflowType});
+    mlir::Value IntrResult = LLVMOp::create(
+        Rewriter, Loc, IntrTy, Adaptor.getOperand1(), Adaptor.getOperand2());
+    mlir::Value LowBits =
+        mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, IntrResult, 0);
+    mlir::Value Overflow =
+        mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, IntrResult, 1);
+    Overflow = mlir::LLVM::ZExtOp::create(Rewriter, Loc, OperandType, Overflow);
+
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
+    Result = insertReassembledStructMember(
+        mlir::cast<mlir::spirv::StructType>(Op.getType()), 0, LowBits, Result,
+        *this->getTypeConverter(), Rewriter, Loc);
+    Result = insertReassembledStructMember(
+        mlir::cast<mlir::spirv::StructType>(Op.getType()), 1, Overflow, Result,
+        *this->getTypeConverter(), Rewriter, Loc);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Forward declaration: defined below, alongside the matrix arithmetic
+/// patterns (its own primary users). Needed by
+/// TightVectorMulExtendedPattern to splat a per-lane shift-amount vector,
+/// the same broadcast idiom those patterns already rely on.
+static mlir::Value broadcastScalar(mlir::ConversionPatternRewriter &Rewriter,
+                                   mlir::Location Loc, mlir::Value Scalar,
+                                   mlir::VectorType VecTy);
+
+/// (Roadmap L268) Overrides upstream's own generic `MulExtendedPattern`
+/// (`spirv.UMulExtended`/`SMulExtended`) for the same 3-lane
+/// `feme.tight_vector` reassembly `TightVectorArithmeticWithOverflowPattern`
+/// above needs -- see that class's own comment; the only difference here
+/// is the pair of fields being reassembled (`lowBits`/`highBits` of a
+/// widened multiply, rather than `lowBits`/a zero-extended overflow bit),
+/// since `spirv.UMulExtended`/`SMulExtended` never involve
+/// `llvm.{u,s}mul.with.overflow` at all (see the file-level `with.overflow`
+/// vs. widened-multiply distinction `isOverflowArithIntrinsic`'s own doc
+/// comment in `feme/lib/Transforms/CPU/SIMDize.cpp` draws for the same
+/// reason). Registered at `FeMeBenefit` for the same reason.
+template <typename SPIRVOp, bool IsSigned>
+class TightVectorMulExtendedPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type OperandType = Adaptor.getOperand1().getType();
+    auto VecType = mlir::dyn_cast<mlir::VectorType>(OperandType);
+    unsigned Width = mlir::cast<mlir::IntegerType>(
+                         VecType ? VecType.getElementType() : OperandType)
+                         .getWidth();
+    mlir::Type WideElementType = Rewriter.getIntegerType(Width * 2);
+    mlir::Type WideType =
+        VecType ? mlir::VectorType::get(VecType.getShape(), WideElementType)
+                : WideElementType;
+
+    auto Extend = [&](mlir::Value V) -> mlir::Value {
+      if (IsSigned)
+        return mlir::LLVM::SExtOp::create(Rewriter, Loc, WideType, V);
+      return mlir::LLVM::ZExtOp::create(Rewriter, Loc, WideType, V);
+    };
+    mlir::Value Lhs = Extend(Adaptor.getOperand1());
+    mlir::Value Rhs = Extend(Adaptor.getOperand2());
+    mlir::Value WideProduct =
+        mlir::LLVM::MulOp::create(Rewriter, Loc, WideType, Lhs, Rhs);
+
+    mlir::Value LowBits =
+        mlir::LLVM::TruncOp::create(Rewriter, Loc, OperandType, WideProduct);
+
+    mlir::Value ShiftAmountScalar = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, WideElementType,
+        Rewriter.getIntegerAttr(WideElementType, Width));
+    mlir::Value ShiftAmount =
+        VecType ? broadcastScalar(Rewriter, Loc, ShiftAmountScalar,
+                                  mlir::cast<mlir::VectorType>(WideType))
+                : ShiftAmountScalar;
+    mlir::Value HighBitsWide = mlir::LLVM::LShrOp::create(
+        Rewriter, Loc, WideType, WideProduct, ShiftAmount);
+    mlir::Value HighBits =
+        mlir::LLVM::TruncOp::create(Rewriter, Loc, OperandType, HighBitsWide);
+
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
+    Result = insertReassembledStructMember(
+        mlir::cast<mlir::spirv::StructType>(Op.getType()), 0, LowBits, Result,
+        *this->getTypeConverter(), Rewriter, Loc);
+    Result = insertReassembledStructMember(
+        mlir::cast<mlir::spirv::StructType>(Op.getType()), 1, HighBits, Result,
+        *this->getTypeConverter(), Rewriter, Loc);
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+using TightVectorUMulExtendedPattern =
+    TightVectorMulExtendedPattern<mlir::spirv::UMulExtendedOp, false>;
+using TightVectorSMulExtendedPattern =
+    TightVectorMulExtendedPattern<mlir::spirv::SMulExtendedOp, true>;
+
 class CompositeConstructPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
 public:
@@ -15815,6 +15986,20 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<FlushedInverseSqrtPattern>(Patterns.getContext(), TypeConverter,
                                           FeMeBenefit);
+  // (Roadmap L268) Supersede upstream's own ArithmeticWithOverflowPattern/
+  // MulExtendedPattern registrations (see
+  // populateSPIRVToLLVMConversionPatterns, called earlier by this same pass)
+  // for exactly the four ops whose result struct can carry a
+  // `feme.tight_vector`-substituted 3-lane member -- see
+  // TightVectorArithmeticWithOverflowPattern/TightVectorMulExtendedPattern's
+  // own comments above.
+  Patterns.add<TightVectorArithmeticWithOverflowPattern<
+                   mlir::spirv::IAddCarryOp, mlir::LLVM::UAddWithOverflowOp>,
+               TightVectorArithmeticWithOverflowPattern<
+                   mlir::spirv::ISubBorrowOp, mlir::LLVM::USubWithOverflowOp>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<TightVectorUMulExtendedPattern, TightVectorSMulExtendedPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<
       InverseHyperbolicPattern<mlir::spirv::GLAsinhOp,
                                InverseHyperbolicKind::Asinh>,
