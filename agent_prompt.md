@@ -61,45 +61,42 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(background, in progress, just needs monitoring)** The fresh
-   full `dEQP-VK.glsl.*` sweep (28,420 cases) kicked off this session
-   to reflect `L261`'s fix -- at last check (~mid-session) was at
-   6,590/28,420 (~23%), still running at session end. Next session:
-   check if it finished; if the shell's gone, just relaunch it (bash
-   tool `mode="async"`, not shell backgrounding -- this convention is
-   now well-established over several sessions, keep following it).
-   Expected new tally roughly: ~17,867 Pass / ~1,590 Fail / ~8,963
-   NotSupported (i.e., -598 Fail from the `L258` baseline, assuming
-   no unexpected knock-on shifts elsewhere in the full sweep) -- worth
-   confirming this matches once it completes.
-2. **(a few hours, new, ready to pick up)** `L262`: the integer-
-   sampler Bias/Grad/MinLodClamp gate in
-   `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
-   (`IsInteger` branch, ~line 1548-1673) still rejects `HasBias`/
-   `HasGrad`/`HasMinLodClamp` for integer images -- this is the
-   remaining ~128+ cases from the original int-sampler split in this
-   session's own investigation (item 1 above). Would need: widening
-   the gate, adding Bias/MinLodClamp operands to the 7
-   `createSample*I32` builders (`ImageCalls.h`/`.cpp`), threading
-   through `lowerImageAccesses`'s integer-shape dispatch, and updating
-   `femeCpuImageSample2DV4I32`-family runtime functions in
-   `FeMeRuntimeCPU.c` to use real (not stubbed) values.
-3. **(unknown, still filed, not started)** `L263`: remaining
-   untriaged smaller `L258` clusters (`builtin.function` biggest at
-   403 in the partial sample, `atomic_operations` 96, `matrix` 92,
-   etc.) -- re-triage against the fresh sweep's numbers once it's
-   done, since `L261`'s fix may have shifted which cluster is
-   actually biggest now.
-4. **(carried over, unchanged)** `L260`: residual
-   `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing bug --
-   still not picked up, several sessions running now.
-5. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-
-   tessellation/glsl CTS sampling (`pipeline`'s other sub-suites)
+1. **(a few hours, new, ready to pick up)** `L264`: the same
+   Bias/Grad/MinLodClamp widening for `Cube`/`CubeArray` int-sampler
+   shapes (~24 cases, ~3% of the original gap's population). Reuse
+   `femeRTComputeCubeUVDerivatives` for the derivative math. Remember
+   the `matchImageCall` lesson from this session and last: when
+   widening a builder, its independent matcher switch in the same
+   file needs the same operand-count/index update, and it fails
+   *silently* (returns `std::nullopt`), not loudly, if missed.
+2. **(unknown, still filed, not started)** `L263`: remaining
+   untriaged `L258`/`L261`-era clusters (`builtin.function`,
+   `atomic_operations`, `matrix`, etc.) -- re-triage against this
+   session's fresh 1,590-fail tally, since `L262`'s fix may have
+   shifted which cluster is now biggest.
+3. **(carried over, unchanged, several sessions running)** `L260`:
+   residual `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing
+   bug in `ImageFixture.cpp`'s `packClearColor`/`unpackColor`.
+4. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-
+   glsl/tessellation CTS sampling (`pipeline`'s other sub-suites)
    still not done at real scale.
-6. **(noted, not actioned)** `offload-test-suite`'s local `feme`
-   checkout branch keeps drifting from `llvm-beanz/feme` between
-   sessions (see item 9 above) -- re-verify/reset at the start of
-   every session rather than trusting it's still intact from last
-   time.
-7. No git stashes left open this session (none were used -- this
-   segment's work didn't need any A/B stash-based comparisons).
+5. **(new, low priority, out of scope for a FeMe-focused session)**
+   `offload-test-suite`'s own `Feature/SpecializationConstant/
+   spec_const_32_bits.test`, `WaveOps/WaveActiveMax.test` (both
+   actually failing) and `Feature/PushConstant/array_of_matrices.test`
+   (unexpectedly passing, i.e. a stale `XFAIL:`) need their upstream
+   lit annotations refreshed -- this is `offload-test-suite`
+   test-infra bookkeeping unrelated to any FeMe or LLVM code change
+   made in this or recent sessions, flagging only so it isn't
+   mistaken for a new regression next time `check-hlsl-feme-vk` is
+   run.
+6. **(re-confirmed, standing risk)** `offload-test-suite`'s local
+   `feme` checkout branch has now drifted from `llvm-beanz/feme`
+   in *two different ways* across recent sessions (a hard external
+   reset to `origin/main`, and this session's silent fall-behind on
+   a critical single commit) -- the standing instruction to
+   re-verify/reset at the start of every session remains essential;
+   consider making this an explicit numbered pre-flight step (like
+   the `vulkaninfo` check) rather than something that only gets
+   caught incidentally when a next step happens to touch it.
+7. No git stashes left open this session (none were used).
