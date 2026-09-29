@@ -1193,79 +1193,95 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                llvm::Value *MinLodClamp, llvm::Value *Mask,
                                const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.2d.v4i32` call (roadmap H109): the
-/// integer-channel, always-nearest-filtered counterpart of `createSample2D`.
-/// Unlike `createSample2D`, there are no `DUdX`/`DUdY`/`DVdX`/`DVdY`, `Bias`,
-/// or `MinLodClamp` operands (SPIR-V forbids combining `Bias`/`Grad`/
-/// `MinLod` with an integer-channel image's mandatory `NEAREST` filtering
-/// in any case this pass has needed to support yet) -- \p Lod may be
-/// either a real explicit-LOD operand or a constant `0.0` synthesized for
-/// an ordinary implicit-LOD sample (roadmap L125(a)), since neither this
-/// call nor its runtime implementation distinguishes the two. \p OffsetX/
-/// \p OffsetY mirror `createSample2D`'s own `ConstOffset` image operand.
-llvm::CallInst *createSample2DI32(llvm::IRBuilderBase &Builder,
-                                  const ImageCallEnv &Env,
-                                  llvm::Value *ImageIndex,
-                                  llvm::Value *SamplerIndex, llvm::Value *U,
-                                  llvm::Value *V, llvm::Value *Lod,
-                                  llvm::Value *OffsetX, llvm::Value *OffsetY,
-                                  llvm::Value *Mask,
-                                  const llvm::Twine &Name = "");
+/// Builds a `feme.cpu.image.sample.2d.v4i32` call (roadmap H109, widened
+/// by L262): the integer-channel counterpart of `createSample2D`. Unlike
+/// that function, the runtime never bilinearly/anisotropically blends
+/// (the Vulkan spec mandates `NEAREST` filtering/mipmapping for an
+/// integer-format image's own sampler), but \p DUdX/\p DUdY/\p DVdX/
+/// \p DVdY/\p Bias/\p MinLodClamp still feed the same implicit-LOD mip-
+/// *level* selection math `createSample2D`'s own runtime uses: GLSL
+/// legally permits `Bias`/`Grad`/`MinLod` against an integer
+/// (`isampler`*/`usampler`*) sampler (confirmed via real
+/// `dEQP-VK.glsl.texture_functions.*_bias_*isampler*`/`*usampler*` and
+/// `texturegrad*` cases -- see roadmap L262's own writeup for why the
+/// prior narrower explicit-LOD-only restriction was wrong). \p Lod is
+/// either a real explicit-LOD operand (\p UseExplicitLod true) or the
+/// zero constant synthesized for an ordinary implicit-LOD sample (in
+/// which case it's ignored in favor of the derivative-derived level).
+/// \p OffsetX/\p OffsetY mirror `createSample2D`'s own `ConstOffset`
+/// image operand.
+llvm::CallInst *createSample2DI32(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *V, llvm::Value *DUdX, llvm::Value *DUdY, llvm::Value *DVdX,
+    llvm::Value *DVdY, llvm::Value *Lod, llvm::Value *UseExplicitLod,
+    llvm::Value *Bias, llvm::Value *OffsetX, llvm::Value *OffsetY,
+    llvm::Value *MinLodClamp, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.1d.v4i32` call (roadmap L125(b)): the
-/// `Plain1D` counterpart of `createSample2DI32`, mirroring `createSample1D`'s
-/// own relationship to `createSample2D`. \p Offset is a bare scalar,
-/// mirroring `createSample1D`'s own `Offset` parameter, unlike
-/// `createSample2DI32`'s two-component `OffsetX`/`OffsetY`.
+/// Builds a `feme.cpu.image.sample.1d.v4i32` call (roadmap L125(b),
+/// widened by L262): the `Plain1D` counterpart of `createSample2DI32`,
+/// mirroring `createSample1D`'s own relationship to `createSample2D`. \p
+/// Offset is a bare scalar, mirroring `createSample1D`'s own `Offset`
+/// parameter, unlike `createSample2DI32`'s two-component `OffsetX`/
+/// `OffsetY`.
 llvm::CallInst *createSample1DI32(llvm::IRBuilderBase &Builder,
                                   const ImageCallEnv &Env,
                                   llvm::Value *ImageIndex,
                                   llvm::Value *SamplerIndex, llvm::Value *U,
-                                  llvm::Value *Lod, llvm::Value *Offset,
-                                  llvm::Value *Mask,
+                                  llvm::Value *DUdX, llvm::Value *DUdY,
+                                  llvm::Value *Lod, llvm::Value *UseExplicitLod,
+                                  llvm::Value *Bias, llvm::Value *Offset,
+                                  llvm::Value *MinLodClamp, llvm::Value *Mask,
                                   const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.1darray.v4i32` call (roadmap L125(b)):
-/// the `Array1D` counterpart of `createSample1DI32`, mirroring
-/// `createSample1DArray`'s own relationship to `createSample1D`. \p
-/// ArrayLayer joins \p U as a second coordinate operand, but (like
-/// `createSample1DArray`'s own \p Offset) \p Offset itself stays a bare
-/// scalar, excluding the array layer, matching a real `deqp-vk` SPIR-V
-/// capture's own `ConstOffset` dimensionality for this shape.
-llvm::CallInst *createSample1DArrayI32(llvm::IRBuilderBase &Builder,
-                                       const ImageCallEnv &Env,
-                                       llvm::Value *ImageIndex,
-                                       llvm::Value *SamplerIndex,
-                                       llvm::Value *U, llvm::Value *ArrayLayer,
-                                       llvm::Value *Lod, llvm::Value *Offset,
-                                       llvm::Value *Mask,
-                                       const llvm::Twine &Name = "");
+/// Builds a `feme.cpu.image.sample.1darray.v4i32` call (roadmap L125(b),
+/// widened by L262): the `Array1D` counterpart of `createSample1DI32`,
+/// mirroring `createSample1DArray`'s own relationship to
+/// `createSample1D`. \p ArrayLayer joins \p U as a second coordinate
+/// operand, but (like `createSample1DArray`'s own \p Offset) \p Offset
+/// itself stays a bare scalar, excluding the array layer, matching a
+/// real `deqp-vk` SPIR-V capture's own `ConstOffset` dimensionality for
+/// this shape.
+llvm::CallInst *createSample1DArrayI32(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
+    llvm::Value *ArrayLayer, llvm::Value *DUdX, llvm::Value *DUdY,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Bias,
+    llvm::Value *Offset, llvm::Value *MinLodClamp, llvm::Value *Mask,
+    const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.2darray.v4i32` call (roadmap L125(b)):
-/// the `Array2D` counterpart of `createSample2DI32`, mirroring
-/// `createSample2DArray`'s own relationship to `createSample2D`. \p
-/// ArrayLayer joins \p U/\p V as a third coordinate operand; \p OffsetX/
-/// \p OffsetY stay a 2-wide `ConstOffset` (excluding the array layer),
-/// mirroring `createSample2DArray`'s own identical operand.
+/// Builds a `feme.cpu.image.sample.2darray.v4i32` call (roadmap L125(b),
+/// widened by L262): the `Array2D` counterpart of `createSample2DI32`,
+/// mirroring `createSample2DArray`'s own relationship to
+/// `createSample2D`. \p ArrayLayer joins \p U/\p V as a third coordinate
+/// operand; \p OffsetX/\p OffsetY stay a 2-wide `ConstOffset` (excluding
+/// the array layer), mirroring `createSample2DArray`'s own identical
+/// operand.
 llvm::CallInst *createSample2DArrayI32(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
-    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *Lod,
-    llvm::Value *OffsetX, llvm::Value *OffsetY, llvm::Value *Mask,
+    llvm::Value *V, llvm::Value *ArrayLayer, llvm::Value *DUdX,
+    llvm::Value *DUdY, llvm::Value *DVdX, llvm::Value *DVdY, llvm::Value *Lod,
+    llvm::Value *UseExplicitLod, llvm::Value *Bias, llvm::Value *OffsetX,
+    llvm::Value *OffsetY, llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.3d.v4i32` call (roadmap L125(b)): the
-/// `Plain3D` counterpart of `createSample2DI32`, mirroring
-/// `createSample3D`'s own relationship to `createSample2D`. \p W joins
-/// \p U/\p V as a third coordinate operand; \p OffsetX/\p OffsetY/
-/// \p OffsetZ stay a genuine 3-wide `ConstOffset` (mirroring
+/// Builds a `feme.cpu.image.sample.3d.v4i32` call (roadmap L125(b),
+/// widened by L262): the `Plain3D` counterpart of `createSample2DI32`,
+/// mirroring `createSample3D`'s own relationship to `createSample2D`. \p
+/// W joins \p U/\p V as a third coordinate operand; \p OffsetX/
+/// \p OffsetY/\p OffsetZ stay a genuine 3-wide `ConstOffset` (mirroring
 /// `createSample3D`'s own identical offset triple), unlike
 /// `createSample2DI32`'s 2-wide `OffsetX`/`OffsetY`.
 llvm::CallInst *createSample3DI32(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *U,
-    llvm::Value *V, llvm::Value *W, llvm::Value *Lod, llvm::Value *OffsetX,
-    llvm::Value *OffsetY, llvm::Value *OffsetZ, llvm::Value *Mask,
+    llvm::Value *V, llvm::Value *W, llvm::Value *DUdX, llvm::Value *DUdY,
+    llvm::Value *DVdX, llvm::Value *DVdY, llvm::Value *DWdX,
+    llvm::Value *DWdY, llvm::Value *Lod, llvm::Value *UseExplicitLod,
+    llvm::Value *Bias, llvm::Value *OffsetX, llvm::Value *OffsetY,
+    llvm::Value *OffsetZ, llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cube.v4i32` call (roadmap L125(b)):

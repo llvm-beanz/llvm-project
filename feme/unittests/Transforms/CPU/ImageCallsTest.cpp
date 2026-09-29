@@ -1107,9 +1107,11 @@ TEST_F(ImageCallsTest, MatchesQuerySamplesCall) {
 }
 
 // `createSample2DI32`'s own `feme.cpu.image.sample.2d.v4i32` call (roadmap
-// H109): a nearest-filtered, explicit-LOD-only sample against an
-// integer-channel (`usampler2D`/`isampler2D`) sampled image -- see
-// `ImageCallKind::Sample2DI32`'s own doc.
+// H109, widened by L262): a sample against an integer-channel
+// (`usampler2D`/`isampler2D`) sampled image -- see
+// `ImageCallKind::Sample2DI32`'s own doc. This case exercises the
+// explicit-LOD path (mirroring `MatchesSample2DCall`'s own explicit-LOD
+// case), with `Bias`/`MinLodClamp` at their no-op defaults.
 TEST_F(ImageCallsTest, MatchesSample2DI32Call) {
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
@@ -1117,8 +1119,15 @@ TEST_F(ImageCallsTest, MatchesSample2DI32Call) {
       Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
       ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(0),
-      Builder.getInt32(0), Builder.getInt1(true));
+      Builder.getInt32(0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -1134,6 +1143,7 @@ TEST_F(ImageCallsTest, MatchesSample2DI32Call) {
   EXPECT_EQ(Matched->U, ConstantFP::get(Builder.getFloatTy(), 0.5));
   EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.5));
   EXPECT_EQ(Matched->Lod, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(true));
   EXPECT_EQ(Matched->OffsetX, Builder.getInt32(0));
   EXPECT_EQ(Matched->OffsetY, Builder.getInt32(0));
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
@@ -1141,17 +1151,53 @@ TEST_F(ImageCallsTest, MatchesSample2DI32Call) {
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
 }
 
+// Roadmap L262: an implicit-LOD `Sample2DI32` call with a real `Bias`
+// operand -- confirms the widened builder/matcher thread a nonzero
+// `Bias` through correctly, mirroring `MatchesSample2DCall`'s own
+// analogous implicit-LOD-with-`Bias` coverage.
+TEST_F(ImageCallsTest, MatchesSample2DI32CallWithBias) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createSample2DI32(
+      Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.01),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.01),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(false),
+      ConstantFP::get(Builder.getFloatTy(), 1.5), Builder.getInt32(0),
+      Builder.getInt32(0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::Sample2DI32);
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(false));
+  EXPECT_EQ(Matched->Bias, ConstantFP::get(Builder.getFloatTy(), 1.5));
+  EXPECT_EQ(Matched->DUdX, ConstantFP::get(Builder.getFloatTy(), 0.01));
+  EXPECT_EQ(Matched->DVdY, ConstantFP::get(Builder.getFloatTy(), 0.01));
+}
+
 TEST_F(ImageCallsTest, MatchesSample1DI32Call) {
-  // Roadmap L125(b): the `Plain1D` counterpart of `MatchesSample2DI32Call`
-  // above, confirming `matchImageCall`'s new `Sample1DI32` case extracts a
-  // bare scalar `U`/`Offset` (no `V`/`OffsetY`), mirroring `Sample1D`'s own
-  // relationship to `Sample2D`.
+  // Roadmap L125(b)/L262: the `Plain1D` counterpart of
+  // `MatchesSample2DI32Call` above, confirming `matchImageCall`'s
+  // `Sample1DI32` case extracts a bare scalar `U`/`Offset` (no
+  // `V`/`OffsetY`), mirroring `Sample1D`'s own relationship to
+  // `Sample2D`.
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   CallInst *CI = createSample1DI32(
       Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
       ConstantFP::get(Builder.getFloatTy(), 0.5),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
       ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
       Builder.getInt1(true));
   Builder.CreateRetVoid();
 
@@ -1174,17 +1220,22 @@ TEST_F(ImageCallsTest, MatchesSample1DI32Call) {
 }
 
 TEST_F(ImageCallsTest, MatchesSample1DArrayI32Call) {
-  // Roadmap L125(b): the `Array1D` counterpart of `MatchesSample1DI32Call`
-  // above, confirming `matchImageCall`'s new `Sample1DArrayI32` case
-  // extracts the added `ArrayLayer` operand alongside `U`, mirroring
-  // `Sample1DArray`'s own relationship to `Sample1D`.
+  // Roadmap L125(b)/L262: the `Array1D` counterpart of
+  // `MatchesSample1DI32Call` above, confirming `matchImageCall`'s
+  // `Sample1DArrayI32` case extracts the added `ArrayLayer` operand
+  // alongside `U`, mirroring `Sample1DArray`'s own relationship to
+  // `Sample1D`.
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   CallInst *CI = createSample1DArrayI32(
       Builder, Env, Builder.getInt32(3), Builder.getInt32(4),
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 2.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
       ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
       Builder.getInt1(true));
   Builder.CreateRetVoid();
 
@@ -1209,10 +1260,11 @@ TEST_F(ImageCallsTest, MatchesSample1DArrayI32Call) {
 
 
 TEST_F(ImageCallsTest, MatchesSample2DArrayI32Call) {
-  // Roadmap L125(b): the `Array2D` counterpart of `MatchesSample1DArrayI32
-  // Call` above, confirming `matchImageCall`'s new `Sample2DArrayI32` case
-  // extracts `V`/`ArrayLayer`/`OffsetY` alongside `U`/`OffsetX`, mirroring
-  // `Sample2DArray`'s own relationship to `Sample1DArray`.
+  // Roadmap L125(b)/L262: the `Array2D` counterpart of
+  // `MatchesSample1DArrayI32Call` above, confirming `matchImageCall`'s
+  // `Sample2DArrayI32` case extracts `V`/`ArrayLayer`/`OffsetY` alongside
+  // `U`/`OffsetX`, mirroring `Sample2DArray`'s own relationship to
+  // `Sample1DArray`.
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   CallInst *CI = createSample2DArrayI32(
@@ -1220,8 +1272,15 @@ TEST_F(ImageCallsTest, MatchesSample2DArrayI32Call) {
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 0.25),
       ConstantFP::get(Builder.getFloatTy(), 2.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
       ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(1),
-      Builder.getInt32(-1), Builder.getInt1(true));
+      Builder.getInt32(-1),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -1246,11 +1305,12 @@ TEST_F(ImageCallsTest, MatchesSample2DArrayI32Call) {
 }
 
 TEST_F(ImageCallsTest, MatchesSample3DI32Call) {
-  // Roadmap L125(b): the `Plain3D` counterpart of `MatchesSample2DArrayI32
-  // Call` above, confirming `matchImageCall`'s new `Sample3DI32` case
-  // extracts `W`/`OffsetZ` alongside `U`/`V`/`OffsetX`/`OffsetY` (no
-  // `ArrayLayer`, unlike `Sample2DArrayI32`), mirroring `Sample3D`'s own
-  // relationship to `Sample2D`.
+  // Roadmap L125(b)/L262: the `Plain3D` counterpart of
+  // `MatchesSample2DArrayI32Call` above, confirming `matchImageCall`'s
+  // `Sample3DI32` case extracts `W`/`OffsetZ` alongside
+  // `U`/`V`/`OffsetX`/`OffsetY` (no `ArrayLayer`, unlike
+  // `Sample2DArrayI32`), mirroring `Sample3D`'s own relationship to
+  // `Sample2D`.
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   CallInst *CI = createSample3DI32(
@@ -1258,8 +1318,17 @@ TEST_F(ImageCallsTest, MatchesSample3DI32Call) {
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 0.25),
       ConstantFP::get(Builder.getFloatTy(), 0.125),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
       ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt32(1),
-      Builder.getInt32(-1), Builder.getInt32(2), Builder.getInt1(true));
+      Builder.getInt32(-1), Builder.getInt32(2),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
