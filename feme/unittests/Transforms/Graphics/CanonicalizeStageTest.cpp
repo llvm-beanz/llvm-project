@@ -6900,5 +6900,97 @@ TEST(CanonicalizeStageTest, RewritesHelperInvocationBuiltinToIsHelperCall) {
     EXPECT_NE(Elt.SystemValue, SignatureSystemValue::IsHelperLane);
 }
 
+/// (Roadmap L271) A vertex-stage `out` varying that is declared (has a
+/// `Location` decoration) but never actually stored to anywhere in the
+/// entry's body -- legal per the Vulkan spec, whose value is then simply
+/// undefined for a later stage to read (exactly the shape
+/// `dEQP-VK.glsl.atomic_operations.*_vertex`'s own `outData` output is:
+/// `vktShaderExecutor.cpp`'s `ShaderExecutor` framework always declares
+/// one `layout(location=N) out` variable per `ShaderSpec::outputs` entry
+/// and links a later stage's own passthrough input against the same
+/// location, whether or not the shader body actually assigns it) still
+/// gets a `SignatureElement` at that `Location`, so a later stage's own
+/// genuinely-matching input can still resolve against it
+/// (`GraphicsPipeline.cpp`'s `validateStageInterfaces`, which previously
+/// rejected this shape outright with `"fragment input location N has no
+/// matching vertex stage output"`, since the ordinary load/store-walk
+/// discovery loop has no instruction to discover an unwritten global
+/// through).
+TEST(CanonicalizeStageTest,
+    RecordsDeclaredButNeverWrittenOutputAsSignatureElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @out_data = external addrspace(8) global i32, !spirv.Decorations !1
+    define void @main() #0 {
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_Position
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 0}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+
+  const SignatureElement *OutData =
+      findElementByLocation(*Sig, SignatureDirection::Output, 0);
+  ASSERT_NE(OutData, nullptr);
+}
+
+/// (Roadmap L271) Running `CanonicalizeStagePass` a *second* time over an
+/// already-canonicalized entry (mirroring `GraphicsPipeline.cpp`'s own
+/// two invocations -- once directly, once again, meant as a no-op repeat,
+/// inside `feme::cpu::CompiledStage::create`'s later `runPipeline` --
+/// see that file's own comment) must not append a spurious duplicate
+/// `SignatureElement` for the same declared-but-never-written output the
+/// previous test covers: by the second pass, the original `store` has
+/// already been rewritten into a `feme.stage.output.store` call, so the
+/// underlying `GlobalVariable` has no remaining load/store instruction
+/// for the discovery walk to find it through at all -- only this fix's
+/// own additional module-globals walk could rediscover it, and must not,
+/// once a signature already exists for `F`. (Regression test for the
+/// `dEQP-VK.glsl.atomic_operations.add_signed_geometry` crash this
+/// exact double-run shape caused before this guard existed.)
+TEST(CanonicalizeStageTest,
+    SecondCanonicalizePassDoesNotDuplicateUnwrittenOutputElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @out_data = external addrspace(8) global i32, !spirv.Decorations !1
+    define void @main() #0 {
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_Position
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 0}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  // A second run over the now-already-canonicalized module: previously
+  // this appended a duplicate `SignatureElement`; must now be a genuine
+  // no-op (`PreservedAnalyses::areAllPreserved()` -- nothing left to
+  // rewrite).
+  EXPECT_FALSE(run(*M));
+
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+
+  unsigned OutDataCount = 0;
+  for (const SignatureElement &Elt : Sig->Elements)
+    if (Elt.Direction == SignatureDirection::Output && Elt.Location == 0u)
+      ++OutDataCount;
+  EXPECT_EQ(OutDataCount, 1u);
+}
 
 } // namespace
+

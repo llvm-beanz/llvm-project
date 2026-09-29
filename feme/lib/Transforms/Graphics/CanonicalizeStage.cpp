@@ -4601,6 +4601,92 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
     InputGlobals.push_back(&GV);
   }
 
+  // (Roadmap L271) A vertex/geometry/tessellation-evaluation entry's own
+  // declared-but-never-written `out` varying (e.g.
+  // `dEQP-VK.glsl.atomic_operations.*_vertex`'s own `outData`:
+  // `vktShaderExecutor.cpp`'s `ShaderExecutor` framework always declares
+  // one `layout(location=...) out` variable per `ShaderSpec::outputs`
+  // entry and links the fragment stage's own passthrough input against
+  // the same location, but this particular shader body never actually
+  // assigns it -- legal per the Vulkan spec, whose value is then simply
+  // left undefined for the consuming fragment stage to read) is invisible
+  // to the load/store walk above for the same "no instruction to
+  // discover through" reason `SampleId`/`SamplePosition` just above is --
+  // except here it is the *producing* stage's own output missing an
+  // element, not the consuming stage's input, so omitting it instead
+  // leaves the fragment stage's own genuinely `Location`-matching input
+  // with no vertex output to link against at all
+  // (`"fragment input location N has no matching vertex stage output"`,
+  // `validateStageInterfaces`). Walk every remaining stage-IO global
+  // decorated with an ordinary user `Location` (as opposed to a
+  // `BuiltIn`, already exhaustively handled above) and add it too,
+  // regardless of direction -- reusing the same `classifySPIRVElement`/
+  // `InputGlobals`/`OutputGlobals` path the load/store walk's own
+  // discoveries already flow through below, so a matrix/single-member-
+  // struct-wrapped varying found only this way is still decomposed the
+  // same way.
+  //
+  // Two things must gate this beyond a plain "not yet `Seen`" check, or
+  // it mis-fires on shapes that look identical to a genuinely-never-
+  // written global but are not:
+  //
+  // (Roadmap L271) First, only worth walking on a genuinely first pass
+  // over `F`: once `dxil::setEntrySignature` has already attached a
+  // signature (`Sig = dxil::getEntrySignature(F).value_or(...)` below
+  // reuses it rather than starting fresh), a *second*
+  // `canonicalizeSPIRVStage` call over the same, already-rewritten `F`
+  // (`GraphicsPipeline.cpp`'s own comment on why
+  // `feme::cpu::CompiledStage::create`'s later `CanonicalizeStagePass`
+  // invocation is meant to be a no-op repeat) sees every already-
+  // canonicalized store/load as gone (raised into a `feme.stage.*` call,
+  // not a raw SPIR-V load/store this pass's own instruction walk
+  // recognizes), while the underlying `GlobalVariable` declaration --
+  // now referenced by nothing at all -- still survives in the module
+  // with its original `!spirv.Decorations` metadata intact. Without this
+  // guard, this loop would rediscover that now-orphaned declaration on
+  // the second pass and append a brand new, spurious duplicate
+  // `SignatureElement` for it, corrupting the entry's already-finalized
+  // signature (confirmed via
+  // `dEQP-VK.glsl.atomic_operations.add_signed_geometry`, which crashed
+  // outright once this loop ran unconditionally).
+  //
+  // (Roadmap L271) Second, this fallback must never fire for either hull
+  // canonicalization phase (`SPIRVCanonicalPhase::HullControlPoint`/
+  // `HullPatchConstant`): `splitBarrierlessTessellationControlEntry`
+  // clones a barrierless mixed-frequency hull entry into separate
+  // control-point/patch-constant functions sharing the *same*
+  // `GlobalVariable`s, each pruning the other phase's own stores
+  // (`pruneStageIOStoresByFrequency`) -- and, by the time the second
+  // phase's own `canonicalizeSPIRVStage` call runs, the first phase's
+  // call has already rewritten (and erased) its own surviving stores to
+  // any shared global, leaving a genuine per-control-point output the
+  // *patch-constant* phase's own prune removed every store to with zero
+  // uses anywhere in the module -- indistinguishable, from `use_empty()`
+  // alone, from a truly-never-written global. It is not one: it belongs
+  // solely to its control-point sibling's already-built signature.
+  // Restricting to `SPIRVCanonicalPhase::Ordinary` (every stage but
+  // hull's two split phases) sidesteps this entirely, since no other
+  // stage's `canonicalizeSPIRVStage` call ever shares a `GlobalVariable`
+  // with a sibling function the way hull's own two phases do (regression
+  // covered by `HullStageDoesNotPeelPatchTessFactorOutputRowCount`).
+  bool AlreadyCanonicalized = dxil::getEntrySignature(F).has_value();
+  if (!AlreadyCanonicalized && Phase == SPIRVCanonicalPhase::Ordinary) {
+    for (GlobalVariable &GV : F.getParent()->globals()) {
+      if (Seen.contains(&GV) || !GV.use_empty())
+        continue;
+      unsigned AddrSpace = 0;
+      if (!isSPIRVStageIOGlobal(&GV, AddrSpace))
+        continue;
+      ParsedSPIRVDecorations D =
+          parseSPIRVDecorations(GV.getMetadata("spirv.Decorations"));
+      if (D.BuiltIn || !D.Location)
+        continue;
+      Seen.insert(&GV);
+      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
+      (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(&GV);
+    }
+  }
+
   DenseMap<GlobalVariable *, SmallVector<uint32_t, 1>> ElementIDs;
   // (Roadmap L206) The subset of `ElementIDs`' own values whose global is
   // a genuinely signed 16-bit integer (`feme.spirv.Int16Signed` metadata,
