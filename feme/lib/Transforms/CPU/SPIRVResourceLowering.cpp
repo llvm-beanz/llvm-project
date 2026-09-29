@@ -1642,22 +1642,21 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // Vulkan spec to `NEAREST` filtering/mipmapping -- but that
       // restriction is about *filtering*, not about which image
       // operands may combine with an integer sampled type at all.
-      // Roadmap L262: confirmed via real
+      // Roadmap L262/L264: confirmed via real
       // `dEQP-VK.glsl.texture_functions.*_bias_*isampler*`/`*usampler*`
       // and `texturegrad*` CTS cases (`isampler2d_bias`/`isampler3d_bias`/
-      // `isampler1d_bias` etc., all `FRAGMENT`-stage) that GLSL legally
-      // emits `Bias`/`Grad`/`MinLod` against an integer sampler -- the
-      // prior blanket rejection of all three here was itself the bug,
-      // not a real SPIR-V/Vulkan restriction; `NEAREST` filtering only
-      // means the runtime never blends between taps/levels, not that it
-      // can't *select* a level via the same bias/derivative math a
-      // float sample uses. `Plain2D`/`Plain1D`/`Array1D`/`Array2D`/
-      // `Plain3D`'s own `createSample*I32` builders now carry the same
-      // `DUdX`/`DUdY`/(`DVdX`/`DVdY`)/`Bias`/`MinLodClamp` operands
-      // their float counterparts do. `Cube`/`CubeArray` (roadmap L264,
-      // filed as a small follow-up -- only ~24 real CTS cases) still
-      // reject `Bias`/`Grad`/`MinLodClamp`: `createSampleCubeI32`/
-      // `createSampleCubeArrayI32` haven't been widened yet.
+      // `isampler1d_bias`/`isamplercube_bias`/`isamplercubearray_bias`
+      // etc., all `FRAGMENT`-stage) that GLSL legally emits `Bias`/
+      // `Grad`/`MinLod` against an integer sampler -- the prior blanket
+      // rejection of all three here was itself the bug, not a real
+      // SPIR-V/Vulkan restriction; `NEAREST` filtering only means the
+      // runtime never blends between taps/levels, not that it can't
+      // *select* a level via the same bias/derivative math a float
+      // sample uses. All 7 shapes' `createSample*I32` builders now carry
+      // the same derivative/`Bias`/`MinLodClamp` operands their float
+      // counterparts do (roadmap L262 widened `Plain1D`/`Array1D`/
+      // `Plain2D`/`Array2D`/`Plain3D`; roadmap L264 widened `Cube`/
+      // `CubeArray`).
       if (IsInteger) {
         bool ShapeSupportsSample =
             Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
@@ -1665,13 +1664,6 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
             Shape == ImageShape::Plain3D || Shape == ImageShape::Cube ||
             Shape == ImageShape::CubeArray;
         if (!ShapeSupportsSample)
-          return false;
-        bool ShapeSupportsBiasGradMinLod =
-            Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
-            Shape == ImageShape::Array1D || Shape == ImageShape::Array2D ||
-            Shape == ImageShape::Plain3D;
-        if (!ShapeSupportsBiasGradMinLod &&
-            (HasMinLodClamp || HasBias || HasGrad))
           return false;
         unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
         if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth,
@@ -3937,20 +3929,43 @@ void lowerImageAccesses(
           // unlike every other shape above: SPIR-V forbids `ConstOffset`
           // against `Dim::Cube` outright, so `createSampleCubeI32` has no
           // such operand (matching `createSampleCube`'s own identical
-          // absence). `Cube`/`CubeArray` haven't been widened for real
-          // `Bias`/`Grad`/`MinLodClamp` yet (roadmap L264, a small
-          // follow-up) -- `hasOnlySupportedImageUses` above already
-          // rejects those operands for these two shapes, so `Lod` here
-          // is always either a real explicit-LOD operand or the
-          // constant `0.0` synthesized for an ordinary implicit-LOD
-          // sample.
+          // absence). Roadmap L264: `Cube`/`CubeArray` are now widened
+          // for real `Bias`/`Grad`/`MinLodClamp` too, mirroring the
+          // float `Cube`/`CubeArray` dispatch below exactly (see its own
+          // comments) -- `getOrSynthesizeSampleCubeDerivatives`
+          // synthesizes implicit-LOD derivatives of the raw direction
+          // vector itself (not a face-local coordinate, which isn't
+          // known until `femeRTSelectCubeFace` runs at runtime).
           if (Shape == ImageShape::Cube) {
             Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
             Value *IntDirZ = Builder.CreateExtractElement(Coord, uint64_t{2});
+            CubeDirectionDerivatives IntCD =
+                HasGrad
+                    ? CubeDirectionDerivatives{
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{1}),
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{2})}
+                : !ExplicitLod
+                    ? getOrSynthesizeSampleCubeDerivatives(
+                          Builder, *CI->getFunction(), IntDirX, IntDirY,
+                          IntDirZ)
+                    : CubeDirectionDerivatives{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             CallInst *NewSampleI32Call = createSampleCubeI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntDirX, IntDirY,
-                IntDirZ, Lod, Mask, CI->getName());
+                IntDirZ, IntCD.DDirXdX, IntCD.DDirXdY, IntCD.DDirYdX,
+                IntCD.DDirYdY, IntCD.DDirZdX, IntCD.DDirZdY, Lod,
+                ExplicitLodFlag, IntBias, IntMinLodClamp, Mask,
+                CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -3963,18 +3978,41 @@ void lowerImageAccesses(
           // plus rounds/clamps `ArrayLayer` to a valid cube element
           // (mirroring `createSampleCubeArray`'s own identical
           // `ArrayLayer` handling). No offset extraction here either,
-          // for the same reason `Cube` has none above; no real `Bias`/
-          // `Grad`/`MinLodClamp` support yet either, for the same reason
-          // `Cube` doesn't (roadmap L264).
+          // for the same reason `Cube` has none above; same real
+          // `Bias`/`Grad`/`MinLodClamp` widening as `Cube` above too
+          // (roadmap L264).
           if (Shape == ImageShape::CubeArray) {
             Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
             Value *IntDirZ = Builder.CreateExtractElement(Coord, uint64_t{2});
             Value *IntArrayLayer =
                 Builder.CreateExtractElement(Coord, uint64_t{3});
+            CubeDirectionDerivatives IntCD =
+                HasGrad
+                    ? CubeDirectionDerivatives{
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{1}),
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{2})}
+                : !ExplicitLod
+                    ? getOrSynthesizeSampleCubeDerivatives(
+                          Builder, *CI->getFunction(), IntDirX, IntDirY,
+                          IntDirZ)
+                    : CubeDirectionDerivatives{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             CallInst *NewSampleI32Call = createSampleCubeArrayI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntDirX, IntDirY,
-                IntDirZ, IntArrayLayer, Lod, Mask, CI->getName());
+                IntDirZ, IntCD.DDirXdX, IntCD.DDirXdY, IntCD.DDirYdX,
+                IntCD.DDirYdY, IntCD.DDirZdX, IntCD.DDirZdY, IntArrayLayer,
+                Lod, ExplicitLodFlag, IntBias, IntMinLodClamp, Mask,
+                CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;

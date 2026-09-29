@@ -5513,9 +5513,13 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, mask). Implicit LOD defaults to 0.0.
-  EXPECT_EQ(Sample->arg_size(), 11u);
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, lod, use_explicit_lod, bias, min_lod_clamp, mask). Implicit
+  //  LOD defaults to 0.0 (roadmap L264: widened from the pre-L264 11-arg
+  //  layout to add derivatives/bias/clamp, mirroring the float `Cube`
+  //  builder's own layout).
+  EXPECT_EQ(Sample->arg_size(), 20u);
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(15))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cube.v4f32"));
 }
 
@@ -5553,12 +5557,13 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cube.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, lod, mask).
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, lod, use_explicit_lod, bias, min_lod_clamp, mask).
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(15))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cube.v4f32"));
 }
 
@@ -5597,10 +5602,12 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, array_layer, lod, mask). Implicit LOD defaults
-  //  to 0.0.
-  EXPECT_EQ(Sample->arg_size(), 12u);
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, array_layer, lod, use_explicit_lod, bias, min_lod_clamp,
+  //  mask). Implicit LOD defaults to 0.0 (roadmap L264: widened from the
+  //  pre-L264 12-arg layout).
+  EXPECT_EQ(Sample->arg_size(), 21u);
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(16))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32"));
 }
 
@@ -5639,12 +5646,14 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.cubearray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  dir_x, dir_y, dir_z, array_layer, lod, mask).
+  //  dir_x, dir_y, dir_z, ddirxdx, ddirxdy, ddirydx, ddirydy, ddirzdx,
+  //  ddirzdy, array_layer, lod, use_explicit_lod, bias, min_lod_clamp,
+  //  mask).
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(16))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.cubearray.v4f32"));
 }
 
