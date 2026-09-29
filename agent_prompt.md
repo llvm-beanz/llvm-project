@@ -58,33 +58,48 @@ file.
 
 # Request
 
-The last session stalled out, any intermediate results will be in the git stash
-and may be restored with `git stash pop`.
-
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(background, in progress, just needs monitoring)** `L258`: the
-   full `dEQP-VK.glsl.*` sweep (shellId `37` if still alive) was
-   ~44% through (12,525/28,420) at session end, ~2 cases/sec. Next
-   session: check if it finished, and if so triage the largest
-   failure cluster first (`dEQP-VK.glsl.builtin.function` was the
-   biggest in every partial sample so far). If the shell is gone,
-   just relaunch it (see "next action" above) -- it no longer crashes
-   partway (that was `L256`, already fixed), so a fresh full run is
-   safe to kick off and forget for ~45-90 min.
-2. **(unknown, new, ready to pick up)** `L260`: the residual
-   `a2b10g10r10_snorm_pack32` alpha-channel bug split out this
-   session. Start from its own `.qpa` diff-vs-threshold breakdown
-   (alpha off by exactly 1.0, RGB fine) and look at
-   `feme/lib/Graphics/ImageFixture.cpp`'s `packClearColor`/
-   `unpackColor` 2-bit-alpha SNORM handling specifically -- check
-   whether other 2-bit-SNORM-channel formats (if any exist) share the
-   bug, to know if the fix should be narrow or general.
-3. **(a few hours, still overdue, unchanged for several sessions)**
-   `L228(e)`/`(f)`: `shader_render` (confirmed last session to not
-   exist as a standalone group -- `dEQP-VK.glsl.*` is its modern
-   replacement, which `L258` above covers) and most of `pipeline`'s
-   other sub-suites remain unsampled at any real scale.
-4. No git stashes left open this session (the A/B-test stash used
-   during the false-alarm detour was popped immediately after use).
+1. **(background, in progress, just needs monitoring)** The fresh
+   full `dEQP-VK.glsl.*` sweep (28,420 cases) kicked off this session
+   to reflect `L261`'s fix -- at last check (~mid-session) was at
+   6,590/28,420 (~23%), still running at session end. Next session:
+   check if it finished; if the shell's gone, just relaunch it (bash
+   tool `mode="async"`, not shell backgrounding -- this convention is
+   now well-established over several sessions, keep following it).
+   Expected new tally roughly: ~17,867 Pass / ~1,590 Fail / ~8,963
+   NotSupported (i.e., -598 Fail from the `L258` baseline, assuming
+   no unexpected knock-on shifts elsewhere in the full sweep) -- worth
+   confirming this matches once it completes.
+2. **(a few hours, new, ready to pick up)** `L262`: the integer-
+   sampler Bias/Grad/MinLodClamp gate in
+   `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
+   (`IsInteger` branch, ~line 1548-1673) still rejects `HasBias`/
+   `HasGrad`/`HasMinLodClamp` for integer images -- this is the
+   remaining ~128+ cases from the original int-sampler split in this
+   session's own investigation (item 1 above). Would need: widening
+   the gate, adding Bias/MinLodClamp operands to the 7
+   `createSample*I32` builders (`ImageCalls.h`/`.cpp`), threading
+   through `lowerImageAccesses`'s integer-shape dispatch, and updating
+   `femeCpuImageSample2DV4I32`-family runtime functions in
+   `FeMeRuntimeCPU.c` to use real (not stubbed) values.
+3. **(unknown, still filed, not started)** `L263`: remaining
+   untriaged smaller `L258` clusters (`builtin.function` biggest at
+   403 in the partial sample, `atomic_operations` 96, `matrix` 92,
+   etc.) -- re-triage against the fresh sweep's numbers once it's
+   done, since `L261`'s fix may have shifted which cluster is
+   actually biggest now.
+4. **(carried over, unchanged)** `L260`: residual
+   `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing bug --
+   still not picked up, several sessions running now.
+5. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-
+   tessellation/glsl CTS sampling (`pipeline`'s other sub-suites)
+   still not done at real scale.
+6. **(noted, not actioned)** `offload-test-suite`'s local `feme`
+   checkout branch keeps drifting from `llvm-beanz/feme` between
+   sessions (see item 9 above) -- re-verify/reset at the start of
+   every session rather than trusting it's still intact from last
+   time.
+7. No git stashes left open this session (none were used -- this
+   segment's work didn't need any A/B stash-based comparisons).
