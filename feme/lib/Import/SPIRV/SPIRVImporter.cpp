@@ -24,6 +24,7 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
 
+#include <optional>
 #include <utility>
 
 using namespace feme;
@@ -37,17 +38,24 @@ constexpr uint32_t kOpExtInstImport = 11;
 constexpr uint32_t kOpExtInst = 12;
 constexpr uint32_t kOpTypeFloat = 22;
 constexpr uint32_t kOpTypeVector = 23;
+constexpr uint32_t kOpTypeImage = 25;
+constexpr uint32_t kOpTypeSampledImage = 27;
 constexpr uint32_t kOpTypeStruct = 30;
 constexpr uint32_t kOpTypeFunction = 33;
 constexpr uint32_t kOpFunction = 54;
 constexpr uint32_t kOpFunctionParameter = 55;
 constexpr uint32_t kOpFunctionEnd = 56;
 constexpr uint32_t kOpFunctionCall = 57;
+constexpr uint32_t kOpSampledImage = 86;
 constexpr uint32_t kOpCompositeConstruct = 80;
 constexpr uint32_t kOpCompositeExtract = 81;
+constexpr uint32_t kOpImageSampleImplicitLod = 87;
 constexpr uint32_t kOpImageSampleExplicitLod = 88;
+constexpr uint32_t kOpImageSampleDrefImplicitLod = 89;
 constexpr uint32_t kOpImageSampleDrefExplicitLod = 90;
+constexpr uint32_t kOpImageSampleProjImplicitLod = 91;
 constexpr uint32_t kOpImageSampleProjExplicitLod = 92;
+constexpr uint32_t kOpImageSampleProjDrefImplicitLod = 93;
 constexpr uint32_t kOpImageSampleProjDrefExplicitLod = 94;
 constexpr uint32_t kOpImage = 100;
 constexpr uint32_t kOpImageQuerySizeLod = 103;
@@ -309,6 +317,16 @@ bool isKnownResultTypeProducer(uint32_t Opcode) {
   case kOpImage: // OpImage: extracts a plain image out of a combined
                  // sampled image -- the shape a `sampler2D`-typed GLSL
                  // query builtin's own Image operand always takes.
+  case kOpSampledImage: // OpSampledImage: combines a separate image and
+                        // sampler into the `OpTypeSampledImage`-typed
+                        // value a sample opcode's own "Sampled Image"
+                        // operand needs -- glslang emits this directly
+                        // for `sampler2D`-style combined uniforms too
+                        // (folding the combination at compile time is
+                        // not guaranteed), so it must be resolvable here
+                        // for `lowerProjectiveImageSamples`'s own
+                        // image-dimensionality lookup (see below) to
+                        // work for every "Sampled Image" operand shape.
   case 111: // OpConvertSToF
   case 112: // OpConvertUToF
   case 124: // OpBitcast
@@ -368,6 +386,18 @@ struct TypeResolutionInfo {
   llvm::DenseMap<std::pair<uint32_t, uint32_t>, uint32_t> VectorTypeByComponent;
   /// Every `OpTypeFloat`'s own Result <id>.
   llvm::DenseSet<uint32_t> FloatTypeIds;
+  /// Every `OpTypeImage`'s own Result <id> -> its (Dim, Arrayed) operand
+  /// pair, letting `lowerProjectiveImageSamples` compute exactly how many
+  /// leading Coordinate components a "Proj" sample's underlying image
+  /// dimensionality needs (see its own comment for why this is not
+  /// simply "the Coordinate's own vector width minus one" -- a Proj
+  /// Coordinate may be *more* than one component wider than that need,
+  /// with every component past the real coordinate but before the
+  /// trailing divisor left as spec-sanctioned, ignored padding).
+  llvm::DenseMap<uint32_t, std::pair<uint32_t, uint32_t>> ImageDimByType;
+  /// Every `OpTypeSampledImage`'s own Result <id> -> the `OpTypeImage`
+  /// <id> it wraps.
+  llvm::DenseMap<uint32_t, uint32_t> SampledImageTypeToImageType;
   /// The word index of the module's first `OpFunction` -- SPIR-V's own
   /// logical layout requires every type/global declaration to precede
   /// every function, so this is where a rewrite must insert any new one
@@ -395,6 +425,13 @@ TypeResolutionInfo scanModuleTypes(llvm::ArrayRef<uint32_t> Words) {
       Info.VectorInfoByType[Words[I + 1]] = {Words[I + 2], Words[I + 3]};
       Info.VectorTypeByComponent[{Words[I + 2], Words[I + 3]}] = Words[I + 1];
     }
+    // `OpTypeImage`: `Result SampledType Dim Depth Arrayed MS Sampled
+    // Format [AccessQualifier]` -- Dim is operand 3, Arrayed operand 5.
+    if (Opcode == kOpTypeImage && WordCount >= 7)
+      Info.ImageDimByType[Words[I + 1]] = {Words[I + 3], Words[I + 5]};
+    // `OpTypeSampledImage`: `Result ImageType`.
+    if (Opcode == kOpTypeSampledImage && WordCount >= 3)
+      Info.SampledImageTypeToImageType[Words[I + 1]] = Words[I + 2];
     if (isKnownResultTypeProducer(Opcode) && WordCount >= 3)
       Info.ValueType[Words[I + 2]] = Words[I + 1];
     I += WordCount;
@@ -402,36 +439,108 @@ TypeResolutionInfo scanModuleTypes(llvm::ArrayRef<uint32_t> Words) {
   return Info;
 }
 
-/// Lowers SPIR-V's two "explicit-LOD projective" image-sampling opcodes --
-/// `OpImageSampleProjExplicitLod` (92) and `OpImageSampleProjDrefExplicitLod`
-/// (94) -- into the semantically equivalent non-projective opcodes MLIR's
-/// own SPIR-V dialect already supports end-to-end
-/// (`OpImageSampleExplicitLod`/`OpImageSampleDrefExplicitLod`, 88/90):
-/// MLIR's autogenerated deserializer has no enum case for either "Proj"
-/// opcode at all (`stringifyOpcode` returns empty for both -- see roadmap
-/// L72(a)), so, mirroring `stripNonSemanticExtInst`'s own
+/// Resolves how many leading Coordinate components a "Proj" sample's
+/// underlying image dimensionality actually needs (i.e. excluding the
+/// trailing projective-divide component), by tracing \p SampledImage
+/// (the sample instruction's own "Sampled Image" operand <id>) through
+/// \p Info's `ValueType`/`SampledImageTypeToImageType`/`ImageDimByType`
+/// tables back to its `OpTypeImage`'s own Dim/Arrayed operands. Returns
+/// `std::nullopt` if any link in that chain cannot be resolved (an
+/// unrecognized producer, a `Dim` this rewrite has no defined component
+/// count for such as `SubpassData`, etc.) -- the caller falls back to a
+/// less precise heuristic in that case.
+std::optional<uint32_t> requiredProjCoordComponents(uint32_t SampledImage,
+                                                    const TypeResolutionInfo &Info) {
+  auto TypeIt = Info.ValueType.find(SampledImage);
+  if (TypeIt == Info.ValueType.end())
+    return std::nullopt;
+  auto ImageTypeIt = Info.SampledImageTypeToImageType.find(TypeIt->second);
+  if (ImageTypeIt == Info.SampledImageTypeToImageType.end())
+    return std::nullopt;
+  auto DimIt = Info.ImageDimByType.find(ImageTypeIt->second);
+  if (DimIt == Info.ImageDimByType.end())
+    return std::nullopt;
+  uint32_t Dim = DimIt->second.first;
+  uint32_t Arrayed = DimIt->second.second;
+  // SPIR-V `Dim` enumerant values (see the specification's "Dim" table):
+  // 0 = 1D, 1 = 2D, 2 = 3D, 3 = Cube, 4 = Rect, 5 = Buffer,
+  // 6 = SubpassData. `Cube`/`Buffer`/`SubpassData` are all specification-
+  // disallowed for any "Proj" sampling opcode, but are handled here (not
+  // rejected outright) for robustness against a malformed module -- the
+  // caller's own downstream sanity check (the resolved count must be
+  // exactly one less than the Coordinate's own vector width) still
+  // catches any resulting mismatch and falls back safely.
+  uint32_t BaseComponents;
+  switch (Dim) {
+  case 0: // 1D
+    BaseComponents = 1;
+    break;
+  case 1: // 2D
+    BaseComponents = 2;
+    break;
+  case 2: // 3D
+    BaseComponents = 3;
+    break;
+  case 3: // Cube
+    BaseComponents = 3;
+    break;
+  case 4: // Rect
+    BaseComponents = 2;
+    break;
+  case 5: // Buffer
+    BaseComponents = 1;
+    break;
+  default: // SubpassData or an unrecognized future Dim value.
+    return std::nullopt;
+  }
+  return BaseComponents + Arrayed;
+}
+
+/// Lowers SPIR-V's four "projective" image-sampling opcodes --
+/// `OpImageSampleProjImplicitLod` (91), `OpImageSampleProjExplicitLod`
+/// (92), `OpImageSampleProjDrefImplicitLod` (93), and
+/// `OpImageSampleProjDrefExplicitLod` (94) -- into the semantically
+/// equivalent non-projective opcodes MLIR's own SPIR-V dialect already
+/// supports end-to-end (`OpImageSampleImplicitLod`/
+/// `OpImageSampleExplicitLod`/`OpImageSampleDrefImplicitLod`/
+/// `OpImageSampleDrefExplicitLod`, 87/88/89/90): MLIR's autogenerated
+/// deserializer has no enum case for any "Proj" opcode at all
+/// (`stringifyOpcode` returns empty for all four -- see roadmap L72(a);
+/// the "ImplicitLod" pair was originally left unhandled -- CTS's
+/// `textureProj`/`textureProjOffset` families, which lower to
+/// `OpImageSampleProjImplicitLod`, failed with "unhandled opcode 91" until
+/// L261 closed this gap), so, mirroring `stripNonSemanticExtInst`'s own
 /// rewrite-before-MLIR-ever-sees-it precedent, the module must be rewritten
 /// here.
 ///
 /// Per the SPIR-V specification, a "Proj" sampling opcode differs from its
 /// non-Proj counterpart only in how its Coordinate (and, for the "Dref"
-/// forms, its depth-reference) operand is interpreted: the Coordinate is
-/// one component wider than the image's own dimensionality needs, and that
-/// trailing "q" component is a projective divisor -- the real coordinate
-/// (and Dref) used for the lookup is each other component divided by q.
-/// This rewrite makes that division explicit: it inserts new
-/// `OpCompositeExtract`/`OpFDiv`[/`OpCompositeConstruct`] instructions
-/// immediately before the sample instruction to compute the divided,
-/// narrowed Coordinate (and Dref), then relabels the instruction's own
-/// opcode to the non-Proj equivalent. The Coordinate operand is narrowed
-/// down to exactly the components the image's dimensionality needs --
-/// not merely left at its original (wider) width with the extra component
-/// divided in place and otherwise ignored, even though the specification
-/// itself permits a Coordinate "vector larger than needed" for every
-/// sampling opcode -- because `feme`'s own SPIR-V-to-LLVM legalization
-/// (`ImageSampleExplicitLodPattern`/`ImageSampleDrefExplicitLodPattern`)
-/// already assumes an exactly-sized Coordinate when selecting which
-/// runtime entry point to call.
+/// forms, its depth-reference) operand is interpreted: the SPIR-V
+/// specification permits the Coordinate to be *any* vector at least one
+/// component wider than the sampled image's own dimensionality needs --
+/// GLSL's own `textureProj*` builtins exploit this explicitly (e.g.
+/// `vec4 textureProj(sampler1D, vec4 P)` uses only `P.x` as the real
+/// coordinate and `P.w` as the divisor, silently ignoring `P.y`/`P.z` as
+/// padding) -- with the trailing component always the projective divisor
+/// "q": the real coordinate (and Dref) used for the lookup is each
+/// leading, dimensionality-sized component divided by q. This rewrite
+/// makes that division explicit: it inserts new `OpCompositeExtract`/
+/// `OpFDiv`[/`OpCompositeConstruct`] instructions immediately before the
+/// sample instruction to compute the divided, narrowed Coordinate (and
+/// Dref), then relabels the instruction's own opcode to the non-Proj
+/// equivalent. The Coordinate operand is narrowed down to exactly the
+/// components the image's dimensionality needs (resolved via the
+/// `OpTypeImage` reachable from the sample's own "Sampled Image" operand
+/// -- see `ImageDimByType`/`SampledImageTypeToImageType`), never left at
+/// its original (possibly wider, padded) width -- because `feme`'s own
+/// SPIR-V-to-LLVM legalization (`ImageSampleExplicitLodPattern`/
+/// `ImageSampleDrefExplicitLodPattern`) already assumes an exactly-sized
+/// Coordinate when selecting which runtime entry point to call. When the
+/// image's own dimensionality cannot be resolved this way (e.g. an
+/// indirectly-loaded/`OpPhi`-merged sampled image this pass's bounded
+/// producer allowlist does not follow), this falls back to the
+/// coordinate-vector-width-minus-one heuristic instead -- correct for the
+/// common, non-padded case, but not for a wider-than-needed Coordinate.
 ///
 /// Deliberately conservative: an occurrence whose Coordinate (or Dref)
 /// operand cannot be resolved back to a plain floating-point
@@ -443,7 +552,9 @@ TypeResolutionInfo scanModuleTypes(llvm::ArrayRef<uint32_t> Words) {
 llvm::SmallVector<uint32_t>
 lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
   if (Words.size() <= kSPIRVHeaderWords ||
-      !containsOpcode(Words, {kOpImageSampleProjExplicitLod,
+      !containsOpcode(Words, {kOpImageSampleProjImplicitLod,
+                              kOpImageSampleProjExplicitLod,
+                              kOpImageSampleProjDrefImplicitLod,
                               kOpImageSampleProjDrefExplicitLod}))
     return llvm::SmallVector<uint32_t>(Words);
 
@@ -503,12 +614,17 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
       break;
     }
 
-    bool IsProjDref = Opcode == kOpImageSampleProjDrefExplicitLod;
-    if (!IsProjDref && Opcode != kOpImageSampleProjExplicitLod) {
+    bool IsProjDref = Opcode == kOpImageSampleProjDrefImplicitLod ||
+                      Opcode == kOpImageSampleProjDrefExplicitLod;
+    bool IsProj = IsProjDref || Opcode == kOpImageSampleProjImplicitLod ||
+                  Opcode == kOpImageSampleProjExplicitLod;
+    if (!IsProj) {
       Body.append(Words.begin() + I, Words.begin() + I + WordCount);
       I += WordCount;
       continue;
     }
+    bool IsExplicitLod = Opcode == kOpImageSampleProjExplicitLod ||
+                         Opcode == kOpImageSampleProjDrefExplicitLod;
 
     uint32_t ResultType = Words[I + 1];
     uint32_t Result = Words[I + 2];
@@ -534,16 +650,27 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
     }
     uint32_t ComponentType = VecInfoIt->second.first;
     uint32_t TotalComponents = VecInfoIt->second.second;
-    // A "Proj" Coordinate always has one extra (divisor) component beyond
-    // what the image's own dimensionality needs, and that dimensionality
-    // is 1D/2D/3D/Rect only (Cube is disallowed for every "Proj" opcode),
-    // i.e. `TotalComponents` (needed-plus-divisor) must be in [2, 4].
+    // A "Proj" Coordinate always has at least one extra (divisor)
+    // component beyond what the image's own dimensionality needs (and,
+    // per GLSL's own `textureProj*` semantics, may have even more --
+    // ignored -- padding components before that divisor), and that
+    // dimensionality is 1D/2D/3D/Rect only (Cube is disallowed for every
+    // "Proj" opcode), i.e. `TotalComponents` (needed-plus-divisor, plus
+    // any padding) must be in [2, 4].
     if (!FloatTypeIds.count(ComponentType) || TotalComponents < 2 ||
         TotalComponents > 4) {
       LeaveUnrewritten();
       continue;
     }
-    uint32_t N = TotalComponents - 1;
+    // Prefer the image's own resolved dimensionality (correct even when
+    // the Coordinate is wider than strictly needed); fall back to the
+    // width-minus-one heuristic (correct only for the non-padded case)
+    // when that resolution fails.
+    std::optional<uint32_t> ResolvedN =
+        requiredProjCoordComponents(SampledImage, Info);
+    uint32_t N = (ResolvedN && *ResolvedN + 1 <= TotalComponents)
+                     ? *ResolvedN
+                     : TotalComponents - 1;
 
     uint32_t DrefType = 0;
     if (IsProjDref) {
@@ -556,11 +683,15 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
       DrefType = DrefTypeIt->second;
     }
 
-    // `%q = OpCompositeExtract %ComponentType %Coordinate <N>` extracts the
-    // trailing divisor component, then each of the `N` real coordinate
-    // components is extracted and divided by it in turn.
+    // `%q = OpCompositeExtract %ComponentType %Coordinate <DivisorIndex>`
+    // extracts the trailing divisor component -- always the Coordinate's
+    // own last component, regardless of how many (ignored) padding
+    // components sit between the real, leading `N` coordinate components
+    // and it -- then each of those `N` components is extracted and
+    // divided by it in turn.
+    uint32_t DivisorIndex = TotalComponents - 1;
     uint32_t QId = AllocId();
-    Emit(kOpCompositeExtract, {ComponentType, QId, Coordinate, N});
+    Emit(kOpCompositeExtract, {ComponentType, QId, Coordinate, DivisorIndex});
 
     llvm::SmallVector<uint32_t, 3> DividedComponents;
     for (uint32_t Idx = 0; Idx < N; ++Idx) {
@@ -599,8 +730,10 @@ lowerProjectiveImageSamples(llvm::ArrayRef<uint32_t> Words) {
     // now-narrowed Coordinate/Dref operands; `ImageOperands` and any
     // trailing operand words are copied through verbatim.
     Body.push_back((static_cast<uint32_t>(WordCount) << 16) |
-                   (IsProjDref ? kOpImageSampleDrefExplicitLod
-                               : kOpImageSampleExplicitLod));
+                   (IsProjDref ? (IsExplicitLod ? kOpImageSampleDrefExplicitLod
+                                                 : kOpImageSampleDrefImplicitLod)
+                               : (IsExplicitLod ? kOpImageSampleExplicitLod
+                                                 : kOpImageSampleImplicitLod)));
     Body.push_back(ResultType);
     Body.push_back(Result);
     Body.push_back(SampledImage);

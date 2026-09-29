@@ -319,6 +319,142 @@ std::vector<uint32_t> buildProjDrefExplicitLodModule() {
   return B.finish();
 }
 
+/// As `buildProjExplicitLodModule` above, but `OpImageSampleProjImplicitLod`
+/// (91, with an optional `Bias` image operand) instead of the ExplicitLod
+/// form -- the pairing this rewrite originally left unhandled (see roadmap
+/// L261), which is exactly the opcode CTS's `textureProj`/
+/// `textureProjOffset` GLSL builtins themselves compile down to (an
+/// implicit-LOD sample, not an explicit one).
+std::vector<uint32_t> buildProjImplicitLodModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Float = B.nextId();
+  uint32_t Vec3 = B.nextId();
+  uint32_t Vec4 = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t SampledImageTy = B.nextId();
+  uint32_t PtrSampledImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t U = B.nextId();
+  uint32_t V = B.nextId();
+  uint32_t Q = B.nextId();
+  uint32_t Coord = B.nextId();
+  uint32_t Bias = B.nextId();
+  uint32_t SampledImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*Fragment=*/4, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*OriginUpperLeft=*/7});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeFloat=*/22, {Float, 32});
+  B.emit(/*OpTypeVector=*/23, {Vec3, Float, 3});
+  B.emit(/*OpTypeVector=*/23, {Vec4, Float, 4});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Float, /*Dim2D=*/1, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/1,
+                              /*Unknown=*/0});
+  B.emit(/*OpTypeSampledImage=*/27, {SampledImageTy, ImageTy});
+  B.emit(/*OpTypePointer=*/32,
+         {PtrSampledImage, /*UniformConstant=*/0, SampledImageTy});
+  B.emit(/*OpVariable=*/59, {PtrSampledImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpConstant=*/43, {Float, U, floatBits(1.0f)});
+  B.emit(/*OpConstant=*/43, {Float, V, floatBits(2.0f)});
+  B.emit(/*OpConstant=*/43, {Float, Q, floatBits(2.0f)});
+  B.emit(/*OpConstantComposite=*/44, {Vec3, Coord, U, V, Q});
+  B.emit(/*OpConstant=*/43, {Float, Bias, floatBits(0.5f)});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {SampledImageTy, SampledImageVal, Variable});
+  // `%Result = OpImageSampleProjImplicitLod %Vec4 %SampledImageVal %Coord
+  //   Bias %Bias`.
+  B.emit(/*OpImageSampleProjImplicitLod=*/91,
+         {Vec4, Result, SampledImageVal, Coord, /*Bias=*/0x1, Bias});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
+/// As `buildProjExplicitLodModule` above, but the image is 1D (needing
+/// only 1 real coordinate component) while the Coordinate is a `vec4` --
+/// i.e. 2 (spec-sanctioned, per GLSL's own `textureProj(sampler1D, vec4
+/// P)` semantics -- ignored) padding components sit between the one real
+/// coordinate component (`P.x`) and the trailing divisor (`P.w`). Before
+/// L261's `requiredProjCoordComponents` image-dimensionality lookup, this
+/// rewrite assumed the real coordinate was always exactly
+/// "Coordinate's own width minus one" (3 components here), which for this
+/// shape would incorrectly narrow to a 3-component coordinate and divide
+/// by the wrong (middle, padding) component instead of the real divisor.
+std::vector<uint32_t> buildProjExplicitLodWithPaddedCoordinateModule() {
+  RawSPIRVModuleBuilder B;
+  uint32_t Void = B.nextId();
+  uint32_t Float = B.nextId();
+  uint32_t Vec4 = B.nextId();
+  uint32_t ImageTy = B.nextId();
+  uint32_t SampledImageTy = B.nextId();
+  uint32_t PtrSampledImage = B.nextId();
+  uint32_t Variable = B.nextId();
+  uint32_t FnTy = B.nextId();
+  uint32_t Main = B.nextId();
+  uint32_t Label = B.nextId();
+  uint32_t X = B.nextId();
+  uint32_t PadY = B.nextId();
+  uint32_t PadZ = B.nextId();
+  uint32_t Q = B.nextId();
+  uint32_t Coord = B.nextId();
+  uint32_t Lod = B.nextId();
+  uint32_t SampledImageVal = B.nextId();
+  uint32_t Result = B.nextId();
+
+  B.emit(/*OpCapability=*/17, {/*Shader=*/1});
+  B.emit(/*OpMemoryModel=*/14, {/*Logical=*/0, /*GLSL450=*/1});
+  {
+    std::vector<uint32_t> Operands{/*Fragment=*/4, Main};
+    llvm::append_range(Operands, RawSPIRVModuleBuilder::literalString("main"));
+    B.emit(/*OpEntryPoint=*/15, Operands);
+  }
+  B.emit(/*OpExecutionMode=*/16, {Main, /*OriginUpperLeft=*/7});
+  B.emit(/*OpDecorate=*/71, {Variable, /*DescriptorSet=*/34, 0});
+  B.emit(/*OpDecorate=*/71, {Variable, /*Binding=*/33, 0});
+  B.emit(/*OpTypeVoid=*/19, {Void});
+  B.emit(/*OpTypeFloat=*/22, {Float, 32});
+  B.emit(/*OpTypeVector=*/23, {Vec4, Float, 4});
+  B.emit(/*OpTypeImage=*/25, {ImageTy, Float, /*Dim1D=*/0, /*Depth=*/0,
+                              /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/1,
+                              /*Unknown=*/0});
+  B.emit(/*OpTypeSampledImage=*/27, {SampledImageTy, ImageTy});
+  B.emit(/*OpTypePointer=*/32,
+         {PtrSampledImage, /*UniformConstant=*/0, SampledImageTy});
+  B.emit(/*OpVariable=*/59, {PtrSampledImage, Variable, /*UniformConstant=*/0});
+  B.emit(/*OpTypeFunction=*/33, {FnTy, Void});
+  B.emit(/*OpConstant=*/43, {Float, X, floatBits(1.0f)});
+  B.emit(/*OpConstant=*/43, {Float, PadY, floatBits(99.0f)});
+  B.emit(/*OpConstant=*/43, {Float, PadZ, floatBits(-99.0f)});
+  B.emit(/*OpConstant=*/43, {Float, Q, floatBits(2.0f)});
+  B.emit(/*OpConstantComposite=*/44, {Vec4, Coord, X, PadY, PadZ, Q});
+  B.emit(/*OpConstant=*/43, {Float, Lod, floatBits(0.0f)});
+  B.emit(/*OpFunction=*/54, {Void, Main, /*None=*/0, FnTy});
+  B.emit(/*OpLabel=*/248, {Label});
+  B.emit(/*OpLoad=*/61, {SampledImageTy, SampledImageVal, Variable});
+  // `%Result = OpImageSampleProjExplicitLod %Vec4 %SampledImageVal %Coord
+  //   Lod %Lod`.
+  B.emit(/*OpImageSampleProjExplicitLod=*/92,
+         {Vec4, Result, SampledImageVal, Coord, /*Lod=*/2, Lod});
+  B.emit(/*OpReturn=*/253, {});
+  B.emit(/*OpFunctionEnd=*/56, {});
+  return B.finish();
+}
+
 /// As `buildProjExplicitLodModule`, but the Coordinate operand is instead
 /// produced by `OpIAdd` -- an opcode `lowerProjectiveImageSamples`'s own
 /// producer allowlist deliberately does not recognize -- so this exercises
@@ -431,6 +567,54 @@ TEST(SPIRVImporterTest, LowersImageSampleProjDrefExplicitLod) {
   EXPECT_EQ(SampleCount, 1u);
   // u/q, v/q, and dref/q.
   EXPECT_EQ(FDivCount, 3u);
+}
+
+TEST(SPIRVImporterTest, LowersImageSampleProjImplicitLod) {
+  Context Ctx;
+  std::vector<uint32_t> Words = buildProjImplicitLodModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  // Without `lowerProjectiveImageSamples` recognizing the ImplicitLod
+  // Proj opcode (91, roadmap L261), this fails: MLIR's deserializer has
+  // no enum case for it at all, and CTS's own `textureProj*` builtins
+  // compile down to exactly this opcode (not the ExplicitLod form).
+  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
+
+  unsigned SampleCount = 0, FDivCount = 0;
+  Result->getMLIROperation()->walk(
+      [&](mlir::spirv::ImageSampleImplicitLodOp Op) {
+        ++SampleCount;
+        auto CoordTy =
+            llvm::cast<mlir::VectorType>(Op.getCoordinate().getType());
+        EXPECT_EQ(CoordTy.getNumElements(), 2);
+      });
+  Result->getMLIROperation()->walk([&](mlir::spirv::FDivOp) { ++FDivCount; });
+  EXPECT_EQ(SampleCount, 1u);
+  EXPECT_EQ(FDivCount, 2u);
+}
+
+TEST(SPIRVImporterTest, LowersImageSampleProjExplicitLodWithPaddedCoordinate) {
+  Context Ctx;
+  std::vector<uint32_t> Words =
+      buildProjExplicitLodWithPaddedCoordinateModule();
+  llvm::Expected<Module> Result = importModule(Ctx, Words);
+  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
+
+  unsigned SampleCount = 0, FDivCount = 0;
+  Result->getMLIROperation()->walk(
+      [&](mlir::spirv::ImageSampleExplicitLodOp Op) {
+        ++SampleCount;
+        // The 1D image needs exactly 1 real coordinate component -- the
+        // rewritten Coordinate must be a plain scalar, not a 3-component
+        // vector (the padded-coordinate-unaware, width-minus-one
+        // heuristic's own wrong answer).
+        EXPECT_FALSE(llvm::isa<mlir::VectorType>(Op.getCoordinate().getType()));
+      });
+  Result->getMLIROperation()->walk([&](mlir::spirv::FDivOp) { ++FDivCount; });
+  EXPECT_EQ(SampleCount, 1u);
+  // Exactly one divide: the sole real coordinate component (`P.x`)
+  // divided by the divisor (`P.w`, the vector's own last component --
+  // not `P.y`/`P.z`, the ignored padding in between).
+  EXPECT_EQ(FDivCount, 1u);
 }
 
 TEST(SPIRVImporterTest,
