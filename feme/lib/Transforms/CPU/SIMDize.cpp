@@ -421,9 +421,86 @@ getDivergentCallOverloadShape(Intrinsic::ID ID) {
   case Intrinsic::ldexp:
     return DivergentCallOverloadShape{/*PrimaryOperandIndex=*/std::nullopt,
                                        /*IndependentOperandIndex=*/1u};
+  // (Roadmap L266) `llvm.ctlz.iN(iN, i1 immarg)`/`llvm.cttz.iN(iN, i1
+  // immarg)`: the overloaded type is shared by the result and argument 0
+  // (`PrimaryOperandIndex = std::nullopt`, i.e. the result type itself,
+  // exactly like a plain `Homogeneous` unary intrinsic), so the *only*
+  // reason these fail the plain `Homogeneous` check at all is their
+  // second `is_zero_poison` argument -- a compile-time-constant `ImmArg`
+  // (per `Intrinsics.td`), not a genuinely-overloaded or per-lane operand,
+  // detected generically the same way `is_fpclass`'s test-mask argument
+  // is and passed through completely unwidened.
+  case Intrinsic::ctlz:
+  case Intrinsic::cttz:
+    return DivergentCallOverloadShape{/*PrimaryOperandIndex=*/std::nullopt,
+                                       /*IndependentOperandIndex=*/std::nullopt};
   default:
     return std::nullopt;
   }
+}
+
+/// (Roadmap L266) Whether \p ID is one of the four `{iN, i1}
+/// @llvm.{u,s}{add,sub,mul}.with.overflow.iN(iN, iN)` arithmetic-with-
+/// overflow-flag intrinsics. Of these, only `uadd_with_overflow`/
+/// `usub_with_overflow` are actually reachable from a real
+/// `dEQP-VK.glsl.builtin.function.integer` shader: GLSL's `uaddCarry`/
+/// `usubBorrow` lower to SPIR-V `OpIAddCarry`/`OpISubBorrow`, which
+/// `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s
+/// `ArithmeticWithOverflowPattern` converts straight to these two
+/// intrinsics. `umulExtended`/`imulExtended` (`OpUMulExtended`/
+/// `OpSMulExtended`) do **not** go through `umul_with_overflow`/
+/// `smul_with_overflow` at all -- that same file's `MulExtendedPattern`
+/// instead computes their `{low, high}` result with a plain
+/// zext-then-multiply-then-truncate/shift sequence (LLVM has no intrinsic
+/// that reports a full-width high product, only a 1-bit overflow flag),
+/// so those two builtins never need this widening path in the first place:
+/// their ordinary `BinaryOperator`/`CastInst` steps and `insertvalue`-built
+/// result are already covered by `widenElementwise`/`widenVectorElementwise`
+/// and the pre-existing `InsertValueInst` aggregate-producer case. The
+/// `umul_with_overflow`/`smul_with_overflow` cases below are kept anyway
+/// (harmless, and future-proof against some other lowering path emitting
+/// them) but are not expected to be hit today. Unlike every other
+/// intrinsic `isElementwiseVectorizableIntrinsic` covers, these four
+/// return a genuinely aggregate (`{iN, i1}` struct, or `{<Nx iN>, <Nx i1>}`
+/// for a vector-typed `uaddCarry`/`usubBorrow` overload) rather than a
+/// scalar or vector one, so they need their own `WidenedAggregateComponents`-
+/// based widening path (`widenOverflowArithIntrinsic`) rather than either of
+/// `widenElementwise`'s two flat-`<W x T>`-result paths -- see
+/// `checkAggregateValueSupported`'s new `CallInst` producer case and the
+/// main dispatch cascade's new early routing for these four IDs.
+bool isOverflowArithIntrinsic(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::uadd_with_overflow:
+  case Intrinsic::usub_with_overflow:
+  case Intrinsic::umul_with_overflow:
+  case Intrinsic::smul_with_overflow:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// (Roadmap L266) Whether every non-`ImmArg` argument of \p CI has type
+/// \p Ty -- the "homogeneous" shape check both `widenElementwise`'s scalar
+/// path and the vector-typed `CallInst` dispatch gates below use to decide
+/// whether a call is a plain elementwise-widenable intrinsic, generalized
+/// to skip an intrinsic's own `ImmArg` parameters (e.g. `llvm.ctlz`/
+/// `cttz`'s `i1 is_zero_poison` flag) rather than requiring *every*
+/// argument, including immediate-constant ones that are never widened in
+/// the first place, to equal the overloaded operand/result type. Without
+/// this, a vector-typed `llvm.ctlz`/`cttz` call (the shape GLSL's
+/// `findMSB`/`findLSB` over an `ivec2`/`ivec3`/`ivec4` operand takes) never
+/// matches either gate's plain `all_of` check and falls through to
+/// `widenElementwise`'s scalar-only `getDivergentCallOverloadShape` path
+/// instead, which builds an illegal `<W x <N x T>>` nested-vector overload.
+bool callNonImmArgsHaveType(const CallInst *CI, Type *Ty) {
+  for (unsigned Idx = 0, E = CI->arg_size(); Idx != E; ++Idx) {
+    if (CI->paramHasAttr(Idx, Attribute::ImmArg))
+      continue;
+    if (CI->getArgOperand(Idx)->getType() != Ty)
+      return false;
+  }
+  return true;
 }
 
 /// Roadmap H6g-b-a-i-a-i-b: whether \p ID is one of the `llvm.vector.reduce.*`
@@ -926,6 +1003,7 @@ private:
   void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenAggregateSelect(SelectInst &SI, IRBuilder<> &Builder);
+  void widenOverflowArithIntrinsic(CallInst &CI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenVectorToScalarBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenScalarToVectorBitCast(BitCastInst &BC, IRBuilder<> &Builder);
@@ -1334,12 +1412,9 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // scalar-element intrinsic call per component (see
         // `widenVectorElementwise`).
         Intrinsic::ID ID = Callee->getIntrinsicID();
-        IsSupportedProducer =
-            ID != Intrinsic::not_intrinsic &&
-            isElementwiseVectorizableIntrinsic(ID) &&
-            llvm::all_of(CI->args(), [&](const Value *Arg) {
-              return Arg->getType() == I.getType();
-            });
+        IsSupportedProducer = ID != Intrinsic::not_intrinsic &&
+                             isElementwiseVectorizableIntrinsic(ID) &&
+                             callNonImmArgsHaveType(CI, I.getType());
       }
     } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
       // An ordinary, non-groupshared divergent-address `load` producing a
@@ -1536,16 +1611,36 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         // is itself visited (and validated as a producer) by this same
         // top-level loop when its result is also vector-typed, so accept
         // it here unconditionally rather than re-checking argument
-        // positions.
+        // positions. (Roadmap L266) Uses `callNonImmArgsHaveType`, not a
+        // plain `all_of`, so a vector-typed `llvm.ctlz`/`cttz` call's
+        // non-`ImmArg` operand (e.g. `I` feeding its own value operand)
+        // is still accepted even though its *other*, `ImmArg` operand
+        // (`i1 is_zero_poison`) never matches the vector result type --
+        // without this, `I` (e.g. this exact call's `xor` operand
+        // computing `findMSB`'s sign-normalized value) would wrongly be
+        // rejected as an unsupported consumer, even though the call
+        // itself was already accepted as a producer just above.
         if (Callee) {
           Intrinsic::ID ID = Callee->getIntrinsicID();
           if (ID != Intrinsic::not_intrinsic &&
               isElementwiseVectorizableIntrinsic(ID) &&
-              llvm::all_of(UserCI->args(), [&](const Value *Arg) {
-                return Arg->getType() == UserCI->getType();
-              }))
+              callNonImmArgsHaveType(UserCI, UserCI->getType()))
             continue;
         }
+        // (Roadmap L266) `I`'s own vector-typed operand of one of the
+        // four `isOverflowArithIntrinsic` arithmetic-with-overflow
+        // intrinsics (e.g. `uaddCarry`'s two `uvec2`/`uvec3`/`uvec4`
+        // operands) -- the call's own `{<N x iN>, <N x i1>}` *result* is
+        // aggregate-typed, so it is validated by `checkAggregateValueSupported`
+        // (not this vector-decomposition loop) when the call instruction
+        // itself is visited, but its *operands* are ordinary vector-typed
+        // values that still need this loop's own consumer acceptance --
+        // `widenOverflowArithIntrinsic`'s vector-operand branch decomposes
+        // each of `I`'s own per-component values into its own genuinely
+        // wide call, exactly like `widenVectorElementwise` does for an
+        // ordinary elementwise intrinsic.
+        if (Callee && isOverflowArithIntrinsic(Callee->getIntrinsicID()))
+          continue;
       }
       if (isa<ExtractElementInst>(U))
         continue;
@@ -1613,12 +1708,15 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 /// confirmed by reducing a real `Graphics/VertexShaderResourceCube.test`
 /// failure (a per-vertex `float4x4 localToWorld` assigned a whole matrix
 /// value along each arm of a divergent `SV_VertexID`-based branch) down to
-/// its exact IR shape; or an `AtomicCmpXchgInst` -- HLSL's
+/// its exact IR shape; an `AtomicCmpXchgInst` -- HLSL's
 /// `InterlockedCompareExchange`/`InterlockedCompareStore` always lower to
 /// a `cmpxchg` whose own `{T, i1}` result type is aggregate regardless of
 /// address uniformity, confirmed by reducing a real
 /// `Feature/HLSLLib/InterlockedCompareExchange.32.test` failure down to
-/// its exact IR shape -- all four producer shapes require every leaf
+/// its exact IR shape; or (roadmap L266) a `CallInst` to one of the four
+/// `isOverflowArithIntrinsic` arithmetic-with-overflow intrinsics, whose
+/// `{iN, i1}` result is aggregate for exactly the same structural reason
+/// `cmpxchg`'s is -- all five producer shapes require every leaf
 /// `isSupportedAggregateLeafType` reaches to be a genuine scalar or a
 /// whole `FixedVectorType`, roadmap L27) and that every use of it is one
 /// of the supported consumer shapes (another `insertvalue`'s aggregate-
@@ -1643,6 +1741,18 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
     IsSupportedProducer =
         isGroupSharedPointerType(CmpXchg->getPointerOperand()->getType()) &&
         isSupportedAggregateLeafType(I.getType());
+  else if (auto *CI = dyn_cast<CallInst>(&I)) {
+    // (Roadmap L266) The only aggregate-*result* `CallInst` shape
+    // supported: one of the four `isOverflowArithIntrinsic` intrinsics,
+    // widened by `widenOverflowArithIntrinsic` below via a single real
+    // vector-typed overload of the same call (no per-lane cloning
+    // needed -- unlike `cmpxchg`, these are pure computations with no
+    // memory side effect to sequence).
+    Function *Callee = CI->getCalledFunction();
+    IsSupportedProducer = Callee &&
+                          isOverflowArithIntrinsic(Callee->getIntrinsicID()) &&
+                          isSupportedAggregateLeafType(I.getType());
+  }
 
   if (!IsSupportedProducer) {
     Ctx.emitError(
@@ -1650,9 +1760,10 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         "' has a divergent value '" + I.getName() +
         "' of aggregate type; component decomposition is not yet supported "
         "for this producer (only an insertvalue chain, a nested "
-        "sub-aggregate extractvalue, a select, a phi, or a cmpxchg, over a "
+        "sub-aggregate extractvalue, a select, a phi, a cmpxchg, or an "
+        "arithmetic-with-overflow intrinsic call, over a "
         "struct/array whose every leaf is a genuine scalar or a whole "
-        "fixed vector, is supported) (roadmap milestone 7/L21/L27/L185 "
+        "fixed vector, is supported) (roadmap milestone 7/L21/L27/L185/L266 "
         "deviation)");
     return false;
   }
@@ -3933,6 +4044,81 @@ void FunctionWidener::widenGroupSharedAtomicCmpXchg(AtomicCmpXchgInst &CmpXchg,
   ToErase.push_back(&CmpXchg);
 }
 
+void FunctionWidener::widenOverflowArithIntrinsic(CallInst &CI,
+                                                  IRBuilder<> &Builder) {
+  // (Roadmap L266) `{iN, i1} @llvm.{u,s}{add,sub,mul}.with.overflow.iN(iN,
+  // iN)` (`isOverflowArithIntrinsic`): unlike `widenGroupSharedAtomicCmpXchg`
+  // just above, this has no memory side effect to sequence one lane at a
+  // time, so it widens like any other pure elementwise intrinsic
+  // (`widenElementwise`'s own `Homogeneous` path) rather than a per-lane
+  // clone loop: a single call to the same intrinsic ID's one real
+  // vector-typed overload (`Intrinsics.td`'s `LLVMMatchType<0>` shape means
+  // both `iN` operands and the `iN` half of the result share one
+  // overloaded type slot, exactly like `llvm.ctlz`/`cttz`) computes every
+  // lane's `{iN, i1}` pair at once; the two flat `<W x iN>`/`<W x i1>`
+  // fields are then split out of that single wide aggregate result via
+  // `extractvalue` and stored in `WidenedAggregateComponents`, mirroring
+  // `widenGroupSharedAtomicCmpXchg`'s own per-leaf storage convention (just
+  // without needing that function's own per-lane loop to get there).
+  //
+  // (Roadmap L266) `uaddCarry`/`usubBorrow` also have `uvec2`/`uvec3`/
+  // `uvec4` overloads (e.g. `findMSB`'s own vector overloads, confirmed by
+  // the same CTS `dEQP-VK.glsl.builtin.function.integer` group), which
+  // lower to a `CallInst` whose own operands are themselves already a
+  // fixed vector type (`<N x iN>`), not a scalar `iN` -- calling the wide
+  // intrinsic overload directly on those would build an illegal
+  // `<W x <N x iN>>` nested-vector operand/result. In that case, this
+  // decomposes per vector-component exactly like `widenVectorElementwise`
+  // does for an ordinary elementwise call: one genuinely wide call per
+  // component, each yielding its own `{<W x iN>, <W x i1>}` pair, flattened
+  // in `isSupportedAggregateLeafType`/`countAggregateLeafScalars`'s own
+  // leaf order (all of field 0's `N` components, then all of field 1's).
+  Function *Callee = CI.getCalledFunction();
+  Intrinsic::ID ID = Callee->getIntrinsicID();
+  Type *OperandTy = CI.getArgOperand(0)->getType();
+  auto *OperandVecTy = dyn_cast<FixedVectorType>(OperandTy);
+  Type *ScalarElemTy =
+      OperandVecTy ? OperandVecTy->getElementType() : OperandTy;
+  Type *WideElemTy = FixedVectorType::get(ScalarElemTy, WaveSize);
+  Function *WideCallee =
+      Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideElemTy});
+
+  if (!OperandVecTy) {
+    Value *WideLHS = getWidened(CI.getArgOperand(0), Builder);
+    Value *WideRHS = getWidened(CI.getArgOperand(1), Builder);
+    Value *WideCall = Builder.CreateCall(WideCallee, {WideLHS, WideRHS},
+                                         CI.getName() + ".wide");
+    Value *WideResult = Builder.CreateExtractValue(
+        WideCall, 0, CI.getName() + ".wide.result");
+    Value *WideOverflow = Builder.CreateExtractValue(
+        WideCall, 1, CI.getName() + ".wide.overflow");
+    WidenedAggregateComponents[&CI] = {WideResult, WideOverflow};
+    ToErase.push_back(&CI);
+    return;
+  }
+
+  SmallVector<Value *, 4> LHSComponents =
+      getVectorComponents(CI.getArgOperand(0), Builder);
+  SmallVector<Value *, 4> RHSComponents =
+      getVectorComponents(CI.getArgOperand(1), Builder);
+  SmallVector<Value *, 4> ResultComponents;
+  SmallVector<Value *, 4> OverflowComponents;
+  for (unsigned C = 0, E = OperandVecTy->getNumElements(); C != E; ++C) {
+    Value *WideCall =
+        Builder.CreateCall(WideCallee, {LHSComponents[C], RHSComponents[C]},
+                           CI.getName() + ".wide" + Twine(C));
+    ResultComponents.push_back(Builder.CreateExtractValue(
+        WideCall, 0, CI.getName() + ".wide.result" + Twine(C)));
+    OverflowComponents.push_back(Builder.CreateExtractValue(
+        WideCall, 1, CI.getName() + ".wide.overflow" + Twine(C)));
+  }
+  SmallVector<Value *, 8> Flattened(ResultComponents.begin(),
+                                    ResultComponents.end());
+  Flattened.append(OverflowComponents.begin(), OverflowComponents.end());
+  WidenedAggregateComponents[&CI] = std::move(Flattened);
+  ToErase.push_back(&CI);
+}
+
 void FunctionWidener::widenInsertElement(InsertElementInst &IE,
                                          IRBuilder<> &Builder) {
   // Decompose a divergent `insertelement` into its widened per-component
@@ -4240,12 +4426,20 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
       // vec-typed resource-load result takes -- widens to the identical
       // intrinsic's `<W x elemT>` overload, called once per component,
       // mirroring `widenElementwise`'s equivalent uniform-broadcast case.
+      // (Roadmap L266) An `ImmArg` parameter (e.g. `llvm.ctlz`/`cttz`'s
+      // `i1 is_zero_poison` flag, the shape GLSL's `findMSB`/`findLSB`
+      // over an `ivec2`/`ivec3`/`ivec4` operand takes) is passed through
+      // unchanged for every component instead -- it is a shared immediate
+      // constant, not a per-component operand, and is never itself
+      // vector-typed or widened.
       Intrinsic::ID ID = ICall->getCalledFunction()->getIntrinsicID();
       Function *WideCallee =
           Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideElemTy});
       SmallVector<Value *, 4> WideArgs;
       for (unsigned OpIdx = 0, E = ICall->arg_size(); OpIdx != E; ++OpIdx)
-        WideArgs.push_back(ComponentOperand(OpIdx));
+        WideArgs.push_back(ICall->paramHasAttr(OpIdx, Attribute::ImmArg)
+                               ? ICall->getArgOperand(OpIdx)
+                               : ComponentOperand(OpIdx));
       NewV = Builder.CreateCall(WideCallee, WideArgs,
                                 I.getName() + ".wide" + Twine(C));
     } else {
@@ -4658,9 +4852,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     if (Function *Callee = CI->getCalledFunction(); Callee &&
         CI->getType()->isVectorTy() &&
         isElementwiseVectorizableIntrinsic(Callee->getIntrinsicID()) &&
-        llvm::all_of(CI->args(), [&](const Value *Arg) {
-          return Arg->getType() == CI->getType();
-        })) {
+        callNonImmArgsHaveType(CI, CI->getType())) {
       // Roadmap H6g-b-a-i-a-i-b: `llvm.minnum`/`llvm.maxnum`/`llvm.smin`/
       // `llvm.smax`/... over an already-decomposed divergent vector
       // operand (see `widenVectorElementwise`). Gated on `isDivergentAtDef`
@@ -5059,10 +5251,25 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   if (auto *CI = dyn_cast<CallInst>(&I); CI && I.getType()->isVectorTy()) {
     if (Function *Callee = CI->getCalledFunction();
         Callee && isElementwiseVectorizableIntrinsic(Callee->getIntrinsicID()) &&
-        llvm::all_of(CI->args(), [&](const Value *Arg) {
-          return Arg->getType() == I.getType();
-        })) {
+        callNonImmArgsHaveType(CI, I.getType())) {
       widenVectorElementwise(I, Builder);
+      return true;
+    }
+  }
+
+  // (Roadmap L266) A `CallInst` to one of the four
+  // `isOverflowArithIntrinsic` arithmetic-with-overflow intrinsics has an
+  // aggregate (`{iN, i1}`) result type, so -- like the vector-typed
+  // `CallInst` case just above -- it cannot fall through to
+  // `widenElementwise`'s own scalar-only homogeneous-intrinsic path
+  // (which would try to build an illegal `<W x {iN, i1}>` aggregate-of-
+  // vector type); route it to its own dedicated widening function instead,
+  // gated by the same `checkAggregateValueSupported` acceptance any other
+  // aggregate-typed producer already goes through.
+  if (auto *CI = dyn_cast<CallInst>(&I); CI && I.getType()->isAggregateType()) {
+    if (Function *Callee = CI->getCalledFunction();
+        Callee && isOverflowArithIntrinsic(Callee->getIntrinsicID())) {
+      widenOverflowArithIntrinsic(*CI, Builder);
       return true;
     }
   }
