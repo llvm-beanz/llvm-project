@@ -523,12 +523,28 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
       // matching `FunctionWidener::widenImageCall`'s own `LaneMaskBase`
       // choice (a store or atomic's real side effect needs
       // `Masks.SideEffect`; a plain load only needs `Masks.Live`).
+      //
+      // Roadmap L267: `QueryLevels`/`QuerySamples` (`createQueryLevels`/
+      // `createQuerySamples`) are the sole `feme.cpu.image.*` kinds with
+      // no trailing mask operand at all (see `MatchedImageCall::Mask`'s
+      // own doc) -- `Call->arg_size() - 1` is their own last *real*
+      // operand (`ImageIndex`), not a mask to narrow, so overwriting it
+      // here silently corrupted the descriptor index into a divergent-
+      // region predicate value (`%live.tN`, an `i1`), producing an
+      // ill-typed call `SIMDize.cpp`'s widener (or, for a wholly-uniform
+      // invocation, the JIT's own verifier) rejected outright -- a real
+      // `dEQP-VK.glsl.texture_functions.query.texturequerylevels.*`/
+      // `texturesamples.*` repro. `Matched->Mask` itself (null for these
+      // two kinds) is the authoritative signal for whether a real mask
+      // operand exists to narrow.
       if (std::optional<MatchedImageCall> Matched = matchImageCall(*Call)) {
-        Value *Mask = (Matched->Texel || Matched->AtomicValue)
-                          ? Masks.SideEffect
-                          : Masks.Live;
-        if (!isKnownConstantMask(Mask))
-          Call->setArgOperand(Call->arg_size() - 1, Mask);
+        if (Matched->Mask) {
+          Value *Mask = (Matched->Texel || Matched->AtomicValue)
+                            ? Masks.SideEffect
+                            : Masks.Live;
+          if (!isKnownConstantMask(Mask))
+            Call->setArgOperand(Call->arg_size() - 1, Mask);
+        }
       }
       // (roadmap L85) `WaveActiveBallot`/`subgroupBallot`'s own predicate
       // operand (operand 0) must reflect exactly the invocations that are

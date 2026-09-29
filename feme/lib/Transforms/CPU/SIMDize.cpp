@@ -2986,7 +2986,24 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   // (`WidenedVectorComponents`) rather than a single `<W x T>`
   // (`Widened`) -- the same distinction `widenResourceCall` already makes
   // for its own vector-typed `StoredValue`.
-  unsigned MaskIdx = CI.arg_size() - 1;
+  //
+  // Roadmap L267: `QueryLevels`/`QuerySamples` (`createQueryLevels`/
+  // `createQuerySamples`, `ImageCalls.cpp`) are the sole `feme.cpu.image.*`
+  // kinds with *no* trailing mask operand at all (see their own
+  // `MatchedImageCall::Mask` doc -- "no per-invocation side effect to
+  // guard against"), so unconditionally treating the last operand as a
+  // mask (`CI.arg_size() - 1`) previously misread their own last *real*
+  // operand (`ImageIndex`) as the mask, silently dropping it from the
+  // generic per-operand widening loop below and instead re-adding it,
+  // wrongly typed `i1`, as the rebuilt scalar call's own trailing operand
+  // -- producing an ill-typed call the verifier rejected outright (a real
+  // `dEQP-VK.glsl.texture_functions.query.texturequerylevels.*`/
+  // `texturesamples.*` repro). `Matched.Mask` itself (null for these two
+  // kinds, non-null for every other) is the authoritative signal for
+  // whether a trailing mask operand exists at all, rather than assuming
+  // one from the call's own arity.
+  bool HasMask = Matched.Mask != nullptr;
+  unsigned MaskIdx = HasMask ? CI.arg_size() - 1 : CI.arg_size();
   int TexelArgIdx = -1;
   if (Matched.Texel)
     for (unsigned I = 0; I != MaskIdx; ++I)
@@ -2997,7 +3014,8 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   bool TexelDivergent =
       Matched.Texel && WidenedVectorComponents.count(Matched.Texel);
 
-  bool AnyDivergent = Widened.count(Matched.Mask) != 0 || TexelDivergent;
+  bool AnyDivergent =
+      (HasMask && Widened.count(Matched.Mask) != 0) || TexelDivergent;
   for (unsigned I = 0; I != MaskIdx; ++I) {
     if (static_cast<int>(I) == TexelArgIdx)
       continue;
@@ -3036,7 +3054,7 @@ void FunctionWidener::widenImageCall(CallInst &CI,
   Value *LaneMaskBase = (Matched.Texel || Matched.AtomicValue)
                            ? Env.SideEffectMask
                            : Env.EntryMask;
-  if (!isa<Constant>(Matched.Mask))
+  if (HasMask && !isa<Constant>(Matched.Mask))
     LaneMaskBase = Builder.CreateAnd(
         LaneMaskBase, getWidened(Matched.Mask, Builder), "image.mask");
 
@@ -3082,8 +3100,9 @@ void FunctionWidener::widenImageCall(CallInst &CI,
                                            "lane.image.arg")
                                      : CI.getArgOperand(I));
     }
-    CallArgs.push_back(Builder.CreateExtractElement(
-        LaneMaskBase, Builder.getInt32(Lane), "lane.mask"));
+    if (HasMask)
+      CallArgs.push_back(Builder.CreateExtractElement(
+          LaneMaskBase, Builder.getInt32(Lane), "lane.mask"));
 
     Value *LaneResult = Builder.CreateCall(Callee, CallArgs);
     if (ResultIsVoid)

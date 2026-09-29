@@ -468,6 +468,61 @@ TEST(LinearizeTest, MasksImageStoreCallUnderDivergentBranch) {
   EXPECT_TRUE(FoundMaskedCall);
 }
 
+TEST(LinearizeTest,
+     LeavesQueryLevelsCallImageIndexUntouchedUnderDivergentBranch) {
+  // Roadmap L267: `feme.cpu.image.querylevels.i32`/
+  // `feme.cpu.image.querysamples.i32` (`createQueryLevels`/
+  // `createQuerySamples`) are the sole `feme.cpu.image.*` kinds with no
+  // trailing mask operand at all (see `MatchedImageCall::Mask`'s own
+  // doc) -- before this fix, `applyStageMasks` unconditionally rewrote a
+  // matched image call's own last operand (`Call->arg_size() - 1`) into
+  // the divergent region's live mask, which for these two kinds is their
+  // own last *real* operand (`%image_index` here), not a mask to narrow.
+  // That silently replaced a real per-invocation resource-descriptor
+  // index with an `i1` live-mask value, corrupting the call outright (a
+  // real `dEQP-VK.glsl.texture_functions.query.texturequerylevels.*`
+  // repro). `%image_index` must survive this pass completely unchanged.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main(ptr %image_heap, i32 %image_heap_count, i32 %image_index) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      %levels = call i32 @feme.cpu.image.querylevels.i32(
+          ptr %image_heap, i32 %image_heap_count, i32 %image_index)
+      br label %end
+    f:
+      br label %end
+    end:
+      %r = phi i32 [ %levels, %t ], [ 0, %f ]
+      ret i32 %r
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @feme.cpu.image.querylevels.i32(ptr, i32, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundQueryLevelsCall = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        CI->getCalledFunction()->getName() != "feme.cpu.image.querylevels.i32")
+      continue;
+    FoundQueryLevelsCall = true;
+    ASSERT_EQ(CI->arg_size(), 3u);
+    EXPECT_EQ(CI->getArgOperand(2), F->getArg(2))
+        << "the call's own real `%image_index` operand must not be "
+           "overwritten with a live mask";
+  }
+  EXPECT_TRUE(FoundQueryLevelsCall);
+}
+
 // Roadmap H149: `WaveIsFirstLane()`'s underlying `llvm.dx.wave.is.first.lane`/
 // `llvm.spv.wave.is.first.lane` intrinsics take zero operands, unlike every
 // other maskless-consuming wave call this pass already narrows (`Ballot`'s

@@ -3463,6 +3463,55 @@ TEST(SIMDizeTest, ScalarizesUniformImageAtomicCall) {
   EXPECT_EQ(AtomicCallCount, 4u);
 }
 
+TEST(SIMDizeTest, WidensDivergentQueryLevelsCallWithNoMaskOperand) {
+  // Roadmap L267: `feme.cpu.image.querylevels.i32`/
+  // `feme.cpu.image.querysamples.i32` (`createQueryLevels`/
+  // `createQuerySamples`, `ImageCalls.cpp`) are the sole
+  // `feme.cpu.image.*` kinds with no trailing mask operand at all --
+  // before this fix, `widenImageCall` unconditionally treated a call's
+  // own last operand as a mask (`MaskIdx = CI.arg_size() - 1`), so a
+  // divergent `%image_index` here (this call's own actual last operand)
+  // was silently dropped from the generic per-operand widening loop and
+  // the rebuilt scalar call instead got a wrongly-typed `i1` lane-mask
+  // value appended as its own third operand, producing an ill-typed call
+  // the verifier rejected outright (a real
+  // `dEQP-VK.glsl.texture_functions.query.texturequerylevels.*` repro).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %image_heap, i32 %image_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %levels = call i32 @feme.cpu.image.querylevels.i32(
+          ptr %image_heap, i32 %image_heap_count, i32 %tid)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @feme.cpu.image.querylevels.i32(ptr, i32, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Every lane must get its own scalar `querylevels` call -- four total,
+  // not one -- since `%image_index` (the divergent thread ID) differs
+  // per lane; each rebuilt call must keep exactly 3 operands (image_heap,
+  // image_heap_count, image_index), matching the callee's own real
+  // signature, with no extraneous mask operand appended.
+  unsigned QueryLevelsCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() == "feme.cpu.image.querylevels.i32") {
+      ++QueryLevelsCallCount;
+      EXPECT_EQ(CI->arg_size(), 3u);
+    }
+  }
+  EXPECT_EQ(QueryLevelsCallCount, 4u);
+}
+
 // Roadmap L191: the `shufflevector`/`insertelement` analogue of L134(c)
 // above, but for a *different* unconditionally-decomposing producer: a
 // `feme.cpu.masked.load.*` call producing a vector-typed result (roadmap
