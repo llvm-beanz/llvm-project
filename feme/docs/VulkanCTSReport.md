@@ -5188,3 +5188,78 @@ the predicted 18,880 + 112 = 18,992 Pass / 577 - 112 = 465 Fail
 (L268's post-fix baseline, plus/minus these 112 now-passing cases),
 confirming no unexpected knock-on shifts elsewhere in the full sweep
 from these fixes.
+
+## L269: `imagesizems`/`texturesizems` multisampled `GetDimensions` gap -- fixed, no new builder needed
+
+Picked up L269 (split out of L267's own triage as the fourth,
+differently-signatured `texture_functions.query.*` sub-cluster): 32
+combined fails across `imagesizems`/`texturesizems` (16 each).
+
+**Root cause:** per the SPIR-V spec, `OpImageQuerySize` (the lod-less
+opcode `imageSize()`/`textureSize()` against a multisampled image
+compiles to -- a multisampled image has exactly one mip level, so
+there is no lod argument to select from) returns the *same* `(Width,
+Height[, Layers])` shape as its non-multisampled counterpart; sample
+*count* is a wholly separate query (`OpImageQuerySamples`, already
+handled, roadmap L73). `SPIRVToLLVMPatterns.cpp`'s
+`ImageQuerySizePattern` already reflected this correctly (it dispatches
+purely on result vector width, with no MS-awareness needed at all) --
+the actual gap was entirely downstream, in
+`SPIRVResourceLowering.cpp`'s shape-gating: `hasOnlySupportedImageUses`
+(sampled-image path) hard-gated its `isGetDimensionsIntrinsic` case to
+`Plain2D` only and had no `isGetDimensions3Intrinsic` case at all;
+`hasOnlySupportedStorageImageUses` (storage-image path) gated both
+cases to non-multisampled shapes only.
+
+**Fix:** widened `hasOnlySupportedImageUses`'s `isGetDimensionsIntrinsic`
+gate to also accept `Plain2DMS`, and added a wholly new
+`isGetDimensions3Intrinsic` case there (for `textureSize(
+sampler2DMSArray)`) scoped to `Array2DMS`; widened
+`hasOnlySupportedStorageImageUses`'s `isGetDimensionsIntrinsic` gate to
+also accept `Plain2DMS` and its `isGetDimensions3Intrinsic` gate to
+also accept `Array2DMS`. All four widened/new cases reuse the
+pre-existing `createGetDimensions2D`/`createQuerySizeLod2DArray`
+builders unchanged -- `lowerImageAccesses`'s dispatch `else` branches
+already routed to them correctly once the shape gates opened, and the
+shared runtime entry points (`femeCpuImageGetDimensions2DV2I32`/
+`femeCpuImageGetDimensionsLod2DArrayV3I32`) already read `Width`/
+`Height`/`ArrayLayers` off the image descriptor generically, with no
+MS-vs-non-MS distinction of their own. No new image-call builder was
+needed, contrary to the initial guess at the end of the prior L267
+session.
+
+**Diagnostic note:** the originally-observed
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic (naming a
+`SignedImage_i32_1_0_0_1_2_23t`-style handle) turned out to be a
+downstream symptom, not the direct cause -- `UnsupportedOps.cpp`'s
+`checkSupportedRaisedOps` has its own documented gotcha that when any
+handle's use is rejected, every handle in that function fails to
+normalize, and the error names whichever handle declaration happens to
+appear first in the module, not necessarily the one whose use actually
+triggered the rejection.
+
+**Unit tests:** converted one existing negative test
+(`LeavesPlain2DMSStorageImageGetDimensionsHandleAlone`, which had
+asserted this exact combination was rejected) into a positive one
+(`LowersPlain2DMSStorageImageGetDimensions`), and added four new
+positive tests: `LowersArray2DMSStorageImageGetDimensions`,
+`LowersPlain2DMSSampledImageGetDimensions`,
+`LowersArray2DMSSampledImageGetDimensions` (plus the converted test).
+
+**`check-feme`:** 3,424 Passed (+3 net new unit tests vs. L267's
+3,421 baseline), 61 Unsupported, 0 Failed (no regressions).
+
+**Targeted CTS re-run:** `dEQP-VK.glsl.texture_functions.query.
+imagesizems.*`/`texturesizems.*` (32 cases): **32/32 Pass (100%)**,
+was 0/32.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change -- an internal compiler-pass correctness fix widening coverage
+of an already-exposed core GLSL texture-query builtin, not a new
+feature/extension.
+
+**Full-sweep confirmation:** kicked off a fresh full `dEQP-VK.glsl.*`
+sweep (28,420 cases) after this fix landed to confirm the predicted
+465 - 32 = 433 Fail delta against L267's post-fix baseline (18,992
+Pass / 465 Fail / 8,963 NotSupported) rather than assume it -- see the
+session's `agent_thoughts.md` entry for the confirmed result.
