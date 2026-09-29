@@ -2730,6 +2730,73 @@ TEST(CanonicalizeStageTest, OutputReadBackResolvesAcrossControlFlow) {
   EXPECT_EQ(SawStore, 2u);
 }
 
+/// (Roadmap L256) `dEQP-VK.glsl.indexing.varying_array.
+/// vec2_dynamic_loop_write_dynamic_loop_read`'s own real shape: a
+/// same-invocation write-then-read-back (`OutputReadBackResolvesTo
+/// StoredValueStraightLine`'s own pattern) but through a *dynamically
+/// selected vector lane* (`ThreadsDynamicComponentIndexIntoCentroidInput
+/// LoadThroughByteGEP`'s own byte-flattened GEP shape) rather than a
+/// plain scalar -- i.e. `Row` (the outer, byte-flattened array index)
+/// stays a compile-time constant (`1`) while `Component` (the inner
+/// byte-flattened lane index) is genuinely dynamic, the reverse of every
+/// other `ShadowValueMap` shape this pass recognized before this row
+/// (which only ever special-cased a dynamic `Row` with a constant
+/// `Component`). Before this fix, `ShadowValueMap::getOrCreate`
+/// unconditionally did `cast<ConstantInt>(Component)`, assuming a
+/// shadowed `Output` read-back's vector-lane index could never itself be
+/// dynamic -- crashing `deqp-vk` outright (`Assertion 'isa<To>(Val) &&
+/// "cast<Ty>() argument of incompatible type!"' failed`) rather than
+/// producing a normal test failure.
+TEST(CanonicalizeStageTest,
+     OutputReadBackResolvesThroughDynamicComponentByteGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_var = external addrspace(8) global [2 x <2 x float>], !spirv.Decorations !0
+    define void @main(i64 %component, float %v) #0 {
+      %base = getelementptr inbounds nuw i8, ptr addrspace(8) @out_var, i64 8
+      %p = getelementptr [4 x i8], ptr addrspace(8) %base, i64 %component
+      store float %v, ptr addrspace(8) %p
+      %r = load float, ptr addrspace(8) %p
+      %r2 = fadd float %r, 1.000000e+00
+      store float %r2, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 2}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No `feme.stage.input.load` at all: the read-back resolves directly
+  // to the shadowed stored value, exactly like the plain-scalar
+  // `OutputReadBackResolvesToStoredValueStraightLine` case -- a dynamic
+  // `Component` does not change that. No raw load/store of `@out_var`
+  // (or a GEP into it) survives either.
+  unsigned SawStore = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(LI->getPointerOperand()));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    EXPECT_NE(Kind, StageOpKind::InputLoad);
+    if (Kind == StageOpKind::OutputStore) {
+      ++SawStore;
+      // `Row` (operand 1) is the constant `1` from the outer byte
+      // offset, while `Component` (operand 2) is genuinely dynamic --
+      // the reverse of this pass's older dynamic-`Row`-only shapes.
+      EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 1u);
+      EXPECT_FALSE(isa<Constant>(CI->getArgOperand(2)));
+    }
+  }
+  EXPECT_EQ(SawStore, 2u);
+}
+
 /// (Roadmap H4a) A SPIR-V `TessellationControl` entry point with no
 /// `OpControlBarrier` (`llvm.spv.group.memory.barrier.with.group.sync`) at
 /// all needs no splitting: `canonicalizeSPIRVHullStage` treats the whole

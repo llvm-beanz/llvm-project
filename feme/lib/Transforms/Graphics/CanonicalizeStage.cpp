@@ -1161,15 +1161,19 @@ void storeTaskPayloadValue(IRBuilderBase &B, Value *Val, Type *Ty,
 /// not be dominated by a write on another, exactly the shape a compiler's
 /// own `mem2reg` pass -- not a linear scan -- is built to resolve.
 ///
-/// (Roadmap H7w) That per-leaf-scalar scheme only works when `Row` is a
-/// compile-time constant -- a distinct alloca per (ElementID, Row,
-/// Component) triple, one per array element, is exactly how a
-/// `gl_ClipDistance`/`gl_CullDistance`-shaped *constant*-indexed write
-/// (e.g. a compile-time-unrolled loop) already gets handled. A
-/// non-constant `Row` (a genuinely loop-carried index) has no compile-time
-/// value to key such an alloca on, so it instead gets one `RowCount`-sized
-/// array alloca per (ElementID, Component), GEP'd by the runtime `Row`
-/// value for both its read-back load and its store.
+/// (Roadmap H7w) That per-leaf-scalar scheme only works when both `Row`
+/// and `Component` are compile-time constants -- a distinct alloca per
+/// (ElementID, Row, Component) triple, one per array element, is exactly
+/// how a `gl_ClipDistance`/`gl_CullDistance`-shaped *constant*-indexed
+/// write (e.g. a compile-time-unrolled loop) already gets handled. A
+/// non-constant `Row` (a genuinely loop-carried array index) or a
+/// non-constant `Component` (a genuinely loop-carried vector-lane index --
+/// (Roadmap L138) `resolveStageIOAccess`'s doubly-dynamic-indexed-access
+/// handling can produce one even when `Row` itself stays constant) has no
+/// compile-time value to key such an alloca on, so it instead gets one
+/// `[RowCount x 4]`-shaped array alloca per `ElementID`, GEP'd by whichever
+/// of `Row`/`Component` is itself dynamic (or a plain constant index
+/// otherwise) for both its read-back load and its store.
 /// `llvm::isAllocaPromotable` does not accept a variable-index GEP into an
 /// alloca, so this array alloca is deliberately left out of
 /// `takeAllocas()`'s own list: `PromoteMemToReg` never sees it, and it
@@ -1184,9 +1188,10 @@ public:
 
   Value *getOrCreate(uint32_t ElementID, Value *Row, Value *Component, Type *Ty,
                      IRBuilderBase &B) {
-    uint64_t ComponentVal = cast<ConstantInt>(Component)->getZExtValue();
-    if (auto *RowC = dyn_cast<ConstantInt>(Row)) {
-      Key K{ElementID, RowC->getZExtValue(), ComponentVal};
+    auto *RowC = dyn_cast<ConstantInt>(Row);
+    auto *ComponentC = dyn_cast<ConstantInt>(Component);
+    if (RowC && ComponentC) {
+      Key K{ElementID, RowC->getZExtValue(), ComponentC->getZExtValue()};
       AllocaInst *&Slot = ScalarAllocas[K];
       if (!Slot) {
         IRBuilder<> EntryBuilder(&F.getEntryBlock(),
@@ -1197,28 +1202,46 @@ public:
       return Slot;
     }
 
-    DynamicKey DK{ElementID, ComponentVal};
-    AllocaInst *&Slot = DynamicAllocas[DK];
+    // (Roadmap L138) At least one of `Row`/`Component` is a genuinely
+    // dynamic (non-constant) index -- fall back to one `[RowCount x 4]`-
+    // shaped array alloca per `ElementID` (4, not this element's own
+    // narrower `ComponentCount`, since a `Component` value is always
+    // absolute within its up-to-4-lane register -- see
+    // `SignatureElement::FirstComponent`'s own comment -- and sizing by
+    // the narrower `ComponentCount` would misindex a `Component`-packed
+    // element whose own lanes don't start at register component 0), GEP'd
+    // by both indices. Either index may itself be dynamic independently
+    // of the other -- e.g. a constant `Row` with a dynamically selected
+    // `Component` lane (a doubly-dynamic-indexed access whose dynamism
+    // happens to land entirely on the component side), which the
+    // previous `Row`-only dynamic scheme could not represent at all.
+    AllocaInst *&Slot = DynamicAllocas[ElementID];
     if (!Slot) {
       uint32_t RowCount = ElementID < Sig.Elements.size()
                               ? Sig.Elements[ElementID].RowCount
                               : 1;
       IRBuilder<> EntryBuilder(&F.getEntryBlock(),
                                F.getEntryBlock().getFirstInsertionPt());
-      Slot = EntryBuilder.CreateAlloca(ArrayType::get(Ty, RowCount), nullptr,
-                                       "feme.stage.output.shadow.dyn");
+      Slot = EntryBuilder.CreateAlloca(
+          ArrayType::get(ArrayType::get(Ty, 4), RowCount), nullptr,
+          "feme.stage.output.shadow.dyn");
     }
+    Value *RowIdx =
+        RowC ? B.getInt32(static_cast<uint32_t>(RowC->getZExtValue())) : Row;
+    Value *ComponentIdx =
+        ComponentC ? B.getInt32(static_cast<uint32_t>(ComponentC->getZExtValue()))
+                   : Component;
     return B.CreateInBoundsGEP(Slot->getAllocatedType(), Slot,
-                               {B.getInt32(0), Row});
+                               {B.getInt32(0), RowIdx, ComponentIdx});
   }
 
   bool empty() const { return ScalarAllocas.empty(); }
 
-  /// Every promotable (constant-`Row`) shadow alloca created so far, for
-  /// `PromoteMemToReg` to convert to SSA form once every instruction has
-  /// been rewritten. A dynamic-`Row` array alloca (see this class's own
-  /// comment) is never included: it is not promotable, and stays ordinary
-  /// stack memory instead.
+  /// Every promotable (constant-`Row`-and-`Component`) shadow alloca
+  /// created so far, for `PromoteMemToReg` to convert to SSA form once
+  /// every instruction has been rewritten. A dynamic array alloca (see
+  /// this class's own comment) is never included: it is not promotable,
+  /// and stays ordinary stack memory instead.
   SmallVector<AllocaInst *, 8> takeAllocas() const {
     SmallVector<AllocaInst *, 8> Result;
     for (const auto &KV : ScalarAllocas)
@@ -1228,11 +1251,10 @@ public:
 
 private:
   using Key = std::tuple<uint32_t, uint64_t, uint64_t>;
-  using DynamicKey = std::pair<uint32_t, uint64_t>;
   Function &F;
   const EntrySignature &Sig;
   DenseMap<Key, AllocaInst *> ScalarAllocas;
-  DenseMap<DynamicKey, AllocaInst *> DynamicAllocas;
+  DenseMap<uint32_t, AllocaInst *> DynamicAllocas;
 };
 
 /// Recursively loads \p Ty's value out of stage-IO element \p ElementID,
