@@ -6947,16 +6947,20 @@ TEST(SPIRVResourceLoweringTest, LowersPlain2DStorageImageGetDimensions) {
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
 }
 
-// Roadmap L227(c): a multisampled storage image (`Plain2DMS`/`Array2DMS`)
-// still has no `GetDimensions` support of any kind -- confirms this
-// session's widening did not accidentally loosen that pre-existing
-// exclusion (`hasOnlySupportedStorageImageUses` never special-cased
-// `getdimensions.xy`/`.xyz`/`.x` for a multisampled shape either before
-// or after this session's changes; multisample support of any kind
-// remains unstarted follow-on work, see roadmap L73's own `QuerySamples`
-// scope).
-TEST(SPIRVResourceLoweringTest,
-     LeavesPlain2DMSStorageImageGetDimensionsHandleAlone) {
+// Roadmap L269: a plain (non-arrayed) multisampled storage image
+// (`Plain2DMS`) now supports `GetDimensions` -- `imageSize(image2DMS)` has
+// no lod parameter (a multisampled image has exactly one mip level), so
+// its own codegen emits the same Lod-less, 2-component
+// `getdimensions.xy` opcode a plain 2D image's own bare `GetDimensions`
+// overload uses, needing no sample-count component of its own (that is
+// `OpImageQuerySamples`'s own, separate job). This closes the
+// `dEQP-VK.glsl.texture_functions.query.imagesizems.*` CTS failures this
+// session root-caused and fixed by widening
+// `hasOnlySupportedStorageImageUses`'s `isGetDimensionsIntrinsic` shape
+// gate to accept `Plain2DMS` (reusing `createGetDimensions2D` unchanged,
+// same as `LowersCubeStorageImageGetDimensions` immediately below does
+// for `Array2D`).
+TEST(SPIRVResourceLoweringTest, LowersPlain2DMSStorageImageGetDimensions) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <2 x i32> @main() {
@@ -6972,12 +6976,44 @@ TEST(SPIRVResourceLoweringTest,
         target("spirv.Image", float, 1, 2, 0, 1, 2, 1))
   )");
   ASSERT_TRUE(M);
-  runPass(*M); // Must not crash.
+  runPass(*M);
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
+}
+
+// Roadmap L269: the arrayed counterpart -- a multisampled storage image
+// (`Array2DMS`)'s own `imageSize(image2DMSArray)` shares `Plain2DMS`'s
+// own "no lod parameter" reasoning above, but its arrayed `(Width,
+// Height, Layers)` result converts to the 3-component opcode instead,
+// reusing `createQuerySizeLod2DArray` unchanged (with a synthesized
+// `Lod = 0`) -- same builder `Array2D`'s own non-multisampled
+// `GetDimensions` already uses, confirming
+// `hasOnlySupportedStorageImageUses`'s `isGetDimensions3Intrinsic` shape
+// gate now accepts `Array2DMS` alongside `Array2D`/`Plain3D`/
+// `StorageCubeArray`.
+TEST(SPIRVResourceLoweringTest, LowersArray2DMSStorageImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 2, 1, 1, 2, 1)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+          target("spirv.Image", float, 1, 2, 1, 1, 2, 1) %img)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 2, 1, 1, 2, 1)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+        target("spirv.Image", float, 1, 2, 1, 1, 2, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
 }
 
 // Roadmap L230: a plain (non-arrayed) storage `Cube` handle -- `Dim ==
@@ -8321,6 +8357,69 @@ TEST(SPIRVResourceLoweringTest, LowersArray2DMSQuerySamples) {
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
   EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querysamples.i32"));
+}
+
+// Roadmap L269: a plain (non-arrayed) multisampled *sampled* image
+// (`Plain2DMS`)'s own `imageSize()`/`textureSize()` query (no lod
+// argument, same "exactly one mip level" reasoning
+// `LowersPlain2DMSStorageImageGetDimensions` documents for the storage
+// case) now lowers via `hasOnlySupportedImageUses`'s widened
+// `isGetDimensionsIntrinsic` shape gate, reusing `createGetDimensions2D`
+// unchanged. This closes the sampled-image half of the
+// `dEQP-VK.glsl.texture_functions.query.texturesizems.*` CTS failures.
+TEST(SPIRVResourceLoweringTest, LowersPlain2DMSSampledImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <2 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img)
+      ret <2 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <2 x i32> @llvm.spv.resource.getdimensions.xy.timg(
+        target("spirv.Image", float, 1, 0, 0, 1, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.2d.v2i32"));
+}
+
+// Roadmap L269: the arrayed counterpart -- a multisampled sampled image
+// (`Array2DMS`)'s own `textureSize(sampler2DMSArray)` shares
+// `Plain2DMS`'s own "no lod parameter" reasoning above, but its arrayed
+// `(Width, Height, Layers)` result converts to the 3-component opcode
+// instead (`isGetDimensions3Intrinsic`) -- a case `hasOnlySupportedImageUses`
+// had *no* handling for at all before this session (every other sampled
+// shape's own 3-component `textureSize()` overload always supplies an
+// explicit lod argument instead, `isQuerySizeLodCall` below), reusing
+// `createQuerySizeLod2DArray` unchanged (with a synthesized `Lod = 0`).
+TEST(SPIRVResourceLoweringTest, LowersArray2DMSSampledImageGetDimensions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <3 x i32> @main() {
+      %img = call target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %dims = call <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+          target("spirv.Image", float, 1, 0, 1, 1, 1, 0) %img)
+      ret <3 x i32> %dims
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare <3 x i32> @llvm.spv.resource.getdimensions.xyz.timg(
+        target("spirv.Image", float, 1, 0, 1, 1, 1, 0))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.getdimensions.lod.2darray.v3i32"));
 }
 
 // Roadmap L73's own widening of `classifySampledImage2DHandle` to accept

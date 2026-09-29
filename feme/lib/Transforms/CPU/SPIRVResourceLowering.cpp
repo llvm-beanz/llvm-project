@@ -1559,13 +1559,46 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     if (!CI)
       return false;
 
-    // Roadmap L70: a plain 2D sampled image's own `imageSize()`/
+    // Roadmap L70/L269: a plain 2D sampled image's own `imageSize()`/
     // `textureSize()` query (`OpImageQuerySize`, no explicit LOD operand)
     // needs no further validation beyond its shape -- see
     // `isGetDimensionsIntrinsic`'s own doc for why this is scoped to
-    // `Plain2D` only.
+    // `Plain2D` originally. `Plain2DMS` was added for roadmap L269:
+    // GLSL's `textureSize(sampler2DMS)` has no lod parameter at all (a
+    // multisampled image has exactly one mip level, so there is nothing
+    // for a lod argument to select), so its own codegen emits this same
+    // Lod-less opcode rather than `OpImageQuerySizeLod` -- and its
+    // `<2 x i32>` `(Width, Height)` result is identical in shape to
+    // `Plain2D`'s own, needing no sample-count component at all (that is
+    // `OpImageQuerySamples`'s own, separate job -- see `isQuerySamplesCall`
+    // below). `femeCpuImageGetDimensions2DV2I32` reads `Width`/`Height`
+    // directly off the shared image descriptor with no MS-vs-non-MS
+    // distinction of its own, so no new runtime entry point is needed
+    // either.
     if (isGetDimensionsIntrinsic(*CI)) {
-      if (Shape != ImageShape::Plain2D)
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Plain2DMS)
+        return false;
+      continue;
+    }
+
+    // Roadmap L269: an *arrayed* multisampled sampled image's own
+    // `imageSize()`/`textureSize()` query -- `textureSize(sampler2DMSArray)`
+    // shares `Plain2DMS`'s own "no lod parameter" reasoning immediately
+    // above, but its arrayed `<3 x i32>` `(Width, Height, Layers)` result
+    // converts to this 3-component opcode instead (`ImageQuerySizePattern`
+    // dispatches purely on result width, same as the 2-component case).
+    // No other sampled shape reaches this opcode: every non-multisampled
+    // sampled `textureSize()` overload always supplies an explicit lod
+    // argument (`OpImageQuerySizeLod`, `isQuerySizeLodCall` below)
+    // instead, so accepting only `Array2DMS` here cannot accidentally
+    // also accept some other shape's own 3-component query.
+    // `femeCpuImageGetDimensionsLod2DArrayV3I32` (reused unchanged, with
+    // a synthesized constant `Lod = 0`, mirroring the storage-image
+    // `Array2D`/`Plain3D` cases below) reads `Width`/`Height`/
+    // `ArrayLayers` directly off the same descriptor, again with no
+    // MS-vs-non-MS distinction needed.
+    if (isGetDimensions3Intrinsic(*CI)) {
+      if (Shape != ImageShape::Array2DMS)
         return false;
       continue;
     }
@@ -2246,19 +2279,19 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     if (!CI)
       return false;
 
-    // Roadmap L70/L227(c)/L230: a `Plain2D` or `Array1D` storage image's
-    // own `imageSize()` query (`OpImageQuerySize`) -- see
-    // `hasOnlySupportedImageUses`'s own identical check for why `Plain2D`
-    // is accepted here; `Array1D` was added alongside it since
-    // `RWTexture1DArray::GetDimensions(Width, Elements)` (no mip
-    // parameter) shares the identical `<2 x i32>`-result opcode shape,
-    // just dispatching to a different runtime builder (see the matching
-    // lowering switch below) -- confirmed via a real `dxc -spirv`
-    // reduction that it is the same `getdimensions.xy` opcode
-    // `Texture2D`'s own bare `GetDimensions(Width, Height)` overload
-    // produces, disambiguated only by `Shape` here. `Array2D` was added
-    // for roadmap `L230`: `classifyStorageImage2DHandle` folds a
-    // non-arrayed storage `Cube` handle into this same `Array2D` shape
+    // Roadmap L70/L227(c)/L230/L269: a `Plain2D`, `Array1D`, `Array2D`,
+    // or (roadmap L269) `Plain2DMS` storage image's own `imageSize()`
+    // query (`OpImageQuerySize`) -- see `hasOnlySupportedImageUses`'s own
+    // identical check for why `Plain2D` is accepted here; `Array1D` was
+    // added alongside it since `RWTexture1DArray::GetDimensions(Width,
+    // Elements)` (no mip parameter) shares the identical `<2 x
+    // i32>`-result opcode shape, just dispatching to a different runtime
+    // builder (see the matching lowering switch below) -- confirmed via
+    // a real `dxc -spirv` reduction that it is the same `getdimensions.xy`
+    // opcode `Texture2D`'s own bare `GetDimensions(Width, Height)`
+    // overload produces, disambiguated only by `Shape` here. `Array2D`
+    // was added for roadmap `L230`: `classifyStorageImage2DHandle` folds
+    // a non-arrayed storage `Cube` handle into this same `Array2D` shape
     // (see its own doc), and a plain cube's own `imageSize(imageCube)`
     // needs no face count (always 6), so its codegen emits this same
     // 2-component `getdimensions.xy` opcode, not the 3-component
@@ -2267,10 +2300,15 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
     // see `isGetDimensions3Intrinsic` below) -- so accepting `Array2D`
     // here can never accidentally also accept a real array image's own
     // 2-component-result use, since a real array image's `imageSize()`
-    // never produces one.
+    // never produces one. `Plain2DMS` was added for roadmap `L269`:
+    // GLSL's `imageSize(image2DMS)` has no lod parameter either (a
+    // multisampled storage image likewise has exactly one mip level), so
+    // it shares this same Lod-less opcode and `<2 x i32>` result shape,
+    // needing no sample-count component (`OpImageQuerySamples`'s own,
+    // separate job).
     if (isGetDimensionsIntrinsic(*CI)) {
       if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array1D &&
-          Shape != ImageShape::Array2D)
+          Shape != ImageShape::Array2D && Shape != ImageShape::Plain2DMS)
         return false;
       continue;
     }
@@ -2294,22 +2332,30 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap H124s/L227(c)/L232: an `Array2D`, `Plain3D`, or
-    // `StorageCubeArray` storage image's own Lod-less `OpImageQuerySize`
-    // (`isGetDimensions3Intrinsic`) -- see its own doc for why a storage
-    // image's `GetDimensions` lowers to this bare 3-component opcode
-    // rather than `OpImageQuerySizeLod`. `RWTexture3D::GetDimensions(Width,
-    // Height, Depth)` (`Plain3D`) was the "unstarted follow-on work" that
-    // doc names; added alongside `Array2D` here since both share the
-    // identical `<3 x i32>`-result opcode shape, just dispatching to a
-    // different runtime builder (see the matching lowering switch below).
-    // `StorageCubeArray` (roadmap L232) shares that same opcode shape too
-    // -- `imageCubeArray::imageSize()` returns `(Width, Height, Elements)`,
-    // just needing the `/6` face-count division `createQuerySizeLodCubeArray`
-    // already applies for the sampled-image case.
+    // Roadmap H124s/L227(c)/L232/L269: an `Array2D`, `Plain3D`,
+    // `StorageCubeArray`, or (roadmap L269) `Array2DMS` storage image's
+    // own Lod-less `OpImageQuerySize` (`isGetDimensions3Intrinsic`) --
+    // see its own doc for why a storage image's `GetDimensions` lowers to
+    // this bare 3-component opcode rather than `OpImageQuerySizeLod`.
+    // `RWTexture3D::GetDimensions(Width, Height, Depth)` (`Plain3D`) was
+    // the "unstarted follow-on work" that doc names; added alongside
+    // `Array2D` here since both share the identical `<3 x i32>`-result
+    // opcode shape, just dispatching to a different runtime builder (see
+    // the matching lowering switch below). `StorageCubeArray` (roadmap
+    // L232) shares that same opcode shape too -- `imageCubeArray::
+    // imageSize()` returns `(Width, Height, Elements)`, just needing the
+    // `/6` face-count division `createQuerySizeLodCubeArray` already
+    // applies for the sampled-image case. `Array2DMS` (roadmap L269)
+    // shares it a fourth way: an *arrayed* multisampled storage image's
+    // own `imageSize(image2DMSArray)` returns `(Width, Height, Layers)`,
+    // the same shape `Array2D`'s own query already dispatches to
+    // `createQuerySizeLod2DArray` for (see the matching lowering switch
+    // below, which already falls into that same `else` branch for any
+    // shape that isn't `Plain3D`/`StorageCubeArray`).
     if (isGetDimensions3Intrinsic(*CI)) {
       if (Shape != ImageShape::Array2D && Shape != ImageShape::Plain3D &&
-          Shape != ImageShape::StorageCubeArray)
+          Shape != ImageShape::StorageCubeArray &&
+          Shape != ImageShape::Array2DMS)
         return false;
       continue;
     }
@@ -5059,9 +5105,10 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L70/L227(c)/L230: `OpImageQuerySize`
+      // Roadmap L70/L227(c)/L230/L269: `OpImageQuerySize`
       // (`isGetDimensionsIntrinsic`, `llvm.spv.resource.getdimensions.xy`)
-      // against a plain 2D image, or (storage images only,
+      // against a plain 2D image, a `Plain2DMS` (multisampled, sampled or
+      // storage) image (roadmap L269), or (storage images only,
       // `hasOnlySupportedStorageImageUses` already restricted this shape
       // to a storage handle) an `Array1D` storage image's
       // `RWTexture1DArray::GetDimensions(Width, Elements)` overload --
@@ -5077,10 +5124,11 @@ void lowerImageAccesses(
       // (non-arrayed) storage `Cube` handle (roadmap `L230`,
       // `classifyStorageImage2DHandle` folds it into this same `Array2D`
       // `Shape` -- see `hasOnlySupportedStorageImageUses`'s own updated
-      // doc above): reusing `createGetDimensions2D` unchanged is already
-      // correct for it, since `imageSize(imageCube)`'s own 2-component
-      // result is identical in shape to a plain 2D image's, needing no
-      // face-count/array-layer component at all.
+      // doc above) and `Plain2DMS` (roadmap `L269`): reusing
+      // `createGetDimensions2D` unchanged is already correct for both,
+      // since neither a cube's own face count nor a multisampled image's
+      // own sample count is part of this 2-component result -- both are
+      // identical in shape to a plain 2D image's own.
       if (isGetDimensionsIntrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         CallInst *NewCall;
@@ -5113,19 +5161,25 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap H124s/L227(c)/L232: `OpImageQuerySize` against an
-      // `Array2D`, `Plain3D`, or `StorageCubeArray` storage image
-      // (`isGetDimensions3Intrinsic`, `hasOnlySupportedStorageImageUses`
-      // already restricted this branch to those three shapes) -- reuses
+      // Roadmap H124s/L227(c)/L232/L269: `OpImageQuerySize` against an
+      // `Array2D`, `Plain3D`, `StorageCubeArray`, or (roadmap L269,
+      // sampled or storage) `Array2DMS` image (`isGetDimensions3Intrinsic`,
+      // `hasOnlySupportedStorageImageUses`/`hasOnlySupportedImageUses`
+      // already restricted this branch to those shapes) -- reuses
       // `QuerySizeLod2DArray`'s/`QuerySizeLod3D`'s/`QuerySizeLodCubeArray`'s
-      // own runtime call with a synthesized constant `Lod = 0`, since a
-      // storage image has exactly one mip level and its formula for that
-      // level is otherwise identical. `StorageCubeArray` reuses the same
-      // `createQuerySizeLodCubeArray` builder already used for a
-      // *sampled* cube array's own identical `/6` face-count division
-      // (see `ImageShape::StorageCubeArray`'s own doc) -- the runtime
-      // entry point reads `ArrayLayers` off the descriptor generically,
-      // with no sampled-vs-storage distinction of its own.
+      // own runtime call with a synthesized constant `Lod = 0`, since
+      // both a storage image and a multisampled image have exactly one
+      // mip level, and the formula for that level is otherwise identical.
+      // `StorageCubeArray` reuses the same `createQuerySizeLodCubeArray`
+      // builder already used for a *sampled* cube array's own identical
+      // `/6` face-count division (see `ImageShape::StorageCubeArray`'s
+      // own doc); `Array2DMS` falls into the same `else` branch as
+      // `Array2D` and reuses `createQuerySizeLod2DArray` unchanged, since
+      // an arrayed multisampled image's own `(Width, Height, Layers)`
+      // result needs no sample-count component either -- the runtime
+      // entry point reads `Width`/`Height`/`ArrayLayers` off the
+      // descriptor generically, with no sampled-vs-storage or
+      // MS-vs-non-MS distinction of its own.
       if (isGetDimensions3Intrinsic(*CI)) {
         IRBuilder<> Builder(CI);
         Value *ZeroLod = Builder.getInt32(0);
