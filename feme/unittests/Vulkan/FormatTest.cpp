@@ -1136,4 +1136,31 @@ TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
 }
 
+// (Roadmap L228(b)) `isASTCSRGBFormat` is what `ImageOps.cpp`'s
+// `runBlitImage` and `CommandBuffer.cpp`'s `decodeASTCImageForSampling`
+// caller both now consult to pick `R8G8B8A8_UNORM_SRGB` (rather than plain
+// `R8G8B8A8_UNORM`) as a decoded ASTC source's reported format -- exactly
+// the 14 `_SRGB` LDR footprints should read true, every `_UNORM` LDR
+// footprint and every HDR (`_SFLOAT`) footprint should read false.
+TEST(FormatTest, IsASTCSRGBFormatIdentifiesOnlyTheFourteenSRGBFootprints) {
+  for (ResourceFormat Format :
+       {ResourceFormat::ASTC_4x4_SRGB, ResourceFormat::ASTC_5x4_SRGB,
+        ResourceFormat::ASTC_5x5_SRGB, ResourceFormat::ASTC_6x5_SRGB,
+        ResourceFormat::ASTC_6x6_SRGB, ResourceFormat::ASTC_8x5_SRGB,
+        ResourceFormat::ASTC_8x6_SRGB, ResourceFormat::ASTC_8x8_SRGB,
+        ResourceFormat::ASTC_10x5_SRGB, ResourceFormat::ASTC_10x6_SRGB,
+        ResourceFormat::ASTC_10x8_SRGB, ResourceFormat::ASTC_10x10_SRGB,
+        ResourceFormat::ASTC_12x10_SRGB, ResourceFormat::ASTC_12x12_SRGB}) {
+    EXPECT_TRUE(isASTCSRGBFormat(Format)) << "format "
+                                          << static_cast<int>(Format);
+  }
+  for (ResourceFormat Format :
+       {ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_UNORM,
+        ResourceFormat::ASTC_5x5_SFLOAT, ResourceFormat::ASTC_12x12_SFLOAT,
+        ResourceFormat::BC7_SRGB, ResourceFormat::R8G8B8A8_UNORM_SRGB}) {
+    EXPECT_FALSE(isASTCSRGBFormat(Format)) << "format "
+                                           << static_cast<int>(Format);
+  }
+}
+
 } // namespace

@@ -225,34 +225,6 @@ struct MaterializedBoundResources {
   std::vector<std::vector<uint8_t>> InlineUniformBlockStorage;
 };
 
-/// Whether \p Format is one of the 14 `_SRGB` ASTC LDR footprints rather
-/// than its `_UNORM` counterpart -- decides which already-supported
-/// `feme::cpu::ResourceFormat` `decodeASTCImageForSampling` below reports
-/// its decoded, per-texel RGBA8 output as (`R8G8B8A8_UNORM_SRGB` applies
-/// the sRGB decode curve at sample time the same way it already does for a
-/// real `R8G8B8A8_UNORM_SRGB` image; `R8G8B8A8_UNORM` does not).
-bool isASTCSRGBFormat(feme::cpu::ResourceFormat Format) {
-  switch (Format) {
-  case feme::cpu::ResourceFormat::ASTC_4x4_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_5x4_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_5x5_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_6x5_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_6x6_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_8x5_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_8x6_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_8x8_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_10x5_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_10x6_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_10x8_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_10x10_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_12x10_SRGB:
-  case feme::cpu::ResourceFormat::ASTC_12x12_SRGB:
-    return true;
-  default:
-    return false;
-  }
-}
-
 /// The per-texel RGBA8 image a `decodeASTCImageForSampling` call produces:
 /// decoded texel bytes plus the per-texel `FemeImageSubresourceLayout`
 /// table describing them, both owned by whichever

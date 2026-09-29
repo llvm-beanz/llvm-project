@@ -957,9 +957,19 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
               // its own sub-family maps to (`SrcBCTarget`); (roadmap H8j)
               // an ETC2/EAC source likewise through `decodeETC2FormatBlock`
               // (`SrcETC2Target`); an ASTC source always decodes through
-              // `decodeASTCBlock` into RGBA8.
+              // `decodeASTCBlock` into RGBA8, reported as
+              // `R8G8B8A8_UNORM_SRGB` rather than plain `R8G8B8A8_UNORM`
+              // when `Src->format()` is one of the 14 `_SRGB` ASTC
+              // footprints (roadmap L228(b)) -- `decodeASTCBlock` itself
+              // has no notion of sRGB (it unpacks the same raw bytes
+              // either way), so `unpackColor` below is what must apply
+              // the sRGB decode curve, exactly like `CommandBuffer.cpp`'s
+              // `decodeASTCImageForSampling` caller already does for
+              // sampling via this same `isASTCSRGBFormat` check.
               feme::cpu::ResourceFormat DecodedFormat =
-                  feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
+                  isASTCSRGBFormat(Src->format())
+                      ? feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB
+                      : feme::cpu::ResourceFormat::R8G8B8A8_UNORM;
               uint32_t DecodedBytesPerTexel = 4;
               if (SrcIsBC) {
                 decodeBCBlock(Src->format(), Block, DecodeBuf.data());

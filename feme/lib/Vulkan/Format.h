@@ -81,6 +81,21 @@ uint32_t blockHeight(feme::cpu::ResourceFormat Format);
 /// does not recognize.
 uint32_t bytesPerBlock(feme::cpu::ResourceFormat Format);
 
+/// Returns whether \p Format is one of the 14 `_SRGB` ASTC LDR footprints
+/// rather than its `_UNORM` counterpart (roadmap L228(b)) -- decides which
+/// already-supported `feme::cpu::ResourceFormat` a decoded ASTC image's
+/// per-texel RGBA8 output should be reported as, both for sampling
+/// (`CommandBuffer.cpp`'s `decodeASTCImageForSampling` caller) and for
+/// blitting (`ImageOps.cpp`'s `runBlitImage`): `R8G8B8A8_UNORM_SRGB`
+/// applies the sRGB decode curve the same way it already does for a real
+/// `R8G8B8A8_UNORM_SRGB` image; `R8G8B8A8_UNORM` does not. Shared between
+/// both call sites rather than duplicated, since `decodeASTCBlock`
+/// (ASTCDecode.h) itself has no notion of sRGB at all -- it only unpacks
+/// the same raw per-texel bytes regardless of which of the two footprints
+/// produced them, so every consumer of its output must apply this
+/// distinction itself.
+bool isASTCSRGBFormat(feme::cpu::ResourceFormat Format);
+
 /// Returns whether \p Format is one of the formats the CPU runtime's
 /// typed-load/store helpers (feme/runtime/CPU/FeMeRuntimeCPU.c) actually
 /// implement a *read* conversion for, and so may legally back a texel

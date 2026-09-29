@@ -714,6 +714,28 @@ uint32_t feme::vulkan::bytesPerBlock(ResourceFormat Format) {
   return formatElementSize(Format);
 }
 
+bool feme::vulkan::isASTCSRGBFormat(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::ASTC_4x4_SRGB:
+  case ResourceFormat::ASTC_5x4_SRGB:
+  case ResourceFormat::ASTC_5x5_SRGB:
+  case ResourceFormat::ASTC_6x5_SRGB:
+  case ResourceFormat::ASTC_6x6_SRGB:
+  case ResourceFormat::ASTC_8x5_SRGB:
+  case ResourceFormat::ASTC_8x6_SRGB:
+  case ResourceFormat::ASTC_8x8_SRGB:
+  case ResourceFormat::ASTC_10x5_SRGB:
+  case ResourceFormat::ASTC_10x6_SRGB:
+  case ResourceFormat::ASTC_10x8_SRGB:
+  case ResourceFormat::ASTC_10x10_SRGB:
+  case ResourceFormat::ASTC_12x10_SRGB:
+  case ResourceFormat::ASTC_12x12_SRGB:
+    return true;
+  default:
+    return false;
+  }
+}
+
 bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   switch (Format) {
   // The identity 32-bit-per-component formats: the CPU runtime's
