@@ -6844,5 +6844,61 @@ TEST(CanonicalizeStageTest, RewritesLoadThroughSelectOfDistinctInputGlobals) {
        Sel->getFalseValue() == InputLoads[0]));
 }
 
-} // namespace
+/// (Roadmap L270) A fragment entry's `BuiltIn HelperInvocation` (code 23,
+/// `gl_HelperInvocation`) load is rewritten directly into a
+/// `feme.stage.is_helper` call (`createStageIsHelper`) -- the same op
+/// DXIL's own `IsHelperLane` opcode (221) already raises to -- rather
+/// than being misclassified as a plain, `Location`-less user varying
+/// input (previously: `getSystemValueForBuiltIn` had no case for this
+/// builtin at all, so it fell through to `SignatureSystemValue::None`,
+/// which is exactly what `GraphicsPipeline.cpp`'s own
+/// `validateStageInterfaces` rejects with `"fragment input element N has
+/// no location to link against a vertex output"` --
+/// `dEQP-VK.glsl.atomic_operations.*`'s own fragment-stage variants all
+/// hit this, since glslang always guards a fragment shader's SSBO/image
+/// read-modify-write with `if (!gl_HelperInvocation) { ... }`). Also
+/// asserts the `HelperInvocation` global itself gets no `SignatureElement`
+/// at all (it is deliberately excluded from the ordinary
+/// `InputGlobals`/`addElement` path).
+TEST(CanonicalizeStageTest, RewritesHelperInvocationBuiltinToIsHelperCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_HelperInvocation = external addrspace(8) global i1, !spirv.Decorations !0
+    @gl_FragDepth = external addrspace(8) global float, !spirv.Decorations !1
+    define void @main() #0 {
+      %h = load i1, ptr addrspace(8) @gl_HelperInvocation
+      %d = select i1 %h, float 0.0, float 1.0
+      store float %d, ptr addrspace(8) @gl_FragDepth
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 23}
+    !3 = !{i32 11, i32 22}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
 
+  bool SawIsHelper = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      StageOpKind Kind;
+      if (isStageOpCall(*CI, &Kind) && Kind == StageOpKind::IsHelper) {
+        SawIsHelper = true;
+        EXPECT_TRUE(CI->getType()->isIntegerTy(1));
+      }
+    }
+  EXPECT_TRUE(SawIsHelper);
+
+  // `gl_HelperInvocation` itself must never have made it into the
+  // signature -- it is routed entirely around `SignatureElement`.
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  for (const SignatureElement &Elt : Sig->Elements)
+    EXPECT_NE(Elt.SystemValue, SignatureSystemValue::IsHelperLane);
+}
+
+
+} // namespace

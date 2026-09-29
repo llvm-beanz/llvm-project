@@ -4492,6 +4492,12 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // formats' numbering conventions consistent.
   SmallVector<GlobalVariable *> InputGlobals, OutputGlobals;
   DenseSet<GlobalVariable *> Seen;
+  // (Roadmap L270) `BuiltIn HelperInvocation` (`gl_HelperInvocation`)
+  // globals discovered below -- routed to `createStageIsHelper()` by the
+  // load-rewriting loop further down, never through the ordinary
+  // `InputGlobals`/`SignatureElement` path. See the discovery loop's own
+  // comment on why.
+  DenseSet<GlobalVariable *> HelperInvocationGlobals;
   const DataLayout &DL = F.getParent()->getDataLayout();
   for (Function *Fn : Functions) {
     for (Instruction &I : instructions(Fn)) {
@@ -4525,6 +4531,35 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           continue;
         ParsedSPIRVDecorations D =
             parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+        // (Roadmap L270) `HelperInvocation` (`BuiltIn` 23, `gl_
+        // HelperInvocation`) is not an ordinary per-invocation *varying*
+        // input like `FrontFacing`/`SampleId` just below -- it has no
+        // fragment-side `Location` to link against a vertex-stage output
+        // at all (glslang never decorates it with one, matching every
+        // other `gl_*` builtin), so routing it through the ordinary
+        // `addElement`/`SignatureElement::Location` machinery the same
+        // way `FrontFacing` is (`getSystemValueForBuiltIn`'s switch, just
+        // below in this file) leaves it wrongly classified as a plain,
+        // `Location`-less user varying instead of the system value it
+        // is -- exactly the `"fragment input element N has no location
+        // to link against a vertex output"` `vkCreateGraphicsPipelines`
+        // rejection this fixes (`dEQP-VK.glsl.atomic_operations.*`'s own
+        // fragment-stage variants: glslang always guards a fragment
+        // shader's SSBO/image read-modify-write with `if
+        // (!gl_HelperInvocation) { ... }`, so every one of them
+        // statically reads this builtin). Instead, skip adding it to
+        // `InputGlobals` entirely here -- the load-rewriting loop further
+        // down recognizes this same `HelperInvocation` builtin globals set
+        // (`HelperInvocationGlobals`, populated right below) and rewrites
+        // every one of its loads directly into `createStageIsHelper()`,
+        // the same `feme.stage.is_helper` op DXIL's own `IsHelperLane`(221)
+        // opcode already raises to just above in this file -- a query the
+        // rest of this pipeline (`SIMDize`/`Linearize`/`ReferenceLowering`/
+        // `ValidateStage`) already fully supports end to end.
+        if (D.BuiltIn && *D.BuiltIn == 23) { // HelperInvocation
+          HelperInvocationGlobals.insert(GV);
+          continue;
+        }
         SPIRVElementInfo Info =
             classifySPIRVElement(Stage, Phase, AddrSpace, D);
         (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
@@ -5564,6 +5599,25 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       Value *Zero = B.getInt32(0);
       if (auto *LI = dyn_cast<LoadInst>(&I)) {
         Value *Ptr = LI->getPointerOperand();
+        // (Roadmap L270) A `HelperInvocation`-decorated global's load
+        // never goes through `resolveStageIOAccess`/`ElementIDs` at all
+        // (it was deliberately excluded from `InputGlobals` above) --
+        // rewrite it directly into the same `feme.stage.is_helper` op
+        // DXIL's own `IsHelperLane` opcode raises to, matching its `i1`
+        // result type exactly (SPIR-V's `HelperInvocation` builtin is
+        // itself `bool`-typed, so no widening is needed, unlike an
+        // ordinary narrow-scalar stage-IO element).
+        if (!HelperInvocationGlobals.empty()) {
+          if (GlobalVariable *GV = getStageIOGlobal(Ptr, DL, Stage);
+              GV && HelperInvocationGlobals.contains(GV)) {
+            Value *New = createStageIsHelper(B);
+            LI->replaceAllUsesWith(New);
+            LI->eraseFromParent();
+            EraseIfNowDead(Ptr);
+            Changed = true;
+            continue;
+          }
+        }
         std::optional<StageIOAccess> Access = resolveStageIOAccess(
             B, Ptr, LI->getType(), DL, ElementIDs, OutputGlobalSet, Stage);
         if (!Access) {
