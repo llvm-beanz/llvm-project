@@ -601,6 +601,8 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   // header comment for the full rationale.
   feme::graphics::UnrollConstantTripCountStageLoopsPass().run(
       AsLLVMIR->getLLVMModule(), MAM);
+  if (::getenv("FEME_DUMP_IR_PRECANON"))
+    AsLLVMIR->getLLVMModule().print(llvm::errs(), nullptr);
   feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
 
   if (OutState || OutGeometryState || OutMeshState) {
