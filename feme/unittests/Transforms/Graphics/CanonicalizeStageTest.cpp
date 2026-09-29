@@ -2578,6 +2578,96 @@ TEST(CanonicalizeStageTest,
     EXPECT_FALSE(isa<LoadInst>(&I));
 }
 
+/// (Roadmap L272) A plain (non-block, non-matrix) narrow-vector-element
+/// array's own genuinely dynamic array-index write -- e.g. `vec3
+/// var[4]; ...; var[dynamicIdx] = someVec3;`
+/// (`dEQP-VK.glsl.indexing.varying_array.vec3_dynamic_write_static_read`'s
+/// own real shape) -- compiles to `ThreadsDynamicComponentIndexIntoCentroid
+/// InputLoadThroughByteGEP`'s identical byte-GEP-wrapped shape (a single
+/// non-constant index into a synthetic `[N x i8]`), but with `N` == this
+/// array level's own *element* size (`16`, this element type's own
+/// ABI-padded `<3 x float>` allocation size under this test's default
+/// `DataLayout`) rather than one scalar lane's own byte size (`4`) --
+/// `getDynamicRowIndexedAccess`'s own comment documents how the two are
+/// told apart. Before this row, the disambiguation compared that `N`
+/// against a *single* `DL.getTypeAllocSize` candidate for this array
+/// level's element type; whichever real stride a given access's own GEP
+/// happened to be generated against (padded here, but tight for some
+/// other, structurally-identical global -- see `resolveRowComponent`'s
+/// own comment for why neither is a reliable, single-candidate guess)
+/// could silently fail to match, misattributing the whole dynamic index
+/// to `DynamicComponent` (a per-lane select) instead of a genuine `Row`
+/// (a whole-row select): every lane of the write's own vector value then
+/// received a *different*, wrongly-offset row (row 0's lane 0, row 1's
+/// lane 0, row 2's lane 0, ...) instead of all three lanes sharing one
+/// correct, dynamically-selected row -- `dEQP-VK.glsl.indexing.
+/// varying_array.vec3_dynamic_write_static_read`'s own "Image mismatch"
+/// (roadmap L272), not a pipeline-creation rejection, since every operand
+/// was still a validly-shaped, in-range constant/`Value*`.
+TEST(CanonicalizeStageTest,
+     ThreadsDynamicRowIndexIntoVec3ArrayOutputStoreThroughByteGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_arr = external addrspace(8) global [4 x <3 x float>], !spirv.Decorations !0
+    define void @main(i64 %idx, <3 x float> %v) #0 {
+      %p = getelementptr [16 x i8], ptr addrspace(8) @out_arr, i64 %idx
+      store <3 x float> %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IdxArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 4u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 3u);
+
+  unsigned SeenStores = 0;
+  Value *RowValue = nullptr;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // `Row` (operand 1) must be the *same* non-constant value -- derived
+    // from `%idx` itself (zext/trunc'd to i32) -- for every one of the
+    // vector's three lane stores, not a constant, and not the lane index
+    // misattributed to it.
+    Value *Row = CI->getArgOperand(1);
+    EXPECT_FALSE(isa<Constant>(Row));
+    if (!RowValue)
+      RowValue = Row;
+    else
+      EXPECT_EQ(Row, RowValue);
+    if (auto *Trunc = dyn_cast<TruncInst>(Row))
+      EXPECT_EQ(Trunc->getOperand(0), IdxArg);
+    else
+      EXPECT_EQ(Row, IdxArg);
+    // `Component` (operand 2) is the constant lane (`0`, `1`, `2`), one
+    // per store, not the dynamic `%idx`.
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Component.has_value());
+    EXPECT_LT(*Component, 3u);
+  }
+  EXPECT_EQ(SeenStores, 3u);
+
+  // No store targets `@out_arr` directly anymore -- the only `StoreInst`s
+  // left are the shadow alloca's own write-throughs (roadmap H2e/H7w),
+  // ordinary locals, not the original stage-IO global.
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+}
+
+
 /// (Roadmap H6k) A multi-`ElementID` builtin interface block whose own
 /// value type is an arrayed `StructType` (a mesh entry's own
 /// `PerPrimitiveEXT`/`PerVertexEXT`-decorated block, e.g.

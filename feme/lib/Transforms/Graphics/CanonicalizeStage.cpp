@@ -2202,6 +2202,22 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
 /// that does not yet expect one (`getDynamicVertexIndexedAccess`'s own
 /// probe declines this shape outright rather than silently dropping it,
 /// see that call site's own comment).
+///
+/// (Roadmap L272) Forward-declared here (defined below, alongside
+/// `resolveRowComponent`'s own identical use of both) so
+/// `getDynamicRowIndexedAccess`'s dynamic-lane-vs-dynamic-row
+/// disambiguation can self-discover which of a narrow vector's two
+/// candidate real strides -- packed (tight) or padded (ABI-aligned) --
+/// actually matches a given byte-array GEP wrapper's own width, exactly
+/// like `resolveRowComponent`'s own array-peeling loop does for the
+/// ordinary constant-offset path. See that function's own comment for
+/// why neither candidate alone is reliable: which one a given access's
+/// own GEP was generated against depends on which `DataLayout` happened
+/// to be attached to the module at that GEP's own construction/folding
+/// time, not on any recoverable static property of the accessed global.
+uint64_t getPackedElementSize(Type *Ty, const DataLayout &DL);
+uint64_t getPaddedElementSize(Type *Ty, const DataLayout &DL);
+
 std::optional<uint32_t> collectDynamicRowTerms(
     Type *Ty, User::op_iterator &It, User::op_iterator End,
     uint32_t &IDStart, SmallVectorImpl<std::pair<Value *, uint64_t>> &Terms,
@@ -2407,11 +2423,27 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
       Value *DynamicRowIndex = nullptr;
       uint64_t DynamicRowMultiplier = 1;
       while (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
-        uint64_t ElemSize =
-            DL.getTypeAllocSize(ArrTy->getElementType()).getFixedValue();
-        if (!ElemSize)
+        // (Roadmap L272) Neither a single `DL.getTypeAllocSize` candidate
+        // nor a single per-global heuristic reliably predicts which real
+        // stride this particular array level's own accesses were
+        // generated against: a narrow (3-wide) vector row may bake
+        // either its packed (tight) or padded (ABI-aligned) size
+        // depending on which `DataLayout` happened to be attached to the
+        // module at whichever lowering/materialization step produced
+        // this exact GEP -- see `resolveRowComponent`'s own comment for
+        // the full root-cause explanation, which applies identically
+        // here. Try both candidates: `ByteArrTy`'s own width tells which
+        // one `DynamicLane` was actually scaled by (checked first, since
+        // it must not consume `Residual`), and, if neither/both match
+        // ambiguously, `Residual`'s own divisibility (mirroring
+        // `resolveRowComponent`'s own `PackedValid`/`PaddedValid` check)
+        // picks between the two for an ordinary constant array level.
+        uint64_t PackedSize = getPackedElementSize(ArrTy->getElementType(), DL);
+        uint64_t PaddedSize = getPaddedElementSize(ArrTy->getElementType(), DL);
+        if (!PackedSize || !PaddedSize)
           return std::nullopt;
-        if (!DynamicRowIndex && ElemSize == ByteArrTy->getNumElements()) {
+        uint64_t N = ByteArrTy->getNumElements();
+        if (!DynamicRowIndex && (PackedSize == N || PaddedSize == N)) {
           // `DynamicLane` itself selects this array level's own instance
           // index, not a byte residual -- do not consume `Residual` for
           // it. Bail rather than risk a mis-flattened `Row` if another
@@ -2428,6 +2460,17 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
             return std::nullopt;
           continue;
         }
+        bool PackedValid = Residual % PackedSize == 0 &&
+                           Residual / PackedSize < ArrTy->getNumElements();
+        bool PaddedValid = Residual % PaddedSize == 0 &&
+                           Residual / PaddedSize < ArrTy->getNumElements();
+        uint64_t ElemSize;
+        if (PackedValid != PaddedValid)
+          ElemSize = PackedValid ? PackedSize : PaddedSize;
+        else if (PackedValid)
+          ElemSize = PackedSize;
+        else
+          return std::nullopt;
         uint64_t Idx = Residual / ElemSize;
         if (Idx >= ArrTy->getNumElements())
           return std::nullopt;
