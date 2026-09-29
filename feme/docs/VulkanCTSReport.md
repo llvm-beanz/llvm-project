@@ -4623,3 +4623,87 @@ remain in this gap.
 remaining untriaged clusters), `L260` (`a2b10g10r10_snorm_pack32`
 alpha-channel SNORM bug), `L228(e)`/`(f)` (broader-than-glsl/
 tessellation CTS sampling at real scale).
+
+## L260: `R10G10B10A2_SNORM` 2-bit alpha channel rounds ties away from zero instead of to even -- fixed; L265 filed for a distinct residual
+
+Root-caused the `L228(b)`-split-off residual: `dEQP-VK.api.
+copy_and_blit...astc_5x5_unorm_block.a2b10g10r10_snorm_pack32.
+general_general_linear`'s "Result image is incorrect" failure, whose
+`.qpa` diagnostic showed RGB channels comfortably within threshold but
+alpha off by exactly 1.0 (the maximum possible difference).
+
+**Method:** extracted the failing case's embedded `Result`/`Reference`
+PNGs directly from the `.qpa` XML (Python: regex out the `<Image
+Name="...">`/`</Image>` blocks, base64-decode, `PIL.Image.open`), then
+diffed the two alpha channels pixel-by-pixel with `numpy`. Found
+exactly 1 differing pixel out of 3,600 (60x60): our result had alpha
+raw code `1` (display `255`), the reference expected raw code `0`
+(display `128`) -- i.e. the blit's blended alpha landed on an exact
+tie (`0.5` normalized) between this format's 2-bit field's only two
+positive-side codes, and the two sides disagreed on which way to round
+it.
+
+**Root cause:** `packClearColor`'s `R10G10B10A2_SNORM` branch used
+`std::lround`, which the C standard mandates always rounds an exact
+`.5` tie away from zero, independent of the current floating-point
+rounding-direction mode. The Vulkan spec's own fixed-point conversion
+formula requires "round to nearest, ties to even" instead. This is
+invisible for the format's 10-bit RGB channels (a tie is
+astronomically rare at that granularity -- would need the input value
+to land on an exact multiple of `1/511`), but the 2-bit alpha channel
+has only 3 representable values across `[-1, 1]` (`{-1, 0, 1}`, since
+raw `-2` aliases to `-1`), so a blit's bilinear blend regularly lands
+exactly on a tie.
+
+**Fix:** added a `roundTiesToEven` helper (`ImageFixture.cpp`,
+anonymous namespace) using `std::llrint`, which -- unlike
+`std::lround` -- honors the current floating-point rounding-direction
+mode (`FE_TONEAREST`/round-to-nearest-even by default, in every
+environment this ICD runs in). Applied it to both `Norm10`/`Norm2` in
+`R10G10B10A2_SNORM`'s pack path (both, for consistency, even though
+only the 2-bit one is ever practically observable).
+
+**Scope decision:** per this row's own original open question ("check
+whether other 2-bit-SNORM-channel formats share the bug, to know if
+the fix should be narrow or general") -- confirmed via `grep` that no
+other format in this codebase has a 2-bit SNORM channel, so the fix is
+intentionally scoped to `R10G10B10A2_SNORM` alone rather than replacing
+every other SNORM format's own `std::lround` call site (their own ties
+are unreachable in practice; broadening the change would be an
+untested, unverifiable blast-radius increase for no observable
+benefit).
+
+**Unit test:** `ImageFixtureTest.PacksR10G10B10A2SnormAlphaTieToEven`
+asserts both `+0.5` and `-0.5` normalized alpha pack to the even code
+(`0`), not the previous away-from-zero result (`1`/`-1`).
+
+**Verification:**
+
+- The originally-reported case: **Pass** (was Fail).
+- A broader, fixed-seed 10,096-case `dEQP-VK.*a2b10g10r10_snorm_pack32*`
+  sample (every group, not just `copy_and_blit`): **24 Fail before this
+  fix, 12 Fail after** (confirmed via `git stash` A/B on the same
+  build). All 12 fixed cases were `astc_{5x4,5x5,8x6}_unorm_block` and
+  `etc2_r8g8b8a8_unorm_block` blit sources; **12 residual failures
+  remain** (`astc_{8x8,10x5,12x12}_unorm_block` blit sources) --
+  investigated with the same qpa-image-diff technique and confirmed to
+  be a *distinct* bug: each has only 1-2 differing pixels (out of
+  3,600-4,096), always at a block-boundary coordinate, where the
+  *decoded* alpha value itself differs from the reference -- not a
+  rounding-tie disagreement (the discrepancy exists independent of
+  which rounding rule either side applies). Filed as new roadmap item
+  `L265` (likely an `ASTCDecode.cpp` per-block weight-interpolation or
+  endpoint-decode precision bug at a source-block edge, not yet
+  root-caused past this single-pixel diagnostic).
+
+`ninja check-feme`: 3,413 Passed / 61 Unsupported / 0 Failed (net +1
+new unit test, no regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal fixed-point-conversion correctness fix to an
+already-supported format, not a new feature-bit or extension exposure.
+
+**Deferred (unchanged, carried over):** `L265` (new, this session --
+the residual 12-case ASTC-block-boundary alpha-decode bug above),
+`L263` (the `L258` sweep's remaining untriaged clusters), `L228(e)`/
+`(f)` (broader-than-glsl/tessellation CTS sampling at real scale).
