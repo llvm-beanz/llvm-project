@@ -5258,8 +5258,10 @@ change -- an internal compiler-pass correctness fix widening coverage
 of an already-exposed core GLSL texture-query builtin, not a new
 feature/extension.
 
-**Full-sweep confirmation:** kicked off a fresh full `dEQP-VK.glsl.*`
-sweep (28,420 cases) after this fix landed to confirm the predicted
-465 - 32 = 433 Fail delta against L267's post-fix baseline (18,992
-Pass / 465 Fail / 8,963 NotSupported) rather than assume it -- see the
-session's `agent_thoughts.md` entry for the confirmed result.
+**Full-sweep confirmation:** a fresh full `dEQP-VK.glsl.*` sweep
+(28,420 cases) after this fix landed completed with **19,024 Pass /
+433 Fail / 8,963 NotSupported** -- an exact match to the predicted
+18,992 + 32 = 19,024 Pass / 465 - 32 = 433 Fail delta against L267's
+post-fix baseline (18,992 Pass / 465 Fail / 8,963 NotSupported),
+confirming no unexpected knock-on shifts elsewhere in the full sweep
+from this fix.
