@@ -2093,6 +2093,12 @@ public:
 /// *already-converted* LLVM dialect type of a `BitField*` operand (a
 /// signless integer, or a fixed vector thereof) -- never the original,
 /// still-SPIR-V-dialect-tagged (`si32`/`ui32`) type of the op's own operand.
+///
+/// Forward-declared here (defined later in this file, near
+/// `flushSubnormalToZero`) since `BitFieldSExtractPattern` below needs it for
+/// its `Count == 0` guard, ahead of its own out-of-line definition.
+mlir::Type getBoolTypeLike(mlir::Type Ty);
+
 static unsigned getBitFieldElementBitWidth(mlir::Type Type) {
   if (auto VecTy = mlir::dyn_cast<mlir::VectorType>(Type))
     return mlir::cast<mlir::IntegerType>(VecTy.getElementType()).getWidth();
@@ -2173,6 +2179,44 @@ static mlir::Value processBitFieldCountOrOffset(
   return Value;
 }
 
+/// Builds a "low `Count` bits set" mask (i.e. `(1 << Count) - 1`, the field
+/// mask `BitFieldInsertPattern`/`BitFieldUExtractPattern` both need before
+/// shifting it up by `Offset`) that is well-defined for every `Count` in
+/// `[0, Size]` inclusive -- both of that closed interval's endpoints are
+/// valid, spec-legal inputs (`Count == 0` means "insert/extract nothing",
+/// `Count == Size` means "the whole field"), but the naive `(-1 << Count) ^
+/// -1` construction is only correct for `Count` strictly inside `(0, Size)`:
+/// at `Count == 0` it happens to still work (`-1 << 0` is a valid, in-range
+/// shift), but at `Count == Size` the `-1 << Count` shift amount equals the
+/// operand's own bit width, which is poison per the LLVM LangRef (only
+/// shift amounts `< Size` are well-defined) -- L263 found this via
+/// `bitfieldExtract`/`bitfieldInsert`'s `offset=0, bits=32` (whole-value)
+/// CTS cases. Fixed by clamping the shift amount to `Size - 1` (always
+/// in-range) and then selecting the correct all-ones mask back in for the
+/// `Count >= Size` case specifically (the clamped shift's own result would
+/// otherwise silently omit the mask's top bit for that case).
+static mlir::Value createBitFieldLowMask(mlir::ConversionPatternRewriter &Rewriter,
+                                         mlir::Location Loc, mlir::Type DstType,
+                                         mlir::Value Count) {
+  unsigned Size = getBitFieldElementBitWidth(DstType);
+  mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
+  mlir::Value SizeMinusOne =
+      createBitFieldConstant(Rewriter, Loc, DstType, Size - 1);
+  mlir::Value ClampedCount = mlir::LLVM::UMinOp::create(
+      Rewriter, Loc, DstType, Count, SizeMinusOne);
+  mlir::Value ShiftedMinusOne = mlir::LLVM::ShlOp::create(
+      Rewriter, Loc, DstType, MinusOne, ClampedCount);
+  mlir::Value LowMask =
+      mlir::LLVM::XOrOp::create(Rewriter, Loc, DstType, ShiftedMinusOne, MinusOne);
+
+  mlir::Value SizeConst = createBitFieldConstant(Rewriter, Loc, DstType, Size);
+  mlir::Value CountAtLeastSize = mlir::LLVM::ICmpOp::create(
+      Rewriter, Loc, getBoolTypeLike(DstType), mlir::LLVM::ICmpPredicate::uge,
+      Count, SizeConst);
+  return mlir::LLVM::SelectOp::create(Rewriter, Loc, CountAtLeastSize,
+                                      MinusOne, LowMask);
+}
+
 /// Converts `spirv.BitFieldInsert` -- overriding MLIR's own pattern (see
 /// `processBitFieldCountOrOffset` above for why: it feeds `Base`/`Insert`/
 /// `Offset`/`Count` from the op's own raw accessors into the final
@@ -2203,10 +2247,7 @@ public:
                                                      Adaptor.getCount(), DstType);
 
     mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
-    mlir::Value MaskShiftedByCount =
-        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, MinusOne, Count);
-    mlir::Value Negated = mlir::LLVM::XOrOp::create(
-        Rewriter, Loc, DstType, MaskShiftedByCount, MinusOne);
+    mlir::Value Negated = createBitFieldLowMask(Rewriter, Loc, DstType, Count);
     mlir::Value MaskShiftedByCountAndOffset =
         mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, Negated, Offset);
     mlir::Value Mask = mlir::LLVM::XOrOp::create(
@@ -2216,8 +2257,20 @@ public:
         Rewriter, Loc, DstType, Adaptor.getBase(), Mask);
     mlir::Value InsertShiftedByOffset = mlir::LLVM::ShlOp::create(
         Rewriter, Loc, DstType, Adaptor.getInsert(), Offset);
+    // L263 fix: `Insert` is a full-width operand whose bits above the
+    // `Count`-wide field being inserted are unspecified by the SPIR-V spec
+    // (only its low `Count` bits are meaningful) -- so `InsertShiftedByOffset`
+    // must be masked down to exactly the field being inserted
+    // (`MaskShiftedByCountAndOffset`, the *positive* field mask computed
+    // above, before it gets inverted into `Mask`) before OR-ing it into
+    // `BaseAndMask`. Without this mask, any set bits in `Insert` above bit
+    // `Count - 1` leak past the field boundary and corrupt bits that should
+    // have been preserved unchanged from `Base`.
+    mlir::Value InsertMaskedAndShifted = mlir::LLVM::AndOp::create(
+        Rewriter, Loc, DstType, InsertShiftedByOffset,
+        MaskShiftedByCountAndOffset);
     Rewriter.replaceOpWithNewOp<mlir::LLVM::OrOp>(Op, DstType, BaseAndMask,
-                                                  InsertShiftedByOffset);
+                                                  InsertMaskedAndShifted);
     return mlir::success();
   }
 };
@@ -2259,8 +2312,24 @@ public:
 
     mlir::Value AmountToShiftRight = mlir::LLVM::AddOp::create(
         Rewriter, Loc, DstType, Offset, AmountToShiftLeft);
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::AShrOp>(
-        Op, DstType, BaseShiftedLeft, AmountToShiftRight);
+    // L263 fix: per the SPIR-V/GLSL spec, `Count == 0` must yield a result of
+    // `0`, but `AmountToShiftRight` reduces to exactly `Size` whenever
+    // `Count == 0` (`Offset + (Size - (0 + Offset)) == Size`) regardless of
+    // `Offset` -- an `llvm.ashr` shift amount equal to the operand's own bit
+    // width is poison per the LLVM LangRef (only `< Size` is well-defined),
+    // so this produced a garbage result instead of the spec-mandated `0`.
+    // Guard with a `Count == 0` select around the `ashr` instead of relying
+    // on its result, since the shift amount itself would already be poison.
+    mlir::Value Zero = createBitFieldConstant(Rewriter, Loc, DstType, 0);
+    mlir::Value CountIsZero = mlir::LLVM::ICmpOp::create(
+        Rewriter, Loc, getBoolTypeLike(DstType), mlir::LLVM::ICmpPredicate::eq,
+        Count, Zero);
+    mlir::Value SafeAmountToShiftRight = mlir::LLVM::SelectOp::create(
+        Rewriter, Loc, CountIsZero, Zero, AmountToShiftRight);
+    mlir::Value ExtractedBits = mlir::LLVM::AShrOp::create(
+        Rewriter, Loc, DstType, BaseShiftedLeft, SafeAmountToShiftRight);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SelectOp>(Op, DstType, CountIsZero,
+                                                      Zero, ExtractedBits);
     return mlir::success();
   }
 };
@@ -2288,11 +2357,7 @@ public:
     mlir::Value Count = processBitFieldCountOrOffset(Rewriter, Loc,
                                                      Adaptor.getCount(), DstType);
 
-    mlir::Value MinusOne = createBitFieldConstant(Rewriter, Loc, DstType, -1);
-    mlir::Value MaskShiftedByCount =
-        mlir::LLVM::ShlOp::create(Rewriter, Loc, DstType, MinusOne, Count);
-    mlir::Value Mask = mlir::LLVM::XOrOp::create(
-        Rewriter, Loc, DstType, MaskShiftedByCount, MinusOne);
+    mlir::Value Mask = createBitFieldLowMask(Rewriter, Loc, DstType, Count);
 
     mlir::Value ShiftedBase = mlir::LLVM::LShrOp::create(
         Rewriter, Loc, DstType, Adaptor.getBase(), Offset);
