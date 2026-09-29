@@ -943,11 +943,74 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2}));
 }
 
-/// (Roadmap H101n) A scalar-member "array of block instances" whose
-/// single real member's own declared offset is nonzero -- e.g.
-/// `layout(xfb_offset = 32) out BlockC { int b; } blockC[3];`, found in a
-/// real `dEQP-VK.transform_feedback.fuzz.random_geometry.
-/// nested_structs_instance_arrays.44` geometry shader -- combines
+/// (Roadmap L259) The same narrow-(3-wide)-vector array-peeling gap
+/// `MapsArrayOfBlockInstancesWithNarrowVectorMemberToDistinctRows` above
+/// exercises for an `XfbBuffer`-decorated "array of block instances", but
+/// for the far more common *ordinary* (non-XFB) case instead: a plain
+/// `layout(location=0) in mat4x3 m;` vertex/fragment input, whose four
+/// columns (`<3 x float>` each) `SPIRVToLLVMPatterns.cpp`'s own SPIR-V-
+/// to-LLVM conversion addresses via constant-offset GEPs 16 bytes apart
+/// (0, 16, 32, 48) -- the real, ABI-padded stride every actual target
+/// bakes in for a 3-wide vector array element, *not* the 12-byte tightly-
+/// packed stride `XfbStride`-captured arrays use. H101h's own fix (before
+/// this row's `UseTightArrayStride` parameter existed) unconditionally
+/// divided every such residual by the 12-byte tightly-packed stride,
+/// resolving this shape's 4th column (byte offset 48) to `Row 4`
+/// (`48 / 12`) -- one past `RowCount == 4`'s own last valid row,
+/// `feme-graphics-validate-stage`'s own "row 4 is out of range for
+/// element" `vkCreateGraphicsPipelines`-time rejection
+/// (`dEQP-VK.glsl.matrix.*`/`indexing.varying_array.*_vec3_*` cases
+/// whose shape includes a narrow-vector row). Fixed by only using the
+/// tightly-packed stride when the underlying global itself is genuinely
+/// `XfbBuffer`-decorated (`hasXfbBufferDecoration`), falling back to the
+/// real padded stride (`getPaddedElementSize`) otherwise -- this global
+/// has no `XfbBuffer` decoration at all, so every column below must
+/// resolve to its own distinct row (0, 1, 2, 3), not (0, 1, 2, 4).
+TEST(CanonicalizeStageTest,
+    ResolvesOrdinaryNarrowVectorMatrixColumnsAtPaddedStrideNotTightStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_mat = external addrspace(7) constant [4 x <3 x float>], !spirv.Decorations !0
+    define void @main() #0 {
+      %c0 = load <3 x float>, ptr addrspace(7) @in_mat
+      %c1 = load <3 x float>, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat, i64 16)
+      %c2 = load <3 x float>, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat, i64 32)
+      %c3 = load <3 x float>, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat, i64 48)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 4u);
+  EXPECT_FALSE(Elt.XfbBuffer.has_value());
+
+  // Each column's own load must resolve to its own distinct `Row` (0, 1,
+  // 2, 3) -- not (0, 1, 2, 4), the wrong result dividing by the 12-byte
+  // tightly-packed stride instead of the real 16-byte padded one
+  // produced before this fix.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3}));
+}
+
+
 /// H101k/H101l's own "leading `[N x i8]` pad" shape
 /// (`layOutStructIfOffsetsMatch`, SPIRVToLLVMPatterns.cpp) with this
 /// milestone's own array-of-instances one: each instance is a 36-byte

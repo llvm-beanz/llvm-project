@@ -1580,6 +1580,20 @@ getStageIOBaseAndOffset(Value *Ptr, const DataLayout &DL) {
   return std::make_pair(GV, Offset.getZExtValue());
 }
 
+/// (Roadmap L259) Whether \p GV -- a stage-IO global -- carries an
+/// `XfbBuffer` decoration of its own, i.e. is captured through
+/// `VK_EXT_transform_feedback` at a SPIR-V-mandated, tightly-packed
+/// `XfbStride`, rather than being an ordinary, buffer-less Location-
+/// addressed Input/Output interface variable whose own constant-offset
+/// GEPs (`getStageIOBaseAndOffset` above) are addressed at LLVM's own
+/// ABI-padded stride instead. See `resolveRowComponent`'s own
+/// `UseTightArrayStride` parameter comment for why this distinction
+/// matters for a narrow (3-wide) vector row's own byte stride.
+bool hasXfbBufferDecoration(const GlobalVariable *GV) {
+  return parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"))
+      .XfbBuffer.has_value();
+}
+
 /// (Roadmap H5b/H5f) Whether \p GV is the exact shape a geometry entry's
 /// per-vertex-arrayed `Input` global takes (`gl_in[]`-shaped: either the
 /// `gl_PerVertex` builtin block itself, or a plain user-defined varying --
@@ -3517,6 +3531,39 @@ uint64_t getPackedElementSize(Type *Ty, const DataLayout &DL) {
   return DL.getTypeAllocSize(Ty);
 }
 
+/// (Roadmap L259) The per-element byte stride an *ordinary* (non-XFB)
+/// stage-IO array is actually addressed at by `SPIRVToLLVMPatterns.cpp`'s
+/// own SPIR-V-to-LLVM conversion -- which is *not* reliably reproducible
+/// from `DataLayout::getTypeAllocSize` alone, since the `DataLayout`
+/// object attached to the module at the point `CanonicalizeStagePass`
+/// runs (a plain MLIR-derived layout, no vector-alignment entries of its
+/// own) computes a narrow vector's own alloc size *without* padding it up
+/// to its next power-of-two lane count (e.g. 12 bytes, not 16, for
+/// `<3 x float>`) -- disagreeing with the real, already-baked-in GEP
+/// byte offsets the SPIR-V-to-LLVM conversion itself produced (confirmed
+/// 16 bytes apart via a raw pre-canonicalization IR dump), which *do*
+/// pad every vector up to its next power-of-two lane count, matching
+/// every real target's own vector ABI rule instead of this pass-time
+/// `DataLayout`'s. Mirrors `getPackedElementSize`'s own recursive shape
+/// (struct/array/vector peeling down to a scalar leaf), but rounds a
+/// `FixedVectorType`'s own lane count up to the next power of two before
+/// multiplying, rather than using it as-is.
+uint64_t getPaddedElementSize(Type *Ty, const DataLayout &DL) {
+  if (isa<StructType>(Ty))
+    return DL.getTypeAllocSize(Ty).getFixedValue();
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty)) {
+    unsigned NumElements = VecTy->getNumElements();
+    unsigned PaddedElements = 1;
+    while (PaddedElements < NumElements)
+      PaddedElements <<= 1;
+    return PaddedElements * getPaddedElementSize(VecTy->getElementType(), DL);
+  }
+  if (auto *ArrTy = dyn_cast<ArrayType>(Ty))
+    return ArrTy->getNumElements() *
+           getPaddedElementSize(ArrTy->getElementType(), DL);
+  return DL.getTypeAllocSize(Ty).getFixedValue();
+}
+
 
 /// The (row, component) pair `loadStageIOValue`/`storeStageIOValue` need to
 /// seed their own recursion with, from \p Residual -- a byte offset within
@@ -3595,9 +3642,45 @@ bool isShapeCompatible(Type *Declared, Type *Actual) {
   return false;
 }
 
+/// (Roadmap L259) \p UseTightArrayStride selects which byte stride this
+/// function's own array-peeling loop divides a residual offset by, for an
+/// element type that is a narrow (3-wide, non-power-of-two) vector or an
+/// under-aligned struct, where `getPaddedElementSize` (the padded size,
+/// e.g. 16 bytes for `<3 x float>`) and `getPackedElementSize` (the
+/// tightly-packed size, 12 bytes for the same type) disagree. Which one is
+/// *correct* depends entirely on how the real byte offset being divided
+/// was itself produced upstream, which differs by storage class: a
+/// Transform-Feedback-captured array (an `XfbBuffer`-decorated global,
+/// roadmap H101h's own `layout(xfb_buffer=0, ...) out Block { ivec3 var;
+/// } block[3];` shape) is genuinely addressed at SPIR-V's own tightly-
+/// packed `XfbStride`, with no ABI padding at all -- `UseTightArrayStride
+/// = true` is required there. An ordinary, `XfbBuffer`-less Input/Output
+/// interface variable (e.g. a plain `in mat4x3 m;` vertex attribute, no
+/// buffer-like stride decoration of its own) has no such SPIR-V-mandated
+/// packed stride to respect; `SPIRVToLLVMPatterns.cpp`'s own conversion
+/// picks a plain LLVM `array<N x vector<M x Scalar>>` for it, and every
+/// access into that array -- including the constant-offset GEPs
+/// `stripAndAccumulateConstantOffsets` walks in `getStageIOBaseAndOffset`
+/// -- is addressed at that array's own genuine, padded stride (every
+/// vector's own lane count rounded up to the next power of two, matching
+/// every real target's own vector ABI rule -- notably *not* reproducible
+/// from `DataLayout::getTypeAllocSize` using the plain, vector-alignment-
+/// entry-less `DataLayout` attached to the module at the point
+/// `CanonicalizeStagePass` actually runs, confirmed empirically to
+/// compute an unpadded 12 bytes for `<3 x float>` there, disagreeing with
+/// the real, already-baked-in 16-byte-strided GEP offsets), not a
+/// tightly-packed one; `UseTightArrayStride = false` (`getPaddedElementSize`)
+/// is required there instead. Before this parameter existed, H101h's fix
+/// (reusing `getPackedElementSize` unconditionally for every array-peeling
+/// level) silently applied the XFB-only tight stride to this second, far
+/// more common shape too, resolving one narrow-vector row past the true
+/// last one (e.g. a `mat4x3`'s 4th column landing on `Row 4` instead of
+/// `Row 3`, `feme-graphics-validate-stage`'s own "row 4 is out of range"
+/// rejection) -- `dEQP-VK.glsl.matrix.*`/`indexing.varying_array.*` cases
+/// whose shape includes a 3-wide-vector row.
 std::pair<uint64_t, uint64_t>
 resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
-                   const DataLayout &DL) {
+                   const DataLayout &DL, bool UseTightArrayStride) {
   Type *PerRowTy = MemberTy;
   uint64_t Row = 0;
   // (Roadmap H101j) Set once the loop below stops at a tight-vector
@@ -3629,7 +3712,10 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
     auto *ArrTy = dyn_cast<ArrayType>(PerRowTy);
     if (!ArrTy)
       break;
-    uint64_t RowSize = getPackedElementSize(ArrTy->getElementType(), DL);
+    uint64_t RowSize =
+        UseTightArrayStride
+            ? getPackedElementSize(ArrTy->getElementType(), DL)
+            : getPaddedElementSize(ArrTy->getElementType(), DL);
     uint64_t Idx = 0;
     if (RowSize) {
       Idx = Residual / RowSize;
@@ -3704,15 +3790,16 @@ struct NestedStageIOField {
 /// correct scale factor.)
 NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
                                              Type *ValueTy,
-                                             const DataLayout &DL) {
+                                             const DataLayout &DL,
+                                             bool UseTightArrayStride) {
   if (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
     if (isGenuineMultiMemberNestedStruct(ArrTy->getElementType())) {
       Type *ElemTy = ArrTy->getElementType();
       uint64_t InstanceSize = DL.getTypeAllocSize(ElemTy).getFixedValue();
       uint64_t Instance = InstanceSize ? Residual / InstanceSize : 0;
       uint64_t InnerResidual = Residual - Instance * InstanceSize;
-      NestedStageIOField Inner =
-          resolveNestedStageIOField(ElemTy, InnerResidual, ValueTy, DL);
+      NestedStageIOField Inner = resolveNestedStageIOField(
+          ElemTy, InnerResidual, ValueTy, DL, UseTightArrayStride);
       return {Inner.IDStart, Instance * Inner.RowCount + Inner.Row,
               Inner.Component,
               static_cast<uint32_t>(ArrTy->getNumElements()) * Inner.RowCount};
@@ -3740,12 +3827,14 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
             "load/store into a nested struct's own synthetic pad field");
       uint64_t InnerResidual = Residual - SL->getElementOffset(Member);
       NestedStageIOField Inner = resolveNestedStageIOField(
-          ST->getElementType(Member), InnerResidual, ValueTy, DL);
+          ST->getElementType(Member), InnerResidual, ValueTy, DL,
+          UseTightArrayStride);
       Inner.IDStart += IDStart;
       return Inner;
     }
   }
-  auto [Row, Component] = resolveRowComponent(Ty, Residual, ValueTy, DL);
+  auto [Row, Component] =
+      resolveRowComponent(Ty, Residual, ValueTy, DL, UseTightArrayStride);
   return {0, Row, Component, getStageIORowShape(Ty).RowCount};
 }
 
@@ -3800,7 +3889,8 @@ std::optional<StageIOAccess>
 resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
                            uint64_t ByteOffset, Type *ValueTy,
                            const DataLayout &DL, bool IsOutput, Value *Vertex,
-                           bool AllowBlockArrayInstanceFold = false) {
+                           bool AllowBlockArrayInstanceFold = false,
+                           bool UseTightArrayStride = false) {
   LLVMContext &Ctx = ElemTy->getContext();
   auto AsConstant = [&](uint64_t V) -> Value * {
     return V ? ConstantInt::get(Type::getInt32Ty(Ctx), V) : nullptr;
@@ -3808,7 +3898,8 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   if (IDs.size() == 1) {
     if (ValueTy == ElemTy)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
-    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, ValueTy, DL);
+    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, ValueTy,
+                                                DL, UseTightArrayStride);
     return StageIOAccess{IDs, AsConstant(Row), AsConstant(Component), Vertex,
                          IsOutput};
   }
@@ -3840,8 +3931,8 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
     // into the right leaf `ElementID`/`Row`/`Component` in one call.
     if (ValueTy == ElemTy)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
-    NestedStageIOField Nested =
-        resolveNestedStageIOField(ElemTy, ByteOffset, ValueTy, DL);
+    NestedStageIOField Nested = resolveNestedStageIOField(
+        ElemTy, ByteOffset, ValueTy, DL, UseTightArrayStride);
     return StageIOAccess{IDs.slice(Nested.IDStart, 1), AsConstant(Nested.Row),
                          AsConstant(Nested.Component), Vertex, IsOutput};
   } else {
@@ -3944,8 +4035,8 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   // level's own instance index folded into the eventual leaf's own
   // `Row`, until a genuine leaf field (a plain scalar/vector/matrix/
   // single-member-wrapper, or a tight-vector marker) is reached.
-  NestedStageIOField Nested =
-      resolveNestedStageIOField(FieldTy, Residual, ValueTy, DL);
+  NestedStageIOField Nested = resolveNestedStageIOField(
+      FieldTy, Residual, ValueTy, DL, UseTightArrayStride);
   IDStart += Nested.IDStart;
   // (Roadmap H117/H118) Folds this block-array instance's own index
   // into the eventual leaf's own `Row`, scaled by that leaf's own
@@ -4133,10 +4224,11 @@ std::optional<StageIOAccess> resolveStageIOAccess(
                            OutputGlobals.contains(Dyn->GV)};
     }
     Type *ElemTy = cast<ArrayType>(Dyn->GV->getValueType())->getElementType();
-    return resolveOffsetWithinElement(ElemTy, It->second, Dyn->ByteOffset,
-                                      ValueTy, DL,
-                                      OutputGlobals.contains(Dyn->GV),
-                                      Dyn->VertexIndex);
+    return resolveOffsetWithinElement(
+        ElemTy, It->second, Dyn->ByteOffset, ValueTy, DL,
+        OutputGlobals.contains(Dyn->GV), Dyn->VertexIndex,
+        /*AllowBlockArrayInstanceFold=*/false,
+        hasXfbBufferDecoration(Dyn->GV));
   }
 
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
@@ -4218,8 +4310,10 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       uint64_t Residual = ByteOffset % VertexSize;
       Value *Vertex =
           ConstantInt::get(Type::getInt32Ty(GV->getContext()), VertexIdx);
-      return resolveOffsetWithinElement(ElemTy, It->second, Residual, ValueTy,
-                                        DL, OutputGlobals.contains(GV), Vertex);
+      return resolveOffsetWithinElement(
+          ElemTy, It->second, Residual, ValueTy, DL,
+          OutputGlobals.contains(GV), Vertex,
+          /*AllowBlockArrayInstanceFold=*/false, hasXfbBufferDecoration(GV));
     }
   }
 
@@ -4256,7 +4350,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   return resolveOffsetWithinElement(EffectiveTy, It->second, ByteOffset,
                                     ValueTy, DL, OutputGlobals.contains(GV),
                                     /*Vertex=*/nullptr,
-                                    AllowBlockArrayInstanceFold);
+                                    AllowBlockArrayInstanceFold,
+                                    hasXfbBufferDecoration(GV));
 }
 
 /// (Roadmap L136) Builds the loaded value for a load whose pointer operand
