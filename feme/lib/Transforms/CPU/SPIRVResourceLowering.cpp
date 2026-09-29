@@ -1638,29 +1638,40 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       // (`OpImageSampleExplicitLod`/`OpImageSampleImplicitLod` against a
       // `usampler2D`/`isampler2D`/`usampler1D`/`isampler1D`/
       // `usampler1DArray`/`isampler1DArray`/`usampler2DArray`/
-      // `isampler2DArray`/`usampler3D`/`isampler3D`), just restricted,
-      // per the Vulkan spec, to `NEAREST` filtering: no `Bias`/`Grad`
-      // (SPIR-V forbids both alongside the mandatory `NEAREST` filtering
-      // in every case this pass has needed to support so far), and no
-      // `MinLod` clamp (none of `createSample2DI32`/`createSample1DI32`/
-      // `createSample1DArrayI32`/`createSample2DArrayI32`/
-      // `createSample3DI32` has such an operand). `Plain2D` (roadmap
-      // H109, widened to implicit-LOD by L125(a)), `Plain1D`, `Array1D`,
-      // `Array2D`, `Plain3D`, `Cube`, and `CubeArray` (all roadmap
-      // L125(b), mirroring `Plain2D`'s own widening exactly) are the
-      // only shapes accepted so far; `lowerImageAccesses` below already
-      // defaults `Lod` to a constant `0.0` whenever `ExplicitLod` is
-      // false (see its own comment), which is exactly right here too --
-      // every real CTS case either widening covers samples a
-      // single-mip-level image, so the true (unimplemented)
-      // derivative-based implicit-LOD computation would clamp to mip 0
-      // regardless.
+      // `isampler2DArray`/`usampler3D`/`isampler3D`), restricted per the
+      // Vulkan spec to `NEAREST` filtering/mipmapping -- but that
+      // restriction is about *filtering*, not about which image
+      // operands may combine with an integer sampled type at all.
+      // Roadmap L262: confirmed via real
+      // `dEQP-VK.glsl.texture_functions.*_bias_*isampler*`/`*usampler*`
+      // and `texturegrad*` CTS cases (`isampler2d_bias`/`isampler3d_bias`/
+      // `isampler1d_bias` etc., all `FRAGMENT`-stage) that GLSL legally
+      // emits `Bias`/`Grad`/`MinLod` against an integer sampler -- the
+      // prior blanket rejection of all three here was itself the bug,
+      // not a real SPIR-V/Vulkan restriction; `NEAREST` filtering only
+      // means the runtime never blends between taps/levels, not that it
+      // can't *select* a level via the same bias/derivative math a
+      // float sample uses. `Plain2D`/`Plain1D`/`Array1D`/`Array2D`/
+      // `Plain3D`'s own `createSample*I32` builders now carry the same
+      // `DUdX`/`DUdY`/(`DVdX`/`DVdY`)/`Bias`/`MinLodClamp` operands
+      // their float counterparts do. `Cube`/`CubeArray` (roadmap L264,
+      // filed as a small follow-up -- only ~24 real CTS cases) still
+      // reject `Bias`/`Grad`/`MinLodClamp`: `createSampleCubeI32`/
+      // `createSampleCubeArrayI32` haven't been widened yet.
       if (IsInteger) {
-        if ((Shape != ImageShape::Plain2D && Shape != ImageShape::Plain1D &&
-             Shape != ImageShape::Array1D && Shape != ImageShape::Array2D &&
-             Shape != ImageShape::Plain3D && Shape != ImageShape::Cube &&
-             Shape != ImageShape::CubeArray) ||
-            HasMinLodClamp || HasBias || HasGrad)
+        bool ShapeSupportsSample =
+            Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
+            Shape == ImageShape::Array1D || Shape == ImageShape::Array2D ||
+            Shape == ImageShape::Plain3D || Shape == ImageShape::Cube ||
+            Shape == ImageShape::CubeArray;
+        if (!ShapeSupportsSample)
+          return false;
+        bool ShapeSupportsBiasGradMinLod =
+            Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
+            Shape == ImageShape::Array1D || Shape == ImageShape::Array2D ||
+            Shape == ImageShape::Plain3D;
+        if (!ShapeSupportsBiasGradMinLod &&
+            (HasMinLodClamp || HasBias || HasGrad))
           return false;
         unsigned OffsetIdx = getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad);
         if (!isCoordN(CI->getArgOperand(2), SampleCoordWidth,
@@ -3755,6 +3766,23 @@ void lowerImageAccesses(
         // otherwise need an `IsInteger` branch threaded through every
         // shape's own case.
         if (isV4I32(CI->getType())) {
+          // Roadmap L262: `Plain1D`/`Array1D`/`Plain2D`/`Array2D`/
+          // `Plain3D`'s own `Bias`/`MinLodClamp` extraction and
+          // derivative synthesis now mirrors the float-sample dispatch
+          // below exactly (`Cube`/`CubeArray` still don't -- see their
+          // own cases just below for why). `IntMinLodClamp` is negative
+          // infinity (a no-op floor) whenever `HasMinLodClamp` is false,
+          // and `IntBias` is a zero constant whenever `HasBias` is
+          // false, mirroring `MinLodClamp`'s/`Bias`'s own identical
+          // no-op defaults in the float dispatch.
+          Value *IntBias = HasBias ? CI->getArgOperand(3)
+                                   : ConstantFP::get(Builder.getFloatTy(), 0.0);
+          Value *IntMinLodClamp =
+              HasMinLodClamp
+                  ? CI->getArgOperand(
+                        getSampleClampIdx(ExplicitLod, HasBias, HasGrad))
+                  : ConstantFP::getInfinity(Builder.getFloatTy(),
+                                            /*Negative=*/true);
           // Roadmap L125(b): `Plain1D`'s own coordinate/offset are bare
           // scalars (see `isCoordN`'s/`isSupportedOffset`'s own comments
           // on why SPIR-V never vector-wraps a single-component
@@ -3765,9 +3793,18 @@ void lowerImageAccesses(
           if (Shape == ImageShape::Plain1D) {
             Value *IntOffset = CI->getArgOperand(
                 getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
-            CallInst *NewSampleI32Call =
-                createSample1DI32(Builder, Env, ImageIndex, SamplerIndex, Coord,
-                                  Lod, IntOffset, Mask, CI->getName());
+            SampleDerivatives1D D =
+                HasGrad ? SampleDerivatives1D{GradDPdx, GradDPdy}
+                : !ExplicitLod
+                    ? getOrSynthesizeSample1DDerivatives(
+                          Builder, *CI->getFunction(), Coord)
+                    : SampleDerivatives1D{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
+            CallInst *NewSampleI32Call = createSample1DI32(
+                Builder, Env, ImageIndex, SamplerIndex, Coord, D.DUdX, D.DUdY,
+                Lod, ExplicitLodFlag, IntBias, IntOffset, IntMinLodClamp, Mask,
+                CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -3784,9 +3821,18 @@ void lowerImageAccesses(
                 Builder.CreateExtractElement(Coord, uint64_t{1});
             Value *IntOffset = CI->getArgOperand(
                 getSampleOffsetIdx(ExplicitLod, HasBias, HasGrad));
+            SampleDerivatives1D ArrayD =
+                HasGrad ? SampleDerivatives1D{GradDPdx, GradDPdy}
+                : !ExplicitLod
+                    ? getOrSynthesizeSample1DDerivatives(
+                          Builder, *CI->getFunction(), IntU)
+                    : SampleDerivatives1D{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             CallInst *NewSampleI32Call = createSample1DArrayI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntU, IntArrayLayer,
-                Lod, IntOffset, Mask, CI->getName());
+                ArrayD.DUdX, ArrayD.DUdY, Lod, ExplicitLodFlag, IntBias,
+                IntOffset, IntMinLodClamp, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -3810,10 +3856,27 @@ void lowerImageAccesses(
                 Builder.CreateExtractElement(IntOffset, uint64_t{0});
             Value *IntOffsetY =
                 Builder.CreateExtractElement(IntOffset, uint64_t{1});
+            SampleDerivatives D =
+                HasGrad
+                    ? SampleDerivatives{
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                          Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                          Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
+                : !ExplicitLod
+                    ? getOrSynthesizeSample2DDerivatives(Builder,
+                                                         *CI->getFunction(),
+                                                         IntU, IntV)
+                    : SampleDerivatives{
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0),
+                          ConstantFP::get(Builder.getFloatTy(), 0.0)};
             CallInst *NewSampleI32Call = createSample2DArrayI32(
                 Builder, Env, ImageIndex, SamplerIndex, IntU, IntV,
-                IntArrayLayer, Lod, IntOffsetX, IntOffsetY, Mask,
-                CI->getName());
+                IntArrayLayer, D.DUdX, D.DUdY, D.DVdX, D.DVdY, Lod,
+                ExplicitLodFlag, IntBias, IntOffsetX, IntOffsetY,
+                IntMinLodClamp, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
@@ -3837,23 +3900,50 @@ void lowerImageAccesses(
                 Builder.CreateExtractElement(IntOffset, uint64_t{1});
             Value *IntOffsetZ =
                 Builder.CreateExtractElement(IntOffset, uint64_t{2});
+            Value *ZeroF = ConstantFP::get(Builder.getFloatTy(), 0.0);
+            SampleDerivatives1D UD, VD, WD;
+            if (HasGrad) {
+              UD = {Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                    Builder.CreateExtractElement(GradDPdy, uint64_t{0})};
+              VD = {Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                    Builder.CreateExtractElement(GradDPdy, uint64_t{1})};
+              WD = {Builder.CreateExtractElement(GradDPdx, uint64_t{2}),
+                    Builder.CreateExtractElement(GradDPdy, uint64_t{2})};
+            } else if (!ExplicitLod) {
+              UD = getOrSynthesizeSample1DDerivatives(Builder,
+                                                      *CI->getFunction(), IntU);
+              VD = getOrSynthesizeSample1DDerivatives(Builder,
+                                                      *CI->getFunction(), IntV);
+              WD = getOrSynthesizeSample1DDerivatives(Builder,
+                                                      *CI->getFunction(), IntW);
+            } else {
+              UD = VD = WD = SampleDerivatives1D{ZeroF, ZeroF};
+            }
             CallInst *NewSampleI32Call = createSample3DI32(
-                Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW, Lod,
-                IntOffsetX, IntOffsetY, IntOffsetZ, Mask, CI->getName());
+                Builder, Env, ImageIndex, SamplerIndex, IntU, IntV, IntW,
+                UD.DUdX, UD.DUdY, VD.DUdX, VD.DUdY, WD.DUdX, WD.DUdY, Lod,
+                ExplicitLodFlag, IntBias, IntOffsetX, IntOffsetY, IntOffsetZ,
+                IntMinLodClamp, Mask, CI->getName());
             CI->replaceAllUsesWith(NewSampleI32Call);
             CI->eraseFromParent();
             continue;
           }
-          // Roadmap L125(b): `Cube`'s own coordinate is a 3-component
-          // direction vector `(DirX, DirY, DirZ)` rather than a spatial
-          // `(U, V[, W])` triple -- `createSampleCubeI32` resolves it to
-          // a face + face-local `(U, V)` internally
+          // Roadmap L125(b)/L264: `Cube`'s own coordinate is a
+          // 3-component direction vector `(DirX, DirY, DirZ)` rather
+          // than a spatial `(U, V[, W])` triple -- `createSampleCubeI32`
+          // resolves it to a face + face-local `(U, V)` internally
           // (`femeRTSelectCubeFace`), mirroring `createSampleCube`'s own
           // identical resolution. No offset extraction at all here,
           // unlike every other shape above: SPIR-V forbids `ConstOffset`
           // against `Dim::Cube` outright, so `createSampleCubeI32` has no
           // such operand (matching `createSampleCube`'s own identical
-          // absence).
+          // absence). `Cube`/`CubeArray` haven't been widened for real
+          // `Bias`/`Grad`/`MinLodClamp` yet (roadmap L264, a small
+          // follow-up) -- `hasOnlySupportedImageUses` above already
+          // rejects those operands for these two shapes, so `Lod` here
+          // is always either a real explicit-LOD operand or the
+          // constant `0.0` synthesized for an ordinary implicit-LOD
+          // sample.
           if (Shape == ImageShape::Cube) {
             Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
@@ -3865,15 +3955,17 @@ void lowerImageAccesses(
             CI->eraseFromParent();
             continue;
           }
-          // Roadmap L125(b): `CubeArray`'s own coordinate is `Cube`'s
-          // direction vector `(DirX, DirY, DirZ)` plus a fourth
+          // Roadmap L125(b)/L264: `CubeArray`'s own coordinate is
+          // `Cube`'s direction vector `(DirX, DirY, DirZ)` plus a fourth
           // `ArrayLayer` lane (mirroring `Array2D`'s own relationship to
           // `Plain2D`) -- `createSampleCubeArrayI32` resolves the
           // direction vector the same way `createSampleCubeI32` does,
           // plus rounds/clamps `ArrayLayer` to a valid cube element
           // (mirroring `createSampleCubeArray`'s own identical
           // `ArrayLayer` handling). No offset extraction here either,
-          // for the same reason `Cube` has none above.
+          // for the same reason `Cube` has none above; no real `Bias`/
+          // `Grad`/`MinLodClamp` support yet either, for the same reason
+          // `Cube` doesn't (roadmap L264).
           if (Shape == ImageShape::CubeArray) {
             Value *IntDirX = Builder.CreateExtractElement(Coord, uint64_t{0});
             Value *IntDirY = Builder.CreateExtractElement(Coord, uint64_t{1});
@@ -3895,9 +3987,24 @@ void lowerImageAccesses(
               Builder.CreateExtractElement(IntOffset, uint64_t{0});
           Value *IntOffsetY =
               Builder.CreateExtractElement(IntOffset, uint64_t{1});
+          SampleDerivatives D =
+              HasGrad
+                  ? SampleDerivatives{
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{0}),
+                        Builder.CreateExtractElement(GradDPdx, uint64_t{1}),
+                        Builder.CreateExtractElement(GradDPdy, uint64_t{1})}
+              : !ExplicitLod ? getOrSynthesizeSample2DDerivatives(
+                                   Builder, *CI->getFunction(), IntC0, IntC1)
+                             : SampleDerivatives{
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0),
+                                   ConstantFP::get(Builder.getFloatTy(), 0.0)};
           CallInst *NewSampleI32Call = createSample2DI32(
-              Builder, Env, ImageIndex, SamplerIndex, IntC0, IntC1, Lod,
-              IntOffsetX, IntOffsetY, Mask, CI->getName());
+              Builder, Env, ImageIndex, SamplerIndex, IntC0, IntC1, D.DUdX,
+              D.DUdY, D.DVdX, D.DVdY, Lod, ExplicitLodFlag, IntBias,
+              IntOffsetX, IntOffsetY, IntMinLodClamp, Mask, CI->getName());
           CI->replaceAllUsesWith(NewSampleI32Call);
           CI->eraseFromParent();
           continue;

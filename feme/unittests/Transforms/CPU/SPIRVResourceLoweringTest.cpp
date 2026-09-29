@@ -5722,15 +5722,17 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImage3DToImageSampleV4I32) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.3d.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, w, lod, offset_x, offset_y, offset_z, mask).
+  //  u, v, w, dudx, dudy, dvdx, dvdy, dwdx, dwdy, lod, use_explicit_lod,
+  //  bias, offset_x, offset_y, offset_z, min_lod_clamp, mask) -- widened
+  // by roadmap L262, see `createSample3DI32`'s own updated doc.
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(10))->getSExtValue(), 1);
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(11))->getSExtValue(), -1);
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(12))->getSExtValue(), 2);
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(15))->isZero());
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(18))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(19))->getSExtValue(), -1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(20))->getSExtValue(), 2);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.3d.v4f32"));
 }
 
@@ -5767,9 +5769,11 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, array_layer, lod, offset_x, offset_y, mask). Implicit LOD
-  //  defaults to 0.0.
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
+  //  u, v, array_layer, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod,
+  //  bias, offset_x, offset_y, min_lod_clamp, mask). Implicit LOD's own
+  //  `lod` operand defaults to 0.0 (widened by roadmap L262, see
+  //  `createSample2DArrayI32`'s own updated doc).
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(13))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
 }
 
@@ -5809,14 +5813,16 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2darray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, array_layer, lod, offset_x, offset_y, mask).
+  //  u, v, array_layer, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod,
+  //  bias, offset_x, offset_y, min_lod_clamp, mask) -- widened by
+  // roadmap L262, see `createSample2DArrayI32`'s own updated doc.
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(10))->getSExtValue(), 1);
-  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(11))->getSExtValue(), -1);
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(13))->isZero());
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(16))->getSExtValue(), 1);
+  EXPECT_EQ(cast<ConstantInt>(Sample->getArgOperand(17))->getSExtValue(), -1);
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2darray.v4f32"));
 }
 
@@ -5853,8 +5859,11 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, array_layer, lod, offset, mask). Implicit LOD defaults to 0.0.
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(8))->isZero());
+  //  u, array_layer, dudx, dudy, lod, use_explicit_lod, bias, offset,
+  //  min_lod_clamp, mask). Implicit LOD's own `lod` operand defaults to
+  //  0.0 (widened by roadmap L262, see `createSample1DArrayI32`'s own
+  //  updated doc).
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32"));
 }
 
@@ -5892,12 +5901,14 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1darray.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, array_layer, lod, offset, mask).
+  //  u, array_layer, dudx, dudy, lod, use_explicit_lod, bias, offset,
+  //  min_lod_clamp, mask) -- widened by roadmap L262, see
+  //  `createSample1DArrayI32`'s own updated doc.
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(8))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(10))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1darray.v4f32"));
 }
 
@@ -5933,8 +5944,10 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, lod, offset, mask). Implicit LOD defaults to 0.0.
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(7))->isZero());
+  //  u, dudx, dudy, lod, use_explicit_lod, bias, offset, min_lod_clamp,
+  //  mask). Implicit LOD's own `lod` operand defaults to 0.0 (widened by
+  //  roadmap L262, see `createSample1DI32`'s own updated doc).
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
 }
 
@@ -5970,12 +5983,14 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImage1DToImageSampleV4I32) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.1d.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, lod, offset, mask).
+  //  u, dudx, dudy, lod, use_explicit_lod, bias, offset, min_lod_clamp,
+  //  mask) -- widened by roadmap L262, see `createSample1DI32`'s own
+  //  updated doc.
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(7))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(9))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.1d.v4f32"));
 }
 
@@ -6016,8 +6031,11 @@ TEST(SPIRVResourceLoweringTest,
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, lod, offset_x, offset_y, mask). Implicit LOD defaults to 0.0.
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(8))->isZero());
+  //  u, v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, bias, offset_x,
+  //  offset_y, min_lod_clamp, mask). Implicit LOD's own `lod` operand
+  //  defaults to 0.0 (widened by roadmap L262, see `createSample2DI32`'s
+  //  own updated doc).
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(12))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
 }
 
@@ -6054,12 +6072,14 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerSampledImageToImageSampleV4I32) {
   CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4i32");
   ASSERT_TRUE(Sample);
   // (image_heap, count, sampler_heap, count, image_index, sampler_index,
-  //  u, v, lod, offset_x, offset_y, mask).
+  //  u, v, dudx, dudy, dvdx, dvdy, lod, use_explicit_lod, bias, offset_x,
+  //  offset_y, min_lod_clamp, mask) -- widened by roadmap L262, see
+  //  `createSample2DI32`'s own updated doc.
   EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
   EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
   EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
-  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(8))->isZero());
+  EXPECT_TRUE(cast<ConstantFP>(Sample->getArgOperand(12))->isZero());
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
 }
 
