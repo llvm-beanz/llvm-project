@@ -4290,3 +4290,80 @@ not a feature-bit or extension exposure change.
 session): `L258` (the full `dEQP-VK.glsl.*` 28,420-case sweep re-run,
 now that neither the crash nor this fix's own scope block it) and
 `L259` (the 2 `vec3_*` pipeline-creation-error cases split out above).
+
+## L228(b): `api.copy_and_blit` ASTC-SRGB blit decode bug -- fixed, 1 residual split off as L260
+
+Resumed this carried-over roadmap item (ASTC/BC/ETC2 compressed-format
+blit failures). Confirmed via code reading, not blind re-sampling: the
+prior session's own spot-checked case
+(`api.copy_and_blit.copy_commands2.blit_image.all_formats.color.2d.
+astc_12x10_srgb_block...`) is an ASTC *SRGB* source specifically, and
+`ImageOps.cpp`'s `runBlitImage` hardcodes its ASTC decode target to
+plain `R8G8B8A8_UNORM` regardless of whether the source is a
+`_UNORM_BLOCK` or `_SRGB_BLOCK` ASTC variant -- `decodeASTCBlock` itself
+has no notion of sRGB (same raw bytes either way), so the sRGB decode
+curve was silently skipped for every SRGB ASTC blit source.
+`CommandBuffer.cpp`'s *sampling* path (`decodeASTCImageForSampling`'s
+caller) already had the correct fix, via a local `isASTCSRGBFormat`
+helper -- the blit path alone never got the equivalent treatment.
+
+Fixed by generalizing `isASTCSRGBFormat` into a shared, exported
+declaration (`Format.h`/`Format.cpp`, moved out of
+`CommandBuffer.cpp`'s own translation unit) and applying the identical
+conditional (`R8G8B8A8_UNORM_SRGB` vs `R8G8B8A8_UNORM`) to
+`runBlitImage`'s own `DecodedFormat`. New unit test
+`FormatTest.IsASTCSRGBFormatIdentifiesOnlyTheFourteenSRGBFootprints`
+covers all 14 SRGB LDR footprints plus UNORM/SFLOAT/other-format
+negatives.
+
+Verified against a durable, fixed-seed (`20260929`) 800-case
+`dEQP-VK.api.copy_and_blit` compressed-format sample:
+- Before: 433 Pass / 7 Fail / 360 NotSupported.
+- After: **439 Pass / 1 Fail / 360 NotSupported** (6 of 7 originally
+  sampled failures fixed).
+
+The 1 residual failure,
+`astc_5x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
+is a *non*-SRGB case (`_unorm_block`, not `_srgb_block`) -- as
+expected, this fix does not touch it. Its own `.qpa` image-comparison
+diagnostic shows a *different* bug entirely: RGB channel differences
+are ~0.0039 (roughly 1/255, comfortably within the ~0.0649 threshold),
+but the alpha channel difference is exactly 1.0 (the maximum possible),
+far exceeding its own ~0.397 threshold. Since `a2b10g10r10_snorm_pack32`
+has only a 2-bit alpha channel, this strongly suggests a bug isolated
+to that format's own 2-bit-alpha SNORM packing/unpacking -- filed as
+new roadmap row `L260`, out of scope for this fix.
+
+`FeMeVulkanTests`: 770/770 (net +1 new unit test). `ninja check-feme`:
+3,404 Passed, 61 Unsupported, 0 Failed (no regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- a core blit-path correctness fix to already-supported ASTC formats,
+not a new feature-bit or extension exposure.
+
+**Methodology note (worth flagging for future sessions):** this fix's
+own verification was significantly derailed, mid-session, by a
+self-inflicted shell environment-variable bug, not a code defect.
+Setting both Vulkan-loader ICD env vars in one command --
+`export VK_ICD_FILENAMES=<path> VK_DRIVER_FILES=$VK_ICD_FILENAMES` --
+evaluates `$VK_ICD_FILENAMES` on its *pre-command* value (empty, in a
+fresh shell) before either assignment takes effect, per standard shell
+semantics (all RHS expansions on one command line happen before any of
+that line's own assignments land). This silently left
+`VK_DRIVER_FILES` empty, and the Vulkan loader fell back to
+discovering the system's Mesa/llvmpipe software ICD instead of
+restricting to FeMe -- producing a lengthy false "the fix isn't
+working" investigation (anomalous `NotSupported`/`Fail` counts that
+reproduced identically with *and* without the fix, via `git stash`
+A/B) before a small standalone C reproducer calling
+`vkEnumeratePhysicalDevices`/`vkGetPhysicalDeviceProperties` directly
+(bypassing the CTS binary entirely) surfaced the wrong device name
+(`llvmpipe`, not `FeMe CPU Vulkan Device`) as the true root cause.
+**Going forward:** always set `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` via
+separate, independent `export` statements with the literal path string
+(never `B=$A` in the same command that also sets `A`), and always
+sanity-check `vulkaninfo --summary | grep deviceName` immediately
+before trusting any anomalous or unexpected CTS/reproducer result.
+
+**Not attempted this session:** `L260` (the newly-split-off 2-bit-alpha
+SNORM bug above).
