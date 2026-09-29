@@ -4837,3 +4837,46 @@ bug), the remaining smaller `L258`-era `dEQP-VK.glsl.*` clusters
 `functions`/`logical_copy` 2 each -- `texture_functions`'s 144 is
 pre-existing/unrelated per `L264`), `L228(e)`/`(f)` (broader-than-glsl/
 tessellation CTS sampling at real scale).
+
+**Post-fix confirmation (fresh full sweep, same session):** kicked off
+a second full `dEQP-VK.glsl.*` sweep (28,420 cases) after the bitfield
+fix landed, specifically to confirm the predicted 966 - 143 = 823 Fail
+delta rather than assume it. **Result: 18,634 Pass / 823 Fail / 8,963
+NotSupported -- an exact match to the prediction**, confirming the fix
+has no unexpected knock-on effects elsewhere in the full `glsl` sweep.
+
+Re-clustered the fresh 823-Fail list by test-path prefix and found the
+earlier partial-sample-based estimate above (`atomic_operations` 96,
+`matrix` 92, etc.) undercounted several clusters that a partial sample
+had missed or under-sampled entirely:
+
+```
+246 builtin.function.integer        (== L266's SIMDize gap exactly, confirmed by cross-reference)
+ 70 texture_functions.query.texturequerylod
+ 49 440.linkage.varying
+ 34 texture_functions.query.texturequerylevels
+ 24 matrix.mul.dynamic
+ 16 shader_expect_assume.compute.expect
+ 16 shader_expect_assume.fragment.expect
+ 16 shader_expect_assume.vertex.expect
+ 16 texture_functions.query.imagesizems
+ 16 texture_functions.query.texturesizems
+ 10 loops.special.do_while_dynamic_iterations
+ 10 loops.special.for_dynamic_iterations
+ 10 loops.special.while_dynamic_iterations
+  8 matrix.{add,div,sub}.dynamic (8 each)
+  8 texture_functions.query.texturesamples
+  6 builtin.function.pack_unpack
+  4 builtin.precision.{cosh,sinh} (4 each)
+  ... (remainder in smaller buckets)
+```
+
+Notably, `texture_functions.query.*` (144 combined across
+`texturequerylod`/`texturequerylevels`/`imagesizems`/`texturesizems`/
+`texturesamples`) is now the single largest *non-L266* cluster --
+larger than `atomic_operations`/`matrix` individually -- and wasn't
+visible at this scale in the earlier partial sample. Filed as a
+priority item for the next untriaged-cluster session (ahead of
+`atomic_operations`/`matrix`, which are smaller). `440.linkage.varying`
+(49) is also a new, previously-unseen-at-this-scale cluster worth
+investigating alongside it.
