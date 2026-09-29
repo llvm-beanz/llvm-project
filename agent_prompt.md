@@ -61,18 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged chunk)** `L267`:
-   `texture_functions.query.*` cluster (144 cases: `texturequerylod`
-   70, `texturequerylevels` 34, `imagesizems`/`texturesizems` 16 each,
-   `texturesamples` 8) -- carried over several sessions now, not yet
-   started. Likely home: `feme/lib/Vulkan/`'s texture-query lowering.
-2. **(unknown, still filed)** Remaining smaller `L258`/`L263`-era
-   clusters: `atomic_operations` (96), `matrix.*` variants (24+),
-   `440.linkage.varying` (49), `shader_expect_assume.*` (48 combined),
+1. **(a few hours, ready to pick up, newly filed)** `L269`:
+   `imagesizems`/`texturesizems` (32 cases, 16 each) -- a multisampled
+   (`MS=1`) image handle shape `hasOnlySupportedImageUses`'s
+   `isGetDimensionsIntrinsic` doesn't recognize at all (hard-gated to
+   `Plain2D` only, confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`'s
+   `"unsupported raised operation:
+   'llvm.spv.resource.handlefrombinding.tspirv.SignedImage_i32_1_0_0_1_2_23t'"`-
+   style diagnostic). Likely needs a new `QuerySizeMS`-shaped image-
+   call builder (no LOD operand, since MS images have exactly one mip
+   level) threaded through `lowerImageAccesses`'s dispatch, plus
+   widening the shape check itself. Start by grepping
+   `SPIRVResourceLowering.cpp` for `isGetDimensionsIntrinsic` and
+   `QuerySizeLod2D`'s existing structure to model the new builder on.
+2. **(unknown, still filed, not started)** Remaining smaller
+   `L258`/`L263`-era clusters: `atomic_operations` (96), `matrix.*`
+   variants (24+), `440.linkage.varying` (49),
+   `shader_expect_assume.*` (48 combined),
    `loops.special.*_dynamic_iterations` (30 combined). Worth a
-   dedicated triage session, re-tally against this session's fresh
-   18,880/577/8,963 sweep first since the exact cluster sizes may have
-   shifted.
+   dedicated triage session after `L269`, re-tallied against this
+   session's fresh 18,992/465/8,963 sweep.
 3. **(carried over, several sessions running)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`. Still not picked up.
