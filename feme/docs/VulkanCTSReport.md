@@ -5378,3 +5378,82 @@ worth a dedicated follow-up session.
 + 32 from L270+L271 combined), confirming no unexpected knock-on shifts
 elsewhere in the full sweep from these fixes (the 1-case discrepancy is
 consistent with ordinary test-to-test noise, not a new regression).
+
+## L259: `resolveRowComponent`'s narrow-vector array-peeling stride -- `H101h`'s XFB-only fix applied too broadly, fixed for the ordinary (non-XFB) case
+
+**Root cause:** `resolveRowComponent`'s array-peeling loop (in
+`CanonicalizeStage.cpp`) computes a column/row index via `Idx = Residual
+/ RowSize`. Since `H101h` (`L257`'s own fix), `RowSize` for a narrow
+(3-wide) vector array element was always computed via
+`getPackedElementSize` -- a tightly-packed, no-ABI-padding size (12
+bytes for `<3 x float>`). This is correct only for a
+`VK_EXT_transform_feedback`-captured array (an `XfbBuffer`-decorated
+global), whose real memory layout is genuinely tightly packed at SPIR-V's
+own `XfbStride`. For an ordinary (non-XFB) Location-addressed
+Input/Output stage-IO global -- e.g. a plain `in mat4x3 m;` vertex
+attribute -- `SPIRVToLLVMPatterns.cpp`'s SPIR-V-to-LLVM conversion
+addresses every array element at a *padded* stride instead (every
+vector's own lane count rounded up to the next power of two, 16 bytes
+for `<3 x float>`), confirmed empirically via a raw pre-canonicalization
+IR dump showing GEP byte offsets 0/16/32/48 (not 0/12/24/36) for a
+`mat4x3`'s 4 columns. `H101h`'s fix, applied unconditionally, divided
+this padded 48-byte offset by the tightly-packed 12-byte stride, landing
+on `Row 4` (`48 / 12`) -- one past the true last row (`RowCount == 4`),
+`feme-graphics-validate-stage`'s own `"row 4 is out of range for
+element"` `vkCreateGraphicsPipelines`-time rejection.
+
+**Note on the module's own `DataLayout` at canonicalization time:** an
+earlier attempt at this fix used `DataLayout::getTypeAllocSize` directly
+for the padded case (matching `DL.getTypeAllocSize(<3 x float>) == 16`
+under LLVM's plain default-constructed `DataLayout`). This did *not*
+work: the actual `DataLayout` object attached to the module at the exact
+point `CanonicalizeStagePass` first runs (`GraphicsPipeline.cpp`, before
+`Pipeline.cpp`'s later `M.setDataLayout(HostDL)`) is a plain
+MLIR-derived layout string (`e-ve-i64:64-n8:16:32:64-G10`, no
+vector-alignment entries of its own), under which
+`getTypeAllocSize(<3 x float>)` computes an *unpadded* 12 bytes --
+disagreeing with the real, already-baked-in 16-byte-strided GEP offsets.
+Fixed instead with a new `getPaddedElementSize` helper that mirrors
+`getPackedElementSize`'s own recursive struct/array/vector-peeling shape,
+but rounds a `FixedVectorType`'s own lane count up to the next power of
+two before multiplying, independent of whichever `DataLayout` happens to
+be attached to the module at the time.
+
+**Fix:** added a `bool UseTightArrayStride` parameter, threaded through
+`resolveOffsetWithinElement` -> `resolveNestedStageIOField` ->
+`resolveRowComponent`, selecting `getPackedElementSize` (tight) vs. the
+new `getPaddedElementSize` (padded) for the array-peeling loop's own
+`RowSize`. Set from a new `hasXfbBufferDecoration(GlobalVariable *GV)`
+helper (checks `parseSPIRVDecorations(...).XfbBuffer.has_value()`) at
+each of `resolveStageIOAccess`'s 3 external call sites into
+`resolveOffsetWithinElement`.
+
+**Unit tests:** new
+`CanonicalizeStageTest.ResolvesOrdinaryNarrowVectorMatrixColumnsAtPaddedStrideNotTightStride`
+(a plain, non-`XfbBuffer`-decorated `mat4x3` Input global, GEPs at
+byte offsets 0/16/32/48, asserting rows `{0,1,2,3}`), confirmed to fail
+pre-fix (rows `{0,1,2,4}`); existing `H101h`
+`MapsArrayOfBlockInstancesWithNarrowVectorMemberToDistinctRows` XFB test
+re-confirmed still passing (the `XfbBuffer`-decorated tight-stride path
+is unaffected). Full `CanonicalizeStageTest`/`ValidateStageTest`/
+`UnrollConstantTripCountLoopsTest` suite: 125 tests, all green.
+
+**`check-feme`:** 1,167 tests / 3,489 discovered, 3,428 Passed (+1 net
+new unit test vs. L271's 3,427 baseline), 61 Unsupported, 0 Failed (no
+regressions).
+
+**Targeted CTS re-run:** `dEQP-VK.glsl.matrix.add.dynamic.highp_mat4x3_float_fragment`
+(the repro case) now passes. The full `dEQP-VK.glsl.matrix.*` group
+(1,764 cases): **1,764 Pass / 0 Fail** -- up from 92 Fail, clearing the
+entire cluster. `dEQP-VK.glsl.indexing.varying_array.*` (64 cases):
+**49 Pass / 15 Fail** -- all 15 remaining failures are `vec3_*`-suffixed
+and confirmed via A/B `git stash` testing (stashing just this fix's own
+`CanonicalizeStage.cpp` change) to reproduce identically with or
+without it, i.e. a **distinct, pre-existing** runtime `Image mismatch`
+bug in the dynamic-row-indexed path (`getDynamicRowIndexedAccess`/
+`collectDynamicRowTerms`), not this fix's own constant-offset
+`resolveRowComponent` path -- filed as new roadmap item `L272`.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change -- an internal compiler-pass correctness fix, not a
+feature/extension surface change.
