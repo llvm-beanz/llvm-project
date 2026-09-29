@@ -61,10 +61,21 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, unchanged for many sessions)** `L227(d)` (3
-   `Graphics/MeshShaders/*` image-comparison failures) or `L228(b)`
-   (compressed-format blits) -- pick one.
-2. **(a few hours, still overdue)** `L228(e)`/`(f)`: `shader_render`
-   and most of `pipeline`'s other sub-suites remain unsampled at any
-   real scale.
-3. No git stashes left open this session.
+1. **(a few hours, new, ready to pick up)** `L257`: the 48-case
+   `dEQP-VK.glsl.indexing.varying_array.*dynamic*` `Fail (Image
+   mismatch)` bug this session's crash fix newly exposed. Start with
+   the single simplest case (`vec2_dynamic_write_dynamic_read`, no
+   loops) and a `FEME_DUMP_IR`/pixel-diff comparison to see whether the
+   new `[RowCount x 4]` shadow-alloca scheme itself has an indexing bug
+   (e.g. absolute-vs-`FirstComponent`-relative off-by-something) or the
+   read-back value is never threaded through correctly at all.
+2. **(a few hours, new, ready to pick up cold)** `L258`: re-run the
+   full `dEQP-VK.glsl.*` sweep (28,420 cases, ~45+ min, use the bash
+   tool's own async/`initial_wait`, not shell backgrounding) now that
+   it no longer aborts partway, then triage the largest cluster first
+   (`dEQP-VK.glsl.builtin.function`, 395 fails in the partial sample).
+3. **(a few hours, still unchanged for many sessions)** `L228(b)`
+   (compressed-format blits) -- still not picked up.
+4. No git stashes left open this session (both uses -- the debug-print
+   iteration and the pre-fix-crash-confirmation A/B -- were popped
+   immediately after use).
