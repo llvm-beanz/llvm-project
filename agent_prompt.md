@@ -61,37 +61,41 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, ready to pick up, newly filed)** `L269`:
-   `imagesizems`/`texturesizems` (32 cases, 16 each) -- a multisampled
-   (`MS=1`) image handle shape `hasOnlySupportedImageUses`'s
-   `isGetDimensionsIntrinsic` doesn't recognize at all (hard-gated to
-   `Plain2D` only, confirmed via `FEME_VULKAN_LOG_CREATION_ERRORS=1`'s
-   `"unsupported raised operation:
-   'llvm.spv.resource.handlefrombinding.tspirv.SignedImage_i32_1_0_0_1_2_23t'"`-
-   style diagnostic). Likely needs a new `QuerySizeMS`-shaped image-
-   call builder (no LOD operand, since MS images have exactly one mip
-   level) threaded through `lowerImageAccesses`'s dispatch, plus
-   widening the shape check itself. Start by grepping
-   `SPIRVResourceLowering.cpp` for `isGetDimensionsIntrinsic` and
-   `QuerySizeLod2D`'s existing structure to model the new builder on.
-2. **(unknown, still filed, not started)** Remaining smaller
-   `L258`/`L263`-era clusters: `atomic_operations` (96), `matrix.*`
-   variants (24+), `440.linkage.varying` (49),
-   `shader_expect_assume.*` (48 combined),
-   `loops.special.*_dynamic_iterations` (30 combined). Worth a
-   dedicated triage session after `L269`, re-tallied against this
-   session's fresh 18,992/465/8,963 sweep.
-3. **(carried over, several sessions running)** `L265`: residual
-   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
-   `ASTCDecode.cpp`. Still not picked up.
-4. **(a few hours, overdue for many sessions)** `L228(e)`/`(f)`:
+1. **(a few hours, largest untriaged cluster, ready to pick up)**
+   `atomic_operations` (96 cases): now the single largest untriaged
+   cluster. Start with `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one
+   failing case to see whether it's a pipeline-creation rejection (like
+   most of `L267`/`L269` were) or a runtime `Image mismatch`/incorrect
+   result (like some of `L257`'s residual bugs were) -- that
+   distinction picks the triage path.
+2. **(a few hours, second-largest, ready to pick up)** `matrix` (92
+   cases): previously estimated at "24 (`matrix.mul.dynamic`) + other
+   variants" from an older partial sample -- this session's fresh full
+   tally shows it's actually the 2nd-largest cluster at 92, not a
+   minor one. Worth checking whether it's one bug or several before
+   committing to a sub-slice.
+3. **(a few hours, third-largest)** `shader_expect_assume` (51 cases,
+   combined across compute/fragment/vertex per prior sessions' notes)
+   -- still not started.
+4. **(unknown, filed, not started)** `440` (49, `linkage.varying`),
+   `conversions` (30), `loops` (30, `*_dynamic_iterations` per prior
+   sessions) -- smaller clusters, worth a joint triage session after
+   the top 3 above.
+5. **(carried over, several sessions running, still not picked up)**
+   `L265`: residual `a2b10g10r10_snorm_pack32` ASTC-block-boundary
+   alpha-decode bug in `ASTCDecode.cpp`.
+6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other
    sub-suites, `api`, `synchronization`) at real scale -- still not
-   done.
-5. **(low priority, not a regression, unresolved for many sessions)**
+   done. Every recent session has run only `dEQP-VK.glsl.*` sweeps;
+   this remains a real blind spot.
+7. **(low priority, not a regression, flagged many sessions now)**
    `offload-test-suite`'s own
    `Feature/SpecializationConstant/spec_const_32_bits.test`/
    `WaveOps/WaveActiveMax.test` (failing) and
    `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) still
-   need upstream lit-annotation fixes -- flagged across many sessions,
-   not a new regression.
+   need upstream lit-annotation fixes -- unrelated to FeMe/LLVM,
+   confirmed unchanged again this session.
+8. No git stashes left open this session (none were used -- both repos
+   were clean/in-sync throughout, confirmed via the mandatory session-
+   start checks and re-confirmed at session end).
