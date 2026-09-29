@@ -61,47 +61,37 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session, strong lead)** Root-cause `L259`
-   via the `mat4x3` reproduction found this session
-   (`dEQP-VK.glsl.matrix.add.dynamic.highp_mat4x3_float_fragment` is
-   the simplest case -- fixed shape, no dynamic indexing needed to
-   trigger it, unlike `L259`'s own original `indexing.varying_array`
-   cases). Start with `FEME_DUMP_IR`/`FEME_DUMP_IR_PRESIMD` on this
-   case vs. a passing `mat4x2`/`mat4x4` sibling to see exactly where a
-   `vec3`-row matrix's row/component count diverges from the 4-lane
-   assumption (`SignatureElement::FirstComponent`'s own comment,
-   `L256`). If confirmed as the same bug, this single fix should clear
-   **104 cases** (12 `indexing` + 92 `matrix`) at once -- the single
-   highest-leverage fix available right now.
-2. **(check first)** Confirm the full `dEQP-VK.glsl.*` sweep
-   (`/tmp/l270_271_full_sweep.log`/`.qpa`) finished with the predicted
-   ~19,056 Pass / ~401 Fail / 8,963 NotSupported; re-tally the residual
-   Fail list fresh (numbers shift slightly session to session) before
-   picking the next cluster.
-3. **(unknown, filed, not started)** Remaining `atomic_operations`
-   residual (64 Fail, down from 96) -- believed to be the runtime
-   `Image mismatch` half rather than pipeline-creation rejections, not
-   yet individually triaged.
-4. **(unknown, filed, not started)** `shader_expect_assume` (51 cases),
-   `440`/`linkage.varying` (49), `conversions` (30), `loops` (30) --
-   smaller clusters from last session's tally, likely still roughly
-   this size; re-tally against the fresh sweep first (item 2 above).
-5. **(carried over, several sessions running, still not picked up)**
+1. **(a few hours, ready to pick up, strong lead)** `L272`: the
+   residual 15 `dEQP-VK.glsl.indexing.varying_array.*` `vec3_*`
+   failures -- a runtime `Image mismatch`, not a pipeline-creation
+   rejection, confirmed distinct from `L259`. Start with the single
+   simplest static case (`vec3_static_write_static_read`, no dynamic
+   indexing or loops) and `FEME_DUMP_IR`/`FEME_DUMP_IR_PRESIMD` to see
+   whether `getDynamicRowIndexedAccess`/`collectDynamicRowTerms` has an
+   analogous narrow-vector padded-vs-tight-stride confusion of its own,
+   or a genuinely different bug.
+2. **(unknown, filed, not started)** Remaining `atomic_operations`
+   residual (64 Fail) -- believed to be the runtime `Image mismatch`
+   half, not yet individually triaged.
+3. **(unknown, filed, not started)** `shader_expect_assume` (51
+   cases), `440`/`linkage.varying` (49), `conversions` (30), `loops`
+   (30) -- smaller clusters from prior sessions' tally, likely still
+   roughly this size; re-tally against a fresh full sweep first.
+4. **(carried over, several sessions running, still not picked up)**
    `L265`: residual `a2b10g10r10_snorm_pack32` ASTC-block-boundary
    alpha-decode bug in `ASTCDecode.cpp`.
-6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
+5. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other
    sub-suites, `api`, `synchronization`) at real scale -- still not
-   done. Every recent session (including this one) has run only
-   `dEQP-VK.glsl.*`/`dEQP-VK.tessellation.*` sweeps; this remains a
-   real blind spot.
-7. **(low priority, not a regression, flagged many sessions now)**
+   done.
+6. **(low priority, not a regression, flagged many sessions now)**
    `offload-test-suite`'s own
    `Feature/SpecializationConstant/spec_const_32_bits.test`/
    `WaveOps/WaveActiveMax.test` (failing) and
    `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) still
    need upstream lit-annotation fixes -- unrelated to FeMe/LLVM,
    confirmed unchanged again this session.
-8. No git stashes left open this session (none were used -- both repos
-   were clean/in-sync throughout, confirmed via the mandatory
-   session-start checks; re-confirmed at session end below).
+7. Used real `git stash push/pop` once this session (isolating just
+   `CanonicalizeStage.cpp`'s own change to A/B-test whether the
+   residual `indexing.varying_array` failures were a regression or
+   pre-existing), popped immediately after. No stashes left open.
