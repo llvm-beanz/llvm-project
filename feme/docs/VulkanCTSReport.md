@@ -4707,3 +4707,133 @@ already-supported format, not a new feature-bit or extension exposure.
 the residual 12-case ASTC-block-boundary alpha-decode bug above),
 `L263` (the `L258` sweep's remaining untriaged clusters), `L228(e)`/
 `(f)` (broader-than-glsl/tessellation CTS sampling at real scale).
+
+## L263: fresh full `dEQP-VK.glsl.*` sweep triage -- `bitfieldInsert`/`bitfieldExtract` Count-edge-case bugs found and fixed; L266 filed for the SIMDize divergent-call gap
+
+Re-ran a fresh full `dEQP-VK.glsl.*` sweep (28,420 cases) to re-triage
+against several sessions' worth of accumulated fixes (`L260`, `L262`,
+`L264`) whose combined effect on the full sweep hadn't been measured
+since the stale `L262`-era baseline (17,867 Pass / 1,590 Fail / 8,963
+NotSupported).
+
+**Fresh tally: 18,491 Pass / 966 Fail / 8,963 NotSupported** -- a much
+larger improvement than expected from `L264`'s own predicted -24-Fail
+delta alone, confirming the fixes had compounded more than previously
+tracked (worth remembering: partial/targeted-sample verification
+numbers from individual fix sessions don't always additively predict
+the next full sweep's tally).
+
+**Re-clustered the fresh 966-Fail list** by test-path prefix:
+`builtin.function` (395) was confirmed the largest chunk, as the prior
+session's tally had predicted. Drilled into it:
+
+```
+96 bitfieldinsert
+80 findMSB
+80 findlsb
+47 bitfieldextract
+40 uaddcarry
+40 usubborrow
+ 3 imulextended
+ 3 umulextended
+```
+
+**Picked `bitfieldinsert`+`bitfieldextract` first** (143 combined,
+since both are `BitField*` SPIR-V ops and looked likely to share a
+root cause). Reproduced `bitfieldextract.int_highp_compute`'s failure
+directly and found the qpa's own diagnostic text already pinpointed
+the exact failing inputs (deqp-vk's shader-function test harness
+prints `inputs:`/`outputs:` for every mismatching sample, no qpa-image-
+diff needed this time -- these are compute-shader value comparisons,
+not image comparisons).
+
+**Root cause (three separate bugs, all in `SPIRVToLLVMPatterns.cpp`,
+all only reachable at `Count`'s two closed-interval endpoints -- `Count
+== 0` ("insert/extract nothing") and `Count == Size` ("the whole
+field"), both spec-legal and both exercised directly by the CTS's own
+`bits=0` and `offset=0,bits=32` test inputs):**
+
+1. `BitFieldInsertPattern` ORed `Insert << Offset` into the result
+   completely **unmasked**. `Insert`'s bits above bit `Count - 1` are
+   unspecified by the SPIR-V spec and routinely nonzero in real test
+   inputs, so those bits leaked past the intended field boundary and
+   corrupted bits that should have been preserved unchanged from
+   `Base` -- for *every* `Count`, not just the edge cases. Confirmed
+   by reproducing the exact failing CTS inputs (`base`/`insert`/
+   `offset`/`bits` from the qpa diagnostic) in Python against both the
+   spec's reference formula and the buggy formula -- the buggy formula
+   reproduced our wrong output exactly.
+2. `BitFieldSExtractPattern` computed a final `llvm.ashr` shift amount
+   that reduces to exactly `Size` whenever `Count == 0`, regardless of
+   `Offset` (`Offset + (Size - (Count + Offset))` simplifies to `Size -
+   Count`). A shift amount equal to the operand's own bit width is
+   poison per the LLVM LangRef (only strictly-less-than-`Size` amounts
+   are well-defined), producing garbage instead of the spec-mandated
+   result of `0`.
+3. `BitFieldUExtractPattern`'s (and `BitFieldInsertPattern`'s own
+   internal field-mask's) `(-1 << Count) ^ -1` low-mask construction
+   requires an out-of-range `llvm.shl` whenever `Count == Size` -- also
+   poison, instead of the spec-mandated all-ones mask. This is what the
+   `offset=0, bits=32` (whole-value) CTS inputs specifically exercise.
+
+**Fix:**
+
+- A new `createBitFieldLowMask()` helper: clamps the shift amount to
+  `Size - 1` (always in-range) via `llvm.intr.umin`, then selects the
+  correct all-ones mask back in for the `Count >= Size` case
+  specifically. Used by both `BitFieldUExtractPattern` and
+  `BitFieldInsertPattern`'s own field mask (replacing their prior
+  `(-1 << Count) ^ -1` constructions).
+- `BitFieldInsertPattern`: mask `Insert << Offset` down to the field
+  mask before OR-ing it into the result.
+- `BitFieldSExtractPattern`: guard the final `ashr` with a `Count == 0`
+  select, since the shift amount itself would already be poison by the
+  time it's computed (poison values are safe to compute and discard
+  via `select`, only unsafe if actually relied upon).
+
+New lit test `spirv-to-llvm-bitfield-count-edge-cases.mlir` (structural
+IR-shape verification, matching this file's existing
+`spirv-to-llvm-bitfield-signed-argument.mlir` convention) covers all
+three fixes.
+
+**Verification:**
+
+- `ninja check-feme`: 3,414 Passed / 61 Unsupported / 0 Failed (net +1
+  new test, no regressions).
+- `dEQP-VK.glsl.builtin.function.integer.{bitfieldinsert,
+  bitfieldextract}.*` (200 cases combined): **0 Fail** (was 96 + 47 =
+  143 Fail).
+- Full `dEQP-VK.glsl.builtin.function.integer.*` (752 cases): 246 Fail
+  remain (was 389) -- cross-referenced via Python to confirm the 246
+  residual fails are *exactly* `findMSB`/`findlsb`/`uaddcarry`/
+  `usubborrow`/`{i,u}mulextended`'s non-`compute`-stage cases (80 + 80
+  + 40 + 40 + 3 + 3 = 246), i.e. this fix's own targeted 143 cases are
+  cleanly gone with zero overlap or side effects on the rest.
+
+**L266 filed:** the 246 residual fails are a *distinct*, much larger
+class of bug: every failing case's diagnostic is `error:
+feme-cpu-simdize: unsupported divergent call to 'llvm.ctlz.i32'` (a
+pipeline-creation-time compile failure, `VK_ERROR_INITIALIZATION_FAILED`
+-- not a runtime value mismatch like this session's own fix). The
+SIMDize pass's own diagnostic text says outright: "roadmap milestone 7
+does not cover a generic vector-call rewrite" for these intrinsics
+in a divergent call within a non-`compute` shader stage. This needs the
+SIMDize pass's vector-call-rewrite machinery widened -- a
+multi-hour/dedicated-session-sized task, not a quick pattern fix like
+this session's two bugs, so filed as new roadmap item `L266` rather
+than picked up this session.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal SPIR-V-to-LLVM lowering correctness fix to already-
+exposed core GLSL integer bitfield functionality.
+
+**Deferred (unchanged, carried over):** `L266` (new, this session --
+the 246-case SIMDize divergent-call gap above), `L265`
+(`a2b10g10r10_snorm_pack32`'s residual ASTC-block-boundary alpha-decode
+bug), the remaining smaller `L258`-era `dEQP-VK.glsl.*` clusters
+(`atomic_operations` 96, `matrix` 92, `shader_expect_assume` 51, `440`
+49, `conversions` 30, `loops` 30, `builtin_var` 21, `struct` 16,
+`indexing` 15, `demote` 9, `derivate`/`linkage` 3 each,
+`functions`/`logical_copy` 2 each -- `texture_functions`'s 144 is
+pre-existing/unrelated per `L264`), `L228(e)`/`(f)` (broader-than-glsl/
+tessellation CTS sampling at real scale).
