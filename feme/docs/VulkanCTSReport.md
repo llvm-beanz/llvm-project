@@ -5078,3 +5078,105 @@ unexpected knock-on shifts elsewhere in the full sweep from this fix.
 change -- an internal SPIR-V-to-LLVM conversion-pattern correctness
 fix for already-exposed core GLSL integer builtins, not a new
 feature/extension.
+
+## L267: `texture_functions.query.*` cluster -- three distinct bugs found and fixed (112/144 cases); `imagesizems`/`texturesizems` split out as L269
+
+Picked up L267 (filed by L263's own post-fix confirmation sweep as
+the largest untriaged non-L266 cluster): 144 combined fails across
+`texturequerylod` (70), `texturequerylevels` (34), `imagesizems`/
+`texturesizems` (16 each), `texturesamples` (8).
+
+**Diagnostic technique:** `FEME_VULKAN_LOG_CREATION_ERRORS=1` (an
+opt-in env var, `feme/lib/Vulkan/Diagnostics.h`, that prints an
+`llvm::Error`'s full message instead of silently discarding it) was
+the key that unblocked this triage -- it should be the default first
+diagnostic step for any `VK_ERROR_INITIALIZATION_FAILED`, ahead of
+the `FEME_DUMP_IR*` family.
+
+### Bug 1: `texturequerylod` -- integer-sampled images wrongly rejected
+
+All 70 fails were `usampler*`/`isampler*` shapes. `hasOnlySupportedImageUses`'s
+`OpImageQueryLod` shape-gating rejected any integer-sampled image
+outright on a stale comment's premise ("SPIR-V never legalizes
+`OpImageQueryLod` against an integer-channel image"). This is simply
+wrong: GLSL's own 4.60 spec's `textureQueryLod()` prototype list
+covers every `gsampler*` shape (`isampler*`/`usampler*` included, not
+just `sampler*`), confirmed against `vktShaderRenderTextureFunctionTests.cpp`'s
+own `textureQueryLod(u_sampler, ...)` test generator. `OpImageQueryLod`'s
+`<2 x float>` result depends only on coordinates/derivatives/dimensions,
+never texel format, so no runtime call signature needed to change --
+only the shape-gating check needed to stop special-casing `IsInteger`.
+
+**Fix:** removed the `IsInteger ||` rejection (mirroring `isGatherIntrinsic`'s
+own `L125(k)` precedent lifting an identical stale rejection); updated
+both the check's own comment and the `lowerImageAccesses` call site's
+comment to reflect the corrected reality.
+
+New unit test: `SPIRVResourceLoweringTest.LowersPlain2DUnsignedIntegerSampledQueryLod`.
+
+**CTS:** `texturequerylod` 190/190 Pass (was 120/190).
+
+### Bugs 2/3: `texturequerylevels`/`texturesamples` -- a no-mask image call kind mishandled in two passes
+
+`ImageCallKind::QueryLevels`/`QuerySamples` (`createQueryLevels`/
+`createQuerySamples`, `ImageCalls.cpp`) are the sole `feme.cpu.image.*`
+call kinds with no trailing mask operand at all -- a 3-arg
+`(ImageHeap, ImageHeapCount, ImageIndex)` signature, confirmed via
+`getOrInsertImageCall`'s own `FunctionType` table and `matchImageCall`'s
+switch statement (which correctly leaves `MatchedImageCall::Mask` null
+for these two kinds).
+
+Two independent pieces of code assumed the opposite -- "the last
+argument of every `feme.cpu.image.*` call is a mask":
+
+1. **`SIMDize.cpp`'s `widenImageCall`**: `unsigned MaskIdx = CI.arg_size() - 1;`
+   misread the real `ImageIndex` operand as a mask during per-lane call
+   rebuilding.
+2. **`Linearize.cpp`'s divergent-region mask-threading**:
+   `Call->setArgOperand(Call->arg_size() - 1, Mask);` unconditionally
+   overwrote the same real `ImageIndex` operand with an `i1` mask value
+   during divergent-region linearization -- confirmed via
+   `FEME_DUMP_IR_PRESIMD` to be the *actual* root cause (the call was
+   already ill-typed, `i1` passed where `i32` is declared, *before*
+   `SIMDizePass` even ran). Fixing only `SIMDize.cpp` still crashed with
+   a verifier/assertion failure (`Calling a function with a bad
+   signature!`) because `Linearize.cpp` had already corrupted the IR
+   upstream -- **both fixes are necessary together.**
+
+**Fix:** both call sites now gate their mask-handling logic on
+`Matched.Mask`/`Matched->Mask`'s nullness instead of unconditionally
+indexing the last operand.
+
+New unit tests: `SIMDizeTest.WidensDivergentQueryLevelsCallWithNoMaskOperand`,
+`LinearizeTest.LeavesQueryLevelsCallImageIndexUntouchedUnderDivergentBranch`.
+
+**CTS:** `texturequerylevels` 102/102 Pass (was 68/102),
+`texturesamples` 24/24 Pass (was 16/24).
+
+### `imagesizems`/`texturesizems` -- distinct, unfixed bug, split out as L269
+
+The remaining 32 cases (16 each) fail with a different error
+signature entirely: `"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding.tspirv.SignedImage_i32_1_0_0_1_2_23t'"`/
+`'Image_f32_1_0_0_1_2_4t'`-style diagnostics, naming a multisampled
+(`MS=1`) image handle shape that `hasOnlySupportedImageUses`'s
+`isGetDimensionsIntrinsic` case (the plain `imageSize()`/`textureSize()`
+path `imagesizems`/`texturesizems` compile down to) doesn't recognize
+at all -- hard-gated to `Shape == ImageShape::Plain2D` only. This is a
+genuinely separate, unstarted feature gap (the same "multisampled
+shape not yet widened" class already called out, but left unresolved,
+in `isQuerySizeLodCall`'s/`isQueryLevelsCall`'s own doc comments), not
+the same bug class as the two fixes above. Filed as new roadmap item
+`L269` for a future dedicated session.
+
+**Combined `texture_functions.query.*` re-run (451 cases):** 419/451
+Pass (92.9%), 32/451 Fail (7.1%, exactly `imagesizems`/`texturesizems`,
+0 unexpected regressions elsewhere in the group).
+
+**`check-feme`:** 3,421 Passed (+3 net new unit tests), 61
+Unsupported, 0 Failed (no regressions).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change -- three internal compiler-pass correctness fixes widening/
+preserving coverage of already-exposed core GLSL texture-query
+builtins, not a new feature/extension.
