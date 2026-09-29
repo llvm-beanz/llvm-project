@@ -61,42 +61,25 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, new, ready to pick up)** `L264`: the same
-   Bias/Grad/MinLodClamp widening for `Cube`/`CubeArray` int-sampler
-   shapes (~24 cases, ~3% of the original gap's population). Reuse
-   `femeRTComputeCubeUVDerivatives` for the derivative math. Remember
-   the `matchImageCall` lesson from this session and last: when
-   widening a builder, its independent matcher switch in the same
-   file needs the same operand-count/index update, and it fails
-   *silently* (returns `std::nullopt`), not loudly, if missed.
-2. **(unknown, still filed, not started)** `L263`: remaining
-   untriaged `L258`/`L261`-era clusters (`builtin.function`,
-   `atomic_operations`, `matrix`, etc.) -- re-triage against this
-   session's fresh 1,590-fail tally, since `L262`'s fix may have
-   shifted which cluster is now biggest.
-3. **(carried over, unchanged, several sessions running)** `L260`:
-   residual `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing
-   bug in `ImageFixture.cpp`'s `packClearColor`/`unpackColor`.
-4. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-
-   glsl/tessellation CTS sampling (`pipeline`'s other sub-suites)
-   still not done at real scale.
-5. **(new, low priority, out of scope for a FeMe-focused session)**
-   `offload-test-suite`'s own `Feature/SpecializationConstant/
-   spec_const_32_bits.test`, `WaveOps/WaveActiveMax.test` (both
-   actually failing) and `Feature/PushConstant/array_of_matrices.test`
-   (unexpectedly passing, i.e. a stale `XFAIL:`) need their upstream
-   lit annotations refreshed -- this is `offload-test-suite`
-   test-infra bookkeeping unrelated to any FeMe or LLVM code change
-   made in this or recent sessions, flagging only so it isn't
-   mistaken for a new regression next time `check-hlsl-feme-vk` is
-   run.
-6. **(re-confirmed, standing risk)** `offload-test-suite`'s local
-   `feme` checkout branch has now drifted from `llvm-beanz/feme`
-   in *two different ways* across recent sessions (a hard external
-   reset to `origin/main`, and this session's silent fall-behind on
-   a critical single commit) -- the standing instruction to
-   re-verify/reset at the start of every session remains essential;
-   consider making this an explicit numbered pre-flight step (like
-   the `vulkaninfo` check) rather than something that only gets
-   caught incidentally when a next step happens to touch it.
-7. No git stashes left open this session (none were used).
+1. **(a few hours, largest untriaged chunk)** `L263`: re-triage the
+   `L258`/`L261`/`L262`/`L264`-era residual `dEQP-VK.glsl.*` fail clusters
+   against a fresh full sweep (last real full-sweep tally was `L262`'s
+   17,867/1,590/8,963 -- this session's fix should shave off another ~24, worth
+   confirming with a fresh run rather than assuming). `builtin.function` (403 in
+   the last partial sample) and `atomic_operations` (96) are the two biggest
+   untriaged buckets.
+2. **(unknown, several sessions carried over)** `L260`:
+   `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing bug in
+   `ImageFixture.cpp`'s `packClearColor`/`unpackColor`. Still not started.
+3. **(a few hours, overdue for many sessions)** `L228(e)`/`(f)`:
+   broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
+   `api`, `synchronization`) at real scale -- still not done.
+4. **(low priority, not a regression)** `offload-test-suite`'s own
+   `Feature/SpecializationConstant/spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test`
+   (failing) and `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`)
+   still need upstream lit-annotation fixes -- unrelated to any FeMe/LLVM
+   change, flagged repeatedly across sessions so it's not mistaken for new
+   breakage.
+5. No git stashes left open this session (none were used -- the
+   `offload-test-suite` branch happened to already be in sync, so no merge/stash
+   cycle was needed this time either).
