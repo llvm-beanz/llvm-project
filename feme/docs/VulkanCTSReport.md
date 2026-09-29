@@ -5457,3 +5457,115 @@ bug in the dynamic-row-indexed path (`getDynamicRowIndexedAccess`/
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
 change -- an internal compiler-pass correctness fix, not a
 feature/extension surface change.
+
+## L272: `dEQP-VK.glsl.indexing.varying_array.vec3_*` residual `Image mismatch` -- two distinct manifestations of the same `DataLayout`-ambiguity root cause, both fixed
+
+**Root cause (general):** two different `DataLayout`s are active at two
+different points in the FeMe graphics-pipeline lowering pipeline -- a
+transient SPIR-V-logical one (`e-ve-i64:64-n8:16:32:64-G10`, which marks
+vectors element-aligned, computing an unpadded 12-byte `getTypeAllocSize`
+for `<3 x float>`) active while `CanonicalizeStagePass` itself runs, and
+the final CPU-target one (which pads a 3-wide vector up to its own
+4-wide SIMD register size, 16 bytes) attached only later. Whichever
+`DataLayout` happened to be active at the specific moment a *particular*
+GEP or byte offset was folded/generated determines which stride that
+access's own IR literally encodes -- this is **not** a recoverable
+static property of the accessed global itself, confirmed this session by
+finding the same ambiguity manifesting in two structurally different
+ways in two different code paths.
+
+**Manifestation 1 (already fixed as part of `L259`):**
+`resolveRowComponent`'s array-peeling loop (the ordinary constant-offset
+path) already self-discovers the real stride by trying both
+`getPackedElementSize`/`getPaddedElementSize` candidates against the
+residual offset directly, rather than a single fixed heuristic. This
+alone cleared 4/16 `vec3_*` cases in `dEQP-VK.glsl.indexing.varying_array.*`
+(the purely-static "static-on-both-sides" combinations:
+`vec3_static_write_static_read`, `vec3_static_write_static_loop_read`,
+`vec3_static_loop_write_static_read`,
+`vec3_static_loop_write_static_loop_read`).
+
+**Manifestation 2 (root-caused and fixed this session):** the remaining
+12/16 `vec3_*` cases (every combination involving a dynamic array index
+on either side) were a **second, distinct** bug in the dynamic-index
+path, `getDynamicRowIndexedAccess`'s "DynamicLane" special case. This
+code disambiguates a byte-GEP wrapper's dynamic index between a
+whole-row select (a genuinely dynamic array-element index,
+`var[dynamicIdx] = ...`) and a per-lane select (a dynamic vector-lane
+index, `var[i].component`) by comparing the wrapper's own literal
+`[N x i8]` source-element-type width against the array element's
+computed size. Before this fix, that computed size came from a single
+`DL.getTypeAllocSize` call -- using whatever `DataLayout` happens to be
+attached to the module at `CanonicalizeStagePass`'s own run time, i.e.
+the *transient SPIR-V-logical* one, which returns the **tight** (12-byte)
+size for `vec3`. But the GEP's own literal `[16 x i8]` wrapper (baked by
+an *earlier* lowering step, under the eventual CPU-target *padded* size)
+used 16 bytes -- so the `12 == 16` comparison always failed, silently
+misrouting every genuine dynamic **row** index into the
+`DynamicComponent` (per-lane) slot instead. The practical effect: each of
+a `vec3` write's three vector lanes got assigned a *different, wrong
+row* (`idx+0`, `idx+1`, `idx+2`) instead of all three lanes correctly
+sharing *one* dynamically-selected row with varying components (`0`,
+`1`, `2`) -- exactly matching the observed "Image mismatch" symptom
+(confirmed via a `FEME_DUMP_IR_POSTCANON_TMP` temporary debug hook
+showing the actual generated `feme.stage.output.store.f32` call
+arguments: `Row` was a constant `0` and `Component` was the dynamic
+`idx`-derived value, the inverse of correct behavior).
+
+**Fix:** `getPackedElementSize`/`getPaddedElementSize` (previously only
+defined much later in the file, alongside `resolveRowComponent`) are now
+forward-declared just before `collectDynamicRowTerms`, and used in place
+of the single `DL.getTypeAllocSize` candidate for both: (1) the
+lane-vs-row disambiguation itself, which now matches if *either*
+candidate equals the wrapper's own byte-array width
+(`PackedSize == N || PaddedSize == N`); and (2) the constant-array-level
+residual-division fallback (used when `DynamicLane` doesn't match the
+current array level), which now uses the same self-discovering
+`PackedValid`/`PaddedValid` check `resolveRowComponent` itself uses,
+rather than a single fixed candidate.
+
+**Unit test:** new
+`CanonicalizeStageTest.ThreadsDynamicRowIndexIntoVec3ArrayOutputStoreThroughByteGEP`,
+modeled on the existing `ThreadsDynamicRowWithConstantComponentIntoInterpolantArrayLoad`/
+`ThreadsDynamicVertexIndexIntoOutputStore` tests: constructs a plain
+`[4 x <3 x float>]` global written through the exact byte-GEP shape this
+bug hit (`getelementptr [16 x i8], ptr addrspace(8) @out_arr, i64 %idx`),
+and asserts all three resulting `feme.stage.output.store.f32` calls
+share the *same* dynamic `Row` operand (a `trunc`/`zext` of `%idx` to
+i32, since the pass always normalizes `Row` to i32 -- not the raw i64
+argument itself) while `Component` varies constantly across `0`/`1`/`2`.
+Confirmed the test fails without the fix (the byte-GEP's dynamic index
+gets misrouted to `Component` instead, leaving the original `store`
+unconverted or wrongly shaped) and passes with it.
+
+**Targeted CTS re-run:**
+`dEQP-VK.glsl.indexing.varying_array.vec3_*` (16 cases): **16/16 Pass**
+(was 4/16). Full `dEQP-VK.glsl.indexing.*` (760 cases): **760/760 Pass**
+(was 748/760) -- the entire group now clears cleanly. Full
+`dEQP-VK.glsl.matrix.*` (1,764 cases): **1,764/1,764 Pass** (unchanged,
+no regression).
+
+**Broad regression sweep:** a fresh full `dEQP-VK.glsl.*` sweep (28,420
+cases, the first full re-run in several sessions) confirms no
+regressions anywhere else:
+
+- Passed: 19,198/28,420 (67.6%) -- up from ~19,056 (the last known
+  baseline before this session's fixes).
+- Failed: 259/28,420 (0.9%) -- down from ~401.
+- Not supported: 8,963/28,420 (31.5%) -- unchanged.
+
+Every one of the 259 residual failures falls into an already-known,
+unrelated cluster, re-tallied fresh from this sweep:
+`atomic_operations` (64), `shader_expect_assume` (51),
+`440.linkage.varying` (49), `loops` (30), `builtin_var` (21), `struct`
+(16), `builtin` (14), `demote` (9), `derivate` (3), `logical_copy` (2).
+None of these overlap with `L272`'s own `indexing`/`matrix` clusters,
+confirming the fix introduced no new regressions.
+
+**`check-feme`:** all 126 tests in `FeMeTransformsGraphicsTests`
+(`CanonicalizeStageTest`/`ValidateStageTest`) pass, including the new
+`ThreadsDynamicRowIndexIntoVec3ArrayOutputStoreThroughByteGEP` test.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal compiler-pass correctness fix, not a
+feature/extension surface change.
