@@ -405,6 +405,26 @@ using SampleCubeArrayFn = void (*)(const FemeImageDescriptor *, uint32_t,
                                    float, float, float, float, float, float,
                                    float, float, bool, float, float, bool,
                                    void *);
+/// The roadmap L125(b) `Cube` integer-sampled counterpart of
+/// `SampleCubeFn`, widened (roadmap L264) to add the same
+/// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY`/
+/// `UseExplicitLod`/`Bias`/`MinLodClamp` operands `SampleCubeFn` (float)
+/// already has -- only the resulting `out` is `<4 x i32>`-shaped, not
+/// `<4 x float>`.
+using SampleCubeI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                 const FemeSamplerDescriptor *, uint32_t,
+                                 uint32_t, uint32_t, float, float, float,
+                                 float, float, float, float, float, float,
+                                 float, bool, float, float, bool, void *);
+/// The roadmap L125(b) `CubeArray` integer-sampled counterpart of
+/// `SampleCubeArrayFn`, widened (roadmap L264) identically to
+/// `SampleCubeI32Fn`'s own relationship to `SampleCubeFn` above.
+using SampleCubeArrayI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
+                                      const FemeSamplerDescriptor *, uint32_t,
+                                      uint32_t, uint32_t, float, float, float,
+                                      float, float, float, float, float,
+                                      float, float, float, bool, float, float,
+                                      bool, void *);
 
 /// The roadmap L48 `Texture2DArray` counterpart of `SampleCmpFn`, adding
 /// a float `ArrayLayer` coordinate before `Lod` -- mirroring
@@ -1452,6 +1472,198 @@ TEST_F(ImageSamplingTest, SampleI32GradSelectsCoarserMipLevel) {
      /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
      /*UseExplicitLod=*/false, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
      -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_EQ(Out[0], 9);
+}
+
+// (Roadmap L264) Confirms `femeCpuImageSampleCubeV4I32`'s newly widened
+// `Bias` operand actually shifts the selected mip level for an
+// integer-format `Cube` image, mirroring
+// `SampleCubeImplicitLodBiasSelectsCoarserMipLevel`'s own float
+// precedent and `SampleI32BiasSelectsCoarserMipLevel`'s own `Plain2D`-
+// integer precedent: with zero screen-space derivatives, a `Bias` of
+// exactly `1.0` must select mip level 1 outright.
+TEST_F(ImageSamplingTest, SampleCubeI32BiasSelectsCoarserMipLevel) {
+  int32_t Level0[6][2][2][4];
+  int32_t Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9;
+  }
+  struct {
+    int32_t L0[6][2][2][4];
+    int32_t L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(int32_t), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(int32_t), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeI32Fn Fn = resolve<SampleCubeI32Fn>(addWrapper(
+      "sample_cube_i32_bias", "feme.cpu.image.sample.cube.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Bias=*/1.0f,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_EQ(Out[0], 9);
+}
+
+// (Roadmap L264) Confirms `femeCpuImageSampleCubeV4I32`'s newly widened
+// `DDirXdX`/`DDirXdY`/`DDirYdX`/`DDirYdY`/`DDirZdX`/`DDirZdY` derivative
+// operands actually drive implicit-LOD mip selection for an
+// integer-format `Cube` image, mirroring
+// `SampleCubeImplicitLodSelectsCoarserMipFromDerivatives`'s own float
+// precedent.
+TEST_F(ImageSamplingTest, SampleCubeI32GradSelectsCoarserMipLevel) {
+  int32_t Level0[6][2][2][4];
+  int32_t Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9;
+  }
+  struct {
+    int32_t L0[6][2][2][4];
+    int32_t L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(int32_t), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(int32_t), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeI32Fn Fn = resolve<SampleCubeI32Fn>(addWrapper(
+      "sample_cube_i32_grad", "feme.cpu.image.sample.cube.v4i32"));
+  int32_t Out[4];
+  // Direction (1, 0, 0) selects face 0 dead-center; a large `DDirYdX`
+  // (this direction's own Y component varying steeply across the
+  // screen-space X axis) is a real, sharp minification once converted
+  // through face 0's own quotient-rule UV derivative, exactly mirroring
+  // `SampleCubeImplicitLodSelectsCoarserMipFromDerivatives`'s own choice
+  // of derivative axis and magnitude.
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/4.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_EQ(Out[0], 9);
+}
+
+// (Roadmap L264) The `CubeArray` counterpart of
+// `SampleCubeI32BiasSelectsCoarserMipLevel` above, confirming the same
+// `Bias`-driven mip selection also lowers for an integer-format
+// `CubeArray` image.
+TEST_F(ImageSamplingTest, SampleCubeArrayI32BiasSelectsCoarserMipLevel) {
+  int32_t Level0[6][2][2][4];
+  int32_t Level1[6][1][1][4];
+  for (unsigned Face = 0; Face < 6; ++Face) {
+    for (unsigned Y = 0; Y < 2; ++Y)
+      for (unsigned X = 0; X < 2; ++X)
+        for (unsigned C = 0; C < 4; ++C)
+          Level0[Face][Y][X][C] = 1;
+    for (unsigned C = 0; C < 4; ++C)
+      Level1[Face][0][0][C] = 9;
+  }
+  struct {
+    int32_t L0[6][2][2][4];
+    int32_t L1[6][1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/2 * 2 * 4 * sizeof(int32_t), /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/1 * 1 * 4 * sizeof(int32_t), /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 6; // A single cube element.
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  Samp.MipFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCubeArrayI32Fn Fn = resolve<SampleCubeArrayI32Fn>(
+      addWrapper("sample_cubearray_i32_bias",
+                 "feme.cpu.image.sample.cubearray.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*DirX=*/1.0f, /*DirY=*/0.0f,
+     /*DirZ=*/0.0f, /*DDirXdX=*/0.0f, /*DDirXdY=*/0.0f, /*DDirYdX=*/0.0f,
+     /*DDirYdY=*/0.0f, /*DDirZdX=*/0.0f, /*DDirZdY=*/0.0f,
+     /*ArrayLayer=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false,
+     /*Bias=*/1.0f, -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_EQ(Out[0], 9);
 }
 

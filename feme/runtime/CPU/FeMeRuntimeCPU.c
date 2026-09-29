@@ -10496,38 +10496,39 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeV4F32(
                                 CF.Face, ClampedLod);
 }
 
-// (Roadmap L125(b)) The `Cube` counterpart of `femeCpuImageSample2DV4I32`
-// above, for `feme.cpu.image.sample.cube.v4i32` -- mirrors
-// `femeCpuImageSampleCubeV4F32`'s own face-selection/address-forcing
-// structure immediately above (hence its placement here, after
-// `femeRTSelectCubeFace`/`femeRTComputeCubeClampedLod`'s own definitions,
-// both `static` and required by C to precede any caller), but simplified
-// to `NEAREST`-only fetch, no `Bias`/`MinLodClamp`/derivative operands
-// (mirroring every other `*I32` kind's own restriction -- `Lod` already
-// defaults to a constant `0.0` at the call site for an implicit-LOD
-// caller, so `femeRTComputeCubeClampedLod`'s own derivative-based
-// implicit-LOD branch is never reached; `UseExplicitLod=1` unconditionally
-// selects its simple bias-and-clamp branch instead, exactly like every
-// prior `*I32` kind's identical choice). Reuses `femeRTFetchTexel2DI32`
-// directly (with `CF.Face` as `Layer`) rather than
-// `femeRTSampleFilteredCube`, since a `NEAREST` cube fetch needs no
-// seamless cross-face blending at all (a single nearest texel is already
-// spec-correct, mirroring `femeRTSampleFilteredCube`'s own `NEAREST`
-// short-circuit to the non-seamless `femeRTSamplePoint2D` path) -- so, as
-// with `Array2D`/`Plain3D` before it, no new low-level texel-fetch helper
-// is needed here either.
+// (Roadmap L125(b), widened by L264) The `Cube` counterpart of
+// `femeCpuImageSample2DV4I32` above, for `feme.cpu.image.sample.cube.v4i32`
+// -- mirrors `femeCpuImageSampleCubeV4F32`'s own face-selection/
+// address-forcing/`ClampedLod` computation exactly (hence its placement
+// here, after `femeRTSelectCubeFace`/`femeRTComputeCubeClampedLod`'s own
+// definitions, both `static` and required by C to precede any caller),
+// but simplified to a `NEAREST`-only fetch at the resulting level
+// (Vulkan mandates `NEAREST` filtering/mipmapping for any `VkSampler`
+// bound to an integer-format image regardless of the sampler's own
+// filter/anisotropy settings). Reuses `femeRTFetchTexel2DI32` directly
+// (with `CF.Face` as `Layer`) rather than `femeRTSampleFilteredCube`,
+// since a `NEAREST` cube fetch needs no seamless cross-face blending at
+// all (a single nearest texel is already spec-correct, mirroring
+// `femeRTSampleFilteredCube`'s own `NEAREST` short-circuit to the
+// non-seamless `femeRTSamplePoint2D` path) -- so, as with
+// `Array2D`/`Plain3D` before it, no new low-level texel-fetch helper is
+// needed here either.
 FemeRTv4i32 femeCpuImageSampleCubeV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod, float Bias,
+    float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.cube.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float Lod, _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float Lod, _Bool UseExplicitLod, float Bias,
+    float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -10540,13 +10541,9 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeV4I32(
   Samp.AddressU = 2; // ClampToEdge -- see femeCpuImageSampleCubeV4F32.
   Samp.AddressV = 2;
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above;
-  // `UseExplicitLod=1` makes `femeRTComputeCubeClampedLod` ignore every
-  // derivative argument, so zero constants are passed for those too.
   float ClampedLod = femeRTComputeCubeClampedLod(
-      &Img, &Samp, CF, Lod, /*UseExplicitLod=*/1, 0.0f, 0.0f, 0.0f, 0.0f,
-      0.0f, 0.0f, -__builtin_inff(), 0.0f);
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX,
+      DDirYdY, DDirZdX, DDirZdY, MinLodClamp, Bias);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -10856,7 +10853,7 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
                                 ClampedLod);
 }
 
-// (Roadmap L125(b)) The `CubeArray` counterpart of
+// (Roadmap L125(b), widened by L264) The `CubeArray` counterpart of
 // `femeCpuImageSampleCubeV4I32` above, for
 // `feme.cpu.image.sample.cubearray.v4i32` -- mirrors
 // `femeCpuImageSampleCubeArrayV4F32`'s own relationship to
@@ -10866,23 +10863,25 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSampleCubeArrayV4F32(
 // `femeRTFetchTexel2DI32`'s own `Layer` as `CubeIndex * 6 + CF.Face`
 // (mirroring `femeRTSampleFilteredCube`'s own identical `LayerBase +
 // BaseFace` addition for its `NEAREST` path). Otherwise identical to
-// `femeCpuImageSampleCubeV4I32`: `UseExplicitLod=1`/zero derivatives (no
-// implicit-LOD derivative logic needed), forced `ClampToEdge` addressing
-// (so no border-color fallback branch), and a direct
-// `femeRTFetchTexel2DI32` point-sample (no seamless cross-face blending
-// needed for `NEAREST`).
+// `femeCpuImageSampleCubeV4I32`: forced `ClampToEdge` addressing (so no
+// border-color fallback branch), and a direct `femeRTFetchTexel2DI32`
+// point-sample (no seamless cross-face blending needed for `NEAREST`).
 FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod,
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, float Bias, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.cubearray.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float DirX, float DirY,
-    float DirZ, float ArrayLayer, float Lod, _Bool Mask) {
+    float DirZ, float DDirXdX, float DDirXdY, float DDirYdX, float DDirYdY,
+    float DDirZdX, float DDirZdY, float ArrayLayer, float Lod,
+    _Bool UseExplicitLod, float Bias, float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -10896,8 +10895,8 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSampleCubeArrayV4I32(
   Samp.AddressV = 2;
   FemeRTCubeFace CF = femeRTSelectCubeFace(DirX, DirY, DirZ);
   float ClampedLod = femeRTComputeCubeClampedLod(
-      &Img, &Samp, CF, Lod, /*UseExplicitLod=*/1, 0.0f, 0.0f, 0.0f, 0.0f,
-      0.0f, 0.0f, -__builtin_inff(), 0.0f);
+      &Img, &Samp, CF, Lod, UseExplicitLod, DDirXdX, DDirXdY, DDirYdX,
+      DDirYdY, DDirZdX, DDirZdY, MinLodClamp, Bias);
   uint32_t NumCubes = Img.ArrayLayers / 6;
   uint32_t CubeIndex = femeRTRoundClampLayer(NumCubes, ArrayLayer);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
