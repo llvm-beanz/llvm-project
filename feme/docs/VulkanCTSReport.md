@@ -4540,3 +4540,86 @@ cases/~3% of this gap's original population) and `L263` (the `L258`
 sweep's remaining untriaged clusters: `builtin` (now likely the largest
 remaining chunk), `atomic_operations`, `matrix`, etc.) are unstarted.
 `L260` (carried over, untouched).
+
+## L264: integer-sampler (`isampler`/`usampler`) `Bias`/`Grad`/`MinLodClamp` -- the remaining `Cube`/`CubeArray` widening, completing `L262`
+
+`L262` (previous session) widened 5 of the 7 shapes
+(`Plain1D`/`Array1D`/`Plain2D`/`Array2D`/`Plain3D`) to accept
+`Bias`/`Grad`/`MinLodClamp` for integer-channel samplers, deferring
+`Cube`/`CubeArray` (~24 cases, ~3% of the original ~739-case
+population) as a follow-on. This session completes that follow-on.
+
+**Fix**, applying the exact same pattern `L262` established, to the 2
+remaining shapes:
+
+- `hasOnlySupportedImageUses`: removed the `ShapeSupportsBiasGradMinLod`
+  sub-gate entirely -- all 7 classifiable shapes now equally accept
+  `HasBias`/`HasGrad`/`HasMinLodClamp` for integer samplers (no
+  shape-specific restriction remains).
+- `ImageCalls.h`/`.cpp`: widened `createSampleCubeI32`/
+  `createSampleCubeArrayI32` with the same 9 new operands (6
+  derivatives, `UseExplicitLod`, `Bias`, `MinLodClamp`) the float
+  `createSampleCube`/`createSampleCubeArray` builders already carry
+  (minus the offset operand, which `Dim::Cube` forbids regardless of
+  sampled type). Also updated `matchImageCall`'s own independent
+  `arg_size()`/operand-index switch for both kinds in lockstep --
+  `L262`'s own hard-won lesson (a missed update here fails silently via
+  `std::nullopt`, not a compile error) reapplied successfully this time.
+- `SPIRVResourceLowering.cpp`'s `lowerImageAccesses`: rewrote the
+  `Cube`/`CubeArray` `isV4I32(...)` dispatch branches to synthesize real
+  derivatives via `getOrSynthesizeSampleCubeDerivatives` (reusing the
+  same helper the float `Cube`/`CubeArray` dispatch already calls) and
+  thread `IntBias`/`IntMinLodClamp` (already computed earlier in the
+  same code block, shared across all 7 shapes) into the widened
+  builders.
+- `FeMeRuntimeCPU.c`: widened `femeCpuImageSampleCubeV4I32`/
+  `femeCpuImageSampleCubeArrayV4I32` to compute a real `ClampedLod` via
+  `femeRTComputeCubeClampedLod` (the same helper the float
+  `femeCpuImageSampleCubeV4F32`/`femeCpuImageSampleCubeArrayV4F32`
+  functions already call), then fetch only the single nearest I32 texel
+  at that level via `femeRTFetchTexel2DI32` (never
+  `femeRTSampleFilteredCube`, since a `NEAREST` fetch needs no seamless
+  cross-face blending at all).
+
+**Verification:**
+
+- Targeted caselist -- the exact same 12
+  `texturegrad.*samplercube*`/`texturegrad.*samplercubearray*` cases
+  `L262` identified as the residual gap: **12/12 now pass (was 0/12)**.
+- Full `dEQP-VK.glsl.texture_functions.*` group re-run (7,946 cases):
+  3,791 Pass / 144 Fail / 4,011 NotSupported -- the 144 fails are all in
+  `texture_functions.query` (`imagesizems`/`texturequerylevels`, a
+  pre-existing, unrelated multisample-image-size/query-level gap; not
+  touched by this change), zero Cube/CubeArray-sampling-related
+  failures remain. This is exactly the predicted -24-Fail delta from
+  `L262`'s own 168-Fail baseline for this same group.
+
+**Unit tests:** 2 existing `SPIRVResourceLoweringTest` cases
+(`LowersImplicitLodIntegerSampledImageCubeToImageSampleV4I32`,
+`LowersImplicitLodIntegerSampledImageCubeArrayToImageSampleV4I32`) had
+their hardcoded `arg_size()`/operand-index assertions widened to match
+the new 20/21-arg layout; 2 existing `ImageCallsTest` cases
+(`MatchesSampleCubeI32Call`/`MatchesSampleCubeArrayI32Call`) widened to
+the new operand list; 3 new `ImageSamplingTest` runtime-level cases
+(`SampleCubeI32BiasSelectsCoarserMipLevel`,
+`SampleCubeI32GradSelectsCoarserMipLevel`,
+`SampleCubeArrayI32BiasSelectsCoarserMipLevel`) directly confirm
+`Bias`/`Grad` now shift the selected mip level for a `Cube`/`CubeArray`
+integer-format image, mirroring `L262`'s own runtime-level proof style
+for the other 5 shapes.
+
+`ninja check-feme`: 3,412 Passed / 61 Unsupported / 0 Failed (net 3 new
+unit tests, no regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal sampling-correctness fix to already-exposed core GLSL
+functionality, same as `L262`.
+
+This completes the full 7-shape int-sampler Bias/Grad/MinLodClamp
+widening that `L262`/`L264` together set out to do; no further shapes
+remain in this gap.
+
+**Deferred (unchanged, carried over):** `L263` (the `L258` sweep's
+remaining untriaged clusters), `L260` (`a2b10g10r10_snorm_pack32`
+alpha-channel SNORM bug), `L228(e)`/`(f)` (broader-than-glsl/
+tessellation CTS sampling at real scale).
