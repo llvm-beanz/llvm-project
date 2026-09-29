@@ -767,12 +767,18 @@ Both passes are registered in `feme-opt`; see
 `unittests/Transforms/Graphics/{CanonicalizeStage,ValidateStage}Test.cpp`.
 Left for later milestones, matching "only operations required by
 implemented stages are legal" above: the patch, stream-emission, mesh-output
-and ray operation families; SPIR-V's `demote`/`is_helper` (there is no
-upstream `llvm.spv.*` intrinsic to raise from yet, unlike DXIL's `Discard`/
-`IsHelperLane`); arrays/structs of stage-IO variables (the same limitation
-R19's SPIR-V conversion already has); and mesh output-count/ray
+and ray operation families; arrays/structs of stage-IO variables (the same
+limitation R19's SPIR-V conversion already has); and mesh output-count/ray
 payload-size uniformity validation, which needs those later operation
-families to exist first.
+families to exist first. (SPIR-V's `demote`/`is_helper` are *not* on this
+list: roadmap E11 already covers `demote` via `llvm.spv.demote.to.helper
+.invocation`, and roadmap L270 covers `is_helper` -- since SPIR-V has no
+`OpIsHelperInvocationEXT`-shaped intrinsic of its own for `OpRaisingPass`
+to raise from the way DXIL's `IsHelperLane` opcode has, this pass instead
+recognizes the plain `BuiltIn HelperInvocation` (`gl_HelperInvocation`)
+global glslang lowers `gl_HelperInvocation` reads to, and rewrites its
+loads directly into `feme.stage.is_helper()`, bypassing the ordinary
+stage-IO-global/`SignatureElement` path entirely.)
 
 Roadmap H4a extended `CanonicalizeStagePass` from the vertex/fragment-only
 `run` filter above to also reflect `TessellationControl`/

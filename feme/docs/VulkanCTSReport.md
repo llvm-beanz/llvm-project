@@ -5265,3 +5265,108 @@ feature/extension.
 post-fix baseline (18,992 Pass / 465 Fail / 8,963 NotSupported),
 confirming no unexpected knock-on shifts elsewhere in the full sweep
 from this fix.
+
+## L270/L271: `atomic_operations` fragment/vertex stage-linkage cluster (32 cases) -- two distinct stage-linkage bugs found and fixed
+
+**Symptom:** 32 of the `dEQP-VK.glsl.atomic_operations.*` group's 96
+failures were `vkCreateGraphicsPipelines`-time rejections, not runtime
+`Image mismatch`es -- 16 fragment-stage cases and 16 vertex-stage cases,
+each with a different rejection message.
+
+### L270: SPIR-V `HelperInvocation` builtin misclassified as a `Location`-less user varying
+
+**Root cause:** SPIR-V's `BuiltIn HelperInvocation` (`gl_HelperInvocation`,
+code 23) was unmapped in `getSystemValueForBuiltIn`, so
+`canonicalizeSPIRVStage`'s discovery loop fell through to treating it as
+an ordinary user varying -- but it has no `Location` decoration at all
+(glslang never gives one to a `gl_*` builtin), so it was added to
+`InputGlobals` with no `Location`, and `validateStageInterfaces` rejected
+the pipeline outright. Every `dEQP-VK.glsl.atomic_operations.*_fragment`
+case statically reads this builtin, since glslang always guards a
+fragment shader's SSBO/image read-modify-write with
+`if (!gl_HelperInvocation) { ... }`.
+
+**Fix:** special-cased `BuiltIn == 23` in the discovery loop to skip the
+ordinary `InputGlobals`/`SignatureElement` path entirely (tracked instead
+in a new `HelperInvocationGlobals` set), and intercepted its loads
+directly in the load-rewrite loop, replacing them with
+`createStageIsHelper()` -- the same `feme.stage.is_helper` op DXIL's own
+`IsHelperLane` opcode already raises to, already fully supported end to
+end by the rest of the pipeline (SIMDize/Linearize/ReferenceLowering/
+ValidateStage).
+
+**Unit test:** `RewritesHelperInvocationBuiltinToIsHelperCall`.
+
+### L271: declared-but-never-written vertex-stage output breaks fragment-stage interface linkage
+
+**Root cause:** a vertex-stage `out` varying that is declared (has a
+`Location` decoration) but never actually stored to anywhere in the
+shader body -- legal per the Vulkan spec, whose value is then simply left
+undefined for a later stage to read -- is invisible to
+`canonicalizeSPIRVStage`'s ordinary load/store-walk discovery loop, since
+there is no instruction to discover it through. This left the global with
+no `SignatureElement` at all, and the fragment stage's own genuinely
+`Location`-matching input had nothing to link against, rejected with
+`"fragment input location N has no matching vertex stage output"`. This
+is exactly the shape `dEQP-VK.glsl.atomic_operations.*_vertex`'s own
+`outData` output is: the CTS's `ShaderExecutor` framework always declares
+one `layout(location=N) out` variable per output and links a later
+stage's input against the same location, whether or not the shader body
+actually assigns it.
+
+**Fix:** added a fallback discovery loop, gated by two conditions to
+avoid mis-firing on two distinct near-identical-looking shapes that are
+*not* this case:
+
+- Only runs on a genuinely first canonicalization pass over the function
+  (`!dxil::getEntrySignature(F).has_value()`). `GraphicsPipeline.cpp`
+  invokes `CanonicalizeStagePass` twice per compiled stage as a
+  documented no-op repeat; on the second pass the original store has
+  already been rewritten and erased, but the now-orphaned
+  `GlobalVariable` declaration survives with its `!spirv.Decorations`
+  metadata intact -- without this guard the loop rediscovers it and
+  appends a spurious duplicate `SignatureElement`, corrupting the
+  signature. This crashed `dEQP-VK.glsl.atomic_operations.
+  add_signed_geometry` outright (a previously-*passing* case) before the
+  guard was added.
+- Only runs for `SPIRVCanonicalPhase::Ordinary`, never either hull split
+  phase. `splitBarrierlessTessellationControlEntry` clones a barrierless
+  mixed-frequency hull entry into control-point/patch-constant functions
+  sharing the same `GlobalVariable`s, each pruning the other phase's own
+  stores. By the time the patch-constant phase's own canonicalization
+  runs, a genuine per-control-point output its own prune removed every
+  store to already has zero uses anywhere in the module --
+  indistinguishable from a truly-never-written global by `use_empty()`
+  alone, but it belongs solely to its control-point sibling's
+  already-built signature. This regressed
+  `HullStageDoesNotPeelPatchTessFactorOutputRowCount` and 4 sibling
+  `NoBarrier*` unit tests before the `Phase == Ordinary` restriction was
+  added.
+
+**Unit tests:** `RecordsDeclaredButNeverWrittenOutputAsSignatureElement`,
+`SecondCanonicalizePassDoesNotDuplicateUnwrittenOutputElement`; full
+`CanonicalizeStageTest`/`ValidateStageTest` suite (124 tests) re-run
+green after both guards landed.
+
+**`check-feme`:** 3,427 Passed (+3 net new unit tests vs. L269's 3,424
+baseline), 61 Unsupported, 0 Failed (no regressions).
+
+**Targeted CTS re-run:** full `dEQP-VK.glsl.atomic_operations.*` group
+(1,040 cases): **128 Pass / 64 Fail / 848 NotSupported**, up from 96
+Pass / 96 Fail / 848 NotSupported (the full expected 32-case delta
+across L270+L271 combined). `dEQP-VK.tessellation.user_defined_io.*`
+(54 cases, the hull-split family the L271 regression touched) re-run at
+**100% Pass**, confirming no regression from the `Phase == Ordinary`
+guard.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change -- both are internal compiler-pass correctness fixes widening
+coverage of already-exposed core GLSL stage-IO semantics, not a new
+feature/extension.
+
+**Remaining `atomic_operations` residual:** 64 Fail still outstanding
+(the group's 96-case triage started at 96, so 64 of the *original* 96 are
+still unfixed) -- these are believed to be the runtime `Image mismatch`
+half rather than pipeline-creation rejections, not yet individually
+triaged past this session's initial fragment/vertex stage-linkage split;
+worth a dedicated follow-up session.
