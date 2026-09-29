@@ -4442,3 +4442,101 @@ surface change.
 **Not attempted this session:** `L262` (integer-sampler Bias/Grad
 gate), `L263` (the remaining, smaller `L258` clusters: `builtin`,
 `atomic_operations`, `matrix`, etc.), `L260` (carried over, untouched).
+
+## L262: integer-sampler (`isampler`/`usampler`) `Bias`/`Grad`/`MinLodClamp` gap -- fixed for 5 of 7 shapes, `Cube`/`CubeArray` deferred as `L264`
+
+`SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses` unconditionally
+rejected any sample against an integer-channel (`isampler`/`usampler`)
+image where `HasBias`/`HasGrad`/`HasMinLodClamp` was set, with a code
+comment claiming SPIR-V forbids this combination alongside integer-format
+sampling's own mandatory `VK_FILTER_NEAREST`. This premise was wrong:
+`NEAREST` filtering only means no *blending* between taps/levels once the
+level is chosen -- it says nothing about *how* that level itself is
+selected, and GLSL legally emits `Bias`/`Grad`/`MinLod` against a
+`gsampler` family sampler (confirmed via real CTS test source,
+`vktShaderRenderTextureFunctionTests.cpp`, and by the failing-case-name
+pattern: `texture`/`textureoffset`/`textureoffsetclamp`/`textureclamp`'s
+int-sampler failures were 100% `_bias_`-suffixed;
+`texturegrad`/`texturegradoffset`/`texturegradclamp`/
+`texturegradoffsetclamp`'s were 100% Grad).
+
+**Fix**, scoped to the 5 highest-value shapes (`Plain1D`/`Array1D`/
+`Plain2D`/`Array2D`/`Plain3D`, ~97% of the ~739 real CTS cases in this
+gap's population; `Cube`/`CubeArray` deferred to `L264`):
+
+- `hasOnlySupportedImageUses`: new `ShapeSupportsBiasGradMinLod` gate
+  accepts `HasBias`/`HasGrad`/`HasMinLodClamp` for the 5 shapes above,
+  still rejects for `Cube`/`CubeArray`.
+- `ImageCalls.h`/`.cpp`: widened all 5 non-Cube `createSample*I32`
+  builders with real derivative (`DUdX`/`DUdY`/`DVdX`/`DVdY`/etc.)/
+  `UseExplicitLod`/`Bias`/`MinLodClamp` operands, mirroring their float
+  counterparts exactly (minus `Dref`). Also required fixing
+  `matchImageCall`'s own independent `arg_size()`/operand-index switch
+  for each of the 5 kinds -- an easy-to-miss second spot, caught only
+  because pre-existing unit tests failed to compile against the new
+  builder signatures; `matchImageCall` itself has no compile-time link
+  to the builders and silently returns `std::nullopt` on a mismatch
+  rather than failing loudly.
+- `SPIRVResourceLowering.cpp`'s `lowerImageAccesses`: rewrote the
+  `isV4I32(...)` dispatch's 5 non-Cube branches to synthesize/extract
+  real derivatives and a real `Bias`/`MinLodClamp`, threading them into
+  the widened builders.
+- `FeMeRuntimeCPU.c`: widened the 5 `femeCpuImageSample*I32` functions to
+  compute a real `ClampedLod` -- `femeRTPlanImplicitLod` (2D/2DArray,
+  using only `.ClampedLod`) or `femeRTPlanImplicitLod1D`/
+  `femeRTPlanImplicitLod3D` (1D/1DArray/3D, followed by a separate
+  `femeRTComputeClampedLod` call, since those two helpers return a raw
+  unclamped LOD rather than a full plan struct) for implicit-LOD, or
+  `femeRTComputeClampedLod` directly for explicit-LOD -- then still fetch
+  only the single nearest tap at that level (anisotropic multi-tap
+  footprint is deliberately discarded, since Vulkan mandates `NEAREST`
+  filtering/mipmapping for any `VkSampler` bound to an integer-format
+  image regardless of the sampler's own anisotropy settings).
+
+**Verification:**
+
+- Full `dEQP-VK.glsl.*` re-run (28,420 cases): **17,867 Pass / 1,590
+  Fail / 8,963 NotSupported** -- exactly the predicted -598-Fail delta
+  from `L258`'s 17,269/2,188/8,963 baseline (matches this session's own
+  pre-computed prediction to the case), confirming no unexpected
+  knock-on regressions elsewhere in the sweep.
+- Targeted caselist (`texturebias`/`texturegrad`, all `isampler*`/
+  `usampler*` variants, 66 cases): **30/30 pass** across the 5 widened
+  shapes (was 0/30); the only 12 remaining failures in that caselist are
+  exactly the deferred `texturegrad.*samplercube*`/
+  `texturegrad.*samplercubearray*` cases (`VK_ERROR_INITIALIZATION_FAILED`
+  at pipeline creation -- the gate still rejects them, as designed,
+  pending `L264`), confirming clean isolation with zero cross-shape
+  regressions.
+- Full `dEQP-VK.glsl.texture_functions.*` group re-run (7,946 cases):
+  3,767 Pass / 168 Fail / 4,011 NotSupported; the 168 fails cluster
+  entirely into pre-existing, unrelated gaps (multisample
+  `texturesizems`/`imagesizems` query cases, `texturequerylod` Cube/
+  CubeArray/3D `_clamp` cases, and the same 12
+  `texturegrad`/`texturegradclamp`-Cube/CubeArray cases the targeted
+  caselist already found) -- none are new regressions from this fix.
+
+**Unit tests:** 12 existing `SPIRVResourceLoweringTest` cases had their
+hardcoded operand-index assertions widened to match the new argument
+layout (no new pass/fail semantics changed, just index shifts); 6
+`ImageCallsTest` cases updated/added (`MatchesSample2DI32CallWithBias`
+new); 2 new `ImageSamplingTest` runtime-level cases
+(`SampleI32BiasSelectsCoarserMipLevel`, `SampleI32GradSelectsCoarserMipLevel`)
+directly confirm `Bias`/`Grad` now shift the selected mip level for an
+integer-format image, not just compile/lower correctly; 3 pre-existing
+`ImageSamplingTest` cases' call sites updated for the widened
+`femeCpuImageSample2DV4I32` runtime signature.
+
+`ninja check-feme`: 3,409 Passed / 61 Unsupported / 0 Failed (net new
+unit tests, no regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal sampling-correctness fix to already-exposed core GLSL
+functionality (`isampler`/`usampler` types, already listed), no
+feature-bit or extension surface change.
+
+**Deferred:** `L264` (the same widening for `Cube`/`CubeArray`, ~24
+cases/~3% of this gap's original population) and `L263` (the `L258`
+sweep's remaining untriaged clusters: `builtin` (now likely the largest
+remaining chunk), `atomic_operations`, `matrix`, etc.) are unstarted.
+`L260` (carried over, untouched).
