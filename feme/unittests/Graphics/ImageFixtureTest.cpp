@@ -325,6 +325,38 @@ TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2SnormNegative) {
   EXPECT_NEAR(Unpacked[3], -1.0, 0.01);
 }
 
+// (Roadmap L260) `R10G10B10A2_SNORM`'s 2-bit alpha channel is coarse
+// enough that a blit's bilinear blend regularly lands *exactly* on a
+// round-half tie (`0.5`); the Vulkan spec's fixed-point conversion
+// formula mandates "round to nearest, ties to even" for this case, not
+// "ties away from zero" -- found via a real CTS image-comparison
+// mismatch (`dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.
+// color.2d.astc_5x5_unorm_block.a2b10g10r10_snorm_pack32.
+// general_general_linear`'s single differing pixel, alpha diff exactly
+// 1.0 -- `packClearColor` rounded a blended `0.5` alpha up to the
+// odd `1`, the reference rounded it down to the even `0`).
+TEST(ImageFixtureTest, PacksR10G10B10A2SnormAlphaTieToEven) {
+  std::array<uint8_t, 4> Texel{};
+  // `0.5` normalized alpha ties exactly between the 2-bit field's two
+  // representable positive-side codes (raw `0` and raw `1`, since the
+  // field's own scale is `2^(2-1)-1 == 1`); `0` is even, so that's the
+  // spec-correct result, not `1`.
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_SNORM,
+                                   {0.0, 0.0, 0.0, 0.5}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ((Word >> 30) & 0x3, 0u); // A ties to the even code (0), not 1.
+
+  // `-0.5` likewise ties between raw `0` and raw `-1`; `0` is still the
+  // even choice.
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_SNORM,
+                                   {0.0, 0.0, 0.0, -0.5}, Texel),
+                    Succeeded());
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ((Word >> 30) & 0x3, 0u); // A ties to the even code (0), not -1.
+}
+
 // (Roadmap L251) `R10G10B10A2_SINT` (`VK_FORMAT_A2B10G10R10_SINT_PACK32`
 // maps onto this same `ResourceFormat`): same packed-word layout as
 // `R10G10B10A2_SNORM` above, but each field holds its raw signed integer

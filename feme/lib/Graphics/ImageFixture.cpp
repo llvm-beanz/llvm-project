@@ -71,6 +71,24 @@ uint16_t floatToHalfBits(float F) {
   return static_cast<uint16_t>(Value.bitcastToAPInt().getZExtValue());
 }
 
+/// (Roadmap L260) Rounds \p V to the nearest integer using "round to
+/// nearest, ties to even" -- the rounding mode the Vulkan spec's own
+/// fixed-point conversion formulas require (see e.g. 46.2 "Conversion
+/// from Floating-Point to Normalized Fixed-Point"), *not*
+/// `std::lround`'s "ties away from zero" (a C-standard-mandated
+/// behavior that ignores the current floating-point rounding-direction
+/// mode entirely). `std::llrint` instead honors that mode, which
+/// defaults to `FE_TONEAREST` (round-to-nearest-even) in every
+/// environment this ICD runs in. The difference is invisible for wide
+/// channels (a tie is astronomically rare once divided down into a
+/// 16-/10-/8-bit field), but `R10G10B10A2_SNORM`'s 2-bit alpha channel
+/// has so few representable values that a tie (`V == 0.5`) is common in
+/// practice -- `std::lround` rounding it up to `1` when the spec (and
+/// every other conformant driver) rounds it down to the even `0` is
+/// exactly the CTS `a2b10g10r10_snorm_pack32` off-by-one-ULP alpha
+/// mismatch this fixes.
+int64_t roundTiesToEven(double V) { return std::llrint(V); }
+
 /// (Roadmap H8q) Returns `floor(log2(X))` for a finite, positive `double`
 /// `X`, via `std::frexp` (which returns a mantissa in `[0.5, 1.0)` and an
 /// exponent `E` such that `X == mantissa * 2^E`, so `E - 1` is the floor)
@@ -560,20 +578,26 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
   // `2^(bits-1)-1` SNORM convention every other format here already
   // follows, e.g. `R16G16B16A16_SNORM`'s `32767 == 2^15-1` below) before
   // being masked down to its field's own bit width for two's-complement
-  // packing.
+  // packing. (Roadmap L260) Uses `roundTiesToEven`, not `std::lround`:
+  // the 2-bit alpha channel's own tie (`V == 0.5`) is common enough in
+  // practice (e.g. a blit's bilinear blend landing exactly halfway
+  // between two source texels' alpha) to be the dominant real-world
+  // case, unlike the 10-bit RGB channels' own effectively-unreachable
+  // tie -- both channels use the spec-mandated rounding mode here for
+  // consistency, even though only the 2-bit one is ever observable.
   if (Format == ResourceFormat::R10G10B10A2_SNORM) {
     if (Clear.size() != 4)
       return createStringError(inconvertibleErrorCode(),
                                "clear color has %zu component(s), expected 4",
                                Clear.size());
     auto Norm10 = [](double V) -> uint32_t {
-      int32_t Signed =
-          static_cast<int32_t>(std::lround(std::clamp(V, -1.0, 1.0) * 511.0));
+      int32_t Signed = static_cast<int32_t>(
+          roundTiesToEven(std::clamp(V, -1.0, 1.0) * 511.0));
       return static_cast<uint32_t>(Signed) & 0x3FFu;
     };
     auto Norm2 = [](double V) -> uint32_t {
-      int32_t Signed =
-          static_cast<int32_t>(std::lround(std::clamp(V, -1.0, 1.0) * 1.0));
+      int32_t Signed = static_cast<int32_t>(
+          roundTiesToEven(std::clamp(V, -1.0, 1.0) * 1.0));
       return static_cast<uint32_t>(Signed) & 0x3u;
     };
     // VK_FORMAT_A2B10G10R10_SNORM_PACK32: from the MSB down, 2 bits of A,
