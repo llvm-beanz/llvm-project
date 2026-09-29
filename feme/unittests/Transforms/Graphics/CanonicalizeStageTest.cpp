@@ -2797,6 +2797,78 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SawStore, 2u);
 }
 
+/// (Roadmap L257) `dEQP-VK.glsl.indexing.varying_array.
+/// vec2_dynamic_write_dynamic_read`'s own real shape: a same-invocation
+/// write-then-read-back through a genuinely dynamic *array-element* (row)
+/// index into a `vec2 var[4]` varying -- `var[dynamicIdx] = ...;
+/// ...; = var[dynamicIdx]` -- rather than a dynamic vector-lane
+/// (`Component`) select. This compiles to the exact same synthetic `[N x
+/// i8]` byte-flattened `getelementptr` shape
+/// `OutputReadBackResolvesThroughDynamicComponentByteGEP` above covers,
+/// but with `N` == 8 (one `vec2` row's own byte size) rather than `N` ==
+/// 4 (one scalar lane's own byte size): before this fix,
+/// `getDynamicRowIndexedAccess` did not tell the two apart at all,
+/// unconditionally treating the dynamic index as a `Component` (a lane
+/// select within row 0) regardless of `N`, silently mis-targeting every
+/// whole-row dynamic-array-index write at row 0's own first lane instead
+/// of the real dynamically-selected row -- producing a wrong (but not
+/// crashing) `Image mismatch`, not a compile-time or runtime error.
+TEST(CanonicalizeStageTest,
+     OutputReadBackResolvesThroughDynamicRowByteGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_var = external addrspace(8) global [4 x <2 x float>], !spirv.Decorations !0
+    define void @main(i64 %row, <2 x float> %v) #0 {
+      %p = getelementptr [8 x i8], ptr addrspace(8) @out_var, i64 %row
+      store <2 x float> %v, ptr addrspace(8) %p
+      %r = load <2 x float>, ptr addrspace(8) %p
+      %r2 = fadd <2 x float> %r, <float 1.000000e+00, float 1.000000e+00>
+      store <2 x float> %r2, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No `feme.stage.input.load` at all: the read-back resolves directly
+  // to the shadowed stored value, exactly like the plain-scalar and
+  // dynamic-component cases above. No raw load/store of `@out_var` (or a
+  // GEP into it) survives either.
+  unsigned SawStore = 0;
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(SI->getPointerOperand()));
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      EXPECT_FALSE(isa<GlobalVariable>(LI->getPointerOperand()));
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind))
+      continue;
+    EXPECT_NE(Kind, StageOpKind::InputLoad);
+    if (Kind == StageOpKind::OutputStore) {
+      ++SawStore;
+      // `Row` (operand 1) is genuinely dynamic -- the real target row,
+      // not folded into a constant `0` -- for every lane's own store
+      // (the `vec2` element is decomposed into one `OutputStore` per
+      // lane, each sharing the same dynamic `Row`). `Component`
+      // (operand 2) is a plain constant lane index (`0` or `1`), not
+      // itself dynamic: the whole row is dynamically selected, but each
+      // lane within it is still enumerated at compile time, the
+      // opposite of `OutputReadBackResolvesThroughDynamicComponentByte
+      // GEP` above (constant `Row`, dynamic `Component`).
+      EXPECT_FALSE(isa<Constant>(CI->getArgOperand(1)));
+      EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(2)));
+    }
+  }
+  // Two top-level (store, read-back-modify-store) writes, each split
+  // into one `OutputStore` per `vec2` lane.
+  EXPECT_EQ(SawStore, 4u);
+}
+
 /// (Roadmap H4a) A SPIR-V `TessellationControl` entry point with no
 /// `OpControlBarrier` (`llvm.spv.group.memory.barrier.with.group.sync`) at
 /// all needs no splitting: `canonicalizeSPIRVHullStage` treats the whole

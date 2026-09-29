@@ -2364,14 +2364,56 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
       // `ElementID`) or any other shape is left for a future extension
       // (out of `L137`'s own scope): returns `std::nullopt`, exactly
       // like every other unrecognized pointer this function rejects.
+      //
+      // (Roadmap L257) This same synthetic `[N x i8]` byte-flattened GEP
+      // shape is *also* what a genuinely dynamic *array-element* index
+      // into an array-of-vector varying compiles to -- e.g. `vec2
+      // var[4]; ...; var[dynamicIdx] = ...`
+      // (`dEQP-VK.glsl.indexing.varying_array.vec2_dynamic_write_
+      // dynamic_read`'s own real shape) -- not just a dynamic vector-
+      // lane select. The two are told apart by `N` itself: a lane select
+      // has `N` == one scalar lane's own byte size (`4` for an
+      // `f32`/`i32` lane, this whole function's original, only
+      // previously-modeled shape); a whole-row (array-element) select
+      // instead has `N` == that *array level's own element size* (`8`
+      // for a `vec2` row, confirmed against this exact CTS case's real
+      // compiled IR). Walking `GV`'s own array levels below checks each
+      // level's element size against `N` as it goes, and folds the
+      // level whose size matches into `Terms` as a genuine dynamic `Row`
+      // term (with `DynamicComponent` left null, since the whole row --
+      // not a further lane within it -- was already what `DynamicLane`
+      // selected) rather than misattributing it to `DynamicComponent`
+      // unconditionally regardless of `N`, as this function did before
+      // this fix (leaving every whole-row dynamic-array-index write
+      // silently mis-targeted at whatever row 0's own first lane
+      // happened to be, rather than the real target row).
       Type *Ty = GV->getValueType();
       uint64_t Row = 0;
       uint64_t Residual = ByteOffset;
+      Value *DynamicRowIndex = nullptr;
+      uint64_t DynamicRowMultiplier = 1;
       while (auto *ArrTy = dyn_cast<ArrayType>(Ty)) {
         uint64_t ElemSize =
             DL.getTypeAllocSize(ArrTy->getElementType()).getFixedValue();
         if (!ElemSize)
           return std::nullopt;
+        if (!DynamicRowIndex && ElemSize == ByteArrTy->getNumElements()) {
+          // `DynamicLane` itself selects this array level's own instance
+          // index, not a byte residual -- do not consume `Residual` for
+          // it. Bail rather than risk a mis-flattened `Row` if another
+          // *further-nested* array level would need walking too (not
+          // exercised by any real shape yet): only a single, outermost
+          // dynamically-indexed array level (with any further nesting
+          // strictly constant, i.e. this loop's next iteration lands
+          // directly on `ArrTy`'s own element type below) is modeled.
+          DynamicRowIndex = DynamicLane;
+          DynamicRowMultiplier =
+              getStageIORowShape(ArrTy->getElementType()).RowCount;
+          Ty = ArrTy->getElementType();
+          if (isa<ArrayType>(Ty))
+            return std::nullopt;
+          continue;
+        }
         uint64_t Idx = Residual / ElemSize;
         if (Idx >= ArrTy->getNumElements())
           return std::nullopt;
@@ -2379,9 +2421,23 @@ getDynamicRowIndexedAccess(Value *Ptr, const DataLayout &DL,
         Residual -= Idx * ElemSize;
         Ty = ArrTy->getElementType();
       }
-      if (!isa<FixedVectorType>(Ty) || Residual != 0)
+      if (Residual != 0)
         return std::nullopt;
       SmallVector<std::pair<Value *, uint64_t>, 2> Terms;
+      if (DynamicRowIndex) {
+        if (!isa<FixedVectorType>(Ty) && !Ty->isFloatingPointTy() &&
+            !Ty->isIntegerTy())
+          return std::nullopt;
+        if (Row)
+          Terms.emplace_back(
+              ConstantInt::get(Type::getInt32Ty(Ptr->getContext()), Row),
+              DynamicRowMultiplier);
+        Terms.emplace_back(DynamicRowIndex, DynamicRowMultiplier);
+        return DynamicRowIndexedAccess{GV, /*Member=*/0, std::move(Terms),
+                                       /*DynamicComponent=*/nullptr};
+      }
+      if (!isa<FixedVectorType>(Ty))
+        return std::nullopt;
       if (Row)
         Terms.emplace_back(
             ConstantInt::get(Type::getInt32Ty(Ptr->getContext()), Row), 1);
