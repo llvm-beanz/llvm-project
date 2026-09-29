@@ -1354,12 +1354,13 @@ TEST_F(ImageCallsTest, MatchesSample3DI32Call) {
 }
 
 TEST_F(ImageCallsTest, MatchesSampleCubeI32Call) {
-  // Roadmap L125(b): the `Cube` counterpart of `MatchesSample3DI32Call`
-  // above, confirming `matchImageCall`'s new `SampleCubeI32` case
-  // extracts `U`/`V`/`W` as the `(DirX, DirY, DirZ)` direction vector
-  // (mirroring `SampleCube`'s own identical field-reuse convention) and
-  // no `OffsetX`/`OffsetY`/`OffsetZ` at all (`Dim::Cube` forbids
-  // `ConstOffset` outright).
+  // Roadmap L125(b), widened by L264: the `Cube` counterpart of
+  // `MatchesSample3DI32Call` above, confirming `matchImageCall`'s new
+  // `SampleCubeI32` case extracts `U`/`V`/`W` as the `(DirX, DirY, DirZ)`
+  // direction vector (mirroring `SampleCube`'s own identical field-reuse
+  // convention), the 6 derivative operands, `UseExplicitLod`/`Bias`/
+  // `MinLodClamp`, and no `OffsetX`/`OffsetY`/`OffsetZ` at all
+  // (`Dim::Cube` forbids `ConstOffset` outright).
   IRBuilder<> Builder(BB);
   ImageCallEnv Env = makeEnv(Builder);
   CallInst *CI = createSampleCubeI32(
@@ -1367,7 +1368,16 @@ TEST_F(ImageCallsTest, MatchesSampleCubeI32Call) {
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 0.25),
       ConstantFP::get(Builder.getFloatTy(), 0.125),
-      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true));
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -1384,13 +1394,14 @@ TEST_F(ImageCallsTest, MatchesSampleCubeI32Call) {
   EXPECT_EQ(Matched->V, ConstantFP::get(Builder.getFloatTy(), 0.25));
   EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.125));
   EXPECT_EQ(Matched->Lod, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(true));
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
   EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));
 }
 
 TEST_F(ImageCallsTest, MatchesSampleCubeArrayI32Call) {
-  // Roadmap L125(b): the `CubeArray` counterpart of
+  // Roadmap L125(b), widened by L264: the `CubeArray` counterpart of
   // `MatchesSampleCubeI32Call` above, confirming `matchImageCall`'s new
   // `SampleCubeArrayI32` case extracts `U`/`V`/`W` as the direction
   // vector (same field-reuse convention) plus `ArrayLayer` as a fourth
@@ -1403,8 +1414,17 @@ TEST_F(ImageCallsTest, MatchesSampleCubeArrayI32Call) {
       ConstantFP::get(Builder.getFloatTy(), 0.5),
       ConstantFP::get(Builder.getFloatTy(), 0.25),
       ConstantFP::get(Builder.getFloatTy(), 0.125),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
       ConstantFP::get(Builder.getFloatTy(), 2.0),
-      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true));
+      ConstantFP::get(Builder.getFloatTy(), 0.0), Builder.getInt1(true),
+      ConstantFP::get(Builder.getFloatTy(), 0.0),
+      ConstantFP::getInfinity(Builder.getFloatTy(), /*Negative=*/true),
+      Builder.getInt1(true));
   Builder.CreateRetVoid();
 
   std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
@@ -1422,6 +1442,7 @@ TEST_F(ImageCallsTest, MatchesSampleCubeArrayI32Call) {
   EXPECT_EQ(Matched->W, ConstantFP::get(Builder.getFloatTy(), 0.125));
   EXPECT_EQ(Matched->ArrayLayer, ConstantFP::get(Builder.getFloatTy(), 2.0));
   EXPECT_EQ(Matched->Lod, ConstantFP::get(Builder.getFloatTy(), 0.0));
+  EXPECT_EQ(Matched->UseExplicitLod, Builder.getInt1(true));
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
   EXPECT_TRUE(isa<FixedVectorType>(CI->getType()));
   EXPECT_TRUE(cast<FixedVectorType>(CI->getType())->getElementType()->isIntegerTy(32));

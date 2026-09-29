@@ -1284,37 +1284,44 @@ llvm::CallInst *createSample3DI32(
     llvm::Value *OffsetZ, llvm::Value *MinLodClamp, llvm::Value *Mask,
     const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.sample.cube.v4i32` call (roadmap L125(b)):
-/// the `Cube` counterpart of `createSample2DI32`, mirroring
-/// `createSampleCube`'s own relationship to `createSample2D`. \p DirX/
-/// \p DirY/\p DirZ carry the same direction-vector coordinate
-/// `createSampleCube`'s own identically-named parameters do -- no
-/// derivative, `Bias`, `MinLodClamp`, or offset operand exists (mirroring
-/// every other `*I32` kind's own restriction, and `Dim::Cube`'s own
-/// blanket `ConstOffset` prohibition besides).
-llvm::CallInst *createSampleCubeI32(llvm::IRBuilderBase &Builder,
-                                    const ImageCallEnv &Env,
-                                    llvm::Value *ImageIndex,
-                                    llvm::Value *SamplerIndex,
-                                    llvm::Value *DirX, llvm::Value *DirY,
-                                    llvm::Value *DirZ, llvm::Value *Lod,
-                                    llvm::Value *Mask,
-                                    const llvm::Twine &Name = "");
+/// Builds a `feme.cpu.image.sample.cube.v4i32` call (roadmap L125(b),
+/// widened by L264): the `Cube` counterpart of `createSample2DI32`,
+/// mirroring `createSampleCube`'s own relationship to `createSample2D`. \p
+/// DirX/\p DirY/\p DirZ carry the same direction-vector coordinate
+/// `createSampleCube`'s own identically-named parameters do; \p
+/// DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY,
+/// \p UseExplicitLod, \p Bias, and \p MinLodClamp mirror
+/// `createSampleCube`'s own identically-named operands (see its doc) --
+/// no offset operand exists, since `Dim::Cube` blanket-prohibits
+/// `ConstOffset` regardless of sampled-type.
+llvm::CallInst *createSampleCubeI32(
+    llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+    llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
+    llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+    llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *Lod,
+    llvm::Value *UseExplicitLod, llvm::Value *Bias, llvm::Value *MinLodClamp,
+    llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.sample.cubearray.v4i32` call (roadmap
-/// L125(b)): the `CubeArray` counterpart of `createSampleCubeI32`,
-/// mirroring `createSampleCubeArray`'s own relationship to
-/// `createSampleCube`. \p ArrayLayer joins \p DirX/\p DirY/\p DirZ as a
-/// fourth (float) coordinate operand selecting which six-layer cube
-/// element of the array, mirroring `createSampleCubeArray`'s own
-/// identical `ArrayLayer` operand -- no derivative, `Bias`,
-/// `MinLodClamp`, or offset operand exists, for the same reasons
-/// `createSampleCubeI32` has none.
+/// L125(b), widened by L264): the `CubeArray` counterpart of
+/// `createSampleCubeI32`, mirroring `createSampleCubeArray`'s own
+/// relationship to `createSampleCube`. \p ArrayLayer joins \p DirX/\p
+/// DirY/\p DirZ as a fourth (float) coordinate operand selecting which
+/// six-layer cube element of the array, mirroring
+/// `createSampleCubeArray`'s own identical `ArrayLayer` operand; \p
+/// DDirXdX/\p DDirXdY/\p DDirYdX/\p DDirYdY/\p DDirZdX/\p DDirZdY, \p
+/// UseExplicitLod, \p Bias, and \p MinLodClamp mirror
+/// `createSampleCubeArray`'s own identically-named operands -- no offset
+/// operand exists, for the same reason `createSampleCubeI32` has none.
 llvm::CallInst *createSampleCubeArrayI32(
     llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
     llvm::Value *ImageIndex, llvm::Value *SamplerIndex, llvm::Value *DirX,
-    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *ArrayLayer,
-    llvm::Value *Lod, llvm::Value *Mask, const llvm::Twine &Name = "");
+    llvm::Value *DirY, llvm::Value *DirZ, llvm::Value *DDirXdX,
+    llvm::Value *DDirXdY, llvm::Value *DDirYdX, llvm::Value *DDirYdY,
+    llvm::Value *DDirZdX, llvm::Value *DDirZdY, llvm::Value *ArrayLayer,
+    llvm::Value *Lod, llvm::Value *UseExplicitLod, llvm::Value *Bias,
+    llvm::Value *MinLodClamp, llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call. \p OffsetX/\p OffsetY
 /// (roadmap L50d) are the same `ConstOffset` image operand
