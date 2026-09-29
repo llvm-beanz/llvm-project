@@ -4132,3 +4132,29 @@ Left untouched -- syncing that branch's own XFAIL list is a
 `offload-test-suite`-side task, out of scope for a FeMe code-fix
 session, and not something this session's standing instructions ask
 for beyond re-syncing the branch pointer itself (already done).
+
+## L255: safety-net timeout override (test-infrastructure fix, no CTS behavior change expected)
+
+This row's fix (see `Roadmap.md` `L255`) makes FeMe's hardcoded 5s
+blocking-wait safety-net timeout (`Sync.h`'s former
+`SafetyNetTimeoutNs`) overridable via a new
+`FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` environment variable, to fix a
+`check-hlsl-feme-vk` parallel-execution-only flake
+(`Basic/Mandelbrot.test` hitting the 5s ceiling purely from 12-way host
+scheduling contention, not a real hang). The default (unset) behavior
+is byte-for-byte unchanged, so no CTS regression was expected -- verified
+anyway per standing instructions:
+
+- `dEQP-VK.synchronization.*` (the full suite -- most relevant, since
+  this fix touches `Fence`/`Semaphore`/`QueueExecutor` waits directly):
+  **0 Fail** (18420 Pass, 46452 NotSupported, 64872 total). No
+  timeouts, no hangs, no `DeviceLost`.
+- `dEQP-VK.api.image_clearing.*` (45636 cases, re-run as a general
+  sanity check against `L252`'s last full-suite baseline): **0 Fail**
+  (23028 Pass, 22608 NotSupported) -- identical to the prior session's
+  numbers, confirming no regression.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- this is a test-harness/host-scheduling robustness fix (an
+environment-variable override for an internal safety-net timeout), not
+a feature-bit or extension exposure change.
