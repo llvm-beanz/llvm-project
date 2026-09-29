@@ -4215,3 +4215,78 @@ conversions.matrix_to_matrix` (20), `dEQP-VK.glsl.builtin_var.
 fragdepth` (18), and a long tail of `atomic_operations.*` -- a future
 session should re-run the full 28,420-case sweep now that it no longer
 aborts partway, then triage the largest cluster first).
+
+## L257: `dEQP-VK.glsl.indexing.varying_array.*dynamic*` `Image mismatch` -- `getDynamicRowIndexedAccess` mis-targeting fixed
+
+Root-caused and fixed the 0/48 correctness bug `L256` above uncovered
+once its own crash fix stopped masking it. Started with the single
+simplest failing case, `dEQP-VK.glsl.indexing.varying_array.
+vec2_dynamic_write_dynamic_read` (no loops at all), confirmed via
+`--deqp-log-images=enable` to reproduce as a non-crashing `Fail (Image
+mismatch)`. Read the CTS test-generator source
+(`vktShaderRenderIndexingTests.cpp`) to confirm this test's real shape:
+a dynamic *array-element* (row) index into a `vec2 var[4]` varying
+(`var[dynamicIdx] = ...`), not a dynamic vector-lane/component index.
+
+`FEME_DUMP_IR=1` on this single case showed the compiled (SIMD-widened)
+IR ultimately routes through `getDynamicRowIndexedAccess`'s own
+synthetic-`[N x i8]`-byte-GEP recognizer (originally added for `L137`/
+`L138`'s genuinely-different dynamic vector-*lane*-select shape,
+`fs_in_pos_screen_centroid[1][component]`). That recognizer
+unconditionally folded any such shape's dynamic byte-flattened index
+into `DynamicComponent`, assuming it always selects a lane within a
+fixed row -- but a genuinely dynamic array-element index compiles to
+the *identical* `getelementptr [N x i8], ptr ..., i64 %idx` IR shape,
+distinguished from a true lane select only by `N` itself: a lane select
+has `N` == one scalar lane's own byte size (4 for `f32`/`i32`); a
+whole-row select instead has `N` == that array level's own element
+size (8 for a `vec2` row -- confirmed directly against this case's own
+dumped IR, `getelementptr [8 x i8], ptr addrspace(8) @spirv_var_23, i64
+%N`). Every whole-row dynamic-array-index write was silently
+mis-targeted at row 0's own first lane instead of the real,
+dynamically selected row.
+
+Fixed by walking `GV`'s own array levels in `getDynamicRowIndexedAccess`
+and checking each level's element size against `N`: a matching level's
+own instance index now folds into `Terms`/`Row` (via the same
+`combineDynamicRowTerms` every other dynamic-row shape already uses)
+rather than into `DynamicComponent`.
+
+Verified against the real Vulkan CTS:
+- `vec2_dynamic_write_dynamic_read` (the single simplest case): now
+  **Pass** (was `Fail (Image mismatch)`).
+- `dEQP-VK.glsl.indexing.varying_array.*dynamic*` (the full 48-case
+  bucket): **36/48 Pass** (was 0/48). The remaining 12 failures are all
+  `vec3_*`-suffixed cases -- confirmed via A/B `git stash` testing
+  (rebuilding with and without this fix) to reproduce *identically*
+  either way, i.e. a distinct, pre-existing bug unrelated to this fix.
+  Two of the 12 (`vec3_dynamic_loop_write_dynamic_loop_read`,
+  `vec3_dynamic_write_dynamic_loop_read`) additionally fail *pipeline
+  creation* outright (`feme-graphics-validate-stage: 'feme.stage.
+  {input.load,output.store}' in function 'main' row 4 is out of range
+  for element ...`), not just an image mismatch -- filed as new roadmap
+  row `L259` for a future session (hypothesis: `vec3`'s `std140`-style
+  4-lane storage-alignment padding interacting badly with the dynamic
+  row-count computation somewhere in this same `getDynamicRowIndexedAccess`/
+  `collectDynamicRowTerms` machinery, not yet investigated further).
+
+`FeMeTransformsGraphicsTests`: new unit test
+`CanonicalizeStageTest.OutputReadBackResolvesThroughDynamicRowByteGEP`
+reproduces this exact shape (confirmed, via a temporary `git stash` of
+just the fix, to fail identically to the real CTS case's own
+`Row`/`Component` mis-assignment pre-fix, and pass post-fix), alongside
+the pre-existing sibling
+`OutputReadBackResolvesThroughDynamicComponentByteGEP` (the true
+dynamic-lane-select shape this change must not regress -- still
+passes).
+`check-feme`: 3,403 Passed (+1 net new unit test), 61 Unsupported, 0
+Failed (was 3,402/61/0).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- a compiler-internals (stage-IO canonicalization) correctness fix,
+not a feature-bit or extension exposure change.
+
+**Not attempted this session** (filed as new roadmap rows for a future
+session): `L258` (the full `dEQP-VK.glsl.*` 28,420-case sweep re-run,
+now that neither the crash nor this fix's own scope block it) and
+`L259` (the 2 `vec3_*` pipeline-creation-error cases split out above).
