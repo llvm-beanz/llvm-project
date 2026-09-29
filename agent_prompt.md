@@ -67,10 +67,4 @@ suggested next steps are:
 2. **(a few hours, still overdue)** `L228(e)`/`(f)`: `shader_render`
    and most of `pipeline`'s other sub-suites remain unsampled at any
    real scale.
-3. **(unknown, new, needs investigation)** The `offload-test-suite`
-   `854cc3f`-branch `check-hlsl-feme-vk` 2-fail/1-unexpected-pass
-   regression noted above -- diagnose whether it's a real FeMe gap the
-   branch's new tests now exercise, or purely an XFAIL-list drift on
-   the branch's own side.
-4. No git stashes left open this session (all `git stash push`/`pop`
-   pairs used for A/B testing were popped immediately after use).
+3. No git stashes left open this session.
