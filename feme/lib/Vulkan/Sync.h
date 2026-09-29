@@ -42,7 +42,7 @@
 //
 // Every blocking wait in this file (`Fence::wait`, `Semaphore`'s
 // `waitTimeline`/`waitAndConsumeBinary`, `QueueExecutor::waitIdle`) is
-// clamped to `SafetyNetTimeoutNs` below regardless of what the caller
+// clamped to `getSafetyNetTimeoutNs()` below regardless of what the caller
 // asked for (including a literal `UINT64_MAX` "wait forever" sentinel):
 // generous enough for any real cross-thread dependency this ICD has no
 // real device latency to actually need, but bounded so an unrelated FeMe
@@ -76,26 +76,60 @@
 
 namespace feme::vulkan {
 
-/// (Roadmap L228(h)/(i)) The longest any blocking wait in this file ever
-/// keeps a thread parked on an unmet condition, regardless of what the
-/// caller asked for -- see the file comment.
-constexpr uint64_t SafetyNetTimeoutNs = 5'000'000'000ULL;
+/// (Roadmap L228(h)/(i)) The default value of `getSafetyNetTimeoutNs()`
+/// below -- see that function for why it is a default rather than a
+/// hardcoded bound.
+constexpr uint64_t DefaultSafetyNetTimeoutNs = 5'000'000'000ULL;
+
+/// (Roadmap L228(h)/(i), L252) The longest any blocking wait in this file
+/// ever keeps a thread parked on an unmet condition, regardless of what
+/// the caller asked for -- see the file comment. `DefaultSafetyNetTimeoutNs`
+/// unless overridden by the `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`
+/// environment variable (a positive integer number of milliseconds):
+/// this ICD has no real device latency of its own to need more than the
+/// default, but a *host* machine heavily oversubscribed by many
+/// concurrently-running processes (e.g. a CTS/lit run with as many
+/// parallel workers as CPU cores, each driving its own FeMe process) can
+/// legitimately make one otherwise-unremarkable large dispatch's own
+/// worker thread wait past the default bound purely from scheduling
+/// contention, not a real FeMe hang -- see `Sync.cpp` for the whole story
+/// and how this was found (`dEQP-VK`-adjacent `Basic/Mandelbrot.test`,
+/// roadmap L252). Cached after the first call (unlike
+/// `FEME_VULKAN_LOG_CREATION_ERRORS`'s own uncached, checked-every-call
+/// `Diagnostics.cpp`, whose creation-failure call site is rare enough
+/// that the cost never matters): every one of this file's blocking waits
+/// is frequent enough that an uncached `getenv` per call would be
+/// wasteful, and no real driver run ever toggles this mid-process anyway.
+uint64_t getSafetyNetTimeoutNs();
+
+/// The pure parsing logic `getSafetyNetTimeoutNs()` applies to
+/// `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`'s value, factored out so
+/// `SyncTest.cpp` can exercise every input case directly (unset, empty,
+/// non-numeric, zero/negative, and a valid override) without needing a
+/// real environment variable or fighting `getSafetyNetTimeoutNs()`'s own
+/// process-lifetime cache. \p Env is `nullptr` for "unset". Returns
+/// `DefaultSafetyNetTimeoutNs` for any input that isn't a positive
+/// integer.
+uint64_t parseSafetyNetTimeoutMsEnv(const char *Env);
 
 /// (Roadmap L228(h)/(i)) The bound `QueueExecutor::waitIdle` (and thus
 /// `vkQueueWaitIdle`/`vkDeviceWaitIdle`) uses instead of
-/// `SafetyNetTimeoutNs` directly -- see that method's own comment for why
-/// it must be a generous multiple of a single blocking wait's own bound,
-/// not the same value.
-constexpr uint64_t QueueIdleSafetyNetTimeoutNs = 4 * SafetyNetTimeoutNs;
+/// `getSafetyNetTimeoutNs()` directly -- see that method's own comment
+/// for why it must be a generous multiple of a single blocking wait's
+/// own bound, not the same value.
+inline uint64_t getQueueIdleSafetyNetTimeoutNs() {
+  return 4 * getSafetyNetTimeoutNs();
+}
+
 
 /// (Roadmap L234) The longest `vkWaitForFences`'s `waitAll == VK_TRUE`
 /// path ever blocks on one fence's own `Fence::wait` before re-checking
 /// `Device::isLost()` -- device loss can be latched by a *different*
 /// queue's `QueueExecutor` worker thread at any point during that wait
 /// (e.g. its own submission task's `consumeWaits` giving up after its own
-/// `SafetyNetTimeoutNs`), and checking only once, before the wait starts,
+/// `getSafetyNetTimeoutNs()`), and checking only once, before the wait starts,
 /// let that race delay `VK_ERROR_DEVICE_LOST` behind a full, separate
-/// `SafetyNetTimeoutNs`-long `VK_TIMEOUT` instead.
+/// `getSafetyNetTimeoutNs()`-long `VK_TIMEOUT` instead.
 constexpr uint64_t DeviceLostPollSliceNs = 50'000'000ULL;
 
 /// A `VkFence`: host synchronization state. Signaled by a `QueueExecutor`
@@ -125,7 +159,7 @@ public:
   }
 
   /// Blocks the calling thread until this fence is signaled or \p
-  /// TimeoutNs nanoseconds elapse (already clamped to `SafetyNetTimeoutNs`
+  /// TimeoutNs nanoseconds elapse (already clamped to `getSafetyNetTimeoutNs()`
   /// by the caller, matching `vkWaitForFences`'s own `applyWaitSafetyNet`
   /// use for semaphores). Returns whether it was actually signaled (false
   /// only on a genuine timeout).
@@ -200,7 +234,7 @@ public:
   /// single-threaded driver reaches this check" the way it used to be.
   /// Returns whether the signal was actually observed (false only on a
   /// genuine timeout).
-  bool waitAndConsumeBinary(uint64_t TimeoutNs = SafetyNetTimeoutNs) {
+  bool waitAndConsumeBinary(uint64_t TimeoutNs = getSafetyNetTimeoutNs()) {
     std::unique_lock<std::mutex> Lock(Mutex);
     bool Reached = CV.wait_for(Lock, std::chrono::nanoseconds(TimeoutNs),
                                 [this] { return Value != 0; });
@@ -308,11 +342,11 @@ public:
 
   /// Blocks the calling thread until every task enqueued so far has
   /// completed (`vkQueueWaitIdle`/`vkDeviceWaitIdle`), or
-  /// `QueueIdleSafetyNetTimeoutNs` elapses -- deliberately a generous
-  /// multiple of `SafetyNetTimeoutNs` (rather than that same bound), so
+  /// `getQueueIdleSafetyNetTimeoutNs()` elapses -- deliberately a generous
+  /// multiple of `getSafetyNetTimeoutNs()` (rather than that same bound), so
   /// this can never spuriously time out merely because it happened to be
   /// called at nearly the same moment some already-running task's own
-  /// single blocking wait started its own, independent `SafetyNetTimeoutNs`
+  /// single blocking wait started its own, independent `getSafetyNetTimeoutNs()`
   /// countdown; a queue only ever fails to drain within this longer bound
   /// if a whole *chain* of tasks each separately hit their own safety net,
   /// or a task is genuinely stuck outside any bounded wait at all (a FeMe
@@ -320,9 +354,9 @@ public:
   /// (false only on a genuine timeout).
   bool waitIdle() {
     std::unique_lock<std::mutex> Lock(Mutex);
-    return CV.wait_for(Lock,
-                        std::chrono::nanoseconds(QueueIdleSafetyNetTimeoutNs),
-                        [this] { return Pending == 0; });
+    return CV.wait_for(
+        Lock, std::chrono::nanoseconds(getQueueIdleSafetyNetTimeoutNs()),
+        [this] { return Pending == 0; });
   }
 
 private:

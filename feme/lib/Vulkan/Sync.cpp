@@ -13,13 +13,40 @@
 #include "Objects.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 using namespace feme::vulkan;
 using namespace llvm;
+
+namespace feme::vulkan {
+
+/// Parses `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` (see `Sync.h`'s own doc
+/// comment): unset, empty, non-numeric, or non-positive all mean "use
+/// the default", matching this codebase's usual permissive treatment of
+/// a malformed opt-in environment variable (`FEME_VULKAN_LOG_CREATION_ERRORS`,
+/// `Diagnostics.cpp`) -- a typo here should fall back quietly rather than
+/// crash or misbehave.
+uint64_t parseSafetyNetTimeoutMsEnv(const char *Env) {
+  if (Env && *Env) {
+    uint64_t Ms = 0;
+    if (!StringRef(Env).getAsInteger(10, Ms) && Ms > 0)
+      return Ms * 1'000'000ULL;
+  }
+  return DefaultSafetyNetTimeoutNs;
+}
+
+uint64_t getSafetyNetTimeoutNs() {
+  static const uint64_t TimeoutNs =
+      parseSafetyNetTimeoutMsEnv(std::getenv("FEME_VULKAN_SAFETY_NET_TIMEOUT_MS"));
+  return TimeoutNs;
+}
+
+} // namespace feme::vulkan
 
 namespace {
 
@@ -36,9 +63,9 @@ struct SemaphoreOp {
 
 /// Clamps a caller-supplied timeout (as passed to `vkWaitSemaphores`'s
 /// explicit \p timeout parameter, which may legally be `UINT64_MAX`) to
-/// `SafetyNetTimeoutNs` (`Sync.h`).
+/// `getSafetyNetTimeoutNs()` (`Sync.h`).
 uint64_t applyWaitSafetyNet(uint64_t RequestedTimeoutNs) {
-  return std::min(RequestedTimeoutNs, SafetyNetTimeoutNs);
+  return std::min(RequestedTimeoutNs, getSafetyNetTimeoutNs());
 }
 
 /// Consumes every wait in \p Waits, in order: both a timeline semaphore's
@@ -50,9 +77,10 @@ uint64_t applyWaitSafetyNet(uint64_t RequestedTimeoutNs) {
 /// own worker thread, running concurrently with this one.
 VkResult consumeWaits(ArrayRef<SemaphoreOp> Waits) {
   for (const SemaphoreOp &Op : Waits) {
+    uint64_t TimeoutNs = getSafetyNetTimeoutNs();
     bool Reached = Op.Sem->isTimeline()
-                       ? Op.Sem->waitTimeline(Op.Value, SafetyNetTimeoutNs)
-                       : Op.Sem->waitAndConsumeBinary(SafetyNetTimeoutNs);
+                       ? Op.Sem->waitTimeline(Op.Value, TimeoutNs)
+                       : Op.Sem->waitAndConsumeBinary(TimeoutNs);
     if (!Reached)
       return VK_ERROR_INITIALIZATION_FAILED;
   }

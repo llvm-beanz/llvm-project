@@ -932,4 +932,35 @@ TEST_F(SyncTest, CommandBufferWaitEvents2FailsWhenUnsignaled) {
   vkDestroyEvent(Device, Ev, nullptr);
 }
 
+// (Roadmap L252) `parseSafetyNetTimeoutMsEnv` is exercised directly
+// (rather than through `getSafetyNetTimeoutNs()`, whose value is cached
+// for the lifetime of the process the first time anything in this test
+// binary blocks on a fence/semaphore -- unavoidable given every other
+// test above does exactly that) so every input case is still covered
+// without depending on test order or a real environment variable.
+TEST(SafetyNetTimeoutEnvTest, UnsetFallsBackToDefault) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv(nullptr), DefaultSafetyNetTimeoutNs);
+}
+
+TEST(SafetyNetTimeoutEnvTest, EmptyFallsBackToDefault) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv(""), DefaultSafetyNetTimeoutNs);
+}
+
+TEST(SafetyNetTimeoutEnvTest, NonNumericFallsBackToDefault) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv("not-a-number"),
+            DefaultSafetyNetTimeoutNs);
+}
+
+TEST(SafetyNetTimeoutEnvTest, ZeroFallsBackToDefault) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv("0"), DefaultSafetyNetTimeoutNs);
+}
+
+TEST(SafetyNetTimeoutEnvTest, NegativeFallsBackToDefault) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv("-5"), DefaultSafetyNetTimeoutNs);
+}
+
+TEST(SafetyNetTimeoutEnvTest, ValidOverrideIsHonoredAndConvertedToNs) {
+  EXPECT_EQ(parseSafetyNetTimeoutMsEnv("30000"), 30'000'000'000ULL);
+}
+
 } // namespace

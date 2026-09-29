@@ -1217,7 +1217,7 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
   // `vkQueueSubmit`'s deferred `QueueExecutor` task, and -- since
   // `vkWaitForFences` only checked device-lost once, before starting its
   // own blocking `Fence::wait` -- that race left the case blocked for
-  // the full `SafetyNetTimeoutNs` (`Sync.h`) before reporting a
+  // the full `getSafetyNetTimeoutNs()` (`Sync.h`) before reporting a
   // misleading `VK_TIMEOUT` instead of `VK_ERROR_DEVICE_LOST`.
   if (Format == ResourceFormat::R8G8B8A8_SNORM) {
     for (unsigned I = 0; I != Info->Components; ++I) {
