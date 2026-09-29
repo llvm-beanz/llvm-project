@@ -7390,6 +7390,48 @@ TEST(SPIRVResourceLoweringTest,
 }
 
 TEST(SPIRVResourceLoweringTest,
+     LowersPlain2DUnsignedIntegerSampledQueryLod) {
+  // Roadmap L267: GLSL's own `textureQueryLod()` overload set explicitly
+  // includes every `gsampler*` shape (`isampler*`/`usampler*`, not just
+  // `sampler*` -- confirmed against the GLSL 4.60 spec's own
+  // `textureQueryLod` prototype list), and `OpImageQueryLod`'s own result
+  // is always a `<2 x float>` LOD pair regardless of the queried image's
+  // sampled-channel type (mip selection is a pure function of an image's
+  // coordinate/derivatives and dimensions, never its texel format) --
+  // this used to be incorrectly rejected as an "unsupported raised
+  // operation" (a real `dEQP-VK.glsl.texture_functions.query.
+  // texturequerylod.usampler2d_fragment` repro, matching every other
+  // `usampler*`/`isampler*` shape in the same CTS group) before this
+  // test's own fix, `hasOnlySupportedImageUses` no longer special-cases
+  // `IsInteger` for this op at all -- mirroring `isGatherIntrinsic`'s own
+  // roadmap L125(k) precedent lifting the same stale rejection.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", i32, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32"));
+  EXPECT_TRUE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
      LowersCubeQueryLodToImageQueryLodCubeWithDirectionVector) {
   // Roadmap H124u: `Cube`'s own `CalculateLevelOfDetail` (an
   // `OpImageQueryLod` against a `TextureCube`) -- unlike `Plain2D`/

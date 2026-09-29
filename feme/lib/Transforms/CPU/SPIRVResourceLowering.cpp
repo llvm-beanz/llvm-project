@@ -2075,15 +2075,29 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    // Roadmap L52e/H124t/H124u/L194/L229: `OpImageQueryLod`'s own two
-    // intrinsic halves (`calculate.lod`/`calculate.lod.unclamped`),
+    // Roadmap L52e/H124t/H124u/L194/L229/L267: `OpImageQueryLod`'s own
+    // two intrinsic halves (`calculate.lod`/`calculate.lod.unclamped`),
     // scoped to `Plain2D`/`Array2D`/`Cube`/`CubeArray`/`Plain1D`/
     // `Array1D`/`Plain3D` -- mirroring this same narrowing's precedent
     // (e.g. roadmap L46's own initial `Plain2D`-only
-    // depth-comparison-sample scope, later widened by L48). An
-    // integer-channel image is rejected the same way an ordinary/dref
-    // sample is above -- SPIR-V never legalizes `OpImageQueryLod`
-    // against one either. Unlike an ordinary sample, `OpImageQueryLod`'s
+    // depth-comparison-sample scope, later widened by L48). Unlike an
+    // ordinary/dref sample above, an integer-channel image is *not*
+    // rejected here: GLSL's own `textureQueryLod()` overload set
+    // explicitly includes every `gsampler*` shape (`isampler*`/
+    // `usampler*`, not just `sampler*` -- confirmed against the GLSL
+    // 4.60 spec's own `textureQueryLod` prototype list, and against
+    // `vktShaderRenderTextureFunctionTests.cpp`'s own
+    // `usampler2d`/`usamplercube`/... cases, which is exactly what
+    // roadmap L267's `dEQP-VK.glsl.texture_functions.query.
+    // texturequerylod.usampler*` residual failures exercised), and
+    // `OpImageQueryLod`'s own result is always a `<2 x float>` LOD pair
+    // regardless of the queried image's sampled-channel type (mip
+    // selection is a pure function of an image's coordinate/derivative
+    // and its dimensions, never its texel format) -- so the runtime
+    // `createQueryLod*` call this recognizes below never needs to know
+    // `IsInteger` at all, exactly like `isGatherIntrinsic`'s own
+    // roadmap L125(k) precedent lifting the same stale rejection.
+    // Unlike an ordinary sample, `OpImageQueryLod`'s
     // own coordinate is always exactly 2 components against a
     // `Plain2D`/`Array2D` handle (`Texture2DArray::
     // CalculateLevelOfDetail`'s own HLSL signature has no slice argument
@@ -2110,11 +2124,10 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // value.
     bool Unclamped = false;
     if (isQueryLodIntrinsic(*CI, Unclamped)) {
-      if (IsInteger ||
-          (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
-           Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
-           Shape != ImageShape::Plain1D && Shape != ImageShape::Array1D &&
-           Shape != ImageShape::Plain3D))
+      if (Shape != ImageShape::Plain2D && Shape != ImageShape::Array2D &&
+          Shape != ImageShape::Cube && Shape != ImageShape::CubeArray &&
+          Shape != ImageShape::Plain1D && Shape != ImageShape::Array1D &&
+          Shape != ImageShape::Plain3D)
         return false;
       if (CI->getArgOperand(0) != &Handle)
         return false;
@@ -4933,9 +4946,11 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L52e: `OpImageQueryLod`'s clamped/unclamped intrinsic
-      // halves (`hasOnlySupportedImageUses` already restricts this to
-      // `Plain2D`, non-integer). Unlike an ordinary sample,
+      // Roadmap L52e/L267: `OpImageQueryLod`'s clamped/unclamped
+      // intrinsic halves (`hasOnlySupportedImageUses` already restricts
+      // this to the shapes listed above, with no channel-type
+      // restriction -- see that check's own updated doc). Unlike an
+      // ordinary sample,
       // `OpImageQueryLod` always measures the implicit LOD a
       // coordinate's own derivatives would produce -- there is no
       // explicit-LOD form to fall back to -- so derivatives are
