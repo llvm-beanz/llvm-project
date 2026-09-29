@@ -61,25 +61,39 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged chunk)** `L263`: re-triage the
-   `L258`/`L261`/`L262`/`L264`-era residual `dEQP-VK.glsl.*` fail clusters
-   against a fresh full sweep (last real full-sweep tally was `L262`'s
-   17,867/1,590/8,963 -- this session's fix should shave off another ~24, worth
-   confirming with a fresh run rather than assuming). `builtin.function` (403 in
-   the last partial sample) and `atomic_operations` (96) are the two biggest
-   untriaged buckets.
-2. **(unknown, several sessions carried over)** `L260`:
-   `a2b10g10r10_snorm_pack32` alpha-channel SNORM-packing bug in
-   `ImageFixture.cpp`'s `packClearColor`/`unpackColor`. Still not started.
-3. **(a few hours, overdue for many sessions)** `L228(e)`/`(f)`:
-   broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
-   `api`, `synchronization`) at real scale -- still not done.
-4. **(low priority, not a regression)** `offload-test-suite`'s own
+1. **(dedicated session, largest remaining chunk, 246 cases)** `L266`: widen the
+   `feme-cpu-simdize` pass's (`feme/lib/Transforms/CPU/`, not yet opened)
+   divergent-call vector-rewrite machinery to cover
+   `llvm.ctlz`/`cttz`/`uadd.with.overflow`/`usub.with.overflow`/`{s,u}mul.with.overflow`
+   for non-`compute` shader stages. This is explicitly flagged by the pass's own
+   diagnostic as a milestone-7 gap, not a quick pattern fix -- start by reading
+   the pass's existing uniform-call rewrite path to understand what "divergent"
+   support would need to add.
+2. **(a few hours, new, ready to pick up)** `L267`: the newly-surfaced
+   `texture_functions.query.*` cluster (144 cases: `texturequerylod` 70,
+   `texturequerylevels` 34, `imagesizems`/`texturesizems` 16 each,
+   `texturesamples` 8) -- now the largest untriaged non-`L266` bucket, not
+   `atomic_operations`/`matrix` as previously estimated from a partial sample.
+   Start with `texturequerylod` (largest sub-cluster) and its likely home in
+   `feme/lib/Vulkan/`'s texture-query lowering.
+3. **(unknown, still filed, not started)** Remaining smaller `L258`/`L263`-era
+   clusters: `atomic_operations` (96), `matrix.mul.dynamic` (24) + other
+   `matrix.*` variants, `440.linkage.varying` (49), `shader_expect_assume.*` (48
+   combined across compute/fragment/vertex),
+   `loops.special.*_dynamic_iterations` (30 combined). Worth a dedicated triage
+   session after `L266`/`L267`.
+4. **(carried over, unchanged, several sessions running)** `L265`: residual
+   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
+   `ASTCDecode.cpp`. Still not picked up.
+5. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
+   CTS sampling (`pipeline`'s other sub-suites, `api`, `synchronization`) at
+   real scale -- still not done.
+6. **(low priority, not a regression, still unresolved)** `offload-test-suite`'s
+   own
    `Feature/SpecializationConstant/spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test`
    (failing) and `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`)
    still need upstream lit-annotation fixes -- unrelated to any FeMe/LLVM
-   change, flagged repeatedly across sessions so it's not mistaken for new
+   change, flagged across many sessions now so it's never mistaken for new
    breakage.
-5. No git stashes left open this session (none were used -- the
-   `offload-test-suite` branch happened to already be in sync, so no merge/stash
-   cycle was needed this time either).
+7. No git stashes left open this session (none were used -- both repos were
+   clean/in-sync throughout).
