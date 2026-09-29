@@ -3642,42 +3642,46 @@ bool isShapeCompatible(Type *Declared, Type *Actual) {
   return false;
 }
 
-/// (Roadmap L259) \p UseTightArrayStride selects which byte stride this
-/// function's own array-peeling loop divides a residual offset by, for an
-/// element type that is a narrow (3-wide, non-power-of-two) vector or an
-/// under-aligned struct, where `getPaddedElementSize` (the padded size,
-/// e.g. 16 bytes for `<3 x float>`) and `getPackedElementSize` (the
-/// tightly-packed size, 12 bytes for the same type) disagree. Which one is
-/// *correct* depends entirely on how the real byte offset being divided
-/// was itself produced upstream, which differs by storage class: a
-/// Transform-Feedback-captured array (an `XfbBuffer`-decorated global,
-/// roadmap H101h's own `layout(xfb_buffer=0, ...) out Block { ivec3 var;
-/// } block[3];` shape) is genuinely addressed at SPIR-V's own tightly-
-/// packed `XfbStride`, with no ABI padding at all -- `UseTightArrayStride
-/// = true` is required there. An ordinary, `XfbBuffer`-less Input/Output
-/// interface variable (e.g. a plain `in mat4x3 m;` vertex attribute, no
-/// buffer-like stride decoration of its own) has no such SPIR-V-mandated
-/// packed stride to respect; `SPIRVToLLVMPatterns.cpp`'s own conversion
-/// picks a plain LLVM `array<N x vector<M x Scalar>>` for it, and every
-/// access into that array -- including the constant-offset GEPs
-/// `stripAndAccumulateConstantOffsets` walks in `getStageIOBaseAndOffset`
-/// -- is addressed at that array's own genuine, padded stride (every
-/// vector's own lane count rounded up to the next power of two, matching
-/// every real target's own vector ABI rule -- notably *not* reproducible
-/// from `DataLayout::getTypeAllocSize` using the plain, vector-alignment-
-/// entry-less `DataLayout` attached to the module at the point
-/// `CanonicalizeStagePass` actually runs, confirmed empirically to
-/// compute an unpadded 12 bytes for `<3 x float>` there, disagreeing with
-/// the real, already-baked-in 16-byte-strided GEP offsets), not a
-/// tightly-packed one; `UseTightArrayStride = false` (`getPaddedElementSize`)
-/// is required there instead. Before this parameter existed, H101h's fix
-/// (reusing `getPackedElementSize` unconditionally for every array-peeling
-/// level) silently applied the XFB-only tight stride to this second, far
-/// more common shape too, resolving one narrow-vector row past the true
-/// last one (e.g. a `mat4x3`'s 4th column landing on `Row 4` instead of
-/// `Row 3`, `feme-graphics-validate-stage`'s own "row 4 is out of range"
-/// rejection) -- `dEQP-VK.glsl.matrix.*`/`indexing.varying_array.*` cases
-/// whose shape includes a 3-wide-vector row.
+/// (Roadmap L259/L272) \p UseTightArrayStride is this function's own
+/// *fallback* tie-breaker, consulted only in the rare case its own
+/// self-discovering stride check (below) cannot tell which of
+/// `getPaddedElementSize` (e.g. 16 bytes for `<3 x float>`) and
+/// `getPackedElementSize` (12 bytes for the same type) the real byte
+/// offset being divided was actually produced with. Both strides are
+/// tried directly against \p Residual at each array-peeling level: the
+/// one that divides it exactly, landing at an in-range row index, is the
+/// real one -- there being no ambiguity to resolve unless \p Residual
+/// happens to be an exact multiple of *both* sizes (e.g. 48, a multiple
+/// of both 12 and 16) *and* both quotients land in range, which only a
+/// large enough array can trigger. \p UseTightArrayStride only matters
+/// for that residual tie, and for the degenerate \p Residual == 0 case
+/// (both candidates trivially agree on row 0 there, so it never actually
+/// changes the answer, but is still consulted for consistency).
+///
+/// (Roadmap L259) This parameter alone used to be the *entire* mechanism
+/// (no self-discovery at all): keyed off `hasXfbBufferDecoration`, on the
+/// theory that a Transform-Feedback-captured array (`XfbBuffer`-decorated,
+/// SPIR-V-mandated packed `XfbStride`) is the only shape genuinely tight,
+/// with every other shape defaulting to padded. That theory held for a
+/// `mat4x3`-shaped matrix (`dEQP-VK.glsl.matrix.*`'s own `L259` failures)
+/// but not for a plain, non-XFB narrow-vector array: `SPIRVToLLVMPatterns
+/// .cpp`'s own SPIR-V -> LLVM conversion (`spirv.AccessChain` -> a
+/// structural `llvm.getelementptr`, only later constant-folded to a raw
+/// byte offset) turns out to bake *either* stride for what is, at the
+/// LLVM-IR level, an *identical* `array<N x vector<M x Scalar>>` global --
+/// confirmed empirically (roadmap L272) by comparing two structurally
+/// indistinguishable `vec3 var[4]` varyings that folded to 12-byte and
+/// 16-byte strides respectively, apparently depending on which of two
+/// different `DataLayout`s (the transient SPIR-V-logical one at
+/// `spirv.AccessChain` conversion time vs. the final CPU-target one still
+/// active for a later whole-aggregate materialization) was active at the
+/// specific point *that* particular access got folded -- not on any
+/// property of the global itself a caller can predict up front. No
+/// static, per-global heuristic (XFB-ness, matrix-vs-plain-array origin,
+/// or anything else recoverable once the SPIR-V has already lowered to
+/// plain LLVM IR/metadata) can therefore be *generally* correct; this
+/// function now discovers the real stride per access instead, using
+/// `UseTightArrayStride` only for the residual tie described above.
 std::pair<uint64_t, uint64_t>
 resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
                    const DataLayout &DL, bool UseTightArrayStride) {
@@ -3712,16 +3716,33 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
     auto *ArrTy = dyn_cast<ArrayType>(PerRowTy);
     if (!ArrTy)
       break;
-    uint64_t RowSize =
-        UseTightArrayStride
-            ? getPackedElementSize(ArrTy->getElementType(), DL)
-            : getPaddedElementSize(ArrTy->getElementType(), DL);
+    uint64_t NumElements = ArrTy->getNumElements();
+    uint64_t PackedSize = getPackedElementSize(ArrTy->getElementType(), DL);
+    uint64_t PaddedSize = getPaddedElementSize(ArrTy->getElementType(), DL);
+    // (Roadmap L272) Prefer whichever of the two candidate strides
+    // actually divides \p Residual exactly into an in-range row -- see
+    // this function's own comment above for why that is a stronger
+    // signal than any static per-global heuristic. Falls back to
+    // \p UseTightArrayStride only when both candidates agree (Residual
+    // == 0), neither divides exactly (e.g. \p PackedSize == \p
+    // PaddedSize, the common power-of-two-lane case, where either
+    // branch below computes the identical answer), or -- rare -- both
+    // divide exactly into distinct in-range rows.
+    bool PackedValid = PackedSize && Residual % PackedSize == 0 &&
+                       Residual / PackedSize < NumElements;
+    bool PaddedValid = PaddedSize && Residual % PaddedSize == 0 &&
+                       Residual / PaddedSize < NumElements;
+    uint64_t RowSize;
+    if (PackedValid != PaddedValid)
+      RowSize = PackedValid ? PackedSize : PaddedSize;
+    else
+      RowSize = UseTightArrayStride ? PackedSize : PaddedSize;
     uint64_t Idx = 0;
     if (RowSize) {
       Idx = Residual / RowSize;
       Residual -= Idx * RowSize;
     }
-    Row = Row * ArrTy->getNumElements() + Idx;
+    Row = Row * NumElements + Idx;
     PerRowTy = ArrTy->getElementType();
   }
   uint64_t Component = 0;
