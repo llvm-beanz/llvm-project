@@ -64,21 +64,27 @@ and may be restored with `git stash pop`.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, new, ready to pick up)** `L257`: the 48-case
-   `dEQP-VK.glsl.indexing.varying_array.*dynamic*` `Fail (Image
-   mismatch)` bug this session's crash fix newly exposed. Start with
-   the single simplest case (`vec2_dynamic_write_dynamic_read`, no
-   loops) and a `FEME_DUMP_IR`/pixel-diff comparison to see whether the
-   new `[RowCount x 4]` shadow-alloca scheme itself has an indexing bug
-   (e.g. absolute-vs-`FirstComponent`-relative off-by-something) or the
-   read-back value is never threaded through correctly at all.
-2. **(a few hours, new, ready to pick up cold)** `L258`: re-run the
-   full `dEQP-VK.glsl.*` sweep (28,420 cases, ~45+ min, use the bash
-   tool's own async/`initial_wait`, not shell backgrounding) now that
-   it no longer aborts partway, then triage the largest cluster first
-   (`dEQP-VK.glsl.builtin.function`, 395 fails in the partial sample).
-3. **(a few hours, still unchanged for many sessions)** `L228(b)`
-   (compressed-format blits) -- still not picked up.
-4. No git stashes left open this session (both uses -- the debug-print
-   iteration and the pre-fix-crash-confirmation A/B -- were popped
-   immediately after use).
+1. **(background, in progress, just needs monitoring)** `L258`: the
+   full `dEQP-VK.glsl.*` sweep (shellId `37` if still alive) was
+   ~44% through (12,525/28,420) at session end, ~2 cases/sec. Next
+   session: check if it finished, and if so triage the largest
+   failure cluster first (`dEQP-VK.glsl.builtin.function` was the
+   biggest in every partial sample so far). If the shell is gone,
+   just relaunch it (see "next action" above) -- it no longer crashes
+   partway (that was `L256`, already fixed), so a fresh full run is
+   safe to kick off and forget for ~45-90 min.
+2. **(unknown, new, ready to pick up)** `L260`: the residual
+   `a2b10g10r10_snorm_pack32` alpha-channel bug split out this
+   session. Start from its own `.qpa` diff-vs-threshold breakdown
+   (alpha off by exactly 1.0, RGB fine) and look at
+   `feme/lib/Graphics/ImageFixture.cpp`'s `packClearColor`/
+   `unpackColor` 2-bit-alpha SNORM handling specifically -- check
+   whether other 2-bit-SNORM-channel formats (if any exist) share the
+   bug, to know if the fix should be narrow or general.
+3. **(a few hours, still overdue, unchanged for several sessions)**
+   `L228(e)`/`(f)`: `shader_render` (confirmed last session to not
+   exist as a standalone group -- `dEQP-VK.glsl.*` is its modern
+   replacement, which `L258` above covers) and most of `pipeline`'s
+   other sub-suites remain unsampled at any real scale.
+4. No git stashes left open this session (the A/B-test stash used
+   during the false-alarm detour was popped immediately after use).
