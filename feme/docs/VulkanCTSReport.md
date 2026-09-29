@@ -5180,3 +5180,11 @@ Unsupported, 0 Failed (no regressions).
 change -- three internal compiler-pass correctness fixes widening/
 preserving coverage of already-exposed core GLSL texture-query
 builtins, not a new feature/extension.
+
+**Full-sweep confirmation:** a fresh full `dEQP-VK.glsl.*` sweep
+(28,420 cases) after all three L267 fixes landed completed with
+**18,992 Pass / 465 Fail / 8,963 NotSupported** -- an exact match to
+the predicted 18,880 + 112 = 18,992 Pass / 577 - 112 = 465 Fail
+(L268's post-fix baseline, plus/minus these 112 now-passing cases),
+confirming no unexpected knock-on shifts elsewhere in the full sweep
+from these fixes.
