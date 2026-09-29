@@ -341,17 +341,19 @@ using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
 /// `Sample` operand (roadmap H19g), like `LoadFn`'s own.
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                            int32_t, int32_t, uint32_t, uint32_t, bool, void *);
-/// `feme.cpu.image.sample.2d.v4i32`'s own operand shape (roadmap H109):
-/// unlike `SampleFn`, an integer-channel sample is always explicit-LOD,
-/// nearest-filtered only -- no `DUdX`/`DUdY`/`DVdX`/`DVdY`/
-/// `UseExplicitLod`/`Bias`/`MinLodClamp` operand at all, just `(U, V,
-/// Lod, OffsetX, OffsetY, Mask)` and a `<4 x i32>`-shaped `out` (roadmap
-/// L125(h) uses this to verify the in-bounds-swizzle fix's own integer
-/// counterpart).
+/// `feme.cpu.image.sample.2d.v4i32`'s own operand shape (roadmap H109,
+/// widened roadmap L262): mirrors `SampleFn`'s own float operand list --
+/// `(U, V, DUdX, DUdY, DVdX, DVdY, Lod, UseExplicitLod, Bias, OffsetX,
+/// OffsetY, MinLodClamp, Mask)` -- now that `Bias`/`Grad`/`MinLodClamp`
+/// are legal against an integer sampler (see `femeCpuImageSample2DV4I32`'s
+/// own updated doc, `FeMeRuntimeCPU.c`); only the resulting `out` is
+/// still `<4 x i32>`-shaped, not `<4 x float>` (roadmap L125(h) uses this
+/// to verify the in-bounds-swizzle fix's own integer counterpart).
 using SampleI32Fn = void (*)(const FemeImageDescriptor *, uint32_t,
                              const FemeSamplerDescriptor *, uint32_t, uint32_t,
-                             uint32_t, float, float, float, int32_t, int32_t,
-                             bool, void *);
+                             uint32_t, float, float, float, float, float,
+                             float, float, bool, float, int32_t, int32_t,
+                             float, bool, void *);
 /// The roadmap H7b-a `Texture2DArray` counterpart of `SampleFn`, adding a
 /// float `ArrayLayer` coordinate (rounded to nearest, clamped) before the
 /// four screen-space partial derivatives of `(U, V)` -- also gains
@@ -1247,8 +1249,9 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToInBoundsTexel) {
   SampleI32Fn Fn = resolve<SampleI32Fn>(
       addWrapper("sample_i32", "feme.cpu.image.sample.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*Lod=*/0.0f,
-     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, true, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
+     -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_EQ(Out[0], 3); // R <- B
   EXPECT_EQ(Out[1], 4); // G <- A
   EXPECT_EQ(Out[2], 1); // B <- R
@@ -1290,8 +1293,9 @@ TEST_F(ImageSamplingTest, SampleI32AppliesImageViewSwizzleToBorderColorFallback)
   SampleI32Fn Fn = resolve<SampleI32Fn>(
       addWrapper("sample_i32_border", "feme.cpu.image.sample.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, /*Lod=*/0.0f,
-     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, true, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
+     -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_EQ(Out[0], 0); // R <- B (pre-swizzle border B is 0)
   EXPECT_EQ(Out[1], 1); // G <- A (pre-swizzle border A is 1)
   EXPECT_EQ(Out[2], 0); // B <- R (pre-swizzle border R is 0)
@@ -1331,12 +1335,124 @@ TEST_F(ImageSamplingTest,
   SampleI32Fn Fn = resolve<SampleI32Fn>(addWrapper(
       "sample_i32_border_opaque_white", "feme.cpu.image.sample.2d.v4i32"));
   int32_t Out[4];
-  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, /*Lod=*/0.0f,
-     /*OffsetX=*/0, /*OffsetY=*/0, true, Out);
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 5.0f, 5.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+     /*Lod=*/0.0f, true, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
+     -std::numeric_limits<float>::infinity(), true, Out);
   EXPECT_EQ(Out[0], 1); // R <- A (pre-swizzle border A is 1)
   EXPECT_EQ(Out[1], 1); // G <- R (pre-swizzle border R is 1)
   EXPECT_EQ(Out[2], 0); // B <- G (pre-swizzle border G is forced 0)
   EXPECT_EQ(Out[3], 0); // A <- B (pre-swizzle border B is forced 0)
+}
+
+// (Roadmap L262) Confirms `femeCpuImageSample2DV4I32`'s newly widened
+// `Bias` operand actually shifts the selected mip level for an
+// integer-format image, mirroring `Sample1DBiasSelectsCoarserMipLevel`'s
+// own `Plain1D`/float-family precedent: with zero screen-space
+// derivatives (no measurable minification of its own), a `Bias` of
+// exactly `1.0` must select mip level 1 outright (`MipFilter=Nearest`
+// rounds `0 + 1.0` up to level 1) via the implicit-LOD path
+// (`UseExplicitLod=false`).
+TEST_F(ImageSamplingTest, SampleI32BiasSelectsCoarserMipLevel) {
+  int32_t Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                             {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  int32_t Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    int32_t L0[2][2][4];
+    int32_t L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleI32Fn Fn = resolve<SampleI32Fn>(
+      addWrapper("sample_i32_bias", "feme.cpu.image.sample.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/0.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Bias=*/1.0f, /*OffsetX=*/0, /*OffsetY=*/0,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_EQ(Out[0], 9);
+}
+
+// (Roadmap L262) Confirms `femeCpuImageSample2DV4I32`'s newly widened
+// `DUdX`/`DUdY`/`DVdX`/`DVdY` derivative operands actually drive
+// implicit-LOD mip selection for an integer-format image (not just
+// `Bias` alone, see the test above), mirroring
+// `ImplicitLodMinifyingUsesMinFilterNotMagFilter`'s own float-family
+// precedent: a per-pixel `dU/dx` of `1.0` across this 2-texel-wide
+// image is a scale factor of 2 texels/pixel (`log2(2) == 1 > 0`), so mip
+// level 1 must be selected even with `Bias` and `MinLodClamp` both
+// no-ops.
+TEST_F(ImageSamplingTest, SampleI32GradSelectsCoarserMipLevel) {
+  int32_t Level0[2][2][4] = {{{1, 1, 1, 1}, {1, 1, 1, 1}},
+                             {{1, 1, 1, 1}, {1, 1, 1, 1}}};
+  int32_t Level1[1][1][4] = {{{9, 9, 9, 9}}};
+  struct {
+    int32_t L0[2][2][4];
+    int32_t L1[1][1][4];
+  } Storage;
+  memcpy(Storage.L0, Level0, sizeof(Level0));
+  memcpy(Storage.L1, Level1, sizeof(Level1));
+
+  FemeImageSubresourceLayout Layouts[2] = {
+      {/*Offset=*/0, /*RowPitch=*/2 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/0, /*SampleStride=*/0},
+      {/*Offset=*/sizeof(Level0), /*RowPitch=*/1 * 4 * sizeof(int32_t),
+       /*SlicePitch=*/0, /*SampleStride=*/0}};
+
+  FemeImageDescriptor Img{};
+  Img.Data = &Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Img.Width = 2;
+  Img.Height = 2;
+  Img.Depth = 1;
+  Img.MipLevels = 2;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 1;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = Layouts;
+  Img.MipLayoutCount = 2;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleI32Fn Fn = resolve<SampleI32Fn>(
+      addWrapper("sample_i32_grad", "feme.cpu.image.sample.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, /*DUdX=*/1.0f,
+     /*DUdY=*/0.0f, /*DVdX=*/0.0f, /*DVdY=*/0.0f, /*Lod=*/0.0f,
+     /*UseExplicitLod=*/false, /*Bias=*/0.0f, /*OffsetX=*/0, /*OffsetY=*/0,
+     -std::numeric_limits<float>::infinity(), true, Out);
+  EXPECT_EQ(Out[0], 9);
 }
 
 // (Roadmap L125(h)) The integer-sampled counterpart of

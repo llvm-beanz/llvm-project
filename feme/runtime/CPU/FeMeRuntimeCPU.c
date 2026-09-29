@@ -5947,31 +5947,43 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
   return Sum * (1.0f / (float)Plan.TapCount);
 }
 
-// (Roadmap H109) Nearest-filtered, explicit-LOD-only sample of an
-// integer-channel (`_UINT`/`_SINT`) image, for `feme.cpu.image.sample.
-// 2d.v4i32` -- the integer counterpart of `femeCpuImageSample2DV4F32`
-// above. Unlike that function, this always reads a single mip level via
-// `femeRTNearestMipLevel` and never bilinearly/trilinearly blends,
-// regardless of `Samp`'s own filter/mipmap-mode fields: the Vulkan spec
-// requires a `VkSampler` bound against an integer-format image to already
-// use `VK_FILTER_NEAREST`/`VK_SAMPLER_MIPMAP_MODE_NEAREST` (enforced by
+// Nearest-filtered sample of an integer-channel (`_UINT`/`_SINT`) image,
+// for `feme.cpu.image.sample.2d.v4i32` -- the integer counterpart of
+// `femeCpuImageSample2DV4F32` above. Unlike that function, this always
+// reads a single mip level via `femeRTNearestMipLevel` and never
+// bilinearly/trilinearly blends, regardless of `Samp`'s own
+// filter/mipmap-mode fields: the Vulkan spec requires a `VkSampler` bound
+// against an integer-format image to already use
+// `VK_FILTER_NEAREST`/`VK_SAMPLER_MIPMAP_MODE_NEAREST` (enforced by
 // validation before this driver ever sees the call), but this function is
 // still defensive about it rather than trusting the caller, matching this
-// file's general style elsewhere. There is no `Bias`/`Grad`/`MinLodClamp`
-// operand -- see `ImageCallKind::Sample2DI32`'s own doc for why this is
-// explicit-LOD only.
+// file's general style elsewhere. (Roadmap L262): `DUdX`/`DUdY`/`DVdX`/
+// `DVdY`/`UseExplicitLod`/`Bias`/`MinLodClamp` mirror
+// `femeCpuImageSample2DV4F32`'s own identical parameters -- confirmed via
+// real `dEQP-VK.glsl.texture_functions.texturebias.*isampler2d*`/
+// `*usampler2d*` and `texturegrad*` CTS cases that GLSL legally emits
+// `Bias`/`Grad` against an integer sampler (the previous unconditional
+// rejection of both, and of `MinLodClamp`, was itself the bug -- see
+// `hasOnlySupportedImageUses`'s own updated comment); only the single
+// resulting `Plan.ClampedLod` is ever used for the one nearest tap below,
+// never `Plan.TapCount`'s multi-tap anisotropic footprint, since Vulkan
+// mandates `NEAREST` filtering/mipmapping for every integer-format image
+// regardless of the sampler's own anisotropy settings.
 FemeRTv4i32 femeCpuImageSample2DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    int32_t OffsetX, int32_t OffsetY,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
+    float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
+    float Bias, int32_t OffsetX, int32_t OffsetY, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.2d.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    int32_t OffsetX, int32_t OffsetY, _Bool Mask) {
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float DUdX,
+    float DUdY, float DVdX, float DVdY, float Lod, _Bool UseExplicitLod,
+    float Bias, int32_t OffsetX, int32_t OffsetY, float MinLodClamp,
+    _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -5989,11 +6001,18 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
   U = femeRTUnnormalizeCoord(U, Img.Width, IsUnnormalized);
   V = femeRTUnnormalizeCoord(V, Img.Height, IsUnnormalized);
 
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample2DV4F32`'s own explicit-LOD
-  // case -- see this call kind's own doc for why no such operand exists.
-  float ClampedLod = femeRTComputeClampedLod(
-      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  // Roadmap L262: `ClampedLod` now comes from the same real `Bias`/
+  // `Grad`-derivative/`MinLodClamp` math `femeCpuImageSample2DV4F32`
+  // uses, in place of the previous hardcoded explicit-LOD-only call.
+  float ClampedLod;
+  if (UseExplicitLod) {
+    ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, &Samp,
+                                         MinLodClamp, Bias);
+  } else {
+    FemeRTImplicitLodPlan Plan = femeRTPlanImplicitLod(
+        &Img, &Samp, DUdX, DUdY, DVdX, DVdY, MinLodClamp, Bias);
+    ClampedLod = Plan.ClampedLod;
+  }
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -6030,18 +6049,24 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DV4I32(
 // above, for `feme.cpu.image.sample.1d.v4i32` -- mirrors that function's
 // structure exactly, but addresses only a single (`X`) axis, matching
 // `femeCpuImageSample1DV4F32`'s own relationship to
-// `femeCpuImageSample2DV4F32`.
+// `femeCpuImageSample2DV4F32`. (Roadmap L262): `DUdX`/`DUdY`/
+// `UseExplicitLod`/`Bias`/`Offset`/`MinLodClamp` mirror
+// `femeCpuImageSample1DV4F32`'s own identical parameters -- see
+// `femeCpuImageSample2DV4I32`'s own updated doc for why real `Bias`/
+// `Grad`/`MinLodClamp` support is now correct here.
 FemeRTv4i32 femeCpuImageSample1DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    int32_t Offset, _Bool Mask) asm("feme.cpu.image.sample.1d.v4i32");
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX,
+    float DUdY, float Lod, _Bool UseExplicitLod, float Bias, int32_t Offset,
+    float MinLodClamp, _Bool Mask) asm("feme.cpu.image.sample.1d.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
-    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float Lod,
-    int32_t Offset, _Bool Mask) {
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float DUdX,
+    float DUdY, float Lod, _Bool UseExplicitLod, float Bias, int32_t Offset,
+    float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -6058,10 +6083,15 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
       U, Img.Width,
       (Samp.Flags & 4u) != 0); // FEME_SAMPLER_UNNORMALIZED_COORDINATES.
 
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above.
-  float ClampedLod = femeRTComputeClampedLod(
-      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  // Roadmap L262: real `Bias`/`Grad`-derivative/`MinLodClamp` math, in
+  // place of the previous hardcoded explicit-LOD-only call -- mirrors
+  // `femeCpuImageSample1DV4F32`'s own identical split.
+  float RawLod =
+      UseExplicitLod ? Lod : femeRTPlanImplicitLod1D(&Img, DUdX, DUdY);
+  float ClampedLod =
+      femeRTComputeClampedLod(RawLod, /*UseExplicitLod=*/1, &Samp,
+                             /*InstructionMinLod=*/MinLodClamp,
+                             /*InstructionBias=*/Bias);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -6087,20 +6117,27 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DV4I32(
 // an arrayed `Dim::3D` image), and `femeRTFetchTexel3DI32` already exists
 // (reused by `feme.cpu.image.load.3d.v4i32`, roadmap H19c), so -- like
 // `Array2D` before it -- no new low-level texel-fetch helper is needed
-// here either.
+// here either. (Roadmap L262): `DUdX`/`DUdY`/`DVdX`/`DVdY`/`DWdX`/`DWdY`/
+// `UseExplicitLod`/`Bias`/`MinLodClamp` mirror
+// `femeCpuImageSample3DV4F32`'s own identical parameters -- see
+// `femeCpuImageSample2DV4I32`'s own updated doc for why real `Bias`/
+// `Grad`/`MinLodClamp` support is now correct here.
 FemeRTv4i32 femeCpuImageSample3DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
-    float Lod, int32_t OffsetX, int32_t OffsetY, int32_t OffsetZ,
+    float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, int32_t OffsetZ, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.3d.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float W,
-    float Lod, int32_t OffsetX, int32_t OffsetY, int32_t OffsetZ,
-    _Bool Mask) {
+    float DUdX, float DUdY, float DVdX, float DVdY, float DWdX, float DWdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, int32_t OffsetZ, float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -6111,10 +6148,17 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample3DV4I32(
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above.
-  float ClampedLod = femeRTComputeClampedLod(
-      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  // Roadmap L262: real `Bias`/`Grad`-derivative/`MinLodClamp` math, in
+  // place of the previous hardcoded explicit-LOD-only call -- mirrors
+  // `femeCpuImageSample3DV4F32`'s own identical split.
+  float RawLod = UseExplicitLod
+                     ? Lod
+                     : femeRTPlanImplicitLod3D(&Img, DUdX, DUdY, DVdX, DVdY,
+                                               DWdX, DWdY);
+  float ClampedLod =
+      femeRTComputeClampedLod(RawLod, /*UseExplicitLod=*/1, &Samp,
+                             /*InstructionMinLod=*/MinLodClamp,
+                             /*InstructionBias=*/Bias);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -9338,19 +9382,24 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample1DArrayV4F32(
 // function's structure exactly, but adds `ArrayLayer` (clamped/rounded via
 // the same `femeRTRoundClampLayer` helper `femeCpuImageSample1DArrayV4F32`
 // immediately above uses), matching `Sample1DArray`'s own relationship to
-// `Sample1D`.
+// `Sample1D`. (Roadmap L262): `DUdX`/`DUdY`/`UseExplicitLod`/`Bias`/
+// `MinLodClamp` mirror `femeCpuImageSample1DArrayV4F32`'s own identical
+// parameters -- see `femeCpuImageSample2DV4I32`'s own updated doc for why
+// real `Bias`/`Grad`/`MinLodClamp` support is now correct here.
 FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, int32_t Offset,
+    float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
+    int32_t Offset, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.1darray.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float ArrayLayer,
-    float Lod, int32_t Offset, _Bool Mask) {
+    float DUdX, float DUdY, float Lod, _Bool UseExplicitLod, float Bias,
+    int32_t Offset, float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -9361,10 +9410,15 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample1DV4I32`'s own choice above.
-  float ClampedLod = femeRTComputeClampedLod(
-      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  // Roadmap L262: real `Bias`/`Grad`-derivative/`MinLodClamp` math, in
+  // place of the previous hardcoded explicit-LOD-only call -- mirrors
+  // `femeCpuImageSample1DArrayV4F32`'s own identical split.
+  float RawLod =
+      UseExplicitLod ? Lod : femeRTPlanImplicitLod1D(&Img, DUdX, DUdY);
+  float ClampedLod =
+      femeRTComputeClampedLod(RawLod, /*UseExplicitLod=*/1, &Samp,
+                             /*InstructionMinLod=*/MinLodClamp,
+                             /*InstructionBias=*/Bias);
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
@@ -9391,20 +9445,29 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample1DArrayV4I32(
 // uses), matching `Sample2DArray`'s own relationship to `Sample2D`.
 // `femeRTFetchTexel2DI32` already takes a `Layer` parameter (it is the
 // same helper `femeCpuImageSample2DV4I32` calls with `Layer=0`), so no new
-// texel-fetch helper is needed here either.
+// texel-fetch helper is needed here either. (Roadmap L262): `DUdX`/`DUdY`/
+// `DVdX`/`DVdY`/`UseExplicitLod`/`Bias`/`MinLodClamp` mirror
+// `femeCpuImageSample2DArrayV4F32`'s own identical parameters -- see
+// `femeCpuImageSample2DV4I32`'s own updated doc for why real `Bias`/
+// `Grad`/`MinLodClamp` support is now correct here; the array layer
+// itself is never differentiated, mirroring `Array2D`'s own float-path
+// derivative handling.
 FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, int32_t OffsetX, int32_t OffsetY,
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, float MinLodClamp,
     _Bool Mask) asm("feme.cpu.image.sample.2darray.v4i32");
 
 __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V,
-    float ArrayLayer, float Lod, int32_t OffsetX, int32_t OffsetY,
-    _Bool Mask) {
+    float ArrayLayer, float DUdX, float DUdY, float DVdX, float DVdY,
+    float Lod, _Bool UseExplicitLod, float Bias, int32_t OffsetX,
+    int32_t OffsetY, float MinLodClamp, _Bool Mask) {
   FemeRTv4i32 Zero = {0, 0, 0, 0};
   if (!Mask)
     return Zero;
@@ -9415,10 +9478,18 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuImageSample2DArrayV4I32(
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
 
-  // `MinLodClamp`/`Bias` are always the no-op values here (`-INFINITY`/
-  // `0.0f`), mirroring `femeCpuImageSample2DV4I32`'s own choice above.
-  float ClampedLod = femeRTComputeClampedLod(
-      Lod, /*UseExplicitLod=*/1, &Samp, -__builtin_inff(), 0.0f);
+  // Roadmap L262: real `Bias`/`Grad`-derivative/`MinLodClamp` math, in
+  // place of the previous hardcoded explicit-LOD-only call -- mirrors
+  // `femeCpuImageSample2DV4I32`'s own identical split.
+  float ClampedLod;
+  if (UseExplicitLod) {
+    ClampedLod = femeRTComputeClampedLod(Lod, /*UseExplicitLod=*/1, &Samp,
+                                         MinLodClamp, Bias);
+  } else {
+    FemeRTImplicitLodPlan Plan = femeRTPlanImplicitLod(
+        &Img, &Samp, DUdX, DUdY, DVdX, DVdY, MinLodClamp, Bias);
+    ClampedLod = Plan.ClampedLod;
+  }
   FemeRTMipTrilinearPlan MipPlan = femeRTSelectMipLevels(&Img, ClampedLod);
   uint32_t Level = femeRTNearestMipLevel(MipPlan);
   uint32_t Layer = femeRTRoundClampLayer(Img.ArrayLayers, ArrayLayer);
