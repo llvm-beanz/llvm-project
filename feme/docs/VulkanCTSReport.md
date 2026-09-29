@@ -4880,3 +4880,120 @@ priority item for the next untriaged-cluster session (ahead of
 `atomic_operations`/`matrix`, which are smaller). `440.linkage.varying`
 (49) is also a new, previously-unseen-at-this-scale cluster worth
 investigating alongside it.
+
+## L266: `feme-cpu-simdize`'s divergent-call/vector-decomposition gap for `ctlz`/`cttz`/`with.overflow` -- fixed; L268 filed for a distinct residual `uvec3` bug
+
+Picked up L266 (filed by L263's triage): 246 residual
+`dEQP-VK.glsl.builtin.function.integer.{findMSB,findlsb,uaddcarry,
+usubborrow,imulextended,umulextended}.*` failures, all non-`compute`-stage
+cases, all failing at pipeline-creation time with a
+`feme-cpu-simdize:` diagnostic (not a runtime value mismatch).
+
+**Root cause, in two layers, found via real `FEME_DUMP_IR_PRESIMD` IR
+traces of actual failing cases rather than assumption:**
+
+1. **Scalar divergent calls** (`llvm.ctlz.i32`/`cttz.i32`/all four
+   `with.overflow.i32` intrinsics) were entirely unhandled by the
+   SIMDize pass's divergent-call rewrite machinery -- a prior segment's
+   baseline fix (not yet CTS-verified when this segment started) added
+   `getDivergentCallOverloadShape` support for `ctlz`/`cttz` and a new
+   `isOverflowArithIntrinsic`/`widenOverflowArithIntrinsic` pair for the
+   four with-overflow intrinsics.
+
+2. **Genuinely vector-typed divergent calls** -- e.g. `findMSB(ivec4)`
+   lowers to a real `llvm.ctlz.v4i32` call, not a scalar one wrapped in
+   a broadcast -- exposed **four further, independent gaps** in the
+   SIMDize pass's separate vector-decomposition loop
+   (`checkVectorDecompositionSupported`/`widenVectorElementwise`),
+   found one at a time across several rebuild/CTS-verify rounds:
+   - Three separate strict `all_of(args, arg-type == result-type)`
+     "Homogeneous" checks (vector producer check, vector consumer
+     check, and the `widenInstruction` dispatch gate) all wrongly
+     rejected `ctlz`/`cttz` purely because of their `is_zero_poison`
+     `ImmArg` operand, which never matches the vector result type by
+     design. Fixed via a new ImmArg-tolerant `callNonImmArgsHaveType`
+     helper used at all three sites -- the fourth, unrelated scalar
+     `Homogeneous` check inside `widenElementwise` is deliberately left
+     strict, since scalar `ctlz`/`cttz` already bypass it via
+     `getDivergentCallOverloadShape`.
+   - `widenVectorElementwise`'s own `ICall` per-component arg-building
+     loop tried to decompose/widen `ImmArg` operands instead of passing
+     them through unchanged.
+   - `widenOverflowArithIntrinsic` only handled scalar (`iN`) operand
+     shapes; `uaddCarry(uvec4,uvec4)`-style vector operand shapes
+     needed a new branch decomposing into `N` independent per-component
+     wide calls, flattening `2*N` result/overflow leaf values in the
+     order the pre-existing generic aggregate-leaf-flattening code
+     (from roadmap `L27`) already expects.
+   - A genuinely vector-typed *operand* of one of the four
+     with-overflow intrinsics (e.g. `uaddCarry`'s own two `uvec4`
+     arguments) had **no consumer-acceptance rule at all** in the
+     vector-decomposition loop, since the call's own *result* is
+     aggregate-typed and validated by a separate code path
+     (`checkAggregateValueSupported`) -- its operands are still
+     ordinary vector-typed values needing this loop's own acceptance.
+     Added a dedicated `isOverflowArithIntrinsic` consumer-acceptance
+     case.
+
+Also corrected a wrong assumption carried over from an earlier
+session: `umulextended`/`imulextended` (`spirv.UMulExtended`/
+`SMulExtended`) do **not** lower to `llvm.{u,s}mul.with.overflow` at
+all -- MLIR's own `MulExtendedPattern` computes the wide product via
+plain `zext`/`mul`/`lshr`/`trunc` and `insertvalue`, with no
+with-overflow intrinsic involved. This meant their residual CTS fails
+were never a SIMDize gap in the first place (see below).
+
+**New lit test**: `simdize-vector-call-immarg-overflow.ll` (extending
+the prior segment's scalar-only `simdize-divergent-call-ctlz-overflow.ll`)
+exercises a real `findMSB`/`uaddCarry`-shaped vector call chain over
+`<4 x i32>`, FileCheck-verified against `feme-opt`'s actual widened
+output -- locks in both the ImmArg-tolerant-homogeneity fix and the
+overflow-intrinsic-operand consumer-acceptance fix together.
+
+**Verification:**
+- `check-feme`: 3,416 Passed (+2 new lit tests total across this and
+  the prior segment), 61 Unsupported, 0 Failed.
+- Targeted 6-group CTS sample (350 cases total, group names
+  case-confirmed via `dEQP-VK-cases.xml`):
+  - `findMSB`/`findlsb`: 96/100 Pass each, 0 Fail (4 NotSupported
+    each, unaffected/expected).
+  - `uaddcarry`/`usubborrow`: 42/50 Pass each (was 18/50 before this
+    segment's fixes) -- **0 of the remaining 6 fails each are the
+    original SIMDize error**; all 6 are a distinct, pre-existing
+    `uvec3`-only MLIR-level `"feme.tight_vector"` type-mismatch bug,
+    filed separately as `L268` (see below).
+  - `umulextended`/`imulextended`: 21/25 Pass each, unchanged from
+    before this segment (these builtins were never a SIMDize gap --
+    all 3 fails each are the same `L268` `uvec3` bug).
+- `check-hlsl-feme-vk`: 482 Pass / 31 XFAIL / 207 Not supported / 2
+  Fail / 1 Unexpected-pass -- unchanged from baseline; the 3
+  discrepancies are the standing, previously-flagged, unrelated
+  `offload-test-suite` lit-annotation staleness
+  (`spec_const_32_bits.test`/`WaveActiveMax.test`/
+  `array_of_matrices.test`), not new regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal compiler-pass (SIMDize) correctness fix widening
+coverage of already-exposed core GLSL integer builtins, not a new
+feature or extension.
+
+**New residual, filed as `L268`**: all 18 remaining fails
+(6+6+3+3 across `uaddcarry`/`usubborrow`/`umulextended`/`imulextended`)
+are `uvec3`-shaped cases specifically, and share one exact MLIR
+verifier diagnostic surfacing *before* the SIMDize pass even runs (a
+module-verification failure straight out of the SPIRV-to-LLVM
+conversion, not a `feme-cpu-simdize:` diagnostic):
+
+```
+'llvm.insertvalue' op Type mismatch: cannot insert 'vector<3xi32>' into
+'!llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>,
+struct<"feme.tight_vector.1", (array<3 x i32>)>)>'
+```
+
+`"feme.tight_vector"` looks like a FeMe-authored packed-struct-of-array
+representation for 3-component vectors at the LLVM-dialect level
+(likely an alignment/ABI workaround, since native `<3 x i32>` has
+different natural alignment than a packed 3-element array), but the
+exact conversion pattern/type-converter code responsible has not yet
+been located -- a distinct root cause from L266's SIMDize-pass gap,
+deferred to its own dedicated session.
