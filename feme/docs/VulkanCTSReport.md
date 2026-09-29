@@ -5370,3 +5370,11 @@ still unfixed) -- these are believed to be the runtime `Image mismatch`
 half rather than pipeline-creation rejections, not yet individually
 triaged past this session's initial fragment/vertex stage-linkage split;
 worth a dedicated follow-up session.
+
+**Full-sweep confirmation:** a fresh full `dEQP-VK.glsl.*` sweep
+(28,420 cases) after L270/L271 landed completed with **19,057 Pass /
+400 Fail / 8,963 NotSupported** -- within 1 case of the predicted
+19,056 Pass / 401 Fail delta against L269's baseline (19,024/433/8,963
++ 32 from L270+L271 combined), confirming no unexpected knock-on shifts
+elsewhere in the full sweep from these fixes (the 1-case discrepancy is
+consistent with ordinary test-to-test noise, not a new regression).
