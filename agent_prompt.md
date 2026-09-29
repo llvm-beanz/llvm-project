@@ -58,6 +58,9 @@ file.
 
 # Request
 
+The last session stalled out, any intermediate results will be in the git stash
+and may be restored with `git stash pop`.
+
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
