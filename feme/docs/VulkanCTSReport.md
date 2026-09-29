@@ -4997,3 +4997,84 @@ different natural alignment than a packed 3-element array), but the
 exact conversion pattern/type-converter code responsible has not yet
 been located -- a distinct root cause from L266's SIMDize-pass gap,
 deferred to its own dedicated session.
+
+**Full-sweep confirmation (next session):** the fresh full
+`dEQP-VK.glsl.*` sweep (28,420 cases) kicked off in the background
+after this fix landed completed with **18,862 Pass / 595 Fail / 8,963
+NotSupported** -- an exact match to the predicted
+823 (L263's post-fix baseline) - 228 (246 L266 cases minus 18 residual
+L268 cases) = 595 Fail, confirming no unexpected knock-on shifts
+elsewhere in the full sweep from this fix.
+
+## L268: `feme.tight_vector` reassembly missing from `with.overflow`/mul-extended patterns -- fixed
+
+Picked up L268 (filed by L266's own CTS verification): the 18 residual
+`uaddcarry`/`usubborrow`/`umulextended`/`imulextended` fails (6/6/3/3),
+all `uvec3`-shaped, all failing with the same MLIR verifier diagnostic
+*before* SIMDize even runs:
+
+```
+'llvm.insertvalue' op Type mismatch: cannot insert 'vector<3xi32>' into
+'!llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>,
+struct<"feme.tight_vector.1", (array<3 x i32>)>)>'
+```
+
+**Root cause:** 100% FeMe-authored, confirmed via a `zero matches`
+grep for any FeMe-authored override of `IAddCarry`/`ISubBorrow`/
+`UMulExtended`/`SMulExtended` -- all four fall through unmodified to
+upstream MLIR's own generic `ArithmeticWithOverflowPattern`/
+`MulExtendedPattern` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`).
+FeMe's own type converter (`SPIRVToLLVMPatterns.cpp`'s
+`layOutStructIfOffsetsMatch`) unconditionally substitutes a
+`feme.tight_vector` marker struct for *any* 3-component vector member
+of *any* `spirv::StructType` with no `Offset` decorations -- including
+these four ops' own transient, SSA-only two-member result struct --
+because a raw `vector<3xiN>`'s ABI alloc size is ambiguously rounded
+up to 4 lanes' worth by LLVM's `DataLayout`, a `DataLayout`-level
+ambiguity that applies regardless of whether the struct is ever laid
+out in real memory. Upstream's own patterns build their result via
+raw, unconditional `insertvalue`s of the un-substituted `vector<3xiN>`
+computed values, with no awareness of FeMe's marker-struct convention
+-- the exact same "producer doesn't know about a type-converter side
+effect" bug class `CompositeConstructPattern::convertStruct` already
+solved for `spirv.CompositeConstruct`.
+
+**Fix:** two new FeMe-authored pattern classes,
+`TightVectorArithmeticWithOverflowPattern<SPIRVOp, LLVMOp>` and
+`TightVectorMulExtendedPattern<SPIRVOp, IsSigned>`, registered at
+`FeMeBenefit` so they supersede upstream's own default-benefit
+registrations for exactly these four ops. Each replicates the
+upstream computation exactly but routes both computed result fields
+through the already-existing `reassembleTightVectorValue` helper (via
+a new shared `insertReassembledStructMember` wrapper, which also
+handles declared-to-physical field-index remapping via
+`getStructMemberPhysicalIndex`) before the final `insertvalue`s. A 2-
+or 4-lane (or scalar) operand reassembles as a no-op via
+`reassembleTightVectorValue`'s own type-equality early-out, so this is
+not a 3-lane-only special case needing separate dispatch -- every
+shape now routes through the same, correct path.
+
+Two new unit tests (`SPIRVToLLVMTest.IAddCarryUVec3ReassemblesTightVectorMembers`,
+`SPIRVToLLVMTest.UMulExtendedUVec3ReassemblesTightVectorMembers`)
+reproduce the exact `uvec3` `IAddCarry`/`UMulExtended` shapes and
+assert the fixed IR has no leftover `unrealized_conversion_cast`.
+
+**`check-feme`:** 3,418 Passed (+2 new unit tests), 61 Unsupported, 0
+Failed.
+
+**CTS (targeted 4-group sample, 150 cases):**
+`uaddcarry`/`usubborrow`/`umulextended`/`imulextended` combined
+144/150 Pass, **0/150 Fail** (was 18 Fail pre-fix), 6 NotSupported
+(`uvec5`, an unrelated `longVector`-not-supported skip, unaffected).
+
+**Full-sweep confirmation:** a fresh full `dEQP-VK.glsl.*` sweep
+(28,420 cases) after this fix landed completed with **18,880 Pass /
+577 Fail / 8,963 NotSupported** -- an exact match to the predicted
+18,862 + 18 = 18,880 Pass / 595 - 18 = 577 Fail (L266's post-fix
+baseline, plus/minus these 18 now-passing cases), confirming no
+unexpected knock-on shifts elsewhere in the full sweep from this fix.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change -- an internal SPIR-V-to-LLVM conversion-pattern correctness
+fix for already-exposed core GLSL integer builtins, not a new
+feature/extension.
