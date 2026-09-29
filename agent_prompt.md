@@ -61,39 +61,53 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(dedicated session, largest remaining chunk, 246 cases)** `L266`: widen the
-   `feme-cpu-simdize` pass's (`feme/lib/Transforms/CPU/`, not yet opened)
-   divergent-call vector-rewrite machinery to cover
-   `llvm.ctlz`/`cttz`/`uadd.with.overflow`/`usub.with.overflow`/`{s,u}mul.with.overflow`
-   for non-`compute` shader stages. This is explicitly flagged by the pass's own
-   diagnostic as a milestone-7 gap, not a quick pattern fix -- start by reading
-   the pass's existing uniform-call rewrite path to understand what "divergent"
-   support would need to add.
-2. **(a few hours, new, ready to pick up)** `L267`: the newly-surfaced
-   `texture_functions.query.*` cluster (144 cases: `texturequerylod` 70,
-   `texturequerylevels` 34, `imagesizems`/`texturesizems` 16 each,
-   `texturesamples` 8) -- now the largest untriaged non-`L266` bucket, not
-   `atomic_operations`/`matrix` as previously estimated from a partial sample.
-   Start with `texturequerylod` (largest sub-cluster) and its likely home in
-   `feme/lib/Vulkan/`'s texture-query lowering.
-3. **(unknown, still filed, not started)** Remaining smaller `L258`/`L263`-era
-   clusters: `atomic_operations` (96), `matrix.mul.dynamic` (24) + other
-   `matrix.*` variants, `440.linkage.varying` (49), `shader_expect_assume.*` (48
-   combined across compute/fragment/vertex),
-   `loops.special.*_dynamic_iterations` (30 combined). Worth a dedicated triage
-   session after `L266`/`L267`.
-4. **(carried over, unchanged, several sessions running)** `L265`: residual
-   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
-   `ASTCDecode.cpp`. Still not picked up.
-5. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
-   CTS sampling (`pipeline`'s other sub-suites, `api`, `synchronization`) at
-   real scale -- still not done.
-6. **(low priority, not a regression, still unresolved)** `offload-test-suite`'s
-   own
-   `Feature/SpecializationConstant/spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test`
-   (failing) and `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`)
-   still need upstream lit-annotation fixes -- unrelated to any FeMe/LLVM
-   change, flagged across many sessions now so it's never mistaken for new
-   breakage.
-7. No git stashes left open this session (none were used -- both repos were
-   clean/in-sync throughout).
+1. **(unknown size, ready to pick up, largest known residual)** `L268`:
+   root-cause the `uvec3`-only `"feme.tight_vector"` MLIR insertvalue
+   type-mismatch bug (18 CTS cases across
+   `uaddcarry`/`usubborrow`/`umulextended`/`imulextended`). Start by
+   grepping `feme/lib/Conversion/SPIRVToLLVM/` for `"feme.tight_vector"`
+   or `tight_vector` to find the type-converter code emitting this
+   struct layout for 3-component vectors, then figure out why it
+   disagrees with the plain `vector<3xi32>` SPIR-V's own
+   `IAddCarry`/`ISubBorrow`/`UMulExtended`/`SMulExtended` conversion
+   pattern expects there. Not yet confirmed whether the responsible
+   code is FeMe-authored (`SPIRVToLLVMPatterns.cpp`, inside `feme/`) or
+   upstream MLIR -- that determines whether the standing "isolate
+   issues outside FeMe into their own commit" instruction applies.
+2. **(check first, may already be done)** The full `dEQP-VK.glsl.*`
+   sweep (28,420 cases) this session kicked off in the background --
+   check `/tmp/l266_full_sweep.txt`/`/tmp/l266_full_sweep.qpa` for
+   completion; if the shell's gone, just relaunch it (same command,
+   `mode="async"`, this convention is well-established over many
+   sessions now). Compare the fresh tally against the last confirmed
+   full-sweep baseline (`L263`'s post-fix: 18,634 Pass / 823 Fail /
+   8,963 NotSupported) -- L266's fix should shave off roughly
+   246 - 18 (residual `L268` fails) = ~228 Fail, so expect somewhere
+   near 18,862 Pass / ~595 Fail / 8,963 NotSupported. Worth confirming
+   this matches rather than assuming.
+3. **(unknown, still filed, not started)** Remaining smaller
+   `L258`/`L263`-era clusters (`atomic_operations` 96,
+   `matrix.mul.dynamic` 24 + other `matrix.*` variants,
+   `440.linkage.varying` 49, `shader_expect_assume.*` 48 combined,
+   `loops.special.*_dynamic_iterations` 30 combined) -- worth a
+   dedicated triage session after `L268`/`L267`.
+4. **(carried over, unchanged, several sessions running)** `L267`:
+   `texture_functions.query.*` cluster (144 cases: `texturequerylod`
+   70, `texturequerylevels` 34, `imagesizems`/`texturesizems` 16 each,
+   `texturesamples` 8) -- filed several sessions ago, not yet started.
+5. **(carried over, unchanged, several sessions running)** `L265`:
+   residual `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode
+   bug in `ASTCDecode.cpp`. Still not picked up.
+6. **(carried over, unchanged)** `L228(e)`/`(f)`: broader-than-glsl/
+   tessellation CTS sampling (`pipeline`'s other sub-suites, `api`,
+   `synchronization`) at real scale -- still not done.
+7. **(low priority, not a regression, unresolved for many sessions)**
+   `offload-test-suite`'s own
+   `Feature/SpecializationConstant/spec_const_32_bits.test`/
+   `WaveOps/WaveActiveMax.test` (failing) and
+   `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) still
+   need upstream lit-annotation fixes -- unrelated to any FeMe/LLVM
+   change, flagged across many sessions now.
+8. No git stashes left open this session (none were used -- both repos
+   were clean/in-sync throughout, confirmed via the mandatory session-
+   start `vulkaninfo`/branch-drift checks).
