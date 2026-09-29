@@ -4367,3 +4367,78 @@ before trusting any anomalous or unexpected CTS/reproducer result.
 
 **Not attempted this session:** `L260` (the newly-split-off 2-bit-alpha
 SNORM bug above).
+
+## L258/L261: dEQP-VK.glsl.* full re-run and textureProj* fix
+
+**`L258` full re-run** (`dEQP-VK.glsl.*`, 28,420 cases, no crash, ~50
+min): **17,269 Pass / 2,188 Fail / 8,963 NotSupported** (60.8% /
+7.7% / 31.5%). Clustered by 3-level test-path prefix, largest first:
+`texture_functions` (1,366), `builtin` (403), `atomic_operations`
+(96), `matrix` (92), `shader_expect_assume` (51), `440` (49),
+`conversions` (30), `loops` (30), `builtin_var` (21), `struct` (16),
+`indexing` (15), `demote` (9), `derivate` (3), `linkage` (3),
+`functions` (2), `logical_copy` (2).
+
+**`texture_functions` (1,366 fails) triaged in full this session.**
+Drilling into its own 4th-level sub-groups found two independent root
+causes, both within the `textureProj`/`textureProjOffset`/
+`textureProjLod`/`textureProjLodOffset`/`textureProjGrad`/
+`textureProjGradOffset` families (838 of the 1,366):
+
+1. **`OpImageSampleProjImplicitLod`(91)/`OpImageSampleProjDrefImplicitLod`(93)
+   were entirely unhandled** by `SPIRVImporter.cpp`'s
+   `lowerProjectiveImageSamples` -- only the ExplicitLod pair (92/94)
+   was rewritten into MLIR-deserializable non-Proj opcodes before this
+   fix, but GLSL's own `textureProj*` builtins compile to the
+   ImplicitLod forms, failing pipeline creation with "unhandled opcode
+   91"/93 (confirmed via a minimal single-case repro,
+   `textureprojoffset.clamp_to_border.isampler2d_vec3_bias_fragment`).
+2. **A separate, pre-existing bug in the same rewrite's Coordinate-
+   narrowing logic**: it assumed a Proj Coordinate is always exactly
+   one component wider than the image's own dimensionality needs (the
+   real coordinate is "every component but the last"), but GLSL
+   permits a *wider*, padded Coordinate too (`textureProj(sampler1D,
+   vec4 P)` uses only `P.x` as the real coordinate and `P.w` as the
+   divisor, silently ignoring `P.y`/`P.z`) -- the old heuristic
+   narrowed such cases to the wrong width and divided by the wrong
+   (padding) component instead of the real divisor.
+
+Both fixed by `L261`: generalized the rewrite to all four Proj
+opcodes, and added `requiredProjCoordComponents`, which resolves the
+image's real dimensionality from the `OpTypeImage` reachable from the
+sample's own Sampled Image operand (two new `TypeResolutionInfo`
+tables), falling back to the old width-minus-one heuristic only when
+that resolution fails.
+
+**Verification:**
+- A 384-case caselist of every non-integer-sampler `textureProj*`
+  failure from the `L258` sweep: **0 Fail / 384 Pass** (was 384/384
+  Fail).
+- A full `dEQP-VK.glsl.texture_functions.*` re-run (7,946 cases,
+  Pass+Fail+NotSupported): **768 Fail** (was 1,366) -- **598 fixed**,
+  **0 regressions** confirmed via an exact set-difference against the
+  `L258` sweep's own fail list (every one of the 768 remaining
+  failures was already failing before this fix; zero new failures).
+- `FeMeImportSPIRVTests`: 14/14 (+2 net new: `LowersImageSampleProjImplicitLod`,
+  `LowersImageSampleProjExplicitLodWithPaddedCoordinate`).
+- `ninja check-feme`: 3,406 Passed / 61 Unsupported / 0 Failed (+2 net
+  new unit tests, no regressions).
+
+**Remaining `texture_functions` failures (768)** are entirely the
+integer-sampler (`isampler`/`usampler`) + `Bias`/`Grad`/`MinLodClamp`
+gap `SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`
+explicitly rejects -- filed as `L262` (Bias/MinLodClamp; ~128 direct
+cases plus an unquantified share of the residual `textureproj*`
+int-sampler failures) with `Grad` support noted as a distinct,
+larger follow-on (~256 cases: `texturegrad`/`texturegradoffset`/
+`texturegradclamp`/`texturegradoffsetclamp`, confirmed via their own
+failing-case names to be 100% Grad, 0% Bias-suffixed).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal SPIR-V-import correctness fix to an already-exposed
+core GLSL feature (`textureProj*`), no feature-bit or extension
+surface change.
+
+**Not attempted this session:** `L262` (integer-sampler Bias/Grad
+gate), `L263` (the remaining, smaller `L258` clusters: `builtin`,
+`atomic_operations`, `matrix`, etc.), `L260` (carried over, untouched).
