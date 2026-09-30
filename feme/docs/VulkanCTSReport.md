@@ -5570,7 +5570,7 @@ confirming the fix introduced no new regressions.
 change needed -- an internal compiler-pass correctness fix, not a
 feature/extension surface change.
 
-## L273/L274: `atomic_operations` shared-memory whole-struct-copy cluster (64 cases) -- one bug fixed, a second, deeper one found underneath
+## L273/L274/L275: `atomic_operations` shared-memory whole-struct-copy cluster (64 cases) -- three layered bugs, two fixed, one filed
 
 **Symptom:** the remaining `dEQP-VK.glsl.atomic_operations.*` 64 failures
 (after `L270`/`L271` cleared the 32 stage-linkage cases) are exactly the
@@ -5627,14 +5627,15 @@ test), 61 Unsupported, 0 Failed (no regressions).
 change needed -- an internal compiler-pass correctness fix, not a
 feature/extension surface change.
 
-### L274 (filed, not started): a second, distinct bug remains one stage later, in the CPU-target SIMDizer
+### L274 (fixed, follow-up session): two distinct, layered bugs in the CPU-target SIMDizer's groupshared-global handling
 
 Re-running the full `dEQP-VK.glsl.atomic_operations.*` group (1,040
-cases) against the rebuilt ICD after `L273`'s fix still shows **64 Fail
-/ 128 Pass / 848 NotSupported** -- the same raw count, but the failure
-signature has moved: pipeline creation now progresses past SPIR-V-to-
-LLVM-dialect conversion (`L273`'s own fix site) and instead fails inside
-`feme-cpu-simdize` (`GroupShared.cpp`'s `rewriteGroupSharedGlobals`):
+cases) against the rebuilt ICD after `L273`'s fix showed **64 Fail /
+128 Pass / 848 NotSupported** -- the same raw count as before `L273`,
+but the failure signature had moved: pipeline creation now progressed
+past SPIR-V-to-LLVM-dialect conversion (`L273`'s own fix site) and
+instead failed inside `feme-cpu-simdize` (`GroupShared.cpp`'s
+`rewriteGroupSharedGlobals`):
 
 - 62/64 cases: `'groupshared global ... feeds a nested getelementptr or
   another unsupported user; only a first-level getelementptr feeding a
@@ -5645,20 +5646,76 @@ LLVM-dialect conversion (`L273`'s own fix site) and instead fails inside
 - 2/64 cases: `'... a divergent value ... of aggregate type; component
   decomposition is not yet supported for this producer ...'`.
 
-Both are shapes `rewriteGroupSharedGlobals`'s own existing code comments
-already document as deliberately out of "milestone 9"'s current scope (a
-*uniform*, non-divergent nested struct access chain into a groupshared
-global, as opposed to the one second-level-GEP shape it already
-supports: a genuinely divergent vector-of-pointers per-row-component
-address) -- not a regression, and not an oversight bug like `L273`'s
-own. Filed as roadmap item `L274` for a dedicated future session rather
-than folded into this fix, since it is a materially different subsystem
-(CPU-target groupshared-global canonicalization, not SPIR-V-to-LLVM-
-dialect conversion).
+**Part 1: validation-scope gap.** `rewriteGroupSharedGlobals`'s
+validation pass only ever accepted a first-level `getelementptr` off
+the groupshared global plus exactly one further nesting level, and
+only when that first-level GEP was vector-typed (the divergent-row
+case) -- rejecting a genuinely uniform, scalar-pointer nested access
+chain (e.g. a struct field's own nested array element,
+`buf.data.field[k]`, the shape glslang's whole-`AtomicStruct`-field
+struct-copy pattern compiles down to once its per-member
+`CompositeExtract`/`CompositeInsert` decomposition further decomposes
+an array-typed member) even though `retargetGroupSharedProducer`
+already rewrites a chain like this correctly. Fixed by adding
+`isSupportedGroupSharedNestedGEPUser`, a fully recursive,
+depth-and-type-unrestricted check that also recognizes a broadcast
+`insertelement` link as a valid terminal case at any nesting depth.
+Built and unit/lit-tested cleanly on its own -- but a real CTS re-run
+after this fix alone showed it did **not** clear any of the 64
+failures (still 128 Pass / 64 Fail / 848 NotSupported), a significant
+mid-session pivot: the fix was real and independently correct, but not
+sufficient on its own.
 
-**Net effect this session:** the `atomic_operations` cluster's own
-blocking bug moved one stage deeper in the pipeline; the raw CTS Pass/
-Fail count for this specific group is unchanged (128/64/848) until
-`L274` is also fixed, but `L273`'s fix is a genuine, independently
-correct bug fix (confirmed via its own dedicated unit test and the
-standalone MLIR repro) needed regardless of `L274`'s own resolution.
+**Part 2: GEP-duplication gap**, found only via targeted debug
+instrumentation after the CTS re-run above. The real cause the
+per-lane broadcast chain for these cases relies on the same nested
+`getelementptr` being inserted at every link of the chain (identity,
+not just structural equality) -- but
+`llvm::convertUsersOfConstantsToInstructions`'s per-`(Constant,
+BasicBlock)` memoization can materialize more than one
+structurally-identical-but-distinct instance of the same nested
+constant-expression GEP within one block, one per sibling insertion
+point. The pre-existing `coalesceIdenticalGroupSharedGEPs` helper,
+written to solve exactly this problem for *first-level* GEPs off the
+global, never extended its predicate to a *nested* one (a GEP whose
+own pointer operand is itself another GEP). Fixed by adding
+`isGroupSharedRootedGEP` (walks up an arbitrary chain of parent GEPs
+to check whether it is ultimately rooted at the global) and wrapping
+the per-block coalescing pass in a fixpoint loop.
+
+Both parts are shapes `rewriteGroupSharedGlobals`'s own pre-existing
+code comments had documented as deliberately out of "milestone 9"'s
+scope, not a regression or an oversight bug like `L273`'s own.
+
+**Verification.** Added a new lit test for part 1 (struct-field +
+nested array shape) and a dedicated lit test for part 2 (four
+structurally-identical-but-distinct nested GEPs feeding separate links
+of one per-lane broadcast chain), both confirmed via `git stash` A/B
+testing to fail with the pre-fix diagnostic and pass post-fix. Rewrote
+a now-stale pre-existing lit test and unit test that had asserted the
+old, now-incorrect "unsupported" behavior for the array-of-array
+shape part 1 now supports.
+
+**`check-feme`:** 3,432/3,432 discovered tests Passed (+2 net new
+tests vs. `L273`'s own count), 61 Unsupported, 0 Failed.
+
+**Real CTS re-run** (`dEQP-VK.glsl.atomic_operations.*`, 1,040 cases)
+against the rebuilt ICD with both parts applied: **176 Pass / 16 Fail
+/ 848 NotSupported** -- clears 48/64 of the previously-failing cases
+(all `*_{compute,mesh}_shared` cases). The residual 16
+(`*_task_payload`) fail with a completely unrelated diagnostic (`JIT
+session error: Symbols not found: [ spirv_var_48 ]` --
+`vkCreateGraphicsPipelines: Failed to materialize symbols`), a distinct
+missing-feature gap (task-payload-memory symbol materialization), not
+a `GroupShared.cpp` SIMDizer scope issue -- filed separately as `L275`
+rather than folded into this fix.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- a compiler-internals correctness fix, not a
+feature/extension surface change.
+
+**Net effect this session:** `L274`'s two-part fix, combined with
+`L273`'s prior-session fix, takes the `atomic_operations` group from
+64 Fail down to 16 Fail (128->176 Pass); the residual 16
+`*_task_payload` cases are a new, distinct gap (`L275`, filed, not
+started).
