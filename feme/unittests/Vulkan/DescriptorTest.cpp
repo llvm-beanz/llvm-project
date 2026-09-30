@@ -1183,7 +1183,85 @@ TEST_F(DescriptorTest,
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
-/// (roadmap L12c) `VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT` on
+/// (roadmap L154) The `VkWriteDescriptorSet` counterpart to
+/// `CopyDescriptorSetSpansConsecutiveBufferBindings` above: per spec, a
+/// single write whose `descriptorCount` exceeds `dstBinding`'s own
+/// declared array size must likewise continue writing into the next
+/// consecutively-numbered binding(s), consuming `pBufferInfo` in order --
+/// exactly the shape `dEQP-VK.glsl.shader_expect_assume.compute.assume.
+/// storagebuffer` (and its `expect.storagebuffer_*` siblings) exercise:
+/// one `VkWriteDescriptorSet` with `dstBinding = 0` and
+/// `descriptorCount = 2` meant to populate both a single-element output
+/// buffer binding 0 and a single-element input buffer binding 1.
+/// `applyDescriptorWrite`'s per-element loop previously wrote every
+/// element to the fixed `Write.dstBinding`, silently dropping anything
+/// past that binding's own first element instead of spilling into
+/// binding 1 -- leaving binding 1 permanently unpopulated
+/// (`ResourceKind::None`) and the shader's second buffer load always
+/// reading as if unbound.
+TEST_F(DescriptorTest, WriteDescriptorSetSpansConsecutiveBufferBindings) {
+  VkDescriptorSetLayoutBinding Bindings[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    Bindings[I].binding = I;
+    Bindings[I].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[I].descriptorCount = 1;
+  }
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 3;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkBuffer Bufs[3] = {createStorageBuffer(64), createStorageBuffer(64),
+                      createStorageBuffer(64)};
+  VkDescriptorBufferInfo BufInfos[3]{};
+  for (uint32_t I = 0; I != 3; ++I)
+    BufInfos[I] = {Bufs[I], /*offset=*/I * 4u, /*range=*/16};
+
+  // One write, dstBinding = 0, descriptorCount = 3 -- spans past binding
+  // 0's own single element into bindings 1 and 2.
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 3;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = BufInfos;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  auto *DstSet = fromHandle<DescriptorSet>(Set);
+  for (uint32_t I = 0; I != 3; ++I) {
+    std::vector<DescriptorBufferBinding> Array = DstSet->bindingArray(I);
+    ASSERT_EQ(Array.size(), 1u);
+    EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Bufs[I]));
+    EXPECT_EQ(Array[0].Offset, I * 4u);
+    EXPECT_EQ(Array[0].Range, 16u);
+  }
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  for (VkBuffer Buf : Bufs)
+    vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+
 /// the layout's own highest-numbered binding, with no chained
 /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` at allocation time:
 /// the allocated set's binding array is the full layout-declared `Count`,

@@ -431,6 +431,41 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
 
 namespace {
 
+/// (L154) A cursor walking one side (src or dst) of a `VkCopyDescriptorSet`
+/// copy, or a `VkWriteDescriptorSet`'s own destination. Per spec, if
+/// `descriptorCount` is greater than the number of elements (or, for an
+/// inline uniform block, bytes) remaining in the binding the write/copy
+/// starts at, it continues into the next consecutively-numbered binding,
+/// and so on. `Binding`/`Element` track the binding number and index/byte
+/// offset within it the write/copy is currently reading or writing.
+struct BindingCursor {
+  uint32_t Binding;
+  uint32_t Element;
+
+  /// Normalizes this cursor so `Element` is in-bounds for `Binding`,
+  /// spanning forward into later binding numbers (resetting `Element` to
+  /// count from each new binding's own start) as needed. \p Size returns
+  /// a given binding's declared array size (element count, or byte count
+  /// for an inline uniform block) -- 0 for a binding this set's layout
+  /// does not declare, which this cursor treats as nothing left to span
+  /// into. Returns false if the walk runs off the end of every
+  /// consecutively-declared binding before `Element` lands in bounds (an
+  /// undeclared/empty binding, or an already-out-of-bounds starting
+  /// element) -- the caller should stop its own copy loop there, exactly
+  /// like the single-binding bounds check this generalizes.
+  bool normalize(llvm::function_ref<size_t(uint32_t)> Size) {
+    for (;;) {
+      size_t N = Size(Binding);
+      if (Element < N)
+        return true;
+      if (N == 0)
+        return false;
+      Element -= static_cast<uint32_t>(N);
+      ++Binding;
+    }
+  }
+};
+
 /// Writes one descriptor array element into \p Set from a raw pointer to
 /// its Vulkan info struct (`VkDescriptorBufferInfo`, `VkDescriptorImageInfo`,
 /// or `VkBufferView`), dispatching on \p Type exactly as
@@ -509,55 +544,42 @@ void applyDescriptorWrite(DescriptorSet &Set,
                                   Inline->dataSize, Inline->pData);
     return;
   }
+  // (L154) Per spec ("11.2.1. Descriptor Set Updates"), if
+  // `Write.descriptorCount` is greater than the number of elements
+  // remaining in `Write.dstBinding` starting at `Write.dstArrayElement`,
+  // the write continues into the next consecutively-numbered binding
+  // (which must have the same `VkDescriptorType`), and so on -- exactly
+  // the same cross-binding overflow rule `vkUpdateDescriptorSets`'s own
+  // `VkCopyDescriptorSet` loop below already implements via the same
+  // `BindingCursor`. Each type's own array (`imageBindingArray` for an
+  // image/sampler descriptor, `bindingArray` for everything else this
+  // function handles, `writeDescriptorFromRaw`'s own `isTexelBuffer...`
+  // arm included -- a texel buffer view lives in the same
+  // `DescriptorBufferBinding` array a plain buffer descriptor does,
+  // distinguished only by its own `View` member) is queried for its
+  // per-binding size the same way that loop's `Size` callback does.
+  bool IsImageOrSampler = isImageDescriptorType(Write.descriptorType) ||
+                          isSamplerDescriptorType(Write.descriptorType);
+  BindingCursor Cursor{Write.dstBinding, Write.dstArrayElement};
   for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
+    if (!Cursor.normalize([&](uint32_t B) {
+          return IsImageOrSampler ? Set.imageBindingArray(B).size()
+                                  : Set.bindingArray(B).size();
+        }))
+      break;
     const void *Data;
     if (isTexelBufferDescriptorType(Write.descriptorType))
       Data = &Write.pTexelBufferView[J];
-    else if (isImageDescriptorType(Write.descriptorType) ||
-             isSamplerDescriptorType(Write.descriptorType))
+    else if (IsImageOrSampler)
       Data = &Write.pImageInfo[J];
     else
       Data = &Write.pBufferInfo[J];
-    writeDescriptorFromRaw(Set, Write.descriptorType, Write.dstBinding,
-                           Write.dstArrayElement + J, Data);
+    writeDescriptorFromRaw(Set, Write.descriptorType, Cursor.Binding,
+                           Cursor.Element, Data);
+    ++Cursor.Element;
   }
 }
 
-/// (L154) A cursor walking one side (src or dst) of a `VkCopyDescriptorSet`
-/// copy. Per spec, if `descriptorCount` is greater than the number of
-/// elements (or, for an inline uniform block, bytes) remaining in the
-/// binding the copy starts at, the copy continues into the next
-/// consecutively-numbered binding, and so on -- the same rule a
-/// `VkWriteDescriptorSet` whose own `descriptorCount` overruns one binding
-/// follows. `Binding`/`Element` track the binding number and index/byte
-/// offset within it the copy is currently reading or writing.
-struct BindingCursor {
-  uint32_t Binding;
-  uint32_t Element;
-
-  /// Normalizes this cursor so `Element` is in-bounds for `Binding`,
-  /// spanning forward into later binding numbers (resetting `Element` to
-  /// count from each new binding's own start) as needed. \p Size returns
-  /// a given binding's declared array size (element count, or byte count
-  /// for an inline uniform block) -- 0 for a binding this set's layout
-  /// does not declare, which this cursor treats as nothing left to span
-  /// into. Returns false if the walk runs off the end of every
-  /// consecutively-declared binding before `Element` lands in bounds (an
-  /// undeclared/empty binding, or an already-out-of-bounds starting
-  /// element) -- the caller should stop its own copy loop there, exactly
-  /// like the single-binding bounds check this generalizes.
-  bool normalize(llvm::function_ref<size_t(uint32_t)> Size) {
-    for (;;) {
-      size_t N = Size(Binding);
-      if (Element < N)
-        return true;
-      if (N == 0)
-        return false;
-      Element -= static_cast<uint32_t>(N);
-      ++Binding;
-    }
-  }
-};
 
 } // namespace
 
