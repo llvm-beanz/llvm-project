@@ -997,14 +997,23 @@ the first two's own remaining narrowings):
   broadcast too, whether it is `ConstantFolder`'s fold-then-
   re-materialize of a direct global reference or `getWidened`'s ordinary
   broadcast of a uniform `getelementptr`). A *nested* `getelementptr` (a
-  groupshared array of arrays/structs, one level deeper than a single
-  index) remains unsupported in general -- except (roadmap L11) the one
+  groupshared array of arrays/structs, more than one level deep) was
+  originally unsupported in general -- except (roadmap L11) the one
   specific shape `widenGroupSharedLoad`'s vector-typed-result case itself
   produces: a second-level, per-component `getelementptr` off an
-  already-divergent, already-widened first-level `<W x ptr>` row address,
-  which `rewriteGroupSharedGlobals` recognizes and retargets precisely
-  because its own first-level GEP's type (a vector of pointers) marks it
-  as this shape and not an ordinary uniform nested array/struct chain.
+  already-divergent, already-widened first-level `<W x ptr>` row address.
+  Roadmap L274 closed the remaining gap: `rewriteGroupSharedGlobals`'s
+  validation had never been widened past that single divergent-row case,
+  even though its own rewriting logic (`retargetGroupSharedProducer`)
+  already recursed through a nested `getelementptr` chain of arbitrary
+  depth unconditionally. `isSupportedGroupSharedNestedGEPUser` replaces
+  the old single-level, vector-typed-only check with a fully general,
+  depth- and type-unrestricted recursive one, so an ordinary *uniform*
+  nested array-of-array/struct-of-array chain -- e.g. glslang's own
+  whole-`AtomicStruct`-field struct-copy pattern, once its per-member
+  `CompositeExtract`/`CompositeInsert` further decomposes an array field
+  into one access per element -- is now accepted too, alongside the
+  pre-existing divergent-row case.
 - **`Device` and `All` memory scope are not distinguished.** Both get a
   `fence` visible across host threads (`SyncScope::System`); the design
   only requires the CPU target's memory model, not DXIL's/SPIR-V's finer

@@ -196,6 +196,48 @@ bool hasOnlySupportedBroadcasts(Value *V) {
          llvm::all_of(*Broadcasts, isSupportedGroupSharedRowUser);
 }
 
+/// Returns whether every user of \p GEP (a `getelementptr` already
+/// reached from a groupshared global, directly or through zero or more
+/// earlier nested `getelementptr`s) is itself a supported leaf access
+/// (roadmap L273/L274: a genuinely *uniform* multi-index-per-instruction
+/// access chain into a struct/array field of a groupshared global --
+/// e.g. `buf.data.field[k]`, glslang's own whole-`AtomicStruct`-field
+/// copy pattern once per-element-decomposed, see
+/// `CompositeExtract`/`CompositeInsert`'s own per-member expansion of a
+/// whole-aggregate load/store -- routinely re-`getelementptr`s an
+/// already-fully-constant-offset field GEP a further, arbitrary number of
+/// times, one per array element, rather than reaching a leaf access in a
+/// single additional `getelementptr` the way the divergent-row case
+/// above does), a well-formed uniform-address broadcast of \p GEP itself
+/// (`FunctionWidener::widenMaskedStore`'s ordinary, non-groupshared-
+/// vector-typed scalar path always calls `getWidened` on its matched
+/// store's own pointer operand regardless of how deeply nested it is,
+/// broadcasting a uniform, deeply-nested field/array address exactly the
+/// same way it would a first-level one -- see `hasOnlySupportedBroadcasts`),
+/// or another nested `getelementptr` recursively satisfying this same
+/// condition, to any depth. Unlike `isSupportedGroupSharedRowUser` above
+/// (gated to a *divergent*, already-widened vector-of-pointers row
+/// address specifically, per roadmap L11/L7o), this helper places no
+/// requirement on \p GEP's own type at all -- it is exactly as applicable
+/// to a uniform scalar-pointer nested chain as the caller's own
+/// single-level check already was, just generalized to any depth instead
+/// of exactly one further level. `retargetGroupSharedProducer` already
+/// rewrites a chain like this correctly (it recurses through every
+/// nested `getelementptr` level unconditionally); this validation pass
+/// had simply never been widened to *accept* more than one further level,
+/// rejecting an otherwise perfectly retargetable access outright.
+bool isSupportedGroupSharedNestedGEPUser(const GetElementPtrInst *GEP) {
+  return llvm::all_of(GEP->users(), [GEP](const User *U) {
+    if (isSupportedGroupSharedLeafUser(U))
+      return true;
+    if (auto *IE = dyn_cast<InsertElementInst>(U);
+        IE && IE->getOperand(1) == GEP)
+      return hasOnlySupportedBroadcasts(const_cast<GetElementPtrInst *>(GEP));
+    const auto *NestedGEP = dyn_cast<GetElementPtrInst>(U);
+    return NestedGEP && isSupportedGroupSharedNestedGEPUser(NestedGEP);
+  });
+}
+
 /// `llvm::convertUsersOfConstantsToInstructions`'s per-`(Constant,
 /// BasicBlock)` memoization (`llvm/lib/IR/ReplaceConstant.cpp`) can still
 /// materialize more than one instance of the *same* constant-expression
@@ -482,27 +524,28 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           auto *IE = dyn_cast<InsertElementInst>(GEPUser);
           if (IE && IE->getOperand(1) == GEP && hasOnlySupportedBroadcasts(GEP))
             continue;
-          // (Roadmap L11) a second-level `getelementptr` off `GEP` --
-          // the per-row-component address `FunctionWidener::
-          // widenGroupSharedLoad`'s vector case builds off a divergent
-          // row address, one per component of the loaded row -- is
-          // supported too, as long as `GEP` itself is a *divergent*,
-          // already-widened vector-of-pointers address (i.e. this is the
-          // specific vector-row-component shape and not an ordinary
-          // uniform nested array/struct access chain, which milestone
-          // 9's own scope narrowing still leaves unsupported) and every
-          // one of the nested GEP's own users is an ordinary leaf access
-          // (in practice always a masked gather, one per component). A
-          // *uniform* row address broadcast into a vector-of-pointers
-          // (roadmap L7o: `subgroupElect()`-style "exactly one invocation
-          // writes" code stores a whole vector-typed row through a
-          // single, wave-shared address rather than a genuinely divergent
-          // one) reaching this exact same second-level-GEP shape is
-          // handled above instead, by `hasOnlySupportedBroadcasts`'s own
-          // `isSupportedGroupSharedRowUser` check on the broadcast link.
+          // A nested `getelementptr` off `GEP`, to any further depth
+          // (roadmap L273/L274): covers both the pre-existing
+          // divergent-row-component shape (`FunctionWidener::
+          // widenGroupSharedLoad`'s vector case builds one per component
+          // of a divergent row address, exactly one further GEP level
+          // deep) and a genuinely *uniform* nested struct/array access
+          // chain reaching a supported leaf several `getelementptr`
+          // levels deep instead of just one -- e.g. glslang's own
+          // whole-`AtomicStruct`-field copy pattern, once decomposed
+          // per-array-element, routinely re-`getelementptr`s an
+          // already-fully-constant-offset field GEP a further, arbitrary
+          // number of times, one per element, rather than reaching its
+          // leaf load/store in a single additional level. A *uniform* row
+          // address broadcast into a vector-of-pointers (roadmap L7o:
+          // `subgroupElect()`-style "exactly one invocation writes" code
+          // stores a whole vector-typed row through a single, wave-shared
+          // address rather than a genuinely divergent one) reaching a
+          // second-level GEP is handled above instead, by
+          // `hasOnlySupportedBroadcasts`'s own `isSupportedGroupSharedRowUser`
+          // check on the broadcast link.
           if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser);
-              NestedGEP && GEP->getType()->isVectorTy() &&
-              llvm::all_of(NestedGEP->users(), isSupportedGroupSharedLeafUser))
+              NestedGEP && isSupportedGroupSharedNestedGEPUser(NestedGEP))
             continue;
           // A per-lane `extractelement` off `GEP` -- the scalar address
           // `FunctionWidener::widenGroupSharedAtomicRMW`/
@@ -520,13 +563,12 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
             continue;
           Ctx.emitError(
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
-              "' feeds a nested getelementptr or another unsupported "
-              "user; only a first-level getelementptr feeding a direct "
-              "load, store, atomicrmw, masked gather/scatter, or (for a "
-              "vector-typed row load, or a uniform row address broadcast "
-              "into one) a second-level per-component getelementptr "
-              "feeding its own masked gather/scatter is supported "
-              "(roadmap milestone 9 deviation)");
+              "' feeds an unsupported user; only a getelementptr chain "
+              "(to any depth) feeding a direct load, store, atomicrmw, "
+              "masked gather/scatter, or (for a vector-typed row load, or "
+              "a uniform row address broadcast into one) an extractelement "
+              "feeding its own scalar leaf access is supported (roadmap "
+              "milestone 9 deviation)");
           return false;
         }
       }

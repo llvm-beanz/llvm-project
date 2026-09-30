@@ -2059,9 +2059,13 @@ TEST(SIMDizeTest, DecomposesInsertElementChainIntoMaskedVectorStore) {
 }
 
 // A *nested* `getelementptr` (one level deeper than a single index --
-// e.g. a groupshared array of arrays) remains outside roadmap step R23's
-// scope and must still be diagnosed, not silently miscompiled.
-TEST(SIMDizeTest, DiagnosesNestedGroupSharedGetElementPtr) {
+// e.g. a groupshared array of arrays) is now supported (roadmap L274):
+// `isSupportedGroupSharedNestedGEPUser` accepts a uniform nested GEP
+// chain of any depth reaching an ordinary leaf access, generalizing the
+// pre-existing single-level, divergent-row-only check. Verifies no
+// diagnostic is raised and the nested chain is retargeted onto the flat
+// groupshared buffer, mirroring simdize-groupshared-nested-array-of-array.ll.
+TEST(SIMDizeTest, RetargetsNestedGroupSharedGetElementPtr) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -2083,7 +2087,14 @@ TEST(SIMDizeTest, DiagnosesNestedGroupSharedGetElementPtr) {
       },
       &SawError);
   runPass(*M);
-  EXPECT_TRUE(SawError);
+  EXPECT_FALSE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
 }
 
 // Roadmap H6g-b-a-i-a-i-b: a divergent vector comparison (`fcmp`/`icmp`)
