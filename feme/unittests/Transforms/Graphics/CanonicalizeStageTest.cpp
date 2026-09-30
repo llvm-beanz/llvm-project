@@ -4160,6 +4160,42 @@ TEST(CanonicalizeStageTest, FragmentStageMapsSamplePositionBuiltin) {
   EXPECT_EQ(SamplePosition.ComponentCount, 2u);
 }
 
+/// (Roadmap L280) A fragment entry's `BuiltIn PointCoord` (code 16,
+/// `gl_PointCoord`) input now maps to
+/// `SignatureSystemValue::PointCoord` instead of falling through to
+/// `None` (which made it an ordinary, `Location`-less varying that
+/// `Executor.cpp`'s fragment-input linkage loop always rejected outright,
+/// exactly like `SamplePosition` above used to -- the
+/// `dEQP-VK.glsl.builtin_var.simple.pointcoord*` failures this fixes).
+TEST(CanonicalizeStageTest, FragmentStageMapsPointCoordBuiltin) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PointCoord = external addrspace(7) constant <2 x float>, !spirv.Decorations !0
+    @out_var = external addrspace(8) global <2 x float>, !spirv.Decorations !1
+    define void @main() #0 {
+      %v = load <2 x float>, ptr addrspace(7) @gl_PointCoord
+      store <2 x float> %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 16}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &PointCoord = Sig->Elements[0];
+  EXPECT_EQ(PointCoord.Direction, SignatureDirection::Input);
+  EXPECT_EQ(PointCoord.SystemValue, SignatureSystemValue::PointCoord);
+  EXPECT_EQ(PointCoord.ComponentCount, 2u);
+}
+
 /// (Roadmap H5e-d) A geometry entry compiled from an `emit`-count shape
 /// that ends its primitive without ever emitting on that stream/count
 /// combination (e.g. a CTS `dEQP-VK.geometry.emit.*_emit_0_end_1` case)

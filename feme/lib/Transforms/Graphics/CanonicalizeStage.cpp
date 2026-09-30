@@ -540,6 +540,17 @@ parseSPIRVMemberDecorations(const MDNode *MD) {
 /// output that was always rejected outright at pipeline-creation time
 /// (`"fragment input element N has no location to link against a vertex
 /// output"`) rather than executing.
+///
+/// (Roadmap L280) `PointCoord` (`gl_PointCoord`) now maps to
+/// `SignatureSystemValue::PointCoord`: `Executor.cpp`'s `emitPointQuad`
+/// synthesizes a distinct `(s, t)` value per quad corner and
+/// barycentric-interpolates it into each covered fragment, exactly like
+/// `SamplePosition` above reads back a real, rasterizer-computed value
+/// instead of the "deterministic zero" a producer-less ordinary varying
+/// gets. Before this row it mapped to `None`, making a real
+/// `gl_PointCoord` read hit the identical "no location to link" rejection
+/// `SamplePosition` used to (`dEQP-VK.glsl.builtin_var.simple.
+/// pointcoord*`).
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
   case 0:  // Position
@@ -599,6 +610,8 @@ SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
     return SignatureSystemValue::CullPrimitive;
   case 19: // SamplePosition
     return SignatureSystemValue::SamplePosition;
+  case 16: // PointCoord
+    return SignatureSystemValue::PointCoord;
   default:
     return SignatureSystemValue::None;
   }

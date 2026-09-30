@@ -164,6 +164,23 @@ enum class SignatureSystemValue : uint8_t {
   /// no-renumbering reason `PointSize`/`PrimitiveIndices`/`CullPrimitive`
   /// were.
   SamplePosition,
+  /// (Roadmap L280) `gl_PointCoord`: a fragment-shader-only input, valid
+  /// only for a point-topology draw's own quad expansion -- the
+  /// fragment's `(s, t)` location within its point sprite, `(0, 0)` at
+  /// the sprite's top-left corner through `(1, 1)` at its bottom-right
+  /// (Vulkan's "Point Sprite" section), linearly interpolated across the
+  /// sprite exactly like an ordinary varying. Unlike `SamplePosition`/
+  /// `SampleIndex` above (whole-pixel, uninterpolated values), this one
+  /// genuinely varies per-fragment across a single primitive, so
+  /// `Executor.cpp`'s `emitPointQuad` synthesizes a distinct value per
+  /// quad corner and threads it through the same barycentric-
+  /// interpolation path `EdgeDistance`/`ArcLength` (a line primitive's
+  /// analogous per-corner synthetic attribute) already use, rather than
+  /// reading back one fixed value like `SamplePosition` does. Always an
+  /// input; always a `vec2` (`ComponentCount == 2`). Added at the end for
+  /// the same no-renumbering reason `PointSize`/`PrimitiveIndices`/
+  /// `CullPrimitive`/`SamplePosition` were.
+  PointCoord,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };

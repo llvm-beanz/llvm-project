@@ -1099,6 +1099,15 @@ struct FemeFragmentInvocation {
   /// same pass, matching `Position.xy`'s own per-lane, per-`PassSample`
   /// shift (`Executor.cpp`'s per-sample-pass loop).
   float SamplePosition[4][2];
+  /// (Roadmap L280) `gl_PointCoord` read back as a fragment-shader input:
+  /// this quad's own per-lane `(s, t)` location within its point sprite
+  /// (`PointCoord[Lane][0]` = s, `[1]` = t, both in `[0, 1]`), already
+  /// barycentric-interpolated from `emitPointQuad`'s per-corner values by
+  /// `Executor.cpp` before this struct is populated -- unlike
+  /// `SamplePosition` above (one fixed value per pass, not per lane's own
+  /// screen position), this is a genuinely per-fragment interpolated
+  /// value, mirroring `Position` above's own per-lane shape.
+  float PointCoord[4][2];
   /// Lanes participating in execution, including helper lanes.
   uint32_t LiveMask;
   /// Lanes allowed to perform side effects.

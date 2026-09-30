@@ -814,6 +814,13 @@ struct ScreenTriangle {
   /// behavior): interpolated per-sample to drive the stipple pattern
   /// test.
   std::array<float, 3> ArcLength{0.0f, 0.0f, 0.0f};
+  /// (Roadmap L280) Each corner's `gl_PointCoord` `(s, t)` value, `(0, 0)`
+  /// at the point sprite's top-left corner through `(1, 1)` at its
+  /// bottom-right -- meaningful only for a point primitive's own quad
+  /// expansion (`emitPointQuad`); left at the default `(0, 0)` for a
+  /// line/real-triangle synthetic triangle, meaningless there.
+  std::array<float, 3> PointCoordS{0.0f, 0.0f, 0.0f};
+  std::array<float, 3> PointCoordT{0.0f, 0.0f, 0.0f};
 };
 
 } // namespace
@@ -2960,6 +2967,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       const RasterVertex *Vtx;
       float Edge = 0.0f;
       float Arc = 0.0f;
+      // (Roadmap L280) This corner's own `gl_PointCoord` `(s, t)` value
+      // (0 and meaningless for a line/real triangle); see
+      // `ScreenTriangle::PointCoordS`/`PointCoordT`'s own comment.
+      float PointS = 0.0f;
+      float PointT = 0.0f;
     };
     auto pushQuadTriangle = [&](QuadCorner A, QuadCorner B, QuadCorner C,
                                 const PrimitiveState &Primitive, bool IsLine) {
@@ -2968,6 +2980,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       std::array<float, 3> Depth = {A.Depth, B.Depth, C.Depth};
       std::array<float, 3> Edge = {A.Edge, B.Edge, C.Edge};
       std::array<float, 3> Arc = {A.Arc, B.Arc, C.Arc};
+      std::array<float, 3> PointS = {A.PointS, B.PointS, C.PointS};
+      std::array<float, 3> PointT = {A.PointT, B.PointT, C.PointT};
       std::array<const RasterVertex *, 3> Src = {A.Vtx, B.Vtx, C.Vtx};
       float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
       if (SArea == 0.0f)
@@ -2978,6 +2992,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         std::swap(Depth[1], Depth[2]);
         std::swap(Edge[1], Edge[2]);
         std::swap(Arc[1], Arc[2]);
+        std::swap(PointS[1], PointS[2]);
+        std::swap(PointT[1], PointT[2]);
         std::swap(Src[1], Src[2]);
       }
       auto VaryingBits = std::make_unique<SmallVector<uint32_t, 8>>();
@@ -2994,6 +3010,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ST.IsLine = IsLine;
       ST.EdgeDistance = Edge;
       ST.ArcLength = Arc;
+      ST.PointCoordS = PointS;
+      ST.PointCoordT = PointT;
       size_t Stride = Src[0]->Varyings.size();
       for (unsigned K = 0; K != 3; ++K)
         ST.Varyings[K] = VaryingBits->data() + K * Stride;
@@ -3036,10 +3054,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       float Half = std::clamp(Vtx.PointSize, 1.0f,
                               Pipeline.getRasterState().MaxPointSize) *
                    0.5f;
-      QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &Vtx};
-      QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &Vtx};
-      QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &Vtx};
-      QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &Vtx};
+      QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &Vtx,
+                    /*Edge=*/0.0f, /*Arc=*/0.0f, /*PointS=*/0.0f,
+                    /*PointT=*/0.0f};
+      QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &Vtx,
+                    /*Edge=*/0.0f, /*Arc=*/0.0f, /*PointS=*/1.0f,
+                    /*PointT=*/0.0f};
+      QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &Vtx,
+                    /*Edge=*/0.0f, /*Arc=*/0.0f, /*PointS=*/1.0f,
+                    /*PointT=*/1.0f};
+      QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &Vtx,
+                    /*Edge=*/0.0f, /*Arc=*/0.0f, /*PointS=*/0.0f,
+                    /*PointT=*/1.0f};
       pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/false);
       pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/false);
     };
@@ -3681,6 +3707,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               // default is overwritten there too.
               Inv.SamplePosition[Lane][0] = (*SamplePositions)[0][0];
               Inv.SamplePosition[Lane][1] = (*SamplePositions)[0][1];
+              // (Roadmap L280) `gl_PointCoord`: barycentric-interpolate
+              // this triangle's own per-corner `(s, t)` values at this
+              // lane's fixed pixel-center weights, exactly like `Depth`
+              // above -- meaningless (always `(0, 0)`) for a non-point
+              // synthetic triangle, whose `PointCoordS`/`PointCoordT`
+              // stay at their all-zero default.
+              Inv.PointCoord[Lane][0] = B0 * Tri.PointCoordS[0] +
+                                        B1 * Tri.PointCoordS[1] +
+                                        B2 * Tri.PointCoordS[2];
+              Inv.PointCoord[Lane][1] = B0 * Tri.PointCoordT[0] +
+                                        B1 * Tri.PointCoordT[1] +
+                                        B2 * Tri.PointCoordT[2];
               Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
               Inv.ViewportIndex[Lane] = Tri.ViewportIndex;
               // (Roadmap H73) `gl_Layer`/`SV_RenderTargetArrayIndex` read

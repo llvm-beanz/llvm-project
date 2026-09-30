@@ -81,9 +81,12 @@ enum FragmentInvocationField : unsigned {
   // (Roadmap L114) Inserted between `ViewIndex` and `LiveMask` to mirror
   // `FemeFragmentInvocation`'s own field order exactly.
   FragmentInvocationFieldSamplePosition = 8,
-  FragmentInvocationFieldLiveMask = 9,
-  FragmentInvocationFieldSideEffectMask = 10,
-  FragmentInvocationFieldReserved = 11,
+  // (Roadmap L280) Inserted between `SamplePosition` and `LiveMask`,
+  // mirroring `FemeFragmentInvocation`'s own field order exactly.
+  FragmentInvocationFieldPointCoord = 9,
+  FragmentInvocationFieldLiveMask = 10,
+  FragmentInvocationFieldSideEffectMask = 11,
+  FragmentInvocationFieldReserved = 12,
 };
 
 enum FragmentResultField : unsigned {
@@ -260,9 +263,14 @@ inline llvm::StructType *getFragmentInvocationType(llvm::LLVMContext &Ctx) {
   // `[Lane][Component]` shape, just with 2 components (x, y) instead of 4.
   llvm::Type *SamplePositionTy =
       llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 4);
+  // (Roadmap L280) `PointCoordTy` mirrors `SamplePositionTy` exactly (same
+  // `[Lane][2]` shape).
+  llvm::Type *PointCoordTy =
+      llvm::ArrayType::get(llvm::ArrayType::get(F32Ty, 2), 4);
   return llvm::StructType::get(
       Ctx, {PositionTy, I32x4, I32x4, I32x4, I32x4, I32x4, I32x4, I32Ty,
-            SamplePositionTy, I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 3)});
+            SamplePositionTy, PointCoordTy, I32Ty, I32Ty,
+            llvm::ArrayType::get(I32Ty, 3)});
 }
 
 inline llvm::StructType *getFragmentResultType(llvm::LLVMContext &Ctx) {

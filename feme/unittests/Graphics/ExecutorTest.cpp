@@ -2118,7 +2118,105 @@ TEST(ExecutorTest, RendersAPointAtItsWrittenPointSize) {
   EXPECT_EQ(texel(3, 0)[3], 0);
 }
 
-// roadmap H7e (`largePoints`): the derived point size is clamped to
+// (Roadmap L280) `gl_PointCoord`: a fragment shader reading it back as a
+// system-value input (element 0, `ComponentCount == 2`, no `Location`)
+// now sees a real, per-fragment `(s, t)` value bilinearly interpolated
+// across a `PointList` primitive's own quad expansion -- `(0, 0)` at the
+// sprite's top-left pixel through `(1, 1)` at its bottom-right -- rather
+// than being rejected outright at pipeline-creation time as an ordinary,
+// `Location`-less varying with no producer (the `dEQP-VK.glsl.
+// builtin_var.simple.pointcoord*` failures this fixes). Mirrors
+// `RendersAPointAtItsWrittenPointSize`'s own 2-pixel point, centered
+// exactly on pixel-grid intersection (2, 2) so its quad's four covered
+// pixel centers land at exact quarter/three-quarter fractions.
+constexpr char PointCoordFragmentShaderIR[] = R"(
+  define void @fs_pointcoord() #0 {
+    %s = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %t = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %s, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %t, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, RendersGlPointCoordAcrossAPointSprite) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/2),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0),
+      makeElement(5, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PointSize)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, PointSizeVertexShaderIR, "vs_pointsize", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 2, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PointCoord),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, PointCoordFragmentShaderIR, "fs_pointcoord", FSSig,
+                  ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PointList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments),
+      StencilState{}, std::vector<BlendState>{BlendState{}});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // One point, centered exactly on pixel-grid intersection (2, 2) with a
+  // `gl_PointSize` of 2.0 -- covers exactly the 2x2 block of pixels
+  // straddling that intersection, matching `RendersAPointAtItsWrittenPoint
+  // Size`'s own point.
+  std::vector<float> VertexData = {
+      0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 2.0f,
+  };
+  std::array<uint8_t, 64> AttachmentStorage{};
+  std::array<VertexBufferBinding, 1> Bindings;
+  std::array<AttachmentView, 1> AttachmentViews;
+  AttachmentView Color;
+  PreparedDraw Draw = preparePointSizeDraw(AttachmentStorage, VertexData,
+                                           Bindings, AttachmentViews, Color);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // `(s, t)` is the affine function `((x - 1) / 2, (y - 1) / 2)` across
+  // this quad (spanning screen x/y `[1, 3]`), so each covered pixel's own
+  // center yields an exact quarter/three-quarter fraction.
+  const uint8_t *TL = texel(1, 1); // pixel center (1.5, 1.5): s=0.25, t=0.25
+  EXPECT_NEAR(TL[0], std::lround(0.25f * 255.0f), 2);
+  EXPECT_NEAR(TL[1], std::lround(0.25f * 255.0f), 2);
+  const uint8_t *TR = texel(2, 1); // pixel center (2.5, 1.5): s=0.75, t=0.25
+  EXPECT_NEAR(TR[0], std::lround(0.75f * 255.0f), 2);
+  EXPECT_NEAR(TR[1], std::lround(0.25f * 255.0f), 2);
+  const uint8_t *BL = texel(1, 2); // pixel center (1.5, 2.5): s=0.25, t=0.75
+  EXPECT_NEAR(BL[0], std::lround(0.25f * 255.0f), 2);
+  EXPECT_NEAR(BL[1], std::lround(0.75f * 255.0f), 2);
+  const uint8_t *BR = texel(2, 2); // pixel center (2.5, 2.5): s=0.75, t=0.75
+  EXPECT_NEAR(BR[0], std::lround(0.75f * 255.0f), 2);
+  EXPECT_NEAR(BR[1], std::lround(0.75f * 255.0f), 2);
+}
+
+
 // `[1.0, RasterState::MaxPointSize]` before quad expansion, exactly like a
 // real `dEQP-VK.rasterization.primitive_size.points.*` case's own expected
 // clamped result -- writing a size far beyond a (test-local) 2-pixel
