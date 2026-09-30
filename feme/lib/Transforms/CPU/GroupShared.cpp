@@ -257,32 +257,54 @@ bool isSupportedGroupSharedNestedGEPUser(const GetElementPtrInst *GEP) {
 /// `matchPointerBroadcasts` has no way to recognize that shape on its
 /// own, since its per-lane walk assumes every link inserts the exact same
 /// producer `Value`. Coalescing every group of structurally-identical
-/// direct `getelementptr` users of \p GV within each basic block back
-/// down to one canonical instance, immediately after
+/// `getelementptr` users of \p GV -- directly, or through any depth of
+/// earlier nested `getelementptr`s also rooted at \p GV (roadmap L274:
+/// the same duplication `convertUsersOfConstantsToInstructions` can
+/// produce for a first-level GEP applies identically to a *nested* one, a
+/// deeply-nested field/array access's own per-lane broadcast chain
+/// materializing its own several structurally-identical, but distinct,
+/// instances the exact same way) -- within each basic block back down to
+/// one canonical instance apiece, immediately after
 /// `convertUsersOfConstantsToInstructions` runs (and so before any
 /// analysis below has to reason about the duplicates), restores that
 /// assumption instead of teaching every later `matchPointerBroadcasts`
 /// caller to compare producers by structural equivalence instead of
-/// identity.
-void coalesceIdenticalGroupSharedGEPs(GlobalVariable &GV, Function &F) {
-  for (BasicBlock &BB : F) {
-    SmallVector<GetElementPtrInst *, 8> GEPs;
-    for (Instruction &I : BB)
-      if (auto *GEP = dyn_cast<GetElementPtrInst>(&I);
-          GEP && GEP->getPointerOperand() == &GV)
-        GEPs.push_back(GEP);
+/// identity. Runs to a fixpoint (coalescing one nesting level can only
+/// make a *deeper* level's own GEPs identical, by updating their now-
+/// shared pointer operand, never the reverse), so this remains correct
+/// regardless of the two levels' relative program order.
+bool isGroupSharedRootedGEP(const GetElementPtrInst *GEP,
+                           const GlobalVariable &GV) {
+  const Value *Ptr = GEP->getPointerOperand();
+  while (const auto *ParentGEP = dyn_cast<GetElementPtrInst>(Ptr))
+    Ptr = ParentGEP->getPointerOperand();
+  return Ptr == &GV;
+}
 
-    for (unsigned I = 0, E = GEPs.size(); I != E; ++I) {
-      GetElementPtrInst *Canonical = GEPs[I];
-      if (!Canonical)
-        continue; // Already coalesced away as an earlier GEP's duplicate.
-      for (unsigned J = I + 1; J != E; ++J) {
-        GetElementPtrInst *Dup = GEPs[J];
-        if (!Dup || !Canonical->isIdenticalTo(Dup))
-          continue;
-        Dup->replaceAllUsesWith(Canonical);
-        Dup->eraseFromParent();
-        GEPs[J] = nullptr;
+void coalesceIdenticalGroupSharedGEPs(GlobalVariable &GV, Function &F) {
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (BasicBlock &BB : F) {
+      SmallVector<GetElementPtrInst *, 8> GEPs;
+      for (Instruction &I : BB)
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(&I);
+            GEP && isGroupSharedRootedGEP(GEP, GV))
+          GEPs.push_back(GEP);
+
+      for (unsigned I = 0, E = GEPs.size(); I != E; ++I) {
+        GetElementPtrInst *Canonical = GEPs[I];
+        if (!Canonical)
+          continue; // Already coalesced away as an earlier GEP's duplicate.
+        for (unsigned J = I + 1; J != E; ++J) {
+          GetElementPtrInst *Dup = GEPs[J];
+          if (!Dup || !Canonical->isIdenticalTo(Dup))
+            continue;
+          Dup->replaceAllUsesWith(Canonical);
+          Dup->eraseFromParent();
+          GEPs[J] = nullptr;
+          Changed = true;
+        }
       }
     }
   }
