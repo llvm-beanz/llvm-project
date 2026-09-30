@@ -17,12 +17,12 @@
 // CHECK-SAME: -> !llvm.ptr<12>
 // CHECK: llvm.load %[[FIELD]] : !llvm.ptr<12> -> vector<2xi32>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0])>, Uniform>
+  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0]), Block>, Uniform>
   spirv.func @read() -> si32 "None" {
-    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0])>, Uniform>
+    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0]), Block>, Uniform>
     %c0 = spirv.Constant 0 : si32
     %c2 = spirv.Constant 2 : si32
-    %ac = spirv.AccessChain %0[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0])>, Uniform>, si32, si32 -> !spirv.ptr<vector<2xsi32>, Uniform>
+    %ac = spirv.AccessChain %0[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.struct<CBVectors, (vector<3xf32> [0], vector<4xsi32> [16], vector<2xsi32> [32], vector<4xsi32> [48])> [0]), Block>, Uniform>, si32, si32 -> !spirv.ptr<vector<2xsi32>, Uniform>
     %v = spirv.Load "Uniform" %ac : vector<2xsi32>
     %e = spirv.CompositeExtract %v[0 : i32] : vector<2xsi32>
     spirv.ReturnValue %e : si32

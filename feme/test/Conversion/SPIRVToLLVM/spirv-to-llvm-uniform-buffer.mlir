@@ -20,12 +20,12 @@
 // CHECK-SAME: -> !llvm.ptr<12>
 // CHECK: llvm.load %[[FIELD]] : !llvm.ptr<12> -> i32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0])>, Uniform>
+  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0]), Block>, Uniform>
   spirv.func @read_field() -> i32 "None" {
-    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0])>, Uniform>
+    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0]), Block>, Uniform>
     %c0 = spirv.Constant 0 : i32
     %c1 = spirv.Constant 1 : i32
-    %ac = spirv.AccessChain %0[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0])>, Uniform>, i32, i32 -> !spirv.ptr<i32, Uniform>
+    %ac = spirv.AccessChain %0[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], i32 [4])> [0]), Block>, Uniform>, i32, i32 -> !spirv.ptr<i32, Uniform>
     %v = spirv.Load "Uniform" %ac : i32
     spirv.ReturnValue %v : i32
   }

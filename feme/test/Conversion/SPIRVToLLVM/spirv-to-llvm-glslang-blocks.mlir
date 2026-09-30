@@ -212,11 +212,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[FIELD]][0, %{{.*}}]
 // CHECK: llvm.load %[[ELEM]] : !llvm.ptr<12> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>
+  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0]), Block>, Uniform>
   spirv.func @read_element(%idx : i32) -> f32 "None" {
-    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>
+    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0]), Block>, Uniform>
     %c0 = spirv.Constant 0 : i32
-    %ac = spirv.AccessChain %0[%c0, %c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>, i32, i32, i32 -> !spirv.ptr<f32, Uniform>
+    %ac = spirv.AccessChain %0[%c0, %c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0]), Block>, Uniform>, i32, i32, i32 -> !spirv.ptr<f32, Uniform>
     %v = spirv.Load "Uniform" %ac : f32
     spirv.ReturnValue %v : f32
   }

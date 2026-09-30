@@ -291,8 +291,31 @@ getUniformBlockElement(mlir::spirv::PointerType Type) {
   if (Type.getStorageClass() != mlir::spirv::StorageClass::Uniform)
     return std::nullopt;
   auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Type.getPointeeType());
+  // A genuine uniform block interface is always decorated `Block` (see
+  // isBufferBlockStorage's own symmetric positive check for `BufferBlock`
+  // just above) -- requiring it here, rather than merely excluding
+  // `BufferBlock`, is essential: without it, this function also matches
+  // any *other* `Uniform`-storage-class pointer to an undecorated struct,
+  // such as `spirv.AccessChain`'s own intermediate result type once it has
+  // already selected a wrapper block's sole field as a whole (e.g. `shared
+  // struct { S data; } buf; ...; buf.data = result.data;`'s
+  // `spirv.AccessChain %result[%c0]`, whose component-pointer type simply
+  // points to `S` itself, never decorated at all) -- misclassifying that
+  // ordinary struct pointer as a second, nested uniform block and routing
+  // the `spirv.Load`/`spirv.Store` that follows through
+  // convertUniformBlockType instead of an ordinary pointer conversion.
+  // Confirmed by every `dEQP-VK.glsl.atomic_operations.*_{compute,mesh,
+  // task}_{shared,payload}` case (roadmap L273): each copies a whole
+  // `AtomicStruct`-shaped storage-buffer field into (or out of) a
+  // `shared`/`taskPayloadSharedEXT` variable this way, and
+  // vkCreateComputePipelines rejected every one of them with `'llvm.load'
+  // op operand #0 must be LLVM pointer type, but got
+  // '!llvm.target<"spirv.VulkanBuffer", ...>'` -- the mis-converted
+  // pointer's own handle type, where `spirv.Load`'s ordinary pattern
+  // expects a real `!llvm.ptr`.
   if (!Struct || Struct.getNumElements() == 0 ||
-      Struct.hasDecoration(mlir::spirv::Decoration::BufferBlock))
+      Struct.hasDecoration(mlir::spirv::Decoration::BufferBlock) ||
+      !Struct.hasDecoration(mlir::spirv::Decoration::Block))
     return std::nullopt;
   if (Struct.getNumElements() == 1) {
     mlir::Type Sole = Struct.getElementType(0);
