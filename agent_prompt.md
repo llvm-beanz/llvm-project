@@ -61,35 +61,32 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged cluster)** `atomic_operations`
-   (64 cases, re-tallied fresh this session) -- start with
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one failing case to check
-   pipeline-creation-rejection vs. runtime `Image mismatch`.
-2. **(a few hours, second-largest)** `shader_expect_assume` (51 cases)
-   -- still not started, re-tallied unchanged from prior sessions.
-3. **(unknown, filed, not started)** `440.linkage.varying` (49),
-   `loops` (30, likely `*_dynamic_iterations`) -- worth a joint triage
-   session.
-4. **(new this session, small, unexplored)** `builtin_var` (21),
-   `struct` (16), `builtin` (14) -- three clusters that only became
-   visible now that `indexing`/`matrix` are fully clear; not
-   previously called out by name in earlier sessions' tallies (may
-   overlap with older, differently-named entries -- worth confirming
-   before assuming these are fully new).
-5. **(small)** `demote` (9), `derivate` (3), `logical_copy` (2) -- tiny
-   residual clusters, likely quick once picked up.
-6. **(carried over, several sessions running, still not picked up)**
-   `L265`: residual `a2b10g10r10_snorm_pack32` ASTC-block-boundary
-   alpha-decode bug in `ASTCDecode.cpp`.
-7. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
+1. **(a few hours, dedicated session, direct continuation, strong lead)**
+   `L274`: root-cause the `GroupShared.cpp` SIMDizer gap. Start with
+   `FEME_DUMP_IR_PRESIMD` on `add_signed_compute_shared` (the same repro
+   `L273` already built, in `/tmp/atomicrepro/` if still present, or rebuild
+   it the same way) to see the exact nested-GEP shape being rejected, then
+   decide whether widening `rewriteGroupSharedGlobals`'s existing
+   second-level-GEP support to also accept a *uniform* (non-vector-typed)
+   nested access chain -- not just the divergent-vector one it already
+   handles -- clears the 62/64 majority; the 2/64 "divergent aggregate"
+   outliers (likely `comp_swap` variants, not yet confirmed) may need a
+   separate fix.
+2. **(a few hours, second-largest, ready to pick up)** `shader_expect_assume`
+   (51 cases) -- still not started across multiple sessions now.
+3. **(unknown, filed, not started)** `440.linkage.varying` (49), `loops` (30,
+   likely `*_dynamic_iterations`) -- worth a joint triage session.
+4. **(small, unexplored across several sessions)** `builtin_var` (21),
+   `struct` (16), `builtin` (14), `demote` (9), `derivate` (3),
+   `logical_copy` (2) -- all still untouched.
+5. **(carried over, several sessions running)** `L265`: residual
+   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
+   `ASTCDecode.cpp`.
+6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other
-   sub-suites, `api`, `synchronization`) at real scale -- still not
-   done. This session's full `dEQP-VK.glsl.*` sweep does NOT cover
-   this gap.
-8. **(low priority, not a regression, flagged many sessions now)**
-   `offload-test-suite`'s own
-   `Feature/SpecializationConstant/spec_const_32_bits.test`/
-   `WaveOps/WaveActiveMax.test` (failing) and
-   `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) still
-   need upstream lit-annotation fixes -- confirmed unchanged again
-   this session.
+   sub-suites, `api`, `synchronization`) at real scale -- still not done.
+7. **(low priority, not a regression, flagged many sessions now)**
+   `offload-test-suite`'s own `Feature/SpecializationConstant/
+   spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test` (failing) and
+   `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) --
+   confirmed unchanged again this session.
