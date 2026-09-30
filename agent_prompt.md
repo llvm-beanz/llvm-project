@@ -61,32 +61,30 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, dedicated session, direct continuation, strong lead)**
-   `L274`: root-cause the `GroupShared.cpp` SIMDizer gap. Start with
-   `FEME_DUMP_IR_PRESIMD` on `add_signed_compute_shared` (the same repro
-   `L273` already built, in `/tmp/atomicrepro/` if still present, or rebuild
-   it the same way) to see the exact nested-GEP shape being rejected, then
-   decide whether widening `rewriteGroupSharedGlobals`'s existing
-   second-level-GEP support to also accept a *uniform* (non-vector-typed)
-   nested access chain -- not just the divergent-vector one it already
-   handles -- clears the 62/64 majority; the 2/64 "divergent aggregate"
-   outliers (likely `comp_swap` variants, not yet confirmed) may need a
-   separate fix.
-2. **(a few hours, second-largest, ready to pick up)** `shader_expect_assume`
-   (51 cases) -- still not started across multiple sessions now.
-3. **(unknown, filed, not started)** `440.linkage.varying` (49), `loops` (30,
-   likely `*_dynamic_iterations`) -- worth a joint triage session.
-4. **(small, unexplored across several sessions)** `builtin_var` (21),
-   `struct` (16), `builtin` (14), `demote` (9), `derivate` (3),
-   `logical_copy` (2) -- all still untouched.
-5. **(carried over, several sessions running)** `L265`: residual
-   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
-   `ASTCDecode.cpp`.
+1. **(a few hours, new lead, ready to pick up)** `L275`: root-cause the
+   `*_task_payload` `JIT session error: Symbols not found: [ spirv_var_48 ]`.
+   Start by finding where `spirv_var_*`-named globals are supposed to be defined
+   for `TaskPayloadWorkgroupEXT`-storage-class variables, vs. how
+   `Workgroup`-storage-class (groupshared) globals get defined, to see what step
+   is missing. Likely home:
+   `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` or CPU-target
+   lowering.
+2. **(check first, ~30 min)** Re-tally the full `dEQP-VK.glsl.*` sweep fresh --
+   last full numbers were from several sessions back (~19,198 Pass/259
+   Fail/8,963 NotSupported before this session's `atomic_operations` work);
+   confirm this session's fix doesn't shift anything else and get a fresh
+   residual-Fail-cluster breakdown before picking the next target.
+3. **(unknown, filed, not started for many sessions)** `shader_expect_assume`
+   (51 cases), `440.linkage.varying` (49), `loops` (30, likely
+   `*_dynamic_iterations`) -- still untouched.
+4. **(small, unexplored for several sessions)** `builtin_var` (21), `struct`
+   (16), `builtin` (14), `demote` (9), `derivate` (3), `logical_copy` (2).
+5. **(carried over many sessions)** `L265`: residual `a2b10g10r10_snorm_pack32`
+   ASTC-block-boundary alpha-decode bug in `ASTCDecode.cpp`.
 6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
-   broader-than-glsl/tessellation CTS sampling (`pipeline`'s other
-   sub-suites, `api`, `synchronization`) at real scale -- still not done.
-7. **(low priority, not a regression, flagged many sessions now)**
-   `offload-test-suite`'s own `Feature/SpecializationConstant/
-   spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test` (failing) and
-   `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) --
-   confirmed unchanged again this session.
+   broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
+   `api`, `synchronization`) at real scale -- still not done.
+7. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
+   `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
+   `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, need
+   upstream lit-annotation fixes.
