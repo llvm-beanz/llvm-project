@@ -5812,3 +5812,139 @@ prior-session fixes, takes the `atomic_operations` group's full residual
 failure count from 64 (`L273`'s starting point) down to 0. The
 `atomic_operations`-specific triage thread `L270` opened is now
 complete.
+
+## L276: `shader_expect_assume.*` residual (51 cases) -- two independent bugs, both fixed; `atomic_operations`-era poison theory retired as a red herring
+
+**Starting point.** `L258`/`L263`'s tally listed `dEQP-VK.glsl.
+shader_expect_assume.*` as a 51-case untriaged cluster, several
+sessions running without a dedicated look. Picked up this session.
+
+**False lead (most of a prior segment plus the first half of this
+one).** An extensive investigation initially chased a suspected LLVM
+poison-propagation bug: `femeCpuResourceLoadRawI32`'s combined
+`if (!((OkRaw||OkStructured) && Mask))` bounds check appeared to
+compile to an `and` of a (potentially poison) comparison result with
+`Mask` in one standalone experiment, versus a `select` in a manually
+split `if (!Mask) ...; if (!(OkRaw||OkStructured)) ...;` form -- a
+plausible poison-propagation difference if `Mask`'s own producer could
+ever be poison. This was refuted by two independent findings once
+pursued to ground truth: (1) the actual runtime bitcode compile target
+is `aarch64-unknown-linux-gnu` (confirmed via `ninja -t commands`), not
+`x86_64-unknown-linux-gnu` as every standalone experiment this
+session and the last had (silently, incorrectly) used -- both the
+combined and split forms compile to `select` (poison-safe) on the real
+target, so there was never a codegen discrepancy to exploit in the
+first place; (2) a new `FEME_DUMP_IR_POSTOPT` debug dump (added this
+session in `CompiledStage.cpp`, alongside `FEME_DUMP_IR_PREOPT`, at the
+one point in the whole pipeline where the fully runtime-linked,
+post-optimization, pre-codegen module can actually be observed --
+every pre-existing `FEME_DUMP_IR*` dump point predates the runtime
+library getting linked in at all) showed `femeCpuResourceLoadRawI32`
+is never inlined into its caller regardless of form, so no
+inlining-site poison interaction of the theorized kind is even
+possible.
+
+**Ground truth, via new runtime instrumentation.** With the poison
+theory exhausted, added a temporary JIT host-callback mechanism to get
+a real runtime trace: a `femeDebugPrintf` function defined in
+`Pipeline.cpp` (a normally-linked, non-JIT'd file) bound into the JIT's
+main `JITDylib` via `orc::absoluteSymbols` with the function's real
+in-process address (`FEME_DEBUG_JIT_CALLBACKS=1`-gated), called from
+inside `femeCpuResourceLoadRawI32` in `FeMeRuntimeCPU.c`. Two dead ends
+were hit before this worked: an `EPCDynamicLibrarySearchGenerator`-based
+dynamic-symbol-search approach failed because `libfeme_vulkan.so` is
+built against an explicit linker export list
+(`libfeme_vulkan.exports`, only the 4 ICD entry points) that hides every
+other symbol from `dlsym`-style lookup regardless of C++ visibility
+attributes -- even after temporarily adding the symbol to that export
+list, the generator still failed, suspected to be an `RTLD_LOCAL`
+dlopen-visibility mismatch from how the Vulkan loader opens an ICD.
+`orc::absoluteSymbols` sidesteps both problems entirely, since it binds
+a real function pointer directly rather than resolving anything via
+dynamic-library search.
+
+The resulting trace showed, for `compute.assume.storagebuffer`'s
+second (input) storage-buffer binding: `kind=0 size=0` -- the
+`ResourceKind::None`/all-zero "never written" sentinel, for every lane,
+unconditionally. Not a mask or poison issue at all: the descriptor was
+simply never populated.
+
+**Root cause 1 (pipeline-creation rejection, fixed first).** Reading
+`vktShaderExpectAssumeTests.cpp`'s `generateComputePipeline` found the
+real reason pipeline creation itself failed before runtime instrumentation
+was even reachable: a divergent `llvm.assume`/`llvm.expect.iN` call
+(lowered from `OpAssumeTrueKHR`/`OpExpectKHR`, `VK_KHR_shader_expect_assume`,
+roadmap `F4`) hit `FunctionWidener::widenElementwise`'s final
+"unsupported divergent call" diagnostic in `SIMDize.cpp` -- neither
+intrinsic has a vector-typed overload `getDivergentCallOverloadShape`'s
+per-lane-masked-call widening can target. Both are pure compiler hints
+with no runtime-observable side effect (`llvm.assume(i1)` is UB only if
+false; `llvm.expect.iN` always returns its first operand unchanged
+regardless of the "expected" value), so the fix drops a divergent
+`llvm.assume` call outright and rewrites any `llvm.expect` use to the
+(widened) value it wraps directly, rather than widening either into a
+real per-lane masked/reduced call. New lit test
+`simdize-divergent-assume-expect.ll`.
+
+**Root cause 2 (the runtime `Image mismatch`, found via the
+instrumentation above).** With pipeline creation succeeding, the
+`.storagebuffer`-suffixed sub-cases still failed at runtime. The CTS
+test's own descriptor-set update issues a *single* `VkWriteDescriptorSet`
+with `dstBinding=0` but `descriptorCount=2` (covering both an
+output-buffer binding 0 and an input-buffer binding 1 in one
+`pBufferInfo` array) -- explicit, spec-legal Vulkan usage: per spec, a
+write whose `descriptorCount` exceeds its named binding's own declared
+array size must continue writing into the next consecutively-numbered
+binding. `feme/lib/Vulkan/Descriptor.cpp`'s `vkCopyDescriptorSets` path
+already implements exactly this for `VkCopyDescriptorSet` entries (via
+`L154`'s `BindingCursor` helper), but `applyDescriptorWrite` (the
+function `vkUpdateDescriptorSets` calls per `VkWriteDescriptorSet`) did
+not -- its per-element loop always wrote to the fixed
+`Write.dstBinding`, silently dropping anything past that binding's own
+declared size instead of spilling into binding 1, leaving binding 1
+permanently unpopulated. Fixed by relocating `BindingCursor` earlier in
+the file (ahead of `applyDescriptorWrite`) and reusing it inside
+`applyDescriptorWrite`'s own per-element write loop, mirroring the copy
+path's own use of it exactly (`Set.bindingArray(B).size()` for
+buffer/texel-buffer descriptors, `Set.imageBindingArray(B).size()` for
+image/sampler descriptors; inline-uniform-block writes are unaffected,
+already handled separately as a single bounded byte-range write). New
+unit test `WriteDescriptorSetSpansConsecutiveBufferBindings`
+(`DescriptorTest.cpp`).
+
+**Cleanup.** All temporary debug instrumentation (the `femeDebugPrintf`
+callback plumbing, its `libfeme_vulkan.exports` entry, the
+`FEME_DEBUG_JIT_CALLBACKS` JIT wiring) was fully reverted once the fix
+was confirmed. `FEME_DUMP_IR_PREOPT`/`FEME_DUMP_IR_POSTOPT` were kept
+as small, permanent, opt-in debug aids in `CompiledStage.cpp` --
+consistent with the existing `FEME_DUMP_IR*` family and filling a
+genuine, previously-missing observability gap (the only point the
+fully runtime-linked, post-optimization module can be inspected) that
+cost real time to work around this session.
+
+**`check-feme`:** 3,435/3,496 discovered tests Passed (+2 net new
+tests: 1 lit, 1 unit), 61 Unsupported, 0 Failed.
+
+**Real CTS re-run** (`dEQP-VK.glsl.shader_expect_assume.*`, 141 cases)
+against the rebuilt ICD: **69 Pass / 0 Fail / 72 NotSupported** (was 18
+Pass / 51 Fail / 72 NotSupported at session start; the 72
+`NotSupported` are all 8-bit-integer-gated, unrelated, unchanged) --
+clears the entire residual cluster.
+
+**`check-hlsl-feme-vk`** (offload-test-suite): re-run for regression
+confirmation -- unchanged from prior sessions (`spec_const_32_bits.test`/
+`WaveActiveMax.test` still fail, `array_of_matrices.test` still an
+unexpected pass from its own stale `XFAIL:`), all pre-existing,
+unrelated to this fix, confirmed unchanged again this session.
+`offload-test-suite`'s `feme` branch was confirmed up to date with its
+remote (no drift, no re-merge needed).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- both fixes are compiler-internals/driver-internals
+correctness fixes to already-exposed core-1.0/`VK_KHR_shader_expect_assume`
+behavior, not a new feature/extension surface change.
+
+**Net effect this session:** the `shader_expect_assume` triage thread
+`L258`/`L263` opened is now complete, closing the second-largest
+untriaged cluster from that tally (`atomic_operations`, the largest,
+was already closed by `L270`-`L275`).
