@@ -4961,8 +4961,38 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // to one merely truncated by the robustness check above, which
           // correctly stays zero) defaults per the standard convention: 0 for
           // a missing X/Y/Z (already zero-initialized above, nothing to do)
-          // and 1 for a missing W.
-          if (FormatComponents < 4 && Elt.ComponentCount == 4) {
+          // and 1 for a missing W -- i.e. *absolute* component index 3.
+          //
+          // (roadmap L279) This must trigger whenever this element's own
+          // absolute range covers component 3 but the bound format doesn't
+          // reach that far -- not only when the element itself is a whole
+          // vec4 read starting at component 0. A GLSL `component`-decorated
+          // shader input can split a wider attribute across several
+          // separately-typed variables (e.g. `440.linkage.varying`'s own
+          // `..._unused` cases: a lone scalar `in0_3` declared at
+          // `layout(location=L, component=3)`, landing at absolute component
+          // 3 with `Elt.FirstComponent == 3`, `Elt.ComponentCount == 1`), and
+          // that scalar still needs the same "format doesn't supply
+          // component 3" -> "defaults to 1" treatment a whole missing-W
+          // vec4 would get. The stale `Elt.ComponentCount == 4` condition
+          // this replaces missed exactly this narrower-element case,
+          // leaving `in0_3` incorrectly defaulted to 0 (its correct
+          // zero-initialized-and-never-written value for any *other*
+          // missing component) instead of the spec's 1 -- CTS's own
+          // expected constants for these cases are only satisfiable with
+          // `in0_3 == 1`.
+          //
+          // This check is intentionally keyed off `FormatComponents` (how
+          // many components the bound *format* actually has), not
+          // `InBoundsComponents` (how many are available given buffer
+          // bounds): a component the format truly lacks defaults to 1, but
+          // one merely truncated by a short buffer (format has it, the
+          // buffer just doesn't reach that far) must stay 0 per the
+          // existing robustness zero-fill above, unchanged.
+          bool ElementCoversComponent3 =
+              Elt.FirstComponent + Elt.ComponentCount > 3;
+          bool FormatMissesComponent3 = Elt.FirstComponent + FormatComponents <= 3;
+          if (ElementCoversComponent3 && FormatMissesComponent3) {
             if (Elt.ComponentType == SignatureComponentType::Float) {
               float One = 1.0f;
               memcpy(&Bits[3], &One, sizeof(float));

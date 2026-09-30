@@ -1338,6 +1338,156 @@ TEST(ExecutorTest,
   }
 }
 
+// (Roadmap L279) A third scalar `int` vertex-shader input, `Elt` 5 at
+// `Location=1, Component=3`, sharing the *same* two-channel `R32G32_SINT`
+// attribute as the split-component pair above -- mirroring
+// `dEQP-VK.glsl.440.linkage.varying.component.vert_in.ivec2.
+// as_int_int_unused`'s own shader shape (a third GLSL `in` variable
+// declared at `component = 3` of a location whose bound attribute only
+// ever supplies two real channels). Per the standard HLSL/Vulkan
+// convention, an absolute component the bound *format* never supplies at
+// all defaults to 0 for X/Y/Z but 1 for W (component 3) -- regardless of
+// whether the *reading element itself* is a whole `vec4` starting at
+// component 0 (already covered by
+// `VertexAttributeDefaultsOnlyMissingAlphaComponent` above) or, as here, a
+// lone scalar landing at absolute component 3 via its own `FirstComponent`
+// via a `component` layout decoration. Before this fix, the write-back
+// default-fill check only fired when `Elt.ComponentCount == 4`, so this
+// narrower (`ComponentCount == 1`) element was left at its zero-
+// initialized default (0) instead of 1, reproducing the CTS test's own
+// failure.
+constexpr char UnusedComponent3VertexAttributeVertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %x = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %y = call i32 @feme.stage.input.load.i32(i32 4, i32 0, i32 1, i32 0)
+    %w = call i32 @feme.stage.input.load.i32(i32 5, i32 0, i32 3, i32 0)
+    %xok = icmp eq i32 %x, 10
+    %yok = icmp eq i32 %y, 20
+    %wok = icmp eq i32 %w, 1
+    %ok0 = and i1 %xok, %yok
+    %ok = and i1 %ok0, %wok
+    %g = select i1 %ok, float 1.0, float 0.0
+    %r = select i1 %ok, float 0.0, float 1.0
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %g, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+TEST(ExecutorTest,
+    VertexAttributeDefaultsScalarComponent3BeyondFormatChannelCount) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, /*ComponentCount=*/1,
+                  /*Location=*/1)};
+  VSSig.Elements[1].ComponentType = SignatureComponentType::SInt;
+  VSSig.Elements[1].FirstComponent = 0;
+  VSSig.Elements.push_back(makeElement(4, SignatureDirection::Input,
+                                       /*ComponentCount=*/1,
+                                       /*Location=*/1));
+  VSSig.Elements[2].ComponentType = SignatureComponentType::SInt;
+  VSSig.Elements[2].FirstComponent = 1;
+  VSSig.Elements.push_back(makeElement(5, SignatureDirection::Input,
+                                       /*ComponentCount=*/1,
+                                       /*Location=*/1));
+  VSSig.Elements[3].ComponentType = SignatureComponentType::SInt;
+  VSSig.Elements[3].FirstComponent = 3;
+  VSSig.Elements.push_back(makeElement(2, SignatureDirection::Output, 4,
+                                       /*Location=*/std::nullopt,
+                                       SignatureSystemValue::Position));
+  VSSig.Elements.push_back(
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0));
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, UnusedComponent3VertexAttributeVertexShaderIR, "vs_main", VSSig,
+      ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // pos (xyz), ivec2 attr (x=10, y=20) -- one R32G32_SINT word pair, 20
+  // bytes/vtx. Only two channels are ever bound; the third (unused)
+  // `Component=3` shader input has no attribute data of its own at all.
+  struct Vertex {
+    float Pos[3];
+    int32_t X;
+    int32_t Y;
+  };
+  std::array<Vertex, 3> VertexData = {
+      Vertex{{-1.0f, -1.0f, 0.0f}, 10, 20},
+      Vertex{{3.0f, -1.0f, 0.0f}, 10, 20},
+      Vertex{{-1.0f, 3.0f, 0.0f}, 10, 20}};
+  std::array<VertexAttribute, 2> VertexAttributes = {
+      VertexAttribute{0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      VertexAttribute{1, cpu::ResourceFormat::R32G32_SINT, 12}};
+  std::array<uint8_t, 64> AttachmentStorage{};
+  AttachmentView Color{AttachmentStorage, cpu::ResourceFormat::R8G8B8A8_UNORM,
+                       4, 4};
+  std::array<AttachmentView, 1> ColorAttachments = {Color};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, sizeof(Vertex),
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(Vertex)),
+      VertexAttributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = ColorAttachments;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Green everywhere confirms the never-bound `Component=3` scalar read
+  // back 1, not the zero-initialized default a whole-vec4-only defaulting
+  // check would have left it at.
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 0) << "texel " << I;
+    EXPECT_EQ(Texel[1], 255) << "texel " << I;
+    EXPECT_EQ(Texel[2], 0) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, RendersTheSameTriangleThroughAnIndexBuffer) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
