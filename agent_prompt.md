@@ -61,44 +61,44 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged cluster, unchanged rank for many
-   sessions)** `loops` (30, likely `*_dynamic_iterations` per `L277`'s write-up
-   -- two separate bugs already known to block non-leaf cycle linearization
-   there) -- still the top pick by size.
-2. **(a few hours, new this session)** The 6-case combined-depth-stencil-format
-   `fragdepth` bug this session distinguished from the clamp bug:
-   `{line,point,triangle}_list_{d24_unorm_s8_uint,d32_sfloat_s8_uint}_no_depth_clamp`.
-   Symptom: a covered pixel's depth reads back as `0` (looks unwritten) instead
-   of its real shaded value. Likely a `readDepth`/`writeDepth` packed-format
-   addressing bug specific to a stencil half being present alongside depth --
-   start in `Executor.cpp`'s `readDepth`/`writeDepth` (~line 999) and the
-   `D24_UNORM_S8_UINT`/`D32_SFLOAT_S8_UINT` pack/unpack helpers.
-3. **(6 cases, feature-decision needed, carried over several sessions)**
+1. **(small-medium, likely 1-2 hours, high value: fully closes `loops`)**
+   Root-cause the remaining 4-case `dowhile_trap` hang:
+   `special.{for,while}_dynamic_iterations.dowhile_trap_{fragment,vertex}`.
+   Narrowly scoped now (not `do_while`, only `for`/`while`
+   dynamic-iteration-count loops combined with the `dowhile_trap` shader shape)
+   -- a much smaller repro surface than before. Likely still related to whatever
+   gap the reverted `isCycleHeaderBranch` attempt was chasing; worth a fresh,
+   careful look now that the mask-threading/non-leaf-traversal fixes have
+   changed the surrounding code.
+2. **(small, unexplored across several sessions)** `builtin` (14), `struct` (12)
+   -- only became visible as separate clusters once bigger ones cleared.
+   `builtin` may include the 8 `cosh`/`sinh` precision fails an earlier partial
+   sweep found (not confirmed) -- re-tally cleanly using the isolated-per-case
+   methodology from item 7 above before trusting any number here.
+3. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
+   up.
+4. **(new, 1 case, unexplored across 3 sessions now)** `texture_gather` -- still
+   flagged, no investigation done.
+5. **(6 cases, feature-decision needed, carried over several sessions)**
    `fragdepth`'s multisample image-creation gap (`*_multisample_{2,4,8}`): CTS's
    own `checkSupport` doesn't account for our `sampledImageDepthSampleCounts =
-   1` scoping decision when combined with `VK_IMAGE_USAGE_SAMPLED_BIT`.
-   Implement per-sample `OpImageFetch` for depth images (real feature work) or
-   find a way to get CTS's own narrower check to catch it as `NotSupported`
-   instead of `Fail`.
-4. **(small, unexplored across several sessions)** `builtin` (14), `struct` (12)
-   -- only became visible as separate clusters once bigger ones cleared.
-5. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
-   up.
-6. **(new, 1 case, unexplored)** `texture_gather` -- still flagged, no
-   investigation done across 2 sessions now.
+   1` scoping decision. Implement per-sample `OpImageFetch` for depth images, or
+   find a way to get CTS's own narrower check to catch it as `NotSupported`.
+6. **(6 cases, carried over)** `fragdepth`'s combined-depth-stencil-format bug:
+   `{line,point,triangle}_list_{d24_unorm_s8_uint,d32_sfloat_s8_uint}_no_depth_clamp`
+   -- a covered pixel's depth reads back as `0` instead of its real shaded
+   value. Likely a `readDepth`/`writeDepth` packed-format addressing bug --
+   start in `Executor.cpp`'s `readDepth`/`writeDepth` (~line 999).
 7. **(carried over, several sessions running)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`.
 8. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
-   `api`, `synchronization`) at real scale -- still not done.
+   `api`, `synchronization`) at real scale -- still not done. Given this
+   session's cascading-false-failure finding, any future broad sweep should be
+   run in small per-group batches from the start, not one giant combined
+   process.
 9. **(low priority, confirmed unchanged for many sessions)**
    `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
    (failing) and `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to
-   FeMe/LLVM, need upstream lit-annotation fixes. Re-verified unchanged this
-   session.
-10. **(housekeeping, 5 min, next session)** The offload-test-suite `feme`
-    branch-drift check should track the cherry-picked hash `99bbd55` (this
-    session's own HEAD), not the original `854cc3f`, since `git merge-base
-    --is-ancestor 854cc3f HEAD` will now permanently fail even with no real
-    drift -- update the check or note both hashes.
+   FeMe/LLVM, need upstream lit-annotation fixes.
