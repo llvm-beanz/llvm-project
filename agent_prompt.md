@@ -60,8 +60,29 @@ file.
 
 # Request
 
-FeMe currently fails to build with a number of errors related to the use of
-AtomicRMWInst, which is not defined by LLVM. Please disable precompiled headers
-in your build so that you actually detect missing includes.
+Please continue working on the FeMe Vulkan ICD. The previous session's suggested
+next steps are:
 
-Please fix this and ensure your configurations are correct.
+1. **(sharpest lead, likely a few hours)** `dowhile_trap` nested-child-cycle
+   hang: focus on `linearizeCycle`'s `DivergentCandidates`-non-empty handling
+   (`PreRegion`/`PostRegion`/`CheckBlock` partitioning, ~lines 3244-3410 in
+   `Linearize.cpp`) and how it treats an `OtherCondBrBlocks` entry that is
+   itself a nested child cycle's latch. Do not re-touch `isLoopControlEdge` --
+   confirmed dead end twice already.
+2. **(small, unexplored several sessions)** `builtin` (14), `struct` (12).
+3. **(small)** `demote` (9), `derivate` (3).
+4. **(1 case, unexplored 4+ sessions)** `texture_gather`.
+5. **(6 cases, feature decision needed)** `fragdepth` multisample image-creation
+   gap (`*_multisample_{2,4,8}`).
+6. **(6 cases)** `fragdepth` combined-depth-stencil-format bug (`Executor.cpp`
+   `readDepth`/`writeDepth`, ~line 999).
+7. **(carried over)** `L265`: `a2b10g10r10_snorm_pack32` ASTC-block-boundary
+   alpha-decode bug.
+8. **(overdue many sessions)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
+   CTS sampling at real scale.
+9. **(low priority, 2+ sessions unverified)** `offload-test-suite`'s own
+   `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
+   lit-annotation issues.
+10. **(housekeeping, 3 sessions overdue now)** `check-hlsl-feme-vk` and the
+    `feme` branch-drift check still not re-run -- do this early next session
+    before it gets any more stale.
