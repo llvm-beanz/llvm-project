@@ -520,13 +520,24 @@ Expected<PipelineResult> runPipeline(Module &M,
     // even once every such bug is eventually found and fixed, since nothing
     // then ever reaches this branch and the extra `verifyModule` call is
     // cheap relative to the rest of this pipeline.
-    if (verifyModule(M, &errs()))
+    if (verifyModule(M, &errs())) {
+      // Debug aid: with `FEME_DUMP_IR_ON_VERIFY_FAIL` set in the
+      // environment, print the module right here, at the exact point
+      // verification fails -- unlike `FEME_DUMP_IR_PRESIMD` below (which
+      // is never reached when verification fails first), this is the
+      // only dump point that shows the broken IR a `LinearizePass` bug
+      // actually produced, rather than nothing at all. Roadmap L283 used
+      // this to isolate a def-dominates-use violation in an early
+      // `dowhile_trap` fix attempt.
+      if (::getenv("FEME_DUMP_IR_ON_VERIFY_FAIL"))
+        M.print(errs(), nullptr);
       return createStringError(
           inconvertibleErrorCode(),
           "feme-cpu-linearize: '%s' produced a module that fails IR "
           "verification (see stderr for the verifier's own diagnostics); "
           "this is a compiler bug, not an unsupported-shader diagnostic",
           EntryName.c_str());
+    }
     // Debug aid: with `FEME_DUMP_IR_PRESIMD` set in the environment, print
     // the module immediately after `feme::cpu::LinearizePass` finishes but
     // before `feme::cpu::SIMDizePass` runs -- the exact shape `SIMDizePass`
