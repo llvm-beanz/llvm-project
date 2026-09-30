@@ -6624,3 +6624,78 @@ change needed -- an internal compiler-correctness investigation, no
 new feature/extension surface (and ultimately no net code change to
 this specific classification logic either, since the attempt was
 reverted).
+
+## L284: fixed a reported "AtomicRMWInst" build failure (not reproducible in the current build directory) by adding a fail-fast configure-time LLVM-version guard
+
+**Request:** "FeMe currently fails to build with a number of errors related
+to the use of `AtomicRMWInst`, which is not defined by LLVM (anymore). I
+suspect you've been building against system-installed LLVM headers instead
+of the in-tree ones."
+
+**Investigation:** Could not reproduce a build failure in the existing
+`build/` directory as configured:
+
+- Deleted all 304 existing FeMe object files (`find tools/feme -name
+  '*.o' -delete`) and ran `ninja check-feme` from a genuinely clean state
+  (forcing every single FeMe translation unit to recompile, not relying on
+  any cached `.o`/ccache hit that might mask a header-path problem).
+  Result: all 304 files recompiled with **zero errors** (one unrelated,
+  confirmed-flaky timing test, `SyncTest.TimelineSemaphoreWaitBlocksUntilHostSignal`,
+  failed on this run only and passed on a clean re-run -- a pre-existing
+  timing-sensitivity issue, not a build or `AtomicRMWInst` problem).
+- Checked `compile_commands.json`: 0 of 304 FeMe compile invocations
+  reference any system LLVM header path (`/usr/include/llvm*`); every one
+  resolves `AtomicRMWInst` et al. from `/home/dev/dev/llvm-project/llvm/include`
+  (in-tree).
+- Confirmed `feme/CMakeLists.txt` already `FATAL_ERROR`s if built
+  standalone (`CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR`), so
+  there is no code path in the current design where feme would pick up an
+  installed LLVM instead of the in-tree one.
+- No `CPATH`/`C_INCLUDE_PATH`/`CPLUS_INCLUDE_PATH`/`LLVM_DIR` environment
+  leakage found in this environment either.
+
+**However, confirmed the underlying risk is real, not imaginary:** the
+system's `llvm-21-dev` package (present in this container) genuinely lacks
+two `AtomicRMWInst::BinOp` enumerators feme uses
+(`feme/lib/Transforms/CPU/AtomicRMWIdentity.cpp`): `FMaximumNum` and
+`FMinimumNum`. `git log -S` on the in-tree history pinpoints exactly when
+these were added upstream: commit `ea8fb06f2443` ("[atomicrmw]
+fminimumnum/fmaximumnum support", #187030), first released in
+`llvmorg-23.1.0`. So if a build ever did pick up `llvm-21` headers (e.g. a
+future stray `-DLLVM_DIR`, a `CPATH`/`CPLUS_INCLUDE_PATH` environment leak,
+or an IDE/tooling misconfiguration), it would fail with exactly the
+symptom described -- deep inside `AtomicRMWIdentity.cpp`, with a cryptic
+"no member named 'FMaximumNum' in 'llvm::AtomicRMWInst'" rather than an
+obvious, actionable diagnostic.
+
+**Fix (fail-fast, not a functional change):** added a configure-time guard
+to `feme/CMakeLists.txt`, right next to the existing
+standalone-build-rejection check: `if(LLVM_VERSION_MAJOR LESS 23)
+message(FATAL_ERROR ...)`, with a message naming the likely causes (stray
+`LLVM_DIR`, `CPATH`/`CPLUS_INCLUDE_PATH`) and the fix (clean build
+directory, only `-DLLVM_ENABLE_PROJECTS=feme` set). This converts a
+future recurrence of this exact failure mode from "a wall of opaque
+compiler errors 20+ minutes into a build" into "an immediate, one-line,
+actionable CMake configure error." Verified the guard fires correctly
+(via an isolated `cmake -P` script with `LLVM_VERSION_MAJOR` forced to 21)
+and does not fire for the current, correct configuration (`cmake .`
+re-run in the existing `build/` directory: `LLVM_VERSION_MAJOR=24`,
+configure succeeds).
+
+**Verification:** `ninja check-feme` (full, from a from-scratch object
+rebuild as above): 3,441/3,502 Passed, 61 Unsupported, 0 Failed. CTS:
+`dEQP-VK.api.smoke.*` (6/6 Pass) and a spot-check of the known
+`special.for_dynamic_iterations.dowhile_trap_fragment` hang (still fails
+identically, as expected -- this change has no functional effect on
+codegen, only on CMake configure-time validation). No CTS regression;
+this is a pure build-configuration hardening change, so a full CTS sweep
+was not re-run (consistent with prior sessions' practice for
+docs-only/non-functional changes).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no change
+needed -- a build-configuration safeguard, no feature/extension surface
+change.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (twice this session: at the start, and
+again after the `cmake .`/`ninja check-feme` rebuild).
