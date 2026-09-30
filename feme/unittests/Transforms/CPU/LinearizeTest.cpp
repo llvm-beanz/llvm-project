@@ -1617,9 +1617,9 @@ TEST(LinearizeTest, TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit) {
   EXPECT_TRUE(FoundMaskAny);
 }
 
-// Roadmap L197/L198/L200: genuinely nested cycles -- an outer loop whose
-// body contains its own, separate inner loop, each with its own divergent
-// exit check. `LoopLinearizer::run()` traverses post-order
+// Roadmap L197/L198/L200/L282: genuinely nested cycles -- an outer loop
+// whose body contains its own, separate inner loop, each with its own
+// divergent exit check. `LoopLinearizer::run()` traverses post-order
 // (`linearizeCyclePostOrder`, recursing into every child before
 // considering its parent), precomputing every cycle's own exit-block
 // list up front (`precomputeExitBlocks`/`getExitBlocks`, sidestepping a
@@ -1630,20 +1630,13 @@ TEST(LinearizeTest, TracksUniformityOfOwnFlattenedDiamondMergeAcrossLoopExit) {
 // previously-hit `UniformityInfo`-recomputation crash this shares its
 // root cause with) and refreshing `DT`/`PDT` after every cycle (a second,
 // independent staleness hazard this same investigation found, affecting
-// even today's leaf-only traversal across *sibling* leaf cycles).
-// Attempting `linearizeCycle` on the *outer*, non-leaf cycle itself is
-// deliberately still not enabled, though: four of five distinct bugs
-// found via real Vulkan CTS shaders once a non-leaf cycle was actually
-// attempted are fixed, but the fifth -- a genuine stack-overflowing
-// runaway recursion inside `DiamondFlattener::validate`, found on
-// `dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop` -- is not
-// yet root-caused (see `linearizeCyclePostOrder`'s own comment for the
-// full writeup of all five). So this test instead documents today's
-// actual, honest boundary: the *inner* leaf cycle is still correctly
-// linearized on its own, while the *outer* cycle (having a child, so
-// never attempted) is left completely alone, exactly as it always was
-// before this milestone's own work, with neither a crash nor a hang.
-TEST(LinearizeTest, LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone) {
+// even leaf-only traversal across *sibling* leaf cycles). With all six
+// bugs found via real Vulkan CTS shaders once a non-leaf cycle was
+// actually attempted now fixed (see `linearizeCyclePostOrder`'s own
+// comment for the full writeup), attempting `linearizeCycle` on the
+// *outer*, non-leaf cycle itself is unconditional: both the inner leaf
+// cycle and the outer non-leaf cycle are now linearized.
+TEST(LinearizeTest, LinearizesBothInnerLeafLoopAndOuterNonLeafLoop) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -1680,11 +1673,10 @@ TEST(LinearizeTest, LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone) {
       if (CI->getCalledFunction() &&
           CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
         ++MaskAnyCount;
-  // Only the inner loop's own divergent exit gets its own reduction --
-  // the outer loop, having a child cycle, is not attempted yet (see the
-  // comment above), so its own `outer.break` check is left completely
-  // untouched (still a plain, unreduced `icmp`/`br`).
-  EXPECT_EQ(MaskAnyCount, 1u);
+  // Both the inner loop's own divergent exit AND the outer loop's own
+  // divergent exit now get their own reduction, now that non-leaf
+  // traversal is unconditional (see the comment above).
+  EXPECT_EQ(MaskAnyCount, 2u);
   BasicBlock *OuterLatch = nullptr;
   for (BasicBlock &BB : *F)
     if (BB.getName() == "outer.latch")
@@ -1692,7 +1684,73 @@ TEST(LinearizeTest, LinearizesInnerLeafLoopButLeavesOuterNonLeafLoopAlone) {
   ASSERT_TRUE(OuterLatch);
   auto *OuterBr = dyn_cast<CondBrInst>(OuterLatch->getTerminator());
   ASSERT_TRUE(OuterBr);
-  EXPECT_EQ(OuterBr->getCondition()->getName(), "outer.break");
+  // The outer loop's own plain `outer.break` icmp/br has been replaced by
+  // a reduced `loop.continue` mask check, just like the inner loop's own
+  // exit already was.
+  EXPECT_EQ(OuterBr->getCondition()->getName(), "loop.continue3");
+}
+
+// Roadmap L282 bug 5: `DiamondFlattener::validate`'s own recursive descent
+// used to have no bound at all, so a genuinely deep chain of nested
+// divergent diamonds (the shape a deeply nested chain of `if`s without
+// `else`s produces) could stack-overflow the process (a real `SIGSEGV`,
+// confirmed via `gdb`, on `dEQP-VK.graphicsfuzz.increment-value-in-nested-
+// for-loop`) instead of being diagnosed as an ordinary "not this shape"
+// validation failure. Build a synthetic, non-loop repro of the same
+// "deeply nested diamond" shape directly (300 levels, comfortably past
+// the 256-deep bound) and confirm it is cleanly rejected rather than
+// crashing the test process. Each level `I` is an `if`-without-`else`
+// nested inside the previous level's own true arm (`tI` branches to
+// `t(I+1)` on true, `fI` on false), with every level's own merge block
+// `mI` falling through to the enclosing level's merge (`m(I-1)`), down
+// to a single shared `exit` that returns -- exactly the "deeply nested
+// `if`" shape a real shader's own deeply nested control flow produces.
+TEST(LinearizeTest,
+     DeeplyNestedDivergentDiamondsDiagnoseInsteadOfStackOverflowing) {
+  constexpr unsigned NumLevels = 300;
+  std::string Asm = R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t0, label %f0
+  )";
+  for (unsigned I = 0; I != NumLevels; ++I) {
+    Asm += "    t" + std::to_string(I) + ":\n";
+    if (I + 1 != NumLevels)
+      Asm += "      br i1 %c, label %t" + std::to_string(I + 1) +
+             ", label %f" + std::to_string(I) + "\n";
+    else
+      Asm += "      br label %m" + std::to_string(I) + "\n";
+    Asm += "    f" + std::to_string(I) + ":\n      br label %m" +
+           std::to_string(I) + "\n";
+    Asm += "    m" + std::to_string(I) + ":\n      br label %" +
+           (I == 0 ? "exit" : ("m" + std::to_string(I - 1))) + "\n";
+  }
+  Asm += R"(
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )";
+
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, Asm);
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  // Must not crash the process (a stack-overflowing SIGSEGV pre-fix would
+  // abort the test binary outright instead of returning).
+  EXPECT_FALSE(run(*M));
+  EXPECT_TRUE(SawError);
 }
 
 } // namespace
