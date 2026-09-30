@@ -497,6 +497,36 @@ Expected<PipelineResult> runPipeline(Module &M,
       M.print(errs(), nullptr);
     if (Error E = runAndCheck("linearizing", LinearizePass()))
       return std::move(E);
+    // Roadmap L282: `feme::cpu::LoopLinearizer` (inside `LinearizePass`)
+    // rewrites a cycle's own control flow into per-lane masking with a
+    // significant amount of ad-hoc CFG/phi surgery (see its own file
+    // comment's "bugs 1-6" writeup) -- verifying right here, rather than
+    // only much later (`CompiledStage::create`'s own `verifyModule` call,
+    // which runs only *after* the standard LLVM optimizer pipeline,
+    // including its inliner, has already had a chance to run on whatever
+    // came out of this pass) is deliberate: a real bug here (a phi with a
+    // stale/missing incoming value, a dangling predecessor, etc.) can
+    // silently produce IR the verifier itself would catch immediately,
+    // but that the *inliner* instead trips over as a raw
+    // `llvm::report_fatal_error`/assertion crash deep inside
+    // `llvm::CloneAndPruneIntoFromInst` several passes later -- turning an
+    // otherwise-diagnosable compiler bug into a hard process abort with a
+    // much harder-to-attribute stack trace (a real repro this milestone's
+    // own development hit,
+    // `dEQP-VK.graphicsfuzz.cov-function-always-return-negative-bitfield-
+    // extract`). Catching it here instead converts that into the same
+    // kind of clean, diagnosed pipeline-creation failure every other
+    // unsupported shape in this file already produces -- strictly better
+    // even once every such bug is eventually found and fixed, since nothing
+    // then ever reaches this branch and the extra `verifyModule` call is
+    // cheap relative to the rest of this pipeline.
+    if (verifyModule(M, &errs()))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "feme-cpu-linearize: '%s' produced a module that fails IR "
+          "verification (see stderr for the verifier's own diagnostics); "
+          "this is a compiler bug, not an unsupported-shader diagnostic",
+          EntryName.c_str());
     // Debug aid: with `FEME_DUMP_IR_PRESIMD` set in the environment, print
     // the module immediately after `feme::cpu::LinearizePass` finishes but
     // before `feme::cpu::SIMDizePass` runs -- the exact shape `SIMDizePass`
