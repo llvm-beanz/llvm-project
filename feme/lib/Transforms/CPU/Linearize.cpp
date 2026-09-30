@@ -1051,7 +1051,24 @@ private:
   /// instead -- used when a failure here is an ordinary "not this shape"
   /// result for a different, later check to try instead, not a genuine
   /// compile error.
-  bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false);
+  ///
+  /// Roadmap L282: \p Depth (never set explicitly by an external caller;
+  /// each recursive self-call below increments it) bounds this function's
+  /// own recursive-descent depth -- see the definition's own comment on
+  /// `dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop`'s real,
+  /// confirmed `SIGSEGV` (a genuine stack overflow, not a hang) once
+  /// `LoopLinearizer` began attempting a non-leaf cycle. Whatever
+  /// structural cause actually drives some shapes into runaway recursion
+  /// here (not yet root-caused -- see roadmap `L277`'s own "bug 5"
+  /// writeup) is irrelevant to this guard: any recursion this deep is
+  /// categorically not a diamond-nesting depth a real shader could ever
+  /// need (ordinary GLSL/HLSL control flow nests at most a few dozen
+  /// diamonds deep, never thousands), so treating it exactly like any
+  /// other "not this shape" validation failure -- a clean diagnostic, not
+  /// a crash -- is always safe, never a false rejection of real shader
+  /// code.
+  bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false,
+               unsigned Depth = 0);
 
   /// Mutates the region \p validate already approved, threading \p Masks
   /// (the live/side-effect mask pair describing whether -- and how -- the
@@ -1132,7 +1149,19 @@ private:
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
-                                bool Quiet) {
+                                bool Quiet, unsigned Depth) {
+  // Roadmap L282: see this method's own declaration comment for why this
+  // bound exists at all -- 256 is generous next to any real diamond
+  // nesting depth a shader could plausibly have, while still being far
+  // short of a stack-overflow-inducing depth.
+  constexpr unsigned MaxValidateDepth = 256;
+  if (Depth >= MaxValidateDepth) {
+    if (!Quiet)
+      diagnose(F, "divergent region starting at '" + Start->getName() +
+                      "' is nested too deeply to validate (roadmap "
+                      "milestone 6 deviation)");
+    return false;
+  }
   BasicBlock *Cur = Start;
   while (Cur != End) {
     Instruction *Term = Cur->getTerminator();
@@ -1206,7 +1235,8 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
       return false;
     }
 
-    if (!validate(T, R, Quiet) || !validate(Fsucc, R, Quiet))
+    if (!validate(T, R, Quiet, Depth + 1) ||
+        !validate(Fsucc, R, Quiet, Depth + 1))
       return false;
     Cur = R;
   }
