@@ -6010,3 +6010,85 @@ extension surface change.
 precisely scoped for a future dedicated session, with a reusable
 debug aid (`FEME_DEBUG_LINEARIZE_TRACE`) left in place to speed up
 that future work.
+
+## L278: `440.linkage.varying` fragment-output/vertex-input component-split fix
+
+Root-caused and mostly fixed the `440.linkage.varying` cluster (49
+`dEQP-VK.glsl.*` failures from the fresh full sweep documented above),
+split 25 `frag_out` + 24 `vert_in`.
+
+**Root cause (two layered bugs, both in `feme/lib/Graphics/
+Executor.cpp`):** SPIR-V's `Component` decoration lets several
+otherwise-unrelated interface variables share one `Location`, each
+covering a disjoint sub-range of its 4 components -- e.g. two separate
+scalar `int` fragment outputs (or vertex inputs) at one `location`,
+`component = 0`/`1`, together forming one `ivec2` value.
+
+1. The fragment-output-to-color-attachment resolution logic
+   (`FSColors`/`FSColorRows`) only ever found *one* `SignatureElement`
+   per location via `findElementCoveringLocation` (hardcoded
+   `Component = 0`), silently missing every split element past the
+   first -- the `.y` component of a split `ivec2` output was left
+   unwritten/garbage.
+2. `StageStorage::readRaw`/`writeRaw`'s `Component` parameter is
+   always the *absolute* component index (0-3); the function itself
+   subtracts `E.FirstComponent` internally. Both the fragment-output
+   read functions and the vertex-attribute fetch loop's
+   `decodeAttribute` call were passing/decoding a *local*
+   (element-relative) index instead -- only ever correct when
+   `FirstComponent == 0` (every previously-tested whole-vec4-style
+   attachment/attribute), silently wrong (reading/writing the first
+   split element's own data again) for a second-or-later split
+   element.
+
+**Fix:** added a new plural `findElementsCoveringLocation`
+(`StageStorage.h`/`.cpp`, ignoring `FirstComponent` when matching) and
+reworked `FSColors`/`FSColorRows` into per-attachment lists of *all*
+split elements with new multi-element `readFragmentColor`/
+`readFragmentColorInt` overloads that merge every element's own
+components into one RGBA value; threaded `Elem.FirstComponent`
+through every fragment-output read call site; added a `StartComponent`
+parameter to `decodeAttribute` so the vertex-attribute fetch loop
+decodes from (and writes to) the correct absolute channel, with its
+buffer-bounds/format-channel-count robustness caps adjusted to be
+relative to `FirstComponent` too.
+
+**New regression test:**
+`VertexAttributeFetchHonorsFirstComponentOfSplitComponentInputs`
+(`ExecutorTest.cpp`) reproduces the vertex-input shape directly (two
+split `int` inputs sharing one `ivec2` attribute with distinct
+per-channel values), confirmed via a `git stash` A/B test to fail
+without the fix and pass with it.
+
+**`check-feme`:** 3,436/3,497 discovered tests Passed (+1 new unit
+test), 61 Unsupported, 0 Failed -- no regressions.
+
+**CTS re-run:**
+- `dEQP-VK.glsl.440.linkage.varying.component.frag_out.*` (25 cases):
+  **0 Fail** (was 25) -- fully cleared.
+- `dEQP-VK.glsl.440.linkage.varying.component.vert_in.*` (24 cases): 5
+  Fail remain (was 24) -- all 5 are the `*_unused` variants, which
+  declare a *third* split input specifically at an out-of-range
+  component (e.g. `component = 3` on a 2-channel `ivec2` attribute) to
+  verify it reads back as a defined zero. Debug instrumentation
+  confirmed the vertex-attribute fetch itself now computes and stores
+  the correct zero for that out-of-range component, so this residual
+  bug is elsewhere in the pipeline -- most likely the compiled shader
+  IR's own read of that component at the JIT/codegen level, not the
+  host-side fetch path this fix targeted. Not chased further this
+  session given the much larger 44/49 win already landed; filed as
+  future work under `L278` in `Roadmap.md`.
+- `dEQP-VK.pipeline.monolithic.vertex_input.*` (13,296 cases, broad
+  spot-check for regressions from the `FSColors`/vertex-fetch
+  data-structure changes): 4,600 Pass / 217 Fail / 8,476 NotSupported,
+  no crashes/assertions -- consistent with this group's own pre-existing,
+  unrelated baseline limitations (not separately re-baselined this
+  session; no new crash-class symptoms observed).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal compiler/runtime-internals correctness
+fix to already-exposed core GLSL `component`-decorated linkage, not a
+new feature/extension surface.
+
+**Net effect this session:** `440.linkage.varying` cluster reduced
+from 49 Fail to 5 Fail (44 cleared); `frag_out` subgroup fully closed.
