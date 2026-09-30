@@ -1090,6 +1090,9 @@ The first fragment milestone supports:
 
 - interpolated user varyings and position;
 - front-face, primitive ID, sample ID/position, coverage, and helper status;
+- point-sprite coordinate (`gl_PointCoord`), synthesized per point-topology
+  quad corner and barycentric-interpolated like any other varying (roadmap
+  L280);
 - color, depth, and coverage outputs;
 - discard/demote and derivative operations.
 

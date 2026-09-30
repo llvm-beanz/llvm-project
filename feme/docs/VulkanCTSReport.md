@@ -6213,3 +6213,104 @@ matching the previously-flagged, confirmed-unrelated baseline
 `WaveOps/WaveActiveMax.test` failing; `Feature/PushConstant/
 array_of_matrices.test` XPASS from a stale `XFAIL:`), i.e. **no
 regression from the `L279` fix**.
+
+## L280: `gl_PointCoord` (`builtin_var` `pointcoord` sub-cluster, 3 cases) -- fixed
+
+Split `L278`'s residual `builtin_var` (21 cases) cluster into
+`pointcoord` (3 cases, this entry) and `fragdepth` (18 cases, separate,
+still open, findings below) sub-clusters, then root-caused and fixed
+`pointcoord`.
+
+**Root cause:** SPIR-V `BuiltIn` `PointCoord` (16) was entirely
+unmapped in `CanonicalizeStage.cpp`'s `getSystemValueForBuiltIn`, so
+`gl_PointCoord` fell through to `SignatureSystemValue::None` and was
+rejected outright as an ordinary, `Location`-less user varying at
+pipeline-creation time. Both `Executor.cpp`'s fragment-input-linking
+loop and `StageLink.cpp` already skip that specific rejection for any
+non-`None` system value, so the enum mapping alone was sufficient to
+unblock linking -- but unlike `SamplePosition`/`SampleIndex` (a fixed
+value re-read once per pass), `gl_PointCoord` genuinely varies
+per-fragment across a single point sprite, so real value synthesis was
+also needed, not just a mapping.
+
+**Fix:** added `SignatureSystemValue::PointCoord` and its
+`BuiltIn 16` mapping; `Executor.cpp`'s `emitPointQuad` now stamps a
+per-corner `(s, t)` value ((0,0) top-left through (1,1) bottom-right,
+Vulkan's Point Sprite convention) onto each of a point's 4 quad
+corners, threaded through `pushQuadTriangle` exactly like
+`EdgeDistance`/`ArcLength` (a line's own per-corner synthetic
+attribute) already are, then barycentric-interpolated per fragment
+into a new `FemeFragmentInvocation::PointCoord[Lane][2]` ABI field
+(`RuntimeABI.h`/`StageArgsLayout.h`/`FragmentWrapper.cpp`, mirroring
+`SamplePosition`'s existing read path exactly).
+
+**New tests:** `CanonicalizeStageTest.FragmentStageMapsPointCoordBuiltin`
+(enum mapping) and `ExecutorTest.RendersGlPointCoordAcrossAPointSprite`
+(end-to-end interpolated value across a real 2-pixel point sprite,
+confirming the affine bilinear `(s,t)` result an all-corners-share-
+`InvW`/`Depth` point quad reduces to regardless of perspective
+correction).
+
+**`check-feme`:** 3,439/3,500 discovered tests Passed (+2 new unit
+tests), 61 Unsupported, 0 Failed -- no regressions.
+
+**CTS re-run:**
+- `dEQP-VK.glsl.builtin_var.simple.pointcoord*` (3 cases, standalone
+  repro): **3/3 Pass** (was 0/3).
+- `dEQP-VK.glsl.builtin_var.*` (111 cases, the full group): **63 Pass**
+  (was 60) / **18 Fail** (was 21, all `fragdepth.*` remaining,
+  unrelated to this fix) / 30 NotSupported.
+
+**`fragdepth` (18 cases) -- two distinct findings, neither fixed this
+session:**
+
+1. **Multisample image-creation failures**
+   (`{line,point}_list_d32_sfloat_multisample_{2,4,8}`, 6 of the 18):
+   the CTS's own `BuiltinFragDepthCaseInstance::checkSupport` queries
+   `vkGetPhysicalDeviceImageFormatProperties` with
+   `usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` only, sees
+   sample counts 1/2/4/8 all supported (`framebufferDepthSampleCounts`),
+   and proceeds -- but the real depth image it then creates
+   (`vktShaderRenderBuiltinVarTests.cpp` line ~660) additionally
+   requests `VK_IMAGE_USAGE_SAMPLED_BIT`, and `Image.cpp`'s
+   `supportedSampleCounts` intersects that usage combination against
+   `sampledImageDepthSampleCounts`, which `PhysicalDeviceInfo.cpp`
+   deliberately advertises as `VK_SAMPLE_COUNT_1_BIT` only (a
+   documented, pre-existing scoping decision: per-sample `OpImageFetch`
+   reads of a depth/stencil image were left out of roadmap R30's
+   scope, unlike a depth/stencil *attachment*'s own per-sample test
+   support). The combined-usage `vkCreateImage` call then legitimately
+   fails at 4/8 samples (`VK_ERROR_INITIALIZATION_FAILED`) since our
+   own advertised capability doesn't cover it -- but CTS's narrower
+   `checkSupport` query never saw that, so it never downgrades these
+   cases to `NotSupported`. Closing this gap for real would mean
+   implementing per-sample-index `OpImageFetch` for depth images (a
+   real feature addition, out of this session's scope); flagged for a
+   future roadmap item rather than attempted here.
+2. **Non-multisample `gl_FragDepth` value mismatch** (remaining 12,
+   e.g. `line_list_d32_sfloat`, `line_list_d24_unorm_s8_uint_no_depth_
+   clamp`, `point_list_*` equivalents): a genuine runtime value bug,
+   not a creation-time rejection. The qpa log's own diagnostic text
+   (`line_list_d32_sfloat`) shows `Mismatch at pixel (10,2,0): expected
+   0 but got -0.164062` -- a background (non-primitive-covered) pixel
+   reading a large, out-of-`[0,1]`-range depth value rather than the
+   expected cleared background value, suggesting either a wrong clear
+   value or a line-rasterization coverage/width issue leaking into
+   background pixels, not (necessarily) `gl_FragDepth`'s own write
+   path. Not root-caused past this single observation; flagged as the
+   top pick for a future dedicated `fragdepth` session.
+
+**Fresh full `dEQP-VK.glsl.*` sweep:** kicked off this session
+(`--deqp-case='dEQP-VK.glsl.*'`, run from the `deqp-vk` binary's own
+directory so its relative data-file lookups resolve) to get an updated
+residual-cluster tally past `L278`'s own 89-case baseline, but did not
+finish inside this session's time budget (it is running dramatically
+slower than prior sessions' full sweeps -- roughly 120 cases/minute
+this run, versus whatever pace let prior full 28,420-case sweeps
+complete in a single working session; possibly host-load-dependent,
+not investigated further). See `agent_thoughts.md` for this session's
+final status of that sweep and next steps.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal driver-internals correctness fix to an
+already-exposed core-1.0 builtin, not a new feature/extension surface.
