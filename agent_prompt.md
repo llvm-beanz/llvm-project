@@ -56,10 +56,12 @@ and tested.
 **Always**: Add thoughts and next steps to the end of the agent_thoughts.md
 file.
 
+**Always**: Make sure you are not using precompiled headers in your build.
+
 # Request
 
 FeMe currently fails to build with a number of errors related to the use of
-AtomicRMWInst, which is not defined by LLVM (anymore). I suspect you've been
-building against system-installed LLVM headers instead of the in-tree ones.
+AtomicRMWInst, which is not defined by LLVM. Please disable precompiled headers
+in your build so that you actually detect missing includes.
 
 Please fix this and ensure your configurations are correct.
