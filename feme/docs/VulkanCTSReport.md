@@ -5948,3 +5948,65 @@ behavior, not a new feature/extension surface change.
 `L258`/`L263` opened is now complete, closing the second-largest
 untriaged cluster from that tally (`atomic_operations`, the largest,
 was already closed by `L270`-`L275`).
+
+## Session: fresh full `dEQP-VK.glsl.*` sweep + `loops` cluster root-cause (L277)
+
+**Offload-test-suite branch-drift check:** `feme` branch had drifted back
+to `origin/main` again (environment appears to reset this checkout
+between sessions -- see `agent_thoughts.md` for the recurring
+`reflog` pattern). Re-merged `FETCH_HEAD` cleanly to restore
+`OFFLOADTEST_ENABLE_FEME_VULKAN`/`feme_vulkan` CMake support.
+
+**Fresh full `dEQP-VK.glsl.*` sweep** (28,420 cases), re-run from
+scratch to confirm the residual-failure tally carried over from prior
+sessions is still accurate: **19,319 Pass / 139 Fail / 8,963
+NotSupported** (was ~19,198/259/8,963 before `L273`-`L276`'s fixes
+landed; net +121 Pass this run reflects those prior sessions' already-
+landed fixes, no new regressions). Fresh cluster breakdown by 3-level
+test-path prefix: `440.linkage.varying` (49), `loops` (30),
+`builtin_var` (21), `builtin` (14), `struct` (12), `demote` (9),
+`derivate` (3), and one previously-uncalled-out single case,
+`texture_gather` (1) -- 139 total, matching the reported Fail count
+exactly.
+
+**`loops` cluster (30 cases) root-cause investigation** (see `L277`):
+reproduced `dEQP-VK.glsl.loops.special.for_dynamic_iterations.
+dowhile_trap_fragment` directly, confirming a pipeline-creation
+rejection (`feme-cpu-simdize: ... has a divergent branch; ... did not
+remove it`). Using `FEME_DUMP_IR_PRESIMD`/`FEME_DUMP_IR_PRELINEARIZE`
+plus a new debug aid added this session (`FEME_DEBUG_LINEARIZE_TRACE`,
+see its own commit) to get ground truth on exactly which cycles
+`LoopLinearizer::linearizeCycle` is invoked on: confirmed that for
+this genuinely two-level nested divergent loop, only the *inner* cycle
+is ever linearized -- `linearizeCyclePostOrder`'s own `CI.children(C).
+empty()` leaf-only gate means the *outer* cycle's own divergent
+backedge is never even attempted, left as a raw per-lane branch that
+SIMDize correctly rejects. This is a pre-existing, deliberate,
+documented limitation (four previously-fixed bugs plus one still-open
+"bug 5" stack overflow are already recorded in-code as the reason
+non-leaf traversal stays disabled).
+
+New finding this session: experimentally flipping the gate to attempt
+non-leaf cycles unconditionally does **not** hit the documented stack
+overflow for this particular repro -- pipeline creation succeeds --
+but the test then hangs at runtime (`VK_TIMEOUT`), a **second,
+previously-undocumented bug** distinct from bug 5. The experimental
+change was fully reverted (not a fix, a regression); only the
+diagnostic debug aid was kept and committed. **No fix lands for the
+`loops` cluster this session** -- filed as `L277`, scoped as a
+dedicated few-hours-or-more session given two separate bugs now block
+it.
+
+**`check-feme`:** 3,435/3,496 discovered tests Passed (unchanged), 61
+Unsupported, 0 Failed -- confirms the debug-aid-only commit is a true
+no-op when its env var is unset.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- investigation only, no fix landed, no feature/
+extension surface change.
+
+**Net effect this session:** no case count change (`loops` remains
+30/30 Fail); the cluster's root cause is now well-understood and
+precisely scoped for a future dedicated session, with a reusable
+debug aid (`FEME_DEBUG_LINEARIZE_TRACE`) left in place to speed up
+that future work.
