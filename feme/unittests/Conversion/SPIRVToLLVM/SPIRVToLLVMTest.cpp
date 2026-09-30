@@ -1649,4 +1649,71 @@ TEST(SPIRVToLLVMTest, AtanhLegalizesToLogExpansion) {
   EXPECT_EQ(Result.find("spirv.GL.Atanh"), std::string::npos) << Result;
 }
 
+// (Roadmap L273) Copying a storage-buffer block's own sole wrapped field
+// as a whole -- e.g. GLSL `shared S buf; ...; buf = ssbo.data;`, the shape
+// every `dEQP-VK.glsl.atomic_operations.*_{compute,mesh,task}_
+// {shared,payload}` case's own `barrier()`-guarded staging copy into (and
+// back out of) a `shared`/`taskPayloadSharedEXT` variable uses -- used to
+// fail `spirv.Load` legalization outright: `spirv.AccessChain`'s single
+// index selecting the wrapper's sole field (no further indices navigating
+// into it) reaches `rewriteBlockAccess`'s "return the pointer directly"
+// branch, whose `ResultType` is computed by re-running the *same* generic
+// `spirv::PointerType` type conversion used everywhere else -- and
+// `getUniformBlockElement` used to accept *any* `Uniform`-storage-class
+// pointer to an undecorated struct as a (spurious, nested) uniform block,
+// since it only positively excluded `BufferBlock` rather than requiring
+// the real `Block` decoration every genuine interface block actually
+// carries. That misclassified the access chain's own component-pointer
+// type (pointing at the wrapper's plain, undecorated field struct) as yet
+// another `spirv.VulkanBuffer` handle, so the `spirv.Load` that read the
+// whole field afterwards ended up with that handle type as its own
+// operand instead of a real pointer -- `vkCreateComputePipelines`
+// rejected every one of these cases with `'llvm.load' op operand #0 must
+// be LLVM pointer type, but got '!llvm.target<"spirv.VulkanBuffer", ...>'`.
+// Fixed by requiring `getUniformBlockElement` to positively confirm the
+// `Block` decoration, mirroring `isBufferBlockStorage`'s own symmetric
+// `BufferBlock` check just above it.
+TEST(SPIRVToLLVMTest, WholeWrapperFieldLoadFromStorageBufferConverts) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @ssbo bind(1, 0) : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])> [0]), "
+      "BufferBlock>, Uniform> "
+      "spirv.GlobalVariable @shared : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])>)>, Workgroup> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%src = spirv.mlir.addressof @ssbo : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])> [0]), "
+      "BufferBlock>, Uniform> "
+      "%c0 = spirv.Constant 0 : i32 "
+      "%srcfield = spirv.AccessChain %src[%c0] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])> [0]), "
+      "BufferBlock>, Uniform>, i32 -> "
+      "!spirv.ptr<!spirv.struct<(f32 [0], si32 [4])>, Uniform> "
+      "%whole = spirv.Load \"Uniform\" %srcfield : "
+      "!spirv.struct<(f32 [0], si32 [4])> "
+      "%dst = spirv.mlir.addressof @shared : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])>)>, Workgroup> "
+      "%dstfield = spirv.AccessChain %dst[%c0] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32 [0], si32 [4])>)>, Workgroup>, "
+      "i32 -> !spirv.ptr<!spirv.struct<(f32 [0], si32 [4])>, Workgroup> "
+      "spirv.Store \"Workgroup\" %dstfield, %whole : "
+      "!spirv.struct<(f32 [0], si32 [4])> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The pass must actually legalize (verifier-succeed) here -- the real
+  // bug was that legalization failed outright (a null/"<failed>" Result,
+  // already checked above), specifically because `llvm.load`'s own
+  // pointer operand converted to a `spirv.VulkanBuffer` handle type
+  // rather than a real `!llvm.ptr`; MLIR's own verifier rejects that
+  // shape (`llvm.load` op operand #0 must be LLVM pointer type), so its
+  // mere presence in a Result that isn't "<failed>" already confirms the
+  // fix, but check explicitly too: the whole-field value must genuinely
+  // round-trip through a real pointer-typed `llvm.load`/`llvm.store` pair,
+  // not stay stuck as a raw handle value.
+  EXPECT_NE(Result.find("llvm.load"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.store"), std::string::npos) << Result;
+}
+
 } // namespace
