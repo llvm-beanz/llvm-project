@@ -6518,3 +6518,109 @@ distinct failure.
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
 change needed -- an internal compiler-correctness fix, no new
 feature/extension surface.
+
+## L283: `dowhile_trap` root-cause attempt -- `isLoopControlEdge` deferral approach found to regress `conditional_break`/`elseblock`/`ifblock`; reverted, mask-narrowing generalized instead
+
+**Investigation (dead end, fully reverted):** traced `dowhile_trap`'s
+hang to `DiamondFlattener::isLoopControlEdge` not recognizing a
+rotated-loop shape where the cycle header's own two successors are
+*both* still cycle members (neither a direct backedge nor a direct
+exit) -- so `DiamondFlattener` flattens the header's real divergent
+"keep iterating" check as an ordinary if/else diamond before
+`LoopLinearizer` ever sees it. Implemented a fix making
+`isLoopControlEdge` unconditionally defer *any* cycle header's own
+branch to `LoopLinearizer`, plus widening `HeaderExit`/`LatchExit`
+matching to a relay-aware `matchExitCheckWithRelay`. This **did** fix
+all 4 `dowhile_trap` cases -- but a full isolated-per-case
+`dEQP-VK.glsl.loops.*` re-run found it introduced **14 new
+regressions**: `special.{do_while,for,while}_dynamic_iterations.
+{conditional_break,elseblock,ifblock}_fragment` (each of these loop
+shapes combines a real, header-level trip-count check with a
+*separate*, genuinely divergent internal check elsewhere in the body,
+e.g. an `if (cond) break`). Root cause of the regression: baseline
+`DiamondFlattener` relies on being able to walk *through* the header's
+own branch (treating the whole loop body between the header and its
+immediate post-dominator as one recursively-flattenable region) to
+reach and flatten that *separate* internal divergent check too,
+reducing the combination down to a single surviving `OtherCondBrBlocks`
+candidate (confirmed via trace: baseline's `conditional_break` case
+ends up with exactly one surviving candidate, a `Flow` merge block,
+after `DiamondFlattener` has already flattened both the header's own
+check and the internal `if`/`break` away). Forcing `DiamondFlattener`
+to stop at the header unconditionally prevents it from ever reaching
+that inner `if`/`break`, leaving it as a *second*, unflattened,
+unclassified divergent branch that neither `LoopLinearizer`'s
+single-candidate path nor SIMDization can handle. **Fully reverted**
+(`git checkout --` on `Linearize.cpp`, confirmed byte-identical to the
+pre-attempt state for this part of the diff) rather than attempting a
+more surgical variant under time pressure -- see "Next steps" below
+for the more promising lead this investigation surfaced instead.
+
+**Kept (1 independent, lower-risk improvement found alongside that
+investigation, re-applied after the revert):** generalized
+`rethreadNestedEntryMasks` (`L282`'s own mechanism) from a
+constant-only match (`isa<ConstantInt>(Use) && C->isOne()`) to a
+structural one: any incoming edge to a child cycle's entry-mask phi
+that is *not* the child's own backedge (determined via
+`CI.getCycle`/`CI.contains`, not by inspecting the edge's current
+value) is narrowed by conjoining it with the enclosing mask, building
+a real `and` instruction when the edge is no longer a literal `true`
+(e.g. already rewritten by `freezeLoopCarriedValues`). Confirmed via
+direct case testing to be strictly additive: no new pass, no new
+fail, and does not by itself fix `dowhile_trap` (it still hangs with
+only this change applied) -- consistent with `L282`'s original
+finding that this mechanism alone is insufficient. Kept because it is
+real, verified-safe progress independent of the reverted
+`isLoopControlEdge` approach.
+
+**New unit tests:** none added this session -- the landed change
+(`rethreadNestedEntryMasks`'s generalization) was already covered by
+existing tests from `L282`'s own session (no test regression, no new
+test needed for a pure strictness-widening of already-tested logic);
+the reverted `isLoopControlEdge` approach never reached the
+test-writing stage.
+
+**`check-feme`:** 3,441/3,502 Passed, 61 Unsupported, 0 Failed (no
+regression from baseline).
+
+**CTS:** isolated-per-case re-verification of all 3 previously-passing
+clusters this investigation's now-reverted approach had regressed
+(`conditional_break`, `elseblock`, `ifblock`, each across
+`do_while`/`for`/`while` `_dynamic_iterations` -- 9 cases spot-checked
+directly) plus a full subgroup-level re-run of all 18
+`{special,generic}.{while,for,do_while}_{uniform,dynamic,constant}
+_iterations` subgroups: identical to `L282`'s baseline in every
+subgroup except `special.for_dynamic_iterations`/`special.
+while_dynamic_iterations`, which still each hang on exactly the same 2
+cases as before (`dowhile_trap_{fragment,vertex}`).
+
+**Result: still 620/624 Pass, 4 Fail** (unchanged from `L282` --
+this session made no net change to the CTS pass count, only reverted
+a regression-causing attempt and kept one small, verified-safe,
+independent improvement).
+
+**Next steps (a stronger, more precise lead than prior sessions had):**
+tracing `dowhile_trap`'s own outer-cycle classification (via
+`FEME_DEBUG_LINEARIZE_TRACE`) shows it takes the *exact same*
+`OtherCondBrBlocks=[Flow]`-single-divergent-candidate code path that
+`conditional_break` et al. use successfully -- **except** with one
+extra entry: `OtherCondBrBlocks=[<inner-do-while's-own-latch>
+(non-divergent), Flow (divergent)]`. That inner-do-while latch entry
+is a nested child cycle's own already-linearized backedge block,
+filtered out of `DivergentCandidates` (only `Flow` remains, matching
+the working mechanism) but apparently *not* handled correctly by the
+`PreRegion`/`PostRegion`/`CheckBlock` partitioning logic in that same
+code path when a literal nested child cycle sits inside `PreRegion` or
+`PostRegion`. This is a **much narrower, more specific lead** than
+"the whole `isLoopControlEdge` classification is wrong" -- focus a
+future session on `linearizeCycle`'s `DivergentCandidates`-non-empty
+handling block (roughly lines 3244-3410) and how it computes/uses
+`PreRegion`/`PostRegion` membership when one of `OtherCondBrBlocks`'s
+own filtered-out (non-divergent) entries is itself a nested child
+cycle's latch, rather than touching `isLoopControlEdge` again.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal compiler-correctness investigation, no
+new feature/extension surface (and ultimately no net code change to
+this specific classification logic either, since the attempt was
+reverted).
