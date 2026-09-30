@@ -21,6 +21,27 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     "supported (see feme/docs/Design.md).")
 endif()
 
+# Sanity-check that this is really the in-tree LLVM being configured, not
+# some other (e.g. system-installed) LLVM that a misconfigured environment
+# has put ahead of it on an include/library search path somewhere. feme uses
+# some `AtomicRMWInst::BinOp` enumerators (`FMaximumNum`/`FMinimumNum`,
+# feme/lib/Transforms/CPU/AtomicRMWIdentity.cpp) that only exist starting in
+# LLVM 23 (https://github.com/llvm/llvm-project/commit/ea8fb06f2443); an
+# older LLVM (e.g. a distro package like Ubuntu's `llvm-21-dev`) does not
+# define them, and building against one by mistake fails deep inside that
+# file with a much less obvious "no member named 'FMaximumNum'" error rather
+# than this clear, immediate one.
+if(LLVM_VERSION_MAJOR LESS 23)
+  message(FATAL_ERROR
+    "feme requires LLVM 23 or newer (found LLVM_VERSION_MAJOR="
+    "${LLVM_VERSION_MAJOR}); this usually means the configured LLVM isn't "
+    "actually this in-tree checkout (e.g. a stray -DLLVM_DIR, CPATH, or "
+    "CPLUS_INCLUDE_PATH pointed the build at an older, system-installed "
+    "LLVM instead). Re-run CMake from a clean build directory with only "
+    "-DLLVM_ENABLE_PROJECTS=feme set, and make sure no such environment "
+    "variables are set.")
+endif()
+
 include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to conform to")
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
