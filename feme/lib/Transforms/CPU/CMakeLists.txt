@@ -1,4 +1,5 @@
 add_feme_library(FeMeTransformsCPU
+  AtomicRMWIdentity.cpp
   BarrierCalls.cpp
   BoundResourceNormalization.cpp
   BuiltinCalls.cpp

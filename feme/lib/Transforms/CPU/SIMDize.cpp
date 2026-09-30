@@ -76,6 +76,7 @@
 #include "feme/Core/ShaderStage.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Target/CPU/WaveSize.h"
+#include "feme/Transforms/CPU/AtomicRMWIdentity.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
@@ -654,59 +655,6 @@ bool isVectorNarrowingBitCast(const Instruction &I) {
 bool isGroupSharedPointerType(Type *Ty) {
   auto *PtrTy = dyn_cast<PointerType>(Ty);
   return PtrTy && PtrTy->getAddressSpace() == GroupSharedAddressSpace;
-}
-
-/// Returns the identity element `Id` for \p Op such that `Op(old, Id) ==
-/// old` for every `old` -- i.e. the value a masked-off lane's `atomicrmw`
-/// should contribute so it becomes a no-op instead of a real, unmasked
-/// modification (see `FunctionWidener::widenMaskedAtomicRMW`). Every
-/// `llvm::AtomicRMWInst::BinOp` HLSL's `Interlocked*` builtins actually
-/// lower to (`Add`/`Sub`/`And`/`Or`/`Xor`/`Max`/`Min`/`UMax`/`UMin`) has one
-/// (`FAdd`/`FSub`/`FMax`/`FMin`/`FMaximum`/`FMinimum`/`USubCond`/`USubSat`
-/// do too, for whatever future front end produces them); `std::nullopt` for
-/// `Xchg` (handled separately -- see `widenMaskedAtomicRMW`) and the three
-/// operations (`Nand`, `UIncWrap`, `UDecWrap`) whose result depends on
-/// `old` in a way no single operand value can leave unchanged for every
-/// `old`.
-std::optional<Constant *> getAtomicRMWIdentity(AtomicRMWInst::BinOp Op,
-                                               Type *Ty) {
-  switch (Op) {
-  case AtomicRMWInst::Add:
-  case AtomicRMWInst::Sub:
-  case AtomicRMWInst::Or:
-  case AtomicRMWInst::Xor:
-  case AtomicRMWInst::UMax:
-  case AtomicRMWInst::USubCond:
-  case AtomicRMWInst::USubSat:
-    return Constant::getNullValue(Ty);
-  case AtomicRMWInst::And:
-  case AtomicRMWInst::UMin:
-    return Constant::getAllOnesValue(Ty);
-  case AtomicRMWInst::Max:
-    return ConstantInt::get(Ty,
-                            APInt::getSignedMinValue(Ty->getIntegerBitWidth()));
-  case AtomicRMWInst::Min:
-    return ConstantInt::get(Ty,
-                            APInt::getSignedMaxValue(Ty->getIntegerBitWidth()));
-  case AtomicRMWInst::FAdd:
-  case AtomicRMWInst::FSub:
-    return ConstantFP::get(Ty, 0.0);
-  case AtomicRMWInst::FMax:
-  case AtomicRMWInst::FMaximum:
-  case AtomicRMWInst::FMaximumNum:
-    return ConstantFP::getInfinity(Ty, /*Negative=*/true);
-  case AtomicRMWInst::FMin:
-  case AtomicRMWInst::FMinimum:
-  case AtomicRMWInst::FMinimumNum:
-    return ConstantFP::getInfinity(Ty, /*Negative=*/false);
-  case AtomicRMWInst::Xchg:
-  case AtomicRMWInst::Nand:
-  case AtomicRMWInst::UIncWrap:
-  case AtomicRMWInst::UDecWrap:
-  case AtomicRMWInst::BAD_BINOP:
-    return std::nullopt;
-  }
-  llvm_unreachable("unhandled AtomicRMWInst::BinOp");
 }
 
 /// Whether every leaf reachable by recursing through \p Ty's own
