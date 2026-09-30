@@ -1912,6 +1912,59 @@ private:
       return {};
     return It->second;
   }
+
+  /// Roadmap L282: every cycle's own header, once successfully
+  /// linearized, mapped to the `MaskPair` phis `makeActivePNPair` created
+  /// for it (see `linearizeCycle`'s own local lambda) -- populated right
+  /// before each of that function's two success paths returns `true`.
+  /// Consulted by `rethreadNestedEntryMasks` (see its own comment) when an
+  /// *enclosing* cycle is linearized afterward (post-order, so a child is
+  /// always recorded here before any parent's own `linearizeCycle` call
+  /// can consult it) and discovers that one of the blocks it is about to
+  /// thread its own freshly computed `MaskPair` through is itself a
+  /// previously linearized child's header.
+  DenseMap<BasicBlock *, MaskPair> HeaderActiveMasks;
+
+  /// Roadmap L282: \p BB was just handed \p Masks by the caller's own
+  /// `applyStageMasks(*BB, Masks)` (an enclosing, currently-being-
+  /// linearized cycle's own per-iteration "am I still active" mask) --
+  /// if \p BB is also a previously linearized child cycle's own header
+  /// (per `HeaderActiveMasks`), that child's `makeActivePNPair` phi was
+  /// built assuming an unconditional `true` on every edge entering it
+  /// from outside its own cycle (the only sound default available at the
+  /// time: nothing yet known might mask that entry down further). Now
+  /// that this enclosing cycle's own `Masks` is available, every such
+  /// `true` incoming edge is retroactively narrowed to \p Masks itself
+  /// (an `and` with a literal `true` is just the other operand, so no new
+  /// `and` instruction is needed) -- \p Masks is defined at the enclosing
+  /// cycle's own header, which dominates every block this function is
+  /// ever called on (a uniform pass-through region reached only through
+  /// that header), so this is always a valid def-dominates-use edit.
+  /// Without this, a lane the enclosing cycle's own check already
+  /// deactivated (e.g. a per-lane loop trip count of zero, entering the
+  /// loop body only because this pass's masked-execution convention
+  /// always enters it structurally) still enters the child cycle marked
+  /// unconditionally "active," and if the child's own exit condition
+  /// itself never independently becomes false for a lane that was never
+  /// supposed to be iterating at all (a real, confirmed shape on
+  /// `dEQP-VK.glsl.loops.special.*_dynamic_iterations.dowhile_trap` and
+  /// its `nested*` siblings -- see the roadmap `L282` entry), that lane's
+  /// `feme.cpu.mask.any` reduction never reaches "no lanes active either,"
+  /// hanging the whole wave forever (confirmed via a live `gdb` attach:
+  /// 100% CPU pinned in the child cycle's own vectorized mask-reduction
+  /// loop, not any kind of deadlock).
+  void rethreadNestedEntryMasks(BasicBlock *BB, const MaskPair &Masks) {
+    auto It = HeaderActiveMasks.find(BB);
+    if (It == HeaderActiveMasks.end())
+      return;
+    MaskPair &Child = It->second;
+    for (auto &Use : cast<PHINode>(Child.Live)->incoming_values())
+      if (auto *C = dyn_cast<ConstantInt>(Use); C && C->isOne())
+        Use.set(Masks.Live);
+    for (auto &Use : cast<PHINode>(Child.SideEffect)->incoming_values())
+      if (auto *C = dyn_cast<ConstantInt>(Use); C && C->isOne())
+        Use.set(Masks.SideEffect);
+  }
 };
 
 /// Roadmap L189: walks forward from \p From (inclusive, guaranteed by
@@ -3008,6 +3061,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(Masks, MasksNext);
+    // Roadmap L282: see the identical comment at the other two success
+    // paths' own `return true` -- a single-block loop can never itself be
+    // an enclosing region for a nested child cycle (it has no other
+    // blocks), but it can still *be* one, so its own entry masks are
+    // recorded here too.
+    HeaderActiveMasks[Header] = Masks;
     return true;
   }
 
@@ -3252,9 +3311,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
 
     MaskPair Masks = makeActivePNPair();
-    for (BasicBlock *BB : *PreRegion)
+    for (BasicBlock *BB : *PreRegion) {
       applyStageMasks(*BB, Masks);
+      rethreadNestedEntryMasks(BB, Masks);
+    }
     applyStageMasks(*CheckBlock, Masks);
+    rethreadNestedEntryMasks(CheckBlock, Masks);
 
     // Roadmap H94a: capture, for every one of `ExitBlock`'s own phis
     // (besides the live/side-effect masks -- see `addLatchIncoming`
@@ -3311,9 +3373,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
     CheckExit->Br->eraseFromParent();
 
-    for (BasicBlock *BB : *PostRegion)
+    for (BasicBlock *BB : *PostRegion) {
       applyStageMasks(*BB, MasksAfterCheck);
+      rethreadNestedEntryMasks(BB, MasksAfterCheck);
+    }
     applyStageMasks(*Latch, MasksAfterCheck);
+    rethreadNestedEntryMasks(Latch, MasksAfterCheck);
 
     Value *Continue = closeLatch(Latch, Header, MasksAfterCheck);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
@@ -3332,6 +3397,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(Masks, MasksAfterCheck);
+    // Roadmap L282: record this cycle's own entry masks so an *enclosing*
+    // cycle (linearized afterward, post-order) can retroactively narrow
+    // them via `rethreadNestedEntryMasks` if it turns out this cycle's
+    // header sits inside a region that enclosing cycle masks too -- see
+    // that function's own comment.
+    HeaderActiveMasks[Header] = Masks;
     return true;
     } // end DivergentCandidates-non-empty handling (Roadmap L197)
   }
@@ -3341,6 +3412,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   MaskPair Masks = makeActivePNPair();
   applyStageMasks(*Header, Masks);
+  rethreadNestedEntryMasks(Header, Masks);
   MaskPair MasksAtLatch = Masks;
   if (HeaderDivergent) {
     IRBuilder<> B(HeaderExit->Br);
@@ -3359,7 +3431,30 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     HeaderExit->Br->eraseFromParent();
   }
 
+  // Roadmap L282: unlike the `DivergentCandidates` branch above, this
+  // shape's own `PreRegion`/`PostRegion` between `Header`'s own exit
+  // check and `Latch` is required to be nothing but a uniform
+  // pass-through (no `discard`/`demote`/output-store call anywhere in
+  // it can differ per lane in a way `applyStageMasks` would need to
+  // narrow, or this shape would have been rejected already) -- but a
+  // *child* cycle's own header can still legitimately sit anywhere in
+  // that pass-through region (e.g. the `dowhile_trap` shape's own inner
+  // `do`-`while`, entirely between this outer loop's own header check
+  // and its latch). Such a child's own entry mask still needs
+  // retroactively narrowing by `MasksAtLatch` (this cycle's own
+  // per-lane "is this iteration of my own body still wanted" decision)
+  // exactly as it would in the `DivergentCandidates` branch, even
+  // though no `applyStageMasks` call is otherwise needed here -- the
+  // bug's own repro (`dEQP-VK.glsl.loops.special.for_dynamic_iterations.
+  // dowhile_trap_fragment`) hung even with the `DivergentCandidates`
+  // branch's own rethreading in place until this loop was added, because
+  // that shape actually takes *this* branch, not `DivergentCandidates`.
+  for (BasicBlock &BB : *Header->getParent())
+    if (CI.contains(C, &BB) && &BB != Header && &BB != Latch)
+      rethreadNestedEntryMasks(&BB, MasksAtLatch);
+
   applyStageMasks(*Latch, MasksAtLatch);
+  rethreadNestedEntryMasks(Latch, MasksAtLatch);
   MaskPair MasksAfterLatchCheck = MasksAtLatch;
   Value *Continue;
   if (LatchDivergent) {
@@ -3386,6 +3481,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
       [&](const BasicBlock *BB) { return CI.contains(C, BB); });
   addLatchIncoming(Masks, MasksAfterLatchCheck);
+  // Roadmap L282: see the identical comment at the `DivergentCandidates`
+  // branch's own `return true` above.
+  HeaderActiveMasks[Header] = Masks;
   return true;
 }
 
