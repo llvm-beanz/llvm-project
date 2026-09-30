@@ -87,6 +87,30 @@ constexpr char FragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// (roadmap L281) A fragment shader that writes a constant, deliberately
+// out-of-`[0, 1]`-range `SV_Depth` (element 1, no `Location`,
+// `SystemValue::Depth`) alongside a solid color -- exercises the "late"
+// depth-test-and-write path's own `depthClampEnable` handling
+// (`Executor.cpp`'s `if (FSDepthOut) { ... }` block), the shader-written
+// counterpart to `InterpolatesAGenuinelyConstantDepthExactly` above's
+// rasterizer-interpolated depth. Real hardware (and the CTS's own
+// `dEQP-VK.glsl.builtin_var.fragdepth.*` non-`_no_depth_clamp` cases)
+// clamps this value to the viewport's `[MinDepth, MaxDepth]` exactly like
+// any other per-fragment depth when `depthClampEnable` is set, regardless
+// of whether the depth came from the rasterizer or the shader itself.
+constexpr char ConstantOutOfRangeFragDepthFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float -0.5, i32 0)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
 // (roadmap H7t) Like FragmentShaderIR above, but only stores its 3 color
 // components (r, g, b) to SV_Target0 -- no alpha write at all, matching a
 // `vec3` fragment output's own signature (`ComponentCount == 3`), legal
@@ -2937,6 +2961,81 @@ TEST(ExecutorTest, InterpolatesAGenuinelyConstantDepthExactly) {
 
   for (uint32_t I = 0; I != 16; ++I)
     EXPECT_EQ(Scene.DepthStorage[I], 0.1f) << "texel " << I;
+}
+
+/// (Roadmap L281) The shader-written counterpart to
+/// `InterpolatesAGenuinelyConstantDepthExactly` above: a fragment shader
+/// that writes `SV_Depth` itself (`ConstantOutOfRangeFragDepthFragmentShaderIR`,
+/// a constant `-0.5`, outside the default `[0, 1]` viewport depth range)
+/// must still have that value clamped to `[MinDepth, MaxDepth]` when
+/// `depthClampEnable` is set -- exactly like the rasterizer-interpolated
+/// depth is, per the Vulkan spec's "depth clamping applies to whichever
+/// depth value is actually used for the test/write" ordering. Before this
+/// row's fix, `Executor.cpp`'s late depth-test-and-write path read
+/// `FSDepthOut`'s value straight from the fragment stage's own output with
+/// no clamp at all, storing `-0.5` as-is instead of the clamped `0.0` --
+/// exactly the `dEQP-VK.glsl.builtin_var.fragdepth.*_d32_sfloat` (no
+/// `_no_depth_clamp` suffix) cases' own failure mode.
+TEST(ExecutorTest, ClampsAShaderWrittenFragDepthWhenDepthClampIsEnabled) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Depth)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, ConstantOutOfRangeFragDepthFragmentShaderIR, "fs_main",
+                   FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.DepthClampEnable = true;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Always;
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList, Raster,
+      Depth, BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A full-viewport CCW triangle, NDC Z = 0.1 at every vertex -- a valid,
+  // in-range depth the rasterizer would interpolate to unchanged, but the
+  // fragment shader always overwrites it with a constant, out-of-range
+  // `-0.5` instead (see the shader's own comment).
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.1f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Clamped to the default viewport's `MinDepth` (0.0), not stored as the
+  // shader's own unclamped `-0.5`.
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
 }
 
 TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {

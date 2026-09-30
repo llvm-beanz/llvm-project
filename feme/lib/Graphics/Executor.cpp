@@ -4200,9 +4200,37 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             uint32_t PassMask = BaseCoverage;
             if (!UseEarlyDepthStencil && NeedsDepthStencil) {
               float FragDepth = PassInvocations[Q].Position[Lane][2];
-              if (FSDepthOut)
+              if (FSDepthOut) {
                 FragDepth =
                     FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
+                // (roadmap L281) `depthClampEnable`'s clamp choke point
+                // above (`Depth = std::clamp(Depth, Tri.DepthClampLo,
+                // Tri.DepthClampHi)`, before the fragment stage even runs)
+                // only ever covers the rasterizer-interpolated depth --
+                // when the fragment shader itself writes `gl_FragDepth`
+                // (`FSDepthOut` set, this whole late path's *raison
+                // d'etre*), that shader-supplied value fully replaces the
+                // interpolated one above and must be clamped again here,
+                // identically: per the spec's fixed-function ordering,
+                // depth clamping applies to whichever depth value is
+                // actually used for the test/write -- shader-written or
+                // interpolated, it makes no difference -- not only to the
+                // interpolated one that happens to be computed earlier.
+                // `dEQP-VK.glsl.builtin_var.fragdepth.*` (the non-multisample
+                // `*_d32_sfloat`/`*_d24_unorm_s8_uint`-style cases, not
+                // their `_no_depth_clamp` siblings) writes deliberately
+                // out-of-`[0,1]`-range depths specifically to probe this:
+                // without this second clamp, an out-of-range shader depth
+                // was stored as-is instead of clamped, meaning a pixel the
+                // shader legitimately executed at (and marked as executed
+                // via its own separate marker-image write) ended up with a
+                // stored depth the CTS's own reference never matched.
+                if (Pipeline.getRasterState().DepthClampEnable) {
+                  const ScreenTriangle &ClampTri = ScreenTris[Quad.TriIdx];
+                  FragDepth = std::clamp(FragDepth, ClampTri.DepthClampLo,
+                                          ClampTri.DepthClampHi);
+                }
+              }
               std::optional<uint8_t> RefOverride;
               if (FSStencilRefOut)
                 RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
