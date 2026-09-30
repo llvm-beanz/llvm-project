@@ -2810,6 +2810,24 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     diagnose(F, "loop at '" + Header->getName() + "' has no latch");
     return false;
   }
+  // Debug aid: with `FEME_DEBUG_LINEARIZE_TRACE` set in the environment,
+  // print this cycle's own Header/Latch/ExitBlock names, and (below,
+  // right after `OtherCondBrBlocks` is computed) whether the header/latch
+  // exit checks and every other in-cycle conditional branch are
+  // classified divergent. Added while root-causing roadmap `L277` (all 30
+  // `dEQP-VK.glsl.loops.special.*_dynamic_iterations.{nested*,
+  // dowhile_trap}` residual failures): confirms that for a *nested*
+  // (non-leaf) divergent cycle, `linearizeCyclePostOrder`'s own
+  // `CI.children(C).empty()` guard (see that function's own long comment
+  // on why non-leaf traversal stays disabled -- "bug 5") means this trace
+  // never even prints for the outer cycle at all, only its inner child --
+  // the outer cycle is left completely untouched, exactly the
+  // `feme-cpu-simdize: ... has a divergent branch` error every one of
+  // these cases hits at pipeline-creation time.
+  if (::getenv("FEME_DEBUG_LINEARIZE_TRACE"))
+    errs() << "L277TRACE: cycle Header=" << Header->getName()
+           << " Latch=" << Latch->getName()
+           << " ExitBlock=" << ExitBlock->getName() << "\n";
 
   // Roadmap H19k: fold away any redundant "Flow" re-derivation of a
   // decision a predecessor already made at compile time, before looking
@@ -3055,6 +3073,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     if (CI.contains(C, &BB) && &BB != Header && &BB != Latch &&
         isa<CondBrInst>(BB.getTerminator()))
       OtherCondBrBlocks.push_back(&BB);
+  if (::getenv("FEME_DEBUG_LINEARIZE_TRACE")) {
+    errs() << "L277TRACE: HeaderDivergent=" << HeaderDivergent
+           << " LatchDivergent=" << LatchDivergent
+           << " OtherCondBrBlocks=[";
+    for (BasicBlock *BB : OtherCondBrBlocks)
+      errs() << BB->getName() << " (divergent="
+             << isDivergentBranch(cast<CondBrInst>(BB->getTerminator()))
+             << ") ";
+    errs() << "]\n";
+  }
 
   if (!OtherCondBrBlocks.empty()) {
     // Roadmap L40: a real, uniform exit check already sitting in the
