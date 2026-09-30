@@ -61,26 +61,24 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged cluster, unchanged rank for many
-   sessions)** `shader_expect_assume` (51 cases) -- still not started. Good next
-   pick: largest single untriaged cluster, and `demote`/`derivate` (12 cases
-   combined) are related GLSL fragment-shader control-flow features that may
-   share root causes worth investigating together.
-2. **(a few hours, second-largest)** `440.linkage.varying` (49) and `loops` (30,
-   likely `*_dynamic_iterations` per prior sessions' naming) -- worth a joint
-   triage session, still untouched across multiple sessions now.
+1. **(30 min, check first)** Re-tally the full `dEQP-VK.glsl.*` sweep fresh --
+   the list above is carried over unchanged from before this session's fix;
+   confirm it didn't shift anything else before picking the next target.
+2. **(a few hours, largest untriaged cluster now)** `440.linkage.varying` (49)
+   and `loops` (30, likely `*_dynamic_iterations` per prior sessions' naming) --
+   worth a joint triage session, still untouched across multiple sessions now.
 3. **(small, unexplored across several sessions)** `builtin_var` (21), `builtin`
-   (14), `struct` (12, re-verify count first) -- these only became visible as
-   separate clusters once `indexing`/`matrix`/`atomic_operations` cleared.
+   (14), `struct` (12) -- these only became visible as separate clusters once
+   `indexing`/`matrix`/`atomic_operations`/`shader_expect_assume` cleared.
 4. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
-   up; consider bundling with `shader_expect_assume` (item 1) if related.
+   up.
 5. **(carried over, several sessions running)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`.
 6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
    `api`, `synchronization`) at real scale -- still not done. This session's
-   full `dEQP-VK.glsl.*` sweep does NOT cover this gap.
+   `dEQP-VK.glsl.shader_expect_assume.*` re-run does NOT cover this gap.
 7. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
    `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
    `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, need
