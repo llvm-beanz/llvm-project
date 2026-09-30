@@ -119,6 +119,8 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
       case StageOpKind::InterpolateAtOffset:
       case StageOpKind::SubpassLoad:
       case StageOpKind::TaskPayloadLoad:
+      case StageOpKind::TaskPayloadAtomicRMW:
+      case StageOpKind::TaskPayloadAtomicCmpXchg:
         return ValueUniformity::NeverUniform;
       case StageOpKind::OutputStore:
       case StageOpKind::Discard:

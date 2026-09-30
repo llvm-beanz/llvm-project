@@ -50,6 +50,10 @@ constexpr StageOpInfo StageOpTable[] = {
     {StageOpKind::SubpassLoad, "feme.stage.subpass.load", true},
     {StageOpKind::TaskPayloadStore, "feme.stage.task.payload.store", true},
     {StageOpKind::TaskPayloadLoad, "feme.stage.task.payload.load", true},
+    {StageOpKind::TaskPayloadAtomicRMW, "feme.stage.task.payload.atomicrmw",
+     true},
+    {StageOpKind::TaskPayloadAtomicCmpXchg, "feme.stage.task.payload.cmpxchg",
+     true},
     {StageOpKind::SetMeshOutputs, "feme.stage.set_mesh_outputs", false},
     {StageOpKind::EmitMeshTasks, "feme.stage.emit_mesh_tasks", false},
 };
@@ -150,7 +154,13 @@ FunctionCallee feme::getOrInsertStageOp(Module &M, StageOpKind Kind,
     // `ResultTy` but different `Offset` shapes must not collide under one
     // mangled name (mirroring `getOrInsertMaskedTaskPayloadStore`'s own
     // identical, independent `OffsetTy` mangling in `StageMaskCalls.cpp`).
-    if (Kind == StageOpKind::TaskPayloadLoad) {
+    // (Roadmap L275) `TaskPayloadAtomicRMW`/`TaskPayloadAtomicCmpXchg`'s
+    // own `offset` operand is `ArgTys[0]` too, so they need the identical
+    // independent mangling `TaskPayloadLoad` does, for the identical
+    // reason.
+    if (Kind == StageOpKind::TaskPayloadLoad ||
+        Kind == StageOpKind::TaskPayloadAtomicRMW ||
+        Kind == StageOpKind::TaskPayloadAtomicCmpXchg) {
       Name.push_back('.');
       appendTypeSuffix(Name, ArgTys[0]);
     }
@@ -287,6 +297,39 @@ CallInst *feme::createStageTaskPayloadLoad(IRBuilderBase &B, Type *ResultTy,
 CallInst *feme::createStageTaskPayloadLoad(IRBuilderBase &B, Type *ResultTy,
                                            Value *Offset) {
   return createCall(B, StageOpKind::TaskPayloadLoad, ResultTy, {Offset});
+}
+
+CallInst *feme::createStageTaskPayloadAtomicRMW(IRBuilderBase &B,
+                                                uint64_t Offset,
+                                                AtomicRMWInst::BinOp Op,
+                                                Value *Val) {
+  return createStageTaskPayloadAtomicRMW(
+      B, ConstantInt::get(B.getInt32Ty(), Offset), Op, Val);
+}
+
+CallInst *feme::createStageTaskPayloadAtomicRMW(IRBuilderBase &B,
+                                                Value *Offset,
+                                                AtomicRMWInst::BinOp Op,
+                                                Value *Val) {
+  Value *OpVal = ConstantInt::get(B.getInt32Ty(), static_cast<uint64_t>(Op));
+  return createCall(B, StageOpKind::TaskPayloadAtomicRMW, Val->getType(),
+                    {Offset, OpVal, Val});
+}
+
+CallInst *feme::createStageTaskPayloadAtomicCmpXchg(IRBuilderBase &B,
+                                                    uint64_t Offset,
+                                                    Value *Compare,
+                                                    Value *NewVal) {
+  return createStageTaskPayloadAtomicCmpXchg(
+      B, ConstantInt::get(B.getInt32Ty(), Offset), Compare, NewVal);
+}
+
+CallInst *feme::createStageTaskPayloadAtomicCmpXchg(IRBuilderBase &B,
+                                                    Value *Offset,
+                                                    Value *Compare,
+                                                    Value *NewVal) {
+  return createCall(B, StageOpKind::TaskPayloadAtomicCmpXchg,
+                    Compare->getType(), {Offset, Compare, NewVal});
 }
 
 CallInst *feme::createStageSetMeshOutputs(IRBuilderBase &B, Value *VertexCount,

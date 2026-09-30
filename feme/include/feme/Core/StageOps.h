@@ -165,6 +165,49 @@ enum class StageOpKind : uint8_t {
   /// handles, needing no special-casing there the way `OutputStore`/
   /// `TaskPayloadStore` need.
   TaskPayloadLoad,
+  /// `feme.stage.task.payload.atomicrmw(offset, op, value) -> old_value`
+  /// (roadmap L275): an `atomicAdd`/`atomicAnd`/`atomicOr`/`atomicXor`/
+  /// `atomicMin`/`atomicMax`/`atomicExchange` against a task/mesh entry's
+  /// own bounded payload storage -- the atomic-RMW counterpart of
+  /// `TaskPayloadStore`/`TaskPayloadLoad` above, for the same
+  /// `TaskPayloadWorkgroupEXT` address-space-14 global neither of those
+  /// two ops alone could canonicalize away (an `AtomicRMWInst`/
+  /// `AtomicCmpXchgInst` against it resolves no `StageIOAccess`, exactly
+  /// like a plain load/store, but `CanonicalizeStage.cpp` had never
+  /// checked for one at all before this, leaving it as a genuinely
+  /// unconvertible raw `atomicrmw`/`cmpxchg` against a global with no real
+  /// definition anywhere -- an unresolved external symbol at JIT-link
+  /// time). Like `TaskPayloadStore`/`TaskPayloadLoad`, \c offset is a
+  /// plain byte offset into the payload's raw storage, not an
+  /// `ElementID`/`Row`/`Component` triple. \c op is a constant `i32`
+  /// holding an `llvm::AtomicRMWInst::BinOp` value, since GLSL's small,
+  /// fixed set of atomic built-ins maps to one of only a handful of
+  /// `BinOp`s -- no need for a whole separate `StageOpKind` per operation
+  /// the way DXIL's own `atomicBinOp`/`atomicCompareExchange` intrinsics
+  /// already fold every operation into one op with an immediate operand.
+  /// \c value is the scalar RMW operand, and the call's own result is the
+  /// value already stored at \c offset immediately before this RMW
+  /// applied (matching `AtomicRMWInst`'s own "result is the old value"
+  /// convention) -- unlike `TaskPayloadStore`, which has no result at all.
+  TaskPayloadAtomicRMW,
+  /// `feme.stage.task.payload.cmpxchg(offset, compare, new_value) ->
+  /// old_value` (roadmap L275): GLSL's `atomicCompSwap` against a task/
+  /// mesh entry's own bounded payload storage -- the compare-and-swap
+  /// counterpart of `TaskPayloadAtomicRMW` just above, for the identical
+  /// reason (an `AtomicCmpXchgInst`, not `AtomicRMWInst`, against the
+  /// payload global). \c offset/\c compare/\c new_value mirror
+  /// `AtomicCmpXchgInst`'s own "compare, then conditionally swap in
+  /// new_value" operands; the call's own result is the value already
+  /// stored at \c offset immediately before this compare-and-swap applied,
+  /// regardless of whether the swap actually took place (matching
+  /// `AtomicCmpXchgInst`'s own "extract the first, `old value`, member of
+  /// its `{ old, success }` result pair" convention -- this op has no
+  /// second, boolean `success` result of its own, since GLSL's
+  /// `atomicCompSwap` itself only ever exposes the old value, the caller
+  /// comparing it against \c compare again itself to learn whether the
+  /// swap took place, exactly like `AtomicCmpXchgInst`'s own callers who
+  /// only need `extractvalue ..., 0` already do).
+  TaskPayloadAtomicCmpXchg,
   /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)`: a mesh
   /// entry's `SetMeshOutputsEXT` call (roadmap H6c-a-a-i), declaring the
   /// workgroup's real (`<= OutputVertices`/`OutputPrimitivesEXT`) output
@@ -340,6 +383,47 @@ llvm::CallInst *createStageTaskPayloadLoad(llvm::IRBuilderBase &B,
 llvm::CallInst *createStageTaskPayloadLoad(llvm::IRBuilderBase &B,
                                            llvm::Type *ResultTy,
                                            llvm::Value *Offset);
+
+/// `feme.stage.task.payload.atomicrmw(offset, op, value) -> old_value`,
+/// where \p Offset is the constant byte offset within the task payload
+/// this atomic RMW applies to, \p Op is the `llvm::AtomicRMWInst::BinOp`
+/// operation, and \p Val is the RMW operand (see
+/// `StageOpKind::TaskPayloadAtomicRMW`'s comment).
+llvm::CallInst *createStageTaskPayloadAtomicRMW(llvm::IRBuilderBase &B,
+                                                uint64_t Offset,
+                                                llvm::AtomicRMWInst::BinOp Op,
+                                                llvm::Value *Val);
+
+/// (Roadmap L275) `feme.stage.task.payload.atomicrmw(offset, op, value) ->
+/// old_value`, where \p Offset is a *dynamic* (not necessarily constant)
+/// `i32` byte offset -- see the dynamic-offset `createStageTaskPayloadStore`
+/// overload's own comment for why this is needed. The constant overload
+/// above is implemented in terms of this one.
+llvm::CallInst *createStageTaskPayloadAtomicRMW(llvm::IRBuilderBase &B,
+                                                llvm::Value *Offset,
+                                                llvm::AtomicRMWInst::BinOp Op,
+                                                llvm::Value *Val);
+
+/// `feme.stage.task.payload.cmpxchg(offset, compare, new_value) ->
+/// old_value`, where \p Offset is the constant byte offset within the task
+/// payload this compare-and-swap applies to, \p Compare is the expected
+/// prior value, and \p NewVal is the value to conditionally swap in (see
+/// `StageOpKind::TaskPayloadAtomicCmpXchg`'s comment).
+llvm::CallInst *createStageTaskPayloadAtomicCmpXchg(llvm::IRBuilderBase &B,
+                                                    uint64_t Offset,
+                                                    llvm::Value *Compare,
+                                                    llvm::Value *NewVal);
+
+/// (Roadmap L275) `feme.stage.task.payload.cmpxchg(offset, compare,
+/// new_value) -> old_value`, where \p Offset is a *dynamic* (not
+/// necessarily constant) `i32` byte offset -- see the dynamic-offset
+/// `createStageTaskPayloadStore` overload's own comment for why this is
+/// needed. The constant overload above is implemented in terms of this
+/// one.
+llvm::CallInst *createStageTaskPayloadAtomicCmpXchg(llvm::IRBuilderBase &B,
+                                                    llvm::Value *Offset,
+                                                    llvm::Value *Compare,
+                                                    llvm::Value *NewVal);
 
 /// `feme.stage.set_mesh_outputs(vertex_count, primitive_count)` (see
 /// `StageOpKind::SetMeshOutputs`'s comment).

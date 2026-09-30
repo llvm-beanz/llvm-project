@@ -74,6 +74,12 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // `StreamEmit`/`StreamCut` above are still unreachable until the
     // geometry stage is validated.
     return Stage == ShaderStage::Amplification;
+  case StageOpKind::TaskPayloadAtomicRMW:
+  case StageOpKind::TaskPayloadAtomicCmpXchg:
+    // (Roadmap L275) An atomic RMW/compare-and-swap against the payload
+    // is a write, exactly like `TaskPayloadStore` above (just also
+    // reading the value already there) -- same "not yet reachable" note.
+    return Stage == ShaderStage::Amplification;
   case StageOpKind::TaskPayloadLoad:
     // (Roadmap L30) The load-side counterpart of `TaskPayloadStore`
     // above, but on the *mesh* stage instead of the task/amplification
@@ -295,6 +301,8 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::SubpassLoad:
   case StageOpKind::TaskPayloadStore:
   case StageOpKind::TaskPayloadLoad:
+  case StageOpKind::TaskPayloadAtomicRMW:
+  case StageOpKind::TaskPayloadAtomicCmpXchg:
   case StageOpKind::SetMeshOutputs:
   case StageOpKind::EmitMeshTasks:
     // No element/row/component operands to validate: a task payload
