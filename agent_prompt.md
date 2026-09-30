@@ -61,31 +61,46 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, largest untriaged cluster, unchanged rank for many
+1. **(carried over, unresolved this session, likely a few hours)** `fragdepth`
+   (18 cases), two separate sub-problems, pick whichever fits the next session's
+   time budget:
+   - the 12-case non-multisample value bug (`Mismatch at pixel (10,2,0):
+     expected 0 but got -0.164062` on `line_list_d32_sfloat`) -- start here,
+     it's a real correctness bug, not a scoping decision. Use
+     `--deqp-log-images=enable` to see the full rendered-vs-reference depth
+     image, not just the first mismatch, to tell whether it's a wrong clear
+     value or a rasterization-coverage leak.
+   - the 6-case multisample image-creation gap needs a real feature decision
+     (implement per-sample-indexed `OpImageFetch` for depth images to honor
+     CTS's expectation, or decide it's out of scope and get the CTS's own
+     `checkSupport` to catch it some other way) -- larger, lower priority than
+     the value bug.
+2. **(30 min, check first)** Re-run the full `dEQP-VK.glsl.*` sweep from scratch
+   early next session (remember the cwd gotcha above) -- this session's sweep
+   only got to 6,940/28,420 cases (~120/min, unusually slow, host-load-dependent
+   and not investigated) before being stopped; no reliable full residual tally
+   exists past `L278`'s 89-case baseline (now 86, since `pointcoord`'s 3
+   cleared) until this re-runs to completion. If it's still this slow, consider
+   capping with `--deqp-caselist-file` splits or accept a partial-sweep
+   spot-check instead of a full one.
+3. **(a few hours, largest untriaged cluster, unchanged rank for many
    sessions)** `loops` (30, likely `*_dynamic_iterations` per `L277`'s write-up
    -- two separate bugs already known to block non-leaf cycle linearization
-   there) -- still the top pick by size.
-2. **(small, unexplored across several sessions)** `builtin_var` (21), `builtin`
-   (14), `struct` (12) -- only became visible as separate clusters once bigger
-   ones cleared.
-3. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
+   there) -- still the top pick by size if `fragdepth` isn't picked up first.
+4. **(small, unexplored across several sessions)** `builtin` (14, may include
+   the 8 new `cosh`/`sinh` precision fails this session's partial sweep found --
+   not confirmed), `struct` (12) -- only became visible as separate clusters
+   once bigger ones cleared.
+5. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
    up.
-4. **(new, 1 case, unexplored)** `texture_gather` -- surfaced for the first time
-   in this session's fresh sweep; no investigation done yet, flagging only.
-5. **(carried over, several sessions running)** `L265`: residual
+6. **(carried over, several sessions running)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`.
-6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
+7. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
    `api`, `synchronization`) at real scale -- still not done.
-7. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
-   `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
-   `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, need
-   upstream lit-annotation fixes.
-8. **(housekeeping, do first, 10 min)** The local `offload-test-suite`
-   checkout's `feme` branch is now 24 commits ahead of `llvm-beanz/feme` (the
-   restored `854cc3f` plus the 23 that were already there) with no clean
-   fast-forward relationship. Consider pushing this reconciled state to a
-   personal fork/branch so future sessions don't have to redo the cherry-pick,
-   or at minimum note in the next session's branch-check to use `git merge-base
-   --is-ancestor 854cc3f HEAD` rather than a tip comparison.
+8. **(low priority, confirmed unchanged for many sessions)**
+   `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
+   (failing) and `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to
+   FeMe/LLVM, need upstream lit-annotation fixes. Did not re-verify this session
+   (skipped `check-hlsl-feme-vk`, see above).
