@@ -6423,3 +6423,98 @@ and after this fix (a real A/B via `git stash`, not inferred):
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
 change needed -- an internal core-1.0 depth-clamp correctness fix, not
 a new feature/extension surface.
+
+## L282: `loops` cluster down to 4 genuine hangs (was 30) -- `isCycleHeaderBranch` reverted, 4 lower-risk fixes kept
+
+**Investigation:** attempted a direct fix for the `*_dynamic_iterations`
+hang cluster (`L277`/`L278`'s `loops` 30-case tally) via a new
+`isCycleHeaderBranch` relay-aware exit-check comparison in
+`LoopLinearizer`. Implemented and CTS-tested, but found to introduce
+two new crash regressions in previously-passing `graphicsfuzz` repros
+(`cov-function-always-return-negative-bitfield-extract`,
+`cov-function-fragcoord-condition-always-return`,
+`cov-function-global-loop-counter-sample-texture`). **Reverted in
+full** -- confirmed via `grep` that no trace of `isCycleHeaderBranch`/
+`HeaderExitRelayValues`/`LatchExitRelayValues` remains, and via a
+byte-identical `diff` against the pre-attempt backup. Flagged as
+needing a dedicated future audit session rather than incremental
+patching.
+
+**Kept (4 independent, lower-risk fixes found alongside that
+investigation):**
+
+1. `DiamondFlattener::validate`'s new `Depth`/`MaxValidateDepth=256`
+   recursion-depth guard -- a pathologically deep nested-diamond
+   shader now gets a clean diagnosed `Error` instead of a stack
+   overflow.
+2. `HeaderActiveMasks`/`rethreadNestedEntryMasks` mask-threading
+   mechanism -- retroactively narrows a child cycle's `true`-constant
+   entry mask once an enclosing cycle's own real mask becomes
+   available (wired into all 5 `LoopLinearizer` call sites).
+3. Removed `linearizeCyclePostOrder`'s `if
+   (CI.children(C).empty())` leaf-only gate -- non-leaf (nested)
+   cycles are now linearized unconditionally for the first time.
+4. New permanent `verifyModule(M, &errs())` safety-net in
+   `Pipeline.cpp` right after `LinearizePass` runs.
+
+Fixes (2)+(3) together are what actually fixed the bulk of the `loops`
+cluster; the reverted `isCycleHeaderBranch` idea was not the fix that
+landed.
+
+**New/updated unit tests:**
+`LinearizeTest.DeeplyNestedDivergentDiamondsDiagnoseInsteadOfStackOverflowing`
+(fix 1, a synthetic 300-level nested-diamond IR; confirmed the test
+shape is otherwise valid by re-running it at a shallow depth of 5,
+where it passes cleanly -- isolating the depth guard as the sole cause
+of rejection at 300 levels); `LinearizeTest.LinearizesBothInnerLeafLoopAndOuterNonLeafLoop`
+(renamed/rewritten from `...LeavesOuterNonLeafLoopAlone`, updated for
+fix 3's behavior change: `MaskAnyCount` now 2 (was 1), outer latch
+condition now `"loop.continue3"` (was `"outer.break"`)).
+
+**`check-feme`:** 3,441/3,502 Passed, 61 Unsupported, 0 Failed.
+
+**CTS:** a clean, isolated-per-case re-tally of the full 624-case
+`dEQP-VK.glsl.loops.*` group. Methodology: first ran each of the 18
+`{special,generic}.{while,for,do_while}_{uniform,dynamic,constant}
+_iterations` subgroups as its own separate `deqp-vk` invocation (not
+one combined process for the whole `loops.*` glob), to avoid a
+discovered cascading-false-failure artifact (see below). 16 of the 18
+subgroups passed 100% outright, including `special.
+do_while_dynamic_iterations` (60/60) -- previously part of the 30-case
+cluster, now fully fixed. Only `special.for_dynamic_iterations` and
+`special.while_dynamic_iterations` showed any failures in their
+subgroup-level runs (52/62 and 52/62 failing respectively); re-running
+every case in *each of those two subgroups* in its own fully separate
+process invocation (not just a separate subgroup-level process) found
+only **2 genuine hangs per subgroup** -- `dowhile_trap_{fragment,vertex}`
+-- with the other 60 cases in each subgroup passing cleanly once
+isolated from the real hang's aftermath.
+
+**Result: 620/624 Pass, 4 Fail** (was 594/624 Pass, 30 Fail per
+`L277`/`L278`'s tally) -- `special.{for,while}_dynamic_iterations.
+dowhile_trap_{fragment,vertex}` (4 cases) still hang; every other case
+in the 624-case group now passes. The remaining hang is narrowly
+scoped to `for`/`while` (not `do_while`) dynamic-iteration-count loops
+combined with the `dowhile_trap` shader shape specifically, not yet
+root-caused past this point, but now isolated to a 4-case repro
+surface for a future session (likely still related to whatever gap
+the reverted `isCycleHeaderBranch` attempt was chasing).
+
+**Methodology finding (cascading false failures):** running many CTS
+cases sequentially within one `deqp-vk` process, once a single case
+genuinely hangs and hits its fence-wait timeout, appears to leave that
+process's Vulkan device/queue in a permanently broken state for the
+remainder of its lifetime -- every subsequent case in the same
+invocation then also reports `VK_TIMEOUT`, even though each would pass
+cleanly (confirmed via direct re-run) if run in its own fresh process.
+This artifact is almost certainly what inflated prior sessions'
+"~30/624" combined-run tallies for this cluster (and potentially other
+clusters previously measured via one large combined sweep process).
+Going forward, a trustworthy failure count requires isolating any
+subgroup/case that shows a failure in a combined run into its own
+separate process invocation before concluding it is a genuine,
+distinct failure.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal compiler-correctness fix, no new
+feature/extension surface.
