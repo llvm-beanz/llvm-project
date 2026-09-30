@@ -5569,3 +5569,96 @@ confirming the fix introduced no new regressions.
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
 change needed -- an internal compiler-pass correctness fix, not a
 feature/extension surface change.
+
+## L273/L274: `atomic_operations` shared-memory whole-struct-copy cluster (64 cases) -- one bug fixed, a second, deeper one found underneath
+
+**Symptom:** the remaining `dEQP-VK.glsl.atomic_operations.*` 64 failures
+(after `L270`/`L271` cleared the 32 stage-linkage cases) are exactly the
+`{add,and,comp_swap,...}_{signed,unsigned}_{compute,mesh,task}_
+{shared,payload}` combinations (8 ops x 2 signedness x 4 stage/storage
+variants) -- every one copies a whole `AtomicStruct`-shaped field from an
+SSBO into (and back out of) a `shared`/`taskPayloadSharedEXT`
+(Workgroup-storage-class) variable via a plain GLSL struct assignment,
+bracketing per-invocation atomic ops on the shared copy.
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` on `add_signed_compute_shared`
+confirmed a pipeline-creation rejection, not a runtime `Image mismatch`.
+
+### L273: `getUniformBlockElement` misclassified an AccessChain's own intermediate component-pointer type as a nested uniform block
+
+**Repro method:** no `glslangValidator`/`glslc` binary exists anywhere in
+this environment. Instead: ran `deqp-vk` with
+`--deqp-log-decompiled-spirv=enable` to extract the real SPIR-V assembly
+from the `.qpa` log, HTML-unescaped it, reassembled it with
+`spirv-as --target-env vulkan1.0`, imported it with
+`feme-translate --import-spirv` to get FeMe's own `spirv` dialect MLIR,
+then reproduced the exact crash standalone with
+`feme-translate --no-implicit-module --spirv-to-llvmdialect`.
+
+**Root cause:** `'llvm.load' op operand #0 must be LLVM pointer type,
+but got '!llvm.target<"spirv.VulkanBuffer", ...>'`. `getUniformBlockElement`
+(`SPIRVToLLVMPatterns.cpp`) only excluded `BufferBlock`-decorated structs,
+never positively required the `Block` decoration a genuine uniform
+interface block actually carries. This let it also match a
+`spirv.AccessChain`'s own intermediate component-pointer type -- reached
+once a wrapper block's sole field has already been selected as a whole,
+pointing at an ordinary, undecorated inner struct -- as a second, nested
+uniform block, wrongly routing the following `spirv.Load`/`spirv.Store`
+through the handle-based (`spirv.VulkanBuffer`) conversion instead of
+leaving it as ordinary memory (address space 12, the type-converter's
+own documented fallback intent).
+
+**Fix:** require `Struct.hasDecoration(Block)` too, mirroring
+`isBufferBlockStorage`'s existing symmetric positive check for
+`BufferBlock`. Updated 3 pre-existing lit tests
+(`spirv-to-llvm-uniform-buffer.mlir`, `spirv-to-llvm-glslang-blocks.mlir`,
+`spirv-to-llvm-struct-trailing-gap-packed.mlir`) whose hand-written
+wrapper structs had omitted the `Block` decoration as a textual shortcut
+(real glslang/dxc output always carries it) so they keep exercising the
+intended paths under the now-stricter check.
+
+**Unit test:** new `SPIRVToLLVMTest.WholeWrapperFieldLoadFromStorageBufferConverts`,
+confirmed via a reverted A/B test (temporarily short-circuiting the new
+`Block` check to `false`) to fail pre-fix and pass post-fix.
+
+**`check-feme`:** 3,430/3,491 discovered tests Passed (+1 net new unit
+test), 61 Unsupported, 0 Failed (no regressions).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal compiler-pass correctness fix, not a
+feature/extension surface change.
+
+### L274 (filed, not started): a second, distinct bug remains one stage later, in the CPU-target SIMDizer
+
+Re-running the full `dEQP-VK.glsl.atomic_operations.*` group (1,040
+cases) against the rebuilt ICD after `L273`'s fix still shows **64 Fail
+/ 128 Pass / 848 NotSupported** -- the same raw count, but the failure
+signature has moved: pipeline creation now progresses past SPIR-V-to-
+LLVM-dialect conversion (`L273`'s own fix site) and instead fails inside
+`feme-cpu-simdize` (`GroupShared.cpp`'s `rewriteGroupSharedGlobals`):
+
+- 62/64 cases: `'groupshared global ... feeds a nested getelementptr or
+  another unsupported user; only a first-level getelementptr feeding a
+  direct load, store, atomicrmw, masked gather/scatter, or (for a
+  vector-typed row load, or a uniform row address broadcast into one) a
+  second-level per-component getelementptr feeding its own masked
+  gather/scatter is supported (roadmap milestone 9 deviation)'`.
+- 2/64 cases: `'... a divergent value ... of aggregate type; component
+  decomposition is not yet supported for this producer ...'`.
+
+Both are shapes `rewriteGroupSharedGlobals`'s own existing code comments
+already document as deliberately out of "milestone 9"'s current scope (a
+*uniform*, non-divergent nested struct access chain into a groupshared
+global, as opposed to the one second-level-GEP shape it already
+supports: a genuinely divergent vector-of-pointers per-row-component
+address) -- not a regression, and not an oversight bug like `L273`'s
+own. Filed as roadmap item `L274` for a dedicated future session rather
+than folded into this fix, since it is a materially different subsystem
+(CPU-target groupshared-global canonicalization, not SPIR-V-to-LLVM-
+dialect conversion).
+
+**Net effect this session:** the `atomic_operations` cluster's own
+blocking bug moved one stage deeper in the pipeline; the raw CTS Pass/
+Fail count for this specific group is unchanged (128/64/848) until
+`L274` is also fixed, but `L273`'s fix is a genuine, independently
+correct bug fix (confirmed via its own dedicated unit test and the
+standalone MLIR repro) needed regardless of `L274`'s own resolution.
