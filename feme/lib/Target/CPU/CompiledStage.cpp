@@ -319,7 +319,21 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     return Default;
   }());
 
+  // Debug aid: with `FEME_DUMP_IR_PREOPT`/`FEME_DUMP_IR_POSTOPT` set in the
+  // environment, print the module immediately before/after
+  // `feme::OptimizerPipeline` runs -- the module here already has
+  // `libFeMeRuntimeCPU`'s own runtime-helper definitions linked in (see
+  // `runPipeline`'s own `Linker::linkInModule` call, `Pipeline.cpp`), so
+  // this is the first point any of `FEME_DUMP_IR*`'s earlier snapshots
+  // (all of which predate that link) can show whether a runtime helper
+  // actually got inlined the way its own `alwaysinline` attribute
+  // requests, and what the fully-optimized, about-to-be-JIT-compiled
+  // form of a call into one looks like.
+  if (::getenv("FEME_DUMP_IR_PREOPT"))
+    Mod.print(errs(), nullptr);
   OptimizerPipeline().run(Mod, OptimizerOptions{toOptimizationLevel(OptLevel)});
+  if (::getenv("FEME_DUMP_IR_POSTOPT"))
+    Mod.print(errs(), nullptr);
   if (verifyModule(Mod, &errs()))
     return createStringError(inconvertibleErrorCode(),
                              "JIT module failed verification");
