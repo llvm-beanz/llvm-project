@@ -5719,3 +5719,96 @@ feature/extension surface change.
 64 Fail down to 16 Fail (128->176 Pass); the residual 16
 `*_task_payload` cases are a new, distinct gap (`L275`, filed, not
 started).
+
+## L275: `atomic_operations.*_task_payload` residual (16 cases) -- missing atomic canonicalization, plus a use-after-free crash the fix itself introduced -- both fixed
+
+**Symptom:** the 16 residual `dEQP-VK.glsl.atomic_operations.*_task_payload`
+failures `L274` split out fail pipeline creation with `JIT session error:
+Symbols not found: [ spirv_var_48 ]` /
+`vkCreateGraphicsPipelines: Failed to materialize symbols`, unlike
+`L273`/`L274`'s own pipeline-creation-*rejection* diagnostics -- an
+unresolved external symbol at JIT-link time.
+
+**Root cause:** `CanonicalizeStage.cpp` already canonicalized a plain
+load/store through a task entry's bounded payload global (address space
+14) into `feme.stage.task.payload.load`/`.store`, but never recognized an
+`AtomicRMWInst`/`AtomicCmpXchgInst` against that same global -- GLSL's
+`atomicAdd`/`atomicCompSwap`/etc. against a `taskPayloadSharedEXT`
+variable. The raw atomic survived uncanonicalized all the way to
+JIT-link time, still referencing the never-defined SPIR-V-derived global
+name.
+
+**Fix, part 1 -- canonicalization and lowering.** Added a new
+`StageOpKind::TaskPayloadAtomicRMW`/`TaskPayloadAtomicCmpXchg` pair
+(`feme.stage.task.payload.atomicrmw`/`.cmpxchg`), canonicalized in
+`CanonicalizeStage.cpp` exactly like the existing load/store rewrite
+immediately above it. Because these ops are, unlike every prior masked
+call (`OutputStore`, `TaskPayloadStore`, `StreamEmit`/`Cut`,
+`SetMeshOutputs`, `EmitMeshTasks` -- all void), both side-effecting
+(need active-lane masking under SIMD divergence) *and* value-producing,
+a new "masked, value-producing call" family was added
+(`StageMaskCalls.h`/`.cpp`), threaded through `Linearize.cpp`'s masking
+pass (which now RAUW's the original call's result with the masked call's
+result, rather than just erasing) and `SIMDize.cpp`'s widening pass
+(`widenMaskedTaskPayloadAtomicRMW`/`CmpXchg`, storing the widened result
+in `Widened` exactly like `widenGroupSharedAtomicRMW`/`CmpXchg` already
+does). `TaskPayloadWrapper.cpp`'s `lowerTaskPayloadAtomicRMW`/`CmpXchg`
+then perform the real per-lane `atomicrmw`/`cmpxchg` against
+`Env.Payload + Offset`, reusing `lowerTaskPayloadStore`'s address
+computation and `widenGroupSharedAtomicRMW`/`CmpXchg`'s
+identity-substitution masking technique (via the shared
+`feme::cpu::getAtomicRMWIdentity` helper, extracted from `SIMDize.cpp`
+in a prior session) to neutralize inactive-but-in-bounds lanes.
+
+**Fix, part 2 -- a SIGSEGV the part-1 fix itself introduced.** The
+`AtomicCmpXchgInst` canonicalization rewrites its `{ old, i1 success }`
+aggregate result by walking `CX`'s `ExtractValueInst` users and erasing
+them once rewritten. The enclosing per-instruction rewrite loop uses
+`llvm::make_early_inc_range`, which only guards against erasing the
+*current* instruction being visited (it caches the next iterator just
+before yielding it) -- `CX`'s `ExtractValueInst` users necessarily sit
+*later* in program order (a use can't precede its def), so eagerly
+erasing them (and `CX` itself, which they still reference) from inside
+the same iteration invalidated that cached "next" iterator the moment it
+happened to point at one of them. Reproduced standalone with a minimal
+two-`extractvalue`-user `feme-opt` repro (`--llvm
+-passes=feme-graphics-canonicalize-stage`); confirmed in practice as a
+raw `SIGSEGV` inside `canonicalizeSPIRVStage`, isolated via `gdb` to a
+single case,
+`dEQP-VK.glsl.atomic_operations.comp_swap_signed_task_payload`, when
+attempting a full-group CTS run. Fixed by deferring both `CX`'s and its
+`ExtractValueInst` users' erasure into a per-function worklist, drained
+only after the per-instruction loop has finished walking every
+instruction in that function -- by which point no cached iterator can
+still be pointing at any of them.
+
+**Verification.** Added a new lit test
+(`spirv-canonicalize-stage-task-payload-atomics.ll`) covering both the
+new `atomicrmw`/`cmpxchg` canonicalization shape and, via a two-user
+`cmpxchg`, the crash fix itself (this exact shape crashed pre-fix,
+confirmed via the standalone `feme-opt` repro before the fix landed).
+
+**`check-feme`:** 3,433/3,433 discovered tests Passed (+1 net new test
+vs. `L274`'s own count), 61 Unsupported, 0 Failed.
+
+**Real CTS re-run** (`dEQP-VK.glsl.atomic_operations.*`, 1,040 cases)
+against the rebuilt ICD: **192 Pass / 0 Fail / 848 NotSupported** --
+clears all 16 residual `*_task_payload` cases, zero regressions
+elsewhere in the group. `atomic_operations` (the full 1,040-case group
+`L270`-`L275` have progressively chased) is now entirely clear.
+
+**`check-hlsl-feme-vk`** (offload-test-suite): re-run for regression
+confirmation -- unchanged from prior sessions (`spec_const_32_bits.test`/
+`WaveActiveMax.test` still fail, `array_of_matrices.test` still an
+unexpected pass from its own stale `XFAIL:`), all pre-existing,
+unrelated to this fix, confirmed unchanged again this session.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- a compiler-internals correctness fix, not a
+feature/extension surface change.
+
+**Net effect this session:** `L275`'s fix, combined with `L273`/`L274`'s
+prior-session fixes, takes the `atomic_operations` group's full residual
+failure count from 64 (`L273`'s starting point) down to 0. The
+`atomic_operations`-specific triage thread `L270` opened is now
+complete.
