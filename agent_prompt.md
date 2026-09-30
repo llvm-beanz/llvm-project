@@ -61,29 +61,26 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, new lead, ready to pick up)** `L275`: root-cause the
-   `*_task_payload` `JIT session error: Symbols not found: [ spirv_var_48 ]`.
-   Start by finding where `spirv_var_*`-named globals are supposed to be defined
-   for `TaskPayloadWorkgroupEXT`-storage-class variables, vs. how
-   `Workgroup`-storage-class (groupshared) globals get defined, to see what step
-   is missing. Likely home:
-   `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` or CPU-target
-   lowering.
-2. **(check first, ~30 min)** Re-tally the full `dEQP-VK.glsl.*` sweep fresh --
-   last full numbers were from several sessions back (~19,198 Pass/259
-   Fail/8,963 NotSupported before this session's `atomic_operations` work);
-   confirm this session's fix doesn't shift anything else and get a fresh
-   residual-Fail-cluster breakdown before picking the next target.
-3. **(unknown, filed, not started for many sessions)** `shader_expect_assume`
-   (51 cases), `440.linkage.varying` (49), `loops` (30, likely
-   `*_dynamic_iterations`) -- still untouched.
-4. **(small, unexplored for several sessions)** `builtin_var` (21), `struct`
-   (16), `builtin` (14), `demote` (9), `derivate` (3), `logical_copy` (2).
-5. **(carried over many sessions)** `L265`: residual `a2b10g10r10_snorm_pack32`
-   ASTC-block-boundary alpha-decode bug in `ASTCDecode.cpp`.
+1. **(a few hours, largest untriaged cluster, unchanged rank for many
+   sessions)** `shader_expect_assume` (51 cases) -- still not started. Good next
+   pick: largest single untriaged cluster, and `demote`/`derivate` (12 cases
+   combined) are related GLSL fragment-shader control-flow features that may
+   share root causes worth investigating together.
+2. **(a few hours, second-largest)** `440.linkage.varying` (49) and `loops` (30,
+   likely `*_dynamic_iterations` per prior sessions' naming) -- worth a joint
+   triage session, still untouched across multiple sessions now.
+3. **(small, unexplored across several sessions)** `builtin_var` (21), `builtin`
+   (14), `struct` (12, re-verify count first) -- these only became visible as
+   separate clusters once `indexing`/`matrix`/`atomic_operations` cleared.
+4. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
+   up; consider bundling with `shader_expect_assume` (item 1) if related.
+5. **(carried over, several sessions running)** `L265`: residual
+   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
+   `ASTCDecode.cpp`.
 6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
-   `api`, `synchronization`) at real scale -- still not done.
+   `api`, `synchronization`) at real scale -- still not done. This session's
+   full `dEQP-VK.glsl.*` sweep does NOT cover this gap.
 7. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
    `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
    `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, need
