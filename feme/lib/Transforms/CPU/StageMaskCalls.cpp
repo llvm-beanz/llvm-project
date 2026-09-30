@@ -237,3 +237,69 @@ bool feme::cpu::isMaskedEmitMeshTasksCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   return Callee && Callee->getName().starts_with(MaskedEmitMeshTasksPrefix);
 }
+
+FunctionCallee feme::cpu::getOrInsertMaskedTaskPayloadAtomicRMW(Module &M,
+                                                                Type *OffsetTy,
+                                                                Type *ValueTy,
+                                                                Type *MaskTy) {
+  SmallString<64> Name(MaskedTaskPayloadAtomicRMWPrefix);
+  Name.push_back('.');
+  // (Roadmap L275) `OffsetTy` is mangled independently of `ValueTy`, the
+  // identical reason `getOrInsertMaskedTaskPayloadStore` above already is.
+  appendTypeSuffix(Name, OffsetTy);
+  Name.push_back('.');
+  appendTypeSuffix(Name, ValueTy);
+  Type *I32 = Type::getInt32Ty(M.getContext());
+  FunctionType *FTy =
+      FunctionType::get(ValueTy, {OffsetTy, I32, ValueTy, MaskTy},
+                        /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedTaskPayloadAtomicRMW(IRBuilderBase &B,
+                                                      Value *Offset, Value *Op,
+                                                      Value *Val,
+                                                      Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadAtomicRMW(
+      *M, Offset->getType(), Val->getType(), Mask->getType());
+  return B.CreateCall(Callee, {Offset, Op, Val, Mask});
+}
+
+bool feme::cpu::isMaskedTaskPayloadAtomicRMWCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee &&
+         Callee->getName().starts_with(MaskedTaskPayloadAtomicRMWPrefix);
+}
+
+FunctionCallee
+feme::cpu::getOrInsertMaskedTaskPayloadAtomicCmpXchg(Module &M, Type *OffsetTy,
+                                                     Type *ValueTy,
+                                                     Type *MaskTy) {
+  SmallString<64> Name(MaskedTaskPayloadAtomicCmpXchgPrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, OffsetTy);
+  Name.push_back('.');
+  appendTypeSuffix(Name, ValueTy);
+  FunctionType *FTy =
+      FunctionType::get(ValueTy, {OffsetTy, ValueTy, ValueTy, MaskTy},
+                        /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedTaskPayloadAtomicCmpXchg(IRBuilderBase &B,
+                                                          Value *Offset,
+                                                          Value *Compare,
+                                                          Value *NewValue,
+                                                          Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadAtomicCmpXchg(
+      *M, Offset->getType(), Compare->getType(), Mask->getType());
+  return B.CreateCall(Callee, {Offset, Compare, NewValue, Mask});
+}
+
+bool feme::cpu::isMaskedTaskPayloadAtomicCmpXchgCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee &&
+         Callee->getName().starts_with(MaskedTaskPayloadAtomicCmpXchgPrefix);
+}

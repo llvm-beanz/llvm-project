@@ -501,6 +501,34 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
                                     Call->getArgOperand(2), Masks.SideEffect);
           Call->eraseFromParent();
           continue;
+        case feme::StageOpKind::TaskPayloadAtomicRMW: {
+          // (Roadmap L275) Mirrors `TaskPayloadStore` above exactly
+          // (`offset`, operand 0, passed through unchanged regardless of
+          // whether it is a compile-time constant or a genuinely dynamic
+          // per-invocation `Value` -- `getOrInsertMaskedTaskPayloadAtomicRMW`
+          // mangles its own callee purely off `Offset`'s actual type), but
+          // unlike `TaskPayloadStore` this has a real result (the value
+          // already stored at `offset` before the RMW applied), so the
+          // masked call's own result replaces the original call's uses
+          // rather than the call simply being erased outright.
+          CallInst *Masked = createMaskedTaskPayloadAtomicRMW(
+              B, Call->getArgOperand(0), Call->getArgOperand(1),
+              Call->getArgOperand(2), Masks.SideEffect);
+          Call->replaceAllUsesWith(Masked);
+          Call->eraseFromParent();
+          continue;
+        }
+        case feme::StageOpKind::TaskPayloadAtomicCmpXchg: {
+          // (Roadmap L275) The compare-and-swap counterpart of
+          // `TaskPayloadAtomicRMW` immediately above, for the identical
+          // reason.
+          CallInst *Masked = createMaskedTaskPayloadAtomicCmpXchg(
+              B, Call->getArgOperand(0), Call->getArgOperand(1),
+              Call->getArgOperand(2), Masks.SideEffect);
+          Call->replaceAllUsesWith(Masked);
+          Call->eraseFromParent();
+          continue;
+        }
         default:
           break; // Not a mask-affecting stage op; fall through below.
         }

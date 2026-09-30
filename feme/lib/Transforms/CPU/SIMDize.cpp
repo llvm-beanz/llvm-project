@@ -916,6 +916,8 @@ private:
   void widenMaskedStreamEmit(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedTaskPayloadStore(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedTaskPayloadAtomicRMW(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedTaskPayloadAtomicCmpXchg(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedSetMeshOutputs(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedEmitMeshTasks(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
@@ -2635,6 +2637,56 @@ void FunctionWidener::widenMaskedTaskPayloadStore(CallInst &CI,
   FunctionCallee Callee = getOrInsertMaskedTaskPayloadStore(
       *M, Offset->getType(), ValueArg->getType(), Mask->getType());
   Builder.CreateCall(Callee, {Offset, ValueArg, Mask});
+  ToErase.push_back(&CI);
+}
+
+// (Roadmap L275) Mirrors `widenMaskedTaskPayloadStore` immediately above
+// exactly for the `Offset`/`Value` operands, but this call has a real
+// result (the value stored at `Offset` immediately before the RMW
+// applied) that must be recorded in `Widened`, unlike the store's
+// void one. `Op` (operand 1, the `AtomicRMWInst::BinOp`) is always a
+// scalar `i32` constant, spec-guaranteed identical for every lane -- never
+// widened, exactly like `widenStageOp`'s own `QuadRead`/`SubpassLoad`
+// constant operands.
+void FunctionWidener::widenMaskedTaskPayloadAtomicRMW(CallInst &CI,
+                                                      IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *OffsetArg = CI.getArgOperand(0);
+  Value *Offset = isa<Constant>(OffsetArg) ? OffsetArg
+                                           : getWidened(OffsetArg, Builder);
+  Value *Op = CI.getArgOperand(1);
+  Value *ValueArg = getWidened(CI.getArgOperand(2), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(3), Builder),
+                                  "task.payload.atomicrmw.mask");
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadAtomicRMW(
+      *M, Offset->getType(), ValueArg->getType(), Mask->getType());
+  Value *Result =
+      Builder.CreateCall(Callee, {Offset, Op, ValueArg, Mask}, CI.getName());
+  Widened[&CI] = Result;
+  ToErase.push_back(&CI);
+}
+
+// (Roadmap L275) The compare-and-swap counterpart of
+// `widenMaskedTaskPayloadAtomicRMW` immediately above, for the identical
+// reason -- `Compare`/`NewValue` (operands 1/2) both widen exactly like
+// `Value` does there.
+void FunctionWidener::widenMaskedTaskPayloadAtomicCmpXchg(
+    CallInst &CI, IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *OffsetArg = CI.getArgOperand(0);
+  Value *Offset = isa<Constant>(OffsetArg) ? OffsetArg
+                                           : getWidened(OffsetArg, Builder);
+  Value *Compare = getWidened(CI.getArgOperand(1), Builder);
+  Value *NewValue = getWidened(CI.getArgOperand(2), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(3), Builder),
+                                  "task.payload.cmpxchg.mask");
+  FunctionCallee Callee = getOrInsertMaskedTaskPayloadAtomicCmpXchg(
+      *M, Offset->getType(), Compare->getType(), Mask->getType());
+  Value *Result = Builder.CreateCall(Callee, {Offset, Compare, NewValue, Mask},
+                                     CI.getName());
+  Widened[&CI] = Result;
   ToErase.push_back(&CI);
 }
 
@@ -4895,6 +4947,14 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       widenMaskedTaskPayloadStore(*CI, Builder);
       return true;
     }
+    if (isMaskedTaskPayloadAtomicRMWCall(*CI)) {
+      widenMaskedTaskPayloadAtomicRMW(*CI, Builder);
+      return true;
+    }
+    if (isMaskedTaskPayloadAtomicCmpXchgCall(*CI)) {
+      widenMaskedTaskPayloadAtomicCmpXchg(*CI, Builder);
+      return true;
+    }
     if (isMaskedSetMeshOutputsCall(*CI)) {
       widenMaskedSetMeshOutputs(*CI, Builder);
       return true;
@@ -4930,6 +4990,8 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       case feme::StageOpKind::StreamEmit:
       case feme::StageOpKind::StreamCut:
       case feme::StageOpKind::TaskPayloadStore:
+      case feme::StageOpKind::TaskPayloadAtomicRMW:
+      case feme::StageOpKind::TaskPayloadAtomicCmpXchg:
       case feme::StageOpKind::SetMeshOutputs:
       case feme::StageOpKind::EmitMeshTasks:
       case feme::StageOpKind::NumStageOpKinds:

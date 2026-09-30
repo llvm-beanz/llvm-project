@@ -65,6 +65,21 @@ inline constexpr llvm::StringLiteral MaskedSetMeshOutputsPrefix =
 /// same per-lane side-effect mask onto a masked variant of it too.
 inline constexpr llvm::StringLiteral MaskedEmitMeshTasksPrefix =
     "feme.cpu.masked.emit_mesh_tasks";
+/// Roadmap L275: `feme.stage.task.payload.atomicrmw` is side-effecting the
+/// same way `feme.stage.task.payload.store` is (both mutate the task/mesh
+/// entry's own bounded payload storage), so `LinearizePass` threads the
+/// same per-lane side-effect mask onto a masked variant of it too. Unlike
+/// `TaskPayloadStore`, this has a real result (the value already stored at
+/// `offset` immediately before the RMW applied), so the masked call is not
+/// void -- mirroring `TaskPayloadLoad`'s own value-producing shape, just
+/// with a mask operand threaded through like every other masked call here.
+inline constexpr llvm::StringLiteral MaskedTaskPayloadAtomicRMWPrefix =
+    "feme.cpu.masked.task.payload.atomicrmw";
+/// Roadmap L275: the compare-and-swap counterpart of
+/// `MaskedTaskPayloadAtomicRMWPrefix` immediately above, for the identical
+/// reason.
+inline constexpr llvm::StringLiteral MaskedTaskPayloadAtomicCmpXchgPrefix =
+    "feme.cpu.masked.task.payload.cmpxchg";
 
 inline llvm::StringRef getMaskedOutputStoreName() {
   return MaskedOutputStorePrefix;
@@ -158,6 +173,40 @@ llvm::CallInst *createMaskedEmitMeshTasks(llvm::IRBuilderBase &B,
                                           llvm::Value *GroupCountZ,
                                           llvm::Value *Mask);
 
+/// `feme.cpu.masked.task.payload.atomicrmw(offset, op, value, mask) ->
+/// old_value`: \p OffsetTy mirrors `getOrInsertMaskedTaskPayloadStore`'s own
+/// independent `Offset`-type mangling (constant-`i32` vs. widened
+/// `<W x i32>`, tracked separately from `ValueTy`/`MaskTy`), for the
+/// identical reason. \p Op (the `llvm::AtomicRMWInst::BinOp`) is always a
+/// scalar `i32` constant, spec-guaranteed identical for every lane, so it
+/// is never widened and needs no mangling of its own -- the same way
+/// `createStageQuadRead`'s own `Direction` operand never is.
+llvm::FunctionCallee getOrInsertMaskedTaskPayloadAtomicRMW(llvm::Module &M,
+                                                           llvm::Type *OffsetTy,
+                                                           llvm::Type *ValueTy,
+                                                           llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedTaskPayloadAtomicRMW(llvm::IRBuilderBase &B,
+                                                 llvm::Value *Offset,
+                                                 llvm::Value *Op,
+                                                 llvm::Value *Value,
+                                                 llvm::Value *Mask);
+
+/// `feme.cpu.masked.task.payload.cmpxchg(offset, compare, new_value, mask)
+/// -> old_value`: mirrors `getOrInsertMaskedTaskPayloadAtomicRMW` above
+/// exactly, just for the compare-and-swap shape (\p ValueTy covers both
+/// `compare`/`new_value`, which always share one type).
+llvm::FunctionCallee
+getOrInsertMaskedTaskPayloadAtomicCmpXchg(llvm::Module &M, llvm::Type *OffsetTy,
+                                          llvm::Type *ValueTy,
+                                          llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedTaskPayloadAtomicCmpXchg(llvm::IRBuilderBase &B,
+                                                     llvm::Value *Offset,
+                                                     llvm::Value *Compare,
+                                                     llvm::Value *NewValue,
+                                                     llvm::Value *Mask);
+
 bool isMaskedOutputStoreCall(const llvm::CallInst &CI);
 bool isMaskedStreamEmitCall(const llvm::CallInst &CI);
 bool isMaskedStreamCutCall(const llvm::CallInst &CI);
@@ -165,6 +214,8 @@ bool isReturnMasksCall(const llvm::CallInst &CI);
 bool isMaskedTaskPayloadStoreCall(const llvm::CallInst &CI);
 bool isMaskedSetMeshOutputsCall(const llvm::CallInst &CI);
 bool isMaskedEmitMeshTasksCall(const llvm::CallInst &CI);
+bool isMaskedTaskPayloadAtomicRMWCall(const llvm::CallInst &CI);
+bool isMaskedTaskPayloadAtomicCmpXchgCall(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

@@ -18,6 +18,7 @@
 #include "feme/Core/ShaderStage.h"
 #include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
+#include "feme/Transforms/CPU/AtomicRMWIdentity.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
@@ -239,6 +240,188 @@ void lowerTaskPayloadStore(CallInst &CI, const TaskPayloadStageEnv &Env,
   }
 }
 
+/// Lowers one `feme.cpu.masked.task.payload.atomicrmw` call (roadmap
+/// L275): the atomic-read-modify-write counterpart of
+/// `lowerTaskPayloadStore` above, mirroring its own address computation
+/// (shared-fast-path-for-a-`ConstantInt`-`Offset`, per-lane fallback
+/// otherwise) exactly, but performing a real `atomicrmw` against
+/// `Env.Payload + Offset` per lane rather than a plain store, and
+/// returning the widened `<W x T>` "old value" result -- `Val`'s own type
+/// tracks `T` directly (`TaskPayloadAtomicRMW`'s result type always
+/// matches its value operand's, per `StageOps.cpp`'s own mangling
+/// convention), so no separate result-type lookup is needed the way
+/// `lowerTaskPayloadLoad` needs `CI.getType()` for a call with no
+/// value-typed operand of its own.
+///
+/// A masked-off (but still in-bounds) lane's clone is substituted with
+/// `Op`'s own identity element (`feme::cpu::getAtomicRMWIdentity`,
+/// mirroring `widenGroupSharedAtomicRMW`'s identical technique in
+/// SIMDize.cpp) so it has no observable memory effect while still
+/// returning the value already there, atomically; a statically
+/// out-of-bounds lane (mirroring `lowerTaskPayloadStore`'s own defensive
+/// skip) never executes the atomic at all and contributes a `poison`
+/// result instead.
+Value *lowerTaskPayloadAtomicRMW(CallInst &CI, const TaskPayloadStageEnv &Env,
+                                 const DataLayout &DL) {
+  IRBuilder<> Builder(&CI);
+  Value *OffsetArg = CI.getArgOperand(0);
+  auto Op = static_cast<AtomicRMWInst::BinOp>(
+      cast<ConstantInt>(CI.getArgOperand(1))->getZExtValue());
+  Value *ValueArg = CI.getArgOperand(2);
+  Value *MaskArg = CI.getArgOperand(3);
+
+  auto *WideTy = dyn_cast<FixedVectorType>(ValueArg->getType());
+  unsigned WaveSize = WideTy ? WideTy->getNumElements() : 1;
+  Type *ScalarTy = WideTy ? WideTy->getElementType() : ValueArg->getType();
+  uint64_t ByteSize = DL.getTypeStoreSize(ScalarTy).getFixedValue();
+
+  std::optional<Constant *> Identity = getAtomicRMWIdentity(Op, ScalarTy);
+  if (!Identity && Op != AtomicRMWInst::Xchg) {
+    CI.getContext().emitError(
+        &CI, "feme-cpu-wrap-task-payload: task payload atomicrmw '" +
+                 Twine(AtomicRMWInst::getOperationName(Op)) +
+                 "' has no maskable identity element (roadmap L275)");
+    return PoisonValue::get(CI.getType());
+  }
+
+  auto *OffsetConst = dyn_cast<ConstantInt>(OffsetArg);
+  Value *SharedAddr = nullptr, *SharedInBounds = nullptr;
+  if (OffsetConst) {
+    uint64_t Offset = OffsetConst->getZExtValue();
+    Value *End = Builder.getInt32(static_cast<uint32_t>(Offset + ByteSize));
+    SharedInBounds =
+        Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+    SharedAddr = Builder.CreateInBoundsGEP(
+        Builder.getInt8Ty(), Env.Payload,
+        Builder.getInt32(static_cast<uint32_t>(Offset)), "payload.addr");
+  }
+
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Addr = SharedAddr;
+    Value *InBounds = SharedInBounds;
+    if (!OffsetConst) {
+      Value *LaneOffset = extractLaneOrScalar(Builder, OffsetArg, Lane);
+      Value *End = Builder.CreateAdd(
+          LaneOffset, Builder.getInt32(static_cast<uint32_t>(ByteSize)));
+      InBounds =
+          Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+      Addr = Builder.CreateInBoundsGEP(Builder.getInt8Ty(), Env.Payload,
+                                       LaneOffset, "payload.addr");
+    }
+
+    Value *Mask = extractLaneOrScalar(Builder, MaskArg, Lane);
+    Value *EffectiveMask = Builder.CreateAnd(Mask, InBounds, "payload.mask");
+    auto *MaskConst = dyn_cast<ConstantInt>(EffectiveMask);
+    Value *LaneVal = extractLaneOrScalar(Builder, ValueArg, Lane);
+
+    Value *LaneResult;
+    if (MaskConst && MaskConst->isZero()) {
+      LaneResult = PoisonValue::get(ScalarTy);
+    } else {
+      Value *IdentityVal =
+          Identity ? static_cast<Value *>(*Identity)
+                   : Builder.CreateLoad(ScalarTy, Addr, "lane.old");
+      Value *MaskedVal =
+          (MaskConst && MaskConst->isOne())
+              ? LaneVal
+              : Builder.CreateSelect(EffectiveMask, LaneVal, IdentityVal,
+                                     "lane.val.masked");
+      LaneResult = Builder.CreateAtomicRMW(
+          Op, Addr, MaskedVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent);
+    }
+    Result = WideTy ? Builder.CreateInsertElement(Result, LaneResult,
+                                                   Builder.getInt32(Lane))
+                    : LaneResult;
+  }
+  return Result;
+}
+
+/// Lowers one `feme.cpu.masked.task.payload.cmpxchg` call (roadmap L275):
+/// the compare-and-swap counterpart of `lowerTaskPayloadAtomicRMW`
+/// immediately above, for the identical reason -- a `cmpxchg` has no
+/// identity operand the way an `atomicrmw` does, so a masked-off (but
+/// in-bounds) lane's clone instead forces its own comparison to fail
+/// (mirroring `widenGroupSharedAtomicCmpXchg`'s identical technique in
+/// SIMDize.cpp): load the current value and compare against its bitwise
+/// complement (guaranteed to differ for any integer width -- GLSL's
+/// `atomicCompSwap` is only ever integer-typed), so it always takes its
+/// "no match" path (no store), returning the value already there.
+Value *lowerTaskPayloadAtomicCmpXchg(CallInst &CI,
+                                     const TaskPayloadStageEnv &Env,
+                                     const DataLayout &DL) {
+  IRBuilder<> Builder(&CI);
+  Value *OffsetArg = CI.getArgOperand(0);
+  Value *CompareArg = CI.getArgOperand(1);
+  Value *NewValueArg = CI.getArgOperand(2);
+  Value *MaskArg = CI.getArgOperand(3);
+
+  auto *WideTy = dyn_cast<FixedVectorType>(CompareArg->getType());
+  unsigned WaveSize = WideTy ? WideTy->getNumElements() : 1;
+  Type *ScalarTy = WideTy ? WideTy->getElementType() : CompareArg->getType();
+  uint64_t ByteSize = DL.getTypeStoreSize(ScalarTy).getFixedValue();
+
+  auto *OffsetConst = dyn_cast<ConstantInt>(OffsetArg);
+  Value *SharedAddr = nullptr, *SharedInBounds = nullptr;
+  if (OffsetConst) {
+    uint64_t Offset = OffsetConst->getZExtValue();
+    Value *End = Builder.getInt32(static_cast<uint32_t>(Offset + ByteSize));
+    SharedInBounds =
+        Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+    SharedAddr = Builder.CreateInBoundsGEP(
+        Builder.getInt8Ty(), Env.Payload,
+        Builder.getInt32(static_cast<uint32_t>(Offset)), "payload.addr");
+  }
+
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Addr = SharedAddr;
+    Value *InBounds = SharedInBounds;
+    if (!OffsetConst) {
+      Value *LaneOffset = extractLaneOrScalar(Builder, OffsetArg, Lane);
+      Value *End = Builder.CreateAdd(
+          LaneOffset, Builder.getInt32(static_cast<uint32_t>(ByteSize)));
+      InBounds =
+          Builder.CreateICmpULE(End, Env.MaxPayloadBytes, "payload.inbounds");
+      Addr = Builder.CreateInBoundsGEP(Builder.getInt8Ty(), Env.Payload,
+                                       LaneOffset, "payload.addr");
+    }
+
+    Value *Mask = extractLaneOrScalar(Builder, MaskArg, Lane);
+    Value *EffectiveMask = Builder.CreateAnd(Mask, InBounds, "payload.mask");
+    auto *MaskConst = dyn_cast<ConstantInt>(EffectiveMask);
+    Value *LaneCompare = extractLaneOrScalar(Builder, CompareArg, Lane);
+    Value *LaneNewVal = extractLaneOrScalar(Builder, NewValueArg, Lane);
+
+    Value *LaneResult;
+    if (MaskConst && MaskConst->isZero()) {
+      LaneResult = PoisonValue::get(ScalarTy);
+    } else if (MaskConst && MaskConst->isOne()) {
+      Value *Pair = Builder.CreateAtomicCmpXchg(
+          Addr, LaneCompare, LaneNewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      LaneResult = Builder.CreateExtractValue(Pair, 0);
+    } else {
+      Value *LoadedVal = Builder.CreateLoad(ScalarTy, Addr, "lane.old");
+      Value *MismatchedCmp = Builder.CreateNot(LoadedVal, "lane.cmp.mismatch");
+      Value *MaskedCmp = Builder.CreateSelect(EffectiveMask, LaneCompare,
+                                              MismatchedCmp,
+                                              "lane.cmp.masked");
+      Value *Pair = Builder.CreateAtomicCmpXchg(
+          Addr, MaskedCmp, LaneNewVal, MaybeAlign(),
+          AtomicOrdering::SequentiallyConsistent,
+          AtomicOrdering::SequentiallyConsistent);
+      LaneResult = Builder.CreateExtractValue(Pair, 0);
+    }
+    Result = WideTy ? Builder.CreateInsertElement(Result, LaneResult,
+                                                   Builder.getInt32(Lane))
+                    : LaneResult;
+  }
+  return Result;
+}
+
 /// Lowers one `feme.cpu.masked.emit_mesh_tasks` call (roadmap H6s): writes
 /// `Env.MeshGroupCount`'s three contiguous slots from the one lane that is
 /// truly SPIR-V invocation 0 (`wave_index == 0 && Lane == 0`, see
@@ -387,20 +570,25 @@ Value *lowerTaskPayloadLoad(CallInst &CI, const WaveBodyEnv &WEnv,
   return Result;
 }
 
-/// Lowers every masked task payload store, `emit_mesh_tasks` call, and
-/// `gl_DrawID` input load in \p F, or diagnoses and returns false if \p F
-/// uses a `feme.stage.*` op this pass does not support (any op other than
-/// `TaskPayloadStore`/`TaskPayloadLoad`/`EmitMeshTasks`/an `InputLoad` of
-/// `gl_DrawID` -- roadmap H6t found that, mirroring
-/// `MeshOutputWrapper.cpp`'s own H6p finding, a task entry point *does*
-/// have one legitimate ordinary stage-IO input to read after all; roadmap
-/// L39 found that it also needs to support reading its own payload back).
+/// Lowers every masked task payload store, masked task payload atomic
+/// (RMW/`cmpxchg`), `emit_mesh_tasks` call, and `gl_DrawID` input load in
+/// \p F, or diagnoses and returns false if \p F uses a `feme.stage.*` op
+/// this pass does not support (any op other than
+/// `TaskPayloadStore`/`TaskPayloadAtomicRMW`/`TaskPayloadAtomicCmpXchg`/
+/// `TaskPayloadLoad`/`EmitMeshTasks`/an `InputLoad` of `gl_DrawID` --
+/// roadmap H6t found that, mirroring `MeshOutputWrapper.cpp`'s own H6p
+/// finding, a task entry point *does* have one legitimate ordinary
+/// stage-IO input to read after all; roadmap L39 found that it also needs
+/// to support reading its own payload back; roadmap L275 found that it
+/// also needs to support atomically read-modify-writing its own payload).
 bool lowerTaskPayloadStageOps(Function &F, const WaveBodyEnv &WEnv,
                               const DataLayout &DL) {
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))
     if (auto *CI = dyn_cast<CallInst>(&I))
       UsesStageOps |= isStageOpCall(*CI) || isMaskedTaskPayloadStoreCall(*CI) ||
+                      isMaskedTaskPayloadAtomicRMWCall(*CI) ||
+                      isMaskedTaskPayloadAtomicCmpXchgCall(*CI) ||
                       isMaskedEmitMeshTasksCall(*CI);
   if (!UsesStageOps)
     return true;
@@ -417,6 +605,18 @@ bool lowerTaskPayloadStageOps(Function &F, const WaveBodyEnv &WEnv,
       continue;
     if (isMaskedTaskPayloadStoreCall(*CI)) {
       lowerTaskPayloadStore(*CI, *Env, DL);
+      CI->eraseFromParent();
+      continue;
+    }
+    if (isMaskedTaskPayloadAtomicRMWCall(*CI)) {
+      Value *Result = lowerTaskPayloadAtomicRMW(*CI, *Env, DL);
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      continue;
+    }
+    if (isMaskedTaskPayloadAtomicCmpXchgCall(*CI)) {
+      Value *Result = lowerTaskPayloadAtomicCmpXchg(*CI, *Env, DL);
+      CI->replaceAllUsesWith(Result);
       CI->eraseFromParent();
       continue;
     }
