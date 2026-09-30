@@ -58,47 +58,8 @@ file.
 
 # Request
 
-Can you continue working on the FeMe ICD implementation? The previous session's
-suggested next steps are:
+FeMe currently fails to build with a number of errors related to the use of
+AtomicRMWInst, which is not defined by LLVM (anymore). I suspect you've been
+building against system-installed LLVM headers instead of the in-tree ones.
 
-1. **(small-medium, likely 1-2 hours, high value: fully closes `loops`)**
-   Root-cause the remaining 4-case `dowhile_trap` hang:
-   `special.{for,while}_dynamic_iterations.dowhile_trap_{fragment,vertex}`.
-   Narrowly scoped now (not `do_while`, only `for`/`while`
-   dynamic-iteration-count loops combined with the `dowhile_trap` shader shape)
-   -- a much smaller repro surface than before. Likely still related to whatever
-   gap the reverted `isCycleHeaderBranch` attempt was chasing; worth a fresh,
-   careful look now that the mask-threading/non-leaf-traversal fixes have
-   changed the surrounding code.
-2. **(small, unexplored across several sessions)** `builtin` (14), `struct` (12)
-   -- only became visible as separate clusters once bigger ones cleared.
-   `builtin` may include the 8 `cosh`/`sinh` precision fails an earlier partial
-   sweep found (not confirmed) -- re-tally cleanly using the isolated-per-case
-   methodology from item 7 above before trusting any number here.
-3. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
-   up.
-4. **(new, 1 case, unexplored across 3 sessions now)** `texture_gather` -- still
-   flagged, no investigation done.
-5. **(6 cases, feature-decision needed, carried over several sessions)**
-   `fragdepth`'s multisample image-creation gap (`*_multisample_{2,4,8}`): CTS's
-   own `checkSupport` doesn't account for our `sampledImageDepthSampleCounts =
-   1` scoping decision. Implement per-sample `OpImageFetch` for depth images, or
-   find a way to get CTS's own narrower check to catch it as `NotSupported`.
-6. **(6 cases, carried over)** `fragdepth`'s combined-depth-stencil-format bug:
-   `{line,point,triangle}_list_{d24_unorm_s8_uint,d32_sfloat_s8_uint}_no_depth_clamp`
-   -- a covered pixel's depth reads back as `0` instead of its real shaded
-   value. Likely a `readDepth`/`writeDepth` packed-format addressing bug --
-   start in `Executor.cpp`'s `readDepth`/`writeDepth` (~line 999).
-7. **(carried over, several sessions running)** `L265`: residual
-   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
-   `ASTCDecode.cpp`.
-8. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
-   broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
-   `api`, `synchronization`) at real scale -- still not done. Given this
-   session's cascading-false-failure finding, any future broad sweep should be
-   run in small per-group batches from the start, not one giant combined
-   process.
-9. **(low priority, confirmed unchanged for many sessions)**
-   `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
-   (failing) and `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to
-   FeMe/LLVM, need upstream lit-annotation fixes.
+Please fix this and ensure your configurations are correct.
