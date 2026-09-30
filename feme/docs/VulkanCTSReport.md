@@ -6181,3 +6181,35 @@ test), 61 Unsupported, 0 Failed -- no regressions.
 change needed -- an internal driver-internals correctness fix to
 already-exposed core-1.0 vertex-input default-fill behavior, not a new
 feature/extension surface.
+
+**offload-test-suite (`check-hlsl-feme-vk`) regression check:** the
+literal ninja target `check-hlsl-feme-vk` referenced by this repo's own
+protocol did not exist in the configured build (only `check-hlsl-vk`/
+`check-hlsl-clang-vk` etc. were present). Root cause: the local
+`/home/dev/dev/offload-test-suite` checkout's `feme` branch had lost
+its actual FeMe-enabling commit (`854cc3f`, "[Vulkan][FeMe] Add FeMe
+test targets") -- a prior session's "no drift" branch check compared
+local `HEAD` against `llvm-beanz/feme`'s tip and found them equal in
+one direction, but the remote branch had itself moved 23 commits ahead
+*without* `854cc3f` in its ancestry (it now sits on a different, older
+base), so local's tip silently stopped including it despite the
+protocol's fetch check finding "no drift" (that check only compares
+tips, not whether a specific known-important commit is still present).
+Fixed by `git cherry-pick 854cc3f` onto the local `feme` branch tip
+(clean, no conflicts) and re-running `cmake .` in the `llvm-project`
+build directory to pick up the newly-restored
+`OFFLOADTEST_ENABLE_FEME_VULKAN`-gated targets. This is a fix to the
+external `offload-test-suite` checkout's branch state only -- no
+`llvm-project` files were touched, so no commit was needed in this
+repo for it.
+
+With the target restored, ran `ninja check-hlsl-feme-vk` (via
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` set on separate `export` lines
+pointing at `feme_icd.json`, confirmed first via `vulkaninfo --summary`
+showing `FeMe CPU Vulkan Device`): **486/727 Passed, 207 Unsupported,
+31 Expectedly Failed, 2 Failed, 1 Unexpectedly Passed** -- exactly
+matching the previously-flagged, confirmed-unrelated baseline
+(`Feature/SpecializationConstant/spec_const_32_bits.test` and
+`WaveOps/WaveActiveMax.test` failing; `Feature/PushConstant/
+array_of_matrices.test` XPASS from a stale `XFAIL:`), i.e. **no
+regression from the `L279` fix**.
