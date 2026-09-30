@@ -1555,8 +1555,9 @@ bool DiamondFlattener::run() {
     auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
     if (!Br || !UI.isDivergentTerminator(Br))
       continue;
-    if (isInCycle(&BB) && (isLoopControlEdge(&BB, Br->getSuccessor(0)) ||
-                           isLoopControlEdge(&BB, Br->getSuccessor(1))))
+    if (isInCycle(&BB) &&
+        (isLoopControlEdge(&BB, Br->getSuccessor(0)) ||
+         isLoopControlEdge(&BB, Br->getSuccessor(1))))
       continue; // The loop's own iteration decision, not a diamond.
     HasDivergentBranch = true;
     break;
@@ -3542,10 +3543,10 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   // unconditionally, once per cycle, rather than trying to track exactly
   // which children actually mutated anything.
   //
-  // Roadmap L197/L198/L200: attempting `C` itself here (not just its
-  // children) has needed five distinct bugs fixed so far, each found via
-  // a real Vulkan CTS shader once a non-leaf `C` was actually attempted
-  // (four fixed, one -- bug 5 below -- still open):
+  // Roadmap L197/L198/L200/L282: attempting `C` itself here (not just its
+  // children) needed six distinct bugs fixed, found via real Vulkan CTS
+  // shaders once a non-leaf `C` was actually attempted (all six now
+  // fixed):
   //  1. `DiamondFlattener::isLoopControlEdge` misclassifying a genuine
   //     loop-exit edge once `CI`'s own exit-block accounting (live or
   //     precomputed) went stale against blocks a child's own
@@ -3583,17 +3584,17 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   //     -- `flatten()` itself never erases a whole `BasicBlock` (only
   //     instructions within one), so nothing after that point needs a
   //     third recompute.
-  //  4. **Fixed**: once bugs 1-3 above were fixed, a full
-  //     `dEQP-VK.graphicsfuzz.*` sweep hit a different, real crash on
-  //     `dEQP-VK.graphicsfuzz.cov-nested-loop-large-array-index-using-
-  //     vector-components`: `llvm/lib/Transforms/Utils/LCSSA.cpp`'s own
-  //     `formLCSSAImpl` asserted `L.isLCSSAForm(DT)` -- some value this
-  //     pass left behind, defined inside a loop and used outside it, was
-  //     not a proper LCSSA `phi` at that loop's exit by the time a later
-  //     pass called `formLCSSA` on it. Root cause, isolated via a
-  //     standalone `feme-opt --llvm -passes=feme-cpu-linearize` repro of
-  //     the same shader's own pre-linearize IR (bypassing `formLCSSA`'s
-  //     own much-later assertion in favor of the plain, immediate
+  //  4. Once bugs 1-3 above were fixed, a full `dEQP-VK.graphicsfuzz.*`
+  //     sweep hit a different, real crash on `dEQP-VK.graphicsfuzz.cov-
+  //     nested-loop-large-array-index-using-vector-components`:
+  //     `llvm/lib/Transforms/Utils/LCSSA.cpp`'s own `formLCSSAImpl`
+  //     asserted `L.isLCSSAForm(DT)` -- some value this pass left behind,
+  //     defined inside a loop and used outside it, was not a proper LCSSA
+  //     `phi` at that loop's exit by the time a later pass called
+  //     `formLCSSA` on it. Root cause, isolated via a standalone
+  //     `feme-opt --llvm -passes=feme-cpu-linearize` repro of the same
+  //     shader's own pre-linearize IR (bypassing `formLCSSA`'s own
+  //     much-later assertion in favor of the plain, immediate
   //     `verifyModule` dominance check `feme-opt` already runs): inside
   //     `peelConstantFlowPredecessors`, redirecting one of `BB`'s
   //     constant-valued predecessors to bypass `BB` outright repairs every
@@ -3609,39 +3610,74 @@ bool LoopLinearizer::linearizeCyclePostOrder(CycleRef C) {
   //     `BB` untouched) whenever it finds such an escaping non-`phi`
   //     value, rather than only ever guarding `phi`s (see that function's
   //     own comment for the full writeup).
-  //  5. **Still open, newly found**: with bug 4 fixed and non-leaf
-  //     traversal temporarily re-enabled for a full sweep,
-  //     `dEQP-VK.graphicsfuzz.increment-value-in-nested-for-loop`
-  //     genuinely crashed (a real `SIGSEGV`, confirmed via `gdb`, not an
-  //     assertion): stack-overflowing tens of thousands of frames deep
-  //     inside `DiamondFlattener::validate`'s own recursive-descent
-  //     (`validate(T, R, Quiet) || validate(Fsucc, R, Quiet)`) calls,
-  //     immediately after printing this exact function's own "divergent
-  //     branch in 'loop.exit.guard' has no reconvergence point"
-  //     diagnostic -- meaning some genuinely-nested shape here drives
+  //  5. With bug 4 fixed and non-leaf traversal temporarily re-enabled
+  //     for a full sweep, `dEQP-VK.graphicsfuzz.increment-value-in-
+  //     nested-for-loop` genuinely crashed (a real `SIGSEGV`, confirmed
+  //     via `gdb`, not an assertion): stack-overflowing tens of thousands
+  //     of frames deep inside `DiamondFlattener::validate`'s own
+  //     recursive-descent (`validate(T, R, Quiet) || validate(Fsucc, R,
+  //     Quiet)`) calls, immediately after printing this exact function's
+  //     own "divergent branch in 'loop.exit.guard' has no reconvergence
+  //     point" diagnostic -- meaning some genuinely-nested shape drives
   //     `validate` into runaway recursion rather than the bounded
-  //     diamond-nesting depth it is supposed to have, on a walk that
-  //     (per the printed diagnostic) was already headed for a clean,
+  //     diamond-nesting depth it is supposed to have, on a walk that (per
+  //     the printed diagnostic) was already headed for a clean,
   //     non-crashing failure once it actually reached the top of that
-  //     recursion. Not yet root-caused: worth checking first whether
-  //     `isInCycle`/`isLoopControlEdge` (the same two functions bug 1
-  //     above already found one staleness bug in) are failing to
-  //     recognize `loop.exit.guard`'s own branch as a loop control edge
-  //     for *this* shape, causing `validate` to walk around the same
-  //     loop body over and over instead of stopping at
-  //     `CycleBoundaryBlocks` the way it is meant to. Given this, non-leaf
-  //     traversal remains disabled below (leaf-only, via
-  //     `CI.children(C).empty()`) until bug 5 is fixed -- bugs 1-4 are
-  //     real, safe, already-shipped fixes on their own, but this new
-  //     crash means the "attempt every non-leaf cycle unconditionally"
-  //     change itself is not yet safe to ship for real.
+  //     recursion. The precise structural cause of the runaway recursion
+  //     itself was never isolated (a real, `isInCycle`/`isLoopControlEdge`
+  //     staleness issue like bug 1's was suspected but not confirmed);
+  //     fixed defensively instead, since a categorical bound is safe
+  //     regardless of the specific cause: `DiamondFlattener::validate`
+  //     now takes a `Depth` parameter (see its own declaration comment)
+  //     and bails out with an ordinary diagnostic, rather than recursing
+  //     further, past a generous fixed depth no real shader's diamond
+  //     nesting could plausibly reach.
+  //  6. With bug 5's crash converted to a clean diagnostic, a *different*,
+  //     non-crashing failure mode surfaced on this milestone's own
+  //     original motivating repro,
+  //     `dEQP-VK.glsl.loops.special.for_dynamic_iterations.
+  //     dowhile_trap_fragment` (and its 29 sibling `loops.special.
+  //     *_dynamic_iterations` cases -- see the roadmap `L282` entry):
+  //     pipeline creation now succeeded, but the test hung at runtime
+  //     (`vk.waitForFences(...) VK_TIMEOUT`) -- confirmed via a live `gdb`
+  //     attach to be a real, 100%-CPU-pinned infinite loop in the JIT'd
+  //     code's own vectorized `feme.cpu.mask.any`-reduction loop for the
+  //     *inner* (child) cycle, not a deadlock. Root cause: a child
+  //     cycle's own `makeActivePNPair` phi, built while the child was
+  //     still a leaf (before any enclosing cycle was attempted), has no
+  //     way to know at that time whether every edge entering it from
+  //     outside its own cycle is actually still "live" by some
+  //     *enclosing* cycle's own, not-yet-computed per-lane mask -- the
+  //     only sound default available then is the unconditional `true`
+  //     this pass's masked-execution convention (the outer cycle always
+  //     structurally enters its own body, deferring actual masking to
+  //     side effects/exits) already relies on elsewhere. For a lane the
+  //     *enclosing* cycle's own check should already have deactivated
+  //     (e.g. a per-lane outer trip count of zero: this lane should never
+  //     run the loop body, hence never run the inner `do`-`while` trap
+  //     loop, at all), entering the child cycle marked unconditionally
+  //     "active" anyway is only harmless if the child's own exit
+  //     condition independently becomes false for that lane on its own --
+  //     which it does not for this shape (the inner `do`-`while`'s own
+  //     `i >= 3` check depends only on the *outer* loop's shared
+  //     induction variable, itself frozen forever at its initial value
+  //     for a lane that can never make outer-loop progress because it
+  //     never exits the inner loop to begin with), hanging the whole
+  //     wave's `mask.any` reduction forever. Fixed by `HeaderActiveMasks`/
+  //     `rethreadNestedEntryMasks` (see their own comments): whenever an
+  //     enclosing cycle threads its own freshly computed `MaskPair`
+  //     through a region containing a previously linearized child's
+  //     header, that child's `true`-constant entry edges are
+  //     retroactively narrowed to the enclosing cycle's own mask instead.
+  // With all six fixed and confirmed (see `docs/VulkanCTSReport.md`'s
+  // `L282` entry for the before/after CTS numbers), non-leaf traversal is
+  // unconditional below.
   bool Changed = false;
   for (CycleRef Child : CI.children(C))
     Changed |= linearizeCyclePostOrder(Child);
   DT.recalculate(F);
   PDT.recalculate(F);
-  if (CI.children(C).empty())
-    Changed |= linearizeCycle(C);
+  Changed |= linearizeCycle(C);
   return Changed;
 }
 
