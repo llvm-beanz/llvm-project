@@ -164,6 +164,22 @@ float halfBitsToFloat(uint16_t Bits) {
 /// pattern for `Float`, a sign/zero-extended 32-bit integer otherwise). See
 /// the file comment above for the supported format subset.
 ///
+/// (Roadmap L278) \p StartComponent is which of \p Format's own real
+/// channels the *first* decoded value corresponds to -- 0 for the common
+/// case of a shader input covering a whole vertex attribute from its first
+/// channel, but nonzero for a `component`-decorated shader input that only
+/// covers a sub-range of a wider bound attribute (the same "SPIR-V's
+/// `Component` decoration lets several otherwise-unrelated interface
+/// variables share one binding" shape the fragment-output side already
+/// needed `findElementsCoveringLocation` for, mirrored here on the
+/// vertex-input side -- see `dEQP-VK.glsl.440.linkage.varying.component.
+/// vert_in.*`). \p WantComponents decoded values are written to
+/// `Out[StartComponent .. StartComponent + WantComponents)`, read from the
+/// correspondingly-shifted channels of \p Src (not from \p Src's own
+/// first channel) for every per-component format; the one packed format
+/// (`R10G10B10A2_UNORM`) unpacks all 4 channels from the same single word
+/// regardless, then simply selects the requested sub-range by index.
+///
 /// (Roadmap L125s) \p WantType's own `UInt` vs `SInt` distinction cannot be
 /// trusted for an integer format's own validation check below: per
 /// `CanonicalizeStage.cpp`'s `getComponentType` (see its own comment, and
@@ -189,10 +205,11 @@ bool isIntegerComponentType(SignatureComponentType Type) {
 }
 
 Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
-                      uint32_t WantComponents, SignatureComponentType WantType,
+                      uint32_t StartComponent, uint32_t WantComponents,
+                      SignatureComponentType WantType,
                       std::array<uint32_t, 4> &Out) {
   auto putFloat = [&](uint32_t I, float F) {
-    memcpy(&Out[I], &F, sizeof(float));
+    memcpy(&Out[StartComponent + I], &F, sizeof(float));
   };
 
   switch (Format) {
@@ -205,7 +222,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "vertex attribute format is floating-point "
                                "but the shader input is not");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      memcpy(&Out[I], Src + I * 4, 4);
+      memcpy(&Out[StartComponent + I], Src + (StartComponent + I) * 4, 4);
     return Error::success();
   }
   case cpu::ResourceFormat::R32_UINT:
@@ -217,7 +234,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "vertex attribute format is UInt but the "
                                "shader input is not an integer type");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      memcpy(&Out[I], Src + I * 4, 4);
+      memcpy(&Out[StartComponent + I], Src + (StartComponent + I) * 4, 4);
     return Error::success();
   }
   case cpu::ResourceFormat::R32_SINT:
@@ -229,7 +246,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "vertex attribute format is SInt but the "
                                "shader input is not an integer type");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      memcpy(&Out[I], Src + I * 4, 4);
+      memcpy(&Out[StartComponent + I], Src + (StartComponent + I) * 4, 4);
     return Error::success();
   }
   case cpu::ResourceFormat::R8_UNORM:
@@ -241,7 +258,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "*_UNORM vertex attribute requires a "
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      putFloat(I, Src[I] / 255.0f);
+      putFloat(I, Src[StartComponent + I] / 255.0f);
     return Error::success();
   }
   // (Roadmap H8t) `B8G8R8A8_UNORM`: the same 1-byte-per-component UNORM
@@ -256,7 +273,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "floating-point shader input");
     static const uint32_t Swizzle[4] = {2, 1, 0, 3};
     for (uint32_t I = 0; I != WantComponents; ++I)
-      putFloat(I, Src[Swizzle[I]] / 255.0f);
+      putFloat(I, Src[Swizzle[StartComponent + I]] / 255.0f);
     return Error::success();
   }
   case cpu::ResourceFormat::R8_SNORM:
@@ -267,8 +284,8 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "*_SNORM vertex attribute requires a "
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      putFloat(I,
-               std::clamp(static_cast<int8_t>(Src[I]) / 127.0f, -1.0f, 1.0f));
+      putFloat(I, std::clamp(static_cast<int8_t>(Src[StartComponent + I]) / 127.0f,
+                             -1.0f, 1.0f));
     return Error::success();
   }
   case cpu::ResourceFormat::R8_UINT:
@@ -279,7 +296,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "*_UINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      Out[I] = Src[I];
+      Out[StartComponent + I] = Src[StartComponent + I];
     return Error::success();
   }
   case cpu::ResourceFormat::R8_SINT:
@@ -290,8 +307,8 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "*_SINT vertex attribute requires an integer "
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I)
-      Out[I] = static_cast<uint32_t>(
-          static_cast<int32_t>(static_cast<int8_t>(Src[I])));
+      Out[StartComponent + I] = static_cast<uint32_t>(
+          static_cast<int32_t>(static_cast<int8_t>(Src[StartComponent + I])));
     return Error::success();
   }
   // (Roadmap H8b) The 16-bit-per-component families: `R16_*`, `R16G16_*`,
@@ -306,7 +323,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       uint16_t V;
-      memcpy(&V, Src + I * 2, 2);
+      memcpy(&V, Src + (StartComponent + I) * 2, 2);
       putFloat(I, V / 65535.0f);
     }
     return Error::success();
@@ -320,7 +337,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       int16_t V;
-      memcpy(&V, Src + I * 2, 2);
+      memcpy(&V, Src + (StartComponent + I) * 2, 2);
       putFloat(I, std::clamp(V / 32767.0f, -1.0f, 1.0f));
     }
     return Error::success();
@@ -334,8 +351,8 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       uint16_t V;
-      memcpy(&V, Src + I * 2, 2);
-      Out[I] = V;
+      memcpy(&V, Src + (StartComponent + I) * 2, 2);
+      Out[StartComponent + I] = V;
     }
     return Error::success();
   }
@@ -348,8 +365,8 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       int16_t V;
-      memcpy(&V, Src + I * 2, 2);
-      Out[I] = static_cast<uint32_t>(static_cast<int32_t>(V));
+      memcpy(&V, Src + (StartComponent + I) * 2, 2);
+      Out[StartComponent + I] = static_cast<uint32_t>(static_cast<int32_t>(V));
     }
     return Error::success();
   }
@@ -362,7 +379,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
                                "floating-point shader input");
     for (uint32_t I = 0; I != WantComponents; ++I) {
       uint16_t Bits;
-      memcpy(&Bits, Src + I * 2, 2);
+      memcpy(&Bits, Src + (StartComponent + I) * 2, 2);
       putFloat(I, halfBitsToFloat(Bits));
     }
     return Error::success();
@@ -389,7 +406,7 @@ Error decodeAttribute(cpu::ResourceFormat Format, const uint8_t *Src,
         ((Raw >> 30) & 0x3u) / 3.0f,
     };
     for (uint32_t I = 0; I != WantComponents; ++I)
-      putFloat(I, Components[I]);
+      putFloat(I, Components[StartComponent + I]);
     return Error::success();
   }
   default:
@@ -1393,44 +1410,88 @@ void readFragmentColor(const StageStorage &FSOutput,
                        std::array<double, 4> &RGBA, uint32_t Row = 0) {
   for (unsigned C = 0; C != 4; ++C)
     RGBA[C] = C < Elem.ComponentCount
-                  ? FSOutput.readFloat(Elem.ElementID, C, Invocation, Row)
+                  ? FSOutput.readFloat(Elem.ElementID, Elem.FirstComponent + C,
+                                          Invocation, Row)
                   : (C == 3 ? 1.0 : 0.0);
 }
 
-/// (Roadmap H8p/L125u) The integer counterpart of `readFragmentColor`
+/// (Roadmap L277) The multi-element counterpart of `readFragmentColor`
+/// above, for a color attachment whose location is covered by *several*
+/// split fragment-output elements at once (SPIR-V's `Component`
+/// decoration letting more than one otherwise-unrelated interface
+/// variable share one `Location`, e.g. two separate scalar `int` outputs
+/// -- one at `Component=0`, one at `Component=1` -- together forming one
+/// `ivec2` color write). Every component not covered by any element in
+/// \p Elems keeps its own SPIR-V/GLSL-defined identity value, exactly
+/// like the single-element overload's own `ComponentCount`-gated
+/// default; a component covered by more than one element (not
+/// well-formed input, but not rejected upstream either) simply keeps
+/// whichever element's own write happens to run last, mirroring how an
+/// analogous overlap is handled elsewhere in this file (e.g.
+/// `StageLink.cpp`'s own per-element copy loop).
+void readFragmentColor(const StageStorage &FSOutput,
+                       ArrayRef<const SignatureElement *> Elems,
+                       uint32_t Invocation, std::array<double, 4> &RGBA,
+                       ArrayRef<uint32_t> Rows) {
+  RGBA = {0.0, 0.0, 0.0, 1.0};
+  for (size_t I = 0; I != Elems.size(); ++I) {
+    const SignatureElement &Elem = *Elems[I];
+    for (unsigned C = 0; C != Elem.ComponentCount; ++C) {
+      unsigned Dest = Elem.FirstComponent + C;
+      if (Dest < 4)
+        RGBA[Dest] = FSOutput.readFloat(Elem.ElementID, Elem.FirstComponent + C,
+                                          Invocation, Rows[I]);
+    }
+  }
+}
+
+/// (Roadmap H8p/L125u/L277) The integer counterpart of `readFragmentColor`
 /// above, for one of `isIntegerColorAttachmentFormat`'s (RuntimeABI.h) 7
-/// real integer color-attachment formats -- reads \p Elem's raw `UInt`/
-/// `SInt` value directly (via `readRaw`, reinterpreting its bit pattern
-/// per \p Unsigned rather than `readFloat`'s IEEE-754 interpretation),
-/// matching `ImageFixture.cpp`'s own "an integer attachment value is a
-/// raw reference value, not a normalized fraction" convention (`S8_UINT`'s
-/// clear-color precedent). \p Elem must already be known to be an integer-
-/// typed output matching its own attachment's width (checked once by
-/// `executeDraws`' own `expectedColorComponentType`-based validation
-/// below); \p Unsigned must come from the *attachment's own format*
-/// (`cpu::isUnsignedIntegerColorAttachmentFormat`), not \p Elem's own
+/// real integer color-attachment formats -- reads every one of \p Elems'
+/// raw `UInt`/`SInt` values directly (via `readRaw`, reinterpreting each
+/// bit pattern per \p Unsigned rather than `readFloat`'s IEEE-754
+/// interpretation), matching `ImageFixture.cpp`'s own "an integer
+/// attachment value is a raw reference value, not a normalized fraction"
+/// convention (`S8_UINT`'s clear-color precedent). Every element in
+/// \p Elems must already be known to be an integer-typed output matching
+/// its own attachment's width (checked once by `executeDraws`' own
+/// `expectedColorComponentType`-based validation below); \p Unsigned must
+/// come from the *attachment's own format*
+/// (`cpu::isUnsignedIntegerColorAttachmentFormat`), not any element's own
 /// `ComponentType` -- a SPIR-V-sourced stage's signature can never
 /// actually report `UInt` (`isCompatibleColorComponentType`'s own comment,
-/// `Pipeline.h`), so `Elem.ComponentType` is always `SInt` regardless of
+/// `Pipeline.h`), so `ComponentType` is always `SInt` regardless of
 /// whether the real shader value is signed or unsigned. Reinterpreting an
 /// unsigned attachment's own raw value as signed here previously turned
 /// every value at or above `2^31` negative, which `packClearColor`'s own
 /// unsigned-range clamp (`ImageFixture.cpp`) then floored to `0` --
 /// exactly the hard cutoff `dEQP-VK.pipeline.monolithic.sampler.
-/// exact_sampling.r32_uint.*` caught.
+/// exact_sampling.r32_uint.*` caught. \p Elems may hold more than one
+/// element when SPIR-V's `Component` decoration splits a single color
+/// attachment's location across several otherwise-unrelated interface
+/// variables -- see `readFragmentColor`'s own multi-element overload
+/// above for why. Any component not covered by any element in \p Elems
+/// keeps its own SPIR-V/GLSL-defined identity value (`0` here, `1` for a
+/// missing alpha), exactly like the single-element case's own
+/// `ComponentCount`-gated default used to.
 void readFragmentColorInt(const StageStorage &FSOutput,
-                          const SignatureElement &Elem, uint32_t Invocation,
-                          bool Unsigned, std::array<double, 4> &RGBA,
-                          uint32_t Row = 0) {
+                          ArrayRef<const SignatureElement *> Elems,
+                          uint32_t Invocation, bool Unsigned,
+                          std::array<double, 4> &RGBA, ArrayRef<uint32_t> Rows) {
   bool Signed = !Unsigned;
-  for (unsigned C = 0; C != 4; ++C) {
-    if (C >= Elem.ComponentCount) {
-      RGBA[C] = C == 3 ? 1.0 : 0.0;
-      continue;
+  RGBA = {0.0, 0.0, 0.0, 1.0};
+  for (size_t I = 0; I != Elems.size(); ++I) {
+    const SignatureElement &Elem = *Elems[I];
+    for (unsigned C = 0; C != Elem.ComponentCount; ++C) {
+      unsigned Dest = Elem.FirstComponent + C;
+      if (Dest >= 4)
+        continue;
+      uint32_t Raw =
+          FSOutput.readRaw(Elem.ElementID, Elem.FirstComponent + C, Invocation,
+                          Rows[I]);
+      RGBA[Dest] = Signed ? static_cast<double>(static_cast<int32_t>(Raw))
+                          : static_cast<double>(Raw);
     }
-    uint32_t Raw = FSOutput.readRaw(Elem.ElementID, C, Invocation, Row);
-    RGBA[C] = Signed ? static_cast<double>(static_cast<int32_t>(Raw))
-                     : static_cast<double>(Raw);
   }
 }
 
@@ -2261,14 +2322,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         return Loc;
     return std::nullopt;
   };
-  SmallVector<const SignatureElement *, 4> FSColors;
-  // (Roadmap L134(b)) The `Row` within each `FSColors[I]` element that
-  // this attachment's own location resolves to -- distinct from index 0
-  // whenever a single fragment-output *array* element (`RowCount > 1`)
-  // spans several consecutive locations, each bound to a different color
-  // attachment. Always `0` for a plain (non-array, `RowCount == 1`)
-  // output, matching every prior behavior.
-  SmallVector<uint32_t, 4> FSColorRows;
+  SmallVector<SmallVector<const SignatureElement *, 2>, 4> FSColors;
+  // (Roadmap L134(b)) The `Row` within each of `FSColors[I]`'s own
+  // elements that this attachment's own location resolves to -- parallel
+  // to `FSColors[I]` itself, one entry per split element. Distinct from
+  // index 0 whenever a single fragment-output *array* element
+  // (`RowCount > 1`) spans several consecutive locations, each bound to
+  // a different color attachment. Always `0` for a plain (non-array,
+  // `RowCount == 1`) output, matching every prior behavior.
+  SmallVector<SmallVector<uint32_t, 2>, 4> FSColorRows;
   // (roadmap H9a) A fragment-less pipeline (`GraphicsPipeline.cpp`'s own
   // pipeline-creation-time rejection of this shape removed by this same
   // row) has no fragment output to link against any color attachment at
@@ -2286,8 +2348,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // present but unused. The spec requires the fragment shader not to
         // write here, so no output is required (or consulted) at this
         // location either.
-        FSColors.push_back(nullptr);
-        FSColorRows.push_back(0);
+        FSColors.push_back({});
+        FSColorRows.push_back({});
         continue;
       }
       std::optional<uint32_t> Loc = locationForAttachment(I);
@@ -2295,19 +2357,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // (roadmap F8) No fragment output location is remapped onto this
         // attachment: it keeps whatever it already held, exactly like an
         // unused `VkRenderingAttachmentInfo` slot above.
-        FSColors.push_back(nullptr);
-        FSColorRows.push_back(0);
+        FSColors.push_back({});
+        FSColorRows.push_back({});
         continue;
       }
-      // (Roadmap L134(b)) `findElementCoveringLocation`, not
-      // `findElementByLocation`: a fragment-output *array* (`RowCount >
-      // 1`) declares one `SignatureElement` spanning several consecutive
-      // locations, so an exact `Location` match alone would only ever
-      // resolve this attachment when `*Loc` equals that element's own
-      // base location, leaving every other location it covers unbound.
-      uint32_t Row = 0;
-      const SignatureElement *FSColor = findElementCoveringLocation(
-          FSSig, SignatureDirection::Output, *Loc, Row);
+      // (Roadmap L277) `findElementsCoveringLocation`, not
+      // `findElementCoveringLocation`: SPIR-V's `Component` decoration
+      // lets several otherwise-unrelated fragment-output elements share
+      // one `Location`, each occupying its own disjoint component
+      // sub-range (e.g. `dEQP-VK.glsl.440.linkage.varying.component.
+      // frag_out.ivec2.*`'s two separate scalar `int` outputs, together
+      // forming one `ivec2` color write) -- looking up only a single,
+      // fixed-`Component` element (as this loop did before) silently
+      // drops every other split element's own component(s).
+      SmallVector<const SignatureElement *, 2> ThisFSColors;
+      SmallVector<uint32_t, 2> ThisFSColorRows;
+      findElementsCoveringLocation(FSSig, SignatureDirection::Output, *Loc,
+                                   ThisFSColors, ThisFSColorRows);
       // (roadmap H11) A genuinely bound color attachment whose location
       // the fragment stage simply never declares an output for is legal
       // per the Vulkan spec's own fragment-output-interface rules (the
@@ -2322,9 +2388,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // one pipeline, with its fragment stage declaring only the
       // locations *some* draw plans to use, across every location a real,
       // possibly-bound attachment format occupies).
-      if (!FSColor) {
-        FSColors.push_back(nullptr);
-        FSColorRows.push_back(0);
+      if (ThisFSColors.empty()) {
+        FSColors.push_back({});
+        FSColorRows.push_back({});
         continue;
       }
       // (Roadmap H8p) An integer color attachment (one of
@@ -2333,20 +2399,24 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // `expectedColorComponentType` (Pipeline.h) resolves which, so a real
       // `ivec4`/`uvec4` fragment output can now be drawn to a real integer
       // attachment rather than being hard-rejected outright regardless of
-      // the attachment's own format.
+      // the attachment's own format. (Roadmap L277) Every split element
+      // covering this location must independently satisfy this, and their
+      // combined `FirstComponent + ComponentCount` span must not exceed 4.
       SignatureComponentType Want =
           expectedColorComponentType(Draw.Attachments[I].Format);
-      if (FSColor->ComponentCount == 0 || FSColor->ComponentCount > 4 ||
-          !isCompatibleColorComponentType(Want, FSColor->ComponentType))
-        return createStringError(
-            inconvertibleErrorCode(),
-            "the fragment output at location %u mapped to color attachment "
-            "%u must be a%s output of 1-4 components",
-            *Loc, I,
-            Want == SignatureComponentType::Float ? " floating-point"
-                                                  : "n integer");
-      FSColors.push_back(FSColor);
-      FSColorRows.push_back(Row);
+      for (const SignatureElement *FSColor : ThisFSColors)
+        if (FSColor->ComponentCount == 0 ||
+            FSColor->FirstComponent + FSColor->ComponentCount > 4 ||
+            !isCompatibleColorComponentType(Want, FSColor->ComponentType))
+          return createStringError(
+              inconvertibleErrorCode(),
+              "the fragment output at location %u mapped to color "
+              "attachment %u must be a%s output of 1-4 components",
+              *Loc, I,
+              Want == SignatureComponentType::Float ? " floating-point"
+                                                    : "n integer");
+      FSColors.push_back(std::move(ThisFSColors));
+      FSColorRows.push_back(std::move(ThisFSColorRows));
     }
   }
 
@@ -4127,7 +4197,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
                 // write is discarded rather than performed.
                 continue;
-              if (!FSColors[AttIdx])
+              if (FSColors[AttIdx].empty())
                 // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` mapped
                 // no fragment output location onto this attachment: it is
                 // left exactly as it was, the same "nothing to write" case
@@ -4136,20 +4206,21 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               std::array<double, 4> RGBA;
               // (Roadmap H8p) An integer color attachment reads its
               // fragment output's raw `UInt`/`SInt` value (`FSColors[
-              // AttIdx]->ComponentType`, validated to match the
-              // attachment's own format above) rather than `readFloat`'s
-              // IEEE-754 interpretation, and skips every one of the
-              // float-only adjustments below (antialiasing coverage,
-              // `alphaToOneEnable`): neither is defined for an integer
-              // numeric format per spec, matching why blending and a
-              // logic op are restricted the same way elsewhere.
-              if (FSColors[AttIdx]->ComponentType != SignatureComponentType::Float) {
+              // AttIdx]`'s own elements' `ComponentType`, validated to
+              // match the attachment's own format above) rather than
+              // `readFloat`'s IEEE-754 interpretation, and skips every one
+              // of the float-only adjustments below (antialiasing
+              // coverage, `alphaToOneEnable`): neither is defined for an
+              // integer numeric format per spec, matching why blending and
+              // a logic op are restricted the same way elsewhere.
+              if (FSColors[AttIdx].front()->ComponentType !=
+                  SignatureComponentType::Float) {
                 readFragmentColorInt(
-                    *FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
+                    *FSOutput, FSColors[AttIdx], Q * 4 + Lane,
                     cpu::isUnsignedIntegerColorAttachmentFormat(Att.Format),
                     RGBA, FSColorRows[AttIdx]);
               } else {
-                readFragmentColor(*FSOutput, *FSColors[AttIdx], Q * 4 + Lane,
+                readFragmentColor(*FSOutput, FSColors[AttIdx], Q * 4 + Lane,
                                   RGBA, FSColorRows[AttIdx]);
                 // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
                 // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
@@ -4851,21 +4922,39 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // buffer-bounds robustness zero-fill above, which still applies
           // unchanged to any component within the format's own channel count
           // that the actual bound buffer's real length happens to cut short.
+          //
+          // (roadmap L278) `Elt.FirstComponent` shifts which of the bound
+          // attribute's own channels this element's `WantComponents` values
+          // start at -- nonzero for a `component`-decorated shader input
+          // that only covers a sub-range of a wider attribute (see
+          // `decodeAttribute`'s own comment). Both the format's real
+          // channel-count cap and the buffer-bounds availability cap below
+          // are therefore computed relative to `Elt.FirstComponent`, not
+          // from channel 0.
           uint32_t FormatComponents =
-              std::min(Elt.ComponentCount, FetchLayout->ChannelCount);
+              Elt.FirstComponent >= FetchLayout->ChannelCount
+                  ? 0
+                  : std::min(Elt.ComponentCount,
+                             FetchLayout->ChannelCount - Elt.FirstComponent);
           uint64_t AvailableBytes =
               SrcOff < Binding->Data.size() ? Binding->Data.size() - SrcOff : 0;
           uint64_t AvailableFetches =
               AvailableBytes / FetchLayout->FetchByteSize;
-          uint32_t InBoundsComponents =
-              static_cast<uint32_t>(std::min<uint64_t>(
-                  FormatComponents,
-                  AvailableFetches * FetchLayout->ComponentsPerFetch));
+          uint64_t AvailableComponentsFromZero =
+              AvailableFetches * FetchLayout->ComponentsPerFetch;
+          uint64_t AvailableComponentsFromStart =
+              AvailableComponentsFromZero > Elt.FirstComponent
+                  ? AvailableComponentsFromZero - Elt.FirstComponent
+                  : 0;
+          uint32_t InBoundsComponents = static_cast<uint32_t>(
+              std::min<uint64_t>(FormatComponents,
+                                 AvailableComponentsFromStart));
           std::array<uint32_t, 4> Bits{};
           if (InBoundsComponents != 0) {
             if (Error E = decodeAttribute(
                     Attr->Format, Binding->Data.data() + SrcOff,
-                    InBoundsComponents, Elt.ComponentType, Bits))
+                    Elt.FirstComponent, InBoundsComponents, Elt.ComponentType,
+                    Bits))
               return E;
           }
           // A component the bound format never supplies at all (as opposed
@@ -4883,7 +4972,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           }
           for (uint32_t C = 0; C != Elt.ComponentCount; ++C)
             VSInput->writeRaw(Elt.ElementID, Elt.FirstComponent + C, Flat,
-                              Bits[C], Row);
+                              Bits[Elt.FirstComponent + C], Row);
         }
       }
     }

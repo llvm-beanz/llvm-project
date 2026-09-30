@@ -30,6 +30,7 @@
 #include "feme/Core/Signature.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Error.h"
 
 #include <cassert>
@@ -199,6 +200,30 @@ const SignatureElement *findElementByLocation(const EntrySignature &Sig,
 const SignatureElement *findElementCoveringLocation(
     const EntrySignature &Sig, SignatureDirection Direction, uint32_t Location,
     uint32_t &OutRow, uint32_t Index = 0, uint32_t Component = 0);
+
+/// (Roadmap L277) Collects *every* non-system-value \p Direction element
+/// of \p Sig at \p Index whose own consecutive-location span contains
+/// \p Location, regardless of its own `FirstComponent` -- unlike
+/// `findElementCoveringLocation`'s single fixed-`Component` match
+/// (`Component = 0` by default), which only ever finds the one element
+/// occupying that location's *first* component. SPIR-V's `Component`
+/// decoration lets several otherwise-unrelated interface variables share
+/// one `Location`, each occupying its own disjoint component sub-range
+/// (e.g. `dEQP-VK.glsl.440.linkage.varying.component.frag_out.ivec2.
+/// as_int_int`'s fragment stage declares two separate scalar `int`
+/// outputs at the same location, one at `Component=0` and one at
+/// `Component=1`, together forming one `ivec2` color-attachment write) --
+/// looking up only the `Component=0` element, as every other color-
+/// attachment binding path in this file does, silently drops every other
+/// split element's own component(s) instead of merging them all into one
+/// color value. `OutElements`/`OutRows` are appended to in matching
+/// order (parallel arrays), not cleared first, so a caller building up a
+/// combined per-attachment element list across several calls (or
+/// starting from a non-empty vector) is safe.
+void findElementsCoveringLocation(
+    const EntrySignature &Sig, SignatureDirection Direction, uint32_t Location,
+    llvm::SmallVectorImpl<const SignatureElement *> &OutElements,
+    llvm::SmallVectorImpl<uint32_t> &OutRows, uint32_t Index = 0);
 
 } // namespace feme::graphics
 
