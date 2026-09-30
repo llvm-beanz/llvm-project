@@ -61,25 +61,33 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(30 min, check first)** Re-tally the full `dEQP-VK.glsl.*` sweep fresh --
-   the list above is carried over unchanged from before this session's fix;
-   confirm it didn't shift anything else before picking the next target.
-2. **(a few hours, largest untriaged cluster now)** `440.linkage.varying` (49)
-   and `loops` (30, likely `*_dynamic_iterations` per prior sessions' naming) --
-   worth a joint triage session, still untouched across multiple sessions now.
-3. **(small, unexplored across several sessions)** `builtin_var` (21), `builtin`
+1. **(a few hours, dedicated session)** Root-cause the residual
+   `440.linkage.varying.component.vert_in.*_unused` 5-case gap: the host-side
+   vertex-attribute fetch now correctly computes zero for the out-of-range
+   component (confirmed via debug instrumentation), so the bug must be in the
+   compiled shader IR's own lowering of `feme.stage.input.load` for an element
+   whose absolute `Component` falls outside its bound attribute's real channel
+   range -- likely `feme/lib/Conversion/SPIRVToLLVM/` or wherever that intrinsic
+   gets lowered to an actual storage read for JIT.
+2. **(30 min, check first)** Re-tally the full `dEQP-VK.glsl.*` sweep fresh --
+   last full numbers were 19,319 Pass/139 Fail/8,963 NotSupported before this
+   fix; confirm the 44-case win landed as expected and get an updated
+   residual-cluster breakdown.
+3. **(a few hours, largest untriaged cluster likely remaining)** `loops` (30,
+   likely `*_dynamic_iterations`, see `L277`'s own write-up -- two separate bugs
+   already known to block non-leaf cycle linearization there).
+4. **(small, unexplored across several sessions)** `builtin_var` (21), `builtin`
    (14), `struct` (12) -- these only became visible as separate clusters once
    `indexing`/`matrix`/`atomic_operations`/`shader_expect_assume` cleared.
-4. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
+5. **(small)** `demote` (9), `derivate` (3) -- tiny, likely quick once picked
    up.
-5. **(carried over, several sessions running)** `L265`: residual
+6. **(carried over, several sessions running)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`.
-6. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
+7. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other sub-suites,
-   `api`, `synchronization`) at real scale -- still not done. This session's
-   `dEQP-VK.glsl.shader_expect_assume.*` re-run does NOT cover this gap.
-7. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
+   `api`, `synchronization`) at real scale -- still not done.
+8. **(low priority, confirmed unchanged again)** `offload-test-suite`'s own
    `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
    `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, need
    upstream lit-annotation fixes.
