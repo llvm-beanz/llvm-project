@@ -6314,3 +6314,112 @@ final status of that sweep and next steps.
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
 change needed -- an internal driver-internals correctness fix to an
 already-exposed core-1.0 builtin, not a new feature/extension surface.
+
+## L281: shader-written `gl_FragDepth` not clamped (`fragdepth`
+non-multisample value bug, 3 of 18 cases) -- fixed
+
+Split out of `L280`'s two-findings `fragdepth` (18 cases) writeup:
+finding 2 there ("non-multisample `gl_FragDepth` value mismatch",
+originally counted as 12 cases) is now root-caused and partly fixed.
+
+**Root cause:** `Executor.cpp`'s "late" depth-test-and-write path (the
+path used whenever the fragment stage itself writes `SV_Depth`, since
+per spec that disables early depth/stencil testing) read the shader's
+own `FSDepthOut` value straight through with no clamp applied at all.
+The pre-existing `depthClampEnable` clamp (`Depth = std::clamp(Depth,
+Tri.DepthClampLo, Tri.DepthClampHi)`, added under roadmap H7d) only
+ever covered the *rasterizer-interpolated* depth, computed earlier in
+the same function and only actually used when the shader does *not*
+write its own `gl_FragDepth`. Per the Vulkan spec's fixed-function
+ordering, depth clamping applies to whichever depth value is actually
+used for the depth test/write -- shader-written or
+rasterizer-interpolated makes no difference to the spec, but it did to
+this code.
+
+**How this was found:** reproduced
+`dEQP-VK.glsl.builtin_var.fragdepth.line_list_d32_sfloat` standalone
+with `--deqp-log-images=enable`; the qpa's diagnostic (`Mismatch at
+pixel (10,2,0): expected 0 but got -0.164062`) was initially
+mis-read (in `L280`'s own writeup) as a background/coverage-leak bug,
+since the CTS's own `validateDepthBuffer` always logs the
+*covered-pixel* expected-value formula in its message text regardless
+of which internal branch the check actually took. Hand-deriving the
+exact per-pixel formula from the CTS's C++ source
+(`vktShaderRenderBuiltinVarTests.cpp`: `control_buffer.data[ndx] =
+(ndx/256.0) * sign`, `sign = depthClampEnable ? -1.0 : 1.0`) and
+computing `index = gl_FragCoord.y*16 + gl_FragCoord.x = 2*16+10 = 42`
+gives `-(42/256.0) = -0.1640625` -- an exact bit-for-bit match with the
+qpa's reported `-0.164062`, proving the pixel genuinely was
+shader-covered (not a background/coverage bug at all) and that the
+real expected value (`0`) is this specific test case's own
+`depthClampEnable = true` multiplier collapsing the "expected" formula
+to `0` (clamping a negative depth to the near plane), not a "default
+background" constant. This reframed the bug from "coverage mask
+mismatch" to "missing depth clamp on a shader-written depth" --
+confirmed against the Vulkan spec's own text on depth clamping via a
+web search before implementing the fix.
+
+**Fix:** in `Executor.cpp`'s late depth/stencil path, after reading
+`FSDepthOut`'s value into `FragDepth`, clamp it to
+`ScreenTris[Quad.TriIdx].DepthClampLo/Hi` (the same per-triangle bounds
+the interpolated path already uses) whenever
+`Pipeline.getRasterState().DepthClampEnable` is set -- the same guard,
+re-applied a second time for the shader-depth-replaces-interpolated-
+depth case the first clamp's own call site can never reach.
+
+**Test:** new `ExecutorTest.ClampsAShaderWrittenFragDepthWhenDepthClampIsEnabled`
+-- a full-viewport CCW triangle at a valid, in-range NDC depth (0.1)
+whose fragment shader (`ConstantOutOfRangeFragDepthFragmentShaderIR`)
+always overwrites `SV_Depth` with a constant, out-of-range `-0.5`,
+with `depthClampEnable = true` and a depth test/write pipeline state;
+asserts every covered texel's stored depth clamps to the viewport's
+`MinDepth` (`0.0`), not the shader's own unclamped `-0.5`. Confirmed
+via `git stash` to fail (`-0.5` stored) pre-fix and pass (`0.0` stored)
+post-fix.
+
+**`check-feme`:** 3,441/3,502 Passed (+1 net new unit test), 61
+Unsupported, 0 Failed -- no regressions.
+
+**CTS:** re-ran the full `dEQP-VK.glsl.builtin_var.fragdepth.*` group
+(45 cases total, including the `large_depth`/unsupported-format
+variants `checkSupport` already correctly rejects -- `L280`'s own "18"
+count only ever referred to the non-`NotSupported` subset) both before
+and after this fix (a real A/B via `git stash`, not inferred):
+
+- Before: 9 Pass / 18 NotSupported / 18 Fail. That 18-Fail figure is
+  `L280`'s own tally, but this session found it splits three ways, not
+  the two `L280` described: 3 plain `{line,point,triangle}_list_
+  d32_sfloat` (this fix's target), 6 multisample-image-creation-gap
+  cases (`L280`'s finding 1, untouched here), and 6
+  `_no_depth_clamp` + combined-stencil-format cases (a third, distinct
+  bug neither previously isolated nor fixed -- see below). `L280`'s own
+  "12 non-multisample value bug" estimate bundled the first and third
+  of these together without distinguishing them; this session's A/B
+  separates them for the first time.
+- After: 12 Pass / 18 NotSupported / 15 Fail -- the 3 plain
+  `{line,point,triangle}_list_d32_sfloat` cases now **Pass**; the
+  remaining 15 Fail are the 6 multisample-creation-gap cases (unaffected,
+  confirmed identical before/after) plus 6 `_no_depth_clamp` +
+  combined-stencil-format cases (also confirmed bit-for-bit identical
+  before/after via the same `git stash` A/B, so unrelated to depth
+  clamping): `{line,point,triangle}_list_d24_unorm_s8_uint_no_depth_clamp`
+  and `{line,point,triangle}_list_d32_sfloat_s8_uint_no_depth_clamp`.
+  Their symptom is the *opposite* shape from this session's bug: e.g.
+  `point_list_d24_unorm_s8_uint_no_depth_clamp`'s qpa shows `Mismatch
+  at pixel (11,1,0): expected 0.105469 but got 0` -- a real, non-zero,
+  presumably-correctly-shaded depth value expected at a covered pixel,
+  but reading back as `0` (looks unwritten/default) instead. Likely a
+  packed combined depth+stencil format (`D24_UNORM_S8_UINT`/
+  `D32_SFLOAT_S8_UINT`) depth-write addressing bug specific to having a
+  stencil half present, not yet root-caused past this one data point.
+  Flagged as a fresh, separate future-session item (see
+  `agent_thoughts.md`) rather than chased this session.
+
+- `dEQP-VK.glsl.builtin_var.*` (111 cases, the full group): **66 Pass**
+  (was 63) / **15 Fail** (was 18, the 3 plain `d32_sfloat` cases moved
+  to Pass) / 30 NotSupported -- three tests newly green, zero
+  regressions.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal core-1.0 depth-clamp correctness fix, not
+a new feature/extension surface.
