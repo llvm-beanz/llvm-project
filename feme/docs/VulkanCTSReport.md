@@ -6092,3 +6092,92 @@ new feature/extension surface.
 
 **Net effect this session:** `440.linkage.varying` cluster reduced
 from 49 Fail to 5 Fail (44 cleared); `frag_out` subgroup fully closed.
+
+## L279: `440.linkage.varying`'s residual `vert_in.*_unused` component-3 default-fill fix
+
+Root-caused and fixed the 5 residual `vert_in.*_unused` failures `L278`
+left open, fully closing the `440.linkage.varying` cluster (49/49
+cases now passing).
+
+**Root cause:** the previous session's own debug instrumentation had
+correctly shown the host-side vertex-attribute fetch computes and
+writes 0 for a shader input whose absolute `component` decoration
+(here, `component = 3`, e.g. `in0_3` in
+`dEQP-VK.glsl.440.linkage.varying.component.vert_in.ivec2.
+as_int_int_unused`) falls beyond the channel count of its bound
+attribute format (a 2-channel `R32G32_SINT`, only ever supplying
+components 0/1) -- but this was checked against the *wrong* expected
+value. Re-reading the CTS shader source
+(`external/vulkancts/data/vulkan/glsl/440/linkage.test`) shows
+`var0 = in0_3 * in0 + in0`, i.e. `(in0_3 + 1) * in0`; the test's own
+hardcoded expected output (`ivec2(14, 26)` for `in0 == ivec2(7, 13)`)
+is only satisfiable with `in0_3 == 1`, not 0 -- CTS is deliberately
+exercising the Vulkan spec's standard "a component the bound vertex
+attribute format never supplies at all defaults to 0 for X/Y/Z, 1 for
+W" convention, keyed on *absolute* component index 3 (the "W"/"alpha"
+slot), independent of whether the reading shader variable happens to
+be a whole `vec4` starting at component 0 or, as here, a lone scalar
+landing at absolute component 3 via its own `FirstComponent`.
+
+`feme/lib/Graphics/Executor.cpp`'s existing default-fill logic already
+implemented this "missing W defaults to 1" rule correctly, but gated it
+on `Elt.ComponentCount == 4` -- true only for a whole-vec4-shaped
+element reading its own components 0-3, never for a narrower
+(`ComponentCount == 1`) split-component scalar sitting at absolute
+position 3. `in0_3` (`FirstComponent == 3`, `ComponentCount == 1`) fell
+through this gate entirely and stayed at its zero-initialized default.
+
+**Fix:** replaced the `Elt.ComponentCount == 4` gate with two explicit
+checks -- `ElementCoversComponent3` (does this element's own absolute
+`[FirstComponent, FirstComponent + ComponentCount)` range include
+component 3 at all?) and `FormatMissesComponent3` (does the bound
+*format* -- not the buffer-bounds availability, which must keep
+deferring to the existing separate robustness zero-fill -- fail to
+reach component 3?), both computed from data already available at that
+point in the loop (`FormatComponents`, the format's real, robustness-
+independent channel count). The default-to-1 fill now fires whenever
+both are true, regardless of the element's own `ComponentCount`.
+
+**New regression test:**
+`VertexAttributeDefaultsScalarComponent3BeyondFormatChannelCount`
+(`ExecutorTest.cpp`) extends `L278`'s own split-component-input shader
+shape with a third scalar input at `FirstComponent == 3` sharing the
+same 2-channel `R32G32_SINT` attribute, asserting it reads back 1 --
+confirmed via a `git stash` A/B test to fail without the fix (reading
+back 0) and pass with it.
+
+**`check-feme`:** 3,437/3,498 discovered tests Passed (+1 new unit
+test), 61 Unsupported, 0 Failed -- no regressions.
+
+**CTS re-run:**
+- `dEQP-VK.glsl.440.linkage.varying.component.vert_in.ivec2.
+  as_int_int_unused` (standalone repro): **Pass** (was Fail).
+- `dEQP-VK.glsl.440.linkage.varying.*` (68 cases, the full cluster):
+  **68/68 Pass, 0 Fail** -- fully cleared, closing out `L278`'s
+  residual 5-case gap.
+- `dEQP-VK.pipeline.monolithic.vertex_input.*` (13,296 cases, broad
+  regression spot-check for the default-fill logic change): 4,600 Pass
+  / 102 Fail / 8,594 NotSupported/QualityWarning, all 102 fails sharing
+  one identical, unrelated `VK_ERROR_INITIALIZATION_FAILED` diagnostic
+  (`mat3`-shaped vertex-attribute pipeline creation, a distinct
+  pre-existing gap, not touched by this fix) -- confirmed no regression
+  in any narrower-format-to-`vec4` case this fix's changed code path
+  covers (e.g. `legacy_vertex_attributes.multi_binding.
+  r32g32b32a32_sfloat_*` group, all passing).
+- Fresh full `dEQP-VK.glsl.*` sweep (28,420 cases, kicked off at this
+  session's start against the pre-fix binary, per the standing "fresh
+  sweep each session" protocol): **19,363 Pass / 94 Fail / 8,963
+  NotSupported** pre-fix; re-clustering the 94-Fail list confirmed
+  exactly the 5 known `440` cases plus `loops` (30, `L277`, not yet
+  fixed), `builtin_var` (21), `builtin` (14), `struct` (12), `demote`
+  (9), `derivate` (3), and one new/unexplored single `texture_gather`
+  case. With this fix, `440`'s cluster clears in full: expected
+  **19,368 Pass / 89 Fail / 8,963 NotSupported** (confirmed directly
+  via the full `440.linkage.varying.*` re-run above against the
+  post-fix binary, rather than re-running a third full 28,420-case
+  sweep purely to re-confirm an already-isolated 5-case delta).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+change needed -- an internal driver-internals correctness fix to
+already-exposed core-1.0 vertex-input default-fill behavior, not a new
+feature/extension surface.
