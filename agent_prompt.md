@@ -61,37 +61,35 @@ file.
 Can you continue working on the FeMe ICD implementation? The previous session's
 suggested next steps are:
 
-1. **(a few hours, ready to pick up, strong lead)** `L272`: the
-   residual 15 `dEQP-VK.glsl.indexing.varying_array.*` `vec3_*`
-   failures -- a runtime `Image mismatch`, not a pipeline-creation
-   rejection, confirmed distinct from `L259`. Start with the single
-   simplest static case (`vec3_static_write_static_read`, no dynamic
-   indexing or loops) and `FEME_DUMP_IR`/`FEME_DUMP_IR_PRESIMD` to see
-   whether `getDynamicRowIndexedAccess`/`collectDynamicRowTerms` has an
-   analogous narrow-vector padded-vs-tight-stride confusion of its own,
-   or a genuinely different bug.
-2. **(unknown, filed, not started)** Remaining `atomic_operations`
-   residual (64 Fail) -- believed to be the runtime `Image mismatch`
-   half, not yet individually triaged.
-3. **(unknown, filed, not started)** `shader_expect_assume` (51
-   cases), `440`/`linkage.varying` (49), `conversions` (30), `loops`
-   (30) -- smaller clusters from prior sessions' tally, likely still
-   roughly this size; re-tally against a fresh full sweep first.
-4. **(carried over, several sessions running, still not picked up)**
+1. **(a few hours, largest untriaged cluster)** `atomic_operations`
+   (64 cases, re-tallied fresh this session) -- start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one failing case to check
+   pipeline-creation-rejection vs. runtime `Image mismatch`.
+2. **(a few hours, second-largest)** `shader_expect_assume` (51 cases)
+   -- still not started, re-tallied unchanged from prior sessions.
+3. **(unknown, filed, not started)** `440.linkage.varying` (49),
+   `loops` (30, likely `*_dynamic_iterations`) -- worth a joint triage
+   session.
+4. **(new this session, small, unexplored)** `builtin_var` (21),
+   `struct` (16), `builtin` (14) -- three clusters that only became
+   visible now that `indexing`/`matrix` are fully clear; not
+   previously called out by name in earlier sessions' tallies (may
+   overlap with older, differently-named entries -- worth confirming
+   before assuming these are fully new).
+5. **(small)** `demote` (9), `derivate` (3), `logical_copy` (2) -- tiny
+   residual clusters, likely quick once picked up.
+6. **(carried over, several sessions running, still not picked up)**
    `L265`: residual `a2b10g10r10_snorm_pack32` ASTC-block-boundary
    alpha-decode bug in `ASTCDecode.cpp`.
-5. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
+7. **(carried over, overdue for many sessions)** `L228(e)`/`(f)`:
    broader-than-glsl/tessellation CTS sampling (`pipeline`'s other
    sub-suites, `api`, `synchronization`) at real scale -- still not
-   done.
-6. **(low priority, not a regression, flagged many sessions now)**
+   done. This session's full `dEQP-VK.glsl.*` sweep does NOT cover
+   this gap.
+8. **(low priority, not a regression, flagged many sessions now)**
    `offload-test-suite`'s own
    `Feature/SpecializationConstant/spec_const_32_bits.test`/
    `WaveOps/WaveActiveMax.test` (failing) and
    `Feature/PushConstant/array_of_matrices.test` (stale `XFAIL:`) still
-   need upstream lit-annotation fixes -- unrelated to FeMe/LLVM,
-   confirmed unchanged again this session.
-7. Used real `git stash push/pop` once this session (isolating just
-   `CanonicalizeStage.cpp`'s own change to A/B-test whether the
-   residual `indexing.varying_array` failures were a regression or
-   pre-existing), popped immediately after. No stashes left open.
+   need upstream lit-annotation fixes -- confirmed unchanged again
+   this session.
