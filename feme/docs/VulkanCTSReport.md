@@ -11,7 +11,10 @@ roadmap owns remaining work; design documents own implementation decisions.
 - Case list: 3,244,369 cases in all 54 top-level `dEQP-VK` groups
 - Device: `FeMe CPU Vulkan Device`
 - Build: `Release`, `LLVM_ENABLE_ASSERTIONS=ON`, C and C++ compilation through
-  `ccache`
+  `ccache`, `-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON` (see `L285`: LLVM's
+  shared `LLVMCore` PCH masked a missing `#include` in feme's own source,
+  so PCH is now disabled for this build directory to catch that class of
+  bug going forward)
 - `check-feme`: 3,352 passed, 3 unsupported, 0 failed
 - Registry used by the inventories: `VK_HEADER_VERSION` 358
 
