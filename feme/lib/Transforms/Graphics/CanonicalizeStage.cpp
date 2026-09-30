@@ -5839,6 +5839,21 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   for (Function *Fn : Functions) {
     ShadowValueMap ShadowValues(*Fn, Sig);
 
+    // `AtomicCmpXchgInst`'s own `{ old, i1 }` result is only ever consumed
+    // through `ExtractValueInst` users, which necessarily sit *later* in
+    // `Fn`'s instruction list than the `cmpxchg` itself (a use can't precede
+    // its def). `llvm::make_early_inc_range`'s outer loop below only
+    // guards against erasing the *current* `I` it is visiting (it caches
+    // the next iterator just before yielding `I`) -- eagerly erasing those
+    // still-unvisited `ExtractValueInst` users from inside the `cmpxchg`
+    // branch would invalidate that cached "next" iterator the moment it
+    // happened to point at one of them, a use-after-free the very next
+    // time the outer loop advances (observed as a `SIGSEGV` inside this
+    // function on `dEQP-VK.glsl.atomic_operations.comp_swap_*_task_payload`,
+    // roadmap L275). Defer their erasure to after the outer loop below has
+    // finished walking every instruction in `Fn`.
+    SmallVector<Instruction *, 8> DeadExtractValues;
+
     for (Instruction &I : llvm::make_early_inc_range(instructions(Fn))) {
       IRBuilder<> B(&I);
       Value *Zero = B.getInt32(0);
@@ -6084,6 +6099,95 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         SI->eraseFromParent();
         EraseIfNowDead(Ptr);
         Changed = true;
+      } else if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+        // (Roadmap L275) A task/mesh entry's own atomic RMW against its
+        // bounded payload storage (e.g. GLSL `atomicAdd(payload.counter,
+        // 1)`) -- unlike an ordinary `LoadInst`/`StoreInst`, this never
+        // resolved a `StageIOAccess` in the first place (this pass never
+        // even looked, before this), so it was left as a raw
+        // `atomicrmw`/`getelementptr` chain against the imported
+        // address-space-14 global, surviving all the way to JIT link time
+        // as an unresolved external symbol reference (`spirv_var_N`) --
+        // the sibling bug `TaskPayloadStore`/`TaskPayloadLoad` above
+        // already fixed for a plain load/store, just never extended to an
+        // atomic RMW. Mirrors the store case immediately above exactly,
+        // just producing `feme.stage.task.payload.atomicrmw` (whose result
+        // is the value already stored at `Offset`, matching
+        // `AtomicRMWInst`'s own "result is the old value" convention)
+        // instead of the store's void result.
+        Value *Ptr = RMW->getPointerOperand();
+        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
+          if (isTaskPayloadGlobal(BaseAndOffset->first)) {
+            Value *New = createStageTaskPayloadAtomicRMW(
+                B, BaseAndOffset->second, RMW->getOperation(),
+                RMW->getValOperand());
+            RMW->replaceAllUsesWith(New);
+            RMW->eraseFromParent();
+            EraseIfNowDead(Ptr);
+            Changed = true;
+          }
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
+          Value *New = createStageTaskPayloadAtomicRMW(
+              B, Dyn->second, RMW->getOperation(), RMW->getValOperand());
+          RMW->replaceAllUsesWith(New);
+          RMW->eraseFromParent();
+          EraseIfNowDead(Ptr);
+          Changed = true;
+        }
+      } else if (auto *CX = dyn_cast<AtomicCmpXchgInst>(&I)) {
+        // (Roadmap L275) The compare-and-swap counterpart of the
+        // `AtomicRMWInst` case just above (GLSL `atomicCompSwap`), for the
+        // identical reason. `AtomicCmpXchgInst`'s own result is a
+        // `{ old, i1 success }` pair -- unlike `feme.stage.task.payload.
+        // atomicrmw`'s plain scalar result -- so this only rewrites the
+        // pair's own `extractvalue` users, not the (never itself directly
+        // used) aggregate result: index 0 (the old value) becomes the new
+        // call's own scalar result directly; index 1 (`success`) is
+        // reconstructed as `icmp eq` between that same old value and the
+        // `compare` operand, exactly matching `cmpxchg`'s own "succeeded
+        // iff the old value matched compare" semantics.
+        Value *Ptr = CX->getPointerOperand();
+        Value *Compare = CX->getCompareOperand();
+        Value *NewVal = CX->getNewValOperand();
+        std::optional<uint64_t> ConstOffset;
+        Value *DynOffset = nullptr;
+        if (auto BaseAndOffset = getStageIOBaseAndOffset(Ptr, DL)) {
+          if (isTaskPayloadGlobal(BaseAndOffset->first))
+            ConstOffset = BaseAndOffset->second;
+        } else if (auto Dyn = getTaskPayloadDynamicOffsetAccess(B, Ptr, DL)) {
+          DynOffset = Dyn->second;
+        }
+        if (ConstOffset || DynOffset) {
+          Value *OldVal =
+              ConstOffset
+                  ? createStageTaskPayloadAtomicCmpXchg(B, *ConstOffset,
+                                                        Compare, NewVal)
+                  : createStageTaskPayloadAtomicCmpXchg(B, DynOffset, Compare,
+                                                        NewVal);
+          for (User *U : CX->users()) {
+            auto *EV = cast<ExtractValueInst>(U);
+            if (EV->getIndices()[0] == 0) {
+              EV->replaceAllUsesWith(OldVal);
+            } else {
+              Value *Success = B.CreateICmpEQ(OldVal, Compare);
+              EV->replaceAllUsesWith(Success);
+            }
+            // Not erased here -- see `DeadExtractValues`'s own comment
+            // above: `EV` is a still-unvisited instruction from the outer
+            // loop's perspective, so erasing it now risks invalidating
+            // that loop's own cached "next" iterator.
+            DeadExtractValues.push_back(EV);
+          }
+          // `CX` itself can't be erased yet either: its result (the
+          // `{ old, i1 }` aggregate) is still referenced by the very
+          // `ExtractValueInst` uses just deferred above -- `Value`'s own
+          // destructor asserts no uses remain, so `CX` must outlive them.
+          // Defer it into the same worklist, appended *after* its own
+          // users, so the post-loop sweep below erases each `EV` first.
+          DeadExtractValues.push_back(CX);
+          EraseIfNowDead(Ptr);
+          Changed = true;
+        }
       } else if (auto *CI = dyn_cast<CallInst>(&I)) {
         // (Roadmap L115(b)) A `feme.spirv.interpolate_at_*` marker call
         // (see `getSPIRVInterpolateAtMarkerKind`'s own comment) resolves
@@ -6135,6 +6239,14 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         Changed = true;
       }
     }
+
+    // Now that the outer loop above has finished walking every instruction
+    // in `Fn` (so no cached "next" iterator can still be pointing at one of
+    // these), it is safe to actually erase the `AtomicCmpXchgInst`
+    // `ExtractValueInst` users deferred above -- see `DeadExtractValues`'s
+    // own comment for why erasing them any earlier is not.
+    for (Instruction *EV : DeadExtractValues)
+      EV->eraseFromParent();
 
     // (Roadmap H115/H117/H118) A `GetElementPtrInst` addressing a stage-IO
     // global that never had a load/store consumer at all -- e.g. a real
