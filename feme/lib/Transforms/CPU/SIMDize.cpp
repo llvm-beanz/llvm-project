@@ -4793,6 +4793,32 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
         return;
       }
     }
+    // (Roadmap L276) `llvm.assume`/`llvm.expect.iN` (`AssumeTrueConversion
+    // Pattern`/`ExpectConversionPattern`, SPIRVToLLVMPatterns.cpp --
+    // `VK_KHR_shader_expect_assume`) are both pure compiler hints with no
+    // runtime-observable side effect of their own: `llvm.assume(i1 %cond)`
+    // is UB only if `%cond` is false, never mandatory to preserve for
+    // *correct* output, and `llvm.expect.iN(iN %val, iN %expected)`'s only
+    // defined behavior (see "llvm.expect" in LangRef.md) is to return
+    // `%val` completely unchanged -- `%expected` is never consulted for
+    // anything but a branch-weight hint. Neither has any vector-typed
+    // overload to widen a divergent (per-lane-different) operand to in
+    // the first place (`Intrinsics.td` declares both scalar-only), so
+    // widening either into a real per-lane masked/reduced call the way
+    // e.g. `TaskPayloadAtomicRMW` does (roadmap L275) would need its own
+    // bespoke masking logic purely to preserve an optimizer hint neither
+    // intrinsic's own defined semantics require -- unlike a real memory
+    // side effect, simply dropping the hint changes no observable
+    // behavior, so that is what both do here.
+    if (ID == Intrinsic::assume) {
+      ToErase.push_back(&I);
+      return;
+    }
+    if (ID == Intrinsic::expect) {
+      Widened[&I] = getWidened(CI->getArgOperand(0), Builder);
+      ToErase.push_back(&I);
+      return;
+    }
     Ctx.emitError("feme-cpu-simdize: unsupported divergent call to '" +
                   Twine(Callee ? Callee->getName() : "<indirect>") +
                   "' (roadmap milestone 7 does not cover a generic vector-call "
