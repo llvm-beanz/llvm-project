@@ -1926,21 +1926,34 @@ private:
   /// previously linearized child's header.
   DenseMap<BasicBlock *, MaskPair> HeaderActiveMasks;
 
-  /// Roadmap L282: \p BB was just handed \p Masks by the caller's own
+  /// Roadmap L282/L283: \p BB was just handed \p Masks by the caller's own
   /// `applyStageMasks(*BB, Masks)` (an enclosing, currently-being-
   /// linearized cycle's own per-iteration "am I still active" mask) --
   /// if \p BB is also a previously linearized child cycle's own header
-  /// (per `HeaderActiveMasks`), that child's `makeActivePNPair` phi was
-  /// built assuming an unconditional `true` on every edge entering it
-  /// from outside its own cycle (the only sound default available at the
-  /// time: nothing yet known might mask that entry down further). Now
-  /// that this enclosing cycle's own `Masks` is available, every such
-  /// `true` incoming edge is retroactively narrowed to \p Masks itself
-  /// (an `and` with a literal `true` is just the other operand, so no new
-  /// `and` instruction is needed) -- \p Masks is defined at the enclosing
-  /// cycle's own header, which dominates every block this function is
-  /// ever called on (a uniform pass-through region reached only through
-  /// that header), so this is always a valid def-dominates-use edit.
+  /// (per `HeaderActiveMasks`), every edge entering that child's own
+  /// `makeActivePNPair` phi from *outside* its own cycle (as opposed to
+  /// its own backedge, which must be left untouched -- distinguished
+  /// structurally via `CI.getCycle`/`CI.contains`, not by inspecting what
+  /// value currently happens to sit on the edge) is retroactively
+  /// narrowed by conjoining it with \p Masks itself: when the edge is
+  /// still the literal `true` `makeActivePNPair` originally seeded it
+  /// with (the only sound default available at child-linearization time:
+  /// nothing yet known might mask that entry down further), narrowing is
+  /// a bare replacement (an `and` with a literal `true` is just the other
+  /// operand, so no new `and` instruction is needed); otherwise (L283: a
+  /// *different* enclosing cycle's own linearization -- e.g.
+  /// `freezeLoopCarriedValues`'s generic loop-carried-value repair -- can
+  /// replace that literal `true` with some other in-region SSA value,
+  /// such as its own entry-mask phi, before this function ever gets a
+  /// chance to see it) a genuine `and` instruction combining the existing
+  /// edge value with \p Masks is built at the end of that edge's own
+  /// predecessor block. \p Masks is defined at the enclosing cycle's own
+  /// header, which dominates every block this function is ever called on
+  /// (a uniform pass-through region reached only through that header),
+  /// and therefore also every one of that header's own predecessors
+  /// within the region, so this is always a valid def-dominates-use edit
+  /// either way.
+  ///
   /// Without this, a lane the enclosing cycle's own check already
   /// deactivated (e.g. a per-lane loop trip count of zero, entering the
   /// loop body only because this pass's masked-execution convention
@@ -1949,22 +1962,51 @@ private:
   /// itself never independently becomes false for a lane that was never
   /// supposed to be iterating at all (a real, confirmed shape on
   /// `dEQP-VK.glsl.loops.special.*_dynamic_iterations.dowhile_trap` and
-  /// its `nested*` siblings -- see the roadmap `L282` entry), that lane's
-  /// `feme.cpu.mask.any` reduction never reaches "no lanes active either,"
-  /// hanging the whole wave forever (confirmed via a live `gdb` attach:
-  /// 100% CPU pinned in the child cycle's own vectorized mask-reduction
-  /// loop, not any kind of deadlock).
+  /// its `nested*` siblings -- see the roadmap `L282`/`L283` entries),
+  /// that lane's `feme.cpu.mask.any` reduction never reaches "no lanes
+  /// active either," hanging the whole wave forever (confirmed via a
+  /// live `gdb` attach: 100% CPU pinned in the child cycle's own
+  /// vectorized mask-reduction loop, not any kind of deadlock). `L282`'s
+  /// own constant-only version of this function left `dowhile_trap`
+  /// itself still hanging: by the time the *outer* `for` loop's own
+  /// linearization calls this on the inner `do`-`while`'s header, the
+  /// inner loop's entry edge had already been rewritten (by the very
+  /// same outer linearization's own `freezeLoopCarriedValues` call, just
+  /// above this call site) from a literal `true` to that outer loop's own
+  /// `active.live2`-style phi -- no longer a `ConstantInt` the old check
+  /// could match at all, so the narrowing silently never applied. This
+  /// generalization alone is confirmed (via targeted tracing) to widen
+  /// the set of edges actually narrowed, but is *not* by itself
+  /// sufficient to fix `dowhile_trap`'s own hang -- see roadmap `L283`'s
+  /// writeup for why (a separate, still-open issue in how this cycle's
+  /// `DivergentCandidates`-non-empty handling interacts with a nested
+  /// child cycle's own already-linearized latch/exit block showing up
+  /// among `OtherCondBrBlocks`). Kept anyway since it is independently a
+  /// strict improvement with no known regression.
   void rethreadNestedEntryMasks(BasicBlock *BB, const MaskPair &Masks) {
     auto It = HeaderActiveMasks.find(BB);
     if (It == HeaderActiveMasks.end())
       return;
     MaskPair &Child = It->second;
-    for (auto &Use : cast<PHINode>(Child.Live)->incoming_values())
-      if (auto *C = dyn_cast<ConstantInt>(Use); C && C->isOne())
-        Use.set(Masks.Live);
-    for (auto &Use : cast<PHINode>(Child.SideEffect)->incoming_values())
-      if (auto *C = dyn_cast<ConstantInt>(Use); C && C->isOne())
-        Use.set(Masks.SideEffect);
+    CycleRef ChildCycle = CI.getCycle(BB);
+    auto Narrow = [&](PHINode *PN, Value *NewMask) {
+      for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
+        BasicBlock *Pred = PN->getIncomingBlock(I);
+        if (ChildCycle.isValid() && CI.contains(ChildCycle, Pred))
+          continue; // The child's own backedge: leave it alone.
+        Value *Incoming = PN->getIncomingValue(I);
+        if (Incoming == NewMask)
+          continue;
+        if (auto *C = dyn_cast<ConstantInt>(Incoming); C && C->isOne()) {
+          PN->setIncomingValue(I, NewMask);
+          continue;
+        }
+        IRBuilder<> B(Pred->getTerminator());
+        PN->setIncomingValue(I, B.CreateAnd(Incoming, NewMask));
+      }
+    };
+    Narrow(cast<PHINode>(Child.Live), Masks.Live);
+    Narrow(cast<PHINode>(Child.SideEffect), Masks.SideEffect);
   }
 };
 
