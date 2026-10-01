@@ -414,36 +414,37 @@ TEST_F(ImageTest, AcceptsMultisampleForSampledOrStorageUsage) {
 // `sampledImageColorSampleCounts` (1|2|4|8) regardless of the image's own
 // format, never `sampledImageDepthSampleCounts` (`VK_SAMPLE_COUNT_1_BIT`
 // only, PhysicalDeviceInfo.cpp) -- over-reporting a capability nothing
-// downstream (no per-sample depth texel fetch exists yet) can honor.
-TEST_F(ImageTest, RejectsMultisampleSampledDepthImage) {
-  VkImageCreateInfo ImageInfo{};
-  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
-  ImageInfo.format = VK_FORMAT_D32_SFLOAT;
-  ImageInfo.extent = {4, 4, 1};
-  ImageInfo.mipLevels = 1;
-  ImageInfo.arrayLayers = 1;
-  ImageInfo.samples = VK_SAMPLE_COUNT_4_BIT;
-  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-  VkImage Img = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
-            VK_ERROR_INITIALIZATION_FAILED);
+// downstream (no per-sample depth texel fetch existed yet) could honor.
+// (Roadmap L309) `sampledImageDepthSampleCounts`/
+// `sampledImageStencilSampleCounts` are now the same `1|2|4|8` mask as
+// every other per-usage sample-count limit: `L73`/`L307` already made a
+// `Plain2DMS`/`Array2DMS` sampled image's per-sample `OpImageFetch`
+// shape-classified, not format-classified, so depth/stencil sampled
+// images were never actually missing support by the time this capability
+// was still advertised as `VK_SAMPLE_COUNT_1_BIT`-only --
+// `dEQP-VK.glsl.builtin_var.fragdepth.*_multisample_*` exercises exactly
+// this shape (a `sampler2DMS`/`texelFetch(..., gl_SampleID)` validation
+// pass against its own rendered depth attachment) and was failing at
+// `vkCreateImage` purely because of this stale, too-conservative limit.
+TEST_F(ImageTest, AcceptsMultisampleSampledDepthImage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_D32_SFLOAT, 4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory,
+      /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  EXPECT_NE(Img, VK_NULL_HANDLE);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
 }
 
-// The stencil-only counterpart of `RejectsMultisampleSampledDepthImage`:
-// `sampledImageStencilSampleCounts` is likewise `VK_SAMPLE_COUNT_1_BIT`
-// only.
-TEST_F(ImageTest, RejectsMultisampleSampledStencilImage) {
-  VkImageCreateInfo ImageInfo{};
-  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
-  ImageInfo.format = VK_FORMAT_S8_UINT;
-  ImageInfo.extent = {4, 4, 1};
-  ImageInfo.mipLevels = 1;
-  ImageInfo.arrayLayers = 1;
-  ImageInfo.samples = VK_SAMPLE_COUNT_4_BIT;
-  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-  VkImage Img = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
-            VK_ERROR_INITIALIZATION_FAILED);
+// The stencil-only counterpart of `AcceptsMultisampleSampledDepthImage`.
+TEST_F(ImageTest, AcceptsMultisampleSampledStencilImage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_S8_UINT, 4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory,
+      /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  EXPECT_NE(Img, VK_NULL_HANDLE);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
 }
 
 // A single-sample sampled depth/stencil image is unaffected by H8f's own
