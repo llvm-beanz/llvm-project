@@ -2150,7 +2150,8 @@ private:
   /// real exit arm, so the *other* successor is `StayInLoop`. Returns
   /// `std::nullopt` if \p BB's terminator is not a `CondBr`, or if neither
   /// (or both) successors match this shape.
-  std::optional<ExitCheck> recoverRelayExitCheck(BasicBlock *BB, CycleRef C);
+  std::optional<ExitCheck> recoverRelayExitCheck(BasicBlock *BB, CycleRef C,
+                                                 BasicBlock *ExitBlock);
 
   /// Roadmap L42: generalizes the "pass-through" tolerance from a *chain*
   /// that tolerated at most one relayed pass-through block per step (an
@@ -3170,13 +3171,36 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
 }
 
 std::optional<LoopLinearizer::ExitCheck>
-LoopLinearizer::recoverRelayExitCheck(BasicBlock *BB, CycleRef C) {
+LoopLinearizer::recoverRelayExitCheck(BasicBlock *BB, CycleRef C,
+                                      BasicBlock *ExitBlock) {
   auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
   if (!Br)
     return std::nullopt;
+  // Roadmap L294: a trivial-looking relay stub is only a genuine exit arm
+  // if it actually, eventually reaches `ExitBlock` -- chasing through
+  // further pure, single-successor relay hops (bounded depth, same as
+  // `uniformRelayChain`'s own bound) is required rather than trusting the
+  // immediate successor alone, since `ifblock`/`elseblock`-shaped loops
+  // (`dEQP-VK.glsl.loops.special.for_dynamic_iterations.ifblock_fragment`)
+  // route `Header`'s own divergent trip-count recheck through a stub that
+  // looks identical to a real exit arm but actually lands back on a
+  // *different*, still-in-loop divergent dispatch block shared with the
+  // loop's own `break`/`continue` check (`OtherCondBrBlocks`'s own entry),
+  // not on `ExitBlock` at all.
   auto IsTrivialExitStub = [&](BasicBlock *Succ) {
-    return CI.contains(C, Succ) && isPureRelayBlock(Succ) &&
-           Succ->getUniquePredecessor() == BB;
+    if (!CI.contains(C, Succ) || !isPureRelayBlock(Succ) ||
+        Succ->getUniquePredecessor() != BB)
+      return false;
+    BasicBlock *Cur = Succ;
+    for (unsigned Depth = 0; Depth != 8; ++Depth) {
+      if (Cur == ExitBlock)
+        return true;
+      auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+      if (!UBr || (Cur != Succ && !isPureRelayBlock(Cur)))
+        return false;
+      Cur = UBr->getSuccessor(0);
+    }
+    return Cur == ExitBlock;
   };
   bool Succ0IsStub = IsTrivialExitStub(Br->getSuccessor(0));
   bool Succ1IsStub = IsTrivialExitStub(Br->getSuccessor(1));
@@ -3585,27 +3609,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
   }
 
-  // Roadmap L292: a plain, direct-successor `matchExitCheck` can miss
-  // `Header`'s (or `Latch`'s) own real exit check entirely when
-  // `StructurizeCFG` has routed both the loop's real "continue" edge and
-  // its real "exit" edge through a single shared `Flow`-style dispatch
-  // block -- see `recoverRelayExitCheck`'s own comment for why a
-  // structural recovery, not `matchExitCheckWithRelay`, is what is safe to
-  // try here. This recovery is shape-only: it says nothing about whether
-  // the recovered check's own condition is actually divergent, so it
-  // correctly leaves `HeaderDivergent`/`LatchDivergent` below to tell a
-  // genuinely divergent header/latch exit (`loop-break-structurized.ll`'s
-  // own shape) apart from a uniform one merely obscured by the same relay
-  // (`dynamic_loop_always`'s shape, handled further below).
-  std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
-  if (!HeaderExit)
-    HeaderExit = recoverRelayExitCheck(Header, C);
-  std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
-  if (!LatchExit)
-    LatchExit = recoverRelayExitCheck(Latch, C);
-  bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
-  bool LatchDivergent = LatchExit && isDivergentBranch(LatchExit->Br);
-
   // Roadmap L292: set below (inside the `OtherCondBrBlocks`-non-empty
   // handling) whenever this cycle has a genuinely divergent internal
   // branch that is *not* a second exit check (see that block's own
@@ -3623,11 +3626,63 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   // Every other cycle block, if any, must instead be the single "Flow
   // merge" exit-check block described above (see the file comment).
+  //
+  // Computed *before* `HeaderExit`/`LatchExit` below (rather than at its
+  // original point of use, inside the `OtherCondBrBlocks`-non-empty
+  // handling) specifically so `DivergentCandidates` (see just below) is
+  // available to gate whether `recoverRelayExitCheck`'s own structural
+  // fallback is safe to try on `Header`/`Latch` at all -- see that
+  // decision's own comment.
   SmallVector<BasicBlock *, 2> OtherCondBrBlocks;
   for (BasicBlock &BB : F)
     if (CI.contains(C, &BB) && &BB != Header && &BB != Latch &&
         isa<CondBrInst>(BB.getTerminator()))
       OtherCondBrBlocks.push_back(&BB);
+
+  // Roadmap L292: a genuinely divergent branch elsewhere in the cycle,
+  // unrelated to `Header`/`Latch` (see the comment on `OtherCondBrBlocks`
+  // above for why such a block is tolerated here at all). Computed ahead
+  // of its original point of use for the same reason as
+  // `OtherCondBrBlocks` itself -- see that comment.
+  SmallVector<BasicBlock *, 2> DivergentCandidates;
+  for (BasicBlock *BB : OtherCondBrBlocks)
+    if (!PeeledFrom.contains(BB) &&
+        isDivergentBranch(cast<CondBrInst>(BB->getTerminator())))
+      DivergentCandidates.push_back(BB);
+
+  // Roadmap L292: a plain, direct-successor `matchExitCheck` can miss
+  // `Header`'s (or `Latch`'s) own real exit check entirely when
+  // `StructurizeCFG` has routed both the loop's real "continue" edge and
+  // its real "exit" edge through a single shared `Flow`-style dispatch
+  // block -- see `recoverRelayExitCheck`'s own comment for why a
+  // structural recovery, not `matchExitCheckWithRelay`, is what is safe to
+  // try here. This recovery is shape-only: it says nothing about whether
+  // the recovered check's own condition is actually divergent, so it
+  // correctly leaves `HeaderDivergent`/`LatchDivergent` below to tell a
+  // genuinely divergent header/latch exit (`loop-break-structurized.ll`'s
+  // own shape) apart from a uniform one merely obscured by the same relay
+  // (`dynamic_loop_always`'s shape, handled further below).
+  //
+  // Always attempted (not gated on whether a separate divergent candidate
+  // also exists elsewhere in the cycle): `dEQP-VK.glsl.loops.special.
+  // for_dynamic_iterations.conditional_break_fragment`'s own shape -- a
+  // genuinely divergent per-fragment trip count hidden behind exactly
+  // this kind of relay *and* a separate, genuinely divergent `break`
+  // check elsewhere, each relayed to `ExitBlock` independently -- is a
+  // real, supported combination (see the `DivergentCandidates`-non-empty
+  // handling below, which now recognizes and masks `HeaderExit`/
+  // `LatchExit`'s own recovered check as a first-stage, sequential "never
+  // really exit, just narrow the mask" filter ahead of the loop's single
+  // other genuine exit check, rather than bailing out on it).
+  std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
+  if (!HeaderExit)
+    HeaderExit = recoverRelayExitCheck(Header, C, ExitBlock);
+  std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
+  if (!LatchExit)
+    LatchExit = recoverRelayExitCheck(Latch, C, ExitBlock);
+  bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
+  bool LatchDivergent = LatchExit && isDivergentBranch(LatchExit->Br);
+
   if (::getenv("FEME_DEBUG_LINEARIZE_TRACE")) {
     errs() << "L277TRACE: HeaderDivergent=" << HeaderDivergent
            << " LatchDivergent=" << LatchDivergent
@@ -3696,20 +3751,23 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // directly, never reaching `ExitBlock` via any straight or singly-
     // relayed chain -- see `collectUniformPassThroughRegion`'s own
     // comment for the region walk that recognizes it instead.
-    SmallVector<BasicBlock *, 2> DivergentCandidates;
-    for (BasicBlock *BB : OtherCondBrBlocks)
-      if (!PeeledFrom.contains(BB) &&
-          isDivergentBranch(cast<CondBrInst>(BB->getTerminator())))
-        DivergentCandidates.push_back(BB);
+    //
+    // (`DivergentCandidates` itself is computed earlier now, alongside
+    // `OtherCondBrBlocks`, so it can also gate whether
+    // `recoverRelayExitCheck` is safe to try on `Header`/`Latch` -- see
+    // that decision's own comment.)
 
-    // Roadmap L197: only bail out here if some `OtherCondBrBlocks` entry
-    // is *itself* still genuinely divergent -- an already-linearized
-    // nested child cycle contributes no `DivergentCandidates` entry at
-    // all (see the comment above), so it never reaches this diagnostic;
-    // it instead simply falls through, untouched, to the ordinary
-    // `Header`/`Latch`-only handling below, exactly like any other
-    // uniform pass-through block already does.
-    if (!DivergentCandidates.empty() && (HeaderDivergent || LatchDivergent)) {
+    // Roadmap L292: only bail out here if `Latch`'s own exit check is
+    // *itself* genuinely divergent -- `HeaderDivergent` coexisting with a
+    // separate genuine exit check elsewhere is instead handled below (see
+    // the "Roadmap L292: `Header`'s own exit check" comment ahead of
+    // `CheckBlock`'s own handling) as long as `Latch` does not *also* have
+    // its own divergent check: two separate divergent checks, each
+    // independently requiring this "never really exit, narrow the mask
+    // instead" treatment, both coexisting with yet a *third* in
+    // `OtherCondBrBlocks`, is the genuinely harder shape this milestone
+    // does not yet support.
+    if (!DivergentCandidates.empty() && LatchDivergent) {
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" +
                       DivergentCandidates.front()->getName() +
@@ -3774,9 +3832,56 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     std::optional<ExitCheck> CheckExit =
         matchExitCheckWithRelay(*CheckBlock, ExitBlock);
 
+    // Roadmap L292: `Header`'s own exit check (recovered via
+    // `recoverRelayExitCheck`, since a plain `matchExitCheck` already
+    // would have made this cycle take the ordinary `HeaderDivergent`
+    // path further below instead of ever reaching here) can be
+    // genuinely divergent *and* coexist with `CheckBlock`'s own,
+    // separate divergent exit check -- confirmed on `dEQP-VK.glsl.loops.
+    // special.for_dynamic_iterations.conditional_break_fragment`'s own
+    // shape: a divergent per-fragment trip count hidden behind `Header`'s
+    // own relay, together with a separate divergent `break` check
+    // elsewhere in the body, each independently relayed to `ExitBlock`.
+    // Apply the exact same "never really exit, just narrow the mask"
+    // treatment to `Header`'s own check *first* -- before `CheckBlock`'s
+    // own region even begins -- so `PreRegion` below starts its walk from
+    // `HeaderExit->StayInLoop` (skipping `Header`'s own now-removed
+    // `CondBr` entirely) rather than from `Header` itself, which
+    // `collectUniformPassThroughRegion` would otherwise immediately
+    // reject (a genuinely divergent `CondBr` strictly inside the region
+    // it is asked to walk is exactly the shape that function refuses --
+    // see its own comment).
+    BasicBlock *PreRegionStart = Header;
+    SmallVector<std::pair<PHINode *, Value *>, 4> ExitBlockRelayValues;
+    MaskPair EntryMasks = makeActivePNPair();
+    MaskPair Masks = EntryMasks;
+    if (HeaderDivergent) {
+      applyStageMasks(*Header, Masks);
+      rethreadNestedEntryMasks(Header, Masks);
+      for (PHINode &PN : ExitBlock->phis())
+        if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock);
+            Idx != -1)
+          ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+      IRBuilder<> HeaderCheckBuilder(HeaderExit->Br);
+      Value *HeaderStaying = HeaderExit->ExitOnTrue
+                                 ? HeaderCheckBuilder.CreateNot(HeaderExit->Cond)
+                                 : HeaderExit->Cond;
+      Masks = stayInLoop(HeaderCheckBuilder, Masks, HeaderStaying,
+                         "active.header.check");
+      // See the identical, more thoroughly-commented pattern just below
+      // for `CheckExit`'s own predecessor/phi bookkeeping -- this is a
+      // no-op (as expected) whenever `Header` was only ever reaching
+      // `ExitBlock` via `HeaderExit->RelayBlock`, never directly itself.
+      if (llvm::is_contained(predecessors(ExitBlock), Header))
+        ExitBlock->removePredecessor(Header, /*KeepOneInputPHIs=*/true);
+      UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
+      HeaderExit->Br->eraseFromParent();
+      PreRegionStart = HeaderExit->StayInLoop;
+    }
+
     std::optional<SmallPtrSet<BasicBlock *, 8>> PreRegion =
-        collectUniformPassThroughRegion(Header, CheckBlock, ExitBlock, C,
-                                        PeeledFrom);
+        collectUniformPassThroughRegion(PreRegionStart, CheckBlock, ExitBlock,
+                                        C, PeeledFrom);
     std::optional<SmallPtrSet<BasicBlock *, 8>> PostRegion =
         collectUniformPassThroughRegion(CheckExit->StayInLoop, Latch,
                                         ExitBlock, C, PeeledFrom);
@@ -3803,7 +3908,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       return false;
     }
 
-    MaskPair Masks = makeActivePNPair();
     for (BasicBlock *BB : *PreRegion) {
       applyStageMasks(*BB, Masks);
       rethreadNestedEntryMasks(BB, Masks);
@@ -3823,7 +3927,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // decision already associated with actually reaching `ExitBlock` --
     // i.e., `RelayBlock`'s own contribution, not some arbitrary or
     // undefined value.
-    SmallVector<std::pair<PHINode *, Value *>, 4> ExitBlockRelayValues;
+    //
+    // (`ExitBlockRelayValues` itself is declared earlier now, alongside
+    // `Header`'s own analogous capture when `HeaderDivergent` -- see that
+    // code's own comment -- so both captures share one restore loop
+    // below.)
     for (PHINode &PN : ExitBlock->phis())
       if (int Idx = PN.getBasicBlockIndex(CheckExit->RelayBlock); Idx != -1)
         ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
@@ -3887,15 +3995,15 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         PN->addIncoming(V, Latch);
     freezeLoopCarriedValues(
         Header, Latch, MasksAfterCheck.Live,
-        {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
+        {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect)},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); });
-    addLatchIncoming(Masks, MasksAfterCheck);
+    addLatchIncoming(EntryMasks, MasksAfterCheck);
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*
     // cycle (linearized afterward, post-order) can retroactively narrow
     // them via `rethreadNestedEntryMasks` if it turns out this cycle's
     // header sits inside a region that enclosing cycle masks too -- see
     // that function's own comment.
-    HeaderActiveMasks[Header] = Masks;
+    HeaderActiveMasks[Header] = EntryMasks;
     return true;
     } // end DivergentCandidates-non-empty handling (Roadmap L197)
   }
