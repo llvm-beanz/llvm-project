@@ -4262,27 +4262,67 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     HeaderExit->Br->eraseFromParent();
   }
 
-  // Roadmap L282: unlike the `DivergentCandidates` branch above, this
-  // shape's own `PreRegion`/`PostRegion` between `Header`'s own exit
-  // check and `Latch` is required to be nothing but a uniform
-  // pass-through (no `discard`/`demote`/output-store call anywhere in
-  // it can differ per lane in a way `applyStageMasks` would need to
-  // narrow, or this shape would have been rejected already) -- but a
-  // *child* cycle's own header can still legitimately sit anywhere in
-  // that pass-through region (e.g. the `dowhile_trap` shape's own inner
+  // Roadmap L298: this shape's own region between `Header`'s own exit
+  // check and `Latch` is required to be a uniform pass-through in the
+  // *control-flow* sense `collectUniformPassThroughRegion` already
+  // checks (no second genuinely divergent branch anywhere in it -- a
+  // `DivergentCandidates`-non-empty cycle takes the branch above
+  // instead) -- but it is **not** required to be free of mask-affecting
+  // *calls*: a `feme.stage.discard`/`.demote`/other `StageOpKind`, or a
+  // convergent wave intrinsic (`WaveActiveBitAnd`/`Ballot`/a reduce/
+  // scan/...), sitting directly in this region (not inside some nested
+  // child cycle's own already-linearized interior, which
+  // `rethreadNestedEntryMasks` alone correctly handles below) still
+  // needs exactly the same `Masks.Live`/`.SideEffect` narrowing
+  // `applyStageMasks` gives the `DivergentCandidates` branch's own
+  // `PreRegion`/`PostRegion` above -- a prior version of this comment
+  // claimed "this shape would have been rejected already" for such a
+  // call, which was never actually true: no earlier check in this
+  // function scans for one. Confirmed via a real, reproduced
+  // `Basic/Mandelbrot.test`-adjacent repro: `WaveActiveBitAnd` inside a
+  // loop whose own header check is itself the loop's *only* divergent
+  // decision (no separate `CheckBlock`, so `DivergentCandidates` is
+  // empty) reached its lowered `llvm.spv.wave.reduce.and.i32` call with
+  // no masking select at all, ANDing in every lane's value unconditionally
+  // regardless of which lanes had actually finished iterating already
+  // (`WaveActiveBitAnd.convergence.test`'s own divergent-trip-count-loop
+  // sub-case). `collectUniformPassThroughRegion` doubles as the missing
+  // validation step here too: if the region is not actually a uniform
+  // pass-through, it returns `std::nullopt` and this cycle is correctly
+  // diagnosed and left alone instead of silently mis-masked.
+  BasicBlock *BodyRegionStart =
+      HeaderDivergent ? HeaderExit->StayInLoop : Header;
+  std::optional<SmallPtrSet<BasicBlock *, 8>> BodyRegion =
+      collectUniformPassThroughRegion(BodyRegionStart, Latch, ExitBlock, C,
+                                       PeeledFrom);
+  if (!BodyRegion) {
+    diagnose(F, "loop at '" + Header->getName() +
+                    "' has an internal branch in a body shape this "
+                    "milestone does not yet lower; only a uniform "
+                    "pass-through region from the header's own exit check "
+                    "to the latch is supported yet (roadmap milestone 6 "
+                    "deviation)");
+    return false;
+  }
+  // A *child* cycle's own header can still legitimately sit anywhere in
+  // this pass-through region (e.g. the `dowhile_trap` shape's own inner
   // `do`-`while`, entirely between this outer loop's own header check
-  // and its latch). Such a child's own entry mask still needs
-  // retroactively narrowing by `MasksAtLatch` (this cycle's own
-  // per-lane "is this iteration of my own body still wanted" decision)
-  // exactly as it would in the `DivergentCandidates` branch, even
-  // though no `applyStageMasks` call is otherwise needed here -- the
-  // bug's own repro (`dEQP-VK.glsl.loops.special.for_dynamic_iterations.
-  // dowhile_trap_fragment`) hung even with the `DivergentCandidates`
-  // branch's own rethreading in place until this loop was added, because
-  // that shape actually takes *this* branch, not `DivergentCandidates`.
-  for (BasicBlock &BB : *Header->getParent())
-    if (CI.contains(C, &BB) && &BB != Header && &BB != Latch)
-      rethreadNestedEntryMasks(&BB, MasksAtLatch);
+  // and its latch): `applyStageMasks` itself is safe to call on such a
+  // header/latch too (its mask-affecting-call scan simply finds nothing
+  // there to narrow, since a linearized child's own calls were already
+  // narrowed by its own, further-restricted masks), but the child's own
+  // entry mask still needs retroactively narrowing by `MasksAtLatch`
+  // (this cycle's own per-lane "is this iteration of my own body still
+  // wanted" decision) via `rethreadNestedEntryMasks` exactly as it would
+  // in the `DivergentCandidates` branch -- the `dowhile_trap` bug's own
+  // repro (`dEQP-VK.glsl.loops.special.for_dynamic_iterations.
+  // dowhile_trap_fragment`) hung until that rethreading was added here,
+  // because that shape actually takes *this* branch, not
+  // `DivergentCandidates`.
+  for (BasicBlock *BB : *BodyRegion) {
+    applyStageMasks(*BB, MasksAtLatch);
+    rethreadNestedEntryMasks(BB, MasksAtLatch);
+  }
 
   applyStageMasks(*Latch, MasksAtLatch);
   rethreadNestedEntryMasks(Latch, MasksAtLatch);
