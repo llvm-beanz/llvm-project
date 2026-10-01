@@ -1261,6 +1261,93 @@ TEST_F(DescriptorTest, WriteDescriptorSetSpansConsecutiveBufferBindings) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// (Roadmap L299 continued) The `VkDescriptorUpdateTemplateEntry`
+/// counterpart to `WriteDescriptorSetSpansConsecutiveBufferBindings`
+/// above: `applyDescriptorUpdateTemplate` never got the matching
+/// cross-binding overflow fix `applyDescriptorWrite` has had since L154,
+/// so a template entry whose `descriptorCount` exceeds `dstBinding`'s own
+/// declared array size silently dropped every descriptor past that
+/// binding's first element instead of spilling into the next binding --
+/// exactly the shape CTS's own
+/// `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_with_
+/// template` exercises (one template entry, `dstBinding = 0`,
+/// `descriptorCount = 2`, meant to populate both a single-element output
+/// buffer binding 0 and a single-element input buffer binding 1).
+TEST_F(DescriptorTest, UpdateTemplateSpansConsecutiveBufferBindings) {
+  VkDescriptorSetLayoutBinding Bindings[3]{};
+  for (uint32_t I = 0; I != 3; ++I) {
+    Bindings[I].binding = I;
+    Bindings[I].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[I].descriptorCount = 1;
+  }
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 3;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkBuffer Bufs[3] = {createStorageBuffer(64), createStorageBuffer(64),
+                      createStorageBuffer(64)};
+  VkDescriptorBufferInfo BufInfos[3]{};
+  for (uint32_t I = 0; I != 3; ++I)
+    BufInfos[I] = {Bufs[I], /*offset=*/I * 4u, /*range=*/16};
+
+  // One template entry, dstBinding = 0, descriptorCount = 3 -- spans past
+  // binding 0's own single element into bindings 1 and 2.
+  VkDescriptorUpdateTemplateEntry Entry{};
+  Entry.dstBinding = 0;
+  Entry.dstArrayElement = 0;
+  Entry.descriptorCount = 3;
+  Entry.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Entry.offset = 0;
+  Entry.stride = sizeof(VkDescriptorBufferInfo);
+
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 1;
+  TemplateInfo.pDescriptorUpdateEntries = &Entry;
+  TemplateInfo.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
+  TemplateInfo.descriptorSetLayout = Layout;
+
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_SUCCESS);
+
+  vkUpdateDescriptorSetWithTemplate(Device, Set, Template, BufInfos);
+
+  auto *DstSet = fromHandle<DescriptorSet>(Set);
+  for (uint32_t I = 0; I != 3; ++I) {
+    std::vector<DescriptorBufferBinding> Array = DstSet->bindingArray(I);
+    ASSERT_EQ(Array.size(), 1u);
+    EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Bufs[I]));
+    EXPECT_EQ(Array[0].Offset, I * 4u);
+    EXPECT_EQ(Array[0].Range, 16u);
+  }
+
+  vkDestroyDescriptorUpdateTemplate(Device, Template, nullptr);
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  for (VkBuffer Buf : Bufs)
+    vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
 
 /// the layout's own highest-numbered binding, with no chained
 /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` at allocation time:

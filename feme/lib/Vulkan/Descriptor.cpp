@@ -796,10 +796,35 @@ void applyDescriptorUpdateTemplate(DescriptorSet &Set,
                                   Entry.descriptorCount, Bytes + Entry.offset);
       continue;
     }
-    for (uint32_t J = 0; J != Entry.descriptorCount; ++J)
-      writeDescriptorFromRaw(Set, Entry.descriptorType, Entry.dstBinding,
-                             Entry.dstArrayElement + J,
+    // (Roadmap L299 continued) Per spec ("11.2.1. Descriptor Set Updates"),
+    // a template entry whose `descriptorCount` exceeds the number of
+    // elements remaining in `dstBinding` starting at `dstArrayElement`
+    // continues into the next consecutively-numbered binding -- the exact
+    // same cross-binding overflow rule `applyDescriptorWrite` already
+    // implements via `BindingCursor` (roadmap L154) for
+    // `vkUpdateDescriptorSets`/`vkCmdPushDescriptorSet`, but this template
+    // path never got the matching fix: it used to index
+    // `Entry.dstBinding`'s own array directly with `Entry.dstArrayElement +
+    // J`, silently dropping any element that overflowed past that single
+    // binding's declared size instead of spilling into the next binding.
+    // CTS-confirmed via `dEQP-VK.api.command_buffers.
+    // secondary_push_descriptor_set_with_template`, whose one template
+    // entry (`dstBinding=0`, `descriptorCount=2`) is deliberately sized to
+    // overflow from a 1-element binding 0 into binding 1.
+    bool IsImageOrSampler = isImageDescriptorType(Entry.descriptorType) ||
+                           isSamplerDescriptorType(Entry.descriptorType);
+    BindingCursor Cursor{Entry.dstBinding, Entry.dstArrayElement};
+    for (uint32_t J = 0; J != Entry.descriptorCount; ++J) {
+      if (!Cursor.normalize([&](uint32_t B) {
+            return IsImageOrSampler ? Set.imageBindingArray(B).size()
+                                    : Set.bindingArray(B).size();
+          }))
+        break;
+      writeDescriptorFromRaw(Set, Entry.descriptorType, Cursor.Binding,
+                             Cursor.Element,
                              Bytes + Entry.offset + J * Entry.stride);
+      ++Cursor.Element;
+    }
   }
 }
 
