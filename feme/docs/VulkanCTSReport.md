@@ -7747,3 +7747,67 @@ no change (investigation only, no feature/extension surface change).
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L299: `InterlockedCompareExchange.32.test`/`InterlockedCompareStore.32.test` regression root-caused and fixed
+
+**Starting point.** The prior session's own next-steps list flagged two
+newly-failing `check-hlsl-feme-vk` cases, `Feature/HLSLLib/`
+`InterlockedCompareExchange.32.test` and `InterlockedCompareStore.32.test`,
+despite both having been closed previously by `H163`/`H164`. First had
+to re-repair the `offload-test-suite` checkout's recurring branch drift
+(an external/automated process keeps resetting it to `origin/main`,
+silently dropping the FeMe-enabling cherry-pick `854cc3f` -- re-applied
+as local commit `d0974dd` this session) before `check-hlsl-feme-vk`
+could even run.
+
+**Root cause, found via `FEME_DUMP_IR` + `feme-opt --llvm`
+`-passes=feme-cpu-wrap-entry`** (the documented isolation recipe in
+`feme/.instructions.md`), not by reconstructing the IR by hand: both
+cases compile fine via `dxc`, but FeMe's own `feme-cpu-wrap-entry` pass
+emitted a hard compile error ("barrier inside non-linear control
+flow"), failing `vkCreateComputePipelines` outright -- not a
+wrong-answer bug like the superficially-similar, already-fixed
+`inc_counter_array.test`. The real compiled shape (SIMDized, wave size
+4): a 256-iteration uniform loop whose body+latch collapses to one
+block, containing a group-sync barrier, a win-counter (`Wins`)
+induction, and a "stays true until a compare fails" (`Mono`) induction
+whose own header phi is read a *second* time inside the header itself
+-- rebroadcast into a `<4 x i32>` splat consumed only by the post-loop
+suffix (storing each lane's final `Mono` value). `matchLoopShape`'s
+induction-safety check had no case for a header-resident use of the
+phi (only "precedes the recurrence," "shares its barrier region," or
+"lives in `Shape.SuffixOrder`"), so it declined the whole shape.
+Fixing that match then surfaced a second, previously-unreachable crash
+in `buildWrapperForLoop`: `HeaderDerivedValues` (the mechanism giving a
+header-local non-phi value its own `loopvarN` wrapper parameter) only
+scanned for uses inside the loop's own per-wave region, never the
+suffix chain, so the splat's only use kept referencing the original,
+soon-to-be-erased header instruction, crashing `eraseFromParent`
+("Use still stuck around after Def was destroyed"). Both checks are
+now suffix-aware. Full details and fix in `feme/docs/Roadmap.md`'s new
+`H174` entry (parent `H163`).
+
+**Verification.** New standalone lit regression
+(`feme/test/Transforms/CPU/entry-wrapper-loop-header-derived-value-in-suffix.ll`)
+isolates this exact shape end to end through the real
+`feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry` pipeline.
+`check-feme`: 3448/3448 passed (61 unsupported), 0 failed.
+`check-hlsl-feme-vk`: both `Interlocked*` cases pass again (along with
+their `.resources.32` siblings); remaining failures unchanged
+(`Basic/Mandelbrot.test`, `Feature/SpecializationConstant/`
+`spec_const_32_bits.test`, `WaveOps/WaveActiveMax.test`, plus the
+pre-existing `array_of_matrices.test` unexpected-pass -- all
+pre-existing, unrelated, lower-priority items already tracked
+separately).
+
+**Vulkan CTS.** Ran `dEQP-VK.compute.pipeline.*` in full (20502 cases:
+684 Pass / 0 Fail / 19818 NotSupported) and the barrier-specific subset
+`dEQP-VK.compute.pipeline.*barrier*` (941 cases: 9 Pass / 0 Fail / 932
+NotSupported) -- both clean, no regressions from this fix.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(internal CPU-backend compiler fix only, no feature/extension surface
+change).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
