@@ -9053,3 +9053,55 @@ surface change, investigation and a new unit test only).
 Tracked as `L318` in the roadmap (breakdown of `L315`'s remaining
 work) -- see `agent_thoughts.md`'s latest entry for the full narrowing
 narrative and concrete next steps.
+
+## Session: L315/L318 full-pipeline repro attempt + feme-run sampler-heap tooling
+
+**Investigation summary:**
+
+Finished verifying `L318`'s one remaining open item: the standalone
+repro's vertex-order (`BL,TL,BR,TR`), `texCoord=[minC,minC,maxC,maxC]`,
+and `w=1.0` (non-`PROJECTED`) assumptions were confirmed bit-for-bit
+correct against `vktTextureTestUtil.cpp`'s real
+`TextureRenderer::renderQuad`/`ComputeBackend::createFrameResources`
+and `gluTextureTestUtil.cpp`'s `computeQuadTexCoord1D` -- no
+discrepancy found.
+
+Attempting the planned next step -- extending the repro to the full
+`interpolate -> dPdx/dPdy -> SampleCmpGrad` pipeline using a real
+`dxc -spirv`-compiled shader -- found `feme-run`'s heap YAML had no
+`samplers:` key at all, so built one first (`SamplerEntry`/
+`buildSamplerStorage`, wired into `DispatchResources::SamplerHeap`,
+which already existed in the runtime ABI unused). New lit test
+`Tools/feme-run/heap-sampler.ll`.
+
+Using the new feature to actually run a real `SampleCmpGrad`/
+`Texture1D`/`SamplerComparisonState` shader end-to-end through
+`feme-run` found a **structural blocker** rather than the hoped-for
+full-pipeline repro: `feme-run --reference` fails outright with
+`unsupported raised operation: ... is a register-bound resource
+handle the FeMe CPU target cannot normalize`, reproduced identically
+for a plain non-comparison `SampleLevel` call (ruling out anything
+`SampleCmpGrad`-specific). The non-`--reference` JIT path does not
+report this error and instead silently dispatches, producing an
+all-zero result -- a separate, smaller diagnostic gap in its own
+right. Since the real CTS `compute_1D_SHADOW` shader clearly executes
+correctly for the vast majority of its own sub-cases, this means
+`feme-run`'s own JIT entry point normalizes a register-bound
+sampled-image handle through a different, less-complete code path
+than `feme::vulkan`'s real `vkCreateComputePipelines` does -- not a
+bug in the sampling math itself, and it retroactively explains why no
+full end-to-end `feme-run`-based repro has ever succeeded across this
+investigation's several sessions.
+
+**No CTS numbers changed this session** (the sampler-heap feature is
+a pure `feme-run` CLI-tool addition; `feme_vulkan.so`/the ICD itself
+is untouched). Spot-checked `dEQP-VK.texture.shadow.1d.
+nearest_mipmap_nearest.equal_d16_unorm` directly: still `Fail (Image
+verification failed)`, unchanged, as expected (investigation only, no
+fix landed). `ninja check-feme`: 3,460/3,521 Passed (+1 new test), 61
+Unsupported, 0 Failed, 0 regressions.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (tooling-only change, no feature/extension surface change).
+
+Tracked as `L318`(f)/`L319` in the roadmap -- see `agent_thoughts.md`'s
+latest entry for the full narrative and concrete next steps.

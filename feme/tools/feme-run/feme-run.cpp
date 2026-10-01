@@ -197,7 +197,7 @@ struct ImageEntry {
   std::vector<uint32_t> Data;
 };
 
-/// One `samplers` entry (roadmap step R34): a `feme::cpu::
+/// One `samplers` entry (roadmap step R41): a `feme::cpu::
 /// FemeSamplerDescriptor` placed in `feme::cpu::DispatchResources::
 /// SamplerHeap`, the sampler-heap counterpart to `images`' `ImageEntry`
 /// above -- needed by any test exercising a real `feme.cpu.image.sample*`/
@@ -880,7 +880,7 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
 /// Builds \p Entries' `FemeSamplerDescriptor`s, dense by each entry's own
 /// `index` field, the same convention `buildImageStorage` uses -- the
 /// sampler-heap counterpart needed by any `feme.cpu.image.sample*`/
-/// `feme.cpu.image.samplecmp*` repro (roadmap step R34). Unlike an image, a
+/// `feme.cpu.image.samplecmp*` repro (roadmap step R41). Unlike an image, a
 /// sampler owns no host storage of its own (see `FemeSamplerDescriptor`'s
 /// header comment), so there is no byte buffer to build alongside the
 /// descriptor array.
