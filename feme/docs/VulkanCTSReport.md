@@ -9267,3 +9267,137 @@ feature/extension surface.
 Tracked as `L315`/`L318` (now both `done`) in the roadmap -- see
 `agent_thoughts.md`'s latest entry for the full narrative and next
 steps.
+
+## L317: `texel_buffer`'s 10 genuine functional failures -- root-caused and fixed
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `llvmpipe (LLVM 21.1.8, 128 bits)` with no ICD env
+vars set (the system default); re-checked with
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly pointed at
+`build/tools/feme/tools/feme-vulkan/feme_icd.json` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+Picked up the prior session's top-ranked next step: root-cause `L317`
+(`texel_buffer`'s 10 genuine `Fail`s, distinct from the already-fixed
+`L314` crash). The prior session's investigation (summarized at
+compaction) had already traced the failure down to a pipeline-creation
+rejection (`vkCreateGraphicsPipelines` → `"shader's (set 0, binding 0)
+requirement is not satisfied by its VkPipelineLayout"`, surfaced via the
+(previously-undocumented) `FEME_VULKAN_LOG_CREATION_ERRORS=1` env var)
+and identified the real shader shape: GLSL's `uniform samplerBuffer` +
+`texelFetch()` declares a *single* `OpTypeSampledImage` variable with no
+`OpSampledImage` combining instruction at all (unlike DXC/HLSL's
+separate `Texture`+`SamplerState` pattern), so its one
+`handlefrombinding` call's own result type is already the combined
+`{image, sampler}` struct -- but had not yet confirmed what actually
+happens to that struct downstream, nor implemented a fix.
+
+**Resolving the `feme-translate` tool-invocation blocker:** the prior
+session got stuck trying to translate the real failing shader's
+extracted SPIR-V all the way to genuine LLVM IR for direct inspection,
+hitting `"expected a 'spirv.module' op, got 'builtin.module'"` from
+`feme-translate --spirv-to-llvmdialect`/`--spirv-to-llvmir` regardless of
+input wrapping. Found the actual working chain this session:
+`feme-translate --import-spirv` (SPIR-V binary → `spirv.module` MLIR,
+already worked) → `feme-opt --feme-convert-spirv-to-llvm` (the same pass
+`test/Conversion/SPIRVToLLVM/*.mlir`'s own `RUN:` lines use, not a
+`feme-translate` flag) → extract the inner, attribute-bearing
+`module attributes {llvm.data_layout = ..., ...} { ... }` from
+`feme-opt`'s doubly-wrapped output (its own top-level `module { ... }` is
+just the generic MLIR file wrapper; the nested one is the real LLVM-
+dialect module `feme-opt`'s conversion pass constructs on purpose) →
+**plain upstream `mlir-translate --mlir-to-llvmir`** (a stock MLIR tool,
+not `feme`-specific at all) on that inner module, which finally produces
+real, inspectable LLVM IR. Worth documenting for future sessions needing
+a from-scratch SPIR-V → LLVM-IR repro: `feme-translate`'s own
+`--spirv-to-llvmdialect`/`--spirv-to-llvmir` flags are not the right tool
+for this; `feme-opt --feme-convert-spirv-to-llvm` + plain `mlir-translate
+--mlir-to-llvmir` is.
+
+**Root cause confirmed empirically, not just by code reading:** the real
+shader's extracted SPIR-V disassembly (from the CTS `.qpa` log),
+hand-assembled with `spirv-as` and round-tripped through the chain
+above, reproduced the exact predicted shape: one `handlefrombinding`
+call returning `{spirv.Image Dim=Buffer Sampled=1, spirv.Sampler}`, with
+a single `extractvalue ..., 0` feeding `llvm.spv.resource.getpointer` +
+`load` (no `.sample` call at all -- `texelFetch()` never touches the
+sampler half). `splitCombinedSampledImageHandles`
+(`SPIRVResourceLowering.cpp`, added under `H13d` for the ordinary
+`uniform sampler2D`/`.sample()` combined-handle case) correctly
+recognizes this shape and splits it, but did so *unconditionally* --
+synthesizing **both** an image-kind and a sampler-kind handle
+regardless of which `extractvalue` indices actually existed. For
+`texelFetch()`'s image-only extraction, the synthesized sampler handle
+ends up with **zero real uses** -- and `collectHandles`'s
+`classifySamplerHandle`/`hasOnlySupportedSamplerUses` dispatch still
+classified and recorded it: `hasOnlySupportedSamplerUses`'s
+`for (const User *U : Handle.users())` loop is vacuously `true` for a
+handle with no users at all, so the always-passing check let this
+synthetic, never-read handle through as a second, *spurious*
+`(set 0, binding 0)` `Sampler`-class `BoundResourceRange` entry,
+recorded alongside the real `TexelUniform`/`Buffer`-class one for the
+exact same binding. `Pipeline.cpp`'s `validateBoundRanges` then rejects
+pipeline creation because the real `VkPipelineLayout` only ever declares
+*one* descriptor there (`VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER`) --
+it cannot satisfy two conflicting class requirements for the same slot.
+Confirmed via a minimal unit-test probe mirroring the exact repro shape
+and inspecting the actual `!feme.cpu.bound_resources` metadata
+`ResourceInfo::fromModule` produces: two `BoundRanges` entries
+(`Buffer` + spurious `Sampler`) before the fix, one (`Buffer` only)
+after.
+
+**Fix:** `splitCombinedSampledImageHandles` now computes `NeedsImage`/
+`NeedsSampler` from the real `extractvalue` index set found on the
+combined handle's own uses, and only synthesizes the half(s) actually
+read -- an unread half's synthetic handle is never created at all,
+rather than created and then silently misclassified as a real,
+separately-bound resource.
+
+**Testing:** added
+`SPIRVResourceLoweringTest.cpp`'s
+`LowersCombinedTexelBufferHandleWithoutSpuriousSamplerRange`, mirroring
+the real repro's exact IR shape (struct-typed single-call handle, one
+`extractvalue ..., 0`, `getpointer` + `load`, no `.sample`), asserting
+both the existing IR-shape expectations (no surviving
+`handlefrombinding`/`extractvalue`) and -- the actual regression check
+this bug needed -- exactly one `BoundResourceRange` via
+`ResourceInfo::fromModule`, of `BoundResourceClass::Buffer`. Needed one
+small test-infrastructure change: linked `FeMeTargetCPU` into
+`FeMeTransformsCPUTests` (`unittests/Transforms/CPU/CMakeLists.txt`) so
+the test can call `ResourceInfo::fromModule` directly, rather than only
+inspecting IR shape as every prior test in this file does.
+
+`ninja FeMeTransformsCPUTests`: 604/604 Passed, 0 Failed, 0 regressions.
+`ninja check-feme` (ccache + assertions, full target-dependency build):
+all discovered tests passing, 0 Failed (3,464/3,525 total; 61
+Unsupported, same pre-existing baseline as every prior session).
+
+**CTS:** re-ran `dEQP-VK.texture.texel_buffer.*` (23 cases): **10/23
+Pass (was 0/23), 0 Fail (was 10/23), 13 NotSupported** (unchanged) --
+every one of the 10 originally-failing cases
+(`uniform.packed.{a2b10g10r10-uint-pack32, a2b10g10r10-unorm-pack32,
+a8b8g8r8-{sint,snorm,uint,unorm}-pack32, b10g11r11-ufloat-pack32}`,
+`uniform.snorm.{r8-snorm, r8g8-snorm, r8g8b8a8-snorm}`) now passes, no
+regressions elsewhere in the group.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal SPIR-V-resource-classification correctness fix
+for already-exposed core Vulkan 1.0 functionality (uniform texel
+buffers), no new feature/extension surface.
+
+`check-hlsl-feme-vk`/offload-test-suite `feme`-branch-drift housekeeping
+check (last done several sessions ago at `d0974dd`): re-investigated
+this session. Local `feme` branch tip (`d0974dd`) and upstream
+`llvm-beanz/offload-test-suite`'s `feme` branch tip (`854cc3f`) still
+differ in commit hash, but diffing each branch's own patch against its
+own base commit (`CMakeLists.txt`/`test/CMakeLists.txt`/
+`test/lit.cfg.py`, the only files either branch touches) and then
+diffing *those two diffs* against each other confirms the actual patch
+content is **byte-identical** -- the hash difference is purely because
+upstream's `feme` branch is based on an older point in `main`
+(`9c6792d`) than this checkout's base (`1814e12`, 24 commits newer), so
+the unified-diff hunk line numbers differ even though the real changes
+do not. **No action needed**; same conclusion as every prior session
+this check has been run.
+
+Tracked as `L317` (now `done`) in the roadmap.
