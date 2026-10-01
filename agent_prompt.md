@@ -63,37 +63,25 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(~4-5 hrs, largest untriaged chunk, best next pick)** `L315`:
-   root-cause `texture.shadow.{1d,1d_array,2d,2d_array,cube,cube_array}`
-   (106 cases, all "Image verification failed" against a
-   depth-comparison-sampling shape). Not examined at all yet beyond
-   confirming the cluster exists -- start with one standalone repro
-   case (e.g. `dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.equal_d16_unorm`)
-   and `--deqp-log-images=enable` to see the actual-vs-expected image
-   diff.
+1. **(best next pick)** `L318`/`L315`: get the real `DUdX`/`DUdY` for
+   the failing shadow-sampling case (see "Start here" above). A few
+   hours if the `fprintf` trace works; half a day if it needs the
+   `feme-run` YAML extension instead.
 2. **(a few hours)** `L317`: `texel_buffer`'s own remaining 10
-   functional failures, now visible for the first time this session
-   (genuine `Fail`s, not crashes -- a separate bug from the one just
-   fixed). Good second pick since it's freshly scoped and small.
+   functional failures (genuine `Fail`s, not crashes) -- untouched
+   this session.
 3. **(a few hours)** `L316`: `texture.explicit_lod.2d.sizes.*` (16
-   cases, mipmap filtering) and `texture.multisample` (5 cases) --
-   smaller, untriaged clusters from the same sample.
-4. **(a few hours, lower priority, carried over many sessions,
-   unchanged)** `L265`'s ASTC alpha-decode tie-break (4 block sizes:
-   `astc_5x5`/`astc_8x8`/`astc_10x5`/`astc_12x12`). Still needs a
-   Mesa/lavapipe reference-decoder comparison -- not revisited this
+   cases) and `texture.multisample` (5 cases) -- untouched this
    session.
+4. **(a few hours, lower priority, many sessions carried over,
+   unchanged)** `L265`'s ASTC alpha-decode tie-break (4 block sizes).
+   Still needs a Mesa/lavapipe reference-decoder comparison.
 5. **(~21 cases, a few hours, carried over, unchanged)**
    `rasterization`'s remaining 82 stipple/adjacency Bresenham
-   failures (`dEQP-VK.rasterization.primitives.dynamic_stipple.bresenham_lines`,
-   227 vs. 233 fragments, diamond-exit rule) -- not revisited this
-   session.
+   failures.
 6. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
-   `offload-test-suite`'s own `spec_const_32_bits.test`/
-   `WaveActiveMax.test` lit-annotation issues, and
-   `array_of_matrices.test`'s unexpected-pass. Not reconfirmed this
-   session -- needs upstream fixes, outside this project's scope.
-7. **(housekeeping, due again in ~3 sessions, last done 2 sessions ago
+   `offload-test-suite`'s `spec_const_32_bits.test`/`WaveActiveMax.test`
+   lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass.
+7. **(housekeeping, due again in ~2 sessions, last done 3 sessions ago
    at `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite`
-   `feme`-branch-drift check -- not checked this session (branch
-   untouched).
+   `feme`-branch-drift check -- not checked this session.
