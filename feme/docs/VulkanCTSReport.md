@@ -7485,3 +7485,83 @@ new feature/extension surface.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L298: `WaveActiveBit{And,Or,Xor}.convergence.test`'s divergent-loop sub-case root-caused and fixed
+
+`L296`'s housekeeping triage flagged 3 new upstream `offload-test-suite`
+convergence cases (`WaveActiveBitAnd`/`BitOr`/`BitXor.convergence.test`)
+as a likely genuine bug "structurally in the same territory as
+`L292`-`L295`", not yet root-caused past a single data point
+(`WaveActiveBitAnd`'s own `Out5` buffer: `[65520,0,0,0]` instead of
+expected `[65520,15,15,15]`). This session root-caused and fixed it,
+confirming it is a distinct, sibling bug to `L297` (same general area
+of `linearizeCycle`'s mask-threading machinery, but an omission rather
+than a conflict-resolution bug).
+
+**Repro:** `WaveActiveBitAnd.convergence.test`'s shader has 5 output
+buffers; only `Out5` (a divergent-trip-count loop, each thread
+iterating `TID.x` times, with a `WaveActiveBitAnd` reduce inside the
+loop body) fails. Compiled a standalone HLSL repro via the real,
+pre-installed `/usr/local/bin/dxc` (`-T cs_6_5 -spirv
+-fspv-target-env=vulkan1.3`; in-tree `clang-dxc` has a pre-existing,
+unrelated `-spirv-ext=all` driver-default-arg bug blocking `-spirv`
+compilation entirely) and dumped pre-linearize/post-linearize IR via
+`FEME_DUMP_IR_PRELINEARIZE=1 FEME_DUMP_IR_PRESIMD=1` (both are boolean
+flags printing to `stderr`, not file-path env vars).
+
+**Root cause:** in the post-linearize (pre-SIMDize) IR, the loop body
+block containing `Out5`'s own `llvm.spv.wave.reduce.and.i32` call has
+**no masking `select`** before the call, unlike the shader's three
+other (non-loop) `WaveActiveBitAnd` call sites, which all correctly get
+one. Traced to `LoopLinearizer::linearizeCycle`'s final fallback branch
+(reached whenever `DivergentCandidates` -- the set of other genuinely-
+divergent `CondBr` blocks in the cycle -- is empty, i.e. no separate
+`CheckBlock` exists, so the `L292`/`L297`-fixed `CheckBlock`-coexist
+branch does not apply): this branch called `applyStageMasks` only on
+`Header`/`Latch`/`ExitBlock`, never on the straight-line body blocks in
+between. A convergent wave-reduce intrinsic sitting directly in such a
+body slips through completely unmasked, ANDing together every lane's
+raw (including stale/frozen, logically-inactive) value unconditionally.
+A stale comment at this exact call site claimed such a body "would have
+been rejected already" if it contained any mask-affecting operation --
+confirmed via code search that no such rejection check actually exists
+for this specific code path (the only similar check, `CycleHasMaskOps`,
+only scans for `StageOpKind` ops in the separate, fully-uniform branch,
+and doesn't scan for wave intrinsics at all).
+
+**Fix:** compute the body region (`Header`'s own exit check through to
+`Latch`) and run it through the existing
+`collectUniformPassThroughRegion` helper -- already proven, in the
+`CheckBlock`-coexist branch, for exactly this "collect and validate a
+uniform-control-flow pass-through body region" purpose. This both
+validates the body really is free of a second, genuinely divergent
+branch (diagnosing and bailing cleanly via `diagnose(F, ...)` if not --
+closing the previously-missing safety check) and enumerates the exact
+blocks needing treatment. Every block in the validated region now gets
+both `applyStageMasks` (the actual fix) and the pre-existing
+`rethreadNestedEntryMasks` call (preserved, needed for a nested child
+cycle's own header -- e.g. the `dowhile_trap` shape -- a no-op
+otherwise).
+
+**Verification:** the standalone repro's `Out5` now correctly outputs
+`[65520,15,15,15]`. Added a new IR-level regression test
+(`wave-reduce-masked-in-divergent-trip-count-loop.ll`), confirmed to
+fail without the fix (temporary `git stash` A/B on `Linearize.cpp`
+alone) and pass with it. `ninja check-feme`: 3447/3447 Passed, 61
+Unsupported, 0 Failed (+1 new test, no regressions).
+`dEQP-VK.glsl.loops.*`: 616/624 Pass, same known 8 `ifblock`/`elseblock`
+cases (`L295`'s own still-open item), unchanged. `dEQP-VK.glsl.demote.*`:
+30/30 Pass, unchanged. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- internal
+`feme-cpu-linearize` correctness fix, no new feature/extension surface.
+
+**Not yet re-run this session:** `check-hlsl-feme-vk` (to directly
+confirm `WaveActiveBitAnd.convergence.test` -- and its `BitOr`/`BitXor`
+siblings, very likely affected by the same bug given their structural
+similarity -- now pass end-to-end, not just via the direct-`llvm-lit`
+spot-check and standalone-repro verification done this session); carried
+to next session's housekeeping pass.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
