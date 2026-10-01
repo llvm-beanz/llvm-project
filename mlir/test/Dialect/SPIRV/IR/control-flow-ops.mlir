@@ -1107,6 +1107,20 @@ func.func @demote_to_helper_invocation() {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.IsHelperInvocationEXT
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func @is_helper_invocation
+func.func @is_helper_invocation() {
+  // CHECK: {{%.*}} = spirv.IsHelperInvocationEXT : i1
+  %0 = spirv.IsHelperInvocationEXT : i1
+  spirv.Return
+}
+
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.Switch
 //===----------------------------------------------------------------------===//
 

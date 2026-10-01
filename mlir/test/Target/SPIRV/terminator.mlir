@@ -49,4 +49,12 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, DemoteT
     // CHECK: spirv.Return
     spirv.Return
   }
+
+  // CHECK-LABEL: @is_helper_invocation
+  spirv.func @is_helper_invocation() -> () "None" {
+    // CHECK: {{%.*}} = spirv.IsHelperInvocationEXT : i1
+    %0 = spirv.IsHelperInvocationEXT : i1
+    // CHECK: spirv.Return
+    spirv.Return
+  }
 }

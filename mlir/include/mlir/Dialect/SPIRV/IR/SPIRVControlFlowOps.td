@@ -478,6 +478,51 @@ def SPIRV_DemoteToHelperInvocationOp : SPIRV_Op<"DemoteToHelperInvocation", []> 
 
 // -----
 
+def SPIRV_IsHelperInvocationEXTOp : SPIRV_Op<"IsHelperInvocationEXT", []> {
+  let summary = [{
+    Returns true if the invocation is currently considered a helper
+    invocation.
+  }];
+
+  let description = [{
+    Returns true if the invocation is currently considered a helper
+    invocation, otherwise returns false. An invocation is considered a
+    helper invocation if it was originally invoked as a helper invocation
+    or if it has been demoted to a helper invocation by
+    OpDemoteToHelperInvocation. An invocation will not be considered a
+    helper invocation when it is initially invoked, unless that
+    invocation is launched as a helper invocation. The value returned
+    may differ depending on where in the invocation this instruction is
+    executed.
+
+    This instruction is only valid in the Fragment Execution Model.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %0 = spirv.IsHelperInvocationEXT : i1
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_0>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[SPV_EXT_demote_to_helper_invocation]>,
+    Capability<[SPIRV_C_DemoteToHelperInvocation]>
+  ];
+
+  let arguments = (ins);
+  let results = (outs
+    SPIRV_Bool:$result
+  );
+  let assemblyFormat = "attr-dict `:` type($result)";
+  let hasVerifier = 0;
+}
+
+// -----
+
 def SPIRV_LoopOp : SPIRV_Op<"mlir.loop", [InFunctionScope]> {
   let summary = "Define a structured loop.";
 
