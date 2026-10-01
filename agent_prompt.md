@@ -63,13 +63,30 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, dedicated session, now has a precise design -- see above)**
-   `L292`: implement bugs 1+2+3 together as one change (not separately),
-   add the regression canary check, rebuild, re-test all 5
-   `dynamic_loop_*` cases, run full `check-feme`, commit.
-2. **(1-2 hours)** `L293`: root-cause `derivate`'s 3 residual failures
+1. **(a few hours, dedicated session)** The 8 remaining
+   `ifblock`/`elseblock` cases. Start: rebuild with
+   `FEME_DEBUG_LINEARIZE_TRACE=1` and a temporary
+   `F.print(errs())` right after the `OtherCondBrBlocks`/
+   `DivergentCandidates` trace print in `linearizeCycle`
+   (`feme/lib/Transforms/CPU/Linearize.cpp`, search for `L277TRACE`), run
+   `dEQP-VK.glsl.loops.special.for_dynamic_iterations.ifblock_fragment`
+   directly via `deqp-vk`. You'll see: `Header`'s own `CondBr` is
+   genuinely divergent, has no `ExitCheck` at all (neither direct nor
+   relay-recovered), and one of its two successors eventually reaches
+   the *same* `Flow` block that `OtherCondBrBlocks`'s own entry already
+   names as `CheckBlock`. Needs a new code path: when `Header`'s own
+   divergent branch and `CheckBlock`'s divergent branch converge on the
+   *same* physical dispatch block (rather than two independently-relayed
+   exits), both conditions need to be combined/reasoned about together
+   before `CheckBlock`'s own phi-based dispatch logic runs -- likely
+   requires peeling or re-deriving `Header`'s own condition from
+   `CheckBlock`'s own phi inputs, not just narrowing a mask sequentially
+   the way the two now-fixed shapes did.
+2. **(1-2 hours)** `L293`: `derivate`'s 3 residual failures
    (`fwidth{,coarse,fine}.fbo_float.vec4_highp`). Extract exact pixel
-   values first.
+   values first (via `--deqp-log-images=enable` or a small repro) to
+   tell a tiny rounding delta (no fix needed, like `L287`'s `cosh`/`sinh`)
+   from a real bug.
 3. **(6 cases, feature decision needed, carried over many sessions)**
    `fragdepth` multisample image-creation gap (`*_multisample_{2,4,8}`).
 4. **(6 cases, carried over many sessions)** `fragdepth`
@@ -78,11 +95,16 @@ next steps are:
 5. **(carried over many sessions)** `L265`: residual
    `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
    `ASTCDecode.cpp`.
-6. **(overdue many sessions)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
-   CTS sampling at real scale. Run in small, isolated per-case batches.
+6. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
+   sampling at real scale (`pipeline`'s other sub-suites, `api`,
+   `synchronization`). This session only re-ran `loops`/`demote`
+   (targeted, since that's what regressed) -- a full `dEQP-VK.glsl.*` run
+   was started but takes much longer than one session's budget; kill any
+   future full-cluster attempt early and instead run small, bounded,
+   genuinely-isolated sub-groups.
 7. **(low priority)** `offload-test-suite`'s own
    `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
    lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
-8. **(housekeeping, due again soon)** `check-hlsl-feme-vk` and the `feme`
+8. **(housekeeping, overdue)** `check-hlsl-feme-vk` and the `feme`
    branch-drift check -- not re-run this session (focus was entirely on
-   `L292`); due for a re-check next session.
+   the `loops.*` regression); do this early next session.
