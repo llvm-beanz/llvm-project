@@ -7949,3 +7949,22 @@ surface.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L299 (continued): further CTS sampling batch -- all clean
+
+Continued `L299`'s broader-sampling item with a second small batch:
+`dEQP-VK.api.pipeline.*` (9/9 Pass), `api.version_check.*` (3/3 Pass),
+`api.invariance.*` (3/3 Pass), `api.null_handle.*` (24/24 Pass),
+`api.frame_boundary.*` (0/19, all 19 NotSupported), and two
+`synchronization.*` subgroups beyond `smoke`:
+`synchronization.basic.*` (21/29 Pass, 8 NotSupported) and
+`synchronization.timeline_semaphore.*` (2880/2880 Pass). All clean, 0
+Fail, no new bugs found this batch.
+
+Still open: `synchronization.op` (20,131 cases, needs sub-batching) and
+`api`'s two largest subgroups (`copy_and_blit`, 201,667 cases;
+`image_clearing`, 45,636 cases) remain unsampled.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
