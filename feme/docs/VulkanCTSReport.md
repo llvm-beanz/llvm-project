@@ -7184,3 +7184,39 @@ needed for either `L291` or `L292` -- internal compiler-correctness work
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L293: `builtin`/`texture_gather` confirmed resolved; `derivate`'s 3 residual failures identified (not yet root-caused)
+
+Completing this session's sweep of the carried-over `builtin`(14)/
+`demote`(9)/`derivate`(3)/`texture_gather`(1) triage list (`demote` is
+covered by `L291`/`L292` above):
+
+- **`builtin`**: fresh full `dEQP-VK.glsl.builtin.*` re-run (3,193 cases):
+  **0 Fail**. Already resolved as a side effect of unrelated earlier
+  fixes; dropped from future triage.
+- **`texture_gather`**: a prior session's guessed CTS path
+  (`dEQP-VK.glsl.texture_functions.texturegather.*`) matched 0 cases; the
+  correct group is `dEQP-VK.glsl.texture_gather.*`. Fresh full re-run
+  (3,174 cases, 1,929 Not supported for unsupported formats): **0 Fail**.
+  Already resolved; dropped from future triage.
+- **`derivate`**: fresh full `dEQP-VK.glsl.derivate.*` re-run (1,674
+  cases): 3 Fail, now identified by name:
+  `fwidth.fbo_float.vec4_highp`, `fwidthcoarse.fbo_float.vec4_highp`,
+  `fwidthfine.fbo_float.vec4_highp`. All three derivative-magnitude
+  built-in precision variants, but only the float-FBO/`vec4`/`highp`
+  combination -- `lowp`/`mediump` and non-float-FBO targets all pass.
+  Not yet root-caused past this; plausibly a `cosh`/`sinh`-style
+  (`L287`) CTS-reference-conformance mismatch given `fwidthCoarse`'s
+  explicitly implementation-defined precision, but not confirmed --
+  could equally be a genuine bit-exact precision bug in FeMe's own
+  `fwidth`/`dFdx`/`dFdy` lowering. Left as an open roadmap item (`L293`)
+  for a dedicated future session: next step is extracting the two
+  images' exact pixel values to distinguish a tiny rounding delta from a
+  larger structural difference.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- triage-only, no code changes this section.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
