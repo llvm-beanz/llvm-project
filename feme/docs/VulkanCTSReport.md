@@ -8409,7 +8409,7 @@ extension surface.
 `FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
 `VK_DRIVER_FILES` explicitly exported (separate statements).
 
-## L310: `fragdepth`'s multisample value-mismatch bug (surfaced by `L309`) -- investigated, not yet root-caused
+## L310: `fragdepth`'s multisample value-mismatch bug (surfaced by `L309`) -- root-caused and fixed
 
 Once `L309`'s image-creation fix landed, the same 9
 `dEQP-VK.glsl.builtin_var.fragdepth.*_multisample_{2,4,8}` cases still
@@ -8474,3 +8474,90 @@ needed (investigation only this session, no code changed).
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
 `VK_DRIVER_FILES` explicitly exported (separate statements).
+
+### Root cause and fix (follow-up session)
+
+Confirmed the "write-side vs. read-side" and "rasterizer
+sample-coverage edge-case" hypotheses above were exactly right, and
+pinned down the precise mechanism: `Executor.cpp`'s `PerSampleShading`
+per-pass loop builds `PassInvocations` as a narrowed copy of the
+whole-quad `QuadInvocations` for each `PassSample`. It correctly
+narrows `PassInv.Coverage[Lane] &= SampleBit` (the mask the late
+depth/stencil test's `BaseCoverage`/`PassMask` computation reads), but
+left `PassInv.SideEffectMask` (the mask gating the shader's *own*
+resource stores/atomics -- e.g. the CTS's own marker-image
+`imageStore`, or this investigation's raw-buffer-marker stand-in)
+completely untouched by that per-pass loop. `SideEffectMask` therefore
+stayed at its original value from before the per-pass split:
+`Quad.Coverage`, the whole-quad "was *any* sample of this lane covered
+at all" bit, computed once during the initial geometric coverage test
+and never revisited per-pass.
+
+Concretely: a lane with sample 0 covered and sample 1 not (a real
+primitive edge passing between the two samples' fixed per-pixel
+offsets) has `Quad.Coverage`'s bit for that lane set (since *some*
+sample is covered), and this stays set for **every** `PassSample`
+pass -- including the pass representing sample 1, which that lane's
+own `Quad.SampleMask` says is *not* actually covered. The fragment
+shader's body (and its side-effecting resource store) still executes
+once per pass regardless of which specific sample that pass
+represents, so the marker write for sample 1's pass still ran and
+still looked "covered" from the shader's perspective -- while the
+*depth* write for that same pass correctly used the properly-narrowed
+`PassInv.Coverage`/`BaseCoverage` and skipped it (sample 1 genuinely
+isn't covered). The CTS's own validation logic takes the marker at
+face value: marker set -> expects a real depth value -> gets the
+depth attachment's untouched clear value (`0`) instead -> reports
+exactly the observed `"expected <nonzero> but got 0"` mismatch, for
+exactly one (pixel, sample) pair per topology (wherever that
+topology's own primitive happens to have an edge splitting a pixel's
+two sample offsets), independent of sample count (the same per-lane
+"any sample covered" over-broadness applies regardless of how many
+total samples that pixel has).
+
+**The fix:** compute a `PassSideEffectMask` alongside the existing
+`PassInv.Coverage` narrowing, from `Quad.SampleMask[Lane] & SampleBit`
+(the exact per-sample geometric coverage result `Coverage` is itself
+narrowed from, not re-derived some other way), and assign it to
+`PassInv.SideEffectMask`. This makes every pass's side effects run
+only for the lanes genuinely covered by *that specific pass's* sample,
+matching the spec's per-sample-shading semantics for resource writes
+(a fragment invocation's own observable side effects should correspond
+to real coverage, not "this lane did something on some other pass").
+
+**Regression test:** `ExecutorTest.cpp`'s
+`SideEffectMaskNarrowsToThePassSpecificSampleNotTheWholeLane` builds a
+1x1-pixel, 2-sample-count pipeline with a real geometric primitive
+edge (not a shader-side `discard`/`gl_SampleMask` narrowing) covering
+exactly sample 0 and not sample 1, and a fragment shader that writes
+an unconditional `1` marker into a bound raw UAV buffer at
+`SampleIndex * 4` before its ordinary color output -- mirroring the
+CTS's own marker-image technique with a simpler raw-buffer resource.
+Confirmed to fail pre-fix (`MarkerBuffer[1] == 1`, falsely marked
+covered) and pass post-fix (`MarkerBuffer[1] == 0`), with the color
+output at sample 1 correctly untouched (`0`) in both cases (proving
+the depth/color-write path was never the buggy side -- only the
+side-effect-gating mask was).
+
+**Verification:**
+- `ninja check-feme`: 3,455/3,516 Passed, 61 Unsupported, 0 Failed
+  (was 3,454/3,515 before this fix's own new test; +1 Passed, 0
+  regressions, 0 newly-Unsupported/Failed).
+- `FeMeGraphicsTests` run in isolation: 382/382 Passed, including the
+  new regression test both standalone and as part of the full suite.
+- CTS re-run, `dEQP-VK.glsl.builtin_var.fragdepth.*` (45 cases): 27
+  Passed / 0 Failed / 18 NotSupported -- every one of the 9 previously
+  value-mismatching cases now passes; the 18 `NotSupported` cases are
+  the pre-existing, unrelated `x8_d24_unorm_pack32`-format and
+  `multisample_64`-sample-count gaps (carried-over separate roadmap
+  items, not part of this bug).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal rasterizer per-sample-shading correctness fix
+to already-exposed core Vulkan 1.0 functionality, no new
+feature/extension surface.
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
+(separate statements).
