@@ -63,33 +63,26 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, dedicated session)** `L292`: root-cause the `dynamic_loop_*`
-   demote runtime bug (5 cases:
-   `dynamic_loop_{always,deriv,dynamic,texture,uniform}`, all image-mismatch at
-   runtime). Start with `dynamic_loop_always` (simplest -- no condition beyond
-   the loop trip count itself) and diff its generated mask/demote IR against an
-   equivalent passing static-trip-count case.
+1. **(a few hours, dedicated session, now has a precise design -- see above)**
+   `L292`: implement bugs 1+2+3 together as one change (not separately),
+   add the regression canary check, rebuild, re-test all 5
+   `dynamic_loop_*` cases, run full `check-feme`, commit.
 2. **(1-2 hours)** `L293`: root-cause `derivate`'s 3 residual failures
-   (`fwidth{,coarse,fine}.fbo_float.vec4_highp`). Extract exact pixel values
-   first to tell a tiny rounding delta (CTS-reference-conformance mismatch, no
-   fix needed, like `L287`'s `cosh`/`sinh`) from a real structural bug.
+   (`fwidth{,coarse,fine}.fbo_float.vec4_highp`). Extract exact pixel
+   values first.
 3. **(6 cases, feature decision needed, carried over many sessions)**
    `fragdepth` multisample image-creation gap (`*_multisample_{2,4,8}`).
 4. **(6 cases, carried over many sessions)** `fragdepth`
-   combined-depth-stencil-format bug: `Executor.cpp`'s `readDepth`/`writeDepth`
-   (~line 999).
-5. **(carried over many sessions)** `L265`: residual `a2b10g10r10_snorm_pack32`
-   ASTC-block-boundary alpha-decode bug in `ASTCDecode.cpp`.
+   combined-depth-stencil-format bug: `Executor.cpp`'s
+   `readDepth`/`writeDepth` (~line 999).
+5. **(carried over many sessions)** `L265`: residual
+   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
+   `ASTCDecode.cpp`.
 6. **(overdue many sessions)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
-   CTS sampling at real scale (`pipeline`'s other sub-suites, `api`,
-   `synchronization`). Run any future broad sweep in small, genuinely isolated
-   per-case batches from the start.
-7. **(low priority, confirmed unchanged this session)** `offload-test-suite`'s
-   own `spec_const_32_bits.test`/`WaveActiveMax.test` (failing) and
-   `array_of_matrices.test` (stale `XFAIL:`) -- unrelated to FeMe/LLVM, needs
-   upstream lit-annotation fixes.
-8. **(housekeeping, just re-verified, due again in ~5 sessions)**
-   `check-hlsl-feme-vk` and the `feme` branch-drift check: clean this session,
-   no repair needed. Note the drift check should compare patch *content*, not
-   commit hash, since a rebase/cherry-pick legitimately changes the SHA with no
-   real divergence.
+   CTS sampling at real scale. Run in small, isolated per-case batches.
+7. **(low priority)** `offload-test-suite`'s own
+   `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
+   lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
+8. **(housekeeping, due again soon)** `check-hlsl-feme-vk` and the `feme`
+   branch-drift check -- not re-run this session (focus was entirely on
+   `L292`); due for a re-check next session.
