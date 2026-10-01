@@ -63,28 +63,22 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(1-2 hours)** Triage the two new
-   `InterlockedCompareExchange`/`InterlockedCompareStore` failures in
-   `check-hlsl-feme-vk` — new this session, same atomic-op family as the
-   already-fixed `inc_counter_array` bug, worth checking first whether it's the
-   same root cause recurring in a different op.
-2. **(30 min)** Confirm `Mandelbrot.test`'s failure is golden-image drift
-   (carried over from 2 sessions ago, still not done) — diff
+1. **(30 min)** Confirm `Mandelbrot.test`'s failure is golden-image drift
+   (carried over 3 sessions now, still not done) -- diff
    `offload-golden-images`' `Mandelbrot.png` against a fresh render.
-3. **(a few hours, only if the above two don't pan out)** `L265`: look for a
-   *scoped* fix distinguishing the `astc_5x5`/`L260` tie case from the
-   `astc_8x8`/`L265` tie case (both land on an exact `0.5`, need opposite
-   rounding) — needs a concrete structural difference, not another global
-   rounding-rule guess. Consider instead comparing against a real GPU's or
-   Mesa/lavapipe's ASTC decoder + blit filter order for the same input to see if
-   the reference avoids the tie entirely via a different computation order.
-4. **(carried over many sessions)** `fragdepth` multisample image-creation gap
+2. **(a few hours, lower priority)** `L265`'s ASTC alpha-decode tie-breaking
+   case -- still needs a structural difference between the `astc_5x5`/`L260` and
+   `astc_8x8`/`L265` cases, or a reference-decoder comparison; no new ideas this
+   session.
+3. **(carried over many sessions)** `fragdepth` multisample image-creation gap
    (6 cases) and combined-depth-stencil-format bug (6 cases, `Executor.cpp`
    `readDepth`/`writeDepth` ~line 999).
-5. **(overdue many sessions)** Broader-than-glsl/tessellation CTS sampling
-   (`api`/`pipeline`/`synchronization`) — run in small, isolated per-case
-   batches, never a full-cluster sweep.
-6. **(low priority, pre-existing, unrelated to FeMe)** `offload-test-suite`'s
+4. **(overdue many sessions)** Broader-than-glsl/tessellation CTS sampling
+   (`api`/`pipeline`/`synchronization`) -- run in small, isolated per-case
+   batches, never a full-cluster sweep. This session's `compute.pipeline.*` run
+   (20502 cases, 0 failed) is a good start on `pipeline`;
+   `api`/`synchronization` still untouched.
+5. **(low priority, pre-existing, unrelated to FeMe)** `offload-test-suite`'s
    own `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation issues, and
-   the newly-noticed `array_of_matrices.test` unexpected-pass — needs upstream
-   fixes, not this project's scope.
+   `array_of_matrices.test`'s unexpected-pass -- needs upstream fixes, not this
+   project's scope.
