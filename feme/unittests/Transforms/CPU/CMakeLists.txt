@@ -44,4 +44,5 @@ target_link_libraries(FeMeTransformsCPUTests
   PRIVATE
   FeMeTransformsCPU
   FeMeTransformsDXIL
+  FeMeTargetCPU
   )

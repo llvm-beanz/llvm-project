@@ -2823,23 +2823,39 @@ bool isCombinedSampledImageStructType(Type *Ty) {
 /// recognizes -- the shape `ResourceAddressOfPattern`
 /// (SPIRVToLLVMPatterns.cpp) produces for an ordinary GLSL
 /// `uniform sampler2D` declaration (a single `OpTypeSampledImage`
-/// `UniformConstant` variable) -- into two synthetic `handlefrombinding`
-/// calls, one per element type, sharing the original call's own (set,
-/// binding, range size, index, name) operands. This is the *other* real
-/// combined-sampled-image shape besides the one `foldSampledImageStructs`
-/// already handles: that one is a genuine `OpSampledImage` instruction
-/// combining two *separately*-declared handles (an `insertvalue` chain
-/// this pass can trace back through with `FindInsertedValue`), while this
-/// one is a single call already returning the pair directly, with nothing
-/// for `FindInsertedValue` to trace -- it only ever seeds from a
-/// `Constant`, `InsertValueInst`, or `ExtractValueInst`, never a `CallInst`
-/// (see `llvm::FindInsertedValue`'s own doc comment), so a call's own
+/// `UniformConstant` variable) -- into up to two synthetic
+/// `handlefrombinding` calls, one per element type actually read by an
+/// `extractvalue`, sharing the original call's own (set, binding, range
+/// size, index, name) operands. This is the *other* real combined-sampled-
+/// image shape besides the one `foldSampledImageStructs` already handles:
+/// that one is a genuine `OpSampledImage` instruction combining two
+/// *separately*-declared handles (an `insertvalue` chain this pass can
+/// trace back through with `FindInsertedValue`), while this one is a
+/// single call already returning the pair directly, with nothing for
+/// `FindInsertedValue` to trace -- it only ever seeds from a `Constant`,
+/// `InsertValueInst`, or `ExtractValueInst`, never a `CallInst` (see
+/// `llvm::FindInsertedValue`'s own doc comment), so a call's own
 /// `extractvalue` users are left untouched otherwise. Redirecting each
 /// such user to the matching synthetic call makes the two shapes converge
 /// on one downstream representation: an ordinary, separately-declared
 /// image handle and sampler handle, exactly as if the module's own source
 /// had declared them independently and combined them via `OpSampledImage`
 /// to begin with.
+///
+/// Only synthesizes the half(s) an `extractvalue` actually reads (roadmap
+/// `L317`): a GLSL `texelFetch`/`imageLoad` on a combined
+/// `samplerBuffer`/`image2D` variable only ever extracts index 0 (the
+/// image), never index 1 (the sampler) -- synthesizing an always-live
+/// `Sampler`-kind handle nobody reads anyway would get it classified and
+/// recorded as a second, spurious `(set, binding)` identity in
+/// `collectHandles` below (`classifySamplerHandle` ->
+/// `hasOnlySupportedSamplerUses`, vacuously true for a handle with no
+/// uses), conflicting with the shader's one real descriptor at that same
+/// binding and rejecting pipeline creation
+/// (`feme::vulkan::validateBoundRanges`) even though the shader never
+/// actually needs a sampler there -- confirmed via
+/// `dEQP-VK.texture.texel_buffer.uniform.*`'s real failure, whose GLSL
+/// `samplerBuffer` + `texelFetch` shaders hit exactly this shape.
 ///
 /// Left entirely alone if any user is not a single-index `extractvalue`
 /// selecting element 0 or 1 -- this pass does not need to model what a
@@ -2867,18 +2883,44 @@ void splitCombinedSampledImageHandles(Function &F) {
     auto *StructTy = cast<StructType>(CI->getType());
     SmallVector<Value *, 5> Args(CI->args());
     IRBuilder<> Builder(CI);
-    Function *ImageFn = Intrinsic::getOrInsertDeclaration(
-        M, Intrinsic::spv_resource_handlefrombinding,
-        {StructTy->getElementType(0)});
-    Function *SamplerFn = Intrinsic::getOrInsertDeclaration(
-        M, Intrinsic::spv_resource_handlefrombinding,
-        {StructTy->getElementType(1)});
-    Value *ImageHandle = Builder.CreateCall(ImageFn, Args);
-    Value *SamplerHandle = Builder.CreateCall(SamplerFn, Args);
 
     SmallVector<ExtractValueInst *, 4> Extracts;
     for (User *U : CI->users())
       Extracts.push_back(cast<ExtractValueInst>(U));
+
+    // Only synthesize the image half and/or the sampler half this handle's
+    // own `extractvalue`s actually read -- a GLSL `texelFetch`/`imageLoad`
+    // on a combined `samplerBuffer`/`image2D` variable (no real sampling,
+    // see `L317`'s own repro) only ever extracts index 0, so creating an
+    // unconditional, always-live `Sampler`-kind handle for the never-
+    // extracted index 1 half would otherwise get classified and recorded
+    // as a second, spurious `(set, binding)` identity below (`collectHandles`
+    // -> `classifySamplerHandle` -> `hasOnlySupportedSamplerUses`, which is
+    // vacuously true for a handle with no uses at all) -- conflicting with
+    // the shader's one real descriptor at that same binding and rejecting
+    // pipeline creation (`feme::vulkan::validateBoundRanges`) even though
+    // the shader never actually needs a sampler there.
+    bool NeedsImage = llvm::any_of(Extracts, [](const ExtractValueInst *EV) {
+      return EV->getIndices()[0] == 0;
+    });
+    bool NeedsSampler = llvm::any_of(Extracts, [](const ExtractValueInst *EV) {
+      return EV->getIndices()[0] == 1;
+    });
+    Value *ImageHandle = nullptr;
+    Value *SamplerHandle = nullptr;
+    if (NeedsImage) {
+      Function *ImageFn = Intrinsic::getOrInsertDeclaration(
+          M, Intrinsic::spv_resource_handlefrombinding,
+          {StructTy->getElementType(0)});
+      ImageHandle = Builder.CreateCall(ImageFn, Args);
+    }
+    if (NeedsSampler) {
+      Function *SamplerFn = Intrinsic::getOrInsertDeclaration(
+          M, Intrinsic::spv_resource_handlefrombinding,
+          {StructTy->getElementType(1)});
+      SamplerHandle = Builder.CreateCall(SamplerFn, Args);
+    }
+
     for (ExtractValueInst *EV : Extracts) {
       EV->replaceAllUsesWith(EV->getIndices()[0] == 0 ? ImageHandle
                                                       : SamplerHandle);

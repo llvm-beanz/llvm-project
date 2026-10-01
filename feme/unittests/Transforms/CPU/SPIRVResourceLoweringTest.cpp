@@ -1113,6 +1113,63 @@ TEST(SPIRVResourceLoweringTest, LowersUniformTexelBufferToTypedLoadOnly) {
 }
 
 TEST(SPIRVResourceLoweringTest,
+     LowersCombinedTexelBufferHandleWithoutSpuriousSamplerRange) {
+  // Roadmap L317: the real shape a GLSL `uniform samplerBuffer` +
+  // `texelFetch` produces (confirmed via
+  // dEQP-VK.texture.texel_buffer.uniform.*'s own real SPIR-V) -- a single
+  // combined `{image, sampler}` struct `handlefrombinding` call, with only
+  // the image half (`extractvalue ..., 0`) ever used, feeding
+  // `getpointer`+`load` directly (no `.sample` call at all, unlike
+  // `LowersCombinedSampledImageHandleToImageSample`'s ordinary
+  // `uniform sampler2D` shape above, which extracts *both* halves).
+  // Before this fix, `splitCombinedSampledImageHandles` synthesized an
+  // always-live `Sampler`-kind handle for the never-extracted index 1
+  // half regardless, which `collectHandles` then classified and recorded
+  // as a second, spurious `(set 0, binding 0)` identity alongside the
+  // real `TexelUniform`/`Buffer`-class one -- exactly the shape that made
+  // real pipeline creation fail with "shader's (set 0, binding 0)
+  // requirement is not satisfied by its VkPipelineLayout" (only one
+  // descriptor, a uniform texel buffer, is ever actually bound there).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %pair = type { target("spirv.Image", float, 5, 0, 0, 0, 1, 0), target("spirv.Sampler") }
+    define <4 x float> @main(i32 %idx) {
+      %h = call %pair
+          @llvm.spv.resource.handlefrombinding.tpair(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %i = extractvalue %pair %h, 0
+      %ptr = call ptr @llvm.spv.resource.getpointer(
+          target("spirv.Image", float, 5, 0, 0, 0, 1, 0) %i, i32 %idx)
+      %loaded = load <4 x float>, ptr %ptr
+      ret <4 x float> %loaded
+    }
+    declare %pair
+        @llvm.spv.resource.handlefrombinding.tpair(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
+  // Neither the combined handle call nor its `extractvalue` survive, and
+  // -- the actual regression check -- no synthetic, never-read sampler
+  // handle was created for it either.
+  for (Instruction &I : instructions(*F)) {
+    EXPECT_FALSE(isa<ExtractValueInst>(&I));
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(),
+                  Intrinsic::spv_resource_handlefrombinding);
+  }
+
+  std::optional<ResourceInfo> Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info.has_value());
+  ASSERT_EQ(Info->BoundRanges.size(), 1u);
+  EXPECT_EQ(Info->BoundRanges[0].Class, BoundResourceClass::Buffer);
+}
+
+TEST(SPIRVResourceLoweringTest,
      LowersUniformTexelBufferGetDimensionsToTypedCall) {
   // Roadmap H144: `Buffer<T>::GetDimensions(uint)` on a uniform (read-only)
   // texel buffer lowers to a bare `llvm.spv.resource.getdimensions.x` call
