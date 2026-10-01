@@ -6915,3 +6915,72 @@ semantics), not a new feature/extension surface change.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L288: `struct` cluster -- tight-vector marker-struct identity bug (nested structs)
+
+**Symptom:** 12 of `dEQP-VK.glsl.struct.*`'s 80 cases failed (from
+`L278`/`L280`'s residual-cluster tally), all involving nested structs:
+`local.nested_{equal,not_equal}_{fragment,vertex}` (4) and
+`uniform.{,dynamic_loop_}{loop_,}nested_struct_array{,_dynamic_index}_
+{fragment,vertex}` (8).
+
+**Root cause:** isolated the simplest case,
+`dEQP-VK.glsl.struct.local.nested_equal_fragment` (a struct-of-struct
+`S{a, T{vec3,int} b, int c}` built via nested `OpCompositeConstruct`),
+via `FEME_VULKAN_LOG_CREATION_ERRORS=1`: a pipeline-creation rejection,
+`spirv.CompositeConstruct` explicitly marked illegal. Reproduced
+standalone with a hand-written `.mlir` file through
+`feme-opt --feme-convert-spirv-to-llvm` (no CTS/driver pipeline needed),
+then added a temporary debug trace inside
+`CompositeConstructPattern::convertStruct`'s reconciliation loop.
+
+The trace showed the inner struct's converted constituent type carrying
+marker struct `"feme.tight_vector"` while the outer struct's re-derived
+field type expected `"feme.tight_vector.3"` -- two structurally
+identical but non-equal identified LLVM struct types, both wrapping
+`array<3xf32>`. `getTightVectorArrayType`/
+`substituteTightVectorMembersIfNeeded` both used
+`LLVM::LLVMStructType::getNewIdentified(...)`, which deliberately mints
+a fresh, counter-suffixed instance on every call (to avoid a
+"redefinition with different body" error when two *different* vector
+shapes would otherwise collide on a fixed name). This breaks down
+specifically for nested structs: the exact same vector shape gets
+independently re-converted twice (once building the inner struct's own
+`CompositeConstruct` result in isolation, once again re-deriving the
+outer struct's field-type layout), producing two non-identical marker
+instances that `mlir::Type` equality then rejects.
+
+**Fix:** added `getOrCreateTightVectorMarkerStruct(ElementType,
+NumElements)`, building a deterministic, shape-derived name (e.g.
+`"feme.tight_vector.f32x3"`, encoding element type + lane count) and
+using `LLVM::LLVMStructType::getIdentified(...)` (idempotent
+lookup-or-create by name) with a conditional `setBody` only on first
+creation -- guaranteeing two independent conversions of the same vector
+shape always produce the same marker struct instance, while genuinely
+different shapes still get genuinely different names. Confirmed safe
+against `CanonicalizeStage.cpp`'s own `isTightVectorMarkerStruct`, which
+only checks a `starts_with(prefix)` match, not an exact name.
+
+Updated 9 existing lit tests' CHECK lines (previously hard-coding the
+old non-deterministic counter-based marker names) plus one unit test
+(`OutOfOrderOffsetInterfaceBlockLegalizes`)'s literal-prefix check. One
+benign behavior change noted: `spirv-to-llvm-task-payload-vec3.mlir`'s
+two identically-shaped `vector<3xi32>` struct members now correctly
+share a single marker instance instead of getting arbitrarily distinct
+ones (an artifact of the old scheme's call-order-dependent naming).
+
+**Verification:** `check-feme`: 3,443/3,504 Passed, 61 Unsupported, 0
+Failed (no net new/removed tests, only existing CHECK lines updated).
+CTS: re-ran `dEQP-VK.glsl.struct.*` (80 cases): 4 of the 12 residual
+failures now pass (`local.nested_{equal,not_equal}_{fragment,vertex}`),
+8 remain -- all `uniform.*nested_struct_array*` variants, a related but
+distinct nested-struct-*array* issue (not yet root-caused; filed as
+roadmap `L289`).
+
+**Feature/extension surface:** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- an internal
+compiler-correctness fix, no new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
