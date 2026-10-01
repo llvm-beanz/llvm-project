@@ -2143,6 +2143,24 @@ femeRTImageFormatElementSize(uint32_t Format) {
     return 2;
   case 32: // D32_FLOAT
     return 4;
+  // (Roadmap L308) `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`: unlike the
+  // "pure" depth/stencil formats above, a *combined* depth-stencil image
+  // can also reach this table directly when sampled through a real
+  // `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` bound to a depth-aspect
+  // `VkImageView` (`CommandBuffer.cpp`'s `materializeImageDescriptor`
+  // exposes the image's own combined `ResourceFormat` verbatim via
+  // `View->format()` for this path, unlike `buildSubpassInputHeap`'s
+  // already-pre-split pure per-aspect attachment views this function's
+  // own comment above describes). The element size here must stay this
+  // format's own real combined-texel byte stride (4 for `D24_UNORM_
+  // S8_UINT`'s one shared word, 8 for `D32_FLOAT_S8X24_UINT`'s two
+  // separate words -- see `packDepthClear`'s own comment, ImageFixture.cpp)
+  // rather than the narrower pure-depth-format's, since `femeRTFetchTexel2D`
+  // derives its X-axis texel stride from this same return value.
+  case 33: // D24_UNORM_S8_UINT
+    return 4;
+  case 34: // D32_FLOAT_S8X24_UINT
+    return 8;
   case 35: // S8_UINT
     return 1;
   // (Roadmap H19j) `R8_{UNORM,SNORM,UINT,SINT}`: a single byte each.
@@ -2743,6 +2761,29 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     return V;
   }
   case 32: { // D32_FLOAT (roadmap F8b): the identity case, like R32_FLOAT.
+    float F;
+    __builtin_memcpy(&F, Ptr, sizeof(F));
+    FemeRTv4f32 V = {F, 0.0f, 0.0f, 1.0f};
+    return V;
+  }
+  // (Roadmap L308) A combined depth-stencil image sampled through its
+  // depth aspect (see `femeRTImageFormatElementSize`'s own comment above
+  // for why this format can reach here at all): decode only the depth
+  // component, same bit layout `Executor.cpp`'s `readDepth`/
+  // `packDepthClear` (ImageFixture.cpp) already use for this format's
+  // depth half, never the stencil half -- there is no way for this
+  // unpack path alone to know whether the view that produced this
+  // descriptor named `VK_IMAGE_ASPECT_DEPTH_BIT` or `_STENCIL_BIT` (see
+  // this row's roadmap entry), so a stencil-aspect sample of a combined
+  // format is a known, separate, not-yet-handled case.
+  case 33: { // D24_UNORM_S8_UINT: low 24 bits are depth, high byte stencil.
+    uint32_t Word;
+    __builtin_memcpy(&Word, Ptr, sizeof(Word));
+    FemeRTv4f32 V = {(float)(Word & 0x00FFFFFFu) / 16777215.0f, 0.0f, 0.0f,
+                     1.0f};
+    return V;
+  }
+  case 34: { // D32_FLOAT_S8X24_UINT: depth is the first separate 4-byte word.
     float F;
     __builtin_memcpy(&F, Ptr, sizeof(F));
     FemeRTv4f32 V = {F, 0.0f, 0.0f, 1.0f};

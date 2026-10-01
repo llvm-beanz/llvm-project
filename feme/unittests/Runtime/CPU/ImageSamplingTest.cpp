@@ -3667,6 +3667,77 @@ TEST_F(ImageSamplingTest, LoadFetchesS8Uint) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+// Roadmap L308: unlike the pure single-component formats above (which
+// `buildSubpassInputHeap` always splits a combined depth-stencil
+// attachment into ahead of time), a *combined* format can also reach this
+// decode table directly: `CommandBuffer.cpp`'s `materializeImageDescriptor`
+// exposes a real `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` bound to a
+// depth-aspect `VkImageView` with the image's own combined `ResourceFormat`
+// verbatim, not a pre-split pure one. Before this row, neither format had
+// an entry in `femeRTImageFormatElementSize` at all, so
+// `femeRTFetchTexel2D`'s `ElemSize == 0` guard silently returned an
+// all-zero texel for every such sample -- this is the regression test for
+// `dEQP-VK.glsl.builtin_var.fragdepth.*_s8_uint_no_depth_clamp` (the cases
+// where the correct depth value is anything other than the `0.0` this bug
+// coincidentally also "returns"). Two texels are stored here, not one,
+// specifically to also guard the texel stride itself: this format's own
+// combined per-texel byte size (4 for `D24_UNORM_S8_UINT`'s one shared
+// word, 8 for `D32_FLOAT_S8X24_UINT`'s two separate words) must be used
+// for `femeRTFetchTexel2D`'s X-axis addressing, not a pure depth format's
+// narrower one, or texel (1, 0) below would alias into texel (0, 0)'s own
+// stencil byte/second word instead of its own depth value.
+TEST_F(ImageSamplingTest, LoadFetchesD24UnormS8UintDepthAspect) {
+  // Texel 0: low 24 bits (depth) = 0x800000 (~0.50000006 of 0xFFFFFF),
+  // high byte (stencil) = 0xFF -- deliberately nonzero, to confirm it is
+  // masked off rather than corrupting the decoded depth. Texel 1: a
+  // different depth value (0x400000) with a different stencil byte
+  // (0x11), to confirm the second texel is read from its own word, not
+  // aliased onto the first.
+  uint32_t Storage[1][2] = {{0xFF800000u, 0x11400000u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 1,
+                 ResourceFormat::D24_UNORM_S8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_NEAR(Out0[0], 0x800000 / 16777215.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(Out0[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out0[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out0[3], 1.0f);
+  EXPECT_NEAR(Out1[0], 0x400000 / 16777215.0f, 1e-6f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesD32FloatS8X24UintDepthAspect) {
+  // Texel 0: depth word = 0.75f, stencil word = 0xFF (a nonzero value in
+  // the second 4-byte word that must not leak into the decoded depth).
+  // Texel 1: depth word = 0.25f, confirming the 8-byte (not 4-byte) texel
+  // stride this format's own two-separate-word layout needs.
+  struct Texel {
+    float Depth;
+    uint32_t Stencil;
+  };
+  Texel Storage[1][2] = {{{0.75f, 0xFFu}, {0.25f, 0x11u}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 1,
+                 ResourceFormat::D32_FLOAT_S8X24_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_FLOAT_EQ(Out0[0], 0.75f);
+  EXPECT_FLOAT_EQ(Out0[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out0[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out0[3], 1.0f);
+  EXPECT_FLOAT_EQ(Out1[0], 0.25f);
+}
+
 // Roadmap F8b: a multisampled image (`SampleCount > 1`) packs every
 // sample of one texel contiguously; `femeRTFetchTexel2D`'s addressing
 // must skip `SampleCount` samples' worth of bytes per texel step along a
