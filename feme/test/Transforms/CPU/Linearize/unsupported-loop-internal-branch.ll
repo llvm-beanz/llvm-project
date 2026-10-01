@@ -3,12 +3,17 @@
 ; A loop with a divergent conditional `continue` (see
 ; `feme/test/Transforms/CPU/CFG/loop-continue.ll`, the same named shape from
 ; the CFG restructurization corpus): the internal diamond reconverging back
-; at the latch is a combination this milestone's loop linearizer does not
-; yet handle -- it only recognizes a divergent exit check directly in the
-; header and/or the latch (see the Status section's milestone 6 deviation
-; note in feme/docs/FeMeCPUDesign.md). Diagnosed and left untouched.
+; at the latch is a combination this milestone's loop linearizer leaves
+; diagnosed and untouched -- not because an internal divergent diamond is
+; unsupported in general (roadmap L292's uniform-loop-with-body-mask-ops
+; handling now lowers that shape, mask ops or not), but because `body`'s
+; own "take the branch" arm (`latch`) *is* the diamond's own reconvergence
+; point itself, with no block of its own in between -- an "empty diamond
+; arm", a different, still-real `DiamondFlattener::validate` limitation
+; (see the Status section's milestone 6 deviation note in
+; feme/docs/FeMeCPUDesign.md).
 
-; CHECK: feme-cpu-linearize: function 'main': loop at 'loop' has an internal branch in 'body'
+; CHECK: feme-cpu-linearize: function 'main': loop at 'loop' has an internal branch in a body shape this milestone does not yet lower
 define void @main(i32 %n) #0 {
 entry:
   br label %loop
