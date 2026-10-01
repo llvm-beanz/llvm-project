@@ -2851,6 +2851,16 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
     PredBr->setSuccessor(0, Target);
     Changed = true;
 
+    if (::getenv("FEME_DEBUG_PEEL_TRACE")) {
+      errs() << "PEELTRACE: peeling pred=" << Pred->getName()
+             << " of BB=" << BB->getName()
+             << " into Target=" << Target->getName()
+             << " TargetHasPhis=" << !Target->phis().empty() << "\n";
+      for (auto &Pair : Incoming)
+        errs() << "PEELTRACE:   incoming phi=" << Pair.first->getName()
+               << " valueAlongPred=" << *Pair.second << "\n";
+    }
+
     // Roadmap L190: `Target` can *already* have a `phi` reconciling some
     // value across `BB` and an unrelated predecessor -- left behind by an
     // earlier peel that bypassed a *different* predecessor of `BB`
@@ -2949,7 +2959,12 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
         auto *UserInst = cast<Instruction>(U.getUser());
         if (UserInst->getParent() == BB)
           continue;
+        if (::getenv("FEME_DEBUG_PEEL_TRACE"))
+          errs() << "PEELTRACE:   rewriting use of " << PN->getName()
+                 << " in " << *UserInst << "\n";
         Updater.RewriteUse(U);
+        if (::getenv("FEME_DEBUG_PEEL_TRACE"))
+          errs() << "PEELTRACE:   after rewrite: " << *UserInst << "\n";
       }
     }
     for (PHINode &PN : BB->phis())
