@@ -14135,6 +14135,12 @@ using GLPackUnorm2x16Pattern =
 using GLUnpackUnorm2x16Pattern =
     GLUnpackNormPattern<mlir::spirv::GLUnpackUnorm2x16Op, /*NumComponents=*/2,
                         /*BitsPerComponent=*/16, /*IsSigned=*/false>;
+using GLPackSnorm2x16Pattern =
+    GLPackNormPattern<mlir::spirv::GLPackSnorm2x16Op, /*NumComponents=*/2,
+                      /*BitsPerComponent=*/16, /*IsSigned=*/true>;
+using GLUnpackSnorm2x16Pattern =
+    GLUnpackNormPattern<mlir::spirv::GLUnpackSnorm2x16Op, /*NumComponents=*/2,
+                        /*BitsPerComponent=*/16, /*IsSigned=*/true>;
 
 /// Builds a value of \p CanonicalType (an `LLVM::LLVMStructType`, possibly
 /// containing `feme.tight_vector`-marker-wrapped and/or synthetic `[N x
@@ -16092,6 +16098,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<GLPackSnorm4x8Pattern, GLUnpackSnorm4x8Pattern,
               GLPackUnorm4x8Pattern, GLUnpackUnorm4x8Pattern,
               GLPackUnorm2x16Pattern, GLUnpackUnorm2x16Pattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
+
+  // `spirv.GL.{Pack,Unpack}Snorm2x16` (roadmap L287): GLSL.std.450
+  // opcodes 56/60 were entirely unmodeled in upstream MLIR's SPIR-V GL
+  // dialect (no TableGen op definition at all, unlike every other
+  // Pack/Unpack variant above) -- fixed upstream (outside feme/, see
+  // that commit) by adding `SPIRV_GLPackSnorm2x16Op`/
+  // `SPIRV_GLUnpackSnorm2x16Op` alongside their Unorm2x16 siblings; this
+  // reuses the same `GLPackNormPattern`/`GLUnpackNormPattern` templates
+  // the rest of this cluster already shares, just with `IsSigned=true`.
+  Patterns.add<GLPackSnorm2x16Pattern, GLUnpackSnorm2x16Pattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
 
   // `spirv.GL.Ldexp` (roadmap L120): already had a TableGen op

@@ -151,3 +151,57 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.EntryPoint "GLCompute" @unpack_unorm_2x16
   spirv.ExecutionMode @unpack_unorm_2x16 "LocalSize", 1, 1, 1
 }
+
+// -----
+
+// Roadmap L287: `PackSnorm2x16(v)`/`UnpackSnorm2x16(p)` -- the signed
+// encoding of the same 2-lane/16-bit shape as `PackUnorm2x16`/
+// `UnpackUnorm2x16` above (scale 32767, clamp to `[-1, +1]`), needing
+// both a new upstream MLIR op definition (GLSL.std.450 opcodes 56/60
+// were entirely unmodeled before this fix, unlike every other
+// Pack/Unpack variant) and this file's own conversion pattern.
+// CHECK-LABEL: llvm.func @pack_snorm_2x16
+// CHECK: %[[NEGONE:.*]] = llvm.mlir.constant(-1.000000e+00 : f32) : f32
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1.000000e+00 : f32) : f32
+// CHECK: %[[SCALE:.*]] = llvm.mlir.constant(3.276700e+04 : f32) : f32
+// CHECK: %[[MASK:.*]] = llvm.mlir.constant(65535 : i32) : i32
+// CHECK: %[[LANE0:.*]] = llvm.extractelement %arg0{{.*}} : vector<2xf32>
+// CHECK: %[[CLAMP0LO:.*]] = llvm.intr.maxnum(%[[LANE0]], %[[NEGONE]]) : (f32, f32) -> f32
+// CHECK: %[[CLAMP0:.*]] = llvm.intr.minnum(%[[CLAMP0LO]], %[[ONE]]) : (f32, f32) -> f32
+// CHECK: %[[SCALED0:.*]] = llvm.fmul %[[CLAMP0]], %[[SCALE]] : f32
+// CHECK: %[[ROUNDED0:.*]] = llvm.intr.round(%[[SCALED0]]) : (f32) -> f32
+// CHECK: %[[INT0:.*]] = llvm.fptosi %[[ROUNDED0]] : f32 to i32
+// CHECK: %[[MASKED0:.*]] = llvm.and %[[INT0]], %[[MASK]] : i32
+// CHECK: %[[SHIFT0:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: llvm.shl %[[MASKED0]], %[[SHIFT0]] : i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @pack_snorm_2x16(%x: vector<2xf32>) -> (i32) "None" {
+    %0 = spirv.GL.PackSnorm2x16 %x : vector<2xf32> -> i32
+    spirv.ReturnValue %0 : i32
+  }
+  spirv.EntryPoint "GLCompute" @pack_snorm_2x16
+  spirv.ExecutionMode @pack_snorm_2x16 "LocalSize", 1, 1, 1
+}
+
+// -----
+
+// CHECK-LABEL: llvm.func @unpack_snorm_2x16
+// CHECK: %[[SCALE:.*]] = llvm.mlir.constant(3.276700e+04 : f32) : f32
+// CHECK: %[[NEGONE:.*]] = llvm.mlir.constant(-1.000000e+00 : f32) : f32
+// CHECK: %[[ONE:.*]] = llvm.mlir.constant(1.000000e+00 : f32) : f32
+// CHECK: %[[SHL0:.*]] = llvm.mlir.constant(16 : i32) : i32
+// CHECK: llvm.shl %arg0, %[[SHL0]] : i32
+// CHECK: %[[SHR:.*]] = llvm.mlir.constant(16 : i32) : i32
+// CHECK: %[[EXTRACTED:.*]] = llvm.ashr {{.*}}, %[[SHR]] : i32
+// CHECK: %[[ASFLOAT:.*]] = llvm.sitofp %[[EXTRACTED]] : i32 to f32
+// CHECK: %[[NORM:.*]] = llvm.fdiv %[[ASFLOAT]], %[[SCALE]] : f32
+// CHECK: %[[CLAMPLO:.*]] = llvm.intr.maxnum(%[[NORM]], %[[NEGONE]]) : (f32, f32) -> f32
+// CHECK: llvm.intr.minnum(%[[CLAMPLO]], %[[ONE]]) : (f32, f32) -> f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @unpack_snorm_2x16(%p: i32) -> (vector<2xf32>) "None" {
+    %0 = spirv.GL.UnpackSnorm2x16 %p : i32 -> vector<2xf32>
+    spirv.ReturnValue %0 : vector<2xf32>
+  }
+  spirv.EntryPoint "GLCompute" @unpack_snorm_2x16
+  spirv.ExecutionMode @unpack_snorm_2x16 "LocalSize", 1, 1, 1
+}
