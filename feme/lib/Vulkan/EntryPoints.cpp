@@ -2580,6 +2580,37 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
           ? (VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
              VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT)
           : VkFormatFeatureFlags2(0);
+  // (Roadmap L299 continued) `VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_
+  // COMPARISON_BIT`: CTS-confirmed genuine gap, found via
+  // `dEQP-VK.api.format_features.format_feature_flags2.{d16_unorm,
+  // d32_sfloat}` -- `vktTestCase.cpp`'s own `getRequiredFormatProperties`
+  // mandates this bit for any depth format wherever that same tiling mode
+  // already reports `SAMPLED_IMAGE_BIT` (a self-consistency rule, not a
+  // hardware capability query: depth-comparison sampling is a sampler-side
+  // concern layered on top of ordinary depth sampling, which this ICD's
+  // `SPIRVResourceLowering.cpp`/`Executor.cpp` `OpImageSampleDrefImplicitLod`
+  // handling already supports unconditionally for every depth format it
+  // recognizes). Like `HOST_IMAGE_TRANSFER_BIT`/`STORAGE_{READ,WRITE}_
+  // WITHOUT_FORMAT_BIT` above, this bit has no 32-bit `VkFormatFeatureFlags`
+  // equivalent, so it can't be set by the widen-from-32-bit path either;
+  // computed here directly, per tiling mode, from that same tiling mode's
+  // own `SAMPLED_IMAGE_BIT`.
+  bool IsDepthFormat =
+      Format && (*Format == feme::cpu::ResourceFormat::D16_UNORM ||
+                 *Format == feme::cpu::ResourceFormat::D32_FLOAT ||
+                 *Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+                 *Format == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT);
+  VkFormatFeatureFlags2 DepthComparisonLinear =
+      (IsDepthFormat && (pFormatProperties->formatProperties.linearTilingFeatures &
+                         VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+          ? VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT
+          : VkFormatFeatureFlags2(0);
+  VkFormatFeatureFlags2 DepthComparisonOptimal =
+      (IsDepthFormat &&
+       (pFormatProperties->formatProperties.optimalTilingFeatures &
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+          ? VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT
+          : VkFormatFeatureFlags2(0);
   for (auto *Base = static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
        Base; Base = Base->pNext) {
     if (Base->sType != VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3)
@@ -2587,10 +2618,10 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
     auto *Props3 = reinterpret_cast<VkFormatProperties3 *>(Base);
     Props3->linearTilingFeatures =
         pFormatProperties->formatProperties.linearTilingFeatures |
-        HostImageTransfer | StorageWithoutFormatImage;
+        HostImageTransfer | StorageWithoutFormatImage | DepthComparisonLinear;
     Props3->optimalTilingFeatures =
         pFormatProperties->formatProperties.optimalTilingFeatures |
-        HostImageTransfer | StorageWithoutFormatImage;
+        HostImageTransfer | StorageWithoutFormatImage | DepthComparisonOptimal;
     Props3->bufferFeatures =
         pFormatProperties->formatProperties.bufferFeatures |
         StorageWithoutFormatBuffer;
