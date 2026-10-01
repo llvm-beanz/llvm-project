@@ -5103,6 +5103,54 @@ TEST_F(ImageSamplingTest, SampleCmpArray1DGradSelectsCoarserMipLevel) {
   EXPECT_FLOAT_EQ(WithGrad, 1.0f);
 }
 
+TEST_F(ImageSamplingTest, SampleCmp1DGradSlightlyMinifyingUsesMinFilter) {
+  // Roadmap L315 investigation: a single-mip-level, narrowly-minifying
+  // `Grad`-driven depth-comparison sample must still pick `MinFilter`
+  // (not `MagFilter`) once its implicit LOD crosses `0`, even when the
+  // crossing is small -- this is exactly the shape
+  // `dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.*` exercises (a
+  // 32-texel-wide depth image, `DUdX` just past `1/32` so
+  // `Ux = DUdX * 32 ~ 1.1`, `lod = log2(1.1) ~ 0.14 > 0`,
+  // `MagFilter=Linear`/`MinFilter=Nearest`, mirroring that test's own
+  // `NEAREST_MIPMAP_NEAREST`/`LINEAR` filter pairing). Written while
+  // investigating that CTS failure to confirm this exact slightly-
+  // minifying case in isolation -- it passes outright, narrowing that
+  // investigation's open bug away from this function and toward
+  // whichever real per-pixel `DUdX`/`DUdY` values the compiled shader
+  // itself actually produces (not yet captured; see
+  // `feme/docs/Roadmap.md`'s own L315 entry). A positive `ClampedLod`
+  // must select `MinFilter` (nearest, no blend), so the result must
+  // equal exactly one of the two neighboring texels' own compare
+  // outcome, never a blended value in between.
+  float Storage[32][4];
+  for (int I = 0; I < 32; ++I)
+    Storage[I][0] = (I % 2 == 0) ? 0.2f : 0.8f;
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage1D(Storage, sizeof(Storage), 32,
+                 ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
+  Samp.MinFilter = static_cast<uint32_t>(SamplerFilter::Nearest);
+  Samp.Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+  Samp.CompareFunc = static_cast<uint32_t>(SamplerCompareFunc::LessEqual);
+  FemeSamplerDescriptor SamplerHeap[1] = {Samp};
+
+  SampleCmp1DFn Fn = resolve<SampleCmp1DFn>(
+      addWrapper("samplecmp_1d", "feme.cpu.image.samplecmp.1d.f32"));
+  float Result = -1.0f;
+  Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, /*U=*/0.265625f, /*DUdX=*/0.04f,
+     /*DUdY=*/0.0f, /*Lod=*/0.0f, /*UseExplicitLod=*/false, /*Dref=*/0.5f,
+     /*Bias=*/0.0f, /*Offset=*/0,
+     /*MinLodClamp=*/-std::numeric_limits<float>::infinity(),
+     /*Mask=*/true, &Result);
+  // Nearest (no blend) must read exactly one texel's own compare result
+  // (0.0 or 1.0, never anything strictly in between).
+  EXPECT_TRUE(Result == 0.0f || Result == 1.0f)
+      << "Result was " << Result << " (expected an unblended 0 or 1)";
+}
+
 TEST_F(ImageSamplingTest, SampleCmpArray2DGradSelectsCoarserMipLevel) {
   // Roadmap L66(g): the `Array2D` counterpart of
   // `ComparisonSamplingGradSelectsCoarserMipLevel` above -- only `U`/`V`,
