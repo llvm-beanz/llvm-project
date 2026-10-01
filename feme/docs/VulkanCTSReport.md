@@ -8333,3 +8333,144 @@ feature/extension surface.
 `FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
 `VK_DRIVER_FILES` explicitly exported (separate statements, not a
 combined one-liner).
+
+## L309: `fragdepth`'s multisample depth/stencil sampled-image-creation gap -- stale `sampledImageDepthSampleCounts`/`sampledImageStencilSampleCounts` capability advertisement
+
+Picked up the first-ranked carried-over next step: the 9 remaining
+`dEQP-VK.glsl.builtin_var.fragdepth.*_multisample_{2,4,8}` cases (one
+per `{line,point,triangle}_list`, all plain `D32_SFLOAT`, no combined
+stencil format) failed `vk.createImage(...): VK_ERROR_INITIALIZATION_FAILED`.
+
+**Root cause:** `PhysicalDeviceInfo.cpp` advertised
+`sampledImageDepthSampleCounts`/`sampledImageStencilSampleCounts` as
+`VK_SAMPLE_COUNT_1_BIT`-only, under an earlier `H8f`/`R30` design
+decision whose comment read "nothing yet reads a single sample from a
+shader... needs `OpImageFetch`-with-sample-index raising, which R30
+left out of scope." `Image.cpp`'s `supportedSampleCounts` intersects
+this limit against any image requesting `VK_IMAGE_USAGE_SAMPLED_BIT`,
+so a depth image requesting both `SAMPLED_BIT` and
+`DEPTH_STENCIL_ATTACHMENT_BIT` with `samples > 1` (exactly what
+`vktShaderRenderBuiltinVarTests.cpp`'s depth image creation requests)
+got narrowed down to 1 sample and rejected by `isValidImageShape`.
+
+This rationale was already stale by this session: `L73` (added
+`Plain2DMS`/`Array2DMS` `OpImageQuerySamples` support) and `L307`
+(fixed arrayed+multisampled `OpImageFetch` legalization, and
+generalized the non-arrayed multisampled sampled-fetch support too)
+had already landed the shape-based (not format-based) per-sample
+sampled-image-fetch lowering needed --
+`SPIRVResourceLowering.cpp`'s `hasOnlySupportedImageUses`/
+`lowerImageAccesses` classify `Plain2DMS`/`Array2DMS` purely by image
+*shape*, never by depth/stencil-ness, so the support `L307` added for
+color images already covered depth/stencil ones too. Confirmed via the
+CTS's own shader source (`vktShaderRenderBuiltinVarTests.cpp`,
+~lines 1802-1822) that its validation pass genuinely needs exactly
+this: a `uniform sampler2DMS u_depthTex` sampled via
+`texelFetch(u_depthTex, imageCoord, int(gl_SampleID))`.
+
+**Fix** (`feme/lib/Vulkan/PhysicalDeviceInfo.cpp`): widened both
+limits to `VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
+VK_SAMPLE_COUNT_4_BIT | VK_SAMPLE_COUNT_8_BIT`, matching
+`sampledImageColorSampleCounts`/`sampledImageIntegerSampleCounts`
+already in place, with an updated comment citing this item and the
+corrected shape-based rationale.
+
+Updated 3 unit tests that encoded the old, now-incorrect behavior:
+- `ImageTest.cpp`: `RejectsMultisampleSampledDepthImage`/
+  `RejectsMultisampleSampledStencilImage` (asserted `vkCreateImage`
+  returned `VK_ERROR_INITIALIZATION_FAILED`) →
+  `AcceptsMultisampleSampledDepthImage`/
+  `AcceptsMultisampleSampledStencilImage` (assert a valid `VkImage`).
+- `EntryPointsTest.cpp`:
+  `ImageFormatPropertiesReportsSingleSampleForSampledDepth` →
+  `ImageFormatPropertiesReportsMultisampleForSampledDepth` (expected
+  `Props.sampleCounts` widened to the full `1|2|4|8` mask).
+
+`ninja check-feme`: 3,454/3,515 Passed, 61 Unsupported, 0 Failed, 0
+regressions. `FeMeVulkanTests` run standalone: 773/773 Passed.
+
+CTS re-run, `dEQP-VK.glsl.builtin_var.fragdepth.*` (45 cases): 18
+Pass/9 Fail/18 NotSupported -- **identical pass/fail/not-supported
+counts to before this fix**, but the *nature* of the 9 failures
+changed: `vkCreateImage` no longer rejects any multisample depth
+image (confirmed via a targeted single-case re-run that the
+`VK_ERROR_INITIALIZATION_FAILED` is gone), so the originally-targeted
+bug is genuinely fixed at this layer -- but fixing it merely unmasked
+a second, previously-unreachable bug underneath (see `L310`): all 9
+cases now fail with a value mismatch instead
+(`Mismatch at pixel (X,Y,0): expected <nonzero> but got 0`).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal capability-advertisement correctness fix for
+already-exposed core Vulkan 1.0 functionality, no new feature/
+extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES` explicitly exported (separate statements).
+
+## L310: `fragdepth`'s multisample value-mismatch bug (surfaced by `L309`) -- investigated, not yet root-caused
+
+Once `L309`'s image-creation fix landed, the same 9
+`dEQP-VK.glsl.builtin_var.fragdepth.*_multisample_{2,4,8}` cases still
+fail, but now with a genuine value mismatch rather than a
+creation-time error. Investigated this session; **not fixed**.
+
+**What was ruled out:** this is *not* the same class of bug as `L308`
+(an all-zero generic sampled-image texel-decode gap for a format
+never given a decode-table entry). `D32_SFLOAT` already had a decode
+case (case 32) long before `L308`, and the same generic
+`femeRTFetchTexel2D`/shape-based lowering path that `L307` validated
+against 196/196 color-format multisample fetch cases is used here too
+-- if this were a systemic decode/addressing bug, it would be expected
+to affect a consistent, format-independent fraction of samples (e.g.
+every odd sample index, or every sample past some stride boundary),
+not what was actually observed.
+
+**What was observed instead:** re-running each failing case and
+mapping the qpa's one reported mismatch pixel back through the test
+shader's own `imageCoord = (sampleNdx + pixelX * numSamples, pixelY)`
+storage-image addressing formula (`vktShaderRenderBuiltinVarTests.cpp`'s
+`FragDepthFragPass2` shader) shows **exactly one (pixel, sample) pair
+mismatches per topology, regardless of sample count** (2, 4, and 8
+samples all reproduce the identical symptom at a topology-specific,
+sample-count-independent pixel). The mismatched sample's actual value
+reads back as exactly `0` (not a nearby-but-wrong value), matching the
+depth attachment's apparent clear value for an uncovered sample.
+
+**Leading hypothesis (not yet proven):** a rasterizer sample-coverage
+edge-case at the test primitive's own boundary. The test's primitive
+is built from 4 arbitrary vertices (`vktShaderRenderBuiltinVarTests.cpp`,
+not a full-viewport-covering shape), and the test is
+`CaseType="SelfValidate"` -- it checks the shader's own written vs.
+sampled-back values against each other on the same device, not
+against a reference/golden image, so the "expected" value is simply
+whatever `control_buffer.data[index]` was written for that pixel,
+regardless of which samples are actually covered. If FeMe's rasterizer
+disagrees with the sample-rate-shaded fragment-invocation path about
+which one specific sample is covered at a primitive's boundary pixel,
+that sample would retain the depth attachment's clear value (`0`)
+instead of the shader-written depth -- structurally similar in spirit
+to the already-documented `isTopLeftEdge`/`H4j` top-left-fill tie-break
+rule, but for multisample coverage specifically, not edge ownership
+between two triangles.
+
+**Not yet distinguished:** whether this is a write-side bug (the
+per-sample depth-attachment write in the first render pass, gated by
+`PerSampleShading`'s per-`PassSample` coverage-mask narrowing in
+`Executor.cpp`) or a read-side bug (the second render pass's own
+per-sample coverage when invoking `FragDepthFragPass2`, which also
+needs `PerSampleShading` to run once per `gl_SampleID`). A dedicated
+session is needed, starting with either (a) a minimal custom repro --
+a known primitive with a controlled, hand-computed 2-sample coverage
+mask at one pixel, and instrumenting/dumping FeMe's actual computed
+coverage mask at that pixel to compare directly, or (b) adding a
+temporary coverage-mask diagnostic dump to `Executor.cpp`'s
+`PerSampleShading` loop for this exact failing case.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (investigation only this session, no code changed).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES` explicitly exported (separate statements).
