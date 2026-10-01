@@ -862,6 +862,25 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     int64_t DstStepX = DstX1 >= DstX0 ? 1 : -1;
     int64_t DstStepY = DstY1 >= DstY0 ? 1 : -1;
     int64_t DstStepZ = DstZ1 >= DstZ0 ? 1 : -1;
+    // Maps a destination loop index (always counting up from `0`) to the
+    // actual pixel coordinate along one axis, for either direction a
+    // `Base`/`Step` pair can describe. The *unmirrored* case (`Step ==
+    // 1`) is the easy one: `Base` (`DstX0` et al.) already names the
+    // first covered pixel, so index `0` maps straight to it. The
+    // *mirrored* case (`Step == -1`, `Base` is the axis' numerically
+    // larger corner) is not simply `Base - index`: per "Blits" (feme/docs/
+    // FeMeVulkanDesign.md) and Vulkan's own corner convention, whichever
+    // corner is numerically larger is the exclusive "one past the last
+    // covered pixel" bound regardless of which corner the application
+    // listed first -- so the first pixel this mirrored axis actually
+    // covers is `Base - 1`, not `Base` itself (roadmap L305(a): the old
+    // `Base + index * Step` formula wrote one pixel past the image's own
+    // edge at index `0` and never reached the axis' own `0` pixel,
+    // exactly the two-ended one-pixel skew `simple_tests.mirror_*`
+    // surfaced as a wrong-image-contents failure, not a crash).
+    auto mirroredCoord = [](int64_t Base, int64_t Step, int64_t Index) {
+      return Step > 0 ? Base + Index : Base - 1 - Index;
+    };
     uint32_t LayerCount =
         std::min(Src->resolvedLayerCount(Region.srcSubresource.baseArrayLayer,
                                          Region.srcSubresource.layerCount),
@@ -881,7 +900,7 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
       for (uint32_t Z = 0; Z != DstDepth; ++Z) {
         double Tz = (Z + 0.5) / DstDepth;
         double W = SrcZ0 + Tz * (SrcZ1 - SrcZ0);
-        int64_t DstZ = DstZ0 + int64_t(Z) * DstStepZ;
+        int64_t DstZ = mirroredCoord(DstZ0, DstStepZ, int64_t(Z));
         for (uint32_t Y = 0; Y != DstHeight; ++Y) {
           for (uint32_t X = 0; X != DstWidth; ++X) {
             // Interpolate the destination texel's fraction across [0, 1]
@@ -894,8 +913,8 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
             double Ty = (Y + 0.5) / DstHeight;
             double U = SrcX0 + Tx * (SrcX1 - SrcX0);
             double V = SrcY0 + Ty * (SrcY1 - SrcY0);
-            int64_t DstX = DstX0 + int64_t(X) * DstStepX;
-            int64_t DstY = DstY0 + int64_t(Y) * DstStepY;
+            int64_t DstX = mirroredCoord(DstX0, DstStepX, int64_t(X));
+            int64_t DstY = mirroredCoord(DstY0, DstStepY, int64_t(Y));
             void *DstTexel = Dst->texelPointer(
                 DstLevel, DstLayer, uint32_t(DstX), uint32_t(DstY),
                 uint32_t(DstZ));

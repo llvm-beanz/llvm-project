@@ -8040,3 +8040,74 @@ graphics}` now `Pass` (verified individually and via `ninja check-feme`,
 `FeMe CPU Vulkan Device`, confirmed via a sourced helper script
 (`source /tmp/feme_env.sh`) after discovering the combined-`export` bug
 above.
+
+## L306: `dEQP-VK.api.copy_and_blit.core.blit_image.simple_tests.mirror_*` and `2d_array_to_3d.reverse_blit_*` -- mirrored-destination blit off-by-one
+
+Found via the same `L305`/`L302` broader CTS sampling, re-running
+`copy_and_blit.core.blit_image.*` (73,839 cases) against the real FeMe
+device once the `L305` env-var methodology bug (see above) was fixed:
+66 genuine failures, split into two independent groups --
+
+- **12 cases**: `blit_image.all_formats.color.2d.astc_{10x5,12x12,8x8}
+  _unorm_block.a2b10g10r10_snorm_pack32.*` -- the already-tracked `L265`
+  ASTC alpha-decode tie-breaking bug, now confirmed broader than
+  previously known (`astc_10x5`/`astc_12x12` in addition to the
+  previously-known `astc_5x5`/`astc_8x8`). Left open under `L265`; not
+  re-attempted this session (several prior sessions already failed to
+  find a scoped fix).
+- **54 cases**: `blit_image.simple_tests.mirror_{subregions,
+  subregions_3d,x,x_3d,xy,xy_3d,y,y_3d,z_3d}.*` -- a new,
+  previously-undiscovered bug, root-caused and fixed this session (below).
+
+**Root cause**: `runBlitImage` (`ImageOps.cpp`) computes each destination
+axis' step direction as `DstStepX = DstX1 >= DstX0 ? 1 : -1` (and the
+`Y`/`Z` equivalents), then maps the destination loop index `X` (always
+counting up from `0`) to the actual pixel coordinate via
+`DstX0 + X * DstStepX`. This formula is correct for the unmirrored case
+(`DstStepX == 1`): `DstX0` is already the first covered pixel, so index
+`0` maps straight to it, and the loop covers `DstX0 .. DstX1 - 1`. It is
+*not* correct for the mirrored case (`DstStepX == -1`, i.e. the
+application listed the axis' numerically larger corner first): per
+Vulkan's own corner convention (and CTS's `addBlittingImageSimpleMirror
+{X,Y}Tests`, which construct exactly this -- an unmirrored source
+`{0,size}` blitted into a mirrored destination `{size,0}`), whichever
+corner is numerically larger is the exclusive "one past the last
+covered pixel" bound *regardless of which corner the application listed
+first*. So in the mirrored case, the first pixel actually covered is
+`DstX0 - 1`, not `DstX0` itself -- the old formula wrote one pixel past
+the image's own edge at index `0` (`DstX == size`, out of bounds) and
+never reached the axis' own pixel `0`, a systematic two-ended one-pixel
+skew across the whole mirrored axis. This is a silent wrong-image-
+contents bug, not a crash (`texelPointer`'s own bounds arithmetic doesn't
+trap on the resulting slightly-out-of-range index in a way that faults),
+which is why it only surfaced as a CTS image-comparison mismatch.
+
+The same bug independently explains the `2d_array_to_3d.reverse_blit_*`
+failures seen in the broader `copy_and_blit` re-run's full 133-case raw
+tally before filtering to genuine `Fail` results (that family also
+exercises `invert_dst_x`/`invert_dst_y`/`invert_z` mirrored destination
+axes); the authoritative 66-case `Fail`-only list (cross-checked by
+re-parsing the run's own `.qpa` with the established
+`<TestCaseResult>`-regex method) confirms only the 12 ASTC + 54 `mirror_*`
+cases were real failures -- the `2d_array_to_3d.reverse_blit_*` family
+was already correctly reported `NotSupported` (FeMe does not advertise
+`VK_KHR_maintenance8`, which 2D/3D cross-blits require), not `Fail`, so
+it was never actually broken by this bug in the first place.
+
+**Fix**: added a `mirroredCoord(Base, Step, Index)` helper in
+`runBlitImage` that returns `Base + Index` when `Step > 0` (unchanged,
+unmirrored behavior) and `Base - 1 - Index` when `Step < 0` (the
+corrected mirrored behavior), and switched `DstX`/`DstY`/`DstZ`'s
+computation to use it instead of the old `Base + Index * Step` formula.
+
+Re-running the authoritative 66-case fail list confirms: 54/66 now
+`Pass` (all `mirror_*` cases), 12/66 still `Fail` (the pre-existing,
+unrelated `L265` ASTC cases, unaffected by this fix as expected). `ninja
+check-feme`: 3450/3450 Passed, 61 Unsupported, 0 Failed, 0 regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal rendering-correctness fix to an already-implemented
+code path, no new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
