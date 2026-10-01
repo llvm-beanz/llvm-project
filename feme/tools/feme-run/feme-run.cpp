@@ -197,12 +197,47 @@ struct ImageEntry {
   std::vector<uint32_t> Data;
 };
 
+/// One `samplers` entry (roadmap step R34): a `feme::cpu::
+/// FemeSamplerDescriptor` placed in `feme::cpu::DispatchResources::
+/// SamplerHeap`, the sampler-heap counterpart to `images`' `ImageEntry`
+/// above -- needed by any test exercising a real `feme.cpu.image.sample*`/
+/// `feme.cpu.image.samplecmp*` call rather than only the bare image side a
+/// texel-fetch-only test can get away with. `MinFilter`/`MagFilter`/
+/// `MipFilter`/`AddressU`/`AddressV`/`AddressW`/`CompareFunc`/
+/// `ReductionMode` use the same lowercase, hyphen-separated spellings as
+/// `resource-heap`'s own `kind`/`format` (see `parseSamplerFilter`/
+/// `parseSamplerAddressMode`/`parseSamplerCompareFunc`/
+/// `parseSamplerReductionMode`). `CompareEnable` gates whether
+/// `CompareFunc` is meaningful, mirroring `FemeSamplerDescriptorFlagBits::
+/// FEME_SAMPLER_COMPARE_ENABLE`'s own relationship to `Sampler::Sampler`'s
+/// `VkSamplerCreateInfo::compareEnable` (`feme/lib/Vulkan/Image.cpp`).
+struct SamplerEntry {
+  uint32_t Index = 0;
+  std::string MinFilter;
+  std::string MagFilter;
+  std::string MipFilter;
+  std::string AddressU;
+  std::string AddressV;
+  std::string AddressW;
+  float LodBias = 0.0f;
+  float MinLod = 0.0f;
+  float MaxLod = 1000.0f;
+  bool CompareEnable = false;
+  std::string CompareFunc;
+  std::vector<float> BorderColor;
+  bool AnisotropyEnable = false;
+  float MaxAnisotropy = 1.0f;
+  std::string ReductionMode;
+  bool UnnormalizedCoordinates = false;
+};
+
 /// The whole heap YAML file's contents.
 struct HeapFile {
   std::vector<uint32_t> RootConstants;
   std::vector<HeapEntry> ResourceHeap;
   std::vector<BindingFile> Bindings;
   std::vector<ImageEntry> Images;
+  std::vector<SamplerEntry> Samplers;
 };
 
 } // namespace
@@ -210,6 +245,7 @@ struct HeapFile {
 LLVM_YAML_IS_SEQUENCE_VECTOR(HeapEntry)
 LLVM_YAML_IS_SEQUENCE_VECTOR(BindingFile)
 LLVM_YAML_IS_SEQUENCE_VECTOR(ImageEntry)
+LLVM_YAML_IS_SEQUENCE_VECTOR(SamplerEntry)
 
 namespace llvm::yaml {
 /// A `std::vector<uint32_t>` sequence: `LLVM_YAML_IS_SEQUENCE_VECTOR`
@@ -218,6 +254,17 @@ namespace llvm::yaml {
 template <> struct SequenceTraits<std::vector<uint32_t>> {
   static size_t size(IO &Io, std::vector<uint32_t> &Seq) { return Seq.size(); }
   static uint32_t &element(IO &Io, std::vector<uint32_t> &Seq, size_t Index) {
+    if (Index >= Seq.size())
+      Seq.resize(Index + 1);
+    return Seq[Index];
+  }
+};
+
+/// A `std::vector<float>` sequence (`SamplerEntry::BorderColor`): same
+/// fundamental-element-type workaround as `std::vector<uint32_t>` above.
+template <> struct SequenceTraits<std::vector<float>> {
+  static size_t size(IO &Io, std::vector<float> &Seq) { return Seq.size(); }
+  static float &element(IO &Io, std::vector<float> &Seq, size_t Index) {
     if (Index >= Seq.size())
       Seq.resize(Index + 1);
     return Seq[Index];
@@ -259,12 +306,36 @@ template <> struct MappingTraits<ImageEntry> {
   }
 };
 
+template <> struct MappingTraits<SamplerEntry> {
+  static void mapping(IO &Io, SamplerEntry &Entry) {
+    Io.mapRequired("index", Entry.Index);
+    Io.mapOptional("min-filter", Entry.MinFilter);
+    Io.mapOptional("mag-filter", Entry.MagFilter);
+    Io.mapOptional("mip-filter", Entry.MipFilter);
+    Io.mapOptional("address-u", Entry.AddressU);
+    Io.mapOptional("address-v", Entry.AddressV);
+    Io.mapOptional("address-w", Entry.AddressW);
+    Io.mapOptional("lod-bias", Entry.LodBias, 0.0f);
+    Io.mapOptional("min-lod", Entry.MinLod, 0.0f);
+    Io.mapOptional("max-lod", Entry.MaxLod, 1000.0f);
+    Io.mapOptional("compare-enable", Entry.CompareEnable, false);
+    Io.mapOptional("compare-func", Entry.CompareFunc);
+    Io.mapOptional("border-color", Entry.BorderColor);
+    Io.mapOptional("anisotropy-enable", Entry.AnisotropyEnable, false);
+    Io.mapOptional("max-anisotropy", Entry.MaxAnisotropy, 1.0f);
+    Io.mapOptional("reduction-mode", Entry.ReductionMode);
+    Io.mapOptional("unnormalized-coordinates", Entry.UnnormalizedCoordinates,
+                   false);
+  }
+};
+
 template <> struct MappingTraits<HeapFile> {
   static void mapping(IO &Io, HeapFile &File) {
     Io.mapOptional("root-constants", File.RootConstants);
     Io.mapOptional("resource-heap", File.ResourceHeap);
     Io.mapOptional("bindings", File.Bindings);
     Io.mapOptional("images", File.Images);
+    Io.mapOptional("samplers", File.Samplers);
   }
 };
 } // namespace llvm::yaml
@@ -449,6 +520,79 @@ Expected<ImageDimension> parseImageDimension(StringRef Dimension) {
   return createStringError(inconvertibleErrorCode(),
                            "unknown heap entry image 'dimension': '%s'",
                            Dimension.str().c_str());
+}
+
+/// Parses `samplers`' own `min-filter`/`mag-filter`/`mip-filter` spelling
+/// (`SamplerFilter`). An empty string parses as `Nearest` (the sampler
+/// heap's own documented zero value, see `FemeSamplerDescriptor`'s header
+/// comment).
+Expected<SamplerFilter> parseSamplerFilter(StringRef Filter) {
+  if (Filter.empty() || Filter == "nearest")
+    return SamplerFilter::Nearest;
+  if (Filter == "linear")
+    return SamplerFilter::Linear;
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry sampler filter: '%s'",
+                           Filter.str().c_str());
+}
+
+/// Parses `samplers`' own `address-u`/`address-v`/`address-w` spelling
+/// (`SamplerAddressMode`). An empty string parses as `Repeat` (the sampler
+/// heap's own documented zero value).
+Expected<SamplerAddressMode> parseSamplerAddressMode(StringRef Mode) {
+  if (Mode.empty() || Mode == "repeat")
+    return SamplerAddressMode::Repeat;
+  if (Mode == "mirrored-repeat")
+    return SamplerAddressMode::MirroredRepeat;
+  if (Mode == "clamp-to-edge")
+    return SamplerAddressMode::ClampToEdge;
+  if (Mode == "clamp-to-border")
+    return SamplerAddressMode::ClampToBorder;
+  if (Mode == "mirror-clamp-to-edge")
+    return SamplerAddressMode::MirrorClampToEdge;
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry sampler 'address-*': '%s'",
+                           Mode.str().c_str());
+}
+
+/// Parses `samplers`' own `compare-func` spelling (`SamplerCompareFunc`),
+/// meaningful only when `compare-enable: true`. An empty string parses as
+/// `Never`.
+Expected<SamplerCompareFunc> parseSamplerCompareFunc(StringRef Func) {
+  if (Func.empty() || Func == "never")
+    return SamplerCompareFunc::Never;
+  if (Func == "less")
+    return SamplerCompareFunc::Less;
+  if (Func == "equal")
+    return SamplerCompareFunc::Equal;
+  if (Func == "less-equal")
+    return SamplerCompareFunc::LessEqual;
+  if (Func == "greater")
+    return SamplerCompareFunc::Greater;
+  if (Func == "not-equal")
+    return SamplerCompareFunc::NotEqual;
+  if (Func == "greater-equal")
+    return SamplerCompareFunc::GreaterEqual;
+  if (Func == "always")
+    return SamplerCompareFunc::Always;
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry sampler 'compare-func': '%s'",
+                           Func.str().c_str());
+}
+
+/// Parses `samplers`' own `reduction-mode` spelling
+/// (`SamplerReductionMode`). An empty string parses as `WeightedAverage`
+/// (ordinary filtering, as opposed to a min/max reduction).
+Expected<SamplerReductionMode> parseSamplerReductionMode(StringRef Mode) {
+  if (Mode.empty() || Mode == "weighted-average")
+    return SamplerReductionMode::WeightedAverage;
+  if (Mode == "min")
+    return SamplerReductionMode::Min;
+  if (Mode == "max")
+    return SamplerReductionMode::Max;
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry sampler 'reduction-mode': '%s'",
+                           Mode.str().c_str());
 }
 
 /// The byte size of one texel of \p Format, covering every
@@ -733,6 +877,84 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
   return Storage;
 }
 
+/// Builds \p Entries' `FemeSamplerDescriptor`s, dense by each entry's own
+/// `index` field, the same convention `buildImageStorage` uses -- the
+/// sampler-heap counterpart needed by any `feme.cpu.image.sample*`/
+/// `feme.cpu.image.samplecmp*` repro (roadmap step R34). Unlike an image, a
+/// sampler owns no host storage of its own (see `FemeSamplerDescriptor`'s
+/// header comment), so there is no byte buffer to build alongside the
+/// descriptor array.
+Expected<std::vector<FemeSamplerDescriptor>>
+buildSamplerStorage(ArrayRef<SamplerEntry> Entries) {
+  uint32_t MaxIndex = 0;
+  for (const SamplerEntry &Entry : Entries)
+    MaxIndex = std::max(MaxIndex, Entry.Index);
+  std::vector<FemeSamplerDescriptor> Descriptors(Entries.empty() ? 0
+                                                                 : MaxIndex + 1);
+
+  for (const SamplerEntry &Entry : Entries) {
+    Expected<SamplerFilter> MinFilter = parseSamplerFilter(Entry.MinFilter);
+    if (!MinFilter)
+      return MinFilter.takeError();
+    Expected<SamplerFilter> MagFilter = parseSamplerFilter(Entry.MagFilter);
+    if (!MagFilter)
+      return MagFilter.takeError();
+    Expected<SamplerFilter> MipFilter = parseSamplerFilter(Entry.MipFilter);
+    if (!MipFilter)
+      return MipFilter.takeError();
+    Expected<SamplerAddressMode> AddressU =
+        parseSamplerAddressMode(Entry.AddressU);
+    if (!AddressU)
+      return AddressU.takeError();
+    Expected<SamplerAddressMode> AddressV =
+        parseSamplerAddressMode(Entry.AddressV);
+    if (!AddressV)
+      return AddressV.takeError();
+    Expected<SamplerAddressMode> AddressW =
+        parseSamplerAddressMode(Entry.AddressW);
+    if (!AddressW)
+      return AddressW.takeError();
+    Expected<SamplerCompareFunc> CompareFunc =
+        parseSamplerCompareFunc(Entry.CompareFunc);
+    if (!CompareFunc)
+      return CompareFunc.takeError();
+    Expected<SamplerReductionMode> ReductionMode =
+        parseSamplerReductionMode(Entry.ReductionMode);
+    if (!ReductionMode)
+      return ReductionMode.takeError();
+    if (!Entry.BorderColor.empty() && Entry.BorderColor.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry sampler %u 'border-color' needs "
+                               "exactly 4 components",
+                               Entry.Index);
+
+    FemeSamplerDescriptor &Desc = Descriptors[Entry.Index];
+    Desc = FemeSamplerDescriptor{};
+    Desc.MinFilter = static_cast<uint32_t>(*MinFilter);
+    Desc.MagFilter = static_cast<uint32_t>(*MagFilter);
+    Desc.MipFilter = static_cast<uint32_t>(*MipFilter);
+    Desc.AddressU = static_cast<uint32_t>(*AddressU);
+    Desc.AddressV = static_cast<uint32_t>(*AddressV);
+    Desc.AddressW = static_cast<uint32_t>(*AddressW);
+    Desc.LodBias = Entry.LodBias;
+    Desc.MinLod = Entry.MinLod;
+    Desc.MaxLod = Entry.MaxLod;
+    Desc.CompareFunc = static_cast<uint32_t>(*CompareFunc);
+    for (int C = 0; C != 4; ++C)
+      Desc.BorderColor[C] =
+          Entry.BorderColor.empty() ? 0.0f : Entry.BorderColor[C];
+    Desc.MaxAnisotropy = Entry.MaxAnisotropy;
+    Desc.ReductionMode = static_cast<uint32_t>(*ReductionMode);
+    Desc.Flags = (Entry.CompareEnable ? FEME_SAMPLER_COMPARE_ENABLE : 0u) |
+                 (Entry.AnisotropyEnable ? FEME_SAMPLER_ANISOTROPY_ENABLE
+                                        : 0u) |
+                 (Entry.UnnormalizedCoordinates
+                      ? FEME_SAMPLER_UNNORMALIZED_COORDINATES
+                      : 0u);
+  }
+  return Descriptors;
+}
+
 /// One `bindings` entry's backing storage: `Entries`' buffers/descriptors
 /// (see `buildEntryStorage`) plus the (space, register) identity a
 /// `feme::cpu::BoundResourceBinding` is matched by.
@@ -772,13 +994,16 @@ toBoundResourceBindings(const std::vector<BindingStorage> &Storage) {
 /// Prints every heap entry's final contents as `uint32` words, one line
 /// per entry: `heap[<index>]: <word0> <word1> ...` for a `resource-heap`
 /// entry, `binding[<space>:<register>][<index>]: <word0> <word1> ...` for a
-/// `bindings` entry, and `image[<index>]: <word0> <word1> ...` for an
-/// `images` entry, for `FileCheck` to match against (see the file comment
-/// above).
+/// `bindings` entry, `image[<index>]: <word0> <word1> ...` for an `images`
+/// entry, and `sampler[<index>]: <word0> <word1> ...` (the descriptor
+/// struct's own raw words, not a host-owned buffer -- see
+/// `FemeSamplerDescriptor`'s header comment) for a `samplers` entry, for
+/// `FileCheck` to match against (see the file comment above).
 void printHeapContents(raw_ostream &OS, const HeapFile &File,
                        const HeapStorage &Storage,
                        const std::vector<BindingStorage> &BindingsStorage,
-                       const ImageStorage &Images) {
+                       const ImageStorage &Images,
+                       ArrayRef<FemeSamplerDescriptor> Samplers) {
   auto PrintBuffer = [&](const std::vector<uint8_t> &Buffer) {
     for (size_t I = 0; I + sizeof(uint32_t) <= Buffer.size();
          I += sizeof(uint32_t)) {
@@ -803,6 +1028,13 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
   for (const ImageEntry &Entry : File.Images) {
     OS << "image[" << Entry.Index << "]:";
     PrintBuffer(Images.Buffers[Entry.Index]);
+  }
+  for (const SamplerEntry &Entry : File.Samplers) {
+    OS << "sampler[" << Entry.Index << "]:";
+    const FemeSamplerDescriptor &Desc = Samplers[Entry.Index];
+    std::vector<uint8_t> Bytes(sizeof(Desc));
+    memcpy(Bytes.data(), &Desc, sizeof(Desc));
+    PrintBuffer(Bytes);
   }
 }
 
@@ -943,7 +1175,8 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
 /// is reserved at all).
 Error runObjectMode(StringRef Filename, StringRef EntryPoint,
                     const HeapFile &Heap, std::array<uint32_t, 3> GroupCount,
-                    const HeapStorage &Storage, const ImageStorage &Images) {
+                    const HeapStorage &Storage, const ImageStorage &Images,
+                    ArrayRef<FemeSamplerDescriptor> Samplers) {
   if (!Heap.Bindings.empty())
     return createStringError(
         inconvertibleErrorCode(),
@@ -973,6 +1206,7 @@ Error runObjectMode(StringRef Filename, StringRef EntryPoint,
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;
   Resources.ImageHeap = Images.Descriptors;
+  Resources.SamplerHeap = Samplers;
   runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
               GroupCount);
   return Error::success();
@@ -1069,13 +1303,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  Expected<std::vector<FemeSamplerDescriptor>> Samplers =
+      buildSamplerStorage(Heap.Samplers);
+  if (!Samplers) {
+    errs() << "feme-run: " << toString(Samplers.takeError()) << "\n";
+    return 1;
+  }
+
   if (ObjectMode) {
     if (Error E = runObjectMode(InputFilename, EntryPoint, Heap, GroupCount,
-                                *Storage, *Images)) {
+                                *Storage, *Images, *Samplers)) {
       errs() << "feme-run: " << toString(std::move(E)) << "\n";
       return 1;
     }
-    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{}, *Images);
+    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{}, *Images,
+                      *Samplers);
     return 0;
   }
 
@@ -1129,12 +1371,14 @@ int main(int argc, char **argv) {
   Resources.BoundResources = Bindings;
   Resources.RootConstants = RootConstantBytes;
   Resources.ImageHeap = Images->Descriptors;
+  Resources.SamplerHeap = *Samplers;
 
   if (Error E = (*Engine)->dispatch(Resources, GroupCount)) {
     errs() << "feme-run: " << toString(std::move(E)) << "\n";
     return 1;
   }
 
-  printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images);
+  printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images,
+                    *Samplers);
   return 0;
 }
