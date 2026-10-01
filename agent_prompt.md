@@ -63,28 +63,32 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(half a day, dedicated session, best next pick)** Root-cause `L310`. Start
-   with a minimal custom repro: a hand-built pipeline with a known 2-sample
-   pixel at a controlled primitive edge, comparing FeMe's actual computed
-   coverage mask at that pixel against the hand-expected one. If that's too slow
-   to set up, add a temporary coverage-mask diagnostic dump to `Executor.cpp`'s
-   `PerSampleShading` loop (around line 3822) for the exact failing case and
-   compare write-pass vs. read-pass coverage directly.
-2. **(a few hours, lower priority, carried over many sessions, unchanged)**
-   `L265`'s ASTC alpha-decode tie-break (4 block sizes affected). No new ideas
-   this session -- still needs a Mesa/lavapipe reference-decoder comparison.
-3. **(overdue many sessions, unchanged)** `copy_and_blit`'s remaining top-level
-   groups (`copy_commands2`, `dedicated_allocation`, `multiplanar_xfer`,
+1. **(a few hours, lower priority, carried over many sessions, unchanged)**
+   `L265`'s ASTC alpha-decode tie-break (4 block sizes affected:
+   `astc_5x5`/`astc_8x8`/`astc_10x5`/`astc_12x12`). Still needs a Mesa/lavapipe
+   reference-decoder comparison -- no new ideas this session (not revisited).
+2. **(overdue many sessions, next best pick for broader sampling)**
+   `copy_and_blit`'s remaining top-level groups are still entirely unsampled:
+   `copy_commands2`, `dedicated_allocation`, `multiplanar_xfer`,
    `copy_memory_indirect`, `device_address`, `sparse`, `dynamic_state`,
-   `reinterpret`) and `image_clearing` (45,636 cases) are still entirely
-   unsampled. Not attempted this session -- stayed focused on `L309`/`L310` per
-   the request.
+   `reinterpret`. `image_clearing` is now done (this session, clean).
+   `copy_and_blit.core.image_to_image.*` (52,692 cases) specifically is still
+   the single largest unsampled chunk.
+3. **(a few hours)** `synchronization.op` (20,131 cases) is still unsampled --
+   needs sub-batching by its own sub-prefixes (too large for one run, same
+   reasoning as `image_clearing` before this session showed it's actually fine
+   to just run in one shot if given enough wall-clock time -- ~5 minutes for 45k
+   cases here, so `synchronization.op` at 20k should be similarly tractable in
+   one run now; worth just trying it directly next time rather than
+   pre-emptively sub-batching).
 4. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
    `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
    lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass.
-   Reconfirmed present this session, needs upstream fixes, outside this
-   project's scope.
-5. **(housekeeping, due again in ~5 sessions)**
-   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check -- not
-   checked this session (branch untouched); file away for its next routine
-   check.
+   Reconfirmed present this session (now against the bumped `d0974dd` tip too),
+   still needs upstream fixes, outside this project's scope.
+5. **(housekeeping, just done this session, due again in ~5 sessions)**
+   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check -- bumped
+   to `d0974dd` this session (25 commits of upstream drift, mostly new test
+   coverage: MSAA, viewport arrays, HLSL intrinsic tests). Baseline Pass/Fail
+   counts updated (727 total now, up from 697) but the known-issue set is
+   unchanged.
