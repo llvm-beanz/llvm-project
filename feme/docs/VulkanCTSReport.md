@@ -7838,3 +7838,114 @@ pre-existing, unrelated, tracked separately) / 1 UnexpectedPass
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L299: broader-than-glsl/tessellation CTS sampling (`api`/`synchronization`)
+
+Addressed the "overdue many sessions" broader-CTS-sampling item,
+explicitly instructed to run in small, isolated per-case batches, never
+a full-cluster sweep. Surveyed group sizes via `dEQP-VK-cases.txt`:
+`api` has 267,504 cases total, `synchronization` 64,872 -- both
+confirmed too large for a full sweep.
+
+Ran `dEQP-VK.api.smoke.*` (6/6 Pass) and
+`dEQP-VK.synchronization.smoke.*` (8/12 Pass, 4 NotSupported), then a
+batch of 12 small/medium `api.*` subgroups: `array`, `device_init`,
+`object_management`, `command_buffers`, `buffer_view`,
+`format_features`, `external`, `granularity`,
+`buffer_memory_requirements`, `fill_and_update_buffer`,
+`image_compression_control`, `ds_color_copy`.
+
+**Found 2 new genuine bugs** (both fixed this session, see `L300`/
+`L301` below): `format_features` (2 Fail, missing
+`VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT`) and
+`command_buffers` (1 Fail,
+`secondary_push_descriptor_set_with_template`, a descriptor-update-
+template cross-binding-overflow gap).
+
+Still open: most of `api.*`'s ~35 subgroups (`pipeline`,
+`version_check`, `invariance`, `null_handle`, `frame_boundary`,
+`gpa_interface`, etc.) and all of `synchronization.*` beyond `smoke`
+remain unsampled; `copy_and_blit` (201,667 cases) and `image_clearing`
+(45,636 cases) deliberately skipped so far as too large even for a
+single batch.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
+
+## L300: `dEQP-VK.api.format_features.format_feature_flags2.{d16_unorm,d32_sfloat}` -- missing depth-comparison bit
+
+Root-caused: `VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT`
+(`0x200000000`, bit 33) has no 32-bit `VkFormatFeatureFlagBits`
+equivalent, so FeMe's existing widen-from-32-bit path in
+`vkGetPhysicalDeviceFormatProperties2` (`EntryPoints.cpp`) could never
+produce it -- the same class of gap already special-cased there for
+`HOST_IMAGE_TRANSFER_BIT`/`STORAGE_{READ,WRITE}_WITHOUT_FORMAT_BIT`.
+CTS's own `Context::getRequiredFormatProperties` (`vktTestCase.cpp`)
+derives this bit purely self-referentially: whenever a depth format's
+own `SAMPLED_IMAGE_BIT` is already reported for a given tiling mode,
+that same tiling mode is required to also report the depth-comparison
+bit -- not an external hardware-capability check.
+
+Fixed by adding direct `IsDepthFormat`/`DepthComparisonLinear`/
+`DepthComparisonOptimal` computation in
+`vkGetPhysicalDeviceFormatProperties2`, ORed into
+`Props3->linearTilingFeatures`/`optimalTilingFeatures` for FeMe's 4
+mapped depth formats (`D16_UNORM`, `D32_FLOAT`, `D24_UNORM_S8_UINT`,
+`D32_FLOAT_S8X24_UINT`). `X8_D24_UNORM_PACK32`/`D16_UNORM_S8_UINT`
+aren't mapped by FeMe at all -- a separate, pre-existing, out-of-scope
+gap, not touched this session.
+
+`dEQP-VK.api.format_features.*` re-run: 184/368 Pass, 0 Fail, 184
+NotSupported (up from 2 Fail). `check-feme`: 3449/3510 Passed, 61
+Unsupported, 0 Failed (no regressions). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- the bit was already
+implicitly promised by `VK_KHR_format_feature_flags2`, which FeMe
+already advertises; this closes a gap in computing it correctly, not a
+new capability.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
+
+## L301: `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_with_template` -- template cross-binding overflow
+
+Root-caused: the test's layout has two separate single-element
+bindings (binding 0 = output buffer, binding 1 = input buffer) and
+pushes both via **one** `VkDescriptorUpdateTemplateEntry` with
+`dstBinding=0`, `descriptorCount=2`, deliberately exercising the spec's
+cross-binding overflow rule (a `descriptorCount` exceeding one
+binding's remaining elements continues into the next
+consecutively-numbered binding). `applyDescriptorUpdateTemplate`'s
+non-inline-uniform-block write loop (`Descriptor.cpp`) used a naive
+`Entry.dstBinding, Entry.dstArrayElement + J` index with no overflow
+handling, unlike `applyDescriptorWrite` (the
+`vkUpdateDescriptorSets`/direct-push-descriptor path), which already
+implements this correctly via the existing `BindingCursor::normalize()`
+helper (fixed for that path under `L154`, but never applied to the
+template path).
+
+Fixed by rewriting `applyDescriptorUpdateTemplate`'s per-element loop
+to use the same `BindingCursor` pattern; the separate inline-uniform-
+block branch (fundamentally different, single-contiguous-byte-range
+semantics) is untouched. Added
+`DescriptorTest.UpdateTemplateSpansConsecutiveBufferBindings`, the
+template-path counterpart to the existing
+`WriteDescriptorSetSpansConsecutiveBufferBindings`.
+
+`dEQP-VK.api.command_buffers.*` re-run: 121/131 Pass, 0 Fail, 10
+NotSupported (up from 1 Fail). `check-feme`: 3449/3510 Passed (+1 new
+test), 61 Unsupported, 0 Failed (no regressions).
+`check-hlsl-feme-vk`: 485 Pass / 31 XFAIL / 207 Unsupported / 2 Fail
+(`spec_const_32_bits.test`, `WaveActiveMax.test`, both pre-existing,
+unrelated) / 1 XPASS (`array_of_matrices.test`, also pre-existing) --
+unchanged from baseline; `Mandelbrot.test` reconfirmed passing in
+isolation after a parallel-run `VK_TIMEOUT` semaphore-wait flake (same
+`L255` flakiness class, not a regression). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- an internal
+descriptor-update-template correctness fix, no new feature/extension
+surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
