@@ -6702,3 +6702,123 @@ change.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (twice this session: at the start, and
 again after the `cmake .`/`ninja check-feme` rebuild).
+
+## L286: `dowhile_trap` hang finally fixed -- cross-pass `DiamondFlattener`-to-`LoopLinearizer` entry-mask gap
+
+**Context:** the `loops` cluster's last residual failure, tracked since
+`L277` first identified the 30-case cluster: the 4-case
+`special.{for,while}_dynamic_iterations.dowhile_trap_{fragment,vertex}`
+hang (`vk.waitForFences(...) VK_TIMEOUT`). `L282` fixed the other 26 cases
+(removing the leaf-cycle-only gate plus `rethreadNestedEntryMasks`);
+`L283` attempted and reverted a direct fix (`isLoopControlEdge` deferral)
+after finding it regressed 14 other cases.
+
+**Root cause:** `LinearizePass::run` runs two architecturally-decoupled
+passes in sequence against the same function -- `DiamondFlattener`
+(ordinary if/else diamond flattening) runs first, entirely before
+`LoopLinearizer` (loop/cycle linearization) even starts, each with its own
+fresh `DominatorTree`/`PostDominatorTree`/`CycleInfo`/`UniformityInfo`.
+`DiamondFlattener::validate`'s own recursive diamond-walk, on reaching a
+block that `isInCycle`s and has a loop-control-edge successor, by design
+returns `true` ("stop here; `LoopLinearizer`'s problem, not an error") and
+records a `CycleBoundaryBlocks`/`CycleBoundaryMasks` entry -- a
+deliberate, already-documented mechanism letting a diamond whose arm
+contains an entire not-yet-linearized nested cycle be flattened safely
+(the "escape-time loop followed by a palette lookup" use-case the
+in-code comments describe). The `CycleBoundaryMasks` entry computed there
+*is* the correct per-lane "should this lane actually enter this nested
+cycle" mask -- but it was never exposed to `LoopLinearizer`, which seeds
+every cycle's own entry mask via `makeActivePNPair`: for every
+non-backedge predecessor of a cycle's header, it unconditionally used a
+bare `ConstantInt::getTrue`, correct only when nothing upstream of the
+cycle had already narrowed which lanes should even reach it.
+
+`dowhile_trap`'s own inner do-while shares its exit condition's induction
+variable/bound with the outer for-loop's own divergent trip-count check.
+A lane the outer check already decided should skip the loop body entirely
+still entered the inner cycle "live" and unmasked; since that lane's own
+induction variable never updates while stuck in the (structurally
+unreachable-for-it) inner cycle, its own exit condition never
+independently becomes false, so the whole wave's `mask.any`-based exit
+reduction spun forever -- confirmed via live `gdb` register dumps in a
+prior session, and via empirical `FEME_DEBUG_LINEARIZE_TRACE`-gated
+trace-debugging this session (iteratively refined and rebuilt, ~4s per
+cycle via ccache/ninja) to pin down exactly which pass dropped the mask.
+
+**Fix:** threaded the mask across the pass boundary explicitly:
+
+- Added `DiamondFlattener::getCycleBoundaryMasks()`, a new public const
+  accessor exposing its own `CycleBoundaryMasks` map.
+- Added a new required `LoopLinearizer` constructor parameter/private
+  member, `DiamondFlattenedEntryMasks` (a `const DenseMap<BasicBlock *,
+  MaskPair> &`), made required rather than defaulted to avoid a
+  dangling-reference footgun from binding a const-ref parameter to a
+  temporary default argument.
+- `LoopLinearizer::makeActivePNPair` now consults
+  `DiamondFlattenedEntryMasks` for the cycle's own `Header` before falling
+  back to the old unconditional `true` -- an exact-match lookup miss
+  (the overwhelmingly common case, whenever no enclosing diamond was ever
+  flattened around this cycle) preserves the original behavior exactly.
+- `LinearizePass::run` now captures `DF.getCycleBoundaryMasks()` into a
+  local variable before the `DiamondFlattener`/`PostDominatorTree` scope
+  closes, and threads it into the `LoopLinearizer` constructor call.
+
+**New regression unit test**
+(`LinearizeTest.NestedCycleInsideFlattenedDiamondArmInheritsOuterDiamondsMask`):
+a synthetic IR with a deliberately *uniform* outer loop (constant trip
+count) containing a genuinely divergent mid-body diamond (condition
+derived from `llvm.dx.thread.id`) whose true arm holds a nested do-while
+cycle sharing the diamond condition's own induction variable/bound. The
+outer loop is kept uniform specifically so `LoopLinearizer`'s own
+existing, already-fixed, same-pass `rethreadNestedEntryMasks` mechanism
+(`L282`) cannot mask the bug via cycle-to-cycle mask propagation, isolating
+the test to the `DiamondFlattener`-to-`LoopLinearizer` cross-pass gap
+specifically. Confirmed via a `git stash` A/B test: fails pre-fix (the
+inner cycle's own entry-mask phi's non-backedge incoming value is a bare
+`ConstantInt` `true`) and passes post-fix (narrowed to an `and` of the
+enclosing diamond's own condition).
+
+**Verification:**
+
+- `FeMeTransformsCPUTests` (full unit binary): 601/601 Pass (+1 new test).
+- `check-feme-transforms-cpu-linearize` (lit): 39/39 Pass.
+- `check-feme` (full target, object-file caching + assertions enabled):
+  3,442/3,503 Passed (+1 net new unit test), 61 Unsupported, 0 Failed.
+- CTS: isolated, fresh full `dEQP-VK.glsl.loops.*` re-run (624 cases):
+  **624/624 (100%) Pass** -- the `dowhile_trap` hang is fixed, and the
+  entire 30-case `loops` cluster `L277` first identified is now fully
+  closed (0 residual failures).
+- Regression spot-check: this file's own code comments cite
+  `dEQP-VK.graphicsfuzz.*` as a historical regression source for exactly
+  this kind of masking logic (see `L282`'s own reverted-regression write-
+  up). A full combined-process `dEQP-VK.graphicsfuzz.*` run hit the
+  already-documented cascading-false-failure artifact (one process,
+  many cases -- a single internal issue partway through made a long,
+  dense run of subsequent cases falsely report `Fail`; confirmed by
+  re-running several of those "failing" cases individually in fresh
+  processes, each passing cleanly in isolation). Rather than re-running
+  the full ~757-case group with the isolated-per-case methodology
+  `L282` established (deferred as future work, folded into the existing
+  carried-over "broader-than-tessellation/loops CTS sampling" item), spot-
+  checked in isolation the 3 specific repros `L282`'s own reverted
+  `isCycleHeaderBranch` attempt had regressed
+  (`cov-function-always-return-negative-bitfield-extract`,
+  `cov-function-fragcoord-condition-always-return`,
+  `cov-function-global-loop-counter-sample-texture`) plus the original
+  `DiamondFlattener::validate` stack-overflow repro
+  (`increment-value-in-nested-for-loop`): all 3 `cov-function-*` cases
+  **Pass** (no regression); `increment-value-in-nested-for-loop` still
+  **Fails**, but cleanly -- a diagnosed "unsupported shape" `Error`
+  (`loop at '' has an internal branch ... that does not reach the loop's
+  exit block`), not a crash or hang, exactly the expected, pre-existing,
+  by-design behavior `L282`'s own depth-guard produces for this
+  genuinely-unsupported shape (never expected to pass; this is a
+  distinct, separate, already-tracked limitation, not a regression).
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no change
+needed -- an internal compiler-correctness fix, no new feature/extension
+surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set, per the standing environment gotcha).
