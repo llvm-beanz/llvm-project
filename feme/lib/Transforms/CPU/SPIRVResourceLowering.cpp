@@ -2220,20 +2220,39 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
 
     if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
         Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D ||
-        Shape == ImageShape::Plain3D || Shape == ImageShape::Plain2DMS ||
-        Shape == ImageShape::Array2DMS)
+        Shape == ImageShape::Plain3D)
       return false; // No fetch shape exists for Cube/CubeArray/Plain1D/
                     // Array1D yet (roadmap L52a: ordinary sampling only),
                     // nor for a sampled `Plain3D` handle's own `OpImageFetch`
-                    // (roadmap L66(a): ordinary *sample* only this row), nor
-                    // for a multisampled sampled image's own `texelFetch()`
-                    // (roadmap L73: `OpImageQuerySamples` is the sole
-                    // operation this shape supports -- already dispatched
-                    // and `continue`d above -- no `runtime/CPU` helper
-                    // exists to fetch a multisampled sampled image's texel).
+                    // (roadmap L66(a): ordinary *sample* only this row).
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
-    unsigned FetchCoordWidth = Shape == ImageShape::Array2D ? 3 : 2;
+    // Roadmap L307: a multisampled sampled image's own zero-mip
+    // `texelFetch()` (no `Lod` image operand -- `isFetchLevelIntrinsic`
+    // above already handles the explicit-`Lod` form, which SPIR-V never
+    // actually emits for a multisampled image since it has no mip chain
+    // to index) reaches here too now, alongside `Plain2D`/`Array2D`'s
+    // already-supported zero-mip fetch -- closing the gap roadmap L73's
+    // own doc flagged as "unstarted follow-on work": `Plain2DMS`'s
+    // coordinate widens by the same one extra (`Sample`) lane
+    // `Array2D`'s own `layer` lane adds to `Plain2D`'s 2-wide coordinate
+    // (`SPIRVToLLVMPatterns.cpp`'s `ImageLoadPattern` now threads
+    // `ImageFetchOp`'s own `Sample` image operand through identically to
+    // how it already threaded `ImageReadOp`'s, see that file's own
+    // updated doc), and `Array2DMS` widens by two (`layer` then
+    // `Sample`) -- `lowerImageAccesses` below already has a `Plain2DMS`/
+    // `Array2DMS` case in its zero-mip-fetch codegen switch (roadmap
+    // H19g/H19m), added for a *storage* image's `OpImageRead`, but reused
+    // here unchanged: `feme.cpu.image.load.2d.v4f32`/`.v4i32` and their
+    // `2darray` counterparts already document themselves as reading "one
+    // texel of a 2D image (sampled or storage)" and already accept the
+    // `Sample` operand this needs (`FeMeRuntimeCPU.c`), so no new
+    // `runtime/CPU` helper or `ImageCallKind` is needed after all.
+    unsigned FetchCoordWidth = Shape == ImageShape::Array2D ||
+                                       Shape == ImageShape::Plain2DMS
+                                   ? 3
+                               : Shape == ImageShape::Array2DMS ? 4
+                                                                : 2;
     if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false))
       return false;
     for (const User *PU : CI->users()) {
