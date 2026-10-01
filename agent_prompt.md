@@ -63,28 +63,34 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, lower priority, carried over many sessions)** `L265`'s ASTC
-   alpha-decode tie-break -- confirmed last session to affect 4 block sizes
-   (`astc_5x5`/`astc_8x8`/`astc_10x5`/`astc_12x12`), not 2. Still no structural
-   difference found between passing/failing cases; a reference-decoder
-   comparison (Mesa/lavapipe) is still the most promising untried angle. No new
-   ideas this session (did not revisit).
-2. **(carried over many sessions)** `fragdepth`/general multisample
-   image-creation gap (`L280`/`L281`, the "group (a)" half of `L307`'s own
-   original 222-case finding, 36 cases, still open) and the
-   combined-depth-stencil-format `readDepth`/`writeDepth` bug (`Executor.cpp`
-   ~line 999, 6 cases). The `x8_d24_unorm_pack32` `NotSupported` cases seen in
-   this session's own re-run are this exact gap.
-3. **(overdue many sessions)** `copy_and_blit.core.image_to_image.*` (52,692
-   cases) and the remaining `copy_and_blit` top-level groups (`copy_commands2`,
-   `dedicated_allocation`, `multiplanar_xfer`, `copy_memory_indirect`,
-   `device_address`, `sparse`, `dynamic_state`, `reinterpret`) are still
-   unsampled, as is `image_clearing` (45,636 cases) entirely. Not attempted this
-   session -- stayed focused on `L307` per the request.
-4. **(low priority, pre-existing, unrelated to FeMe)** `offload-test-suite`'s
-   own `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation issues, and
-   `array_of_matrices.test`'s unexpected-pass. Reconfirmed present, unchanged,
-   still needs upstream fixes outside this project's scope.
+1. **(carried over many sessions, ~36 cases, likely a half-day)**
+   `L280`/`L307`(a)'s multisample depth-image-creation gap:
+   `vkCreateImage` rejects 2/4/8-sample depth images with
+   `VK_ERROR_INITIALIZATION_FAILED`. Confirmed via this session's own
+   `fragdepth` re-run (9 of its remaining fails) and `L307`'s own
+   `copy_and_blit` sample (36 cases) to be the *same* general
+   multisample-image-creation limitation, not depth-specific --
+   likely a capability-advertisement or format-support-query gap in
+   `PhysicalDeviceInfo.cpp`. Good next pick: it's now the single
+   largest concretely-scoped, well-understood open item.
+2. **(a few hours, lower priority, carried over many sessions)**
+   `L265`'s ASTC alpha-decode tie-break (affects 4 block sizes). No
+   new ideas this session (not revisited) -- a Mesa/lavapipe
+   reference-decoder comparison is still the most promising untried
+   angle.
+3. **(overdue many sessions)** `copy_and_blit`'s remaining top-level
+   groups (`copy_commands2`, `dedicated_allocation`,
+   `multiplanar_xfer`, `copy_memory_indirect`, `device_address`,
+   `sparse`, `dynamic_state`, `reinterpret`) and `image_clearing`
+   (45,636 cases) are still entirely unsampled. Not attempted this
+   session -- stayed focused on `L308` per the request.
+4. **(low priority, pre-existing, unrelated to FeMe)**
+   `offload-test-suite`'s own `spec_const_32_bits.test`/
+   `WaveActiveMax.test` lit-annotation issues, and
+   `array_of_matrices.test`'s unexpected-pass. Reconfirmed present,
+   unchanged this session -- needs upstream fixes, outside this
+   project's scope.
 5. **(housekeeping, due again in ~5 sessions)**
-   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check -- not
-   checked this session (branch untouched), file away for a routine check soon.
+   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check
+   -- not checked this session (branch untouched); file away for its
+   next routine check.
