@@ -6984,3 +6984,57 @@ compiler-correctness fix, no new feature/extension surface.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L289/L290: `struct` cluster -- `nested_struct_array` GEP-index and stride-padding bugs
+
+Continuing the `struct` cluster's remaining 8 residual failures from
+`L288`: `uniform.{,dynamic_loop_}{loop_,}nested_struct_array{,_dynamic_index}_{fragment,vertex}`,
+a uniform block whose struct contains an array of a further nested
+struct (GLSL `struct T { float a; vec2 b[2]; }; struct S { float a; T
+b[3]; int c; };`), read back via deeply-indexed expressions like
+`s[0].b[1].b[0].x`.
+
+**L289 (fixed):** Isolated via `FEME_VULKAN_LOG_CREATION_ERRORS=1` on
+`nested_struct_array_fragment`: `error: 'llvm.getelementptr' op index 5
+indexing a struct is out of bounds` at pipeline-creation time -- a
+distinct bug from `L288`'s marker-identity issue. Extracted the shader
+source and SPIR-V disassembly via `--deqp-log-decompiled-spirv=enable
+--deqp-log-shader-sources=enable` and built a standalone two-access-chain
+`feme-opt` repro (a single access chain alone did not reproduce it,
+despite exercising the same index pattern -- a new lesson for this bug
+class: always mirror the real shader's *multiple* access chains, not
+just the simplest single case). Root-caused to
+`remapNestedStructMemberIndices`'s `ArrayTy` branch missing the
+tight-vector-marker unwrap-zero-insertion logic its `StructTy` branch
+already has (added for the direct-struct-member case). Fixed by adding
+a `RealArrayElementTy` tracking variable and matching `ArrayTy`-branch
+logic, mirroring the existing `RealStructTy` mechanism. Added a
+minimized single-access-chain FileCheck regression test,
+`spirv-to-llvm-nested-struct-array-of-vector-component.mlir`.
+
+**Verification:** `check-feme`: 3,444/3,505 Passed (+1 new test), 61
+Unsupported, 0 Failed. CTS: `dEQP-VK.glsl.struct.*` re-run: still 72/80
+Pass -- this fix unblocks pipeline creation for all 8 cases (previously
+failed before even building), but all 8 now fail at runtime with an
+image mismatch instead, due to a second, distinct, not-yet-fixed bug
+(`L290`).
+
+**L290 (not yet fixed):** Root-caused via IR inspection:
+`getTightNestedStructType`'s array-of-vector branch builds `array<N x
+markerStruct>` with no stride-aware padding, so each 8-byte marker-struct
+element disagrees with the array's own declared 16-byte `ArrayStride`
+(for `vec2 b[2]`) -- `b[1]` is read/written at the wrong byte offset. The
+obvious fix (reusing `padStructToSize`) is blocked: that helper
+explicitly refuses to pad a tight-vector marker struct, by design, to
+preserve the "exactly one member" invariant other code depends on. A new
+padding mechanism is needed; not yet implemented. See roadmap `L290` for
+the full design discussion.
+
+**Feature/extension surface:** `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed for `L289` -- an
+internal compiler-correctness fix, no new feature/extension surface.
+`L290` is expected to be the same once implemented.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
