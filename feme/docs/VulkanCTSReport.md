@@ -7425,3 +7425,63 @@ cases remain fixed); `dEQP-VK.glsl.loops.*`: **616/624 Pass** (up from
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L297: `Basic/Mandelbrot.test` miscompile root-caused and fixed
+
+`L296`'s own housekeeping triage flagged `Basic/Mandelbrot.test` (a
+pre-existing, non-CTS `offload-test-suite` test, not a `dEQP-VK` case)
+as a 91%-of-pixels image mismatch, suspecting golden-image drift. This
+session confirmed via `git merge-base --is-ancestor` that the original
+`L124p` fix for this exact shader is still present and un-reverted, and
+root-caused a genuine new regression instead.
+
+**Repro:** a minimal, standalone 4-thread HLSL compute shader (`for`
+loop with a data-dependent `break` plus a post-loop `if` on the
+break-set flag) isolating Mandelbrot's own per-pixel escape-iteration-
+loop shape -- expected per-lane output `[1003,1002,1001,1000]`, FeMe
+produced `[0,0,0,0]`. Far faster to iterate on than Mandelbrot's own
+16M-thread dispatch.
+
+**Root cause:** `LoopLinearizer::linearizeCycle`'s `ExitBlockRelayValues`
+mechanism (the `HeaderDivergent`-coexists-with-`CheckBlock` code path,
+see `L292`) can capture *two different* values for the *same*
+`ExitBlock` phi -- one from `Header`'s own uniform-timeout route, one
+from `CheckBlock`'s own genuinely divergent route -- whenever both
+relay through the same intermediate dispatch block one hop before
+`ExitBlock`. The old restore loop used "whichever capture runs first
+wins" (`PN->addIncoming` guarded only by "does `PN` already have a
+`Latch` entry"), silently discarding `CheckBlock`'s own genuinely
+load-bearing, per-lane value whenever it differed from `Header`'s flat
+constant. Once the now-dead original relay chain was cleaned up by a
+later unreachable-block cleanup pass, the surviving single-entry phi
+collapsed to `Header`'s own constant, permanently losing the per-lane
+"did this lane take the divergent exit" signal (the HLSL-level
+`Diverged` boolean in Mandelbrot's own shader) -- a provably-wrong,
+always-constant value, observed at runtime as solid-black rendering.
+
+**Fix:** tag each `ExitBlockRelayValues` entry with its origin (`Header`
+vs. `Check`) and, when both are present and differ for the same phi,
+merge them via a `select` keyed on a new genuinely loop-carried boolean
+phi (`ExitedViaCheck`, threaded like the existing `Live`/`SideEffect`
+`MaskPair` via `addLatchIncoming`/`freezeLoopCarriedValues`) recording
+whether this lane's own exit was via `CheckBlock` specifically (`Masks.Live
+AND NOT Staying`, folded monotonically each iteration).
+
+**Verification:** `Basic/Mandelbrot.test` now passes (confirmed both in
+isolation and via `check-hlsl-feme-vk` under `-j1`, avoiding a known
+`VK_TIMEOUT` sandbox-parallelism flake on this specific test that
+disappears under serial execution -- the same methodology `L296` used).
+Added a standalone IR-level regression test reduced from the repro's own
+pre-linearize IR, confirmed to fail without the fix and pass with it.
+`ninja check-feme`: 3446/3446 Passed, 61 Unsupported, 0 Failed (+1 new
+test, no regressions). `dEQP-VK.glsl.loops.*`: 616/624 Pass, same known
+8 `ifblock`/`elseblock` cases (`L295`'s own still-open item), unchanged.
+`dEQP-VK.glsl.demote.*`: 30/30 Pass, unchanged. `check-hlsl-feme-vk`:
+same 10 pre-existing unrelated failures as `L296`'s own baseline, no
+regressions. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed -- internal `feme-cpu-linearize` correctness fix, no
+new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
