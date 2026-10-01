@@ -8705,3 +8705,163 @@ out-of-scope `offload-test-suite` lit-annotation issues.
 grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
 `FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
 (separate statements).
+
+## L312: scoping-pass broader CTS sampling (`rasterization`, `texture`) -- wide Bresenham line bug found and fixed
+
+This session's goal was to resume the broader-sampling backlog with a
+fresh top-level `dEQP-VK.*` group never previously sampled against the
+real FeMe device. Rather than guess, generated a full case-list XML
+(`deqp-vk --deqp-runmode=xml-caselist`) and streamed it through a
+`xml.etree.ElementTree.iterparse` parser to get exact per-group leaf-
+case counts for all 56 top-level groups, cross-referenced against this
+report's own prior mentions to find genuinely never-sampled groups.
+Picked `rasterization` (15,019 cases) and `texture` (25,669 cases) --
+both reasonably sized, both explicitly suggested by the previous
+session's own next-steps list.
+
+**`rasterization` initial run:** 390 Pass / 94 Fail / 14,535
+NotSupported. Grouping the 94 failures by case-name prefix showed 73
+were `bresenham_line*_wide`/`_with_adjacency` variants across
+`primitives`/`primitives_multisample_{2,4,8}_bit` (plus
+`static_stipple`/`dynamic_stipple`'s own narrow base cases, which also
+combine with adjacency); the remaining ~21 are a scattered,
+not-yet-investigated mix (`depth_bias`, `flatshading`,
+`frag_side_effects.*`, `line_continuity.*`,
+`maintenance5.non_strict_line*`,
+`provoking_vertex.draw.default.triangle_fan`,
+`rasterization_order_attachment_access.*.multi_draw_barriers`).
+
+**Root cause:** isolated the cleanest repro,
+`dEQP-VK.rasterization.primitives.no_stipple.bresenham_lines_wide`,
+which reports "Invalid line width at (X, Y) - (X, Y). Detected width
+of 1, expected 5" at dozens of sample points -- FeMe rendered the
+line exactly 1 pixel wide regardless of the pipeline's `lineWidth`
+(5 in this test). `feme/include/feme/Graphics/Pipeline.h`'s
+`LineRasterizationMode`/`RasterState::LineWidth` doc comments
+explicitly documented this as deliberate: "always exactly 1 pixel
+wide regardless of `LineWidth` (per the spec, 'the width of the line
+is not adjustable, and it is always as if it were 1.0')". This
+citation turned out to be **stale** -- it matches core Vulkan 1.0's
+original, pre-`VK_EXT_line_rasterization` line-rasterization spec
+language, which has since been superseded by `VK_EXT_line_rasterization`
+(and the equivalent `VK_KHR_line_rasterization`/Vulkan 1.4 core
+promotion)'s own, more precise "Bresenham Line Segment Rasterization"
+section.
+
+Confirmed the current spec text directly from the
+`KhronosGroup/Vulkan-Docs` source (`chapters/primsrast.adoc`, fetched
+via a shallow git clone after several `web_fetch` attempts at the
+rendered HTML kept resolving to unrelated chapters/sections): "The
+actual width `w` of Bresenham lines is determined by rounding the
+line width to the nearest integer, clamping it to the
+implementation-dependent `lineWidthRange` (with both values rounded to
+the nearest integer), then clamping it to be no less than 1. Bresenham
+line segments of width other than one are rasterized by offsetting
+them in the minor direction ... and producing a row or column of
+fragments in the minor direction," with the lowest fragment of that
+row/column being the one the width-1 algorithm would have produced at
+the offset coordinates, and "the preferred method of attribute
+interpolation ... is to generate the same attribute values for all
+fragments in the row or column ... as if the adjusted line was used
+for interpolation and those values replicated to the other fragments,
+except for `FragCoord` which is interpolated as usual."
+
+**Fix:** rewrote `emitLineSegment`'s `Bresenham` branch in
+`Executor.cpp` to implement this algorithm: determine x-major/y-major
+via `abs(Dx) >= abs(Dy)` (matching the spec's own "slope in `[-1,1]`"
+definition), compute an integer width `W = clamp(round(LineWidth), 1,
+64)` (`64` matching `PhysicalDeviceInfo.cpp`'s own
+`lineWidthRange[1]`), offset the walked line's endpoints by
+`-(W-1)/2` pixels in the minor direction before walking the same
+Bresenham grid-walk loop as before, and -- at each walked step --
+emit `W` fragments (a column for x-major, a row for y-major) instead
+of 1, all sharing the one set of interpolated attributes computed for
+that step (the spec's own "preferred method", simpler than full
+per-fragment recomputation and explicitly spec-permitted). Updated
+`LineRasterizationMode`/`RasterState::LineWidth`'s own doc comments in
+`Pipeline.h` to describe the corrected behavior.
+
+**Regression test:** `ExecutorTest.RendersAWideBresenhamHorizontalLine`
+-- a width-3 horizontal Bresenham line, confirming it now lights a
+3-row band centered on the width-1 line's own row (rows 1-3 of a 4x4
+target) instead of just 1 row.
+
+**Verification:**
+- `ninja check-feme`: 3,458/3,519 Passed (+1 new test), 61
+  Unsupported, 0 Failed, 0 regressions.
+- `FeMeGraphicsTests --gtest_filter='*Bresenham*'`: 2/2 Passed
+  (the pre-existing `RendersABresenhamDiagonalLine` and the new wide
+  test).
+- CTS re-run of the full `rasterization` group: 402 Pass / 82 Fail /
+  14,535 NotSupported (was 390/94/14,535) -- confirmed exactly the 12
+  plain `*_wide` (no stipple, no adjacency) cases newly Pass
+  (`bresenham_lines_wide`/`bresenham_line_strip_wide` across
+  `primitives`/`primitives_multisample_{2,4,8}_bit`, plus their
+  `_factor_0`/`_factor_large` variants under `primitives`). The
+  remaining 82 failures are a confirmed **separate, not-yet-root-caused
+  bug**: every `bresenham_line*` case additionally combined with
+  `static_stipple`/`dynamic_stipple`/`dynamic_stipple_and_topology` or
+  `_with_adjacency` still fails, including cases with **no** width
+  component at all (e.g.
+  `dEQP-VK.rasterization.primitives.dynamic_stipple.bresenham_lines`,
+  confirmed via a standalone repro to report "Invalid fragment
+  count"/"missing fragments" against the diamond-exit rule, 227 vs.
+  233 expected fragments) -- this is unrelated to line width and needs
+  its own dedicated root-causing session (likely a stipple/adjacency-
+  specific bug in the same `Bresenham`-mode code path, or in how
+  stipple state interacts with the per-step walk).
+- `texture`'s run was launched in parallel this session; its own
+  results are reported separately once triaged (not yet, as of this
+  entry -- see this session's next steps).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- `VK_EXT_line_rasterization`/`VK_KHR_line_rasterization` were
+already advertised and `VK_LINE_RASTERIZATION_MODE_BRESENHAM` already
+selectable; this is a correctness fix to an already-exposed mode, not
+a new feature/extension surface.
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
+(separate statements).
+
+## `texture` group sampling -- 131 failures triaged (not yet root-caused), plus a texel-buffer crash
+
+The `texture` group's background run (launched in parallel with
+`rasterization` above) completed 25,646 of its 25,669 cases before the
+`deqp-vk` process itself aborted on
+`dEQP-VK.texture.texel_buffer.uniform.packed.a2b10g10r10-uint-pack32`
+with an MLIR assertion failure: `error: Dim must not be SubpassData or
+Buffer` / `StorageUniquerSupport.h:180:
+mlir::spirv::SampledImageType::get(...): Assertion
+'succeeded(ConcreteT::verifyInvariants(...))' failed` -- a genuine
+process crash, not a graceful `Fail`, while building a
+`SampledImageType` for a texel-buffer (`samplerBuffer`-shaped) sampled
+image. Not yet root-caused; the remaining ~23 untested
+`texel_buffer`/later cases are unknown.
+
+Of the 25,646 cases that did run: **9,668 Pass, 131 Fail, 15,846
+NotSupported, 1 crash**. Grouping the 131 failures by case-name prefix
+shows two dominant clusters, both confirmed via standalone repro to
+be genuine `Fail`s (not crashes):
+- **106 cases** under `texture.shadow.{1d,1d_array,2d,2d_array,cube,
+  cube_array}` (all `Image verification failed`/depth-comparison-
+  sampling-shaped tests -- e.g.
+  `dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.equal_d16_unorm`).
+- **16 cases** under `texture.explicit_lod.2d.sizes.*` (`Verification
+  failed` -- mipmap-filtering-shaped, e.g.
+  `dEQP-VK.texture.explicit_lod.2d.sizes.31x55_nearest_linear_mipmap_linear_repeat`).
+- 5 cases under `texture.multisample` (not yet individually examined).
+
+None of this session's investigation time was spent root-causing
+either cluster beyond confirming they reproduce standalone and
+roughly bucketing by prefix -- genuinely new, untriaged findings for a
+dedicated future session. Given the size of each cluster (106 and 16
+cases respectively) and that neither obviously overlaps with
+`L312`'s own Bresenham-line fix, these are tracked as open items
+rather than attempted this session (time budget was spent on `L312`'s
+fix instead, per this session's own prioritization).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- investigation only, no code changed for these findings this
+session.
