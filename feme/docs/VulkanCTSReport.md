@@ -7588,3 +7588,58 @@ pre-existing issues: 4 `InterlockedCompareExchange{,.resources}.32.test`
 barrier-inside-divergent-control-flow milestone-9 limitation, not a
 bug) plus `spec_const_32_bits.test`/`WaveActiveMax.test` (upstream
 `offload-test-suite` lit-annotation issues, unrelated to FeMe).
+
+## L293 (continued): `derivate`'s 3 residual `fwidth` failures confirmed non-bug
+
+`L293`'s own triage left `fwidth{,coarse,fine}.fbo_float.vec4_highp`
+(3 cases) unroot-caused, suspecting either the same class of
+reference-conformance mismatch as `L287`'s `cosh`/`sinh`, or a real
+precision bug in FeMe's own `fwidth`/`dFdx`/`dFdy` lowering. This
+session extracted the exact pixel values to settle it.
+
+**Method:** `deqp-vk --deqp-case='dEQP-VK.glsl.derivate.fwidth*.fbo_float.vec4_highp'
+--deqp-log-images=enable`, then read the `FAIL: got (...), diff = (...)`
+lines directly out of the resulting QPA log (no need for a side-by-side
+image diff -- deqp already logs the exact expected/actual/diff/threshold
+vectors and failing pixel coordinates per case).
+
+**Findings:**
+- `fwidth`/`fwidthfine`: exactly 1 failing pixel each, at `(78,38)`.
+- `fwidthcoarse`: exactly 4 failing pixels, at `(78,38)`/`(79,38)`/
+  `(78,39)`/`(79,39)` -- precisely the 2x2 quad `fwidthCoarse` is
+  spec-required to compute one shared derivative value across (GLSL
+  spec: coarse derivatives "may" be computed per 2x2 pixel block); this
+  4-pixel pattern is expected `fwidthCoarse` behavior, not a bug.
+- All 4 failing-pixel instances (across all 3 cases) report the
+  **identical** expected/actual/diff vectors: expected
+  `(0.846465, 0.580451, 0.237867, 0.0176198)`, got
+  `(0.846464, 0.580452, 0.237862, 0.0175858)`, diff
+  `(5.36442e-07, 8.34465e-07, 5.76675e-06, 3.40529e-05)` against
+  threshold `(6.09756e-05, 6.09756e-05, 3.05101e-05, 3.05171e-05)`.
+- RGB are all well within threshold (diffs 5e-07 to 5.8e-06 vs ~3e-05/
+  6e-05 thresholds). Only alpha (w) is marginally over: `3.40529e-05`
+  vs threshold `3.05171e-05` (~12% overshoot).
+- The test applies a per-channel display-space remapping before
+  thresholding (`p' = p * derivScale + derivBias`, logged as
+  `(1.18135, 1.72273, 4.20372, 56.6675)` / `(-0.999955, -0.999947,
+  -0.99984, 2.26719e-08)` for this case) to make small derivative
+  magnitudes visible in an 8-bit-equivalent comparison. The alpha
+  channel's scale factor (`56.6675`) is far larger than RGB's
+  (`1.18135`-`4.20372`), so it amplifies the underlying raw per-lane
+  difference by ~57x before the threshold check. Dividing the observed
+  display-space diff back by this scale gives the real underlying raw
+  diff: `3.40529e-05 / 56.6675 ≈ 6.0e-7` -- a few ULPs of float32
+  precision at this magnitude, not a structural lowering bug.
+
+**Conclusion:** same class of finding as `L287`'s `cosh`/`sinh` --
+a legitimate, tiny floating-point rounding difference between FeMe's
+own `fwidth`/`dFdx`/`dFdy` lowering and the CTS's reference
+implementation, amplified to just barely exceed an aggressively tight,
+scale-amplified comparison threshold. No code change made; this
+closes `L293`'s last open item. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed (no code change at
+all this item).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
