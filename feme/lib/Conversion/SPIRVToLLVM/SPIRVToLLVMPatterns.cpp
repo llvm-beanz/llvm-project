@@ -8091,17 +8091,27 @@ bool hasExactImageOperands(
 /// from which intrinsic produced the load -- see `generateImageReadOrFetch`
 /// in `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`.
 ///
-/// Roadmap H19g: a `spirv.ImageRead` against a plain (non-arrayed)
-/// multisampled 2D storage image may also carry a lone `Sample` image
-/// operand (SPIR-V requires one whenever the image's own `MS == 1`); this
-/// is accepted only for `ImageReadOp` (an `ImageFetchOp`'s own multisampled-
-/// *sampled*-image case is still unstarted follow-on work) and its operand
-/// value is appended as the coordinate vector's own trailing lane
-/// (`appendVectorLane`), which `SPIRVResourceLowering.cpp`'s
-/// `classifyStorageImage2DHandle`/`lowerImageAccesses` then extract exactly
-/// like `Array2D`'s own array-layer/`Plain3D`'s own depth-slice 3rd
-/// component (`ImageShape::Plain2DMS`, or roadmap H19m's `Array2DMS` when
-/// the image is also arrayed).
+/// Roadmap H19g/L307: a `spirv.ImageRead` or `spirv.ImageFetch` against a
+/// multisampled 2D image (plain or arrayed, storage or sampled) may also
+/// carry a lone `Sample` image operand (SPIR-V requires one whenever the
+/// image's own `MS == 1`). `ImageReadOp` (a storage-image read) gained
+/// this first, under H19g/H19m; `ImageFetchOp` (a *sampled*-image
+/// texelFetch, e.g. GLSL's `texelFetch()`/HLSL's `Texture2DMS::Load()`)
+/// was left as "unstarted follow-on work" at the time, surfaced later by
+/// roadmap L307's own real `dEQP-VK.api.copy_and_blit.core.use_after_copy.
+/// *_msaa` CTS failures (a `spirv.ImageFetch` with a `Sample` operand
+/// against an arrayed+multisampled sampled image failed MLIR
+/// legalization outright, since this pattern declined to match it at
+/// all). Both ops reach `createResourcePointer`
+/// (`llvm.spv.resource.getpointer`) identically regardless of whether the
+/// underlying handle is a storage or sampled image -- nothing below is
+/// actually storage-image-specific, so the two ops need no different
+/// handling here; the `Sample` operand value is appended as the
+/// coordinate vector's own trailing lane (`appendVectorLane`), the same
+/// shape `SPIRVResourceLowering.cpp`'s `classifyStorageImage2DHandle`/
+/// `lowerImageAccesses` already extract an array layer/depth-slice from
+/// for `Array2D`/`Plain3D` (see `ImageShape::Plain2DMS`'s own comment, or
+/// roadmap H19m's `Array2DMS` when the image is also arrayed).
 template <typename ImageOpTy>
 class ImageLoadPattern : public mlir::SPIRVToLLVMConversion<ImageOpTy> {
 public:
@@ -8113,21 +8123,18 @@ public:
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     std::optional<mlir::spirv::ImageOperands> ImageOperands =
         Op.getImageOperands();
-    bool HasSample = false;
-    if constexpr (std::is_same_v<ImageOpTy, mlir::spirv::ImageReadOp>) {
-      HasSample = hasExactImageOperands(ImageOperands,
-                                        mlir::spirv::ImageOperands::Sample);
-      if (HasSample) {
-        auto ImageType =
-            mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
-        if (!ImageType || !isMultisampled2DImage(ImageType))
-          return Rewriter.notifyMatchFailure(
-              Op, "Sample image operand only supported for a "
-                  "multisampled 2D storage image");
-        if (Adaptor.getOperandArguments().size() != 1)
-          return Rewriter.notifyMatchFailure(
-              Op, "Sample image operand needs exactly one operand argument");
-      }
+    bool HasSample = hasExactImageOperands(ImageOperands,
+                                           mlir::spirv::ImageOperands::Sample);
+    if (HasSample) {
+      auto ImageType =
+          mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
+      if (!ImageType || !isMultisampled2DImage(ImageType))
+        return Rewriter.notifyMatchFailure(
+            Op, "Sample image operand only supported for a multisampled "
+                "2D image");
+      if (Adaptor.getOperandArguments().size() != 1)
+        return Rewriter.notifyMatchFailure(
+            Op, "Sample image operand needs exactly one operand argument");
     }
     if (hasImageOperands(ImageOperands) && !HasSample)
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
