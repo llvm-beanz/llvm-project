@@ -8561,3 +8561,38 @@ feature/extension surface.
 grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
 `FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
 (separate statements).
+
+## `api.image_clearing` broader sampling (overdue backlog item, this session)
+
+Per the standing backlog (`image_clearing`'s 45,636 cases had never
+been run against the real FeMe device at all), sampled the full group
+after `L310`'s fix landed:
+
+```
+./deqp-vk --deqp-case='dEQP-VK.api.image_clearing.*' \
+    --deqp-log-filename=/tmp/l311_image_clearing.qpa \
+    --deqp-log-images=disable
+```
+
+**Result: 23,028 Pass / 0 Fail / 22,608 NotSupported (45,636 total).**
+Entirely clean -- no new bugs found in this group. The `NotSupported`
+half is expected: this group exhaustively covers every
+format/image-type/sample-count/layer-count combination the Vulkan
+spec allows a device to decline (e.g. many compressed/multi-planar
+formats, several sample counts per format), and FeMe's device-info
+advertisement already correctly declines exactly the combinations it
+does not implement (validated by the 0-Fail result -- a real
+format-support gap would show up as a hard `vkCreateImage`/
+`vkCmdClearColorImage` failure inside a case marked `Pass`/`Fail`, not
+as a clean `NotSupported` skip).
+
+This closes out `image_clearing` from the broader-CTS-sampling
+backlog entirely. Remaining unsampled backlog: `copy_and_blit`'s
+`copy_commands2`/`dedicated_allocation`/`multiplanar_xfer`/
+`copy_memory_indirect`/`device_address`/`sparse`/`dynamic_state`/
+`reinterpret` groups, and `synchronization.op`/`api.copy_and_blit.
+core.image_to_image`/a few smaller untouched `api.*` subgroups (see
+`agent_thoughts.md`'s next steps for the full ranked list).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- this was a read-only CTS sample, no code changed.
