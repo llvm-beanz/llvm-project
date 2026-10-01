@@ -187,6 +187,93 @@ TEST(JITEngineTest, ReferenceModeRunsTheSameShaderUnwidened) {
   EXPECT_EQ(Buffer, (std::vector<int32_t>{0, 1, 2, 3}));
 }
 
+// A minimal raised SPIR-V-sourced compute shader: reads a float from a
+// register-bound `spirv.VulkanBuffer` (descriptor set 0, binding 0) and
+// stores `2x` it into a traditionally-bound raw output buffer (set 0,
+// binding 1) -- the `llvm.spv.resource.handlefrombinding`/`getpointer`
+// vocabulary `feme::SPIRVToLLVMTranslator` raises a SPIR-V-origin module
+// to, as opposed to `ShaderIR`/`MixedResourceShaderIR` above's
+// `llvm.dx.resource.*` (DXIL-origin) vocabulary.
+constexpr char SPIRVBoundResourceShaderIR[] = R"(
+  define void @main() #0 {
+    %in = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+    %out = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+    %tid = call i32 @llvm.spv.thread.id(i32 0)
+    %inptr = call ptr
+        @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %in, i32 %tid)
+    %v = load float, ptr %inptr
+    %doubled = fmul float %v, 2.0
+    %outptr = call ptr
+        @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %out, i32 %tid)
+    store float %doubled, ptr %outptr
+    ret void
+  }
+  declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+      @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+  declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  declare i32 @llvm.spv.thread.id(i32)
+  attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+)";
+
+// Regression test for roadmap L319: `CompiledStage::create`'s `Reference`
+// branch only ever ran `BoundResourceNormalizationPass` (which exclusively
+// matches `llvm.dx.resource.handlefrombinding`, see that pass's own header
+// comment) before `checkSupportedRaisedOps`, never
+// `SPIRVResourceLoweringPass` (the SPIR-V counterpart `runPipeline`'s own,
+// non-`Reference` pipeline already ran). Every register-bound
+// `llvm.spv.resource.handlefrombinding` call -- the vocabulary any
+// SPIR-V-sourced module uses -- therefore survived unnormalized into
+// `checkSupportedRaisedOps`, which rejected it as an unsupported raised
+// operation in `--reference` mode specifically, even though the identical
+// module ran correctly through the normal (non-`Reference`) JIT path. This
+// test would have failed (`JITEngine::create` returning that error) before
+// the fix.
+TEST(JITEngineTest, ReferenceModeNormalizesSPIRVBoundResourceHandles) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(SPIRVBoundResourceShaderIR, Err,
+                                     Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << "parse error: " << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+
+  JITOptions Opts;
+  Opts.Reference = true;
+  Expected<std::unique_ptr<JITEngine>> Engine =
+      JITEngine::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Engine, Succeeded());
+
+  std::vector<float> InBuffer{1.0f, 2.0f, 3.0f, 4.0f};
+  FemeDescriptor InDesc{};
+  InDesc.Data = InBuffer.data();
+  InDesc.SizeInBytes = InBuffer.size() * sizeof(float);
+  InDesc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+
+  std::vector<float> OutBuffer(4, -1.0f);
+  FemeDescriptor OutDesc{};
+  OutDesc.Data = OutBuffer.data();
+  OutDesc.SizeInBytes = OutBuffer.size() * sizeof(float);
+  OutDesc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  OutDesc.Flags = FEME_DESCRIPTOR_UAV;
+
+  std::array<BoundResourceBinding, 2> Bindings;
+  Bindings[0].Space = 0;
+  Bindings[0].BaseRegister = 0;
+  Bindings[0].Descriptors = ArrayRef<FemeDescriptor>(&InDesc, 1);
+  Bindings[1].Space = 0;
+  Bindings[1].BaseRegister = 1;
+  Bindings[1].Descriptors = ArrayRef<FemeDescriptor>(&OutDesc, 1);
+
+  DispatchResources Resources;
+  Resources.BoundResources = ArrayRef<BoundResourceBinding>(Bindings);
+
+  ASSERT_THAT_ERROR((*Engine)->dispatch(Resources, {1, 1, 1}), Succeeded());
+
+  EXPECT_EQ(OutBuffer, (std::vector<float>{2.0f, 4.0f, 6.0f, 8.0f}));
+}
+
 // Regression test for the Mach-O-specific `asm`-label mangling escape (see
 // `feme::cpu::detail::stripAsmLabelManglingEscape`'s comment in
 // JITEngine.cpp): a `'\1'`-prefixed global name, exactly like Clang emits

@@ -22,6 +22,10 @@
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/RootConstantLowering.h"
+#include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
+#include "feme/Transforms/CPU/SPIRVResourceLowering.h"
+#include "feme/Transforms/CPU/SPIRVSubpassLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
@@ -252,6 +256,22 @@ createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
     ModulePassManager Normalize;
     Normalize.addPass(PreparePass(EntryPoint, Stage));
     Normalize.addPass(BoundResourceNormalizationPass());
+    // (Roadmap L319) `BoundResourceNormalizationPass` above only matches
+    // `llvm.dx.resource.handlefrombinding` (DXIL): a SPIR-V-sourced
+    // module's own `llvm.spv.resource.handlefrombinding` calls survive it
+    // completely untouched. `runPipeline`'s non-`Reference` pipeline
+    // (Pipeline.cpp) normalizes those through this same quartet of passes,
+    // in this same order, before its own `checkSupportedRaisedOps` call;
+    // this `Reference` path had never run any of them, so every
+    // SPIR-V-sourced shader that binds a sampled image/sampler/root
+    // constant/push constant/subpass input failed `checkSupportedRaisedOps`
+    // below with a "cannot normalize" diagnostic in `--reference` mode
+    // specifically, even though the identical module ran correctly through
+    // the normal (non-`Reference`) JIT path.
+    Normalize.addPass(RootConstantLoweringPass());
+    Normalize.addPass(SPIRVResourceLoweringPass());
+    Normalize.addPass(SPIRVPushConstantLoweringPass());
+    Normalize.addPass(SPIRVSubpassLoweringPass());
     Normalize.run(Mod, MAM);
 
     if (Error E = checkSupportedRaisedOps(Mod))
