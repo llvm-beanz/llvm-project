@@ -7220,3 +7220,74 @@ needed -- triage-only, no code changes this section.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L292 (continued): root cause fully confirmed for both uniform- and divergent-condition variants; fix attempted, found unsafe in isolation, reverted
+
+Deepened this session's investigation of `L292` (the 5-case `dynamic_loop_*`
+`demote` runtime image-mismatch bug) with real pre-SIMD IR dumps (via
+`FEME_DUMP_IR_PRESIMD=1 deqp-vk --deqp-case=...`) of both
+`dynamic_loop_always` (uniform loop exit, uniform `if (i>0) demote`
+condition) and `dynamic_loop_dynamic` (uniform loop exit, but a *divergent*
+`if (i>0) demote` condition, varying per-lane via a texture/position-derived
+value). Both confirmed to share the same final symptom: the real
+framebuffer-gating `feme.cpu.stage.return.masks` call at the loop's exit
+block is a hardcoded, compile-time-constant `true`/`true`, never narrowed
+by any iteration's `demote`, regardless of how many iterations ran or
+whether the per-lane demote condition is itself uniform or divergent.
+
+Root cause has two layered parts, both in `feme/lib/Transforms/CPU/Linearize.cpp`:
+
+1. `DiamondFlattener::isLoopControlEdge` only inspects a branch's *direct*
+   successors to decide whether it is a cycle boundary (and hence
+   `LoopLinearizer`'s problem, not an ordinary flattenable diamond). When
+   `StructurizeCFG` inserts a synthetic `Flow` dispatch block between a
+   loop header's own continue/exit branch and the loop's real continue/exit
+   targets, *both* of the header's direct successors fail this check,
+   misclassifying the header's own iteration decision as an ordinary
+   two-way uniform diamond reconverging at `Flow`.
+2. Even with (1) fixed, `DiamondFlattener::run()`'s cycle-exit-root
+   handling seeds the exit block's downstream code directly from
+   `CycleBoundaryMasks[Header]` -- the loop's pre-loop *entry* mask
+   (`true`/`true`), baked in as an immutable constant call argument
+   *before* `LoopLinearizer` ever runs -- with no mechanism for
+   `LoopLinearizer`'s own later, correctly-computed final per-iteration
+   mask to patch it afterward.
+
+Confirmed via `dynamic_loop_dynamic`'s IR that gap (2) is the one actually
+responsible for the CTS failure: `LoopLinearizer`'s existing
+`DivergentCandidates` code path *does* run successfully here (the per-lane
+`i>0` check is divergent) and *does* correctly compute a narrowed
+per-iteration `live.merge`/`sideeffect.merge` pair -- but the exit block's
+`return.masks` call is still the stale hardcoded `true`/`true`, structurally
+disconnected from that correctly-computed value. For `dynamic_loop_always`
+(uniform `i>0` condition, no divergence anywhere in the cycle),
+`LoopLinearizer` additionally bails out entirely before computing anything
+(it unconditionally leaves alone any cycle where neither the header nor
+latch exit check is divergent) -- a third, separate gap for that
+sub-variant specifically.
+
+A first fix attempt (making a cycle's own header branch always a cycle
+boundary, in both `DiamondFlattener::validate()` and `::flatten()`) was
+implemented, built, and tested: it changes the IR shape as expected
+(removes the incorrect `Flow`-reconvergence phi at the header) but does
+**not** change the CTS outcome (all 5 cases still fail identically, since
+gap (2) is untouched), and **regresses two existing tests**
+(`FEME :: Transforms/CPU/Linearize/loop-break-structurized.ll` and
+`LinearizeTest.NestedCycleInsideFlattenedDiamondArmInheritsOuterDiamondsMask`).
+Confirmed via `check-feme` before and after: baseline 3,443/3,504 Pass, 61
+Unsupported, 0 Failed; with the attempted fix, 3,441/3,504 Pass (2 new
+Failed). Reverted; **nothing committed this session for `L292`**. Full fix
+design (freeze-based unique per-cycle placeholder values, patched via
+`replaceAllUsesWith` once `LoopLinearizer` computes the real final mask,
+plus a new `LoopLinearizer` code path for uniform-exit loops whose body
+still narrows the mask) recorded in `Roadmap.md`'s `L292` entry and
+`agent_thoughts.md` for a dedicated future session.
+
+`check-feme`: 3,443/3,504 Passed, 61 Unsupported, 0 Failed (confirmed clean
+at session end, after the revert). CTS: no change in pass/fail counts this
+session (fix not landed). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- no code landed.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
