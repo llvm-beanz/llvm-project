@@ -3866,9 +3866,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           for (uint32_t Q = 0; Q != QuadCount; ++Q) {
             cpu::FemeFragmentInvocation &PassInv = PassInvocations[Q];
             const PendingQuad &Quad = Quads[Q];
+            // (roadmap L310) `PassInv.SideEffectMask` gates the shader's
+            // own resource stores/atomics (e.g. an `imageStore`), and
+            // must be narrowed to exactly this pass's own sample, just
+            // like `PassInv.Coverage` immediately below -- not left at
+            // `QuadInvocations`' original whole-quad `Quad.Coverage`
+            // (true whenever *any* sample of the lane was covered, by
+            // *any* pass). Before this fix, a lane with one covered and
+            // one uncovered sample ran its side effects for *every*
+            // pass, including the pass for its genuinely-uncovered
+            // sample -- while the late depth/stencil test (correctly
+            // gated by the narrowed `PassInv.Coverage` below) still
+            // skipped writing depth for that uncovered sample, leaving a
+            // real shader side effect (e.g. a marker write) falsely
+            // indicating a sample was shaded when no actual
+            // depth/color-writing invocation for it ever ran.
+            uint32_t PassSideEffectMask = 0;
             for (unsigned Lane = 0; Lane != 4; ++Lane) {
               PassInv.SampleIndex[Lane] = PassSample;
               PassInv.Coverage[Lane] &= SampleBit;
+              if (Quad.SampleMask[Lane] & SampleBit)
+                PassSideEffectMask |= (1u << Lane);
               PassInv.Position[Lane][0] = Quad.PixelX[Lane] + Offset[0];
               PassInv.Position[Lane][1] = Quad.PixelY[Lane] + Offset[1];
               // (roadmap L114) `gl_SamplePosition` reads back this same
@@ -3878,6 +3896,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               PassInv.SamplePosition[Lane][0] = Offset[0];
               PassInv.SamplePosition[Lane][1] = Offset[1];
             }
+            PassInv.SideEffectMask = PassSideEffectMask;
           }
         }
 

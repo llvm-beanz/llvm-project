@@ -6276,6 +6276,153 @@ TEST(ExecutorTest, AcceptsEightSampleCount) {
   }
 }
 
+// (roadmap L310) A fragment shader that reads `SV_SampleIndex` (forcing
+// `PerSampleShading`, exactly like `SampleIndexFragmentShaderIR` above)
+// and, before writing its ordinary color output, unconditionally stores
+// a `1` marker into a bound raw UAV buffer at `SampleIndex * 4` -- the
+// same "did this exact (pixel, sample) pair's fragment invocation really
+// run" technique `dEQP-VK.glsl.builtin_var.fragdepth`'s own marker-image
+// write uses, just via a raw buffer instead of a storage image (simpler
+// to set up here, and exercises the identical `SideEffectMask` gating
+// path: both lower to a resource-heap store call masked by the per-pass
+// `SideEffectMask` SIMDize threads through the compiled entry's ABI).
+constexpr char SampleMarkerFragmentShaderIR[] = R"(
+  define void @fs_samplemarker() #0 {
+    %h = call target("dx.RawBuffer", i8, 1, 0)
+        @llvm.dx.resource.handlefromheap(i32 0)
+    %sidx = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+    %off = mul i32 %sidx, 4
+    call void @llvm.dx.resource.store.rawbuffer.i32(
+        target("dx.RawBuffer", i8, 1, 0) %h, i32 %off, i32 poison, i32 1)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare target("dx.RawBuffer", i8, 1, 0)
+      @llvm.dx.resource.handlefromheap(i32)
+  declare void @llvm.dx.resource.store.rawbuffer.i32(
+      target("dx.RawBuffer", i8, 1, 0), i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+// Roadmap L310: before this fix, a lane whose quad had *any* sample
+// covered ran every `PerSampleShading` pass's side effects for *every*
+// sample of that lane, not just the samples actually covered by that
+// specific pass -- because `Executor.cpp`'s per-pass `PassInvocations`
+// narrowing loop updated `PassInv.Coverage` (which gates the late
+// depth/stencil test) with `&= SampleBit`, but left `PassInv.
+// SideEffectMask` (which gates the shader's own resource stores, e.g. an
+// `imageStore`/raw-buffer marker write) at its original whole-quad
+// `Quad.Coverage` value, unnarrowed, for every pass. A single pixel with
+// a primitive edge that covers sample 0 but not sample 1 exposes this
+// exactly: the marker write (gated by the stale `SideEffectMask`) fires
+// for *both* samples, but the real depth/color write (correctly gated by
+// the narrowed `PassInv.Coverage`) only happens for sample 0 -- the
+// mismatch this milestone's CTS investigation (`dEQP-VK.glsl.builtin_var.
+// fragdepth.*_multisample_{2,4,8}`) traced back to: the CTS's own marker
+// image reports a sample as shaded when it was not, so it expects a real
+// depth value there and gets the clear value instead.
+TEST(ExecutorTest, SideEffectMaskNarrowsToThePassSpecificSampleNotTheWholeLane) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement SampleIndexIn;
+  SampleIndexIn.ElementID = 0;
+  SampleIndexIn.Direction = SignatureDirection::Input;
+  SampleIndexIn.SystemValue = SignatureSystemValue::SampleIndex;
+  SampleIndexIn.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {SampleIndexIn, makeElement(1, SignatureDirection::Output, 4,
+                                               /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, SampleMarkerFragmentShaderIR, "fs_samplemarker", FSSig,
+      ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/2,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 1, 1}});
+
+  std::array<uint8_t, 2 * 4> MSStorage{};
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 1, 1};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+
+  // A quad covering NDC x in [-3, 0] (screen x in [-4, 0.5] for a 1x1
+  // viewport -- i.e. the left half of the single pixel) and the whole
+  // height: sample 0's fixed offset (0.25, 0.25) lies inside this half
+  // (screen x == 0.25 < 0.5), sample 1's (0.75, 0.75) does not (screen x
+  // == 0.75 >= 0.5), so this one pixel has exactly one covered and one
+  // uncovered sample -- a real, geometric partial-coverage edge, not a
+  // shader-side `discard`/`gl_SampleMask` narrowing (which this bug does
+  // not affect; see `AlphaToCoverageEnableGeneratesPerSampleCoverageFrom
+  // Alpha`/`FragmentSampleMaskOutputNarrowsPerSampleCoverage` above).
+  std::vector<float> VertexData = {
+      -3.0f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.0f,  -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.0f,  3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -3.0f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.0f,  3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -3.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::array<int32_t, 2> MarkerBuffer = {0, 0};
+  cpu::FemeDescriptor Desc{};
+  Desc.Data = MarkerBuffer.data();
+  Desc.SizeInBytes = MarkerBuffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(cpu::ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  Draw.VertexBuffers = Bindings;
+  Draw.Resources.ResourceHeap = ArrayRef<cpu::FemeDescriptor>(&Desc, 1);
+  DrawCommand Cmd;
+  Cmd.VertexCount = 6;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  // Sample 0 is genuinely covered: its marker is set, and its own
+  // fragment invocation's color write landed (red channel saturated).
+  EXPECT_EQ(MarkerBuffer[0], 1);
+  EXPECT_EQ(MSStorage[0 * 4], 255);
+  // Sample 1 is NOT covered by this edge: its marker must stay 0 (no
+  // fragment invocation's side effects ever legitimately ran for it),
+  // matching its color staying untouched (0, from the zero-initialized
+  // `MSStorage`) -- before this fix, the marker went to 1 here even
+  // though no real per-sample invocation's depth/color write ever
+  // touched sample 1, exactly the `L310` CTS symptom.
+  EXPECT_EQ(MarkerBuffer[1], 0);
+  EXPECT_EQ(MSStorage[1 * 4], 0);
+}
+
 TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
   Context Ctx;
   EntrySignature VSSig;
