@@ -1880,6 +1880,23 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
             return true;
           if (UI == NextInst || PrecedesInRegions(UI, NextInst))
             return false;
+          // Roadmap H165: a use inside `Shape.Header` itself (e.g. a
+          // per-iteration broadcast/splat of the phi's *current*
+          // iteration value, computed in the header and only consumed
+          // later, possibly after the loop) is always fine: the header
+          // is cloned into the wrapper whole, once per iteration (see
+          // the `NextInst->getParent() == Shape.Header` check just
+          // above), so every such use already sees that same clone's
+          // value -- including on the exiting iteration, whose header
+          // clone is exactly what is live into `Shape.ExitBlock`. This
+          // is the same guarantee the `Shape.SuffixOrder` check below
+          // gives a direct use after the loop, just one level removed:
+          // the header value itself (not the phi) is what the suffix
+          // actually reads, and the header's own re-execution each
+          // iteration already keeps that value correct without needing
+          // its own per-use barrier/order check.
+          if (UI->getParent() == Shape.Header)
+            return false;
           // Roadmap H163: a read after the loop has finished is always
           // fine -- the slot then holds exactly the value the header phi
           // would have on the exiting edge (the last iteration's
@@ -2318,27 +2335,35 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
       U->set(NewArg);
   }
 
-  // Roadmap H124e(a): the body chain may also directly reference some
-  // OTHER (non-phi) instruction still local to `Shape.Header` -- e.g. a
+  // Roadmap H124e(a)/H165: the body chain -- or, per H165, `Shape.Suffix`
+  // after the loop has exited -- may also directly reference some OTHER
+  // (non-phi) instruction still local to `Shape.Header`: e.g. a
   // `feme::cpu::SIMDizePass`-inserted per-iteration "splat" of an
-  // induction variable, computed once in the header and reused unchanged
-  // by the barrier region(s) -- previously untested, since a loop whose
-  // body chain referenced a header-local value like this never
-  // successfully matched `matchLoopShape` at all until this milestone's
-  // collapsed-single-block-latch case started recognizing this shape.
-  // `Shape.Header` is cloned (not outlined) exactly like its own phis
-  // above, so give each such value the same trailing-parameter treatment,
-  // continuing the same `loopvarN` numbering right after the real
-  // inductions -- `buildWaveLoop`'s own by-name dispatch already threads
-  // any `loopvarN` parameter through `LoopScalars` without needing to
-  // know the difference between a genuine induction and one of these.
+  // induction variable, computed once in the header and either reused
+  // unchanged by the barrier region(s) (H124e(a)) or read once more,
+  // post-loop, to store out that induction's final value (H165) --
+  // previously untested, since a loop whose body chain referenced a
+  // header-local value like this never successfully matched
+  // `matchLoopShape` at all until this milestone's collapsed-single-block-
+  // latch case started recognizing this shape. `Shape.Header` is cloned
+  // (not outlined) exactly like its own phis above, so give each such
+  // value the same trailing-parameter treatment, continuing the same
+  // `loopvarN` numbering right after the real inductions --
+  // `buildWaveLoop`'s own by-name dispatch already threads any `loopvarN`
+  // parameter through `LoopScalars` without needing to know the
+  // difference between a genuine induction and one of these, and
+  // `SuffixRegions` below is built from the same, already-extended
+  // `WaveBody`/`LoopScalars` as every other region.
+  auto IsInWaveRegionOrSuffix = [&](BasicBlock *BB) {
+    return IsInWaveRegion(BB) || is_contained(Shape.SuffixOrder, BB);
+  };
   SmallVector<Instruction *, 2> HeaderDerivedValues;
   for (Instruction &I : *Shape.Header) {
     if (isa<PHINode>(I) || I.isTerminator())
       continue;
     if (any_of(I.uses(), [&](Use &U) {
           auto *UI = dyn_cast<Instruction>(U.getUser());
-          return UI && IsInWaveRegion(UI->getParent());
+          return UI && IsInWaveRegionOrSuffix(UI->getParent());
         }))
       HeaderDerivedValues.push_back(&I);
   }
@@ -2347,7 +2372,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     SmallVector<Use *, 4> UsesInBody;
     for (Use &U : HV->uses())
       if (auto *UI = dyn_cast<Instruction>(U.getUser());
-          UI && IsInWaveRegion(UI->getParent()))
+          UI && IsInWaveRegionOrSuffix(UI->getParent()))
         UsesInBody.push_back(&U);
 
     auto AppendResult =
