@@ -8596,3 +8596,112 @@ core.image_to_image`/a few smaller untouched `api.*` subgroups (see
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 -- this was a read-only CTS sample, no code changed.
+
+## L311: broader CTS sampling (`synchronization.op`, `copy_and_blit`'s remaining groups) -- one new bug found and fixed
+
+Per the standing backlog, sampled `dEQP-VK.synchronization.op.*`
+(20,131 cases, run in one shot per the prior session's "just try it,
+`image_clearing` took ~5 minutes for 45k cases" suggestion) and all 8
+remaining unsampled `copy_and_blit` top-level groups
+(`copy_commands2`, `dedicated_allocation`, `multiplanar_xfer`,
+`copy_memory_indirect`, `device_address`, `sparse`, `dynamic_state`,
+`reinterpret`).
+
+**`synchronization.op`: 14,694 Pass / 0 Fail / 5,437 NotSupported.**
+Entirely clean, no new bugs.
+
+**`copy_and_blit`'s 8 groups:** 6 of 8 entirely clean (0 Fail each):
+`multiplanar_xfer` (2,216, all NotSupported), `copy_memory_indirect`
+(1,573, all NotSupported), `device_address` (918: 186 Pass / 732
+NotSupported), `sparse` (38, all NotSupported), `dynamic_state` (12,
+all NotSupported), `reinterpret` (6: 2 Pass / 4 NotSupported). The
+remaining 2 groups each had exactly 3 failures:
+- `copy_commands2` (34,962 cases): 15,525 Pass / **3 Fail** / 19,434
+  NotSupported
+- `dedicated_allocation` (27,539 cases): 11,179 Pass / **3 Fail** /
+  16,357 NotSupported
+
+All 6 failures (3 per group) are the identical bug, one per
+multisample count:
+`dEQP-VK.api.copy_and_blit.{copy_commands2,dedicated_allocation}.resolve_image.whole_copy_before_resolving_no_cab.{2,4,8}_bit`,
+each failing at `vk.createImage(...)`:
+`VK_ERROR_INITIALIZATION_FAILED at vkRefUtilImpl.inl:410`.
+
+**Root cause:** traced via `vktApiResolveTests.cpp` to the test's
+`COPY_MS_IMAGE_TO_MS_IMAGE_NO_CAB` option path, which creates an
+intermediate multisample (2/4/8-sample) `R8G8B8A8_UNORM` image
+(`m_multisampledCopyNoCabImage`) with usage `VK_IMAGE_USAGE_
+TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_
+INPUT_ATTACHMENT_BIT` -- deliberately *without*
+`VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`, unlike every other image this
+test file creates. This is legal Vulkan usage: an image may be bound
+as a subpass input attachment to read an earlier pass's output
+without this pass writing to it too.
+
+`Image.cpp`'s `supportedSampleCounts` (the single source of truth
+`isValidImageShape`'s `vkCreateImage`-time check and `EntryPoints.cpp`'s
+`vkGetPhysicalDeviceImageFormatProperties` both consult) intersects
+`pCreateInfo->samples` against the device's per-usage sample-count
+limits, but had a branch for every attachment-shaped usage bit
+*except* `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` itself:
+`VK_IMAGE_USAGE_SAMPLED_BIT`, `_STORAGE_BIT`,
+`_COLOR_ATTACHMENT_BIT`, and `_DEPTH_STENCIL_ATTACHMENT_BIT` all had
+their own branch setting `Constrained = true` and narrowing `Mask`
+against the matching `VkPhysicalDeviceLimits` field, but
+`_INPUT_ATTACHMENT_BIT` matched none of them. An image whose *only*
+attachment-shaped usage bit is `INPUT_ATTACHMENT_BIT` (as here) left
+`Constrained` false for the whole function, falling through to the
+unconditional `return Constrained ? Mask : VK_SAMPLE_COUNT_1_BIT;`
+tail -- wrongly reporting (and enforcing) a `VK_SAMPLE_COUNT_1_BIT`-only
+mask, even though this device's own `framebufferColorSampleCounts`/
+`framebufferDepthSampleCounts`/`framebufferStencilSampleCounts` are
+all `1|2|4|8`.
+
+**The fix:** added an `INPUT_ATTACHMENT_BIT` branch to
+`supportedSampleCounts`, mirroring the existing
+`COLOR_ATTACHMENT_BIT`/`DEPTH_STENCIL_ATTACHMENT_BIT` branches'
+`HasDepth`/`HasStencil`-keyed limit selection (an input attachment is
+read during rendering exactly like a color/depth-stencil attachment is
+written, so it is bound by the same `framebuffer*SampleCounts`
+limits, not left unconstrained).
+
+**Regression tests:** `ImageTest.cpp`'s
+`AcceptsMultisampleInputAttachmentOnlyImage` (color format,
+`R8G8B8A8_UNORM`, mirroring the CTS repro exactly) and
+`AcceptsMultisampleInputAttachmentOnlyDepthImage` (depth format,
+`D32_SFLOAT`, confirming the depth-keyed limit path too). Both
+confirmed via `git stash` A/B to crash on an `EXPECT_EQ` failure
+(`vkCreateImage` returning `VK_ERROR_INITIALIZATION_FAILED` instead of
+`VK_SUCCESS`) pre-fix, and pass post-fix.
+
+**Verification:**
+- `ninja check-feme`: 3,457/3,518 Passed, 61 Unsupported, 0 Failed
+  (was 3,455/3,516 before this fix's own 2 new tests; +2 Passed, 0
+  regressions).
+- `FeMeVulkanTests` run in isolation (targeted `ImageTest` filter):
+  6/6 Passed, including both new regression tests.
+- CTS re-run: all 6 originally-failing cases
+  (`copy_commands2`/`dedicated_allocation` ×
+  `whole_copy_before_resolving_no_cab.{2,4,8}_bit`) now `Pass`.
+  Re-running both full groups confirms 0 Fail and exactly the expected
+  `+3` Pass each: `copy_commands2` 15,528/34,962 Pass (was 15,525),
+  `dedicated_allocation` 11,182/27,539 Pass (was 11,179) -- no
+  regressions elsewhere in either group.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal capability-advertisement correctness fix for
+already-exposed core Vulkan 1.0 functionality (an input-attachment-only
+multisample image), no new feature/extension surface.
+
+This closes out the broader-CTS-sampling backlog that had carried
+across several sessions: `synchronization.op` and all 8 previously-
+unsampled `copy_and_blit` top-level groups have now been run at least
+once against the real FeMe device, with only this one new bug found
+(now fixed). Remaining known-open items: `L265`'s ASTC alpha-decode
+tie-break (low priority, unchanged), and the pre-existing,
+out-of-scope `offload-test-suite` lit-annotation issues.
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
+(separate statements).
