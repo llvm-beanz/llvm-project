@@ -637,6 +637,18 @@ func.func @sampled_image(%arg0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, S
 
 // -----
 
+// A sampled image wrapping a Buffer-dim image (e.g. a GLSL `samplerBuffer`,
+// as used for uniform texel buffers) is legal prior to SPIR-V 1.6 and must
+// not be rejected here, since this op's verifier has no SPIR-V version
+// context.
+func.func @sampled_image_dim_buffer(%arg0 : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, %arg1 : !spirv.sampler) -> () {
+  // CHECK: spirv.SampledImage {{%.*}}, {{%.*}} : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+  %0 = spirv.SampledImage %arg0, %arg1 : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+  spirv.Return
+}
+
+// -----
+
 func.func @sampled_image_sampler_unknown(%arg0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, SamplerUnknown, Unknown>, %arg1 : !spirv.sampler) -> () {
   // CHECK: spirv.SampledImage {{%.*}}, {{%.*}} : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, SamplerUnknown, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, SamplerUnknown, Unknown>>
   %0 = spirv.SampledImage %arg0, %arg1 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, SamplerUnknown, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, SamplerUnknown, Unknown>>
@@ -654,7 +666,7 @@ func.func @sampled_image_error(%arg0 : !spirv.image<f32, Dim2D, NoDepth, NonArra
 // -----
 
 func.func @sampled_image_dim_subpassdata(%arg0 : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, %arg1 : !spirv.sampler) -> () {
-  // expected-error @+1 {{sampled image Dim must not be SubpassData or Buffer, got SubpassData}}
+  // expected-error @+1 {{sampled image Dim must not be SubpassData, got SubpassData}}
   %0 = spirv.SampledImage %arg0, %arg1 : !spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
   spirv.Return
 }

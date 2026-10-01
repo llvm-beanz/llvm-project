@@ -273,12 +273,16 @@ func.func private @samped_image_type_invaid_type(!spirv.sampled_image<f32>) -> (
 
 // -----
 
-// expected-error @+1 {{sampled image Dim must not be SubpassData or Buffer, got Buffer}}
+// A Dim of Buffer (e.g. a GLSL `samplerBuffer`) is legal prior to SPIR-V 1.6;
+// since this type has no notion of the enclosing module's SPIR-V version,
+// it must be accepted here (version-gated rejection is left to
+// version-aware validation).
+// CHECK: func private @sampled_image_type(!spirv.sampled_image<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>)
 func.func private @sampled_image_type(!spirv.sampled_image<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>) -> ()
 
 // -----
 
-// expected-error @+1 {{sampled image Dim must not be SubpassData or Buffer, got SubpassData}}
+// expected-error @+1 {{sampled image Dim must not be SubpassData, got SubpassData}}
 func.func private @sampled_image_type(!spirv.sampled_image<!spirv.image<f32, SubpassData, NoDepth, NonArrayed, SingleSampled, NoSampler, Unknown>>) -> ()
 
 // -----

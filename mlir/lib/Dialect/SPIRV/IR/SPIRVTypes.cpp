@@ -854,8 +854,17 @@ SampledImageType::verifyInvariants(function_ref<InFlightDiagnostic()> emitError,
   // As per SPIR-V spec: "It [ImageType] must not have a Dim of SubpassData.
   // Additionally, starting with version 1.6, it must not have a Dim of Buffer.
   // ("3.3.6. Type-Declaration Instructions")
-  if (llvm::is_contained({Dim::SubpassData, Dim::Buffer}, image.getDim()))
-    return emitError() << "Dim must not be SubpassData or Buffer";
+  //
+  // The SubpassData restriction is unconditional and is a genuine type
+  // invariant, so it is checked here. The Buffer restriction, however, only
+  // applies starting with SPIR-V 1.6: a sampled image wrapping a Buffer-dim
+  // image (e.g. a GLSL `samplerBuffer`) is legal SPIR-V in versions prior to
+  // 1.6. This type (unlike module-level constructs) has no notion of the
+  // enclosing module's SPIR-V version, so the version-gated Buffer
+  // restriction cannot be enforced here; it is left to version-aware
+  // validation (e.g. spirv-val) instead.
+  if (image.getDim() == Dim::SubpassData)
+    return emitError() << "Dim must not be SubpassData";
 
   return success();
 }

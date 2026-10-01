@@ -271,9 +271,12 @@ static Type parseAndVerifySampledImageType(SPIRVDialect const &dialect,
     return Type();
   }
 
-  if (llvm::is_contained({Dim::SubpassData, Dim::Buffer}, imageType.getDim())) {
-    parser.emitError(
-        typeLoc, "sampled image Dim must not be SubpassData or Buffer, got ")
+  // Dim::Buffer is only disallowed starting with SPIR-V 1.6 (see the longer
+  // explanation in SampledImageType::verifyInvariants); this textual-form
+  // parser has no SPIR-V version context either, so only the unconditional
+  // SubpassData restriction is enforced here.
+  if (imageType.getDim() == Dim::SubpassData) {
+    parser.emitError(typeLoc, "sampled image Dim must not be SubpassData, got ")
         << stringifyDim(imageType.getDim());
     return Type();
   }
