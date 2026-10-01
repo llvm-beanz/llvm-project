@@ -63,32 +63,28 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(3 cases, new territory, same family as this fix)**
-   `WaveActiveBit{And,Or,Xor}.convergence.test` -- still open from
-   `L296`'s triage. `WaveActiveBitAnd` returns `[65520,0,0,0]` vs.
-   expected `[65520,15,15,15]`. Worth checking first whether this is
-   the *same* `ExitBlockRelayValues` first-wins bug in a different
-   shape (a convergent wave op's own result could plausibly be another
-   "value captured per-exit-route" case) before assuming it needs new
-   design work.
-2. **(1-2 hours)** `inc_counter_array.test`: `[5,5,5,5]` instead of
-   `[1,2,3,4]` -- atomic-counter ordering bug, not yet root-caused.
-3. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases --
-   extract exact pixel values first.
-4. **(6 cases, feature decision needed, carried over many sessions)**
-   `fragdepth` multisample image-creation gap.
-5. **(6 cases, carried over many sessions)** `fragdepth`
+1. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases
+   (`fwidth{,coarse,fine}.fbo_float.vec4_highp`) -- extract exact pixel
+   values first to tell a tiny rounding delta from a real bug.
+2. **(6 cases, feature decision needed, carried over many sessions)**
+   `fragdepth` multisample image-creation gap (`*_multisample_{2,4,8}`).
+3. **(6 cases, carried over many sessions)** `fragdepth`
    combined-depth-stencil-format bug (`Executor.cpp` `readDepth`/
    `writeDepth`, ~line 999).
-6. **(carried over many sessions)** `L265`'s `a2b10g10r10_snorm_pack32`
-   ASTC decode bug.
-7. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
+4. **(carried over many sessions)** `L265`'s `a2b10g10r10_snorm_pack32`
+   ASTC decode bug in `ASTCDecode.cpp`.
+5. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
    sampling (`api`/`pipeline`/`synchronization`) -- run in small,
    isolated per-case batches, never a full-cluster sweep.
-8. **(low priority)** `offload-test-suite`'s own pre-existing
-   `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation issues
-   -- unrelated to FeMe/LLVM.
-9. **(housekeeping, just repaired, due again in ~5 sessions)**
+6. **(low priority)** `offload-test-suite`'s own pre-existing
+   `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation
+   issues -- unrelated to FeMe/LLVM, needs upstream fixes.
+7. **(housekeeping, just repaired, due again in ~5 sessions)**
    `check-hlsl-feme-vk` branch-drift check: repaired this session
-   (`854cc3f` cherry-pick), no `agent_thoughts.md`-worthy drift beyond
-   the routine reset.
+   (`854cc3f` cherry-pick), no drift beyond the routine reset.
+8. **(optional, low priority)** Independently root-cause why
+   `inc_counter_array.test` started passing this session (it was not
+   directly targeted) -- currently just noted as a plausible side
+   effect of the `L298` masking fix, not confirmed via its own IR
+   trace. Only worth doing if a similar atomic-ordering bug resurfaces
+   elsewhere and a confirmed mechanism would help.
