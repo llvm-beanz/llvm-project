@@ -4518,21 +4518,31 @@ void lowerImageAccesses(
       // (`spv_resource_samplecmp`/`samplecmplevelzero`/`samplecmp_clamp`),
       // extended from `Plain2D`-only (roadmap L46) to also cover
       // `Array2D`/`Cube`/`CubeArray`, mirroring the ordinary-sample
-      // `switch (Shape)` just above. Every non-`Grad`, non-`samplecmplevel`
-      // shape shares `createSampleCmp2D`'s own `Lod` parameter passed as
-      // a constant zero: `samplecmplevelzero` always forces mip level 0
-      // (no LOD operand of its own to read), and
-      // `samplecmp`/`samplecmp_clamp`'s implicit LOD already degenerates
-      // to the same level 0 today -- only `UseExplicitLod` itself differs
-      // between them. Roadmap L66(c) adds a real, derivative-driven
-      // implicit LOD for `Plain2D` alone, via `samplecmpgrad{,_clamp}`'s
-      // own `dPdx`/`dPdy` pair (`femeCpuImageSampleCmp2DF32` itself now
-      // branches on whether `UseExplicitLod` is set the same way it
-      // always has, but computes a real implicit LOD from these
-      // derivatives when it is not, in place of the always-level-0 result
-      // every other intrinsic form still gets). Roadmap L72(b) adds
+      // `switch (Shape)` just above. `samplecmplevelzero`'s own `Lod`
+      // parameter is a constant zero (it has no LOD operand of its own
+      // to read -- mip level 0 is forced by construction). Roadmap
+      // L66(c) adds a real, derivative-driven implicit LOD via
+      // `samplecmpgrad{,_clamp}`'s own `dPdx`/`dPdy` pair
+      // (`femeCpuImageSampleCmp2DF32` itself branches on whether
+      // `UseExplicitLod` is set, computing a real implicit LOD from
+      // these derivatives when it is not). Roadmap L72(b) adds
       // `samplecmplevel`'s own real (non-zero) `Lod` operand, read from
       // `DrefSampleLevelIdx` instead of synthesizing a constant zero.
+      // Roadmap L315: `samplecmp`/`samplecmp_clamp`/`samplecmpbias`/
+      // `samplecmpbias_clamp` (no `Grad` operand, and not
+      // `samplecmplevelzero`/`samplecmplevel`'s own explicit `Lod`) is
+      // SPIR-V's/HLSL's own genuine *implicit*-LOD depth-comparison
+      // sample, whose mip level must be selected from real screen-space
+      // derivatives the same way an ordinary (non-`Dref`) implicit-LOD
+      // sample already is -- it does *not* degenerate to mip level 0 in
+      // general (that was this code's own, now-fixed, bug: leaving
+      // `DUdX`/`DUdY`/`DVdX`/`DVdY` at zero unconditionally forced every
+      // such sample to mip 0 regardless of its sampler's own
+      // `nearest_mipmap_nearest`/`linear_mipmap_linear` filter, the root
+      // cause of the `texture.shadow.*` CTS failures). See the
+      // `!DrefExplicitLod` branch below, which synthesizes real
+      // derivatives for this case exactly like the `Grad` branch does
+      // for its own explicit ones.
       bool DrefExplicitLod = false;
       bool DrefHasClamp = false;
       bool DrefHasBias = false;
@@ -4594,12 +4604,14 @@ void lowerImageAccesses(
         // scalars the same way `Coord`'s own `C0`/`C1` are for
         // `Plain2D`/`Array2D` (both have a genuine 2-wide derivative,
         // `Array2D`'s own array layer having none of its own), and
-        // threaded through only for those two arms below. Zero constants
-        // for the non-`Grad` forms, which have no such operand of their
-        // own -- `femeCpuImageSampleCmp2DF32`/`femeCpuImageSampleCmpArray2DF32`
-        // provably degenerate to the exact same level-0 result their own
-        // narrower pre-L66(c)/pre-L66(g) implementations always computed
-        // for all-zero derivatives.
+        // threaded through only for those two arms below. Zero-constant
+        // placeholders for `samplecmplevelzero`/`samplecmplevel` (which
+        // have no implicit LOD to compute at all -- see
+        // `DrefExplicitLod` below); the genuine non-`Grad` implicit-LOD
+        // case (`samplecmp`/`samplecmp_clamp`/`samplecmpbias`/
+        // `samplecmpbias_clamp`) overwrites these with real synthesized
+        // derivatives in the `!DrefExplicitLod` branch below, mirroring
+        // the `DrefHasGrad` branch immediately above it.
         Value *DUdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *DUdY = ConstantFP::get(Builder.getFloatTy(), 0.0);
         Value *DVdX = ConstantFP::get(Builder.getFloatTy(), 0.0);
@@ -4649,6 +4661,44 @@ void lowerImageAccesses(
           } else {
             Grad1DDUdX = GradDPdx;
             Grad1DDUdY = GradDPdy;
+          }
+        } else if (!DrefExplicitLod) {
+          // Roadmap L315: a `samplecmp`/`samplecmp_clamp`/`samplecmpbias`/
+          // `samplecmpbias_clamp` call (no explicit `Grad` operand above,
+          // and not `samplecmplevelzero`/`samplecmplevel`'s own explicit
+          // `Lod`, i.e. `DrefExplicitLod` is false) is SPIR-V's and
+          // HLSL's own *implicit*-LOD depth-comparison sample
+          // (`SampleCmp`/`SampleCmpBias`) -- the exact same implicit-LOD
+          // contract an ordinary (non-`Dref`) `Sample()` already honors
+          // above via `getOrSynthesizeSample2DDerivatives` et al. This
+          // case was previously left out entirely: `DUdX`/`DUdY`/`DVdX`/
+          // `DVdY` (and their `Grad1D`/`CubeDDir*` siblings) stayed at
+          // the always-zero defaults set above, forcing every implicit-
+          // LOD depth-comparison sample to mip level 0 regardless of its
+          // sampler's own `nearest_mipmap_nearest`/`linear_mipmap_linear`
+          // filter -- the actual root cause of roadmap L315's
+          // `texture.shadow.*` CTS failures (106 cases). Synthesize the
+          // same real, quad-lane screen-space derivatives those ordinary-
+          // sample helpers already provide, keyed on `Shape` the same
+          // way the `Grad` branch just above is. `Cube`/`CubeArray` are
+          // handled in their own `switch` arms below instead of here,
+          // since their own `C2` (the direction vector's third
+          // component) isn't extracted until that switch runs -- doing
+          // it here too would insert a redundant, duplicate
+          // `extractelement`.
+          if (Shape == ImageShape::Plain2D || Shape == ImageShape::Array2D) {
+            SampleDerivatives D = getOrSynthesizeSample2DDerivatives(
+                Builder, *CI->getFunction(), C0, C1);
+            DUdX = D.DUdX;
+            DUdY = D.DUdY;
+            DVdX = D.DVdX;
+            DVdY = D.DVdY;
+          } else if (Shape != ImageShape::Cube &&
+                     Shape != ImageShape::CubeArray) {
+            SampleDerivatives1D D = getOrSynthesizeSample1DDerivatives(
+                Builder, *CI->getFunction(), C0);
+            Grad1DDUdX = D.DUdX;
+            Grad1DDUdY = D.DUdY;
           }
         }
         // Roadmap L50d: SPIR-V's own `ConstOffset` image operand --
@@ -4709,10 +4759,25 @@ void lowerImageAccesses(
           Value *C2 = Builder.CreateExtractElement(Coord, uint64_t{2});
           // Roadmap L66(h): `CubeDDirXdX`/`CubeDDirXdY`/`CubeDDirYdX`/
           // `CubeDDirYdY`/`CubeDDirZdX`/`CubeDDirZdY` thread a real
-          // direction-vector derivative sextuple through, mirroring
-          // `createSampleCube`'s own identical parameters -- zero
-          // constants for every non-`Grad` form, degenerating to the same
-          // always-level-0 result as before.
+          // direction-vector derivative sextuple through for a `Grad`
+          // sample, mirroring `createSampleCube`'s own identical
+          // parameters. Roadmap L315: an implicit-LOD sample (no `Grad`,
+          // no explicit `Lod`) instead synthesizes the same real
+          // screen-space direction-vector derivatives an ordinary
+          // implicit-LOD `SampleCube` already gets -- done here, after
+          // `C2` is already extracted, rather than in the shared
+          // `!DrefExplicitLod` block above, to avoid a redundant,
+          // duplicate `extractelement` of `Coord`'s third component.
+          if (!DrefHasGrad && !DrefExplicitLod) {
+            CubeDirectionDerivatives D = getOrSynthesizeSampleCubeDerivatives(
+                Builder, *CI->getFunction(), C0, C1, C2);
+            CubeDDirXdX = D.DDirXdX;
+            CubeDDirXdY = D.DDirXdY;
+            CubeDDirYdX = D.DDirYdX;
+            CubeDDirYdY = D.DDirYdY;
+            CubeDDirZdX = D.DDirZdX;
+            CubeDDirZdY = D.DDirZdY;
+          }
           NewCall = createSampleCmpCube(Builder, Env, ImageIndex, SamplerIndex,
                                         C0, C1, C2, CubeDDirXdX, CubeDDirXdY,
                                         CubeDDirYdX, CubeDDirYdY, CubeDDirZdX,
@@ -4725,10 +4790,21 @@ void lowerImageAccesses(
           Value *ArrayLayer = Builder.CreateExtractElement(Coord, uint64_t{3});
           // Roadmap L66(i): `CubeDDirXdX`/`CubeDDirXdY`/`CubeDDirYdX`/
           // `CubeDDirYdY`/`CubeDDirZdX`/`CubeDDirZdY` thread a real
-          // direction-vector derivative sextuple through, mirroring
-          // `createSampleCubeArray`'s own identical parameters -- zero
-          // constants for every non-`Grad` form, degenerating to the same
-          // always-level-0 result as before.
+          // direction-vector derivative sextuple through for a `Grad`
+          // sample, mirroring `createSampleCubeArray`'s own identical
+          // parameters. Roadmap L315: same implicit-LOD synthesis as
+          // `Cube`'s own arm just above, for the same reason (avoiding a
+          // duplicate `extractelement` of `C2`).
+          if (!DrefHasGrad && !DrefExplicitLod) {
+            CubeDirectionDerivatives D = getOrSynthesizeSampleCubeDerivatives(
+                Builder, *CI->getFunction(), C0, C1, C2);
+            CubeDDirXdX = D.DDirXdX;
+            CubeDDirXdY = D.DDirXdY;
+            CubeDDirYdX = D.DDirYdX;
+            CubeDDirYdY = D.DDirYdY;
+            CubeDDirZdX = D.DDirZdX;
+            CubeDDirZdY = D.DDirZdY;
+          }
           NewCall = createSampleCmpCubeArray(
               Builder, Env, ImageIndex, SamplerIndex, C0, C1, C2, CubeDDirXdX,
               CubeDDirXdY, CubeDDirYdX, CubeDDirYdY, CubeDDirZdX, CubeDDirZdY,

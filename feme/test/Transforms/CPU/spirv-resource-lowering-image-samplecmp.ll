@@ -27,9 +27,11 @@ target triple = "spirv-unknown-vulkan-compute"
 
 ; An implicit-LOD depth-comparison sample: `use_explicit_lod` is `false`,
 ; and the constant `Lod` operand passed to `createSampleCmp2D` is always
-; zero (`femeCpuImageSampleCmp2DF32` has no derivative inputs of its own
-; to compute a real implicit LOD from, see `isDrefSampleIntrinsic`'s
-; comment -- a pre-existing narrowing, not something this row changes).
+; zero. Roadmap L315: this function has no `"feme.shader.stage"="fragment"`
+; attribute, so `getOrSynthesizeSample2DDerivatives` (ImageCalls.cpp)
+; leaves `DUdX`/`DUdY`/`DVdX`/`DVdY` at zero -- see `samplecmp_fragment`
+; below for the real, derivative-driven case a `Fragment`-stage caller
+; gets instead.
 
 ; CHECK-LABEL: define float @samplecmp(
 ; CHECK-SAME: <3 x float> %coord, float %dref, ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count
@@ -41,6 +43,35 @@ define float @samplecmp(<3 x float> %coord, float %dref) {
   ; CHECK: %[[U:.*]] = extractelement <3 x float> %coord, i64 0
   ; CHECK: %[[V:.*]] = extractelement <3 x float> %coord, i64 1
   ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
+  %r = call float @llvm.spv.resource.samplecmp(
+      target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
+      target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
+      <3 x i32> zeroinitializer)
+  ret float %r
+}
+
+; Roadmap L315: the same implicit-LOD `samplecmp` form as above, but from
+; a `Fragment`-stage caller (`"feme.shader.stage"="fragment"`) -- the only
+; stage SPIR-V's own implicit-LOD depth-comparison sample is ever legal
+; from. `getOrSynthesizeSample2DDerivatives` now synthesizes real
+; `feme.stage.derivative.x.coarse`/`.y.coarse` calls on `%u`/`%v` instead
+; of leaving `DUdX`/`DUdY`/`DVdX`/`DVdY` at zero like `samplecmp` above,
+; so a `nearest_mipmap_nearest`-filtered sampler can actually select a
+; nonzero mip level for this call -- fixing the `texture.shadow.*` CTS
+; failures (roadmap L315) a constant-zero implicit LOD previously caused.
+; CHECK-LABEL: define float @samplecmp_fragment(
+define float @samplecmp_fragment(<3 x float> %coord, float %dref) #0 {
+  %img = call target("spirv.Image", float, 1, 2, 0, 0, 1, 0)
+      @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+  %samp = call target("spirv.Sampler")
+      @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+  ; CHECK: %[[U:.*]] = extractelement <3 x float> %coord, i64 0
+  ; CHECK: %[[V:.*]] = extractelement <3 x float> %coord, i64 1
+  ; CHECK: %[[DUDX:.*]] = call float @feme.stage.derivative.x.coarse.f32(float %[[U]])
+  ; CHECK: %[[DUDY:.*]] = call float @feme.stage.derivative.y.coarse.f32(float %[[U]])
+  ; CHECK: %[[DVDX:.*]] = call float @feme.stage.derivative.x.coarse.f32(float %[[V]])
+  ; CHECK: %[[DVDY:.*]] = call float @feme.stage.derivative.y.coarse.f32(float %[[V]])
+  ; CHECK: call float @feme.cpu.image.samplecmp.2d.f32(ptr %image_heap, i32 %image_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, i32 0, i32 0, float %[[U]], float %[[V]], float %[[DUDX]], float %[[DUDY]], float %[[DVDX]], float %[[DVDY]], float 0.000000e+00, i1 false, float %dref, float 0.000000e+00, i32 0, i32 0, float -inf, i1 true)
   %r = call float @llvm.spv.resource.samplecmp(
       target("spirv.Image", float, 1, 2, 0, 0, 1, 0) %img,
       target("spirv.Sampler") %samp, <3 x float> %coord, float %dref,
@@ -96,3 +127,5 @@ declare target("spirv.Image", float, 1, 2, 0, 0, 1, 0)
     @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
 declare target("spirv.Sampler")
     @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+
+attributes #0 = { "feme.shader.stage"="fragment" }
