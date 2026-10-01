@@ -8979,3 +8979,77 @@ are now fully visible and untriaged, tracked as new roadmap items:
 None of these three were root-caused this session -- time was spent
 on the crash fix itself (the top-ranked next step) plus its full
 verification and CTS re-runs.
+
+## L315: `texture.shadow.*` root-cause investigation -- three pipeline stages verified correct, root cause not yet found
+
+This session's top-ranked next step was `L315`: root-causing
+`dEQP-VK.texture.shadow.{1d,1d_array,2d,2d_array,cube,cube_array}`
+(106 cases, "Image verification failed" against depth-comparison
+sampling). **No fix landed this session** -- the investigation
+substantially narrowed the search space but did not pin down the
+actual bug.
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
+(separate statements).
+
+**Investigation summary:**
+
+Reproduced `dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.equal_d16_unorm`
+standalone and decoded its embedded reference/rendered PNGs: FeMe's
+output shows smooth multi-texel blending where the reference expects a
+hard binary step. Hand-derived from CTS's own `FilterCase`/viewport-
+and texture-width constants (`TEX1D_VIEWPORT_WIDTH=64`, texture
+`width=32`) that the failing sub-case most likely has a narrowly-
+minifying implicit LOD (~0.14, just past the `MagFilter`/`MinFilter`
+boundary at `0`) -- i.e. FeMe appears to be incorrectly selecting the
+magnifying (linear-blend) filter path for a sample that should select
+the minifying (nearest, unblended) one.
+
+Rather than guessing at a fix, verified each pipeline stage a
+`Grad`-driven depth-comparison sample passes through, individually and
+in isolation, for exactly this shape:
+
+1. **CPU runtime math** (`femeRTComputeClampedLod`/
+   `femeRTUseLinearFilter`/`femeCpuImageSampleCmp1DF32` in
+   `FeMeRuntimeCPU.c`): read in full, appeared correct on inspection;
+   confirmed empirically via a new unit test
+   (`SampleCmp1DGradSlightlyMinifyingUsesMinFilter`, committed this
+   session) that directly calls the runtime's `SampleCmp1D` entry
+   point with the hypothesized real numbers (32-texel image, `DUdX`
+   just past `1/32`, `MagFilter=Linear`/`MinFilter=Nearest`) -- it
+   correctly selects the unblended `MinFilter` result. **This stage is
+   not the bug.**
+2. **`SPIRVResourceLowering.cpp`'s `llvm.spv.resource.samplecmpgrad`-
+   to-runtime-call lowering** for `Plain1D`: already covered by the
+   existing `spirv-resource-lowering-image-samplecmpgrad.ll` lit test
+   (confirmed passing, operand shapes/order correct). **Not the bug.**
+3. **`SPIRVToLLVMPatterns.cpp`'s `ImageSampleDrefGradPattern`**
+   (`spirv.ImageSampleDrefExplicitLod`+`Grad` →
+   `llvm.spv.resource.samplecmpgrad`): verified via a hand-written
+   synthetic `Dim1D` MLIR test run through `feme-opt
+   --feme-convert-spirv-to-llvm` -- dx/dy threaded through correctly.
+   **Not the bug**, though not yet a committed regression test (the
+   existing `spirv-to-llvm-sample-dref-and-query-lod.mlir` only has
+   `Dim2D` `Grad` cases -- a genuine coverage gap, tracked under
+   `L318`).
+
+The remaining unverified stage is the SPIR-V-binary-to-MLIR import
+(`SPIRVImporter.cpp`), plus -- more importantly -- the *actual*
+per-pixel `DUdX`/`DUdY` values the real compiled shader produces at
+runtime for the failing case, which have not yet been captured
+empirically; the ~0.0345 hand-derived `dPdx` remains only a
+hypothesis. `feme-run`'s `--heap` YAML has no `samplers:` key yet, so
+it cannot currently drive a standalone `Dref`+`Grad` repro outside the
+full CTS harness.
+
+**No CTS numbers changed this session** (investigation only, no fix).
+`ninja check-feme`: 3,459/3,520 Passed (+1 new test), 61 Unsupported,
+0 Failed, 0 regressions. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed (no feature/extension
+surface change, investigation and a new unit test only).
+
+Tracked as `L318` in the roadmap (breakdown of `L315`'s remaining
+work) -- see `agent_thoughts.md`'s latest entry for the full narrowing
+narrative and concrete next steps.
