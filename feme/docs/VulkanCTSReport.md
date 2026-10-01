@@ -9105,3 +9105,86 @@ needed (tooling-only change, no feature/extension surface change).
 
 Tracked as `L318`(f)/`L319` in the roadmap -- see `agent_thoughts.md`'s
 latest entry for the full narrative and concrete next steps.
+
+## Session: L319 closed (reframed) + L320 found/fixed + first working SampleCmp repro
+
+**`L319` root-cause, reframed:** the prior session's hypothesis (a
+`feme-run`-vs-`feme::vulkan` pipeline-creation divergence) was wrong.
+`feme::vulkan`'s real compute/graphics pipeline creation
+(`feme/lib/Vulkan/Pipeline.cpp`, `feme/lib/Graphics/
+GraphicsPipeline.cpp`) and `feme-run`'s own non-`--reference` JIT path
+both call the same `feme::cpu::CompiledStage::create`, specifically
+its non-`Reference` branch, which already runs the full `runPipeline`.
+`Reference` mode is a `feme-run`-only ground-truth debugging feature
+the real driver never exercises. The real divergence was between
+`feme-run`'s own two modes: `CompiledStage::create`'s `Reference`
+branch hand-rolled a much shorter pass list (`PreparePass` +
+`BoundResourceNormalizationPass` only), omitting
+`RootConstantLoweringPass`/`SPIRVResourceLoweringPass`/
+`SPIRVPushConstantLoweringPass`/`SPIRVSubpassLoweringPass` --
+blocking any SPIR-V-sourced shader using a register-bound resource
+handle from running under `--reference` specifically. **The real
+Vulkan driver was never affected.** Fixed by adding the four missing
+passes in `runPipeline`'s own order; new unit test
+`JITEngineTest.ReferenceModeNormalizesSPIRVBoundResourceHandles`.
+Committed as `d18ba923b320`.
+
+**`L320` found and fixed:** fixing `L319` unblocked the first attempt
+to actually run a register-bound `Texture1D`/`SamplerState` shader
+through `feme-run`, which immediately surfaced a second, independent
+gap: the result was silently all-zero, in both `--reference` and the
+normal JIT path, with no diagnostic. Root cause: `feme-run`'s heap
+YAML had no way to describe a traditionally-bound (`register(tN,
+spaceM)`) image or sampler at all -- its `images:`/`samplers:` keys
+only ever append to the *dynamic*, bindless heap, never the reserved
+per-range prefix a traditional binding resolves to. Fixed by adding
+`image-bindings:`/`sampler-bindings:` heap YAML keys, mirroring the
+existing `bindings:` pattern, wired into
+`DispatchResources::BoundImages`/`BoundSamplers` (which already
+existed correctly in the runtime ABI, simply unused by this tool).
+New lit tests `Tools/feme-run/SPIRV/{image,sampler}-binding.hlsl`.
+
+**First working full-pipeline `SampleCmp` repro, finally:** using the
+new `image-bindings`/`sampler-bindings` keys, built a real
+`dxc -spirv`-compiled `Texture1D::SampleCmp`/`SamplerComparisonState`
+compute shader with a depth-formatted (`r32_float`, `depth: true`)
+bound image and a comparison-enabled (`compare-func: greater`) bound
+sampler, with depth texel values (0.1, 0.3, 0.5, 0.7) deliberately
+bracketing the comparison reference (0.4) so a correct result is
+non-uniform (`1, 1, 0, 0`), not a value that could be an artifact of
+an all-pass/all-fail degenerate case. **Result: exactly the expected
+`1.0, 1.0, 0.0, 0.0` pattern** -- `feme-run --reference`'s own
+`SampleCmp` execution is correct for this basic 1D, no-mipmapping,
+no-derivative case. This is the first time this multi-session
+investigation has had a working end-to-end comparison-sampling repro
+through `feme-run` at all.
+
+**However, this does not explain `L315` on its own:** re-ran
+`dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.equal_d16_unorm`
+directly against the real driver after both fixes landed -- still
+`Fail (Image verification failed)`, unchanged. Since the basic
+`SampleCmp` shape now verified correct via `feme-run`, the remaining
+bug is specific to something this simple compute-shader repro does
+not exercise: most likely the fragment-shader implicit-derivative
+path (a compute shader has no screen-space derivatives, so `SampleCmp`
+there implicitly uses LOD 0 / no derivative-driven mip selection,
+unlike the real CTS test, which is a fragment shader using implicit
+derivatives against a `nearest_mipmap_nearest` sampler), or the
+mipmap-selection math itself (the failing case name's own
+`nearest_mipmap_nearest` strongly suggests this). This narrows next
+session's starting point considerably: the comparison math itself is
+no longer a suspect; implicit-derivative/mip-level selection for a
+depth-comparison sample is.
+
+**CTS numbers:** `L319`/`L320` are both pure `feme-run` CLI-tool
+changes -- no change to `feme_vulkan.so`/the ICD itself, so no broad
+CTS re-run was performed; only the known `L315` repro case was
+spot-checked (unchanged, as predicted). `ninja check-feme`:
+3,463 Passed (+2 new lit tests net of this and `L319`'s own unit
+test)/61 Unsupported/0 Failed, 0 regressions, across both commits.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed for either fix (both are internal tooling/JIT-path
+correctness fixes, no feature/extension surface change).
+
+Tracked as `L319`/`L320` in the roadmap -- see `agent_thoughts.md`'s
+latest entry for the full narrative and concrete next steps.
