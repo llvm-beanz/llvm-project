@@ -55,6 +55,7 @@
 #include "feme/Transforms/CPU/WaveCalls.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -3867,16 +3868,45 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // it is asked to walk is exactly the shape that function refuses --
     // see its own comment).
     BasicBlock *PreRegionStart = Header;
-    SmallVector<std::pair<PHINode *, Value *>, 4> ExitBlockRelayValues;
+    // Roadmap L297: `Header`'s own exit and `CheckBlock`'s own exit can
+    // *both* capture a value for the *same* `ExitBlock` phi (e.g. a
+    // per-lane flag distinguishing "exited via Header's uniform timeout"
+    // from "exited via CheckBlock's own genuinely divergent condition" --
+    // reduced from `Basic/Mandelbrot.test`'s own per-pixel escape-
+    // iteration loop, whose post-loop `if (Diverged)` color selection
+    // depends on exactly this). Tag each capture with its own origin so
+    // the restore loop below can tell them apart: a flat "whichever
+    // capture runs first wins" restore (this milestone's prior behavior)
+    // silently drops the other value whenever the two genuinely differ,
+    // which is wrong whenever that other value is runtime-varying (as
+    // opposed to merely a second, redundant route to the same constant).
+    enum class RelaySource { Header, Check };
+    SmallVector<std::tuple<PHINode *, Value *, RelaySource>, 4>
+        ExitBlockRelayValues;
     MaskPair EntryMasks = makeActivePNPair();
     MaskPair Masks = EntryMasks;
+    // Roadmap L297: a loop-carried flag, frozen like `EntryMasks` itself,
+    // recording whether *this lane* has, by the current iteration,
+    // exited via `CheckBlock`'s own check specifically (as opposed to
+    // `Header`'s) -- seeded `false`, since no lane has exited via
+    // `CheckBlock` before the loop even starts. Used below to correctly
+    // merge, rather than arbitrarily pick between, `Header`'s and
+    // `CheckBlock`'s own captured `ExitBlockRelayValues` whenever they
+    // differ for the same phi.
+    PHINode *ExitedViaCheck =
+        PHINode::Create(I1Ty, /*NumReservedValues=*/2, "exited.via.check");
+    ExitedViaCheck->insertBefore(Header->getFirstNonPHIIt());
+    for (BasicBlock *Pred : predecessors(Header))
+      if (!CI.contains(C, Pred))
+        ExitedViaCheck->addIncoming(ConstantInt::getFalse(Ctx), Pred);
     if (HeaderDivergent) {
       applyStageMasks(*Header, Masks);
       rethreadNestedEntryMasks(Header, Masks);
       for (PHINode &PN : ExitBlock->phis())
         if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock);
             Idx != -1)
-          ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+          ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx),
+                                            RelaySource::Header);
       IRBuilder<> HeaderCheckBuilder(HeaderExit->Br);
       Value *HeaderStaying = HeaderExit->ExitOnTrue
                                  ? HeaderCheckBuilder.CreateNot(HeaderExit->Cond)
@@ -3949,12 +3979,28 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // below.)
     for (PHINode &PN : ExitBlock->phis())
       if (int Idx = PN.getBasicBlockIndex(CheckExit->RelayBlock); Idx != -1)
-        ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+        ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx),
+                                          RelaySource::Check);
 
     IRBuilder<> CheckBuilder(CheckExit->Br);
     Value *Staying = CheckExit->ExitOnTrue
                          ? CheckBuilder.CreateNot(CheckExit->Cond)
                          : CheckExit->Cond;
+    // Roadmap L297: a lane transitions from live to masked-off right
+    // here, specifically because of `CheckBlock`'s own condition (as
+    // opposed to `Header`'s, already applied earlier into `Masks`),
+    // precisely when it was still live entering this check and
+    // `Staying` says to leave -- fold that into `ExitedViaCheck`'s own
+    // running flag (monotonic, like `Masks.Live` itself: once true for a
+    // lane, it stays true, since a lane that already exited never
+    // re-enters this check again) so the restore loop below can tell
+    // which of `Header`'s or `CheckBlock`'s own captured value is the
+    // semantically correct one to use for this lane.
+    Value *DivergedViaCheckThisIter = CheckBuilder.CreateAnd(
+        Masks.Live, CheckBuilder.CreateNot(Staying),
+        "exited.via.check.this.iter");
+    Value *ExitedViaCheckNext = CheckBuilder.CreateOr(
+        DivergedViaCheckThisIter, ExitedViaCheck, "exited.via.check.next");
     MaskPair MasksAfterCheck =
         stayInLoop(CheckBuilder, Masks, Staying, "active.check");
     // Never really exit here: always continue toward the latch, letting an
@@ -4005,12 +4051,36 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // leftover phis captured above for this edge too, so every one of
     // `ExitBlock`'s phis still lists exactly one entry per real
     // predecessor.
-    for (auto &[PN, V] : ExitBlockRelayValues)
-      if (PN->getBasicBlockIndex(Latch) == -1)
-        PN->addIncoming(V, Latch);
+    // Roadmap L297: merge each phi's `Header`- and `Check`-sourced
+    // captures (see `ExitBlockRelayValues`'s own declaration comment
+    // above) rather than letting whichever happens to run first in this
+    // list silently win -- a `MapVector` keeps the merge order (and
+    // therefore the new `select`s' own relative order in the IR)
+    // deterministic.
+    MapVector<PHINode *, std::pair<Value *, Value *>> MergedRelayValues;
+    for (auto &[PN, V, Source] : ExitBlockRelayValues) {
+      std::pair<Value *, Value *> &Entry = MergedRelayValues[PN];
+      (Source == RelaySource::Header ? Entry.first : Entry.second) = V;
+    }
+    IRBuilder<> RelayRestoreBuilder(Latch->getTerminator());
+    for (auto &[PN, HeaderAndCheck] : MergedRelayValues) {
+      if (PN->getBasicBlockIndex(Latch) != -1)
+        continue;
+      auto &[HeaderValue, CheckValue] = HeaderAndCheck;
+      Value *Restored;
+      if (HeaderValue && CheckValue && HeaderValue != CheckValue)
+        Restored = RelayRestoreBuilder.CreateSelect(
+            ExitedViaCheckNext, CheckValue, HeaderValue,
+            PN->getName() + ".exit.merge");
+      else
+        Restored = CheckValue ? CheckValue : HeaderValue;
+      PN->addIncoming(Restored, Latch);
+    }
+    ExitedViaCheck->addIncoming(ExitedViaCheckNext, Latch);
     freezeLoopCarriedValues(
         Header, Latch, MasksAfterCheck.Live,
-        {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect)},
+        {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect),
+         ExitedViaCheck},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); });
     addLatchIncoming(EntryMasks, MasksAfterCheck);
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*

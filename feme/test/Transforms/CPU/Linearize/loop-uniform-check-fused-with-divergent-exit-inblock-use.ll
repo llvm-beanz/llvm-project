@@ -36,7 +36,12 @@
 ; CHECK: {{^}}check:
 ; CHECK-NEXT: %cond = phi i1 [ %divergent, %divergent.flow ]
 ; CHECK-NEXT: %[[NOT:.*]] = xor i1 %cond, true
-; CHECK-NEXT: %active.check.live = and i1 %active.live, %[[NOT]]
+; Roadmap L297: the `ExitedViaCheck`-tracking instructions (see that
+; roadmap entry's own comment) are threaded between the `NOT` above and
+; `active.check.live` below -- harmless here (dead, this test's own
+; `ExitBlock` has no leftover phi needing them merged) but present
+; unconditionally.
+; CHECK: %active.check.live = and i1 %active.live, %[[NOT]]
 ; CHECK: latch:
 ; CHECK: feme.cpu.mask.any
 define void @main(i32 %n) #0 {
