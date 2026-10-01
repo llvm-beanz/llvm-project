@@ -67,28 +67,21 @@ next steps are:
    `L265`'s ASTC alpha-decode tie-break (4 block sizes affected:
    `astc_5x5`/`astc_8x8`/`astc_10x5`/`astc_12x12`). Still needs a Mesa/lavapipe
    reference-decoder comparison -- no new ideas this session (not revisited).
-2. **(overdue many sessions, next best pick for broader sampling)**
-   `copy_and_blit`'s remaining top-level groups are still entirely unsampled:
-   `copy_commands2`, `dedicated_allocation`, `multiplanar_xfer`,
-   `copy_memory_indirect`, `device_address`, `sparse`, `dynamic_state`,
-   `reinterpret`. `image_clearing` is now done (this session, clean).
-   `copy_and_blit.core.image_to_image.*` (52,692 cases) specifically is still
-   the single largest unsampled chunk.
-3. **(a few hours)** `synchronization.op` (20,131 cases) is still unsampled --
-   needs sub-batching by its own sub-prefixes (too large for one run, same
-   reasoning as `image_clearing` before this session showed it's actually fine
-   to just run in one shot if given enough wall-clock time -- ~5 minutes for 45k
-   cases here, so `synchronization.op` at 20k should be similarly tractable in
-   one run now; worth just trying it directly next time rather than
-   pre-emptively sub-batching).
-4. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
+2. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
    `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
-   lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass.
-   Reconfirmed present this session (now against the bumped `d0974dd` tip too),
-   still needs upstream fixes, outside this project's scope.
-5. **(housekeeping, just done this session, due again in ~5 sessions)**
-   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check -- bumped
-   to `d0974dd` this session (25 commits of upstream drift, mostly new test
-   coverage: MSAA, viewport arrays, HLSL intrinsic tests). Baseline Pass/Fail
-   counts updated (727 total now, up from 697) but the known-issue set is
-   unchanged.
+   lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass. Not
+   reconfirmed this session (not revisited) -- needs upstream fixes, outside
+   this project's scope.
+3. **(housekeeping, due again in ~5 sessions, last done 2 sessions ago at
+   `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift
+   check -- not checked this session (branch untouched); file away for its next
+   routine check.
+4. **(new, needs scoping)** With the `api`/`synchronization` broader-sampling
+   backlog now exhausted, the next dedicated-sampling session should pick a
+   fresh untouched top-level `dEQP-VK.*` group (e.g. `pipeline`,
+   `shader_render`, `rasterization`, `texture`, `robustness`, or similar -- not
+   yet inventoried which top-level groups have never been run at all against the
+   real FeMe device). Worth a short scoping pass first (`deqp-vk
+   --deqp-runmode=xml-caselist` or similar to enumerate top-level groups and
+   cross-reference against this session's/prior sessions' own notes) before
+   picking the next target.
