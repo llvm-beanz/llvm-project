@@ -63,28 +63,28 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases
-   (`fwidth{,coarse,fine}.fbo_float.vec4_highp`) -- extract exact pixel
-   values first to tell a tiny rounding delta from a real bug.
-2. **(6 cases, feature decision needed, carried over many sessions)**
-   `fragdepth` multisample image-creation gap (`*_multisample_{2,4,8}`).
-3. **(6 cases, carried over many sessions)** `fragdepth`
-   combined-depth-stencil-format bug (`Executor.cpp` `readDepth`/
-   `writeDepth`, ~line 999).
-4. **(carried over many sessions)** `L265`'s `a2b10g10r10_snorm_pack32`
-   ASTC decode bug in `ASTCDecode.cpp`.
-5. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
-   sampling (`api`/`pipeline`/`synchronization`) -- run in small,
-   isolated per-case batches, never a full-cluster sweep.
-6. **(low priority)** `offload-test-suite`'s own pre-existing
-   `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation
-   issues -- unrelated to FeMe/LLVM, needs upstream fixes.
-7. **(housekeeping, just repaired, due again in ~5 sessions)**
-   `check-hlsl-feme-vk` branch-drift check: repaired this session
-   (`854cc3f` cherry-pick), no drift beyond the routine reset.
-8. **(optional, low priority)** Independently root-cause why
-   `inc_counter_array.test` started passing this session (it was not
-   directly targeted) -- currently just noted as a plausible side
-   effect of the `L298` masking fix, not confirmed via its own IR
-   trace. Only worth doing if a similar atomic-ordering bug resurfaces
-   elsewhere and a confirmed mechanism would help.
+1. **(1-2 hours)** Triage the two new
+   `InterlockedCompareExchange`/`InterlockedCompareStore` failures in
+   `check-hlsl-feme-vk` — new this session, same atomic-op family as the
+   already-fixed `inc_counter_array` bug, worth checking first whether it's the
+   same root cause recurring in a different op.
+2. **(30 min)** Confirm `Mandelbrot.test`'s failure is golden-image drift
+   (carried over from 2 sessions ago, still not done) — diff
+   `offload-golden-images`' `Mandelbrot.png` against a fresh render.
+3. **(a few hours, only if the above two don't pan out)** `L265`: look for a
+   *scoped* fix distinguishing the `astc_5x5`/`L260` tie case from the
+   `astc_8x8`/`L265` tie case (both land on an exact `0.5`, need opposite
+   rounding) — needs a concrete structural difference, not another global
+   rounding-rule guess. Consider instead comparing against a real GPU's or
+   Mesa/lavapipe's ASTC decoder + blit filter order for the same input to see if
+   the reference avoids the tie entirely via a different computation order.
+4. **(carried over many sessions)** `fragdepth` multisample image-creation gap
+   (6 cases) and combined-depth-stencil-format bug (6 cases, `Executor.cpp`
+   `readDepth`/`writeDepth` ~line 999).
+5. **(overdue many sessions)** Broader-than-glsl/tessellation CTS sampling
+   (`api`/`pipeline`/`synchronization`) — run in small, isolated per-case
+   batches, never a full-cluster sweep.
+6. **(low priority, pre-existing, unrelated to FeMe)** `offload-test-suite`'s
+   own `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation issues, and
+   the newly-noticed `array_of_matrices.test` unexpected-pass — needs upstream
+   fixes, not this project's scope.
