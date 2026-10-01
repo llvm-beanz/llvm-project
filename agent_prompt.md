@@ -63,35 +63,25 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(half a day to a day, best next pick, new)** `L319`: find and
-   close the gap between `feme-run`'s own JIT-path resource
-   normalization and `feme::vulkan`'s real `vkCreateComputePipelines`
-   path for a register-bound sampled-image handle. Start by comparing
-   `feme::cpu::runPipeline`'s own pass list against whatever
-   `feme::vulkan` calls for compute-pipeline creation (`GraphicsPipeline.cpp`'s
-   compute counterpart, if one exists separately) -- `H8`'s own root
-   cause (a missing `CanonicalizeStagePass` call) is the first thing to
-   check for by analogy. Once closed, also fix the SIMD-path
-   silent-zero gap found alongside it (small, same area).
-2. **(a few hours, once `L319` is closed)** Resume `L315`/`L318`'s
-   actual full-pipeline repro: the real `SampleCmpGrad`/`Texture1D`/
-   `SamplerComparisonState` shader (already written this session,
-   not committed since it currently fails for the wrong reason) should
-   finally be runnable once `L319` lands; use it to capture the real
-   bug's shape end-to-end for the first time this investigation.
-3. **(a few hours, carried over, unchanged)** `L317`: `texel_buffer`'s
-   10 remaining functional failures.
-4. **(a few hours, carried over, unchanged)** `L316`:
-   `texture.explicit_lod.2d.sizes.*` (16 cases) and
-   `texture.multisample` (5 cases).
-5. **(a few hours, lower priority, many sessions carried over,
-   unchanged)** `L265`'s ASTC alpha-decode tie-break (4 block sizes).
-6. **(~21 cases, a few hours, carried over, unchanged)**
-   `rasterization`'s remaining 82 stipple/adjacency Bresenham failures.
-7. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
-   `offload-test-suite`'s `spec_const_32_bits.test`/
-   `WaveActiveMax.test` lit-annotation issues, and
-   `array_of_matrices.test`'s unexpected-pass.
-8. **(housekeeping, overdue, last done 5 sessions ago at `d0974dd`)**
-   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check
-   -- not checked again this session.
+1. **`L315` (~4-5 hrs, best next pick, newly narrowed)**: the
+   comparison-sampling math is now confirmed correct via `feme-run`. Next lead:
+   implicit-derivative-driven mip selection for depth-comparison sampling
+   specifically. Start in `Pipeline.cpp`'s SPIR-V-to-runtime-call lowering for
+   `OpImageSampleDrefImplicitLod` vs. `OpImageSampleDrefExplicitLod` -- compare
+   how each computes/selects the mip level, since `nearest_mipmap_nearest` in
+   the failing case name is the strongest hint yet this investigation has had.
+2. **`L317` (a few hours)**: `texel_buffer`'s own remaining 10 functional
+   failures (genuine `Fail`s, not crashes) -- untouched many sessions running.
+3. **`L316` (a few hours)**: `texture.explicit_lod.2d.sizes.*` (16 cases) and
+   `texture.multisample` (5 cases) -- untouched many sessions running.
+4. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
+   alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
+   reference-decoder comparison.
+5. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
+   hours, carried over, unchanged)**.
+6. **`offload-test-suite`'s own lit-annotation issues**
+   (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`) --
+   low priority, pre-existing, outside this project's scope.
+7. **`check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check** --
+   housekeeping, overdue (last done 6 sessions ago at `d0974dd`), not checked
+   again this session.
