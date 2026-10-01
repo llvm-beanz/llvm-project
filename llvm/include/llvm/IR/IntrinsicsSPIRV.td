@@ -186,6 +186,14 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
   // for importers that need to preserve that distinction rather than
   // recover it from a single generic "discard" op.
   def int_spv_demote_to_helper_invocation : DefaultAttrsIntrinsic<[], [], []>;
+  // Queries whether the invocation is currently considered a helper
+  // invocation (SPIR-V's `OpIsHelperInvocationEXT`, the read-only
+  // counterpart to `int_spv_demote_to_helper_invocation` above): true both
+  // for an invocation launched as a helper invocation and for one demoted
+  // to one by a preceding `int_spv_demote_to_helper_invocation` in the same
+  // invocation, so this must not be marked `IntrNoMem`/hoisted or CSE'd
+  // across such a call.
+  def int_spv_is_helper_invocation : DefaultAttrsIntrinsic<[llvm_i1_ty], [], []>;
   def int_spv_ddx : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_ddy : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_ddx_coarse : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
