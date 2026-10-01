@@ -12770,6 +12770,77 @@ public:
   }
 };
 
+/// Converts `spirv.GL.Sinh`/`Cosh` (roadmap L287) via the GLSL.std.450
+/// spec's own literal formula (`0.5 * (exp(x) +/- exp(-x))`, using
+/// `llvm.exp`) instead of `TranscendentalFlushInputPattern`'s previous
+/// direct mapping onto `llvm.sinh`/`llvm.cosh`. Those two LLVM
+/// intrinsics lower (on this CPU target) to a numerically *careful*
+/// libm implementation that deliberately avoids the premature overflow
+/// the naive formula hits -- e.g. `coshf(89.414)` returns the correct,
+/// finite, barely-sub-`FLT_MAX` answer `~3.397e38` by computing `exp(x)/
+/// 2` directly rather than computing `exp(x)` (`~6.79e38`, itself
+/// already past `FLT_MAX`) as a separate intermediate step. CTS's own
+/// precision tests (`dEQP-VK.glsl.builtin.precision.{sinh,cosh}.
+/// highp.*`), though, build their own "expected range" by literally
+/// composing `exp<float>(x)` (itself its own derived/interval op) with
+/// `+`/`-`/`*0.5` -- so for inputs whose `exp(x)` already overflows
+/// (even though the final `cosh`/`sinh` answer would not, computed
+/// carefully), the reference's own `exp(x)` step already overflows to
+/// `+inf` first, making the *expected* answer `+inf` too, not the more
+/// precise finite value a careful libm implementation returns. Real GPU
+/// hardware's own `exp`/`sinh`/`cosh` special-function units are
+/// presumably equally loose (matching GLSL's own generous `ulp(ret, 3.0
+/// + 2.0*|x|)`-style precision requirements), which is exactly why CTS
+/// accepts (and, per this fix, now requires) this early-overflow
+/// behavior rather than the numerically ideal one. `Sinh` keeps the
+/// same subnormal-input flush `TranscendentalFlushInputPattern` already
+/// gave it (`Cosh` never needs one -- `cosh`'s own range never comes
+/// near zero/subnormal scale the way `sinh(x) ~= x` does for small
+/// `x`).
+enum class HyperbolicKind { Sinh, Cosh };
+
+template <typename SPIRVOp, HyperbolicKind Kind, bool FlushSubnormalInput>
+class HyperbolicViaExpPattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = Adaptor.getOperand();
+    if constexpr (FlushSubnormalInput)
+      X = flushSubnormalToZero(Rewriter, Loc, X);
+    mlir::Value NegX = mlir::LLVM::FNegOp::create(Rewriter, Loc, DstType, X);
+    mlir::Value ExpX = mlir::LLVM::ExpOp::create(Rewriter, Loc, DstType, X);
+    mlir::Value ExpNegX =
+        mlir::LLVM::ExpOp::create(Rewriter, Loc, DstType, NegX);
+    mlir::Value Combined =
+        Kind == HyperbolicKind::Cosh
+            ? mlir::LLVM::FAddOp::create(Rewriter, Loc, DstType, ExpX,
+                                         ExpNegX)
+                  .getResult()
+            : mlir::LLVM::FSubOp::create(Rewriter, Loc, DstType, ExpX,
+                                         ExpNegX)
+                  .getResult();
+    mlir::Value Half = createSameShapeFPConstant(Rewriter, Loc, DstType, 0.5);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::FMulOp>(Op, DstType, Half,
+                                                    Combined);
+    return mlir::success();
+  }
+};
+
+using GLSinhViaExpPattern =
+    HyperbolicViaExpPattern<mlir::spirv::GLSinhOp, HyperbolicKind::Sinh,
+                            /*FlushSubnormalInput=*/true>;
+using GLCoshViaExpPattern =
+    HyperbolicViaExpPattern<mlir::spirv::GLCoshOp, HyperbolicKind::Cosh,
+                            /*FlushSubnormalInput=*/false>;
+
 /// Converts `spirv.GL.Asinh`/`Acosh`/`Atanh` (roadmap L184) via the
 /// standard closed-form identities the GLSL.std.450 spec itself defines
 /// them by:
@@ -15996,7 +16067,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<FConvertRoundingModePattern>(Patterns.getContext(),
                                             TypeConverter, FeMeBenefit);
   // Overrides upstream's own unconditional `DirectConversionPattern`/
-  // `InverseSqrtPattern`/`ScalePattern` for these six GLSL.std.450 ops with
+  // `InverseSqrtPattern`/`ScalePattern` for these GLSL.std.450 ops with
   // an unconditional subnormal-input flush (roadmap H6m), modeling a real
   // GPU's own special-function-unit hardware behavior; see
   // `TranscendentalFlushInputPattern`'s own comment above for why only
@@ -16004,17 +16075,24 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   // L192(b)) why `GLSqrtOp` alone opts out of the flush at `f16` width --
   // `sqrt.16.test`'s own golden data disagrees with the flushed answer
   // there, unlike every other op/width combination this pattern covers.
+  // (Roadmap L287) `GLSinhOp` moved off this direct-`llvm.sinh`-mapping
+  // pattern onto `GLSinhViaExpPattern` below (still flushing its own
+  // subnormal input the same way) -- see that pattern's own comment for
+  // why.
   Patterns.add<
       TranscendentalFlushInputPattern<mlir::spirv::GLLogOp, mlir::LLVM::LogOp>,
       TranscendentalFlushInputPattern<mlir::spirv::GLLog2Op,
                                       mlir::LLVM::Log2Op>,
       TranscendentalFlushInputPattern<mlir::spirv::GLSqrtOp, mlir::LLVM::SqrtOp,
-                                      /*FlushF16Denormals=*/false>,
-      TranscendentalFlushInputPattern<mlir::spirv::GLSinhOp,
-                                      mlir::LLVM::SinhOp>>(
+                                      /*FlushF16Denormals=*/false>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<FlushedInverseSqrtPattern>(Patterns.getContext(), TypeConverter,
                                           FeMeBenefit);
+  // `spirv.GL.Sinh`/`Cosh` (roadmap L287): see `HyperbolicViaExpPattern`'s
+  // own comment above for why these supersede the previous direct
+  // `llvm.sinh`/`llvm.cosh` mapping.
+  Patterns.add<GLSinhViaExpPattern, GLCoshViaExpPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   // (Roadmap L268) Supersede upstream's own ArithmeticWithOverflowPattern/
   // MulExtendedPattern registrations (see
   // populateSPIRVToLLVMConversionPatterns, called earlier by this same pass)

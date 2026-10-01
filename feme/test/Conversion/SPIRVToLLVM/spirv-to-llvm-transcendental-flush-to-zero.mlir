@@ -59,7 +59,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // CHECK-LABEL: llvm.func @sinh_flush
 // CHECK: llvm.select
-// CHECK: %[[RES:.*]] = llvm.intr.sinh(%{{.*}}) : (f32) -> f32
+// CHECK: %[[EXPX:.*]] = llvm.intr.exp(%{{.*}}) : (f32) -> f32
+// CHECK: %[[EXPNEGX:.*]] = llvm.intr.exp(%{{.*}}) : (f32) -> f32
+// CHECK: %[[DIFF:.*]] = llvm.fsub %[[EXPX]], %[[EXPNEGX]] : f32
+// CHECK: %[[RES:.*]] = llvm.fmul %{{.*}}, %[[DIFF]] : f32
 // CHECK: llvm.return %[[RES]] : f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @sinh_flush(%a: f32) -> (f32) "None" {
@@ -165,7 +168,10 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Float16], []> {
 // CHECK-LABEL: llvm.func @sinh_flush_f16
 // CHECK: %[[SUBNORMAL:.*]] = "llvm.intr.is.fpclass"(%arg0) <{bit = 144 : i32}> : (f16) -> i1
 // CHECK: llvm.select %[[SUBNORMAL]], %{{.*}}, %arg0 : i1, f16
-// CHECK: %[[RES:.*]] = llvm.intr.sinh(%{{.*}}) : (f16) -> f16
+// CHECK: %[[EXPX:.*]] = llvm.intr.exp(%{{.*}}) : (f16) -> f16
+// CHECK: %[[EXPNEGX:.*]] = llvm.intr.exp(%{{.*}}) : (f16) -> f16
+// CHECK: %[[DIFF:.*]] = llvm.fsub %[[EXPX]], %[[EXPNEGX]] : f16
+// CHECK: %[[RES:.*]] = llvm.fmul %{{.*}}, %[[DIFF]] : f16
 // CHECK: llvm.return %[[RES]] : f16
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Float16], []> {
   spirv.func @sinh_flush_f16(%a: f16) -> (f16) "None" {
