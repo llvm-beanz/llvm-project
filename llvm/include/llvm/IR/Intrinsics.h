@@ -157,6 +157,31 @@ LLVM_ABI Function *getDeclarationIfExists(Module *M, ID id,
 LLVM_ABI ID getIntrinsicForClangBuiltin(StringRef TargetPrefix,
                                         StringRef BuiltinName);
 
+enum class ClangBuiltinPredicateKind : uint8_t {
+  Any,
+  Floating,
+  SignedInteger,
+  UnsignedInteger,
+};
+
+struct ClangBuiltinOperand {
+  unsigned ArgNo;
+  unsigned IntegerCastBitWidth;
+  bool IntegerCastIsSigned;
+};
+
+struct ClangBuiltinLowering {
+  ID IntrinsicID;
+  ArrayRef<ClangBuiltinOperand> Operands;
+  ClangBuiltinPredicateKind PredicateKind;
+  unsigned PredicateArgNo;
+  StringRef ResultName;
+};
+
+/// Return the target-specific lowering recipes for a Clang builtin.
+LLVM_ABI ArrayRef<ClangBuiltinLowering>
+getClangBuiltinLowerings(StringRef TargetPrefix, StringRef BuiltinName);
+
 /// Map a MS builtin name to an intrinsic ID.
 LLVM_ABI ID getIntrinsicForMSBuiltin(StringRef TargetPrefix,
                                      StringRef BuiltinName);

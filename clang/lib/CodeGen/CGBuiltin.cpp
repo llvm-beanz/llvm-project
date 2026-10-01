@@ -29,6 +29,7 @@
 #include "clang/Basic/DiagnosticFrontend.h"
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/SmallBitVector.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Intrinsics.h"
@@ -75,16 +76,6 @@ static Value *EmitTargetArchBuiltinExpr(CodeGenFunction *CGF,
                                         unsigned BuiltinID, const CallExpr *E,
                                         ReturnValueSlot ReturnValue,
                                         llvm::Triple::ArchType Arch) {
-  // When compiling in HipStdPar mode we have to be conservative in rejecting
-  // target specific features in the FE, and defer the possible error to the
-  // AcceleratorCodeSelection pass, wherein iff an unsupported target builtin is
-  // referenced by an accelerator executable function, we emit an error.
-  // Returning nullptr here leads to the builtin being handled in
-  // EmitStdParUnsupportedBuiltin.
-  if (CGF->getLangOpts().HIPStdPar && CGF->getLangOpts().CUDAIsDevice &&
-      Arch != CGF->getTarget().getTriple().getArch())
-    return nullptr;
-
   switch (Arch) {
   case llvm::Triple::arm:
   case llvm::Triple::armeb:
@@ -6886,18 +6877,73 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
   // See if we have a target specific intrinsic.
   std::string Name = getContext().BuiltinInfo.getName(BuiltinID);
   Intrinsic::ID IntrinsicID = Intrinsic::not_intrinsic;
+  ArrayRef<Intrinsic::ClangBuiltinLowering> Lowerings;
   StringRef Prefix =
       llvm::Triple::getArchTypePrefix(getTarget().getTriple().getArch());
   if (!Prefix.empty()) {
     IntrinsicID = Intrinsic::getIntrinsicForClangBuiltin(Prefix.data(), Name);
-    if (IntrinsicID == Intrinsic::not_intrinsic && Prefix == "spv" &&
-        getTarget().getTriple().getOS() == llvm::Triple::OSType::AMDHSA)
+    Lowerings = Intrinsic::getClangBuiltinLowerings(Prefix, Name);
+    if (IntrinsicID == Intrinsic::not_intrinsic && Lowerings.empty() &&
+        Prefix == "spv" &&
+        getTarget().getTriple().getOS() == llvm::Triple::OSType::AMDHSA) {
       IntrinsicID = Intrinsic::getIntrinsicForClangBuiltin("amdgcn", Name);
+      Lowerings = Intrinsic::getClangBuiltinLowerings("amdgcn", Name);
+    }
     // NOTE we don't need to perform a compatibility flag check here since the
     // intrinsics are declared in Builtins*.def via LANGBUILTIN which filter the
     // MS builtins via ALL_MS_LANGUAGES and are filtered earlier.
-    if (IntrinsicID == Intrinsic::not_intrinsic)
+    if (IntrinsicID == Intrinsic::not_intrinsic && Lowerings.empty())
       IntrinsicID = Intrinsic::getIntrinsicForMSBuiltin(Prefix.data(), Name);
+  }
+
+  if (!Lowerings.empty()) {
+    for (const Intrinsic::ClangBuiltinLowering &Lowering : Lowerings) {
+      if (Lowering.PredicateKind !=
+          Intrinsic::ClangBuiltinPredicateKind::Any) {
+        QualType PredicateType =
+            E->getArg(Lowering.PredicateArgNo)->getType();
+        if (Lowering.PredicateKind ==
+                Intrinsic::ClangBuiltinPredicateKind::Floating &&
+            !PredicateType->hasFloatingRepresentation())
+          continue;
+        if (Lowering.PredicateKind ==
+                Intrinsic::ClangBuiltinPredicateKind::SignedInteger &&
+            !PredicateType->hasSignedIntegerRepresentation())
+          continue;
+        if (Lowering.PredicateKind ==
+                Intrinsic::ClangBuiltinPredicateKind::UnsignedInteger &&
+            !PredicateType->hasUnsignedIntegerRepresentation())
+          continue;
+      }
+
+      SmallVector<Value *> EmittedArgs(E->getNumArgs());
+      SmallBitVector ReferencedArgs(E->getNumArgs());
+      for (const Intrinsic::ClangBuiltinOperand &Operand : Lowering.Operands)
+        ReferencedArgs.set(Operand.ArgNo);
+      for (unsigned ArgNo : ReferencedArgs.set_bits())
+        EmittedArgs[ArgNo] = EmitScalarExpr(E->getArg(ArgNo));
+
+      SmallVector<Value *> Args;
+      for (const Intrinsic::ClangBuiltinOperand &Operand : Lowering.Operands) {
+        Value *Arg = EmittedArgs[Operand.ArgNo];
+        if (Operand.IntegerCastBitWidth)
+          Arg = Builder.CreateIntCast(
+              Arg,
+              llvm::IntegerType::get(getLLVMContext(),
+                                     Operand.IntegerCastBitWidth),
+              Operand.IntegerCastIsSigned);
+        Args.push_back(Arg);
+      }
+
+      if (Lowering.IntrinsicID == Intrinsic::not_intrinsic) {
+        assert(Args.size() == 1 && "fallback must have exactly one operand");
+        return RValue::get(Args.front());
+      }
+      return RValue::get(EmitIntrinsicCall(Lowering.IntrinsicID, Args,
+                                           ConvertType(E->getType()),
+                                           Lowering.ResultName));
+    }
+    llvm_unreachable("builtin intrinsic lowering has no matching predicate");
   }
 
   if (IntrinsicID != Intrinsic::not_intrinsic) {

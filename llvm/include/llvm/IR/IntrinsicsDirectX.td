@@ -22,7 +22,11 @@ def int_dx_flattened_thread_id_in_group : Intrinsic<[llvm_i32_ty], [], [IntrNoMe
 // bound and range size of the binding, as well as an index and an indicator
 // whether that index may be non-uniform.
 def int_dx_resource_handlefrombinding
-    : DefaultAttrsIntrinsic<
+    : ClangBuiltinLowering<
+        "__builtin_hlsl_resource_handlefrombinding",
+        [ClangBuiltinArg<2>, ClangBuiltinArg<1>, ClangBuiltinArg<3>,
+         ClangBuiltinArg<4>, ClangBuiltinArg<5>]>,
+    DefaultAttrsIntrinsic<
           [llvm_any_ty],
           [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_ptr_ty],
           [IntrNoMem]>;
@@ -109,7 +113,11 @@ def int_dx_resource_load_cbufferrow_2
                             [llvm_any_ty, llvm_i32_ty], [IntrReadMem]>;
 
 def int_dx_resource_updatecounter
-    : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_any_ty, llvm_i8_ty],
+    : ClangBuiltinLowering<
+          "__builtin_hlsl_buffer_update_counter",
+          [ClangBuiltinArg<0>,
+           ClangBuiltinIntCast<ClangBuiltinArg<1>, llvm_i8_ty, 1>]>,
+      DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_any_ty, llvm_i8_ty],
                             [IntrInaccessibleMemOrArgMemOnly]>;
 
 def int_dx_resource_getdimensions_x
@@ -221,9 +229,9 @@ def int_dx_resource_casthandle : Intrinsic<[llvm_any_ty], [llvm_any_ty]>;
 def int_dx_all : DefaultAttrsIntrinsic<[llvm_i1_ty], [llvm_any_ty], [IntrNoMem]>;
 def int_dx_any : DefaultAttrsIntrinsic<[llvm_i1_ty], [llvm_any_ty], [IntrNoMem]>;
 def int_dx_asdouble : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_double_ty>], [llvm_anyint_ty, LLVMMatchType<0>], [IntrNoMem, IntrTriviallyScalarizable]>;
-def int_dx_uclamp : DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
-def int_dx_sclamp : DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
-def int_dx_nclamp : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+def int_dx_uclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinUnsignedIntegerType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+def int_dx_sclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinSignedIntegerType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+def int_dx_nclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinFloatingType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
 def int_dx_saturate : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem, IntrTriviallyScalarizable]>;
 
 def int_dx_dot2 : DefaultAttrsIntrinsic<[LLVMMatchType<0>],
@@ -263,12 +271,12 @@ def int_dx_dot2add :
     DefaultAttrsIntrinsic<[llvm_float_ty],
     [llvm_float_ty, llvm_half_ty, llvm_half_ty, llvm_half_ty, llvm_half_ty],
     [IntrNoMem, Commutative]>;
-def int_dx_dot4add_i8packed : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
+def int_dx_dot4add_i8packed : ClangBuiltinLowering<"__builtin_hlsl_dot4add_i8packed", [ClangBuiltinArg<2>, ClangBuiltinArg<0>, ClangBuiltinArg<1>], ClangBuiltinAnyType, "hlsl.dot4add.i8packed">, DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
 def int_dx_dot4add_u8packed : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
 
-def int_dx_frac  : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem, IntrTriviallyScalarizable]>;
+def int_dx_frac  : ClangBuiltinLowering<"__builtin_hlsl_elementwise_frac", [ClangBuiltinArg<0>], ClangBuiltinAnyType, "hlsl.frac">, DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem, IntrTriviallyScalarizable]>;
 
-def int_dx_isinf : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
+def int_dx_isinf : ClangBuiltinLowering<"__builtin_hlsl_elementwise_isinf", [ClangBuiltinArg<0>], ClangBuiltinAnyType, "hlsl.isinf">, DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
     [llvm_anyfloat_ty], [IntrNoMem, IntrTriviallyScalarizable]>;
 def int_dx_isnan : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
     [llvm_anyfloat_ty], [IntrNoMem, IntrTriviallyScalarizable]>;
@@ -329,7 +337,8 @@ def int_dx_firstbitshigh : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0,
 def int_dx_firstbitlow : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i32_ty>], [llvm_anyint_ty], [IntrNoMem, IntrTriviallyScalarizable]>;
 
 def int_dx_all_memory_barrier
-    : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
+        : ClangBuiltinLowering<"__builtin_hlsl_all_memory_barrier", []>,
+            DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
 
 def int_dx_all_memory_barrier_with_group_sync
     : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;

@@ -19,6 +19,7 @@
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsARM.h"
 #include "llvm/IR/IntrinsicsBPF.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/IntrinsicsHexagon.h"
 #include "llvm/IR/IntrinsicsLoongArch.h"
 #include "llvm/IR/IntrinsicsMips.h"
@@ -838,6 +839,10 @@ Function *Intrinsic::getDeclarationIfExists(Module *M, ID id,
 
 // This defines the "Intrinsic::getIntrinsicForClangBuiltin()" method.
 #define GET_LLVM_INTRINSIC_FOR_CLANG_BUILTIN
+#include "llvm/IR/IntrinsicImpl.inc"
+
+// This defines the "Intrinsic::getClangBuiltinLowerings()" method.
+#define GET_LLVM_CLANG_BUILTIN_LOWERING
 #include "llvm/IR/IntrinsicImpl.inc"
 
 // This defines the "Intrinsic::getIntrinsicForMSBuiltin()" method.

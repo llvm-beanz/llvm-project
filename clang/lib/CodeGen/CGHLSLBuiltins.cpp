@@ -1081,18 +1081,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
     llvm::Type *HandleTy = CGM.getTypes().ConvertType(E->getType());
     return llvm::PoisonValue::get(HandleTy);
   }
-  case Builtin::BI__builtin_hlsl_resource_handlefrombinding: {
-    llvm::Type *HandleTy = CGM.getTypes().ConvertType(E->getType());
-    Value *RegisterOp = EmitScalarExpr(E->getArg(1));
-    Value *SpaceOp = EmitScalarExpr(E->getArg(2));
-    Value *RangeOp = EmitScalarExpr(E->getArg(3));
-    Value *IndexOp = EmitScalarExpr(E->getArg(4));
-    Value *Name = EmitScalarExpr(E->getArg(5));
-    llvm::Intrinsic::ID IntrinsicID =
-        CGM.getHLSLRuntime().getCreateHandleFromBindingIntrinsic();
-    SmallVector<Value *> Args{SpaceOp, RegisterOp, RangeOp, IndexOp, Name};
-    return Builder.CreateIntrinsic(HandleTy, IntrinsicID, Args);
-  }
   case Builtin::BI__builtin_hlsl_resource_handlefromimplicitbinding: {
     llvm::Type *HandleTy = CGM.getTypes().ConvertType(E->getType());
     Value *OrderID = EmitScalarExpr(E->getArg(1));
@@ -1126,18 +1114,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
         CGM.getHLSLRuntime().getCreateHandleFromHeapIntrinsic();
     return Builder.CreateIntrinsic(HandleTy, IntrinsicID, {IndexOp});
   }
-  case Builtin::BI__builtin_hlsl_resource_counterhandlefromheap: {
-    Value *MainHandle = EmitScalarExpr(E->getArg(0));
-    if (!CGM.getTriple().isSPIRV())
-      return MainHandle;
-
-    llvm::Type *HandleTy = CGM.getTypes().ConvertType(E->getType());
-    llvm::Intrinsic::ID IntrinsicID =
-        llvm::Intrinsic::spv_resource_counterhandlefromheap;
-    return EmitIntrinsicCall(IntrinsicID, {HandleTy, MainHandle->getType()},
-                             {MainHandle});
-  }
-
   case Builtin::BI__builtin_hlsl_resource_nonuniformindex: {
     Value *IndexOp = EmitScalarExpr(E->getArg(0));
     llvm::Type *RetTy = ConvertType(E->getType());
@@ -1190,28 +1166,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
   }
   case Builtin::BI__builtin_hlsl_asdouble:
     return handleAsDoubleBuiltin(*this, E);
-  case Builtin::BI__builtin_hlsl_elementwise_clamp: {
-    Value *OpX = EmitScalarExpr(E->getArg(0));
-    Value *OpMin = EmitScalarExpr(E->getArg(1));
-    Value *OpMax = EmitScalarExpr(E->getArg(2));
-
-    QualType Ty = E->getArg(0)->getType();
-    if (auto *VecTy = Ty->getAs<VectorType>())
-      Ty = VecTy->getElementType();
-
-    Intrinsic::ID Intr;
-    if (Ty->isFloatingType()) {
-      Intr = CGM.getHLSLRuntime().getNClampIntrinsic();
-    } else if (Ty->isUnsignedIntegerType()) {
-      Intr = CGM.getHLSLRuntime().getUClampIntrinsic();
-    } else {
-      assert(Ty->isSignedIntegerType());
-      Intr = CGM.getHLSLRuntime().getSClampIntrinsic();
-    }
-    return Builder.CreateIntrinsic(
-        /*ReturnType=*/OpX->getType(), Intr,
-        ArrayRef<Value *>{OpX, OpMin, OpMax}, nullptr, "hlsl.clamp");
-  }
   case Builtin::BI__builtin_hlsl_dot: {
     Value *Op0 = EmitScalarExpr(E->getArg(0));
     Value *Op1 = EmitScalarExpr(E->getArg(1));
@@ -1241,18 +1195,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
         /*ReturnType=*/T0->getScalarType(),
         getDotProductIntrinsic(CGM.getHLSLRuntime(), VecTy0->getElementType()),
         ArrayRef<Value *>{Op0, Op1}, nullptr, "hlsl.dot");
-  }
-  case Builtin::BI__builtin_hlsl_dot4add_i8packed: {
-    Value *X = EmitScalarExpr(E->getArg(0));
-    Value *Y = EmitScalarExpr(E->getArg(1));
-    Value *Acc = EmitScalarExpr(E->getArg(2));
-
-    Intrinsic::ID ID = CGM.getHLSLRuntime().getDot4AddI8PackedIntrinsic();
-    // Note that the argument order disagrees between the builtin and the
-    // intrinsic here.
-    return Builder.CreateIntrinsic(
-        /*ReturnType=*/Acc->getType(), ID, ArrayRef<Value *>{Acc, X, Y},
-        nullptr, "hlsl.dot4add.i8packed");
   }
   case Builtin::BI__builtin_hlsl_dot4add_u8packed: {
     Value *X = EmitScalarExpr(E->getArg(0));
@@ -1287,24 +1229,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
   }
   case Builtin::BI__builtin_hlsl_elementwise_f32tof16: {
     return handleElementwiseF32ToF16(*this, E);
-  }
-  case Builtin::BI__builtin_hlsl_elementwise_frac: {
-    Value *Op0 = EmitScalarExpr(E->getArg(0));
-    if (!E->getArg(0)->getType()->hasFloatingRepresentation())
-      llvm_unreachable("frac operand must have a float representation");
-    return Builder.CreateIntrinsic(
-        /*ReturnType=*/Op0->getType(), CGM.getHLSLRuntime().getFracIntrinsic(),
-        ArrayRef<Value *>{Op0}, nullptr, "hlsl.frac");
-  }
-  case Builtin::BI__builtin_hlsl_elementwise_isinf: {
-    Value *Op0 = EmitScalarExpr(E->getArg(0));
-    if (!E->getArg(0)->getType()->hasFloatingRepresentation())
-      llvm_unreachable("isinf operand must have a float representation");
-    llvm::Type *retType = getAggregateType(
-        llvm::Type::getInt1Ty(getLLVMContext()), E->getArg(0)->getType());
-    return Builder.CreateIntrinsic(
-        retType, CGM.getHLSLRuntime().getIsInfIntrinsic(),
-        ArrayRef<Value *>{Op0}, nullptr, "hlsl.isinf");
   }
   case Builtin::BI__builtin_hlsl_elementwise_isnan: {
     Value *Op0 = EmitScalarExpr(E->getArg(0));
@@ -1715,15 +1639,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
         retType, CGM.getHLSLRuntime().getSignIntrinsic(),
         ArrayRef<Value *>{Op0}, nullptr, "hlsl.sign");
   }
-  case Builtin::BI__builtin_hlsl_buffer_update_counter: {
-    Value *ResHandle = EmitScalarExpr(E->getArg(0));
-    Value *Offset = EmitScalarExpr(E->getArg(1));
-    Value *OffsetI8 = Builder.CreateIntCast(Offset, Int8Ty, true);
-    return Builder.CreateIntrinsic(
-        /*ReturnType=*/Offset->getType(),
-        CGM.getHLSLRuntime().getBufferUpdateCounterIntrinsic(),
-        ArrayRef<Value *>{ResHandle, OffsetI8}, nullptr);
-  }
   case Builtin::BI__builtin_hlsl_elementwise_splitdouble: {
 
     assert((E->getArg(0)->getType()->hasFloatingRepresentation() &&
@@ -1736,10 +1651,6 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
     assert(E->getArg(0)->getType()->hasFloatingRepresentation() &&
            "clip operands types mismatch");
     return handleHlslClip(E, this);
-  case Builtin::BI__builtin_hlsl_all_memory_barrier: {
-    Intrinsic::ID ID = CGM.getHLSLRuntime().getAllMemoryBarrierIntrinsic();
-    return EmitIntrinsicCall(ID);
-  }
   case Builtin::BI__builtin_hlsl_all_memory_barrier_with_group_sync: {
     Intrinsic::ID ID =
         CGM.getHLSLRuntime().getAllMemoryBarrierWithGroupSyncIntrinsic();

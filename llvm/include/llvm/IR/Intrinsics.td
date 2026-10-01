@@ -851,6 +851,51 @@ class ClangBuiltin<string name> {
   string ClangBuiltinName = name;
 }
 
+// Describes how Clang should lower a builtin to an intrinsic. Unlike
+// ClangBuiltin, these records support argument transformations and selecting
+// among multiple intrinsics for the same builtin.
+class ClangBuiltinOperand;
+
+class ClangBuiltinArg<int arg_no> : ClangBuiltinOperand {
+  int ArgNo = arg_no;
+}
+
+class ClangBuiltinIntCast<ClangBuiltinOperand operand, LLVMType type,
+                          bit is_signed> : ClangBuiltinOperand {
+  ClangBuiltinOperand Operand = operand;
+  LLVMType Type = type;
+  bit IsSigned = is_signed;
+}
+
+class ClangBuiltinTypePredicate<int arg_no, string kind> {
+  int ArgNo = arg_no;
+  string Kind = kind;
+}
+
+def ClangBuiltinAnyType : ClangBuiltinTypePredicate<0, "any">;
+class ClangBuiltinFloatingType<int arg_no>
+    : ClangBuiltinTypePredicate<arg_no, "floating">;
+class ClangBuiltinSignedIntegerType<int arg_no>
+    : ClangBuiltinTypePredicate<arg_no, "signed">;
+class ClangBuiltinUnsignedIntegerType<int arg_no>
+    : ClangBuiltinTypePredicate<arg_no, "unsigned">;
+
+class ClangBuiltinLowering<string name,
+                           list<ClangBuiltinOperand> operands,
+                           ClangBuiltinTypePredicate predicate =
+                               ClangBuiltinAnyType,
+                           string result_name = ""> {
+  string ClangBuiltinLoweringName = name;
+  list<ClangBuiltinOperand> ClangBuiltinOperands = operands;
+  ClangBuiltinTypePredicate ClangBuiltinPredicate = predicate;
+  string ClangBuiltinResultName = result_name;
+}
+
+class ClangBuiltinFallback<string name, ClangBuiltinOperand operand> {
+  string ClangBuiltinFallbackName = name;
+  ClangBuiltinOperand ClangBuiltinFallbackOperand = operand;
+}
+
 class MSBuiltin<string name> {
   string MSBuiltinName = name;
 }

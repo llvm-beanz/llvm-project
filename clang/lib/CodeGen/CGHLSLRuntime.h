@@ -124,10 +124,8 @@ public:
 
   GENERATE_HLSL_INTRINSIC_FUNCTION(All, all)
   GENERATE_HLSL_INTRINSIC_FUNCTION(Any, any)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(Frac, frac)
   GENERATE_HLSL_INTRINSIC_FUNCTION(FlattenedThreadIdInGroup,
                                    flattened_thread_id_in_group)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(IsInf, isinf)
   GENERATE_HLSL_INTRINSIC_FUNCTION(IsNaN, isnan)
   GENERATE_HLSL_INTRINSIC_FUNCTION(Rsqrt, rsqrt)
   GENERATE_HLSL_INTRINSIC_FUNCTION(Saturate, saturate)
@@ -138,7 +136,6 @@ public:
   GENERATE_HLSL_INTRINSIC_FUNCTION(FDot, fdot)
   GENERATE_HLSL_INTRINSIC_FUNCTION(SDot, sdot)
   GENERATE_HLSL_INTRINSIC_FUNCTION(UDot, udot)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(Dot4AddI8Packed, dot4add_i8packed)
   GENERATE_HLSL_INTRINSIC_FUNCTION(Dot4AddU8Packed, dot4add_u8packed)
   GENERATE_HLSL_INTRINSIC_FUNCTION(WaveActiveAllEqual, wave_all_equal)
   GENERATE_HLSL_INTRINSIC_FUNCTION(WaveActiveAllTrue, wave_all)
@@ -162,9 +159,6 @@ public:
   GENERATE_HLSL_INTRINSIC_FUNCTION(FirstBitUHigh, firstbituhigh)
   GENERATE_HLSL_INTRINSIC_FUNCTION(FirstBitSHigh, firstbitshigh)
   GENERATE_HLSL_INTRINSIC_FUNCTION(FirstBitLow, firstbitlow)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(NClamp, nclamp)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(SClamp, sclamp)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(UClamp, uclamp)
 
   GENERATE_HLSL_INTRINSIC_FUNCTION(CreateResourceGetBasePointer,
                                    resource_getbasepointer)
@@ -191,8 +185,6 @@ public:
                                    resource_handlefromheap)
   GENERATE_HLSL_INTRINSIC_FUNCTION(NonUniformResourceIndex,
                                    resource_nonuniformindex)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(BufferUpdateCounter, resource_updatecounter)
-  GENERATE_HLSL_INTRINSIC_FUNCTION(AllMemoryBarrier, all_memory_barrier)
   GENERATE_HLSL_INTRINSIC_FUNCTION(AllMemoryBarrierWithGroupSync,
                                    all_memory_barrier_with_group_sync)
   GENERATE_HLSL_INTRINSIC_FUNCTION(DeviceMemoryBarrier, device_memory_barrier)

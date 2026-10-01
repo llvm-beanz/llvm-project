@@ -102,8 +102,8 @@ let TargetPrefix = "spv" in {
   def int_spv_degrees : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty], [IntrNoMem]>;
   def int_spv_distance : DefaultAttrsIntrinsic<[LLVMVectorElementType<0>], [llvm_anyfloat_ty, LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_faceforward : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
-  def int_spv_frac : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty], [IntrNoMem]>;
-  def int_spv_isinf : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
+  def int_spv_frac : ClangBuiltinLowering<"__builtin_hlsl_elementwise_frac", [ClangBuiltinArg<0>], ClangBuiltinAnyType, "hlsl.frac">, DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty], [IntrNoMem]>;
+  def int_spv_isinf : ClangBuiltinLowering<"__builtin_hlsl_elementwise_isinf", [ClangBuiltinArg<0>], ClangBuiltinAnyType, "hlsl.isinf">, DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
     [llvm_anyfloat_ty], [IntrNoMem]>;
   def int_spv_isnan : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i1_ty>],
     [llvm_anyfloat_ty], [IntrNoMem]>;
@@ -136,7 +136,7 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
     DefaultAttrsIntrinsic<[LLVMVectorElementType<0>],
     [llvm_anyint_ty, LLVMScalarOrSameVectorWidth<0, LLVMVectorElementType<0>>],
     [IntrNoMem, Commutative] >;
-  def int_spv_dot4add_i8packed : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
+  def int_spv_dot4add_i8packed : ClangBuiltinLowering<"__builtin_hlsl_dot4add_i8packed", [ClangBuiltinArg<2>, ClangBuiltinArg<0>, ClangBuiltinArg<1>], ClangBuiltinAnyType, "hlsl.dot4add.i8packed">, DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
   def int_spv_dot4add_u8packed : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty], [IntrNoMem]>;
   def int_spv_subgroup_prefix_bit_count : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i1_ty], [IntrConvergent, IntrNoMem]>;
   def int_spv_wave_active_countbits : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_i1_ty], [IntrConvergent, IntrNoMem]>;
@@ -166,7 +166,7 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
   def int_spv_quad_read_across_diagonal : DefaultAttrsIntrinsic<[llvm_any_ty], [LLVMMatchType<0>], [IntrConvergent, IntrNoMem]>;
   def int_spv_sign : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i32_ty>], [llvm_any_ty], [IntrNoMem]>;
   def int_spv_radians : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty], [IntrNoMem]>;
-  def int_spv_all_memory_barrier : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
+  def int_spv_all_memory_barrier : ClangBuiltinLowering<"__builtin_hlsl_all_memory_barrier", []>, DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
   def int_spv_all_memory_barrier_with_group_sync : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
   def int_spv_device_memory_barrier : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
   def int_spv_device_memory_barrier_with_group_sync : DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
@@ -181,16 +181,20 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
   def int_spv_ddx_fine : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_ddy_fine : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_fwidth : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
-  def int_spv_uclamp : DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
-  def int_spv_sclamp : DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
-  def int_spv_nclamp : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+  def int_spv_uclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinUnsignedIntegerType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+  def int_spv_sclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinSignedIntegerType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyint_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
+  def int_spv_nclamp : ClangBuiltinLowering<"__builtin_hlsl_elementwise_clamp", [ClangBuiltinArg<0>, ClangBuiltinArg<1>, ClangBuiltinArg<2>], ClangBuiltinFloatingType<0>, "hlsl.clamp">, DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>, LLVMMatchType<0>, LLVMMatchType<0>], [IntrNoMem]>;
 
   // Create resource handle given the binding information. Returns a
   // type appropriate for the kind of resource given the set id, binding id,
   // array size of the binding, as well as an index and an indicator
   // whether that index may be non-uniform.
   def int_spv_resource_handlefrombinding
-      : DefaultAttrsIntrinsic<[llvm_any_ty],
+    : ClangBuiltinLowering<
+      "__builtin_hlsl_resource_handlefrombinding",
+      [ClangBuiltinArg<2>, ClangBuiltinArg<1>, ClangBuiltinArg<3>,
+       ClangBuiltinArg<4>, ClangBuiltinArg<5>]>,
+      DefaultAttrsIntrinsic<[llvm_any_ty],
                               [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty,
                                llvm_i32_ty, llvm_ptr_ty],
                               [IntrNoMem]>;
@@ -213,7 +217,10 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
                               [llvm_i32_ty],
                               [IntrNoMem]>;
   def int_spv_resource_counterhandlefromheap
-      : DefaultAttrsIntrinsic<[llvm_any_ty],
+    : ClangBuiltinLowering<
+      "__builtin_hlsl_resource_counterhandlefromheap",
+      [ClangBuiltinArg<0>]>,
+      DefaultAttrsIntrinsic<[llvm_any_ty],
                               [llvm_any_ty],
                               [IntrNoMem, IntrConvergent]>;
                               
@@ -222,7 +229,11 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
   def int_spv_firstbitlow : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i32_ty>], [llvm_anyint_ty], [IntrNoMem]>;
 
   def int_spv_resource_updatecounter
-      : DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_any_ty, llvm_i8_ty],
+    : ClangBuiltinLowering<
+      "__builtin_hlsl_buffer_update_counter",
+      [ClangBuiltinArg<0>,
+       ClangBuiltinIntCast<ClangBuiltinArg<1>, llvm_i8_ty, 1>]>,
+      DefaultAttrsIntrinsic<[llvm_i32_ty], [llvm_any_ty, llvm_i8_ty],
                               [IntrInaccessibleMemOrArgMemOnly]>;
 
   def int_spv_resource_getdimensions_x
@@ -377,3 +388,6 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
 
 
 }
+
+def : ClangBuiltinFallback<"__builtin_hlsl_resource_counterhandlefromheap",
+                           ClangBuiltinArg<0>>;

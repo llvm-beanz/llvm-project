@@ -33,6 +33,7 @@
 #include <cctype>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,6 +82,8 @@ public:
                                  raw_ostream &OS);
   void EmitIntrinsicToBuiltinMap(const CodeGenIntrinsicTable &Ints,
                                  bool IsClang, raw_ostream &OS);
+  void EmitClangBuiltinLowering(const CodeGenIntrinsicTable &Ints,
+                                raw_ostream &OS);
 };
 
 // Helper class to use with `TableGen::Emitter::OptClass`.
@@ -146,6 +149,9 @@ void IntrinsicEmitter::run(raw_ostream &OS, bool Enums) {
 
     // Emit code to translate Clang builtins into LLVM intrinsics.
     EmitIntrinsicToBuiltinMap(Ints, true, OS);
+
+    // Emit target-specific Clang builtin lowering recipes.
+    EmitClangBuiltinLowering(Ints, OS);
 
     // Emit code to translate MS builtins into LLVM intrinsics.
     EmitIntrinsicToBuiltinMap(Ints, false, OS);
@@ -1302,6 +1308,201 @@ Intrinsic::getIntrinsicFor{}Builtin(StringRef TargetPrefix,
   if (II == std::end(TI->Names) || II->getName() != BuiltinName)
     return not_intrinsic;
   return II->IntrinsicID;
+}
+)";
+}
+
+void IntrinsicEmitter::EmitClangBuiltinLowering(
+    const CodeGenIntrinsicTable &Ints, raw_ostream &OS) {
+  using Key = std::pair<std::string, std::string>;
+  std::map<Key, std::vector<const CodeGenIntrinsic *>> Mappings;
+  for (const CodeGenIntrinsic &Int : Ints) {
+    if (!Int.TheDef->isSubClassOf("ClangBuiltinLowering"))
+      continue;
+    if (Int.TargetPrefix.empty())
+      PrintFatalError(Int.TheDef->getLoc(),
+                      "Clang builtin lowering requires a target intrinsic");
+    Mappings[{Int.TargetPrefix.str(),
+              Int.TheDef->getValueAsString("ClangBuiltinLoweringName").str()}]
+        .push_back(&Int);
+  }
+
+  std::map<std::string, const Record *> Fallbacks;
+  for (const Record *Fallback :
+       Records.getAllDerivedDefinitions("ClangBuiltinFallback")) {
+    std::string Name =
+        Fallback->getValueAsString("ClangBuiltinFallbackName").str();
+    if (!Fallbacks.try_emplace(Name, Fallback).second)
+      PrintFatalError(Fallback->getLoc(),
+                      "duplicate Clang builtin fallback for '" + Name + "'");
+  }
+
+  IfDefEmitter IfDef(OS, "GET_LLVM_CLANG_BUILTIN_LOWERING");
+  unsigned EntryIndex = 0;
+  for (const auto &[Key, BuiltinMappings] : Mappings) {
+    std::set<std::string> Selectors;
+    unsigned MappingIndex = 0;
+    for (const CodeGenIntrinsic *Int : BuiltinMappings) {
+      const Record *Predicate =
+          Int->TheDef->getValueAsDef("ClangBuiltinPredicate");
+      std::string Selector = (Predicate->getValueAsString("Kind") + ":" +
+                              Twine(Predicate->getValueAsInt("ArgNo")))
+                                 .str();
+      if (!Selectors.insert(Selector).second)
+        PrintFatalError(Int->TheDef->getLoc(),
+                        "duplicate Clang builtin lowering selector for '" +
+                            Key.second + "'");
+
+      std::vector<const Record *> Operands =
+          Int->TheDef->getValueAsListOfDefs("ClangBuiltinOperands");
+      if (!Operands.empty())
+        OS << "static constexpr Intrinsic::ClangBuiltinOperand "
+              "ClangBuiltinOperands"
+           << EntryIndex << "_" << MappingIndex << "[] = {\n";
+      for (const Record *Operand : Operands) {
+        unsigned CastBitWidth = 0;
+        bool CastIsSigned = false;
+        if (Operand->isSubClassOf("ClangBuiltinIntCast")) {
+          const Record *Type = Operand->getValueAsDef("Type");
+          const Record *ValueType = Type->getValueAsDef("VT");
+          if (!ValueType->getValueAsBit("isInteger"))
+            PrintFatalError(
+                Operand->getLoc(),
+                "Clang builtin integer cast requires an integer type");
+          int64_t Size = ValueType->getValueAsInt("Size");
+          if (Size <= 0)
+            PrintFatalError(
+                Operand->getLoc(),
+                "Clang builtin integer cast requires a fixed-width type");
+          CastBitWidth = static_cast<unsigned>(Size);
+          CastIsSigned = Operand->getValueAsBit("IsSigned");
+          Operand = Operand->getValueAsDef("Operand");
+        }
+        if (!Operand->isSubClassOf("ClangBuiltinArg"))
+          PrintFatalError(Operand->getLoc(),
+                          "unsupported Clang builtin operand");
+        OS << "  {" << Operand->getValueAsInt("ArgNo") << ", " << CastBitWidth
+           << ", " << (CastIsSigned ? "true" : "false") << "},\n";
+      }
+      if (!Operands.empty())
+        OS << "};\n";
+      ++MappingIndex;
+    }
+
+    OS << "static const Intrinsic::ClangBuiltinLowering "
+          "ClangBuiltinLowerings"
+       << EntryIndex << "[] = {\n";
+    MappingIndex = 0;
+    for (const CodeGenIntrinsic *Int : BuiltinMappings) {
+      const Record *Predicate =
+          Int->TheDef->getValueAsDef("ClangBuiltinPredicate");
+      StringRef PredicateKind = Predicate->getValueAsString("Kind");
+      StringRef PredicateEnum;
+      if (PredicateKind == "any")
+        PredicateEnum = "Any";
+      else if (PredicateKind == "floating")
+        PredicateEnum = "Floating";
+      else if (PredicateKind == "signed")
+        PredicateEnum = "SignedInteger";
+      else if (PredicateKind == "unsigned")
+        PredicateEnum = "UnsignedInteger";
+      else
+        PrintFatalError(Predicate->getLoc(),
+                        "unsupported Clang builtin type predicate '" +
+                            PredicateKind + "'");
+      std::vector<const Record *> Operands =
+          Int->TheDef->getValueAsListOfDefs("ClangBuiltinOperands");
+      OS << "  {Intrinsic::" << Int->EnumName << ", ";
+      if (Operands.empty())
+        OS << "{}";
+      else
+        OS << "ClangBuiltinOperands" << EntryIndex << "_" << MappingIndex;
+      OS << ", Intrinsic::ClangBuiltinPredicateKind::" << PredicateEnum << ", "
+         << Predicate->getValueAsInt("ArgNo") << ", \""
+         << Int->TheDef->getValueAsString("ClangBuiltinResultName") << "\"},\n";
+      ++MappingIndex;
+    }
+    OS << "};\n";
+    ++EntryIndex;
+  }
+
+  unsigned FallbackIndex = 0;
+  for (const auto &[Name, Fallback] : Fallbacks) {
+    const Record *Operand =
+        Fallback->getValueAsDef("ClangBuiltinFallbackOperand");
+    if (!Operand->isSubClassOf("ClangBuiltinArg"))
+      PrintFatalError(Operand->getLoc(),
+                      "unsupported Clang builtin fallback operand");
+    OS << "static constexpr Intrinsic::ClangBuiltinOperand "
+          "ClangBuiltinFallbackOperand"
+       << FallbackIndex << "[] = {\n  {" << Operand->getValueAsInt("ArgNo")
+       << ", 0, false},\n};\n"
+          "static const Intrinsic::ClangBuiltinLowering "
+          "ClangBuiltinFallback"
+       << FallbackIndex << "[] = {\n"
+       << "  {Intrinsic::not_intrinsic, ClangBuiltinFallbackOperand"
+       << FallbackIndex
+       << ", Intrinsic::ClangBuiltinPredicateKind::Any, 0, \"\"},\n};\n";
+    ++FallbackIndex;
+  }
+
+  for (const auto &[Name, Fallback] : Fallbacks)
+    if (none_of(Mappings,
+                [&](const auto &Entry) { return Entry.first.second == Name; }))
+      PrintFatalError(Fallback->getLoc(),
+                      "Clang builtin fallback has no intrinsic mapping for '" +
+                          Name + "'");
+
+  OS << R"(
+struct ClangBuiltinLoweringEntry {
+  StringLiteral TargetPrefix;
+  StringLiteral BuiltinName;
+  ArrayRef<Intrinsic::ClangBuiltinLowering> Lowerings;
+
+  bool operator<(const std::pair<StringRef, StringRef> &RHS) const {
+    return TargetPrefix < RHS.first ||
+           (TargetPrefix == RHS.first && BuiltinName < RHS.second);
+  }
+};
+
+static const ClangBuiltinLoweringEntry ClangBuiltinLoweringTable[] = {
+)";
+  EntryIndex = 0;
+  for (const auto &[Key, BuiltinMappings] : Mappings) {
+    OS << "  {\"" << Key.first << "\", \"" << Key.second
+       << "\", ClangBuiltinLowerings" << EntryIndex << "},\n";
+    ++EntryIndex;
+  }
+  OS << "};\n\n"
+        "struct ClangBuiltinFallbackEntry {\n"
+        "  StringLiteral BuiltinName;\n"
+        "  ArrayRef<Intrinsic::ClangBuiltinLowering> Lowerings;\n\n"
+        "  bool operator<(StringRef RHS) const { return BuiltinName < RHS; }\n"
+        "};\n\n"
+        "static const ClangBuiltinFallbackEntry ClangBuiltinFallbackTable[] "
+        "= {\n";
+  FallbackIndex = 0;
+  for (const auto &[Name, Fallback] : Fallbacks) {
+    OS << "  {\"" << Name << "\", ClangBuiltinFallback" << FallbackIndex
+       << "},\n";
+    ++FallbackIndex;
+  }
+  OS << R"(};
+
+ArrayRef<Intrinsic::ClangBuiltinLowering>
+Intrinsic::getClangBuiltinLowerings(StringRef TargetPrefix,
+                                    StringRef BuiltinName) {
+  auto Key = std::make_pair(TargetPrefix, BuiltinName);
+  auto It = llvm::lower_bound(ClangBuiltinLoweringTable, Key);
+  if (It != std::end(ClangBuiltinLoweringTable) &&
+      It->TargetPrefix == TargetPrefix && It->BuiltinName == BuiltinName)
+    return It->Lowerings;
+
+  auto Fallback = llvm::lower_bound(ClangBuiltinFallbackTable, BuiltinName);
+  if (Fallback != std::end(ClangBuiltinFallbackTable) &&
+      Fallback->BuiltinName == BuiltinName)
+    return Fallback->Lowerings;
+  return {};
 }
 )";
 }
