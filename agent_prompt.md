@@ -63,26 +63,29 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(sharpest lead, likely a few hours)** `dowhile_trap` nested-child-cycle
-   hang: focus on `linearizeCycle`'s `DivergentCandidates`-non-empty handling
-   (`PreRegion`/`PostRegion`/`CheckBlock` partitioning, ~lines 3244-3410 in
-   `Linearize.cpp`) and how it treats an `OtherCondBrBlocks` entry that is
-   itself a nested child cycle's latch. Do not re-touch `isLoopControlEdge` --
-   confirmed dead end twice already.
-2. **(small, unexplored several sessions)** `builtin` (14), `struct` (12).
-3. **(small)** `demote` (9), `derivate` (3).
-4. **(1 case, unexplored 4+ sessions)** `texture_gather`.
-5. **(6 cases, feature decision needed)** `fragdepth` multisample image-creation
-   gap (`*_multisample_{2,4,8}`).
-6. **(6 cases)** `fragdepth` combined-depth-stencil-format bug (`Executor.cpp`
-   `readDepth`/`writeDepth`, ~line 999).
-7. **(carried over)** `L265`: `a2b10g10r10_snorm_pack32` ASTC-block-boundary
-   alpha-decode bug.
-8. **(overdue many sessions)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
-   CTS sampling at real scale.
-9. **(low priority, 2+ sessions unverified)** `offload-test-suite`'s own
+1. **(small, unexplored several sessions)** `builtin` (14), `struct` (12) --
+   largest remaining untriaged clusters now that `loops` is done.
+2. **(small)** `demote` (9), `derivate` (3).
+3. **(1 case, unexplored 5+ sessions)** `texture_gather`.
+4. **(6 cases, feature decision needed)** `fragdepth` multisample image-creation
+   gap (`*_multisample_{2,4,8}`): CTS's own `checkSupport` doesn't account for
+   our `sampledImageDepthSampleCounts = 1` scoping decision combined with
+   `VK_IMAGE_USAGE_SAMPLED_BIT`.
+5. **(6 cases)** `fragdepth` combined-depth-stencil-format bug: a covered
+   pixel's depth reads back as `0` instead of its shaded value. Start in
+   `Executor.cpp`'s `readDepth`/`writeDepth` (~line 999), the
+   `D24_UNORM_S8_UINT`/`D32_SFLOAT_S8_UINT` pack/unpack helpers.
+6. **(carried over several sessions)** `L265`: residual
+   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
+   `ASTCDecode.cpp`.
+7. **(overdue many sessions)** `L228(e)`/`(f)`: broader-than-glsl/tessellation
+   CTS sampling at real scale (`pipeline`'s other sub-suites, `api`,
+   `synchronization`). Given this session's own repeat cascading-false-failure
+   hit, run any future broad sweep in small, genuinely isolated per-case batches
+   from the start -- do not trust one big combined-process run's raw tally
+   without spot-verifying any long fail streak in isolation.
+8. **(low priority, several sessions unverified)** `offload-test-suite`'s own
    `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
-   lit-annotation issues.
-10. **(housekeeping, 3 sessions overdue now)** `check-hlsl-feme-vk` and the
-    `feme` branch-drift check still not re-run -- do this early next session
-    before it gets any more stale.
+   lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
+9. **(housekeeping, 4 sessions overdue now)** `check-hlsl-feme-vk` and the
+   `feme` branch-drift check still not re-run -- do this early next session.
