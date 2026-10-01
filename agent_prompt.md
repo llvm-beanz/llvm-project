@@ -63,25 +63,42 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, lower priority, carried over many sessions, unchanged)**
-   `L265`'s ASTC alpha-decode tie-break (4 block sizes affected:
-   `astc_5x5`/`astc_8x8`/`astc_10x5`/`astc_12x12`). Still needs a Mesa/lavapipe
-   reference-decoder comparison -- no new ideas this session (not revisited).
-2. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
+1. **(new, best next pick -- unblocks visibility into the rest of
+   `texel_buffer`)** Root-cause the `deqp-vk` process crash at
+   `dEQP-VK.texture.texel_buffer.uniform.packed.a2b10g10r10-uint-pack32`:
+   `error: Dim must not be SubpassData or Buffer` / an MLIR
+   `SampledImageType::get` assertion failure. Start by finding where FeMe's
+   SPIR-V lowering constructs a `SampledImageType` for a texel-buffer
+   (`samplerBuffer`-shaped) sampled image -- likely a missing/wrong `Dim` enum
+   value for the buffer-image case. Determine whether this is a FeMe-specific
+   lowering bug (fix in `feme/`) or a genuine MLIR `spirv` dialect bug (fix
+   outside `feme/`, needs an isolated reproducer per the standing instruction)
+   before touching anything.
+2. **(new, ~106 cases, a half-day)**
+   `texture.shadow.{1d,1d_array,2d,2d_array,cube,cube_array}` -- 106 failures,
+   all "Image verification failed" against a depth-comparison-sampling shape.
+   Not yet root-caused. Good next pick after the crash above, since it's the
+   single largest untriaged cluster.
+3. **(new, ~21 cases, a few hours)** The `rasterization` group's remaining 82
+   failures (all stipple/adjacency combinations with Bresenham-mode lines,
+   confirmed unrelated to `L312`'s own width fix -- a genuinely different bug in
+   the same code path) need their own root-causing session. Standalone repro
+   already confirmed:
+   `dEQP-VK.rasterization.primitives.dynamic_stipple.bresenham_lines` reports a
+   fragment-count mismatch (227 vs. 233 expected) against the diamond-exit rule.
+4. **(new, ~16+5 cases, a few hours)** `texture.explicit_lod.2d.sizes.*` (16
+   failures, mipmap filtering) and `texture.multisample` (5 failures) --
+   smaller, untriaged clusters from the same `texture` sample.
+5. **(a few hours, lower priority, carried over many sessions, unchanged)**
+   `L265`'s ASTC alpha-decode tie-break (4 block sizes affected). Still needs a
+   Mesa/lavapipe reference-decoder comparison -- no new ideas this session (not
+   revisited).
+6. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
    `offload-test-suite`'s own `spec_const_32_bits.test`/`WaveActiveMax.test`
    lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass. Not
    reconfirmed this session (not revisited) -- needs upstream fixes, outside
    this project's scope.
-3. **(housekeeping, due again in ~5 sessions, last done 2 sessions ago at
+7. **(housekeeping, due again in ~4 sessions, last done 1 session ago at
    `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift
    check -- not checked this session (branch untouched); file away for its next
    routine check.
-4. **(new, needs scoping)** With the `api`/`synchronization` broader-sampling
-   backlog now exhausted, the next dedicated-sampling session should pick a
-   fresh untouched top-level `dEQP-VK.*` group (e.g. `pipeline`,
-   `shader_render`, `rasterization`, `texture`, `robustness`, or similar -- not
-   yet inventoried which top-level groups have never been run at all against the
-   real FeMe device). Worth a short scoping pass first (`deqp-vk
-   --deqp-runmode=xml-caselist` or similar to enumerate top-level groups and
-   cross-reference against this session's/prior sessions' own notes) before
-   picking the next target.
