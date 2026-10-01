@@ -7565,3 +7565,26 @@ to next session's housekeeping pass.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+**Update (same session, `check-hlsl-feme-vk` re-run):** repaired the
+expected `feme` branch drift (`git fetch llvm-beanz feme && git
+cherry-pick 854cc3f` against `/home/dev/dev/offload-test-suite`,
+followed by a `cmake .` reconfigure in the `llvm-project` build dir --
+the standard, every-session routine, not a new finding) and re-ran
+`check-hlsl-feme-vk` serially (`-j1`, avoiding the known `Mandelbrot
+.test` `VK_TIMEOUT` sandbox-parallelism flake): **721 Passed / 6 Failed
+/ 1 XPASS out of 727** (up from `L296`'s own 477/11/1 baseline, after
+accounting for upstream `origin/main` test-content churn in between).
+Directly confirmed: `WaveActiveBitAnd/BitOr/BitXor.convergence.test`
+all now pass (this session's `L298` fix). Also confirmed newly passing,
+without any dedicated fix this session: `Basic/Mandelbrot.test`
+(`L297`'s own fix) and `Feature/StructuredBuffer/inc_counter_array.test`
+(previously suspected atomic-counter-ordering bug -- now passes;
+plausibly a side effect of this session's `L298` fix narrowing a
+divergent-loop body's masking more correctly, though not independently
+re-root-caused). The remaining 6 failures are the same already-tracked,
+pre-existing issues: 4 `InterlockedCompareExchange{,.resources}.32.test`
+/`InterlockedCompareStore{,.resources}.32.test` (documented
+barrier-inside-divergent-control-flow milestone-9 limitation, not a
+bug) plus `spec_const_32_bits.test`/`WaveActiveMax.test` (upstream
+`offload-test-suite` lit-annotation issues, unrelated to FeMe).
