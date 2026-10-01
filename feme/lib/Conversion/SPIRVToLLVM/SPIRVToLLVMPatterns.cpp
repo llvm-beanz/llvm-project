@@ -6798,6 +6798,25 @@ bool remapNestedStructMemberIndices(
   // *nested* struct's own physical layout cannot safely be re-derived
   // from scratch the way the outermost struct's can).
   mlir::LLVM::LLVMStructType RealStructTy = nullptr;
+  // (Roadmap L289) The *real*, already-known-correct LLVM element type of
+  // whatever array CurrentType turns out to be *this* iteration, when that
+  // array was itself just reached by selecting a struct member one level
+  // up -- mirrors \p RealStructTy's own role, but for an array-typed
+  // member rather than a struct-typed one (the shape a marker-wrapped
+  // array-of-vectors struct member, e.g. a nested struct's own
+  // `vec2 b[2]`, needs: PhysicalFieldTy there is an *array* of the
+  // marker struct, not the marker struct directly, so the direct-vector
+  // check below it never fires for this member on its own; the array
+  // branch below needs this hint instead, to know -- once *it* then picks
+  // one array element -- whether *that* element is itself a
+  // tight-vector marker needing one more `0` index to cross, exactly the
+  // way a direct (non-array) vector member already does). Null whenever
+  // the array now being entered was not reached via an immediately
+  // preceding struct-member selection (nested arrays-of-arrays, or the
+  // very first/outermost level), in which case no insertion happens --
+  // not yet observed in practice, but safe: only a strictly-too-few-
+  // index error would result, not a silently wrong address.
+  mlir::Type RealArrayElementTy = nullptr;
   while (Pos < Op.getIndices().size()) {
     mlir::Type ElementType;
     if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(CurrentType)) {
@@ -6854,6 +6873,15 @@ bool remapNestedStructMemberIndices(
       // path would.
       RealStructTy =
           mlir::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(PhysicalFieldTy);
+      // (Roadmap L289) Likewise remember PhysicalFieldTy's own element
+      // type, should it turn out to be an array instead -- see
+      // \p RealArrayElementTy's own comment above for why the array
+      // branch below needs this.
+      RealArrayElementTy =
+          mlir::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(PhysicalFieldTy)
+              ? mlir::cast<mlir::LLVM::LLVMArrayType>(PhysicalFieldTy)
+                    .getElementType()
+              : nullptr;
       // (Roadmap L104) No longer gated on StructTy.hasOffset(): a
       // non-offset struct's own layout (layOutStructIfOffsetsMatch's
       // non-offset branch) now also substitutes a non-power-of-two-lane
@@ -6901,9 +6929,33 @@ bool remapNestedStructMemberIndices(
       // exactly as before this roadmap item.
       RealStructTy = nullptr;
       ElementType = ArrayTy.getElementType();
+      // (Roadmap L289) This array's own element may itself be a vector
+      // that needed `getTightVectorArrayType`'s marker-struct
+      // substitution (e.g. a nested struct's own `vec2 b[2]` member,
+      // itself reached one struct level below an enclosing array, as
+      // `dEQP-VK.glsl.struct.uniform.nested_struct_array_fragment`
+      // exercises) -- checked here against \p RealArrayElementTy, the
+      // hint the struct branch above left for exactly this array,
+      // mirroring the direct (non-array) vector-member check above:
+      // without this, the one further (component-selecting) index past
+      // this array's own element-selecting index gets forwarded
+      // straight at the marker struct itself, which -- having only one
+      // member -- rejects any index past 0 as "indexing a struct out of
+      // bounds".
+      if (Pos + 1 < Op.getIndices().size() &&
+          mlir::isa<mlir::VectorType>(ElementType) && RealArrayElementTy &&
+          getTightVectorMarkerInnerType(RealArrayElementTy)) {
+        mlir::Type LLVMIndexType = Indices[Pos + 1].getType();
+        mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+            Rewriter, Op.getLoc(), LLVMIndexType,
+            Rewriter.getIntegerAttr(LLVMIndexType, 0));
+        Indices.insert(Indices.begin() + Pos + 1, Zero);
+      }
+      RealArrayElementTy = nullptr;
     } else if (auto RTArrayTy =
                    mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(CurrentType)) {
       RealStructTy = nullptr;
+      RealArrayElementTy = nullptr;
       ElementType = RTArrayTy.getElementType();
     } else {
       // A matrix/vector/scalar leaf: no further struct-member selector
