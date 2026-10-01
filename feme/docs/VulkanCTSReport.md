@@ -8232,3 +8232,104 @@ feature bit.
 
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
+
+## L308: `fragdepth`'s combined-depth-stencil `_no_depth_clamp` bug -- sampled-image depth-aspect decode gap (not a `readDepth`/`writeDepth` bug as `L281` hypothesized)
+
+Picked up the sub-bug `L281` discovered but deferred: every
+`dEQP-VK.glsl.builtin_var.fragdepth.*_s8_uint_no_depth_clamp` case (6
+total, one per topology x `{d24_unorm_s8_uint,d32_sfloat_s8_uint}`)
+fails `expected <nonzero> but got 0`.
+
+**Root cause, corrected from `L281`'s hypothesis:** `Executor.cpp`'s
+`readDepth`/`writeDepth` (the depth-attachment write/test path) already
+correctly handle both combined formats' addressing -- confirmed by
+direct inspection, not the bug. The real bug is in the CTS test's own
+*validation* mechanism: `BuiltinFragDepthCaseInstance`
+(`vktShaderRenderBuiltinVarTests.cpp`) doesn't do a plain buffer copy
+to check the rendered depth -- it runs a **second render pass** that
+samples the depth attachment through a real
+`VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` bound to a depth-aspect
+`VkImageView` whose own declared format is the *combined*
+`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` format, verbatim (per spec,
+not split into a pure-depth format). `CommandBuffer.cpp`'s
+`materializeImageDescriptor` passes this format straight through
+(`Dst.Format = View->format()`) to the runtime's generic sampling
+path -- unlike `buildSubpassInputHeap` (used only for same-render-pass
+`subpassLoad` input-attachment reads), which already receives
+pre-split pure-format `AttachmentView`s and was never affected.
+
+`FeMeRuntimeCPU.c`'s `femeRTImageFormatElementSize`/
+`femeRTUnpackImageTexel` (the generic sampled-image texel-decode
+tables) had cases for `D16_UNORM`(31)/`D32_FLOAT`(32)/`S8_UINT`(35),
+but **none at all** for `D24_UNORM_S8_UINT`(33) or
+`D32_FLOAT_S8X24_UINT`(34). `femeRTFetchTexel2D`'s
+`if (ElemSize == 0) return Zero;` guard then silently returned an
+all-zero `vec4` for any such sample -- exactly the observed symptom.
+
+**Why the depth-clamp-enabled sibling cases still passed despite the
+same bug:** the CTS test deliberately sign-flips its written depth
+values based on `depthClampEnable` so that every clamp-enabled case's
+expected value is always exactly `0` (clamped to the near plane) --
+a "passing for the wrong reason" trap that only the `_no_depth_clamp`
+siblings (needing the real nonzero value) exposed.
+
+**Fix** (`feme/runtime/CPU/FeMeRuntimeCPU.c`): added `case 33`/`case 34`
+to both functions.
+`femeRTImageFormatElementSize` now reports each format's own real
+combined-texel byte size (4 for `D24_UNORM_S8_UINT`'s one shared word,
+8 for `D32_FLOAT_S8X24_UINT`'s two separate words) -- not a narrower
+pure-depth-format's size, since `femeRTFetchTexel2D`'s X-axis
+addressing stride comes directly from this return value, and using
+too small a stride would misalign every texel beyond `X=0`.
+`femeRTUnpackImageTexel` decodes just the depth component (low 24 bits
+of the shared 4-byte word for `D24_UNORM_S8_UINT`, matching
+`ImageFixture.cpp`'s own `unpackDepth` math; the first of two separate
+4-byte words for `D32_FLOAT_S8X24_UINT`), padding `G=B=0, A=1` per the
+existing `D16_UNORM`/`D32_FLOAT` convention.
+
+**Deliberately out of scope:** sampling the *stencil* aspect of a
+combined format through this same `COMBINED_IMAGE_SAMPLER` path still
+decodes as depth, since no aspect information reaches
+`femeRTUnpackImageTexel` at this point in the generic sampling
+pipeline. A known, accepted asymmetry -- no real CTS case exercising it
+has been found yet; flagged for a future session if one turns up.
+
+**Unit tests:** two new regression tests in `ImageSamplingTest.cpp`,
+`LoadFetchesD24UnormS8UintDepthAspect`/
+`LoadFetchesD32FloatS8X24UintDepthAspect`, each storing *two* texels
+specifically to also guard the texel-stride fix (not just the decode
+math) -- a second texel with a different depth value and a
+deliberately nonzero "neighboring" stencil/second-word value, to
+confirm neither aliasing nor stencil-byte leakage into the decoded
+depth. Confirmed via `git stash` to fail (all-zero decode) pre-fix,
+pass post-fix.
+
+`ninja check-feme`: 3,454/3,515 Passed (+2 new unit tests), 61
+Unsupported, 0 Failed, 0 regressions.
+
+**CTS:** re-ran the full `dEQP-VK.glsl.builtin_var.fragdepth.*` group
+(45 cases): **18 Pass / 9 Fail / 18 NotSupported** (was 12/15/18) --
+the predicted 6 cases now pass. The remaining 9 Fail are all
+`*_d32_sfloat_multisample_{2,4,8}` cases, failing at `vkCreateImage`
+with `VK_ERROR_INITIALIZATION_FAILED` -- the separate, already-tracked
+`L280`/`L307`(a) multisample depth-image-creation gap, confirmed
+unaffected by this fix.
+
+`check-hlsl-feme-vk`: 485 Pass / 31 XFAIL / 207 NotSupported / 3 Fail /
+1 Unexpected-pass -- unchanged from the standing pre-existing baseline:
+`Basic/Mandelbrot.test` (golden-image drift, unrelated, carried over
+many sessions), `Feature/SpecializationConstant/
+spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test` (pre-existing
+lit-annotation issues, unrelated), `Feature/PushConstant/
+array_of_matrices.test` (pre-existing unexpected-pass, unrelated) --
+no new failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal sampled-image texel-decode correctness fix for
+already-exposed core Vulkan 1.0 depth-stencil formats, no new
+feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed with `FEME_ICD`/`VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES` explicitly exported (separate statements, not a
+combined one-liner).
