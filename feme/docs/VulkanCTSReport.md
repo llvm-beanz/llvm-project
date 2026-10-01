@@ -7839,7 +7839,7 @@ pre-existing, unrelated, tracked separately) / 1 UnexpectedPass
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
 
-## L299: broader-than-glsl/tessellation CTS sampling (`api`/`synchronization`)
+## L302: broader-than-glsl/tessellation CTS sampling (`api`/`synchronization`)
 
 Addressed the "overdue many sessions" broader-CTS-sampling item,
 explicitly instructed to run in small, isolated per-case batches, never
@@ -7855,8 +7855,8 @@ batch of 12 small/medium `api.*` subgroups: `array`, `device_init`,
 `buffer_memory_requirements`, `fill_and_update_buffer`,
 `image_compression_control`, `ds_color_copy`.
 
-**Found 2 new genuine bugs** (both fixed this session, see `L300`/
-`L301` below): `format_features` (2 Fail, missing
+**Found 2 new genuine bugs** (both fixed this session, see `L303`/
+`L304` below): `format_features` (2 Fail, missing
 `VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT`) and
 `command_buffers` (1 Fail,
 `secondary_push_descriptor_set_with_template`, a descriptor-update-
@@ -7873,7 +7873,7 @@ single batch.
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
 
-## L300: `dEQP-VK.api.format_features.format_feature_flags2.{d16_unorm,d32_sfloat}` -- missing depth-comparison bit
+## L303: `dEQP-VK.api.format_features.format_feature_flags2.{d16_unorm,d32_sfloat}` -- missing depth-comparison bit
 
 Root-caused: `VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT`
 (`0x200000000`, bit 33) has no 32-bit `VkFormatFeatureFlagBits`
@@ -7908,7 +7908,7 @@ new capability.
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
 
-## L301: `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_with_template` -- template cross-binding overflow
+## L304: `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_with_template` -- template cross-binding overflow
 
 Root-caused: the test's layout has two separate single-element
 bindings (binding 0 = output buffer, binding 1 = input buffer) and
@@ -7950,9 +7950,9 @@ surface.
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
 
-## L299 (continued): further CTS sampling batch -- all clean
+## L302 (continued): further CTS sampling batch -- all clean
 
-Continued `L299`'s broader-sampling item with a second small batch:
+Continued `L302`'s broader-sampling item with a second small batch:
 `dEQP-VK.api.pipeline.*` (9/9 Pass), `api.version_check.*` (3/3 Pass),
 `api.invariance.*` (3/3 Pass), `api.null_handle.*` (24/24 Pass),
 `api.frame_boundary.*` (0/19, all 19 NotSupported), and two
