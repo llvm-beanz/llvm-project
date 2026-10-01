@@ -1654,6 +1654,75 @@ TEST(SPIRVResourceLoweringTest, LowersImageFetchToImageLoad) {
   EXPECT_EQ(mdInt(Resources->getOperand(0), 2), 0u);
 }
 
+// Roadmap L307: a multisampled *sampled* image's own zero-mip
+// `OpImageFetch` (`texelFetch(sampler2DMS, ...)`) -- `Plain2DMS`'s
+// 3-component `(x, y, sample)` coordinate, mirroring `Array2D`'s own
+// `(x, y, layer)` one. Before this row, `hasOnlySupportedImageUses`
+// explicitly rejected any fetch-shaped use against `Plain2DMS`/
+// `Array2DMS`, a deliberate scope gap left open by roadmap L73 (which
+// only added `OpImageQuerySamples` support for these two shapes). Reuses
+// the same `feme.cpu.image.load.2d.v4f32` entry point `LowersImage
+// FetchToImageLoad` above already exercises for `Plain2D` -- no new
+// `runtime/CPU` helper or `ImageCallKind` was needed, since that
+// entry point already documents itself as reading "one texel of a 2D
+// image (sampled or storage)" and already accepts the `Sample` operand
+// this needs.
+TEST(SPIRVResourceLoweringTest, LowersPlain2DMSSampledImageFetchToImageLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 1, 1, 0) %img, <3 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 1, 1, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
+}
+
+// Roadmap L307: the arrayed counterpart of the test above -- an arrayed
+// multisampled sampled image's own zero-mip `OpImageFetch` (`texelFetch(
+// sampler2DMSArray, ...)`), whose 4-component `(x, y, layer, sample)`
+// coordinate reuses `feme.cpu.image.load.2darray.v4f32`, the same entry
+// point `LowersImageArrayFetchToImageLoadArray` already exercises for
+// `Array2D`. This is the exact shape (arrayed + multisampled + sampled)
+// `dEQP-VK.api.copy_and_blit.core.use_after_copy.*_msaa` exercises.
+TEST(SPIRVResourceLoweringTest,
+     LowersArray2DMSSampledImageFetchToImageLoadArray) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<4 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 1, 1, 1, 0) %img, <4 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 1, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 1, 1, 1, 0), <4 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.2darray.v4f32"));
+}
+
 TEST(SPIRVResourceLoweringTest, LowersImageFetchLevelToImageLoad) {
   // Roadmap L72: GLSL's `texelFetch(sampler2D, coord, lod)` always
   // supplies an explicit LOD, which `feme::spirv::ImageFetchLodPattern`
