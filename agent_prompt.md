@@ -63,28 +63,20 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L317` (a few hours, best next pick)**: `texel_buffer`'s own remaining 10
-   functional failures (genuine `Fail`s, not crashes) -- untouched many sessions
+1. **`L316` (a few hours, best next pick)**: `texture.explicit_lod.2d.sizes.*`
+   (16 cases) and `texture.multisample` (5 cases) -- untouched many sessions
    running, now the largest scoped-but-unstarted item.
-2. **`L316` (a few hours)**: `texture.explicit_lod.2d.sizes.*` (16 cases) and
-   `texture.multisample` (5 cases) -- untouched many sessions running.
-3. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
+2. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
    alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
    reference-decoder comparison.
-4. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
+3. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
    hours, carried over, unchanged)**.
-5. **`offload-test-suite`'s own lit-annotation issues**
+4. **`offload-test-suite`'s own lit-annotation issues**
    (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`) --
    low priority, pre-existing, outside this project's scope.
-6. **`check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift**: now
-   confirmed drifted (`d0974dd` → `854cc3f`, a routine
-   regeneration-on-newer-main, not a real content change) but not yet
-   rebased/updated. Should be quick (a `git rebase`/cherry-pick of the
-   regenerated commit, then re-verify `check-hlsl-feme-vk` still builds and
-   passes) -- worth doing early next session since it's now cheap to diagnose
-   (already done here) and only the mechanical update remains.
-7. **`L318`'s own item (d)** (optional, low priority): add a committed
-   `Dim1D`+`Grad`+`Dref` FileCheck case to
+5. **`L318`'s own item (d)** (optional, low priority, carried over several
+   sessions): add a committed `Dim1D`+`Grad`+`Dref` FileCheck case to
    `spirv-to-llvm-sample-dref-and-query-lod.mlir` for coverage completeness --
-   not blocking anything, closed out alongside `L315` but the specific test gap
-   was never filled.
+   not blocking anything.
+6. **Branch-drift housekeeping**: confirmed a non-issue again this session; no
+   action needed until it actually diverges in content, not just hash.
