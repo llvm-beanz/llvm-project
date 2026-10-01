@@ -718,10 +718,18 @@ constexpr StringLiteral TightVectorMarkerName = "feme.tight_vector";
 /// each dimension its own row, never a component axis) -- `DataLayout`
 /// reports identical size/alignment for both, so this marker is the only
 /// positive, unambiguous signal available to tell the two apart.
+///
+/// (Roadmap L290) `SPIRVToLLVMPatterns.cpp`'s own
+/// `getOrCreateTightVectorMarkerStruct` may bake a second, always-ignored
+/// trailing `array<N x i8>` padding member into the struct's own body
+/// (used for an array-of-vectors element whose declared `ArrayStride` is
+/// wider than the vector's own tight natural size) -- member 0 is always
+/// the real tight array in either shape, so this accepts a one- or
+/// two-member body, always returning member 0.
 Type *getTightVectorMarkerInnerType(Type *Ty) {
   auto *ST = dyn_cast<StructType>(Ty);
-  if (!ST || ST->getNumElements() != 1 || !ST->hasName() ||
-      !ST->getName().starts_with(TightVectorMarkerName))
+  if (!ST || ST->getNumElements() == 0 || ST->getNumElements() > 2 ||
+      !ST->hasName() || !ST->getName().starts_with(TightVectorMarkerName))
     return nullptr;
   return ST->getElementType(0);
 }

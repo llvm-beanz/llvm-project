@@ -5390,36 +5390,71 @@ constexpr llvm::StringLiteral kTightVectorMarkerName = "feme.tight_vector";
 /// same name: a later call recovers the already-initialized type rather
 /// than erroring on a body mismatch, unlike a fixed, un-suffixed name
 /// used with `getNewIdentified` would if called twice.
+///
+/// (Roadmap L290) \p TrailingPaddingBytes, when nonzero, bakes a second,
+/// always-ignored `array<TrailingPaddingBytes x i8>` member into the
+/// struct's own body (and into its name, e.g.
+/// `"feme.tight_vector.f32x2.pad8"`, so a differently-padded instance of
+/// the same vector shape never collides with an unpadded one). This is
+/// for `getTightNestedStructType`'s own array-of-vector branch: unlike a
+/// bare vector member (whose own enclosing struct's *outer* padding tier
+/// can always grow the struct's own trailing gap to fix up a short
+/// member), a tight-vector marker used as an *array element*'s stand-in
+/// has no such outer tier to rely on -- the array's own per-element
+/// stride is exactly this marker's own natural size, with no way for
+/// anything outside this function to insert a gap *between* elements
+/// after the fact. Padding the marker struct itself (rather than calling
+/// `padStructToSize` on it, which explicitly refuses to touch a marker
+/// struct -- see its own comment) is the only way to reproduce a
+/// declared `ArrayStride` wider than the vector's own tight natural size
+/// here. This keeps the "exactly one *logical* member" invariant every
+/// consumer (`getTightVectorMarkerInnerType` below, and
+/// `CanonicalizeStage.cpp`'s own copy) already relies on: both always
+/// look at (and only ever return) body member 0, the real tight array,
+/// treating any second body member as pure, meaningless filler.
 mlir::LLVM::LLVMStructType
-getOrCreateTightVectorMarkerStruct(mlir::Type ElementType,
-                                   int64_t NumElements) {
+getOrCreateTightVectorMarkerStruct(mlir::Type ElementType, int64_t NumElements,
+                                   uint64_t TrailingPaddingBytes = 0) {
   std::string Name;
   llvm::raw_string_ostream OS(Name);
   OS << kTightVectorMarkerName << '.' << ElementType << 'x' << NumElements;
+  if (TrailingPaddingBytes)
+    OS << ".pad" << TrailingPaddingBytes;
   auto StructTy =
       mlir::LLVM::LLVMStructType::getIdentified(ElementType.getContext(), Name);
   if (!StructTy.isInitialized()) {
     mlir::Type ArrayTy = mlir::LLVM::LLVMArrayType::get(ElementType, NumElements);
-    if (mlir::failed(StructTy.setBody({ArrayTy}, /*isPacked=*/false)))
+    llvm::SmallVector<mlir::Type, 2> Body{ArrayTy};
+    if (TrailingPaddingBytes)
+      Body.push_back(mlir::LLVM::LLVMArrayType::get(
+          mlir::IntegerType::get(ElementType.getContext(), 8),
+          TrailingPaddingBytes));
+    if (mlir::failed(StructTy.setBody(Body, /*isPacked=*/false)))
       return {};
   }
   return StructTy;
 }
 
 /// If \p Ty is one of `getTightVectorArrayType`'s own marker structs,
-/// returns its one member's own (tight array) type; otherwise returns
-/// null. Lets a consumer that needs to see *through* the marker (e.g.
-/// `CompositeConstructPattern`'s own struct case below, reassembling a
-/// real vector constituent into a tight-substituted member) recognize it
-/// positively, rather than assuming any `LLVM::LLVMArrayType` struct
-/// member must itself directly be the tight-substituted array (true
-/// before this roadmap item, no longer true now that the marker wraps
-/// it).
+/// returns its one *logical* member's own (tight array) type; otherwise
+/// returns null. Lets a consumer that needs to see *through* the marker
+/// (e.g. `CompositeConstructPattern`'s own struct case below,
+/// reassembling a real vector constituent into a tight-substituted
+/// member) recognize it positively, rather than assuming any
+/// `LLVM::LLVMArrayType` struct member must itself directly be the
+/// tight-substituted array (true before this roadmap item, no longer
+/// true now that the marker wraps it).
+///
+/// (Roadmap L290) Accepts either a bare, one-body-member marker or a
+/// `getOrCreateTightVectorMarkerStruct`'s own padded, two-body-member
+/// form (see that function's own comment) -- body member 0 is always the
+/// real tight array in either shape, with member 1 (if present) always
+/// pure trailing padding a caller never needs to see.
 mlir::Type getTightVectorMarkerInnerType(mlir::Type Ty) {
   auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Ty);
   if (!StructTy || !StructTy.isIdentified() ||
       !StructTy.getName().starts_with(kTightVectorMarkerName) ||
-      StructTy.getBody().size() != 1)
+      StructTy.getBody().empty() || StructTy.getBody().size() > 2)
     return nullptr;
   return StructTy.getBody()[0];
 }
@@ -5472,6 +5507,42 @@ mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
     return nullptr;
   return getOrCreateTightVectorMarkerStruct(ElementType,
                                             VectorTy.getNumElements());
+}
+
+/// (Roadmap L290) Same substitution as `getTightVectorArrayType`, for a
+/// \p VectorTy reached as the *element* of a declared-`ArrayStride`
+/// array (e.g. `vec2 b[2]`) rather than as a bare struct member. Unlike a
+/// bare vector member (whose enclosing struct's own outer padding tier,
+/// `padUndersizedMembersIfNeeded`, can always grow a short member's
+/// trailing gap after the fact), this array's own per-element stride
+/// *is* the tight-vector marker's own natural size, with no later tier
+/// able to insert a gap *between* elements once this array type is
+/// built -- so this bakes any padding \p ArrayStride needs directly into
+/// the marker struct itself (see `getOrCreateTightVectorMarkerStruct`'s
+/// own comment on why padding the marker, not calling `padStructToSize`
+/// on it afterward, is the only way to do this). Returns the same,
+/// unpadded marker `getTightVectorArrayType` would if \p ArrayStride is 0
+/// (no stride declared) or already no wider than the marker's own
+/// natural size.
+mlir::Type getStridedTightVectorArrayType(mlir::VectorType VectorTy,
+                                          unsigned ArrayStride,
+                                          const mlir::TypeConverter &Converter) {
+  mlir::Type ElementType = Converter.convertType(VectorTy.getElementType());
+  if (!ElementType)
+    return nullptr;
+  mlir::LLVM::LLVMStructType Unpadded = getOrCreateTightVectorMarkerStruct(
+      ElementType, VectorTy.getNumElements());
+  if (!Unpadded)
+    return nullptr;
+  if (!ArrayStride)
+    return Unpadded;
+  mlir::DataLayout DL;
+  uint64_t NaturalSize = DL.getTypeSize(Unpadded);
+  if (ArrayStride <= NaturalSize)
+    return Unpadded;
+  return getOrCreateTightVectorMarkerStruct(ElementType,
+                                            VectorTy.getNumElements(),
+                                            ArrayStride - NaturalSize);
 }
 
 /// Forward declaration: defined below. Needed by this file's own struct
@@ -5631,8 +5702,12 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
                    mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
       if (auto InnerVectorTy =
               mlir::dyn_cast<mlir::VectorType>(ArrayTy.getElementType())) {
-        mlir::Type TightElement =
-            getTightVectorArrayType(InnerVectorTy, Converter);
+        // (Roadmap L290) Bake any padding this array's own declared
+        // `ArrayStride` needs directly into the tight-vector marker
+        // struct standing in for its vector element -- see
+        // `getStridedTightVectorArrayType`'s own comment for why.
+        mlir::Type TightElement = getStridedTightVectorArrayType(
+            InnerVectorTy, ArrayTy.getArrayStride(), Converter);
         if (TightElement)
           MemberTy = mlir::LLVM::LLVMArrayType::get(
               TightElement, ArrayTy.getNumElements());
@@ -6572,8 +6647,17 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
     auto InnerVectorTy = mlir::dyn_cast<mlir::VectorType>(InnerElementTy);
     if (!InnerVectorTy)
       continue;
+    // (Roadmap L290) An array-of-vectors member's own per-element stride
+    // is this tight-vector substitution's own natural size, with no
+    // later tier able to insert a gap *between* elements once this
+    // array type is built -- bake any padding the declared `ArrayStride`
+    // needs directly into the marker struct itself (see
+    // `getStridedTightVectorArrayType`'s own comment).
+    unsigned InnerStride = 0;
+    if (auto InnerArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy))
+      InnerStride = InnerArrayTy.getArrayStride();
     mlir::Type TightElementTy =
-        getTightVectorArrayType(InnerVectorTy, Converter);
+        getStridedTightVectorArrayType(InnerVectorTy, InnerStride, Converter);
     if (!TightElementTy)
       return nullptr;
     WithArraysAndMatrices[I] =
