@@ -7068,3 +7068,119 @@ feature/extension surface.
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L291/L292: `demote` cluster -- `OpIsHelperInvocationEXT` opcode-5381 gap fixed (layered MLIR + LLVM upstream gaps); `dynamic_loop_*` runtime bug still open
+
+Continuing the carried-over `builtin` (14)/`demote` (9)/`derivate` (3)/
+`texture_gather` (1) triage list. A fresh `dEQP-VK.glsl.builtin.*` re-run
+(3,193 cases) showed **0 Fail** -- that cluster was already silently
+resolved by earlier, unrelated fixes (most likely the `loops`/`struct`
+cluster work); it needed no dedicated action and is dropped from future
+next-steps lists.
+
+`dEQP-VK.glsl.demote.*` (30 cases) showed 9 Fail, splitting into two
+distinct bugs on inspection of the CTS log:
+
+- **5 cases** (`basic_deriv`, `dynamic_loop_deriv`, `function_deriv`,
+  `function_static_loop_deriv`, `static_loop_deriv` -- all containing
+  "deriv", all using GLSL's `helperInvocationEXT()` built-in to guard a
+  derivative read against invalid demoted-lane contributions) failed at
+  **pipeline-creation time** with `error: unhandled opcode 5381`.
+- **4 cases** (`dynamic_loop_{always,dynamic,texture,uniform}`) failed at
+  **runtime** with an image mismatch -- a separate bug, not yet
+  root-caused.
+
+### The opcode-5381 gap (`L291`, fixed)
+
+Opcode 5381 is SPIR-V's `OpIsHelperInvocationEXT`, part of
+`SPV_EXT_demote_to_helper_invocation` -- the read-only "query" counterpart
+to `OpDemoteToHelperInvocation` (opcode 5380), which FeMe already supports.
+Root-caused to **two layered upstream gaps**, neither a FeMe bug:
+
+1. **MLIR's SPIR-V dialect had no op at all for `OpIsHelperInvocationEXT`**
+   (confirmed via grep against `SPIRVControlFlowOps.td`/`SPIRVBase.td`:
+   `OpDemoteToHelperInvocation` is defined, its query counterpart is not).
+   Fixed with an isolated, self-contained upstream MLIR commit: added
+   `SPIRV_OC_OpIsHelperInvocationEXT` (5381) to `SPIRVBase.td`'s opcode
+   enum/validity list, and `SPIRV_IsHelperInvocationEXTOp` to
+   `SPIRVControlFlowOps.td` (mirroring `SPIRV_DemoteToHelperInvocationOp`'s
+   shape exactly -- same extension/capability -- but with a `SPIRV_Bool:
+   $result` output, since this op is a query, not a side-effecting
+   no-result op). Confirmed MLIR's `autogenSerialization` default (`1`)
+   means tablegen alone generates full binary (de)serialization for this
+   op shape -- no manual `Serialization`/`Deserialization` code needed,
+   the same way `OpDemoteToHelperInvocation` itself needs none. Verified
+   via `mlir-opt` parse and
+   `mlir-translate --no-implicit-module --test-spirv-roundtrip` (full
+   binary round-trip); added `control-flow-ops.mlir` (assembly test) and
+   `terminator.mlir` (binary round-trip test) regression tests, both
+   passing; broader `check-mlir-dialect-spirv`/`check-mlir-target-spirv`
+   suites: 122/122 pass, no regressions.
+2. **LLVM itself had no symmetric query intrinsic.** `IntrinsicsSPIRV.td`
+   defines `int_spv_demote_to_helper_invocation` (the write/demote
+   direction) but nothing for the read/query direction. Fixed with a
+   second isolated, self-contained upstream LLVM commit: added
+   `int_spv_is_helper_invocation` (`llvm.spv.is.helper.invocation`,
+   returning `i1`), deliberately given **no** `IntrNoMem`/speculatable
+   attributes -- its result can legitimately change across an
+   intervening `llvm.spv.demote.to.helper.invocation` call in the same
+   invocation, so it must not be hoisted above or CSE'd across one.
+   Added an Assembler round-trip test (`llvm-as | llvm-dis`), passing.
+
+With both upstream gaps closed, added the FeMe-side plumbing (its own,
+separately-committed, FeMe-only change):
+
+- `IsHelperInvocationConversionPattern` (`SPIRVToLLVMPatterns.cpp`)
+  converts `spirv.IsHelperInvocationEXT` into a call to the new intrinsic,
+  mirroring `DemoteToHelperInvocationConversionPattern`'s own shape (using
+  the file's existing `createIntrinsicCall` helper for the result-bearing
+  call).
+- `CanonicalizeStage.cpp` raises `llvm.spv.is.helper.invocation` calls
+  directly into `createStageIsHelper()`'s `feme.stage.is_helper` op -- the
+  same op DXIL's `IsHelperLane`(221) opcode and SPIR-V's `BuiltIn
+  HelperInvocation` (`gl_HelperInvocation`, `L270`) already converge on,
+  so a shader using any of the three spellings observes an identical
+  runtime value.
+
+Added a SPIRVToLLVM conversion FileCheck test
+(`spirv-to-llvm-is-helper-invocation.mlir`) and extended the existing
+`spirv-canonicalize-stage-raised.ll` raising test with an
+`llvm.spv.is.helper.invocation` case.
+
+**`check-feme`:** 3,445/3,506 Passed (+1 net new test), 61 Unsupported, 0
+Failed -- no regressions.
+
+**CTS:** re-ran `dEQP-VK.glsl.demote.*` (30 cases) after the fix. The 5
+previously-unbuildable `*_deriv` cases now all build and run; 4 of them
+(`basic_deriv`, `function_deriv`, `function_static_loop_deriv`,
+`static_loop_deriv`) now **pass outright**. `dynamic_loop_deriv` still
+fails at runtime with an image mismatch -- it turns out to share the
+*other*, still-open `dynamic_loop_*` bug (see `L292` below), which the
+opcode-5381 build failure had simply been masking until now. Net:
+**25/30 Pass (up from 21/30)**.
+
+### The `dynamic_loop_*` runtime bug (`L292`, still open)
+
+5 cases now fail identically at runtime with an image mismatch:
+`dynamic_loop_{always,deriv,dynamic,texture,uniform}` (up from 4 before
+this session, since fixing `L291` exposed `dynamic_loop_deriv` to this
+pre-existing bug instead of hiding it behind the build failure). All 5
+share a `discard`/`demote` shader combined with a **dynamic (non-compile-
+time-constant) loop trip count** -- not yet root-caused. Plausibly
+interacts with FeMe's loop-linearization/masking machinery (the same
+general area `L286`'s `dowhile_trap` fix touched, though that fixed a
+different cluster, `loops`, and this is not confirmed to be related).
+Next session should isolate the simplest case (`dynamic_loop_always`
+looks like the best starting point, having no further runtime-dependent
+condition beyond the loop trip count itself) and diff its generated
+mask/demote IR against an equivalent *static*-trip-count `demote` case
+that already passes -- the same differential method used for prior
+loop-masking bugs.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed for either `L291` or `L292` -- internal compiler-correctness work
+(plus the two upstream MLIR/LLVM gaps), no new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
