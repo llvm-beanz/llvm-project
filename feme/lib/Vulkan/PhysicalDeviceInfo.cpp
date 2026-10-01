@@ -394,22 +394,33 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxColorAttachments = 4;
   // A sampled/storage image may be created with up to 8 samples (see "V5:
   // Images and sampling"'s multisample-object-model scope note in
-  // FeMeVulkanDesign.md): this ICD stores every sample's data, but nothing
-  // yet reads a single sample from a shader or resolves one, so there is no
-  // reason to advertise a wider count than the CTS/an application might
-  // exercise for the object model alone. A *sampled* depth/stencil image
-  // stays single-sample: reading an individual sample of one from a shader
-  // needs `OpImageFetch`-with-sample-index raising, which R30 left out of
-  // scope -- unlike a depth/stencil *attachment*, whose per-sample tests
-  // the executor does implement (see the framebuffer counts above).
+  // FeMeVulkanDesign.md): this ICD stores every sample's data, and (roadmap
+  // L309) `OpImageFetch`-with-an-explicit-`Sample`-operand against a
+  // `Plain2DMS`/`Array2DMS` *sampled* image is now lowered the same way
+  // regardless of the image's own format (`SPIRVResourceLowering.cpp`'s
+  // `hasOnlySupportedImageUses`/`lowerImageAccesses` classify purely by
+  // image *shape*, never by depth/stencil-ness) -- so a depth/stencil
+  // sampled image can be fetched from per-sample exactly like a color one
+  // already could since `L73`/`L307`. This was previously advertised as
+  // depth/stencil-specific unsupported scope (see the removed comment this
+  // replaces), but `dEQP-VK.glsl.builtin_var.fragdepth.*_multisample_*`
+  // exercises exactly this (a `sampler2DMS`/`texelFetch(..., gl_SampleID)`
+  // validation pass reading its own rendered multisample depth attachment
+  // back), proving the previous restriction was stricter than this ICD's
+  // own actual sampled-fetch support -- was already unconditional once
+  // `L307` landed, this limit advertisement was simply stale.
   Limits.sampledImageColorSampleCounts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
       VK_SAMPLE_COUNT_8_BIT;
   Limits.sampledImageIntegerSampleCounts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
       VK_SAMPLE_COUNT_8_BIT;
-  Limits.sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT;
-  Limits.sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+  Limits.sampledImageDepthSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
+  Limits.sampledImageStencilSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.storageImageSampleCounts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
       VK_SAMPLE_COUNT_8_BIT;
