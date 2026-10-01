@@ -7019,21 +7019,51 @@ failed before even building), but all 8 now fail at runtime with an
 image mismatch instead, due to a second, distinct, not-yet-fixed bug
 (`L290`).
 
-**L290 (not yet fixed):** Root-caused via IR inspection:
-`getTightNestedStructType`'s array-of-vector branch builds `array<N x
-markerStruct>` with no stride-aware padding, so each 8-byte marker-struct
-element disagrees with the array's own declared 16-byte `ArrayStride`
-(for `vec2 b[2]`) -- `b[1]` is read/written at the wrong byte offset. The
-obvious fix (reusing `padStructToSize`) is blocked: that helper
-explicitly refuses to pad a tight-vector marker struct, by design, to
-preserve the "exactly one member" invariant other code depends on. A new
-padding mechanism is needed; not yet implemented. See roadmap `L290` for
-the full design discussion.
+**L290 (fixed):** The initial IR-inspection-based diagnosis (pointing at
+`getTightNestedStructType`'s array-of-vector branch) was **wrong** --
+confirmed via `llvm::errs()` debug-print tracing with a minimized
+single-struct repro (`Block { struct T { f32 a; array<2 x vec2,
+stride=16> b; } }`) that that function is never even reached for this
+shape. The real bug is in
+`convertOffsetStructTypeIgnoringDecorations`'s own
+`WithArraysAndMatrices` retry tier, which builds the `array<N x
+markerStruct>` standing in for an array-of-vectors struct member via the
+plain unpadded `getTightVectorArrayType` helper, giving each
+marker-struct element only 8 bytes instead of the array's own declared
+16-byte `ArrayStride` (for `vec2 b[2]`) -- so `b[1]` was read/written 8
+bytes short of its spec-required offset. The obvious fix (reusing
+`padStructToSize`) was blocked: that helper explicitly refuses to pad a
+tight-vector marker struct, by design, to preserve the "exactly one
+member" invariant other code depends on. Fixed instead by adding an
+optional `TrailingPaddingBytes` parameter to
+`getOrCreateTightVectorMarkerStruct` (baking a second always-ignored
+`array<N x i8>` body member and a deterministic `.padN` name suffix, e.g.
+`"feme.tight_vector.f32x2.pad8"`, when needed) and a new
+`getStridedTightVectorArrayType` helper that computes the padding from
+the array's own declared stride; wired into both the real bug site and
+`getTightNestedStructType`'s own array-of-vector branch (not exercised
+by current CTS cases, but structurally the same bug, fixed for
+consistency). `getTightVectorMarkerInnerType` (both the MLIR-type copy in
+`SPIRVToLLVMPatterns.cpp` and the raw-`llvm::Type*` copy in
+`CanonicalizeStage.cpp`) relaxed to accept a 1- or 2-member marker body,
+always returning member 0, so every existing consumer
+(`padStructToSize`'s refusal check, `remapNestedStructMemberIndices`'s
+and `resolvePhysicalCompositeAccess`'s unwrap loops,
+`reassembleTightVectorValue`/`unwrapTightVectorValue`) keeps working
+unchanged. Extended `L289`'s regression test
+(`spirv-to-llvm-nested-struct-array-of-vector-component.mlir`) to cover
+both bugs with two differently-shaped access chains and updated CHECK
+lines for the padded `.pad8` marker shape.
+
+**Verification:** `check-feme`: 3,444/3,505 Passed, 61 Unsupported, 0
+Failed (no regressions). CTS: `dEQP-VK.glsl.struct.*` re-run: **80/80
+Pass** (up from 72/80) -- all 8 residual `nested_struct_array*` cases now
+pass, closing the `struct` cluster entirely.
 
 **Feature/extension surface:** `Vulkan14FeatureInventory.md`/
-`VulkanExtensionInventory.md`: no change needed for `L289` -- an
-internal compiler-correctness fix, no new feature/extension surface.
-`L290` is expected to be the same once implemented.
+`VulkanExtensionInventory.md`: no change needed for either `L289` or
+`L290` -- both are internal compiler-correctness fixes, no new
+feature/extension surface.
 
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
