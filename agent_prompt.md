@@ -63,25 +63,28 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L315` (~4-5 hrs, best next pick, newly narrowed)**: the
-   comparison-sampling math is now confirmed correct via `feme-run`. Next lead:
-   implicit-derivative-driven mip selection for depth-comparison sampling
-   specifically. Start in `Pipeline.cpp`'s SPIR-V-to-runtime-call lowering for
-   `OpImageSampleDrefImplicitLod` vs. `OpImageSampleDrefExplicitLod` -- compare
-   how each computes/selects the mip level, since `nearest_mipmap_nearest` in
-   the failing case name is the strongest hint yet this investigation has had.
-2. **`L317` (a few hours)**: `texel_buffer`'s own remaining 10 functional
-   failures (genuine `Fail`s, not crashes) -- untouched many sessions running.
-3. **`L316` (a few hours)**: `texture.explicit_lod.2d.sizes.*` (16 cases) and
+1. **`L317` (a few hours, best next pick)**: `texel_buffer`'s own remaining 10
+   functional failures (genuine `Fail`s, not crashes) -- untouched many sessions
+   running, now the largest scoped-but-unstarted item.
+2. **`L316` (a few hours)**: `texture.explicit_lod.2d.sizes.*` (16 cases) and
    `texture.multisample` (5 cases) -- untouched many sessions running.
-4. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
+3. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
    alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
    reference-decoder comparison.
-5. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
+4. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
    hours, carried over, unchanged)**.
-6. **`offload-test-suite`'s own lit-annotation issues**
+5. **`offload-test-suite`'s own lit-annotation issues**
    (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`) --
    low priority, pre-existing, outside this project's scope.
-7. **`check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check** --
-   housekeeping, overdue (last done 6 sessions ago at `d0974dd`), not checked
-   again this session.
+6. **`check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift**: now
+   confirmed drifted (`d0974dd` → `854cc3f`, a routine
+   regeneration-on-newer-main, not a real content change) but not yet
+   rebased/updated. Should be quick (a `git rebase`/cherry-pick of the
+   regenerated commit, then re-verify `check-hlsl-feme-vk` still builds and
+   passes) -- worth doing early next session since it's now cheap to diagnose
+   (already done here) and only the mechanical update remains.
+7. **`L318`'s own item (d)** (optional, low priority): add a committed
+   `Dim1D`+`Grad`+`Dref` FileCheck case to
+   `spirv-to-llvm-sample-dref-and-query-lod.mlir` for coverage completeness --
+   not blocking anything, closed out alongside `L315` but the specific test gap
+   was never filled.
