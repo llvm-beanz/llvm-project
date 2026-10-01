@@ -63,25 +63,31 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(best next pick)** `L318`/`L315`: get the real `DUdX`/`DUdY` for
-   the failing shadow-sampling case (see "Start here" above). A few
-   hours if the `fprintf` trace works; half a day if it needs the
-   `feme-run` YAML extension instead.
-2. **(a few hours)** `L317`: `texel_buffer`'s own remaining 10
-   functional failures (genuine `Fail`s, not crashes) -- untouched
-   this session.
-3. **(a few hours)** `L316`: `texture.explicit_lod.2d.sizes.*` (16
-   cases) and `texture.multisample` (5 cases) -- untouched this
+1. **(best next pick, resume exactly here)** Finish verifying this
+   session's repro's own vertex-order/`texCoord`/`w` assumptions
+   against `vktTextureTestUtil.cpp`'s real `ComputeBackend::
+   createFrameResources` call site -- interrupted mid-read this
    session.
-4. **(a few hours, lower priority, many sessions carried over,
+2. **(a few hours, once #1 is confirmed)** Extend the repro to the
+   full `interpolate → dPdx/dPdy → textureGrad` pipeline (not just the
+   derivative math in isolation) -- the one shape not yet tested
+   end-to-end, and the most likely place left for the bug to hide
+   given how many individual stages now check out clean.
+3. **(a few hours)** `L317`: `texel_buffer`'s own remaining 10
+   functional failures (genuine `Fail`s, not crashes) -- untouched
+   this session, carried over again.
+4. **(a few hours)** `L316`: `texture.explicit_lod.2d.sizes.*` (16
+   cases) and `texture.multisample` (5 cases) -- untouched this
+   session, carried over again.
+5. **(a few hours, lower priority, many sessions carried over,
    unchanged)** `L265`'s ASTC alpha-decode tie-break (4 block sizes).
    Still needs a Mesa/lavapipe reference-decoder comparison.
-5. **(~21 cases, a few hours, carried over, unchanged)**
+6. **(~21 cases, a few hours, carried over, unchanged)**
    `rasterization`'s remaining 82 stipple/adjacency Bresenham
    failures.
-6. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
+7. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
    `offload-test-suite`'s `spec_const_32_bits.test`/`WaveActiveMax.test`
    lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass.
-7. **(housekeeping, due again in ~2 sessions, last done 3 sessions ago
-   at `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite`
-   `feme`-branch-drift check -- not checked this session.
+8. **(housekeeping, due again very soon, last done 4 sessions ago at
+   `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite`
+   `feme`-branch-drift check -- not checked this session again.
