@@ -513,6 +513,34 @@ public:
   }
 };
 
+/// Converts `spirv.IsHelperInvocationEXT` (roadmap L291) -- the read-only
+/// counterpart to `spirv.DemoteToHelperInvocation` just above, MLIR having
+/// just as little a pattern for it as that op had before this roadmap
+/// milestone -- into a call to the `llvm.spv.is.helper.invocation`
+/// intrinsic. `feme::graphics::CanonicalizeStagePass` later raises that
+/// intrinsic call into `createStageIsHelper()`'s `feme.stage.is_helper` op,
+/// exactly as it already does for SPIR-V's other "am I a helper invocation"
+/// spelling, the `BuiltIn HelperInvocation` builtin-variable form
+/// (`gl_HelperInvocation`, roadmap L270).
+class IsHelperInvocationConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::IsHelperInvocationEXTOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::IsHelperInvocationEXTOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::IsHelperInvocationEXTOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultTy = getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return mlir::failure();
+    Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Op.getLoc(),
+                                               "llvm.spv.is.helper.invocation",
+                                               ResultTy, mlir::ValueRange{}));
+    return mlir::success();
+  }
+};
+
 /// Builds the operand list for an `llvm.return` replacing a true-terminator
 /// discard op (`spirv.Kill`/`spirv.TerminateInvocation`) nested inside an
 /// arbitrary SPIR-V function -- not just the fragment entry point itself.
@@ -16113,7 +16141,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BlockAccessChainPattern, CompositeConstructPattern,
       ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
       CopyObjectConversionPattern, CopyLogicalConversionPattern,
-      DemoteToHelperInvocationConversionPattern, DotConversionPattern,
+      DemoteToHelperInvocationConversionPattern,
+      IsHelperInvocationConversionPattern, DotConversionPattern,
       ElectConversionPattern, AllEqualConversionPattern,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAllOp>,
       VoteConversionPattern<mlir::spirv::GroupNonUniformAnyOp>,

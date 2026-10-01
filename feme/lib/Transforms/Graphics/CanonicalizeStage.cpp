@@ -4542,6 +4542,28 @@ bool rewriteSPIRVDiscardAndDerivativeIntrinsics(Function &F) {
                                     return true;
                                   });
 
+  // (Roadmap L291) `llvm.spv.is.helper.invocation` (SPIR-V's
+  // `OpIsHelperInvocationEXT`, the read-only counterpart to
+  // `OpDemoteToHelperInvocation` just above) raises directly into
+  // `createStageIsHelper()`, the exact same `feme.stage.is_helper` op
+  // DXIL's own `IsHelperLane`(221) opcode and SPIR-V's `BuiltIn
+  // HelperInvocation` (`gl_HelperInvocation`, roadmap L270) both already
+  // raise to -- a shader may use any of these three forms to read "is this
+  // invocation currently a helper invocation" (DXIL has no separate
+  // builtin-variable form at all; SPIR-V/GLSL has both a builtin-variable
+  // form, `gl_HelperInvocation`, predating `SPV_EXT_demote_to_helper_
+  // invocation`, and this instruction form, `helperInvocationEXT()`, added
+  // alongside that extension) and all three must observe the exact same
+  // runtime value.
+  Changed |= forEachIntrinsicCall(F, Intrinsic::spv_is_helper_invocation,
+                                  [](CallInst &CI) {
+                                    IRBuilder<> B(&CI);
+                                    CallInst *New = createStageIsHelper(B);
+                                    CI.replaceAllUsesWith(New);
+                                    CI.eraseFromParent();
+                                    return true;
+                                  });
+
   // SPIR-V's plain `OpDPdx`/`OpDPdy` (raised as `llvm.spv.ddx`/`.ddy`) leave
   // fine-vs-coarse precision to the implementation; this conservatively
   // maps them to the fine variant, matching `feme.stage.derivative.*`'s two

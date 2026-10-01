@@ -9,6 +9,10 @@
 ; condition operand. `llvm.spv.demote.to.helper.invocation` (SPIR-V's
 ; unconditional, non-terminating `OpDemoteToHelperInvocation`, roadmap E11)
 ; becomes a constant-true `feme.stage.demote` the same way.
+; `llvm.spv.is.helper.invocation` (SPIR-V's `OpIsHelperInvocationEXT`,
+; roadmap L291) is a pure query with no condition operand to synthesize, so
+; it raises into a direct, argument-less `feme.stage.is_helper` call
+; instead, with the intrinsic call's result forwarded.
 
 target triple = "spirv-unknown-vulkan1.3-pixel"
 
@@ -19,6 +23,11 @@ define void @main() #0 {
 
   ; CHECK: call void @feme.stage.demote(i1 true)
   call void @llvm.spv.demote.to.helper.invocation()
+
+  ; CHECK: %[[IS_HELPER:.*]] = call i1 @feme.stage.is_helper()
+  %is.helper = call i1 @llvm.spv.is.helper.invocation()
+  ; CHECK: call void @use.i1(i1 %[[IS_HELPER]])
+  call void @use.i1(i1 %is.helper)
 
   %v = fadd float 1.0, 2.0
 
@@ -41,6 +50,8 @@ define void @main() #0 {
 
 declare void @llvm.spv.discard()
 declare void @llvm.spv.demote.to.helper.invocation()
+declare i1 @llvm.spv.is.helper.invocation()
+declare void @use.i1(i1)
 declare float @llvm.spv.ddx.f32(float)
 declare float @llvm.spv.ddy.f32(float)
 declare float @llvm.spv.ddx.coarse.f32(float)
