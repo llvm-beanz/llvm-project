@@ -7643,3 +7643,107 @@ all this item).
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L265 (deep-dive, still open)
+
+Resumed the long-carried-over `L265` item: the residual 12-case
+`astc_{8x8,10x5,12x12}_unorm_block.a2b10g10r10_snorm_pack32` blit
+failures left over after `L260`'s rounding-convention fix.
+
+**Corrected a coordinate-mapping mistake from a prior session.** The
+specific failing case investigated in depth,
+`astc_8x8_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
+is a *rescaling* blit (`general_general_linear`), not a 1:1 copy, so a
+destination pixel's coordinates do not divide cleanly by the ASTC block
+size to find the relevant source block. A prior session's "block
+boundary" framing assumed destination pixel `(23,3)` maps to source
+block `(2,0)` (naive `floor(23/8), floor(3/8)`); tracing the actual
+blit math this session found the real source sample coordinates are
+`~(60, 28)`, i.e. source block `(7,3)` -- a completely different block.
+Re-traced from the correct block.
+
+**Exhaustively instrumented and bit-verified every decode stage** for
+block `(7,3)` (raw bytes `25 6c 73 1a af 7e 9c 26 10 c7 5b 4b fc ac 72
+85`) against a from-scratch Python re-implementation:
+- Raw ISE `ColorVals` extraction (`decodeISESequence` at `ColorRange=7`,
+  a pure 3-bit range with no trit/quint component): matches.
+- `unquantizeColorValue`'s bit-replication: matches.
+- `bitTransferSigned`: an initial by-hand re-derivation of this
+  function (from memory, not re-reading the source) produced a
+  completely different result from the real traced output: real
+  `V[0]`/`V[4]`/`V[6]` came out as `128`/`255`/`128`, not the
+  hand-derived `0`/`127`/`0`. Re-reading the actual source line-by-line
+  found the by-hand version had the two statements backwards (assumed
+  `A = (A>>1)|(B&0x80); B >>= 1;` when the real code is `B >>= 1; B |=
+  A & 0x80; A >>= 1; ...`) -- the real code matches the ASTC
+  specification's `bit_transfer_signed` procedure exactly. Once
+  corrected, the by-hand Python port reproduces the traced CEM-13
+  endpoints bit-for-bit for both partitions
+  (`P0: Lo=(190,158,254,127) Hi=(191,173,255,128)`, `P1:
+  Lo=(100,45,18,127) Hi=(100,36,0,109)`).
+- CEM-13 endpoint construction, swap condition, and `blueContract`: all
+  match the reference bit-for-bit once the above correction was made.
+
+**Conclusion: `ASTCDecode.cpp`'s decode pipeline is spec-correct for
+this block.** The decoded alpha endpoints (`127`/`128` for partition 0,
+the one all four relevant destination-blend texels resolve to) are
+*not* a decode bug -- they are exactly what a spec-faithful decoder
+produces from this block's bits. A prior session's `L260` commit
+message's claim that these 12 residual cases involve "a decoded alpha
+value that differs from the reference's before either side's rounding
+is even applied" could not be reproduced this session; the most likely
+explanation is that claim was itself based on an analysis mistake (this
+session independently caught and corrected two of its own by-hand
+arithmetic errors while re-deriving the same functions, so a similar
+slip in a much earlier session re-deriving the same code by hand is
+plausible, though not provable after the fact).
+
+**Confirmed, bit-exact mechanism of the visible failure.** The
+destination pixel's bilinear blend averages four source texels' decoded
+alpha (two at byte `127`, two at `128`, all four resolving to partition
+0 from the traced block) with weights of exactly `0.25` each (`WX =
+WY = 0.5`). Traced the blend accumulator at full `%.20g` precision:
+`Accum[3] == 0.5` exactly (not a near-tie amplified by display
+rounding; `(127+127+128+128)/4/255` is mathematically exactly `0.5` in
+IEEE-754 double precision, since `255 == 2 * 127.5` divides exactly).
+This lands precisely on the 2-bit-SNORM-alpha quantization boundary
+between codes `0` (`0.0`) and `1` (`1.0`) -- the same class of tie
+`L260` fixed for a different case, but this case's reference image
+requires the ties to break the **other** way (`0.5 -> 1`, away from
+zero) to match.
+
+**This directly conflicts with `L260`'s fix, confirmed empirically
+rather than assumed:** re-ran
+`astc_5x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`
+(`L260`'s own originally-fixed case) against the unmodified,
+currently-committed `ties-to-even` code this session -- it still
+**Pass**es. So `L260`'s case needs `0.5 -> 0` (even) and this `L265`
+case needs `0.5 -> 1` (away from zero); no single global
+tie-breaking rule in `packClearColor`'s `R10G10B10A2_SNORM` branch can
+satisfy both. The Vulkan spec text (fetched directly from the
+Khronos registry this session) only says implementations "should round
+to nearest" for fixed-point conversion and does not mandate a tie
+direction either way, so this is not resolvable by re-reading the spec
+more carefully -- it would need either a non-tie-breaking-convention
+root cause (not found: every stage up through the exact `0.5` tie is
+spec-correct and bit-verified) or a scoped, evidence-backed special
+case distinguishing blit-interpolated alpha from direct writes (not
+attempted this session -- no concrete structural difference between the
+two cases' sampling was identified beyond "one is 2-bit alpha via a
+5-partition-adjacent small ASTC block, the other via a 2-partition
+dual-plane large ASTC block", which is too speculative a basis for a
+targeted fix without more data).
+
+**No code change made this session for `L265`** (all temporary debug
+instrumentation in `ASTCDecode.cpp`/`ImageOps.cpp` added during this
+investigation was reverted via `git checkout`, confirmed via `git diff`
+returning empty before any other change was layered on). `L260`'s
+existing fix was not touched and remains correct for its own case.
+`check-feme`: unaffected (3447/3447, no code changed). CTS: no change
+(still 12 residual `L265` failures, `astc_5x5`'s `L260` case still
+passing). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change (investigation only, no feature/extension surface change).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
