@@ -8111,3 +8111,48 @@ code path, no new feature/extension surface.
 
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
+
+## L307: `copy_and_blit.core` small-subgroup sweep -- confirmed scope, new `use_after_copy.*_msaa` legalization gap
+
+Continuing this session's `L302`/`L305`/`L306` broader CTS sampling:
+re-ran `copy_and_blit.core`'s remaining small/medium subgroups (the
+7,872-case batch already queued from before the `L305` env-var fix,
+case list regenerated against the corrected FeMe device) -- 222 Fail,
+split into two independently-confirmed groups:
+
+- **36 cases** (`depth_stencil_msaa_copy.*`,
+  `resolve_image.whole_copy_before_resolving_no_cab.*`): every case
+  fails identically, at `vkCreateImage` returning
+  `VK_ERROR_INITIALIZATION_FAILED` for a multisample (2/4/8-sample)
+  image. This is the *same* already-tracked multisample
+  image-creation gap `L280`/`L281` found via `fragdepth` -- confirmed
+  this session to be a general multisample-image-creation limitation,
+  not specific to depth formats as the "fragdepth multisample"
+  framing implied. No new work needed; left open under `L280`/`L281`.
+- **162 cases**, all `use_after_copy.<format>.*_msaa` variants across
+  many unrelated color formats -- a genuinely new bug. Isolated one
+  case directly:
+  `dEQP-VK.api.copy_and_blit.core.use_after_copy.r8_unorm.general.
+  32x32x2_img2img_msaa` fails with:
+  ```
+  error: failed to legalize operation 'spirv.ImageFetch' that was
+  explicitly marked illegal: %40 = "spirv.ImageFetch"(%39, %33, %37)
+  <{image_operands = #spirv.image_operands<Sample>}> :
+  (!spirv.image<f32, Dim2D, NoDepth, Arrayed, MultiSampled, NeedSampler,
+  Unknown>, vector<3xsi32>, si32) -> vector<4xf32>
+    Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+  ```
+  i.e. `OpImageFetch` with an explicit `Sample` operand against an
+  **arrayed and multisampled** image has no SPIR-V-to-LLVM lowering
+  case -- a missing-feature compiler gap (pipeline creation itself
+  fails, so the shader never runs; not a runtime correctness bug like
+  `L306`'s). Not root-caused past this diagnostic; filed as `L307`
+  (todo) rather than attempted this session -- likely substantial new
+  lowering work, better suited to a dedicated session.
+
+No code change this session for either sub-finding (confirmation +
+new-bug triage only). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed yet (no fix landed).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
