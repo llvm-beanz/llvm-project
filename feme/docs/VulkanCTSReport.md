@@ -9188,3 +9188,82 @@ correctness fixes, no feature/extension surface change).
 
 Tracked as `L319`/`L320` in the roadmap -- see `agent_thoughts.md`'s
 latest entry for the full narrative and concrete next steps.
+
+## L315: `texture.shadow.*` root-caused and fixed -- missing implicit-derivative synthesis for depth-comparison sampling
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported.
+
+Picked up the prior session's top-ranked next step: root-cause `L315`
+(`texture.shadow.*`, 106 failures) by comparing
+`OpImageSampleDrefImplicitLod` against the already-correct ordinary
+(non-`Dref`) implicit-LOD sample lowering. Read all three `Dref`
+MLIR-dialect conversion patterns in `SPIRVToLLVMPatterns.cpp`
+(`ImageSampleDrefImplicitLodPattern`/`ImageSampleDrefGradPattern`/
+`ImageSampleDrefExplicitLodPattern`) and confirmed none of them perform
+mip-selection -- they are pure operand-forwarding to
+`llvm.spv.resource.samplecmp*` intrinsics, so the bug had to be
+downstream, in `SPIRVResourceLowering.cpp`'s own lowering of those
+intrinsics to `feme.cpu.image.samplecmp.*` runtime calls.
+
+**Root cause found:** `SPIRVResourceLowering.cpp`'s `isDrefSampleIntrinsic`
+dispatch handles `samplecmp`/`samplecmp_clamp`/`samplecmpbias`/
+`samplecmpbias_clamp` (SPIR-V's `OpImageSampleDrefImplicitLod` with no
+`Grad` operand -- exactly what a fragment shader's `SampleCmp`/
+`SampleCmpBias` HLSL intrinsic compiles to) by always passing
+`DUdX`/`DUdY`/`DVdX`/`DVdY` (and their `Plain1D`/`Array1D` `Grad1DDUdX`/
+`Grad1DDUdY` and `Cube`/`CubeArray` `CubeDDir*` siblings) as permanent
+zero constants. The CPU runtime (`femeCpuImageSampleCmp2DF32` et al.,
+`FeMeRuntimeCPU.c`) already correctly computes a real, derivative-driven
+implicit LOD via `femeRTPlanImplicitLod` whenever it is given nonzero
+derivatives -- it was simply never given any. The ordinary (non-`Dref`)
+sample path already solves this exact problem via
+`getOrSynthesizeSample2DDerivatives`/`getOrSynthesizeSample1DDerivatives`/
+`getOrSynthesizeSampleCubeDerivatives` (`ImageCalls.cpp`), which
+synthesize real `feme.stage.derivative.x.coarse`/`.y.coarse` calls
+(later lowered to genuine quad-lane cross-differencing by
+`WaveLoweringPass`) when the calling function is a `Fragment`-stage
+entry point, and zero constants otherwise. The `Dref` path never called
+these helpers at all -- every implicit-LOD depth-comparison sample was
+unconditionally forced to mip level 0, regardless of its sampler's own
+`nearest_mipmap_nearest`/`linear_mipmap_linear` filter mode.
+
+**Fix:** call the same `getOrSynthesize*Derivatives` helpers for the
+`!DrefHasGrad && !DrefExplicitLod` case, for all five shapes
+(`Plain2D`/`Array2D` via `getOrSynthesizeSample2DDerivatives`;
+`Plain1D`/`Array1D` via `getOrSynthesizeSample1DDerivatives`;
+`Cube`/`CubeArray` via `getOrSynthesizeSampleCubeDerivatives`),
+mirroring the existing `DrefHasGrad` branch immediately above it.
+`Cube`/`CubeArray` needed their own synthesis call placed inside their
+`switch (Shape)` arms (after each arm's own `C2` extraction) rather
+than in the shared pre-switch block, to avoid inserting a redundant,
+duplicate `extractelement` of `Coord`'s third component (caught by a
+`spirv-resource-lowering-image-samplecmp-shapes.ll` lit-test failure
+during iteration, fixed before landing).
+
+**Testing:** added a `samplecmp_fragment` case to
+`spirv-resource-lowering-image-samplecmp.ll` -- a
+`"feme.shader.stage"="fragment"`-tagged function, confirming real
+`feme.stage.derivative.x.coarse`/`.y.coarse` calls are now synthesized
+on `%u`/`%v` instead of the always-zero constants a non-fragment-stage
+caller (the pre-existing `samplecmp` case in the same file) still
+correctly gets. `ninja check-feme`: 3,463 Passed/61 Unsupported/0
+Failed, 0 regressions.
+
+**CTS re-run:** the known repro case,
+`dEQP-VK.texture.shadow.1d.nearest_mipmap_nearest.equal_d16_unorm`, now
+`Pass`. Ran the full `dEQP-VK.texture.shadow.*` group (5,377 cases):
+**577 Pass / 0 Fail / 4,800 NotSupported** -- all 106 previously-failing
+cases in this group now pass, and no new failures were introduced.
+This is the largest single-session CTS fix of this investigation's
+multi-session history.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal CPU-target lowering correctness fix for an
+already-advertised feature (depth-comparison sampling), no new
+feature/extension surface.
+
+Tracked as `L315`/`L318` (now both `done`) in the roadmap -- see
+`agent_thoughts.md`'s latest entry for the full narrative and next
+steps.
