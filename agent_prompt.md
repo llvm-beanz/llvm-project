@@ -63,48 +63,41 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, dedicated session)** The 8 remaining
-   `ifblock`/`elseblock` cases. Start: rebuild with
-   `FEME_DEBUG_LINEARIZE_TRACE=1` and a temporary
-   `F.print(errs())` right after the `OtherCondBrBlocks`/
-   `DivergentCandidates` trace print in `linearizeCycle`
-   (`feme/lib/Transforms/CPU/Linearize.cpp`, search for `L277TRACE`), run
-   `dEQP-VK.glsl.loops.special.for_dynamic_iterations.ifblock_fragment`
-   directly via `deqp-vk`. You'll see: `Header`'s own `CondBr` is
-   genuinely divergent, has no `ExitCheck` at all (neither direct nor
-   relay-recovered), and one of its two successors eventually reaches
-   the *same* `Flow` block that `OtherCondBrBlocks`'s own entry already
-   names as `CheckBlock`. Needs a new code path: when `Header`'s own
-   divergent branch and `CheckBlock`'s divergent branch converge on the
-   *same* physical dispatch block (rather than two independently-relayed
-   exits), both conditions need to be combined/reasoned about together
-   before `CheckBlock`'s own phi-based dispatch logic runs -- likely
-   requires peeling or re-deriving `Header`'s own condition from
-   `CheckBlock`'s own phi inputs, not just narrowing a mask sequentially
-   the way the two now-fixed shapes did.
-2. **(1-2 hours)** `L293`: `derivate`'s 3 residual failures
-   (`fwidth{,coarse,fine}.fbo_float.vec4_highp`). Extract exact pixel
-   values first (via `--deqp-log-images=enable` or a small repro) to
-   tell a tiny rounding delta (no fix needed, like `L287`'s `cosh`/`sinh`)
-   from a real bug.
-3. **(6 cases, feature decision needed, carried over many sessions)**
-   `fragdepth` multisample image-creation gap (`*_multisample_{2,4,8}`).
-4. **(6 cases, carried over many sessions)** `fragdepth`
-   combined-depth-stencil-format bug: `Executor.cpp`'s
-   `readDepth`/`writeDepth` (~line 999).
-5. **(carried over many sessions)** `L265`: residual
-   `a2b10g10r10_snorm_pack32` ASTC-block-boundary alpha-decode bug in
-   `ASTCDecode.cpp`.
-6. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
-   sampling at real scale (`pipeline`'s other sub-suites, `api`,
-   `synchronization`). This session only re-ran `loops`/`demote`
-   (targeted, since that's what regressed) -- a full `dEQP-VK.glsl.*` run
-   was started but takes much longer than one session's budget; kill any
-   future full-cluster attempt early and instead run small, bounded,
-   genuinely-isolated sub-groups.
-7. **(low priority)** `offload-test-suite`'s own
-   `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
-   lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
-8. **(housekeeping, overdue)** `check-hlsl-feme-vk` and the `feme`
-   branch-drift check -- not re-run this session (focus was entirely on
-   the `loops.*` regression); do this early next session.
+1. **(sharpest lead, new this session, ~2-3 hours)** Root-cause
+   `WaveActiveBit{And,Or,Xor}.convergence.test`. Same
+   reconvergence-under-divergence territory as `L292`-`L295` -- the
+   `L295` design sketch above (generalized relay-value capture) may be
+   directly relevant, or this could be a cleaner, more isolated bug.
+   Start with a single-op repro (`WaveActiveBitAnd` alone) and a
+   `FEME_DEBUG_LINEARIZE_TRACE=1` IR dump of its compute shader.
+2. **(a few hours, dedicated session, design already sketched above)**
+   Implement the `L295` third approach: generalize
+   `ExitBlockRelayValues`'s select-merge capture to every intermediate
+   relay-chain block, not just literal `ExitBlock`. Verify against the
+   standalone reproducer first, then all 8 CTS cases, then full
+   `check-feme` and `loops.*` (target 624/624).
+3. **(1-2 hours)** `inc_counter_array.test`'s atomic-counter-ordering
+   bug -- extract the exact shader and trace the counter-increment
+   lowering; `[5,5,5,5]` strongly suggests every lane is reading the
+   counter's value *after* all increments instead of its own
+   turn's value.
+4. **(30 min)** Confirm `Mandelbrot.test`'s 91% pixel mismatch is a
+   golden-image drift, not a real regression -- diff the current
+   `offload-golden-images` checkout's `Mandelbrot.png` against a fresh
+   FeMe render side-by-side (`imgdiff` already reports per-pixel stats).
+5. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases --
+   extract exact pixel values first.
+6. **(6 cases, feature decision needed, carried over many sessions)**
+   `fragdepth` multisample image-creation gap.
+7. **(6 cases, carried over many sessions)** `fragdepth`
+   combined-depth-stencil-format bug.
+8. **(carried over many sessions)** `L265`'s ASTC decode bug.
+9. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
+   sampling at real scale -- run in small, isolated per-case batches.
+10. **(low priority)** `offload-test-suite`'s own pre-existing
+    `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
+    lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
+11. **(housekeeping, just re-verified, due again in ~5 sessions)**
+    `check-hlsl-feme-vk` and the `feme` branch-drift check: repaired and
+    re-run this session; 9 newly-failing cases now tracked individually
+    above (items 1, 3, 4) instead of as one opaque Pass/Fail delta.
