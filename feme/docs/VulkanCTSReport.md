@@ -7811,3 +7811,30 @@ change).
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L299 (continued): `Basic/Mandelbrot.test` confirmed passing, not golden-image drift
+
+Carried over 3+ sessions as an open "confirm golden-image drift" item.
+Confirmed it is **not failing at all**: ran the full 727-case
+`check-hlsl-feme-vk` suite this session (default parallelism, no `-j1`
+workaround needed) and `Mandelbrot.test` passes, consistent with
+`L297`'s fix. Also regenerated its output standalone via `offloader`
+and diffed against `offload-golden-images`' `Mandelbrot.png` with the
+test's own `rules.yaml` thresholds (`imgdiff`: 0.086% differing
+pixels, RMS 2.17 on those pixels, furthest-interval histogram entirely
+within the rules' allowed buckets) -- passes with margin.
+
+The stale "still failing" entries threaded through several prior
+sessions' next-steps lists were carried forward without
+re-verification; `L297` already fixed the real miscompile, and the
+`VK_TIMEOUT`/flaky-parallelism failure mode `L255` separately fixed
+(via `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) was the likely source of any
+residual noise. No code change needed this session -- closing this
+item out. `check-hlsl-feme-vk`: 486 Pass / 31 XFAIL / 207 Unsupported
+/ 2 Fail (`spec_const_32_bits.test`, `WaveActiveMax.test`, both
+pre-existing, unrelated, tracked separately) / 1 UnexpectedPass
+(`array_of_matrices.test`, also pre-existing and tracked separately).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
