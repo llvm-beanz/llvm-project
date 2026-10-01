@@ -8156,3 +8156,79 @@ new-bug triage only). `Vulkan14FeatureInventory.md`/
 
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
+
+### L307 follow-up (later session): root-caused and fixed the `use_after_copy.*_msaa` legalization gap
+
+Picked up `L307`'s group (b) as this session's top-priority item.
+Root-caused two distinct, stacked gaps rather than one:
+
+- **Layer 1 (MLIR legalization, `SPIRVToLLVMPatterns.cpp`):**
+  `ImageLoadPattern<ImageOpTy>`'s `Sample`-image-operand handling
+  (added under `H19g` for a multisampled 2D *storage* image's
+  `OpImageRead`) was gated behind
+  `if constexpr (std::is_same_v<ImageOpTy, ImageReadOp>)` --
+  `ImageFetchOp` (a *sampled* image's `texelFetch()`) was never given
+  the same treatment, so any `Sample` operand on it was declined
+  outright. This produces the exact diagnostic quoted above
+  (`error: failed to legalize operation 'spirv.ImageFetch'...`).
+  Checked MLIR's own `SPIRVImageOps.td`: `ImageFetchOp`'s definition
+  has no verifier restriction against a `Sample` operand, confirming
+  this was a FeMe-side pattern gap, not a real SPIR-V/MLIR limitation.
+  Fixed by generalizing the `HasSample` computation to run
+  unconditionally for both ops -- both reach `createResourcePointer`
+  (`llvm.spv.resource.getpointer`) identically regardless of whether
+  the handle is a storage or sampled image, so nothing in the pattern
+  was actually storage-image-specific.
+- **Layer 2 (CPU lowering, `SPIRVResourceLowering.cpp`):** even with
+  layer 1 fixed, `hasOnlySupportedImageUses` still explicitly rejected
+  any fetch-shaped use against `Plain2DMS`/`Array2DMS` *sampled*-image
+  shapes -- a deliberate scope gap `L73`'s own closure note flagged as
+  "unstarted follow-on work" (`L73` only added `OpImageQuerySamples`
+  support for these two shapes). Fixed by widening the zero-mip-fetch
+  acceptance branch to also accept `Plain2DMS` (3-wide `(x, y,
+  sample)` coordinate, the same one-extra-lane widening `Array2D`'s
+  own `layer` lane already gets over `Plain2D`) and `Array2DMS`
+  (4-wide `(x, y, layer, sample)`). This needed **no new runtime
+  helper or `ImageCallKind`**: once accepted, the resulting IR
+  (`getpointer` + `load`) is structurally identical to a storage
+  image's `OpImageRead` against the same `Plain2DMS`/`Array2DMS`
+  shapes (already supported since `H19g`/`H19m`), so
+  `lowerImageAccesses`'s existing codegen switch and
+  `feme.cpu.image.load.2d(.array).v4f32`/`.v4i32`'s own runtime
+  implementation (`FeMeRuntimeCPU.c`, which already documents itself
+  as reading "one texel of a 2D image (sampled or storage)" and
+  already accepts a `Sample` operand) serve both storage reads and
+  sampled fetches without modification.
+
+Added coverage for both phases: `spirv-to-llvm-image-access-
+multisample.mlir` gained `fetch_ms`/`fetch_arrayed_ms` cases (plain and
+arrayed `ImageFetch` against a multisampled sampled image), and
+`SPIRVResourceLoweringTest.cpp` gained
+`LowersPlain2DMSSampledImageFetchToImageLoad`/
+`LowersArray2DMSSampledImageFetchToImageLoadArray`.
+
+Re-ran the authoritative caselist:
+`dEQP-VK.api.copy_and_blit.core.use_after_copy.*_msaa` -- 348 total,
+152 `NotSupported` (an unrelated, pre-existing
+`x8_d24_unorm_pack32`/combined-depth-stencil-format gap, not this
+bug), **196/196 applicable cases now Pass** (was 0/196, every one a
+pipeline-creation legalization failure).
+
+`ninja check-feme`: 3452/3513 Passed (+2 new tests vs. the prior
+3450/3510 baseline), 61 Unsupported, 0 Failed, 0 regressions.
+`ninja check-hlsl-feme-vk`: unchanged pre-existing baseline --
+`Basic/Mandelbrot.test` (golden-image drift, unrelated, carried over
+many sessions), `Feature/SpecializationConstant/
+spec_const_32_bits.test`/`WaveOps/WaveActiveMax.test` (pre-existing
+lit-annotation issues, unrelated), `Feature/PushConstant/
+array_of_matrices.test` (pre-existing unexpected-pass, unrelated) --
+no new failures.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal SPIR-V-to-LLVM/CPU-lowering correctness fix
+closing a documented scope gap (`L73`); multisampled sampled-image
+`texelFetch()` is core Vulkan 1.0 functionality with no gating optional
+feature bit.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed via `source /tmp/feme_env.sh`.
