@@ -459,6 +459,50 @@ TEST_F(ImageTest, AcceptsSingleSampleSampledDepthImage) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// (Roadmap L311) A multisample image created with *only*
+// `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` as its attachment-shaped usage
+// (plus non-attachment `TRANSFER_SRC_BIT`/`_DST_BIT`, and deliberately no
+// `COLOR_ATTACHMENT_BIT`/`DEPTH_STENCIL_ATTACHMENT_BIT` of its own) used
+// to be wrongly rejected: `supportedSampleCounts` (Image.cpp) never
+// checked `INPUT_ATTACHMENT_BIT` at all, so `Constrained` stayed false
+// and the image fell through to the unconditional
+// `VK_SAMPLE_COUNT_1_BIT`-only default -- even though this device's own
+// `framebufferColorSampleCounts` is `1|2|4|8`, same as every other
+// attachment-shaped usage. Found via
+// `dEQP-VK.api.copy_and_blit.{copy_commands2,dedicated_allocation}.
+// resolve_image.whole_copy_before_resolving_no_cab.*`, whose own
+// intermediate "no barrier" copy-destination image uses exactly this
+// `TRANSFER_SRC_BIT | TRANSFER_DST_BIT | INPUT_ATTACHMENT_BIT`
+// combination at 2/4/8 samples.
+TEST_F(ImageTest, AcceptsMultisampleInputAttachmentOnlyImage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(
+      4, 4,
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+          VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+      Memory, /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  EXPECT_NE(Img, VK_NULL_HANDLE);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// The depth-format counterpart of
+// `AcceptsMultisampleInputAttachmentOnlyImage`: an input-attachment-only
+// multisample image of a depth format must be constrained by
+// `framebufferDepthSampleCounts` (also `1|2|4|8`), not left unconstrained
+// or constrained by the color mask instead.
+TEST_F(ImageTest, AcceptsMultisampleInputAttachmentOnlyDepthImage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_D32_SFLOAT, 4, 4,
+      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+          VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+      Memory, /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  EXPECT_NE(Img, VK_NULL_HANDLE);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(ImageTest, MultisampleImageRejectsBufferCopy) {
   VkDeviceMemory Memory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2D(

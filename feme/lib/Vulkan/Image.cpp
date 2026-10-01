@@ -438,6 +438,35 @@ supportedSampleCounts(const PhysicalDeviceInfo &Info, VkImageUsageFlags Usage,
               Limits.framebufferStencilSampleCounts;
     Constrained = true;
   }
+  // (Roadmap L311) `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` is itself a
+  // render-pass-attachment usage -- an image bound as a subpass input
+  // attachment is read during rendering exactly like a color/depth-
+  // stencil attachment is written, so it is bound by the very same
+  // `framebuffer*SampleCounts` limits, not left unconstrained. Before
+  // this fix, an image created with *only* `INPUT_ATTACHMENT_BIT` (plus
+  // any non-attachment usage like `TRANSFER_SRC_BIT`/`_DST_BIT`, and
+  // deliberately no `COLOR_ATTACHMENT_BIT`/`DEPTH_STENCIL_ATTACHMENT_BIT`
+  // of its own -- a legal combination: a subpass may read an attachment
+  // written by an earlier pass without this pass writing it too) matched
+  // none of the branches above, left `Constrained` false, and fell
+  // through to the unconditional `VK_SAMPLE_COUNT_1_BIT`-only return --
+  // wrongly rejecting any multisample request for it, even though this
+  // device's own `framebufferColorSampleCounts`/`framebufferDepth
+  // SampleCounts`/`framebufferStencilSampleCounts` are all `1|2|4|8`.
+  // Found via `dEQP-VK.api.copy_and_blit.{copy_commands2,dedicated_
+  // allocation}.resolve_image.whole_copy_before_resolving_no_cab.*`,
+  // whose own intermediate "no barrier" copy-destination image uses
+  // exactly this `TRANSFER_SRC_BIT | TRANSFER_DST_BIT |
+  // INPUT_ATTACHMENT_BIT` combination at 2/4/8 samples.
+  if (Usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) {
+    if (HasDepth)
+      Mask &= Limits.framebufferDepthSampleCounts;
+    if (HasStencil)
+      Mask &= Limits.framebufferStencilSampleCounts;
+    if (!HasDepth && !HasStencil)
+      Mask &= Limits.framebufferColorSampleCounts;
+    Constrained = true;
+  }
   return Constrained ? Mask : VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT);
 }
 
