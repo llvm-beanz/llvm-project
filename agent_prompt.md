@@ -63,31 +63,35 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(best next pick, resume exactly here)** Finish verifying this
-   session's repro's own vertex-order/`texCoord`/`w` assumptions
-   against `vktTextureTestUtil.cpp`'s real `ComputeBackend::
-   createFrameResources` call site -- interrupted mid-read this
-   session.
-2. **(a few hours, once #1 is confirmed)** Extend the repro to the
-   full `interpolate → dPdx/dPdy → textureGrad` pipeline (not just the
-   derivative math in isolation) -- the one shape not yet tested
-   end-to-end, and the most likely place left for the bug to hide
-   given how many individual stages now check out clean.
-3. **(a few hours)** `L317`: `texel_buffer`'s own remaining 10
-   functional failures (genuine `Fail`s, not crashes) -- untouched
-   this session, carried over again.
-4. **(a few hours)** `L316`: `texture.explicit_lod.2d.sizes.*` (16
-   cases) and `texture.multisample` (5 cases) -- untouched this
-   session, carried over again.
+1. **(half a day to a day, best next pick, new)** `L319`: find and
+   close the gap between `feme-run`'s own JIT-path resource
+   normalization and `feme::vulkan`'s real `vkCreateComputePipelines`
+   path for a register-bound sampled-image handle. Start by comparing
+   `feme::cpu::runPipeline`'s own pass list against whatever
+   `feme::vulkan` calls for compute-pipeline creation (`GraphicsPipeline.cpp`'s
+   compute counterpart, if one exists separately) -- `H8`'s own root
+   cause (a missing `CanonicalizeStagePass` call) is the first thing to
+   check for by analogy. Once closed, also fix the SIMD-path
+   silent-zero gap found alongside it (small, same area).
+2. **(a few hours, once `L319` is closed)** Resume `L315`/`L318`'s
+   actual full-pipeline repro: the real `SampleCmpGrad`/`Texture1D`/
+   `SamplerComparisonState` shader (already written this session,
+   not committed since it currently fails for the wrong reason) should
+   finally be runnable once `L319` lands; use it to capture the real
+   bug's shape end-to-end for the first time this investigation.
+3. **(a few hours, carried over, unchanged)** `L317`: `texel_buffer`'s
+   10 remaining functional failures.
+4. **(a few hours, carried over, unchanged)** `L316`:
+   `texture.explicit_lod.2d.sizes.*` (16 cases) and
+   `texture.multisample` (5 cases).
 5. **(a few hours, lower priority, many sessions carried over,
    unchanged)** `L265`'s ASTC alpha-decode tie-break (4 block sizes).
-   Still needs a Mesa/lavapipe reference-decoder comparison.
 6. **(~21 cases, a few hours, carried over, unchanged)**
-   `rasterization`'s remaining 82 stipple/adjacency Bresenham
-   failures.
+   `rasterization`'s remaining 82 stipple/adjacency Bresenham failures.
 7. **(low priority, pre-existing, unrelated to FeMe, unchanged)**
-   `offload-test-suite`'s `spec_const_32_bits.test`/`WaveActiveMax.test`
-   lit-annotation issues, and `array_of_matrices.test`'s unexpected-pass.
-8. **(housekeeping, due again very soon, last done 4 sessions ago at
-   `d0974dd`)** `check-hlsl-feme-vk`/`offload-test-suite`
-   `feme`-branch-drift check -- not checked this session again.
+   `offload-test-suite`'s `spec_const_32_bits.test`/
+   `WaveActiveMax.test` lit-annotation issues, and
+   `array_of_matrices.test`'s unexpected-pass.
+8. **(housekeeping, overdue, last done 5 sessions ago at `d0974dd`)**
+   `check-hlsl-feme-vk`/`offload-test-suite` `feme`-branch-drift check
+   -- not checked again this session.
