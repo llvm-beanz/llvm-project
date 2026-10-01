@@ -63,41 +63,32 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(sharpest lead, new this session, ~2-3 hours)** Root-cause
-   `WaveActiveBit{And,Or,Xor}.convergence.test`. Same
-   reconvergence-under-divergence territory as `L292`-`L295` -- the
-   `L295` design sketch above (generalized relay-value capture) may be
-   directly relevant, or this could be a cleaner, more isolated bug.
-   Start with a single-op repro (`WaveActiveBitAnd` alone) and a
-   `FEME_DEBUG_LINEARIZE_TRACE=1` IR dump of its compute shader.
-2. **(a few hours, dedicated session, design already sketched above)**
-   Implement the `L295` third approach: generalize
-   `ExitBlockRelayValues`'s select-merge capture to every intermediate
-   relay-chain block, not just literal `ExitBlock`. Verify against the
-   standalone reproducer first, then all 8 CTS cases, then full
-   `check-feme` and `loops.*` (target 624/624).
-3. **(1-2 hours)** `inc_counter_array.test`'s atomic-counter-ordering
-   bug -- extract the exact shader and trace the counter-increment
-   lowering; `[5,5,5,5]` strongly suggests every lane is reading the
-   counter's value *after* all increments instead of its own
-   turn's value.
-4. **(30 min)** Confirm `Mandelbrot.test`'s 91% pixel mismatch is a
-   golden-image drift, not a real regression -- diff the current
-   `offload-golden-images` checkout's `Mandelbrot.png` against a fresh
-   FeMe render side-by-side (`imgdiff` already reports per-pixel stats).
-5. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases --
+1. **(3 cases, new territory, same family as this fix)**
+   `WaveActiveBit{And,Or,Xor}.convergence.test` -- still open from
+   `L296`'s triage. `WaveActiveBitAnd` returns `[65520,0,0,0]` vs.
+   expected `[65520,15,15,15]`. Worth checking first whether this is
+   the *same* `ExitBlockRelayValues` first-wins bug in a different
+   shape (a convergent wave op's own result could plausibly be another
+   "value captured per-exit-route" case) before assuming it needs new
+   design work.
+2. **(1-2 hours)** `inc_counter_array.test`: `[5,5,5,5]` instead of
+   `[1,2,3,4]` -- atomic-counter ordering bug, not yet root-caused.
+3. **(1-2 hours)** `L293`: `derivate`'s 3 residual `fwidth` cases --
    extract exact pixel values first.
-6. **(6 cases, feature decision needed, carried over many sessions)**
+4. **(6 cases, feature decision needed, carried over many sessions)**
    `fragdepth` multisample image-creation gap.
-7. **(6 cases, carried over many sessions)** `fragdepth`
-   combined-depth-stencil-format bug.
-8. **(carried over many sessions)** `L265`'s ASTC decode bug.
-9. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
-   sampling at real scale -- run in small, isolated per-case batches.
-10. **(low priority)** `offload-test-suite`'s own pre-existing
-    `spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`
-    lit-annotation issues -- unrelated to FeMe/LLVM, needs upstream fixes.
-11. **(housekeeping, just re-verified, due again in ~5 sessions)**
-    `check-hlsl-feme-vk` and the `feme` branch-drift check: repaired and
-    re-run this session; 9 newly-failing cases now tracked individually
-    above (items 1, 3, 4) instead of as one opaque Pass/Fail delta.
+5. **(6 cases, carried over many sessions)** `fragdepth`
+   combined-depth-stencil-format bug (`Executor.cpp` `readDepth`/
+   `writeDepth`, ~line 999).
+6. **(carried over many sessions)** `L265`'s `a2b10g10r10_snorm_pack32`
+   ASTC decode bug.
+7. **(overdue many sessions)** Broader-than-glsl/tessellation CTS
+   sampling (`api`/`pipeline`/`synchronization`) -- run in small,
+   isolated per-case batches, never a full-cluster sweep.
+8. **(low priority)** `offload-test-suite`'s own pre-existing
+   `spec_const_32_bits.test`/`WaveActiveMax.test` lit-annotation issues
+   -- unrelated to FeMe/LLVM.
+9. **(housekeeping, just repaired, due again in ~5 sessions)**
+   `check-hlsl-feme-vk` branch-drift check: repaired this session
+   (`854cc3f` cherry-pick), no `agent_thoughts.md`-worthy drift beyond
+   the routine reset.
