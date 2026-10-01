@@ -409,11 +409,18 @@ VKAPI_ATTR VkResult VKAPI_CALL
 vkCreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *pCreateInfo,
                        const VkAllocationCallbacks *pAllocator,
                        VkPipelineLayout *pPipelineLayout) {
-  std::vector<const DescriptorSetLayout *> SetLayouts;
+  // Deep-copy each set's bindings rather than keeping `pSetLayouts[I]`'s own
+  // `DescriptorSetLayout *` -- see `PipelineLayout`'s own comment for why
+  // (the application may legally destroy that handle right after this call
+  // returns).
+  std::vector<std::optional<DescriptorSetLayout>> SetLayouts;
   SetLayouts.reserve(pCreateInfo->setLayoutCount);
-  for (uint32_t I = 0; I != pCreateInfo->setLayoutCount; ++I)
-    SetLayouts.push_back(
-        fromHandle<DescriptorSetLayout>(pCreateInfo->pSetLayouts[I]));
+  for (uint32_t I = 0; I != pCreateInfo->setLayoutCount; ++I) {
+    const DescriptorSetLayout *Src =
+        fromHandle<DescriptorSetLayout>(pCreateInfo->pSetLayouts[I]);
+    SetLayouts.push_back(Src ? std::optional<DescriptorSetLayout>(*Src)
+                             : std::nullopt);
+  }
 
   std::vector<VkPushConstantRange> PushConstantRanges(
       pCreateInfo->pPushConstantRanges,

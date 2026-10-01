@@ -7968,3 +7968,75 @@ Still open: `synchronization.op` (20,131 cases, needs sub-batching) and
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L305: `dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.{compute,graphics}` -- dangling `DescriptorSetLayout *` crash
+
+**Methodology note first**: this session's env-var setup
+(`export VK_ICD_FILENAMES=... VK_DRIVER_FILES=$VK_ICD_FILENAMES` as a
+*single* combined `export` line) silently targeted the system's real
+`llvmpipe` ICD instead of FeMe's: in that one-line form, bash expands
+`$VK_ICD_FILENAMES` against its value *before* the same command's own
+assignment takes effect, so `VK_DRIVER_FILES` picked up whatever
+preexisting/default value was in the environment rather than FeMe's path.
+`vulkaninfo --summary` happened to be run as two separate sequential
+`export` statements at session start (so it correctly reported `FeMe CPU
+Vulkan Device`), but every subsequent CTS batch command this session used
+the broken combined form and therefore silently ran against real
+`llvmpipe` the whole time. All of this session's `synchronization.op`/
+`api` misc/`copy_and_blit` sampling (described above and in `L302`
+"continued") had to be **discarded and rerun** once this was caught
+(triggered by `copy_and_blit.core.blit_image.simple_tests.2d_array_to_3d`
+showing 134 failures gated behind `VK_KHR_maintenance8`, which FeMe's own
+source has zero references to -- directly querying the device showed
+`vulkaninfo` was reporting `llvmpipe`, not FeMe, once the full non-
+summary dump was checked). Re-running with a safe two-statement (or
+`source`d helper script) form confirmed `synchronization.op` (20,131
+cases) and the `api` misc batch (14,052 cases) are genuinely clean
+against real FeMe -- the `maintenance8` blit failures were a real
+(certified) llvmpipe gap, not a FeMe bug, and do not apply to FeMe at all.
+**Going forward, always set `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` as two
+separate statements (or via a sourced script), never a single combined
+`export A=... B=$A` line, and periodically spot-check a full (non-
+`--summary`) `vulkaninfo` dump's `deviceName`, not just `--summary`'s.**
+
+**The real bug**, found once `copy_and_blit`'s re-run (now correctly
+against FeMe) reached `api.descriptor_set.descriptor_set_layout_lifetime`:
+both `.compute` and `.graphics` cases **segfault**. Root cause (via
+`gdb -batch -ex run -ex bt`): `vkCreatePipelineLayout` stored each
+`VkDescriptorSetLayout` argument's raw `DescriptorSetLayout *` (from
+`fromHandle`) directly inside the new `PipelineLayout`. Per spec, an
+application may call `vkDestroyDescriptorSetLayout` immediately after
+`vkCreatePipelineLayout` returns -- the set-layout object need not outlive
+pipeline-*layout* creation, only the *bindings it described* need to
+remain known to anything created from that pipeline layout later. CTS's
+`descriptor_set_layout_lifetime` test exercises exactly this: create a
+set layout, create a pipeline layout from it, destroy the set layout, then
+create a real pipeline from the (still-live) pipeline layout. FeMe's
+`PipelineLayout` was still holding the now-freed `DescriptorSetLayout *`,
+and `vkCreateComputePipelines`/`vkCreateGraphicsPipelines`'s pipeline-
+cache-key computation (`PipelineCache.cpp`'s
+`hashSetLayoutsAndPushConstants`, which walks `Layout->bindings()` for
+every set) dereferenced it -- a use-after-free, landing in
+`llvm::SHA256::update` (reading freed/garbage memory) in the crash's
+backtrace.
+
+**Fix**: `PipelineLayout` (`Pipeline.h`/`Pipeline.cpp`) now deep-copies
+each set's `DescriptorSetLayoutBinding` list into an
+`std::optional<DescriptorSetLayout>` it owns, at `vkCreatePipelineLayout`
+time, rather than retaining the handle's own object pointer; it still
+exposes the same `ArrayRef<const DescriptorSetLayout *>` from
+`setLayouts()` (now pointing into its own owned copies), so every existing
+consumer (`hashSetLayoutsAndPushConstants`, `validateBoundRanges`,
+`patchUnboundedResourceRanges`) is unchanged. A new regression test,
+`PipelineTest.CompilesPipelineAfterDescriptorSetLayoutDestroyed`, destroys
+the descriptor set layout before creating the pipeline (mirroring CTS's
+sequence exactly) and asserts pipeline creation still succeeds.
+
+Both `dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.{compute,
+graphics}` now `Pass` (verified individually and via `ninja check-feme`,
+3450/3450 passed, 0 regressions).
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed via a sourced helper script
+(`source /tmp/feme_env.sh`) after discovering the combined-`export` bug
+above.

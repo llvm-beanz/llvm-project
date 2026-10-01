@@ -725,6 +725,60 @@ TEST_F(PipelineTest, CompilesStorageBufferShaderWithCompatibleLayout) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
+// Regression test for roadmap L305: per spec, an application may destroy a
+// `VkDescriptorSetLayout` immediately after `vkCreatePipelineLayout` returns
+// -- the layout object itself need not outlive pipeline-layout creation.
+// `PipelineLayout` used to retain the original `DescriptorSetLayout *`
+// handed to it, which dangled once the application destroyed the layout
+// below, and crashed `hashSetLayoutsAndPushConstants` the first time a
+// pipeline was created from the (still-live) pipeline layout --
+// `dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.compute`
+// exercises exactly this sequence.
+TEST_F(PipelineTest, CompilesPipelineAfterDescriptorSetLayoutDestroyed) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+      VK_SUCCESS);
+
+  // Destroy the descriptor set layout *before* using the pipeline layout --
+  // this must not leave `StorageLayout` holding a dangling pointer.
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+
+  VkShaderModule Module = createShaderModule(kStorageBufferShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = StorageLayout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+  vkDestroyPipelineLayout(Device, StorageLayout, nullptr);
+}
+
 TEST_F(PipelineTest, RejectsStorageBufferShaderWithoutMatchingBinding) {
   // `Layout` (from SetUp) declares no descriptor sets at all, so the
   // shader's (set 0, binding 0) requirement cannot be satisfied.
@@ -1133,7 +1187,7 @@ TEST(PatchUnboundedResourceRangesTest, RewritesUnboundedRangeToLayoutCount) {
                                  /*VariableCount=*/false,
                                  /*ImmutableSamplers=*/{}},
   });
-  PipelineLayout Layout({&SetLayout}, {});
+  PipelineLayout Layout({SetLayout}, {});
 
   patchUnboundedResourceRanges(*M, Layout);
 
@@ -1186,7 +1240,7 @@ TEST(PatchUnboundedResourceRangesTest, LeavesUndeclaredBindingUnpatched) {
       {DescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                   /*VariableCount=*/false,
                                   /*ImmutableSamplers=*/{}}});
-  PipelineLayout Layout({&SetLayout}, {});
+  PipelineLayout Layout({SetLayout}, {});
 
   patchUnboundedResourceRanges(*M, Layout);
 

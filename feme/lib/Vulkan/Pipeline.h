@@ -18,6 +18,7 @@
 #ifndef FEME_LIB_VULKAN_PIPELINE_H
 #define FEME_LIB_VULKAN_PIPELINE_H
 
+#include "Descriptor.h"
 #include "GroupSize.h"
 
 #include "feme/Core/ShaderStage.h"
@@ -31,6 +32,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace llvm {
@@ -48,7 +50,6 @@ struct ResourceInfo;
 
 namespace feme::vulkan {
 
-class DescriptorSetLayout;
 struct PhysicalDeviceInfo;
 
 /// A `VkShaderModule`: a validated, owned copy of the application's SPIR-V
@@ -94,22 +95,46 @@ resolveShaderStageModule(const VkPipelineShaderStageCreateInfo &StageInfo,
 /// list, so no translation table is needed between the two -- see
 /// `compileComputePipeline`'s use of this list to validate a shader's
 /// bound-resource requirements against it.
+///
+/// Stores a deep copy of each `VkDescriptorSetLayout`'s bindings (roadmap
+/// L305), not the handle's own `DescriptorSetLayout *`: per spec, an
+/// application may call `vkDestroyDescriptorSetLayout` immediately after
+/// `vkCreatePipelineLayout` returns (the layout object itself need not
+/// outlive pipeline-layout creation), so retaining the original pointer
+/// would dangle by the time a later `vkCreateComputePipelines`/
+/// `vkCreateGraphicsPipelines` call walked `setLayouts()` --
+/// `dEQP-VK.api.descriptor_set.descriptor_set_layout_lifetime.*` exercises
+/// exactly this sequence and crashed before this fix.
 class PipelineLayout {
 public:
-  PipelineLayout(std::vector<const DescriptorSetLayout *> SetLayouts,
+  PipelineLayout(std::vector<std::optional<DescriptorSetLayout>> SetLayouts,
                  std::vector<VkPushConstantRange> PushConstantRanges)
-      : SetLayouts(std::move(SetLayouts)),
-        PushConstantRanges(std::move(PushConstantRanges)) {}
+      : OwnedSetLayouts(std::move(SetLayouts)),
+        PushConstantRanges(std::move(PushConstantRanges)) {
+    SetLayoutPtrs.reserve(OwnedSetLayouts.size());
+    for (const std::optional<DescriptorSetLayout> &Layout : OwnedSetLayouts)
+      SetLayoutPtrs.push_back(Layout ? &*Layout : nullptr);
+  }
 
   llvm::ArrayRef<const DescriptorSetLayout *> setLayouts() const {
-    return SetLayouts;
+    return SetLayoutPtrs;
   }
   llvm::ArrayRef<VkPushConstantRange> pushConstantRanges() const {
     return PushConstantRanges;
   }
 
 private:
-  std::vector<const DescriptorSetLayout *> SetLayouts;
+  /// This layout's own copy of every set's bindings; `std::nullopt` for an
+  /// unused set (`VK_NULL_HANDLE`, see "Descriptor Model"'s independent-sets
+  /// note). Declared before `SetLayoutPtrs` so it is fully constructed
+  /// first -- `SetLayoutPtrs`' entries point into it.
+  std::vector<std::optional<DescriptorSetLayout>> OwnedSetLayouts;
+  /// One pointer per `OwnedSetLayouts` entry (or null), rebuilt once in the
+  /// constructor so `setLayouts()` can keep returning a flat
+  /// `ArrayRef<const DescriptorSetLayout *>` -- every existing consumer
+  /// (`hashSetLayoutsAndPushConstants`, `validateBoundRanges`,
+  /// `patchUnboundedResourceRanges`) stays unchanged.
+  std::vector<const DescriptorSetLayout *> SetLayoutPtrs;
   std::vector<VkPushConstantRange> PushConstantRanges;
 };
 
