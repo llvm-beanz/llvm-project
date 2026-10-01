@@ -952,6 +952,37 @@ public:
   /// reconvergence block.
   std::optional<BasicBlock *> flattenLoopBodyDiamond(BasicBlock *Start);
 
+  /// Roadmap L286: every nested cycle's own header this pass's `flatten`
+  /// walk stopped at (see `CycleBoundaryBlocks`/the identical early-return
+  /// in `flatten` itself), mapped to the `MaskPair` that walk had
+  /// accumulated at the point it reached that header -- i.e. "should this
+  /// lane actually be considered live entering this not-yet-linearized
+  /// cycle at all", reflecting whatever enclosing divergent diamond(s)
+  /// this cycle's own preheader edge sits inside. `LoopLinearizer` (a
+  /// wholly separate pass, run afterward against the same, by-then-
+  /// unchanged IR -- see `LinearizePass::run`) has no other way to learn
+  /// this: its own `makeActivePNPair` otherwise always seeds a cycle's
+  /// entry mask as a bare, unconditional `true` on every non-backedge
+  /// predecessor, correct only when nothing upstream of the cycle ever
+  /// narrowed which lanes should even reach it. When an enclosing
+  /// diamond's arm contains the entire cycle (exactly the shape
+  /// `CycleBoundaryBlocks` exists to tolerate, e.g. `dEQP-VK.glsl.loops.
+  /// special.for_dynamic_iterations.dowhile_trap_fragment`'s own outer
+  /// `for` loop, whose divergent trip-count check gates whether its
+  /// nested `do`-`while` body should run at all for a given lane), that
+  /// default silently drops the outer diamond's own narrowing on the
+  /// floor: a lane the outer check already decided should skip the body
+  /// entirely still enters the nested cycle "live", and if that cycle's
+  /// own exit condition happens to never independently become false for
+  /// such a lane (as `dowhile_trap`'s does not -- its own check shares the
+  /// outer loop's induction variable, frozen forever once that lane can
+  /// never make outer-loop progress), the whole wave's `mask.any`
+  /// reduction spins forever. See `LoopLinearizer`'s own
+  /// `DiamondFlattenedEntryMasks` member for the consuming side.
+  const DenseMap<BasicBlock *, MaskPair> &getCycleBoundaryMasks() const {
+    return CycleBoundaryMasks;
+  }
+
 private:
   Function &F;
   DominatorTree &DT;
@@ -1635,9 +1666,12 @@ bool DiamondFlattener::run() {
 /// really branching away.
 class LoopLinearizer {
 public:
-  LoopLinearizer(Function &F, DominatorTree &DT, PostDominatorTree &PDT,
-                CycleInfo &CI, UniformityInfo &UI)
-      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI) {}
+  LoopLinearizer(
+      Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
+      UniformityInfo &UI,
+      const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks)
+      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI),
+        DiamondFlattenedEntryMasks(DiamondFlattenedEntryMasks) {}
 
   /// Validates and linearizes every leaf cycle in \p F matching the shape
   /// this pass supports. Returns whether \p F was changed.
@@ -1925,6 +1959,26 @@ private:
   /// thread its own freshly computed `MaskPair` through is itself a
   /// previously linearized child's header.
   DenseMap<BasicBlock *, MaskPair> HeaderActiveMasks;
+
+  /// Roadmap L286: `feme::cpu::DiamondFlattener`'s own, separately-run,
+  /// earlier pass's record of every not-yet-linearized cycle header it
+  /// stopped at while flattening some enclosing divergent diamond (see
+  /// that class's own `getCycleBoundaryMasks` comment) -- i.e. the mask
+  /// this cycle's entry should have been seeded with all along, had
+  /// `DiamondFlattener` and `LoopLinearizer` been a single pass instead of
+  /// two run back-to-back (`LinearizePass::run` threads this through
+  /// explicitly since they are not). Consulted by `makeActivePNPair`
+  /// exactly where it would otherwise seed a bare, unconditional `true`
+  /// for one of `Header`'s own non-backedge predecessors -- using this
+  /// cycle's own `Header` as the lookup key mirrors `HeaderActiveMasks`'s
+  /// identical convention (a cycle's mask is always keyed by its header,
+  /// never by a specific predecessor edge, since every structured cycle
+  /// this pass supports has exactly one such edge in the first place).
+  /// Empty whenever `DiamondFlattener` never actually flattened an
+  /// enclosing diamond around this cycle (the overwhelmingly common
+  /// case), in which case lookups simply miss and this pass's original,
+  /// unconditional-`true` behavior is preserved exactly.
+  const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks;
 
   /// Roadmap L282/L283: \p BB was just handed \p Masks by the caller's own
   /// `applyStageMasks(*BB, Masks)` (an enclosing, currently-being-
@@ -3041,11 +3095,24 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     PHINode *SideEffectPN =
         PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active.sideeffect");
     SideEffectPN->insertBefore(Header->getFirstNonPHIIt());
+    // Roadmap L286: an enclosing divergent diamond `DiamondFlattener`
+    // already flattened, before this pass ever ran, may have narrowed
+    // which lanes should even be considered live entering this cycle at
+    // all -- see `DiamondFlattenedEntryMasks`'s own comment. Prefer that
+    // recorded mask over the bare, unconditional `true` this pass would
+    // otherwise always seed a non-backedge predecessor with.
+    auto It = DiamondFlattenedEntryMasks.find(Header);
+    bool HasFlattenedMask = It != DiamondFlattenedEntryMasks.end();
     for (BasicBlock *Pred : predecessors(Header)) {
       if (CI.contains(C, Pred))
         continue;
-      LivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
-      SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+      if (HasFlattenedMask) {
+        LivePN->addIncoming(It->second.Live, Pred);
+        SideEffectPN->addIncoming(It->second.SideEffect, Pred);
+      } else {
+        LivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+        SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+      }
     }
     return MaskPair{LivePN, SideEffectPN};
   };
@@ -3748,9 +3815,18 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CI.compute(F);
     UniformityInfo UI = computeWaveUniformity(F, DT, CI);
 
+    DenseMap<BasicBlock *, MaskPair> DiamondFlattenedEntryMasks;
     {
       PostDominatorTree PDT(F);
-      Changed |= DiamondFlattener(F, DT, PDT, CI, UI).run();
+      DiamondFlattener DF(F, DT, PDT, CI, UI);
+      Changed |= DF.run();
+      // Roadmap L286: captured *before* `DF` (and the `PDT` it holds a
+      // reference to) goes out of scope -- see `LoopLinearizer`'s own
+      // `DiamondFlattenedEntryMasks` member comment for why this pass's
+      // own record of "should this lane even enter this not-yet-
+      // linearized cycle" must be threaded through explicitly rather than
+      // left for `LoopLinearizer` to somehow rediscover on its own.
+      DiamondFlattenedEntryMasks = DF.getCycleBoundaryMasks();
     }
 
     // The diamond flattening pass above may have changed the CFG (and thus
@@ -3768,7 +3844,9 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CycleInfo CI2;
     CI2.compute(F);
     UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
-    bool CycleChanged = LoopLinearizer(F, DT2, PDT2, CI2, UI2).run();
+    bool CycleChanged =
+        LoopLinearizer(F, DT2, PDT2, CI2, UI2, DiamondFlattenedEntryMasks)
+            .run();
     // Roadmap H94b: eliminating a loop's divergent exit `CondBr` in favor
     // of an unconditional fall-through plus a mask computation (this
     // pass's whole point) can leave one of that `CondBr`'s own successors

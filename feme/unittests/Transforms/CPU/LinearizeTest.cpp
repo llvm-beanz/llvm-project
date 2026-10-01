@@ -12,6 +12,7 @@
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -1751,6 +1752,114 @@ TEST(LinearizeTest,
   // abort the test binary outright instead of returning).
   EXPECT_FALSE(run(*M));
   EXPECT_TRUE(SawError);
+}
+
+// Roadmap L286: root-caused via a live `gdb` repro of `dEQP-VK.glsl.loops.
+// special.{for,while}_dynamic_iterations.dowhile_trap_{fragment,vertex}`
+// (see this session's own `agent_thoughts.md` entry, and
+// `DiamondFlattener::getCycleBoundaryMasks`/`LoopLinearizer::
+// DiamondFlattenedEntryMasks`'s own member comments for the full
+// writeup). `DiamondFlattener::run()` -- a wholly separate pass that runs
+// *before* `LoopLinearizer`, against the pristine, not-yet-linearized IR
+// -- flattens an outer divergent diamond (`%cond` below) whose "true" arm
+// contains an entire nested cycle it has not linearized yet, tolerated via
+// its own `CycleBoundaryBlocks` mechanism (see `validate`'s own early
+// return "stop here; LoopLinearizer's problem, not an error"). Before this
+// fix, `LoopLinearizer`'s own `makeActivePNPair` had no way to learn what
+// mask `DiamondFlattener` had already computed reaching that boundary, and
+// always seeded the nested cycle's own entry mask with a bare,
+// unconditional `true` instead -- so a lane `%cond` already decided should
+// skip the nested cycle entirely still entered it "live". Here, exactly
+// like the real `dowhile_trap` shape, the nested cycle's own exit
+// condition (`%inner.cond`) depends on the very same, now-frozen `%i`/
+// `%bound` pair `%cond` does, so such a lane's own reduction would spin
+// forever once actually executed -- this test instead just confirms the
+// nested cycle's own entry mask phi is no longer a bare literal `true` for
+// its non-backedge incoming edge, i.e. that it has genuinely inherited
+// `%cond`'s own narrowing rather than reproducing the hang via a slow,
+// real JIT execution.
+TEST(LinearizeTest,
+     NestedCycleInsideFlattenedDiamondArmInheritsOuterDiamondsMask) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %bound = call i32 @llvm.dx.thread.id(i32 0)
+      br label %outer.header
+    outer.header:
+      %i = phi i32 [0, %entry], [%i.next, %outer.latch]
+      %cond = icmp slt i32 %i, %bound
+      br i1 %cond, label %inner.preheader, label %skip
+    inner.preheader:
+      br label %inner.header
+    inner.header:
+      %j = phi i32 [0, %inner.preheader], [%j.next, %inner.header]
+      %j.next = add i32 %j, 1
+      %inner.cond = icmp slt i32 %i, %bound
+      br i1 %inner.cond, label %inner.header, label %inner.exit
+    inner.exit:
+      br label %merge
+    skip:
+      br label %merge
+    merge:
+      br label %outer.latch
+    outer.latch:
+      %i.next = add i32 %i, 1
+      ; Deliberately a *uniform* trip count (a constant bound), unlike
+      ; %cond above -- so the outer loop itself is an ordinary, uniform
+      ; loop LoopLinearizer leaves untouched (see `LeavesUniformLoopUnchanged`
+      ; above), and only the divergent mid-body diamond (%cond) plus the
+      ; nested cycle it contains need any masking at all. This isolates the
+      ; bug to the DiamondFlattener-to-LoopLinearizer cross-pass gap instead
+      ; of also exercising LoopLinearizer's own, already-fixed, same-pass
+      ; cycle-to-cycle `rethreadNestedEntryMasks` mechanism, which would
+      ; mask this exact failure if the outer loop were divergent too.
+      %outer.cond = icmp slt i32 %i.next, 4
+      br i1 %outer.cond, label %outer.header, label %exit
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *InnerHeader = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName().starts_with("inner.header"))
+      InnerHeader = &BB;
+  ASSERT_TRUE(InnerHeader);
+
+  PHINode *InnerLive = nullptr;
+  for (PHINode &PN : InnerHeader->phis())
+    if (PN.getName().starts_with("active.live")) {
+      InnerLive = &PN;
+      break;
+    }
+  ASSERT_TRUE(InnerLive);
+
+  // Every incoming value entering the inner cycle from *outside* it (not
+  // its own backedge) must not be a bare literal `true` -- it must be
+  // narrowed by the enclosing diamond's own condition, otherwise a lane
+  // the enclosing diamond's own condition excluded would still enter the
+  // inner cycle "live", reproducing the hang this test guards against.
+  bool SawNonBackedgeIncoming = false;
+  for (unsigned I = 0, E = InnerLive->getNumIncomingValues(); I != E; ++I) {
+    BasicBlock *Pred = InnerLive->getIncomingBlock(I);
+    if (Pred == InnerHeader)
+      continue; // The cycle's own backedge -- not an entry edge.
+    SawNonBackedgeIncoming = true;
+    Value *V = InnerLive->getIncomingValue(I);
+    EXPECT_FALSE(isa<ConstantInt>(V))
+        << "inner cycle's own entry mask was not narrowed by the "
+           "enclosing diamond's condition (Pred='"
+        << Pred->getName() << "')";
+  }
+  EXPECT_TRUE(SawNonBackedgeIncoming);
 }
 
 } // namespace
