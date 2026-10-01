@@ -231,6 +231,33 @@ struct SamplerEntry {
   bool UnnormalizedCoordinates = false;
 };
 
+/// One `image-bindings` entry (roadmap L319): the host's descriptors for a
+/// shader's traditionally-bound (register-bound, not
+/// `ResourceDescriptorHeap`) sampled/storage image, matched to a
+/// `feme::cpu::ResourceInfo::BoundRanges` entry (`BoundResourceClass::
+/// Image`) by (`Space`, `Register`) -- the image-heap counterpart to
+/// `BindingFile` above. Before this, `feme-run`'s heap YAML had no way to
+/// describe a traditionally-bound image/sampler at all: `images`/
+/// `samplers` only ever append to the *dynamic* heap
+/// (`ResourceDescriptorHeap`/`SamplerDescriptorHeap` access), so every
+/// traditionally-bound (`register(tN, spaceM)`) image/sampler handle
+/// resolved to that range's zero-initialized reserved-heap prefix instead
+/// of the host's real descriptor -- silently producing an all-zero sample
+/// result rather than any diagnosable error.
+struct ImageBindingFile {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  std::vector<ImageEntry> Entries;
+};
+
+/// The same, for a traditionally-bound sampler range
+/// (`BoundResourceClass::Sampler`).
+struct SamplerBindingFile {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  std::vector<SamplerEntry> Entries;
+};
+
 /// The whole heap YAML file's contents.
 struct HeapFile {
   std::vector<uint32_t> RootConstants;
@@ -238,6 +265,8 @@ struct HeapFile {
   std::vector<BindingFile> Bindings;
   std::vector<ImageEntry> Images;
   std::vector<SamplerEntry> Samplers;
+  std::vector<ImageBindingFile> ImageBindings;
+  std::vector<SamplerBindingFile> SamplerBindings;
 };
 
 } // namespace
@@ -246,6 +275,8 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(HeapEntry)
 LLVM_YAML_IS_SEQUENCE_VECTOR(BindingFile)
 LLVM_YAML_IS_SEQUENCE_VECTOR(ImageEntry)
 LLVM_YAML_IS_SEQUENCE_VECTOR(SamplerEntry)
+LLVM_YAML_IS_SEQUENCE_VECTOR(ImageBindingFile)
+LLVM_YAML_IS_SEQUENCE_VECTOR(SamplerBindingFile)
 
 namespace llvm::yaml {
 /// A `std::vector<uint32_t>` sequence: `LLVM_YAML_IS_SEQUENCE_VECTOR`
@@ -329,6 +360,22 @@ template <> struct MappingTraits<SamplerEntry> {
   }
 };
 
+template <> struct MappingTraits<ImageBindingFile> {
+  static void mapping(IO &Io, ImageBindingFile &Binding) {
+    Io.mapRequired("space", Binding.Space);
+    Io.mapRequired("register", Binding.Register);
+    Io.mapOptional("entries", Binding.Entries);
+  }
+};
+
+template <> struct MappingTraits<SamplerBindingFile> {
+  static void mapping(IO &Io, SamplerBindingFile &Binding) {
+    Io.mapRequired("space", Binding.Space);
+    Io.mapRequired("register", Binding.Register);
+    Io.mapOptional("entries", Binding.Entries);
+  }
+};
+
 template <> struct MappingTraits<HeapFile> {
   static void mapping(IO &Io, HeapFile &File) {
     Io.mapOptional("root-constants", File.RootConstants);
@@ -336,6 +383,8 @@ template <> struct MappingTraits<HeapFile> {
     Io.mapOptional("bindings", File.Bindings);
     Io.mapOptional("images", File.Images);
     Io.mapOptional("samplers", File.Samplers);
+    Io.mapOptional("image-bindings", File.ImageBindings);
+    Io.mapOptional("sampler-bindings", File.SamplerBindings);
   }
 };
 } // namespace llvm::yaml
@@ -991,19 +1040,97 @@ toBoundResourceBindings(const std::vector<BindingStorage> &Storage) {
   return Bindings;
 }
 
+/// One `image-bindings` entry's backing storage: `Entries`' image
+/// descriptors (see `buildImageStorage`) plus the (space, register)
+/// identity a `feme::cpu::BoundImageBinding` is matched by -- the image-heap
+/// counterpart to `BindingStorage` above.
+struct ImageBindingStorage {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  ImageStorage Entries;
+};
+
+Expected<std::vector<ImageBindingStorage>>
+buildImageBindingStorage(const HeapFile &File) {
+  std::vector<ImageBindingStorage> Storage;
+  Storage.reserve(File.ImageBindings.size());
+  for (const ImageBindingFile &Binding : File.ImageBindings) {
+    Expected<ImageStorage> Entries = buildImageStorage(Binding.Entries);
+    if (!Entries)
+      return Entries.takeError();
+    Storage.push_back(ImageBindingStorage{Binding.Space, Binding.Register,
+                                          std::move(*Entries)});
+  }
+  return Storage;
+}
+
+/// Builds the `feme::cpu::BoundImageBinding` array `JITEngine::dispatch`
+/// expects from \p Storage, referencing (not copying) each binding's own
+/// descriptor storage.
+std::vector<BoundImageBinding>
+toBoundImageBindings(const std::vector<ImageBindingStorage> &Storage) {
+  std::vector<BoundImageBinding> Bindings;
+  Bindings.reserve(Storage.size());
+  for (const ImageBindingStorage &Binding : Storage)
+    Bindings.push_back(BoundImageBinding{Binding.Space, Binding.Register,
+                                         Binding.Entries.Descriptors});
+  return Bindings;
+}
+
+/// One `sampler-bindings` entry's backing storage: `Entries`' sampler
+/// descriptors (see `buildSamplerStorage`) plus the (space, register)
+/// identity a `feme::cpu::BoundSamplerBinding` is matched by.
+struct SamplerBindingStorage {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  std::vector<FemeSamplerDescriptor> Entries;
+};
+
+Expected<std::vector<SamplerBindingStorage>>
+buildSamplerBindingStorage(const HeapFile &File) {
+  std::vector<SamplerBindingStorage> Storage;
+  Storage.reserve(File.SamplerBindings.size());
+  for (const SamplerBindingFile &Binding : File.SamplerBindings) {
+    Expected<std::vector<FemeSamplerDescriptor>> Entries =
+        buildSamplerStorage(Binding.Entries);
+    if (!Entries)
+      return Entries.takeError();
+    Storage.push_back(SamplerBindingStorage{Binding.Space, Binding.Register,
+                                            std::move(*Entries)});
+  }
+  return Storage;
+}
+
+/// Builds the `feme::cpu::BoundSamplerBinding` array `JITEngine::dispatch`
+/// expects from \p Storage, referencing (not copying) each binding's own
+/// descriptor storage.
+std::vector<BoundSamplerBinding>
+toBoundSamplerBindings(const std::vector<SamplerBindingStorage> &Storage) {
+  std::vector<BoundSamplerBinding> Bindings;
+  Bindings.reserve(Storage.size());
+  for (const SamplerBindingStorage &Binding : Storage)
+    Bindings.push_back(BoundSamplerBinding{Binding.Space, Binding.Register,
+                                           Binding.Entries});
+  return Bindings;
+}
+
 /// Prints every heap entry's final contents as `uint32` words, one line
 /// per entry: `heap[<index>]: <word0> <word1> ...` for a `resource-heap`
 /// entry, `binding[<space>:<register>][<index>]: <word0> <word1> ...` for a
 /// `bindings` entry, `image[<index>]: <word0> <word1> ...` for an `images`
-/// entry, and `sampler[<index>]: <word0> <word1> ...` (the descriptor
+/// entry, `sampler[<index>]: <word0> <word1> ...` (the descriptor
 /// struct's own raw words, not a host-owned buffer -- see
-/// `FemeSamplerDescriptor`'s header comment) for a `samplers` entry, for
+/// `FemeSamplerDescriptor`'s header comment) for a `samplers` entry,
+/// `image-binding[<space>:<register>][<index>]: <word0> <word1> ...` for an
+/// `image-bindings` entry, and `sampler-binding[<space>:<register>]
+/// [<index>]: <word0> <word1> ...` for a `sampler-bindings` entry, for
 /// `FileCheck` to match against (see the file comment above).
-void printHeapContents(raw_ostream &OS, const HeapFile &File,
-                       const HeapStorage &Storage,
-                       const std::vector<BindingStorage> &BindingsStorage,
-                       const ImageStorage &Images,
-                       ArrayRef<FemeSamplerDescriptor> Samplers) {
+void printHeapContents(
+    raw_ostream &OS, const HeapFile &File, const HeapStorage &Storage,
+    const std::vector<BindingStorage> &BindingsStorage,
+    const ImageStorage &Images, ArrayRef<FemeSamplerDescriptor> Samplers,
+    const std::vector<ImageBindingStorage> &ImageBindingsStorage = {},
+    const std::vector<SamplerBindingStorage> &SamplerBindingsStorage = {}) {
   auto PrintBuffer = [&](const std::vector<uint8_t> &Buffer) {
     for (size_t I = 0; I + sizeof(uint32_t) <= Buffer.size();
          I += sizeof(uint32_t)) {
@@ -1012,6 +1139,11 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
       OS << ' ' << Word;
     }
     OS << '\n';
+  };
+  auto PrintSampler = [&](const FemeSamplerDescriptor &Desc) {
+    std::vector<uint8_t> Bytes(sizeof(Desc));
+    memcpy(Bytes.data(), &Desc, sizeof(Desc));
+    PrintBuffer(Bytes);
   };
 
   for (const HeapEntry &Entry : File.ResourceHeap) {
@@ -1031,10 +1163,23 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
   }
   for (const SamplerEntry &Entry : File.Samplers) {
     OS << "sampler[" << Entry.Index << "]:";
-    const FemeSamplerDescriptor &Desc = Samplers[Entry.Index];
-    std::vector<uint8_t> Bytes(sizeof(Desc));
-    memcpy(Bytes.data(), &Desc, sizeof(Desc));
-    PrintBuffer(Bytes);
+    PrintSampler(Samplers[Entry.Index]);
+  }
+  for (auto [Binding, BindingFile] :
+       zip(ImageBindingsStorage, File.ImageBindings)) {
+    for (const ImageEntry &Entry : BindingFile.Entries) {
+      OS << "image-binding[" << Binding.Space << ":" << Binding.Register
+         << "][" << Entry.Index << "]:";
+      PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
+    }
+  }
+  for (auto [Binding, BindingFile] :
+       zip(SamplerBindingsStorage, File.SamplerBindings)) {
+    for (const SamplerEntry &Entry : BindingFile.Entries) {
+      OS << "sampler-binding[" << Binding.Space << ":" << Binding.Register
+         << "][" << Entry.Index << "]:";
+      PrintSampler(Binding.Entries[Entry.Index]);
+    }
   }
 }
 
@@ -1184,6 +1329,13 @@ Error runObjectMode(StringRef Filename, StringRef EntryPoint,
         "'bindings'): no compiled-object metadata records their reserved "
         "heap prefix; describe every resource under 'resource-heap' "
         "instead");
+  if (!Heap.ImageBindings.empty() || !Heap.SamplerBindings.empty())
+    return createStringError(
+        inconvertibleErrorCode(),
+        "'--object' does not support traditional image/sampler bindings "
+        "(heap YAML 'image-bindings'/'sampler-bindings'): no "
+        "compiled-object metadata records their reserved heap prefix; "
+        "describe every image/sampler under 'images'/'samplers' instead");
 
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
       MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/false);
@@ -1358,6 +1510,24 @@ int main(int argc, char **argv) {
   }
   std::vector<BoundResourceBinding> Bindings =
       toBoundResourceBindings(*BindingsStorage);
+  Expected<std::vector<ImageBindingStorage>> ImageBindingsStorage =
+      buildImageBindingStorage(Heap);
+  if (!ImageBindingsStorage) {
+    errs() << "feme-run: " << toString(ImageBindingsStorage.takeError())
+           << "\n";
+    return 1;
+  }
+  std::vector<BoundImageBinding> ImageBindings =
+      toBoundImageBindings(*ImageBindingsStorage);
+  Expected<std::vector<SamplerBindingStorage>> SamplerBindingsStorage =
+      buildSamplerBindingStorage(Heap);
+  if (!SamplerBindingsStorage) {
+    errs() << "feme-run: " << toString(SamplerBindingsStorage.takeError())
+           << "\n";
+    return 1;
+  }
+  std::vector<BoundSamplerBinding> SamplerBindings =
+      toBoundSamplerBindings(*SamplerBindingsStorage);
   std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
                                          sizeof(uint32_t));
   // Guard against a null `data()` on both sides when `RootConstants` is
@@ -1369,6 +1539,8 @@ int main(int argc, char **argv) {
   DispatchResources Resources;
   Resources.ResourceHeap = Storage->Descriptors;
   Resources.BoundResources = Bindings;
+  Resources.BoundImages = ImageBindings;
+  Resources.BoundSamplers = SamplerBindings;
   Resources.RootConstants = RootConstantBytes;
   Resources.ImageHeap = Images->Descriptors;
   Resources.SamplerHeap = *Samplers;
@@ -1379,6 +1551,6 @@ int main(int argc, char **argv) {
   }
 
   printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images,
-                    *Samplers);
+                    *Samplers, *ImageBindingsStorage, *SamplerBindingsStorage);
   return 0;
 }

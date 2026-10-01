@@ -60,17 +60,59 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
         - index: 0              # array element within the binding's range
           size: 64
           data: [0, 1, 2, 3]
+  images:                        # the shader's *logical* dynamic image heap
+    - index: 0
+      dimension: 1d              # 1d/1d-array/2d/2d-array/cube/cube-array/3d
+      extent: [4, 1]
+      format: r32g32b32a32_float
+      data: [0, 1, 2, 3]         # little-endian uint32 words, one mip/layer
+  samplers:                      # the shader's *logical* dynamic sampler heap
+    - index: 0
+      min-filter: nearest        # nearest/linear
+      address-u: clamp-to-edge   # clamp-to-edge/repeat/mirror/clamp-to-border
+  image-bindings:                 # traditionally-bound images (register(tN, spaceM))
+    - space: 0
+      register: 0
+      entries:
+        - index: 0               # array element within the binding's range
+          dimension: 1d
+          extent: [4, 1]
+          format: r32g32b32a32_float
+          data: [0, 1, 2, 3]
+  sampler-bindings:                # traditionally-bound samplers (register(sN, spaceM))
+    - space: 0
+      register: 0
+      entries:
+        - index: 0
+          min-filter: nearest
+          address-u: clamp-to-edge
   ```
 
-  Every entry becomes an unstructured, host-writable raw buffer
-  (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV` set). A `resource-heap` entry
-  is the buffer a shader's native `ResourceDescriptorHeap[index]` indexes.
-  A `bindings` entry (roadmap milestone 11) is matched by (`space`,
-  `register`) to a traditional binding (e.g. `register(u0, space0)`)
+  Every `resource-heap`/`bindings` entry becomes an unstructured,
+  host-writable raw buffer (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV`
+  set). A `resource-heap` entry is the buffer a shader's native
+  `ResourceDescriptorHeap[index]` indexes. A `bindings` entry (roadmap
+  milestone 11) is matched by (`space`, `register`) to a traditional
+  binding (e.g. `register(u0, space0)`)
   `feme::cpu::BoundResourceNormalizationPass` normalized into the CPU
   target's reserved heap prefix (see "Bound-resource normalization" in
   [../FeMeCPUDesign.md](../FeMeCPUDesign.md)); an unbound slot within a
   declared range is left as the zero descriptor.
+
+  `images`/`samplers` (roadmap steps R31/R41) are the image-heap/
+  sampler-heap counterparts of `resource-heap`: each entry is the
+  descriptor a shader's native `ResourceDescriptorHeap[index]`/
+  `SamplerDescriptorHeap[index]` indexes. `image-bindings`/
+  `sampler-bindings` (roadmap item `L320`) are the corresponding
+  counterparts of `bindings`: each entry is matched by (`space`,
+  `register`) to a traditionally-bound image/sampler range (e.g.
+  `register(t0, space1)`/`register(s0, space2)`)
+  `feme::cpu::SPIRVResourceLoweringPass` normalized into the CPU target's
+  reserved image/sampler heap prefix; before `L320`, there was no way to
+  describe such a binding at all, so every traditionally-bound image or
+  sampler silently resolved to the zero-initialized reserved prefix
+  instead of any host-supplied descriptor. An unbound slot within a
+  declared range is left as the zero descriptor, same as `bindings`.
 
 ## OUTPUT
 
@@ -80,6 +122,10 @@ contents as `uint32` words, one line per entry, for `FileCheck` to match:
 ```
 heap[0]: 0 1 2 3
 binding[0:0][0]: 4 5 6 7
+image[0]: 0 1 2 3
+sampler[0]: ...
+image-binding[0:0][0]: 0 1 2 3
+sampler-binding[0:0][0]: ...
 ```
 
 ## EXAMPLES
