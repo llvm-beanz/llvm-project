@@ -24,7 +24,7 @@
 // *outer*, two-member struct instead of hopping through the inner marker
 // wrapper first.
 //
-// CHECK: llvm.mlir.global external @td() {addr_space = 14 : i32} : !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, struct<"feme.tight_vector.1", (array<3 x i32>)>)>
+// CHECK: llvm.mlir.global external @td() {addr_space = 14 : i32} : !llvm.struct<packed (struct<"feme.tight_vector.i32x3", (array<3 x i32>)>, struct<"feme.tight_vector.i32x3", (array<3 x i32>)>)>
 // CHECK-LABEL: llvm.func @read_parent_id_z
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @td : !llvm.ptr<14>
 // CHECK: %[[GEP:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 0, 0, %{{.*}}]
@@ -46,7 +46,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [MeshShadingEXT], [SPV_EX
 // The struct's *second* member (`parentSize`, physically shifted by the
 // first member's own tight-vector wrapper) reads correctly too.
 //
-// CHECK: llvm.mlir.global external @td2() {addr_space = 14 : i32} : !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, struct<"feme.tight_vector.1", (array<3 x i32>)>)>
+// CHECK: llvm.mlir.global external @td2() {addr_space = 14 : i32} : !llvm.struct<packed (struct<"feme.tight_vector.i32x3", (array<3 x i32>)>, struct<"feme.tight_vector.i32x3", (array<3 x i32>)>)>
 // CHECK-LABEL: llvm.func @read_parent_size_y
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @td2 : !llvm.ptr<14>
 // CHECK: %[[GEP:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 1, 0, %{{.*}}]

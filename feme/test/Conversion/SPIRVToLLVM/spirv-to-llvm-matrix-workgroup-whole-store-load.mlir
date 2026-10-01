@@ -27,7 +27,7 @@
 // The struct's own second member (the trailing `f16`) sits exactly 48
 // bytes after the matrix's own start -- 4 tight, 12-byte columns, not 4
 // ABI-rounded, 16-byte ones (which would place it at byte 64 instead).
-// CHECK: llvm.mlir.global external @s() {{.*}} : !llvm.struct<packed (array<4 x struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>>, f16)>
+// CHECK: llvm.mlir.global external @s() {{.*}} : !llvm.struct<packed (array<4 x struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>>, f16)>
 // The stored constant (the natural `!llvm.array<4 x vector<3xf32>>` a
 // bare matrix constant always converts to) is reassembled column by
 // column into the same tight-vector-wrapped shape as the member itself
@@ -36,8 +36,8 @@
 // natural array.
 // CHECK-LABEL: llvm.func @store_whole_matrix
 // CHECK: %[[NATURAL:.*]] = llvm.mlir.constant{{.*}} : !llvm.array<4 x vector<3xf32>>
-// CHECK: %[[TIGHT:.*]] = llvm.insertvalue %{{.*}}, %{{.*}}[3] : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>>
-// CHECK: llvm.store %[[TIGHT]], %{{.*}} : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>>, !llvm.ptr<3>
+// CHECK: %[[TIGHT:.*]] = llvm.insertvalue %{{.*}}, %{{.*}}[3] : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>>
+// CHECK: llvm.store %[[TIGHT]], %{{.*}} : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>>, !llvm.ptr<3>
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @s : !spirv.ptr<!spirv.struct<(!spirv.matrix<4 x vector<3xf32>> [0], f16 [48])>, Workgroup>
   spirv.func @store_whole_matrix() -> () "None" {
@@ -66,9 +66,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // instead of the next column's own real data.
 
 // CHECK-LABEL: llvm.func @load_whole_matrix
-// CHECK: %[[LOADED:.*]] = llvm.load %{{.*}} : !llvm.ptr<3> -> !llvm.array<4 x struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>>
-// CHECK: %[[COL0:.*]] = llvm.extractvalue %[[LOADED]][0] : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>>
-// CHECK: llvm.extractvalue %[[COL0]][0] : !llvm.struct<"feme.tight_vector{{[.0-9]*}}", (array<3 x f32>)>
+// CHECK: %[[LOADED:.*]] = llvm.load %{{.*}} : !llvm.ptr<3> -> !llvm.array<4 x struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>>
+// CHECK: %[[COL0:.*]] = llvm.extractvalue %[[LOADED]][0] : !llvm.array<4 x struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>>
+// CHECK: llvm.extractvalue %[[COL0]][0] : !llvm.struct<"feme.tight_vector{{[.0-9a-zA-Z]*}}", (array<3 x f32>)>
 // The final result reassembles back to the ordinary, natural
 // `!llvm.array<4 x vector<3xf32>>` shape, not the tight one.
 // CHECK: llvm.return %{{.*}} : !llvm.array<4 x vector<3xf32>>

@@ -5373,6 +5373,39 @@ bool adjustMatrixScalarElementIndices(
 /// mismatching.
 constexpr llvm::StringLiteral kTightVectorMarkerName = "feme.tight_vector";
 
+/// (Roadmap L288) Returns the one marker struct for an
+/// `array<NumElements x ElementType>` tight-vector substitution, keyed by
+/// a name that fully encodes its own body (e.g.
+/// `"feme.tight_vector.f32x3"`) rather than minting a fresh,
+/// counter-suffixed instance (`getNewIdentified`) on every call. Two
+/// independent conversions of the very same vector shape -- e.g. a
+/// nested struct converted once on its own (building a
+/// `spirv.CompositeConstruct` constituent) and again as part of its
+/// enclosing struct's own layout (computing that constituent's own
+/// *field* type) -- must produce the exact same marker struct instance,
+/// not merely a bit-identical one, or `CompositeConstructPattern`'s own
+/// struct case below (which compares the two via plain `mlir::Type`
+/// equality) spuriously rejects an otherwise-valid nested-struct
+/// constituent. `LLVMStructType::getIdentified` is idempotent given the
+/// same name: a later call recovers the already-initialized type rather
+/// than erroring on a body mismatch, unlike a fixed, un-suffixed name
+/// used with `getNewIdentified` would if called twice.
+mlir::LLVM::LLVMStructType
+getOrCreateTightVectorMarkerStruct(mlir::Type ElementType,
+                                   int64_t NumElements) {
+  std::string Name;
+  llvm::raw_string_ostream OS(Name);
+  OS << kTightVectorMarkerName << '.' << ElementType << 'x' << NumElements;
+  auto StructTy =
+      mlir::LLVM::LLVMStructType::getIdentified(ElementType.getContext(), Name);
+  if (!StructTy.isInitialized()) {
+    mlir::Type ArrayTy = mlir::LLVM::LLVMArrayType::get(ElementType, NumElements);
+    if (mlir::failed(StructTy.setBody({ArrayTy}, /*isPacked=*/false)))
+      return {};
+  }
+  return StructTy;
+}
+
 /// If \p Ty is one of `getTightVectorArrayType`'s own marker structs,
 /// returns its one member's own (tight array) type; otherwise returns
 /// null. Lets a consumer that needs to see *through* the marker (e.g.
@@ -5427,21 +5460,18 @@ mlir::Type getTightVectorMarkerInnerType(mlir::Type Ty) {
 /// both. `CanonicalizeStage.cpp`'s row/component-shape inference
 /// (`getStageIORowShape`) and access-resolution (`resolveRowComponent`)
 /// need a positive, unambiguous signal to tell the two apart; this marker
-/// is that signal. `getNewIdentified` (rather than a fixed name via
-/// `getIdentified`) lets each call site instantiate its own body without
-/// colliding across differently-shaped substitutions in the same
-/// `MLIRContext` -- the exact name does not matter beyond the shared
-/// prefix, since nothing besides `isTightVectorMarkerStruct`'s own prefix
-/// check ever looks at it.
+/// is that signal. (Roadmap L288) The actual struct instance comes from
+/// `getOrCreateTightVectorMarkerStruct`, keyed by its own exact shape, so
+/// repeated conversions of the same vector shape -- e.g. a nested
+/// struct's member converted once on its own and again as part of its
+/// enclosing struct's own layout -- always agree on one marker instance.
 mlir::Type getTightVectorArrayType(mlir::VectorType VectorTy,
                                    const mlir::TypeConverter &Converter) {
   mlir::Type ElementType = Converter.convertType(VectorTy.getElementType());
   if (!ElementType)
     return nullptr;
-  mlir::Type ArrayTy =
-      mlir::LLVM::LLVMArrayType::get(ElementType, VectorTy.getNumElements());
-  return mlir::LLVM::LLVMStructType::getNewIdentified(
-      VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
+  return getOrCreateTightVectorMarkerStruct(ElementType,
+                                            VectorTy.getNumElements());
 }
 
 /// Forward declaration: defined below. Needed by this file's own struct
@@ -5893,10 +5923,8 @@ mlir::Type substituteTightVectorMembersIfNeeded(mlir::Type Member) {
   if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Member)) {
     if (llvm::isPowerOf2_64(VectorTy.getNumElements()))
       return Member;
-    mlir::Type ArrayTy = mlir::LLVM::LLVMArrayType::get(
-        VectorTy.getElementType(), VectorTy.getNumElements());
-    return mlir::LLVM::LLVMStructType::getNewIdentified(
-        VectorTy.getContext(), kTightVectorMarkerName, {ArrayTy});
+    return getOrCreateTightVectorMarkerStruct(VectorTy.getElementType(),
+                                              VectorTy.getNumElements());
   }
   if (auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Member)) {
     mlir::Type NewElementTy =

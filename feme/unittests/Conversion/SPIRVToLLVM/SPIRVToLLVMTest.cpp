@@ -360,7 +360,7 @@ TEST(SPIRVToLLVMTest, OutOfOrderOffsetInterfaceBlockLegalizes) {
   // The physically-first (lowest-offset) member is the `vector<3xsi32>`
   // declared second, so it must be laid out as the LLVM struct's first
   // field, ahead of the `mat4x2` declared first.
-  EXPECT_NE(Result.find("!llvm.struct<packed (struct<\"feme.tight_vector\""),
+  EXPECT_NE(Result.find("!llvm.struct<packed (struct<\"feme.tight_vector."),
             std::string::npos)
       << Result;
 }

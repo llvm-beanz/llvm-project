@@ -22,7 +22,7 @@
 // struct's own extra `0` index whenever the *real* converted field type
 // (via `getStructMemberPhysicalFieldType`, not a standalone reconversion
 // of the vector type on its own) is that wrapper.
-// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, i32)>
+// CHECK: llvm.mlir.global external constant @pc() {addr_space = 13 : i32} : !llvm.struct<packed (struct<"feme.tight_vector.i32x3", (array<3 x i32>)>, i32)>
 // CHECK-LABEL: llvm.func @read_vector_component
 // CHECK: %[[BASE:.*]] = llvm.mlir.addressof @pc : !llvm.ptr<13>
 // CHECK: %[[FIELD:.*]] = llvm.getelementptr %[[BASE]][%{{.*}}, 0, 0, %{{.*}}]
@@ -56,7 +56,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // the same tight-vector fixup with `MemberIndexPos` selecting a
 // non-first member, and no trailing member after the vector to require
 // any further remapping.
-// CHECK: llvm.mlir.global external constant @pc2() {addr_space = 13 : i32} : !llvm.struct<packed (f32, struct<"feme.tight_vector", (array<3 x f32>)>)>
+// CHECK: llvm.mlir.global external constant @pc2() {addr_space = 13 : i32} : !llvm.struct<packed (f32, struct<"feme.tight_vector.f32x3", (array<3 x f32>)>)>
 // CHECK-LABEL: llvm.func @read_second_vector_component
 // CHECK: %[[BASE3:.*]] = llvm.mlir.addressof @pc2 : !llvm.ptr<13>
 // CHECK: %[[FIELD3:.*]] = llvm.getelementptr %[[BASE3]][%{{.*}}, 1, 0, %{{.*}}]

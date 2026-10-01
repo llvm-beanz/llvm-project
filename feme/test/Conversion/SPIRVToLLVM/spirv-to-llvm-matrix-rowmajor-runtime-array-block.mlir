@@ -42,7 +42,7 @@
 // CHECK-LABEL: llvm.func @store_load
 // CHECK-SAME: (%[[M:.*]]: !llvm.array<4 x vector<3xf32>>, %[[IDX:.*]]: i32) -> !llvm.array<4 x vector<3xf32>>
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x f32>)>, i32, array<0 x array<3 x array<4 x f32>>>)>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector.f32x3", (array<3 x f32>)>, i32, array<0 x array<3 x array<4 x f32>>>)>, 12, 1>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]]
 // CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[PTR]][0, %[[IDX]]]
 // CHECK-SAME: -> !llvm.ptr<12>, !llvm.array<0 x array<3 x array<4 x f32>>>

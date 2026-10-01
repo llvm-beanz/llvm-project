@@ -36,7 +36,7 @@
 // CHECK-LABEL: llvm.func @store_load
 // CHECK-SAME: (%[[M:.*]]: !llvm.array<2 x vector<3xf32>>) -> !llvm.array<2 x vector<3xf32>>
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector", (array<3 x i32>)>, i32, struct<"feme.tight_vector.1", (array<4 x f32>)>, array<1 x array<16 x i8>>, array<1 x array<3 x struct<packed (array<2 x f32>, array<8 x i8>)>>>)>, 12, 1>
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (struct<"feme.tight_vector.i32x3", (array<3 x i32>)>, i32, struct<"feme.tight_vector.f32x4", (array<4 x f32>)>, array<1 x array<16 x i8>>, array<1 x array<3 x struct<packed (array<2 x f32>, array<8 x i8>)>>>)>, 12, 1>
 // CHECK: %[[PTR:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[PTR]][0, %{{.*}}]
 // CHECK-SAME: -> !llvm.ptr<12>, !llvm.array<1 x array<3 x struct<packed (array<2 x f32>, array<8 x i8>)>>>
