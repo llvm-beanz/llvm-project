@@ -3452,12 +3452,18 @@ the quad 1 pixel past its nominal width, carrying each corner's signed
 perpendicular distance from the centerline (`ScreenTriangle::
 EdgeDistance`) through the same per-pixel barycentric interpolation
 `Depth` already uses, turning it into a 0..1 antialiasing coverage that
-multiplies into the written alpha; `Bresenham` does not build a
-width-dependent quad at all -- it walks the integer pixel grid directly
-with Bresenham's own algorithm (always exactly 1 pixel wide, matching the
-spec's own "not adjustable" rule for this mode), emitting a 1x1
-axis-aligned quad per covered pixel, shaded at the line parameter nearest
-that pixel's center. Every mode also carries each corner's distance along
+multiplies into the written alpha; `Bresenham` walks the integer pixel
+grid directly with Bresenham's own algorithm rather than building one
+quad spanning the whole segment, but -- since roadmap L312 corrected an
+earlier, spec-stale assumption here -- it does honor `LineWidth`: a
+width-1 line emits a single 1x1 axis-aligned quad per covered pixel,
+shaded at the line parameter nearest that pixel's center, while a width
+`w > 1` line (per the spec's own "Bresenham Line Segment Rasterization"
+rule) offsets that same 1-pixel walk by `-(w-1)/2` pixels in the line's
+minor direction and emits a `w`-fragment column (x-major) or row
+(y-major) of quads at each walked step, all sharing the one set of
+interpolated attributes computed for that step. Every mode also carries
+each corner's distance along
 the line's length (`ScreenTriangle::ArcLength`, accumulating across a
 `LineStrip`'s connected segments per Vulkan's "continuously stippled"
 rule, resetting at a `LineList` segment boundary or a strip's own
@@ -3498,7 +3504,8 @@ since claimed both (see "Builtins and system values"'s own "Status
 (roadmap H7e)" note, and the primitive-topology paragraph above, both in
 this file). See `unittests/Graphics/ExecutorTest.cpp`'s
 `RendersAWideRectangularLine`/`RendersABresenhamDiagonalLine`/
-`RendersAStippledLine`/`RectangularSmoothLineAntialiasesItsEdge` (direct
+`RendersAWideBresenhamHorizontalLine`/`RendersAStippledLine`/
+`RectangularSmoothLineAntialiasesItsEdge` (direct
 `RasterState` coverage) and `unittests/Vulkan/GraphicsPipelineTest.cpp`'s
 `TranslatesLineRasterizationState`/
 `DynamicLineWidthAndStippleOverrideStaticState` plus
