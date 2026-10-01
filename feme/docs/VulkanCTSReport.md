@@ -7291,3 +7291,137 @@ session (fix not landed). `Vulkan14FeatureInventory.md`/
 **Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
 `FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
 set).
+
+## L292 follow-up: `dynamic_loop_*` demote bug and the `loop-break-structurized.ll` regression it exposed, both fixed
+
+Picked up this multi-session effort's own uncommitted `L292` investigation.
+The two layered gaps the prior entry above described were real, but the
+actual landed fix ended up narrower than that entry's own proposed
+freeze/placeholder design:
+
+- `DiamondFlattener::isLoopControlEdge` was extended
+  (`isLoopControlEdgeThroughRelay`) to recognize a loop header's own
+  continue/exit branch as a cycle boundary even when `StructurizeCFG` has
+  routed it through one hop of a `Flow`-style relay dispatch block, so it
+  is never incorrectly flattened into an ordinary diamond before
+  `LoopLinearizer` runs. `flattenLoopBodyRegion`'s own precondition was
+  relaxed to tolerate this same boundary shape, and `applyStageMasks` was
+  made idempotent for repeat `ReturnInst` handling. Together, these
+  already fix all 5 `dynamic_loop_*` cases via `LoopLinearizer`'s existing
+  `CycleHasMaskOps`/`flattenLoopBodyRegion` path -- no placeholder/freeze
+  mechanism was actually required.
+- That fix regressed `loop-break-structurized.ll`: a *different* loop
+  shape, with a genuinely divergent header exit check hidden behind the
+  same one-hop `Flow`-relay shape, was left completely unrecognized by
+  `LoopLinearizer::linearizeCycle` once `DiamondFlattener` correctly
+  stopped pre-flattening it. Fixed by adding
+  `LoopLinearizer::recoverRelayExitCheck`: a structural (divergence-
+  agnostic) fallback for `HeaderExit`/`LatchExit`, reusing the same
+  trivial-relay-stub recognition pattern already implemented (but only
+  applied later in the function, for a different code path) -- plus
+  relay-aware `ExitBlock` predecessor/phi bookkeeping in the
+  `HeaderDivergent`/`LatchDivergent` linearization path, since a relay-
+  based `ExitCheck` means `Header`/`Latch` are no longer necessarily
+  `ExitBlock`'s own literal predecessor.
+
+Root-cause investigation used repeated git-stash/`/tmp`-scratch-file A/B
+comparisons against committed `HEAD` (temporary `FEME_DEBUG_LINEARIZE_TRACE`/
+`FEME_DEBUG_VALIDATE_TRACE` instrumentation, since removed) to pin down
+exactly why `Flow`'s own divergence classification flipped between `HEAD`
+and the in-progress fix: at `HEAD`, `DiamondFlattener` pre-flattens the
+header's break check into a `select` before `LoopLinearizer`'s own fresh
+`UniformityInfo` is computed, so the merge value is judged divergent via
+ordinary data-flow (its select condition is `tid`-based); with the fix,
+the header's break check survives untouched, and `LoopLinearizer`'s own
+internal phi-folding collapses the latch's separate re-check down to the
+bare, genuinely uniform trip-count value -- correctly judged *not*
+divergent (lane-activity divergence, not value divergence) by the same
+`UniformityInfo`, but leaving the header's real check unaccounted for by
+any existing classification.
+
+Verified: all 601 `FeMeTransformsCPUTests` unit tests pass; full
+`check-feme`: 3,445/3,505 Passed, 61 Unsupported, 0 Failed (up from the
+prior session's 3,443/3,504 baseline, since `loop-break-structurized.ll`
+and 2 new coverage points land net new/fixed); all 5
+`dEQP-VK.glsl.demote.dynamic_loop_{always,uniform,deriv,dynamic,texture}`
+cases now **Pass** (0/5 before, 5/5 after). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- an internal
+`feme-cpu-linearize` correctness fix, no new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
+
+## L294: `L292`'s own `dEQP-VK.glsl.loops.*` regression, root-caused and mostly fixed
+
+A broader sanity sweep after `L292` landed (`dEQP-VK.glsl.loops.*`, 624
+cases -- previously 624/624) found a real regression `L292` itself
+introduced: 590/624 Pass, 34 Fail, all in the
+`special.{for,while}_dynamic_iterations.*` family. Confirmed real (not a
+flaky/cascading artifact) by building the true `HEAD~1` pre-session
+baseline and re-running `conditional_break_fragment` directly: Pass at
+`HEAD~1`, Fail at the committed `L292` state.
+
+**Root cause:** `LoopLinearizer::recoverRelayExitCheck` (added by `L292`)
+recognizes a candidate relay stub as `Header`/`Latch`'s own exit arm
+purely structurally -- a pure-relay block with `BB` as its unique
+predecessor -- with no check that the stub actually, eventually reaches
+`ExitBlock`. Loops whose body independently needs its own `Flow`-style
+dispatch block for an `if`/`break` check (a second, genuinely separate
+divergent decision point sharing the *same* `StructurizeCFG`-generated
+dispatch block as the loop's own re-entry check) have a stub that looks
+identical in shape but actually lands back on that shared dispatch block,
+not on `ExitBlock`.
+
+**Fix, in two stages:**
+
+1. For the sub-case where the loop *also* has a second, genuinely
+   independent divergent exit elsewhere (relayed to `ExitBlock`
+   separately from `Header`'s own check) -- `conditional_break_fragment`'s
+   own shape -- generalized `LoopLinearizer::linearizeCycle`'s existing
+   single-divergent-exit lowering machinery to *also* apply the same
+   "never really exit here, just narrow the mask" treatment to `Header`'s
+   own relay-recovered divergent check, sequentially, ahead of computing
+   `PreRegion`. Required splitting the loop's working mask into
+   `EntryMasks` (the literal `PHINode` pair `makeActivePNPair()` creates,
+   required by `addLatchIncoming`/`freezeLoopCarriedValues`) and `Masks`
+   (the progressively-narrowed value used for `applyStageMasks`/
+   `rethreadNestedEntryMasks`), and merging both `Header`'s and
+   `CheckExit`'s own relay-block phi captures into one shared restore
+   loop. Recovered 6 of the 34 regressed cases (590/624 -> 596/624).
+2. For the remaining 28: tightened `recoverRelayExitCheck` itself to
+   require the candidate stub to *actually* resolve to `ExitBlock`,
+   chasing further pure, single-successor relay hops (bounded depth,
+   mirroring `uniformRelayChain`'s own bound) instead of trusting the
+   immediate successor alone. Now takes `ExitBlock` as an explicit new
+   parameter. Correctly returns `std::nullopt` (no false match) for the
+   shared-dispatch shape. Recovered 20 more cases (596/624 -> **616/624**).
+
+**Remaining 8, left open (new, harder shape):** `special.
+{for,while}_dynamic_iterations.{ifblock,elseblock}_{fragment,vertex}`.
+Fresh IR dumps confirm `Header`'s own trip-count recheck is *genuinely
+divergent* (depends on a per-fragment `feme.stage.input.load.f32` value)
+and is **not an exit check at all** -- it is a second, independent
+divergent decision that happens to share the exact same physical `Flow`
+dispatch block as the loop body's own `if`/`else` divergent check,
+rather than two independently-relayed-to-`ExitBlock` divergent exits
+(the shape stage 1 above already handles). `collectUniformPassThroughRegion`
+correctly refuses to walk through `Header`'s own un-recovered divergent
+`CondBr`, bailing with `"has an internal branch in 'Flow'"`. This needs a
+genuinely new code path recognizing and merging **two divergent decision
+points sharing one dispatch block**, not a mechanical extension of the
+existing machinery -- left for a dedicated future session.
+
+**Verification:** 601/601 `FeMeTransformsCPUTests` unit tests; all 39
+`Transforms/CPU/Linearize/*.ll` lit tests; `ninja check-feme`:
+3,445/3,505 Passed, 61 Unsupported, 0 Failed (no regressions);
+`dEQP-VK.glsl.demote.*` still 30/30 Pass (the original `L292` target
+cases remain fixed); `dEQP-VK.glsl.loops.*`: **616/624 Pass** (up from
+590/624 at the start of this investigation, 8 short of the pre-`L292`
+624/624 baseline). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- internal
+`feme-cpu-linearize` correctness fix, no new feature/extension surface.
+
+**Mandatory device check:** `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed (with `VK_ICD_FILENAMES` explicitly
+set).
