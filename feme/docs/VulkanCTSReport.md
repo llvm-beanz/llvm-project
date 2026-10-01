@@ -8865,3 +8865,117 @@ fix instead, per this session's own prioritization).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 -- investigation only, no code changed for these findings this
 session.
+
+## L314: `texel_buffer` process crash -- root-caused and fixed (MLIR core, outside `feme/`)
+
+Root-caused the `deqp-vk` process crash flagged by the prior
+session's `texture` group sampling at
+`dEQP-VK.texture.texel_buffer.uniform.packed.a2b10g10r10-uint-pack32`:
+`error: Dim must not be SubpassData or Buffer` followed by an MLIR
+assertion failure in `mlir::spirv::SampledImageType::get`
+(`StorageUniquerSupport.h:180`).
+
+This turned out to be a genuine **MLIR-core bug, outside `feme/`**,
+not a FeMe-specific SPIR-V lowering bug. FeMe's own code only
+*consumes* `SampledImageType` (casts, type-converter registrations in
+`SPIRVToLLVMPatterns.cpp`/`SPIRVResourceLowering.cpp`); the type is
+*constructed* during SPIR-V deserialization of CTS-supplied SPIR-V
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s
+`processSampledImageType`, which calls the unchecked
+`SampledImageType::get`).
+
+`mlir::spirv::SampledImageType::verifyInvariants`
+(`mlir/lib/Dialect/SPIRV/IR/SPIRVTypes.cpp`) and the matching
+textual-form parser (`mlir/lib/Dialect/SPIRV/IR/SPIRVDialect.cpp`)
+unconditionally rejected any sampled image wrapping an `OpTypeImage`
+with `Dim::SubpassData` *or* `Dim::Buffer`, each citing the real
+SPIR-V spec text in a comment: *"It [ImageType] must not have a Dim
+of SubpassData. Additionally, starting with version 1.6, it must not
+have a Dim of Buffer."* The `Dim::Buffer` half of that rule is
+explicitly version-gated -- a sampled image wrapping a `Dim::Buffer`
+image (GLSL's `samplerBuffer`, exactly what a uniform texel buffer
+compiles to) is legal SPIR-V prior to 1.6 -- yet the code applied it
+unconditionally regardless of the module's actual SPIR-V version,
+with no version parameter even threaded into the verifier's
+signature. Corroborated via web research against two known upstream
+reports of this exact spec-version nuance biting real tooling:
+`glslang` issue #2956 ("Invalid SPIR-V Generated For samplerBuffer in
+SPIR-V 1.6") and `SPIRV-Registry` issue #139 ("SamplerBuffer error in
+SPIR-V 1.6"). Since texel buffers (`uniform samplerBuffer`) are a
+long-standing, pre-1.6-era shader feature and CTS is not deliberately
+targeting SPIR-V 1.6 for this core test, the module genuinely is
+legal SPIR-V that MLIR's verifier incorrectly rejects.
+
+Because SPIR-V deserialization constructs this type via the unchecked
+`SampledImageType::get` (not `getChecked`), tripping the unconditional
+rejection doesn't produce a graceful deserialization error -- it trips
+an assertion in `StorageUserBase::get` and aborts the entire `deqp-vk`
+process. This explains why the prior session's `texture` group CTS run
+was truncated at 25,646/25,669 cases.
+
+Fixed by only rejecting `Dim::SubpassData` unconditionally (the one
+half of the rule that genuinely has no version carve-out per the
+spec) and dropping the unconditional `Dim::Buffer` rejection from both
+`SampledImageType::verifyInvariants` and `SPIRVDialect.cpp`'s
+`parseAndVerifySampledImageType`. `SampledImageType` has no notion of
+its enclosing module's SPIR-V version (its invariant-check signature
+only receives the wrapped image type), so threading real version
+awareness into this check would be a much larger MLIR API change;
+leaving the version-gated half of the rule to version-aware validation
+elsewhere (e.g. `spirv-val`) is the narrower, correct fix for this
+type-construction-time check. Updated the existing MLIR lit tests'
+expected diagnostics (`image-ops.mlir`, `types.mlir`) and added new
+positive-path tests confirming a `Dim::Buffer` sampled image is now
+accepted in both the op-verifier path and the type-parsing path.
+
+Committed as a single, isolated, self-contained commit
+(`c0314ba407ec`) touching only `mlir/` files, per the standing
+cross-subproject-fix instruction -- no `feme/`-internal changes were
+needed, since the bug and its fix live entirely in MLIR core.
+
+**Verification:**
+- `mlir-opt`'s full `mlir/test/Dialect/SPIRV/` + `mlir/test/Target/SPIRV/`
+  lit suites: 122/122 Passed, 0 regressions.
+- `MLIRSPIRVToLLVMTests` (unit tests covering `SampledImageType`
+  conversion): 3/3 Passed.
+- `ninja check-feme`: 3,458/3,519 Passed, 61 Unsupported, 0 Failed, 0
+  regressions.
+- Standalone repro
+  (`dEQP-VK.texture.texel_buffer.uniform.packed.a2b10g10r10-uint-pack32`):
+  no longer crashes the process -- runs to completion and reports a
+  graceful `Fail` (a separate, not-yet-root-caused functional
+  texel-buffer-sampling bug, tracked as `L317` below -- not a crash).
+- Full `texel_buffer` group (23 cases): 0 Pass, 10 Fail, 13 NotSupported,
+  all genuinely sampled with no crash.
+- Full `texture.*` group: now runs to completion at **25,669/25,669**
+  cases (was 25,646/25,669 before this fix, process aborting on the
+  crash). Final tally: **9,669 Pass, 141 Fail, 15,859 NotSupported, 0
+  crashes** (was 9,668/131/15,846 plus 1 crash before this fix).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is an infrastructure crash fix in underlying
+SPIR-V-handling tooling FeMe depends on (MLIR core), not a change to
+any FeMe-advertised feature or extension surface.
+
+**Mandatory device check (this session):** `vulkaninfo --summary |
+grep deviceName` → `FeMe CPU Vulkan Device`, confirmed with
+`FEME_ICD`/`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` explicitly exported
+(separate statements).
+
+### Remaining untriaged `texture` findings (carried forward)
+
+With the crash fixed, the rest of the `texture` group's 141 failures
+are now fully visible and untriaged, tracked as new roadmap items:
+- `L315`: `texture.shadow.{1d,1d_array,2d,2d_array,cube,cube_array}`
+  (106 cases, "Image verification failed", depth-comparison sampling)
+  -- largest untriaged cluster.
+- `L316`: `texture.explicit_lod.2d.sizes.*` (16 cases, mipmap
+  filtering) and `texture.multisample` (5 cases) -- smaller clusters.
+- `L317`: `texel_buffer`'s own remaining 10 functional failures
+  (genuine `Fail`s, not crashes, now visible for the first time) --
+  a distinct, not-yet-root-caused bug, separate from the crash this
+  session fixed.
+
+None of these three were root-caused this session -- time was spent
+on the crash fix itself (the top-ranked next step) plus its full
+verification and CTS re-runs.
