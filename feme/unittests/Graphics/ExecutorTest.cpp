@@ -2534,6 +2534,45 @@ TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
   EXPECT_EQ(texel(3, 3)[3], 0);
 }
 
+// roadmap L312: a `Bresenham` line with `LineWidth > 1` offsets its 1-
+// pixel walk by `-(W-1)/2` pixels in the minor direction and replicates
+// each walked pixel into a `W`-pixel column/row, per the spec's
+// "Bresenham line segments of width other than one" rule -- confirming
+// FeMe no longer ignores `LineWidth` for this mode (roadmap F5's
+// original "always 1 pixel" assumption was spec-incorrect).
+TEST(ExecutorTest, RendersAWideBresenhamHorizontalLine) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineMode = LineRasterizationMode::Bresenham;
+  Raster.LineWidth = 3.0f;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // A horizontal, x-major line whose 1-pixel walk alone would light row
+  // 2 (same NDC endpoints `RendersAStippledLine` uses); width 3 offsets
+  // that walk by `-(3-1)/2 == -1` row and replicates across 3 rows, so
+  // rows 1, 2, and 3 (the target's last row) should all be lit across
+  // every column, while row 0 stays untouched.
+  Scene.VertexData = {
+      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {1u, 2u, 3u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t X = 0; X != 4; ++X)
+    EXPECT_EQ(texel(X, 0)[3], 0) << "x=" << X;
+}
+
 // roadmap F5: a stippled line rejects a covered fragment whose position
 // along the line's length falls in one of `StipplePattern`'s "off" bits.
 TEST(ExecutorTest, RendersAStippledLine) {

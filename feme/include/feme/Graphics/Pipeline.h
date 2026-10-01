@@ -368,9 +368,16 @@ struct DepthState {
 /// `RasterState::LineWidth`'s actual value: a screen-space rectangle
 /// `LineWidth` pixels wide, binary-covered exactly like a triangle.
 /// `Bresenham` instead walks the integer pixel grid with Bresenham's own
-/// algorithm, always exactly 1 pixel wide regardless of `LineWidth` (per
-/// the spec, "the width of the line is not adjustable, and it is always
-/// as if it were 1.0"). `RectangularSmooth` is `Rectangular` with a 1-pixel
+/// algorithm. Per the "Bresenham Line Segment Rasterization" section of
+/// the spec, a `Bresenham` line's actual pixel width `w` is `LineWidth`
+/// rounded to the nearest integer, clamped into
+/// `lineWidthRange` (itself rounded), then clamped to be no less than 1
+/// -- when `w > 1`, the 1-pixel-wide walk below is offset by `-(w-1)/2`
+/// in the line's minor direction (`y` for an x-major line, `x` for a
+/// y-major one) and a row/column of `w` fragments is emitted at each
+/// step, rather than ignoring `LineWidth` outright as roadmap F5
+/// originally assumed (see roadmap L312). `RectangularSmooth` is
+/// `Rectangular` with a 1-pixel
 /// antialiasing feather: fragments near the line's edge get fractional
 /// coverage (`ScreenTriangle::EdgeDistance`) instead of a binary in/out
 /// test, and that coverage multiplies into the written alpha (see
@@ -398,8 +405,9 @@ struct RasterState {
   LineRasterizationMode LineMode = LineRasterizationMode::Rectangular;
   /// (roadmap F5) A line primitive's screen-space width in pixels
   /// (`VkPipelineRasterizationStateCreateInfo::lineWidth`, or
-  /// `vkCmdSetLineWidth`'s value when dynamic). Ignored entirely by
-  /// `Bresenham` mode, which is always 1 pixel wide.
+  /// `vkCmdSetLineWidth`'s value when dynamic). `Bresenham` mode rounds
+  /// this to the nearest integer pixel width rather than using it
+  /// directly (see `LineRasterizationMode::Bresenham`'s own comment).
   float LineWidth = 1.0f;
   /// (roadmap F5) Whether a line primitive is stippled -- rejected in a
   /// per-fragment repeating on/off pattern along the line's length --

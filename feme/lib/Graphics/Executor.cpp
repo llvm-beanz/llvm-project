@@ -3098,37 +3098,64 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
       if (Raster.LineMode == LineRasterizationMode::Bresenham) {
         // `Bresenham` mode walks the integer pixel grid directly
-        // (`LineRasterizationMode`'s comment): the line's width is never
-        // consulted, and each covered pixel becomes its own 1x1 axis-
-        // aligned quad, shaded/interpolated at the line parameter `T`
-        // nearest that pixel's center -- there is no per-pixel width to
-        // expand, unlike the rectangular styles below.
-        int32_t X0 = static_cast<int32_t>(std::floor(P0[0]));
-        int32_t Y0 = static_cast<int32_t>(std::floor(P0[1]));
-        int32_t X1 = static_cast<int32_t>(std::floor(P1[0]));
-        int32_t Y1 = static_cast<int32_t>(std::floor(P1[1]));
+        // (`LineRasterizationMode`'s comment). Per the spec's "Bresenham
+        // Line Segment Rasterization" section (roadmap L312), a width-1
+        // line walks exactly the diamond-exit-rule pixels below; a width
+        // `W > 1` line instead offsets that walk by `-(W-1)/2` pixels in
+        // the line's *minor* direction (x-major: offset `y`; y-major:
+        // offset `x`) and replicates each walked pixel into a `W`-tall
+        // column (x-major) or `W`-wide row (y-major) of fragments, with
+        // every fragment in that column/row sharing the one set of
+        // interpolated attributes computed for the walked (lowest)
+        // fragment -- the spec's "preferred method" of attribute
+        // interpolation for wide Bresenham lines.
+        bool XMajor = std::abs(Dx) >= std::abs(Dy);
+        int32_t W = std::clamp(
+            static_cast<int32_t>(std::lround(Raster.LineWidth)), 1, 64);
+        float MinorOffset = (W - 1) * 0.5f;
+        std::array<float, 2> P0a = P0, P1a = P1;
+        if (XMajor) {
+          P0a[1] -= MinorOffset;
+          P1a[1] -= MinorOffset;
+        } else {
+          P0a[0] -= MinorOffset;
+          P1a[0] -= MinorOffset;
+        }
+        int32_t X0 = static_cast<int32_t>(std::floor(P0a[0]));
+        int32_t Y0 = static_cast<int32_t>(std::floor(P0a[1]));
+        int32_t X1 = static_cast<int32_t>(std::floor(P1a[0]));
+        int32_t Y1 = static_cast<int32_t>(std::floor(P1a[1]));
         int32_t StepDx = std::abs(X1 - X0), Sx = X0 < X1 ? 1 : -1;
         int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
         int32_t Err = StepDx + StepDy;
         int32_t X = X0, Y = Y0;
         for (;;) {
           std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
-          float T = ((Center[0] - P0[0]) * Dx + (Center[1] - P0[1]) * Dy) /
+          float T = ((Center[0] - P0a[0]) * Dx + (Center[1] - P0a[1]) * Dy) /
                     (Len * Len);
           T = std::clamp(T, 0.0f, 1.0f);
           RasterVertex Vt = lerpVertex(V0, V1, T, Varyings);
           float InvWt = InvW0 + (InvW1 - InvW0) * T;
           float Deptht = Depth0 + (Depth1 - Depth0) * T;
           float Arc = ArcAccum + T * Len;
-          QuadCorner TL{{float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-          QuadCorner TR{
-              {float(X + 1), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-          QuadCorner BR{
-              {float(X + 1), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-          QuadCorner BL{
-              {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-          pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/true);
-          pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/true);
+          for (int32_t I = 0; I < W; ++I) {
+            int32_t FX = XMajor ? X : X + I;
+            int32_t FY = XMajor ? Y + I : Y;
+            QuadCorner TL{
+                {float(FX), float(FY)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            QuadCorner TR{
+                {float(FX + 1), float(FY)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            QuadCorner BR{{float(FX + 1), float(FY + 1)},
+                          InvWt,
+                          Deptht,
+                          &Vt,
+                          0.0f,
+                          Arc};
+            QuadCorner BL{
+                {float(FX), float(FY + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+            pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/true);
+            pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/true);
+          }
           if (X == X1 && Y == Y1)
             break;
           int32_t E2 = 2 * Err;
