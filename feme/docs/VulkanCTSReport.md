@@ -9909,15 +9909,72 @@ overlap, most likely at the join between two consecutive wide Bresenham
 line-strip segments (a single-segment wide Bresenham line, exercised by
 `L312`'s own regression test, is unaffected).
 
-Not yet root-caused. Likely candidate: the half-open diamond-exit rule
-(`L324`) combined with the width-replication offset (`L312`) may
-interact incorrectly specifically at a strip join, double-covering one
-row/column where the previous segment's trailing replicated band and
-the next segment's leading replicated band both land on the same pixel
-row, one pixel wider than either alone. Needs its own standalone
-reduction (a 2-segment wide Bresenham strip, non-axis-aligned, small
-enough to hand-check the walked pixel set against the reference
-rasterizer's own strip-join handling in `rrRasterizer.cpp`).
+Not yet root-caused as of the prior session. **This session root-caused
+it precisely** (still not fixed -- see rationale below for why the fix
+is deferred).
+
+**Root cause (confirmed, not a strip-join/half-open-rule bug as
+previously hypothesized)**: extracted and diffed the Reference vs
+Result PNGs pixel-by-pixel (not just trusting the verifier's own
+"Invalid line width" text, which was misleading) and found the real
+divergence is a **whole extra walked step** in FeMe's output at
+segment 1's `Y=85` row (an entire row wrongly lit across the full
+width-replicated span, not a localized 1px geometry glitch). Added
+temporary `getenv("FEME_DEBUG_BRESENHAM")`-guarded instrumentation to
+capture ground-truth per-segment values (`P0`, `P1`, `XMajor`, `W`,
+floored endpoints, `ArcAccum`, stipple state), then hand-simulated
+FeMe's own algorithm in Python (`numpy.float32`, matching C++ `float`
+precision exactly) using those real values. This confirmed FeMe's own
+stipple-bit arithmetic is **internally self-consistent** -- given its
+own `ArcAccum=231` carried over from segment 0 and
+`Factor=2`/`Pattern=0xf0f`, the `Y=85` step's stipple bit genuinely
+computes to "on" by a literal reading of FeMe's algorithm. This rules
+out a simple `L325`-style arithmetic bug.
+
+The actual mismatch is **algorithmic**, found by reading VK-GL-CTS's
+own reference rasterizer (`framework/referencerenderer/rrRasterizer.cpp`,
+`SingleSampleLineRasterizer`) in detail: FeMe's Bresenham-mode walk
+uses the classic integer DDA (err-accumulator) algorithm -- floor the
+(width-shifted) float endpoints to get `X0Y0`/`X1Y1`, then step one
+pixel per major-axis increment, choosing exactly one minor-axis
+candidate per step via the accumulated error term. This is a
+widely-used *approximation* of the Vulkan spec's actual rasterization
+rule, provably exact for simple unshifted width-1 lines, but not
+identical to the spec's literal definition.
+
+The spec's actual rule, and what the reference rasterizer implements
+verbatim, is an exact **diamond-exit test**
+(`LineRasterUtil::doesLineSegmentExitDiamond`, ~250 lines) performed in
+fixed-point subpixel arithmetic (`int64_t`, precision matching the
+device's own advertised `VkPhysicalDeviceLimits::subPixelPrecisionBits`
+-- FeMe currently advertises `4`, confirmed in
+`feme/lib/Vulkan/PhysicalDeviceInfo.cpp`). Critically, this test is
+evaluated against the **entire** width-shifted line segment (`m_v0` to
+`m_v1`, not an incremental local step) for every candidate pixel in the
+line's bounding box, with explicit handling for a line passing exactly
+through a diamond's corner (4 distinct corner behaviors, each with
+"line-through", "starts-here", and "ends-here" sub-cases) to resolve
+ties consistently. For slopes near specific ratios (common at
+non-axis-aligned, non-45-degree angles, which is segment 1's case
+here: `(211,12)` to `(186,115)`, a shallow-steep y-major slope), the
+exact geometric test can accept a position that the DDA's "exactly one
+minor-axis candidate per major step" assumption doesn't produce (or
+vice versa), shifting FeMe's effective step count by one relative to
+the reference for the remainder of that segment's walk -- which then
+feeds forward into the stipple counter and manifests as an entire
+extra/missing row, exactly matching the observed symptom.
+
+**Why not fixed this session**: a bit-exact fix requires literally
+porting `doesLineSegmentExitDiamond`'s exact fixed-point algorithm
+(including all 4 diamond-corner tie-break cases) into
+`emitLineSegment`'s Bresenham branch, replacing the DDA walk with a
+bounding-box-and-diamond-test walk. This is a substantial, intricate
+port (not a quick arithmetic patch) and attempting it under session
+time pressure risks introducing a subtly wrong implementation that
+appears to work on this one reduction but miscompiles other slopes.
+Deferred to a dedicated future session; broken down into sub-items in
+`Roadmap.md` (`L326`/`L327`/`L328`) rather than left as a single
+"unknown effort" item.
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 anticipated once fixed -- expected to be a correctness fix to an
