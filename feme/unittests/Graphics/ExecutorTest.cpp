@@ -2611,13 +2611,22 @@ TEST(ExecutorTest, RendersAWideBresenhamHorizontalLine) {
 
   TriangleScene Scene;
   // A horizontal, x-major line whose 1-pixel walk alone would light row
-  // 2 (same NDC endpoints `RendersAStippledLine` uses); width 3 offsets
-  // that walk by `-(3-1)/2 == -1` row and replicates across 3 rows, so
-  // rows 1, 2, and 3 (the target's last row) should all be lit across
-  // every column, while row 0 stays untouched.
+  // 2; width 3 offsets that walk
+  // by `-(3-1)/2 == -1` row and replicates across 3 rows, so rows 1, 2,
+  // and 3 (the target's last row) should all be lit across every
+  // column, while row 0 stays untouched. Endpoints are nudged in from
+  // the exact `-1`/`1` NDC viewport edges and off the row's exact pixel-
+  // center height (roadmap L328) -- the spec's exact diamond-exit rule
+  // is a genuine geometric test of whether the (sub-pixel-precision)
+  // segment crosses out of each column's diamond before terminating,
+  // which for an *exactly* axis-aligned, dead-centered line can
+  // legitimately differ from a naive "every column in range" DDA
+  // approximation at the segment's own last column; nudging both
+  // coordinates keeps this test's intent (every visible column, 3 full
+  // rows) while avoiding that genuine tie case.
   Scene.VertexData = {
-      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      -0.95f, 0.1f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      0.95f,  0.1f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
   };
   PreparedDraw Draw = Scene.prepare();
 

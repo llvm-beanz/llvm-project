@@ -70,6 +70,7 @@
 #include "feme/Graphics/GeometryStreamCollection.h"
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/LayeredRendering.h"
+#include "feme/Graphics/LineRasterization.h"
 #include "feme/Graphics/Mesh.h"
 #include "feme/Graphics/MeshOutput.h"
 #include "feme/Graphics/Meshlet.h"
@@ -86,6 +87,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
@@ -3129,6 +3131,37 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
         int32_t Err = StepDx + StepDy;
         int32_t X = X0, Y = Y0;
+        // (roadmap L328) The classic integer DDA walked above (`X`/`Y`/
+        // `Err`) is exact only for axis-aligned/45-degree lines; for
+        // other slopes it can select a different pixel than the spec's
+        // literal "diamond-exit rule" (`primsrast.adoc`'s "Basic Line
+        // Segment Rasterization"), which is what CTS's own reference
+        // rasterizer actually verifies against (roadmap L326/L327). So
+        // the DDA above is now used only as a *prediction* of where the
+        // minor coordinate roughly sits at each major-axis step -- the
+        // actual accept/reject decision for every candidate pixel is the
+        // exact `doesLineSegmentExitDiamond` primitive below, tested
+        // over a small window of candidates around that prediction
+        // (rather than the reference's own brute-force whole-bounding-
+        // -box sweep, `rrRasterizer.cpp`'s `init`/`rasterize`, which is
+        // `O(length^2)` for near-45-degree lines): the window only needs
+        // to be wide enough to cover how far the exact diamond-covered
+        // pixel can stray from the plain DDA's own prediction within one
+        // major step, which is at most a pixel or two even at the
+        // steepest non-45-degree slopes the DDA doesn't handle exactly.
+        constexpr int32_t CandidateWindow = 2;
+        unsigned Bits = feme::graphics::LineSubPixelPrecisionBits;
+        feme::graphics::SubpixelLineSegment SubLine{
+            {feme::graphics::toSubpixelCoord(P0a[0], Bits),
+             feme::graphics::toSubpixelCoord(P0a[1], Bits)},
+            {feme::graphics::toSubpixelCoord(P1a[0], Bits),
+             feme::graphics::toSubpixelCoord(P1a[1], Bits)}};
+        auto PixelCenter = [Bits](int32_t Px,
+                                  int32_t Py) -> feme::graphics::SubpixelPoint {
+          int64_t HalfPixel = int64_t(1) << (Bits - 1);
+          return {feme::graphics::toSubpixelCoord(Px, Bits) + HalfPixel,
+                  feme::graphics::toSubpixelCoord(Py, Bits) + HalfPixel};
+        };
         // (roadmap L325) The spec's "Line Stipple" section defines the
         // Bresenham stipple counter `s` as an *integer*, incremented by
         // exactly 1 "after production of each fragment of a line
@@ -3148,20 +3181,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // preserved exactly as before, just now counting fragments
         // instead of accumulating distance.
         float StippleCounter = ArcAccum;
-        for (;;) {
-          // (roadmap L324) The spec's diamond-exit rule is explicitly
-          // "half-open": the final fragment (corresponding to `p1`) is
-          // never drawn, precisely so a connected strip's shared
-          // endpoints are produced once rather than twice. Check that
-          // *before* emitting the walked pixel below -- not just as the
-          // loop's own exit condition after emitting it -- except when
-          // the whole segment degenerates to a single pixel (`X0==X1 &&
-          // Y0==Y1`), where that one pixel is `p0` as much as `p1` and
-          // must still be drawn.
-          bool AtEnd = X == X1 && Y == Y1;
-          if (AtEnd && !(X0 == X1 && Y0 == Y1))
-            break;
-          std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
+        llvm::DenseSet<uint64_t> EmittedPixels;
+        auto EmitPixel = [&](int32_t Px, int32_t Py) {
+          std::array<float, 2> Center{Px + 0.5f, Py + 0.5f};
           float T = ((Center[0] - P0a[0]) * Dx + (Center[1] - P0a[1]) * Dy) /
                     (Len * Len);
           T = std::clamp(T, 0.0f, 1.0f);
@@ -3170,25 +3192,41 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           float Deptht = Depth0 + (Depth1 - Depth0) * T;
           float Arc = StippleCounter;
           for (int32_t I = 0; I < W; ++I) {
-            int32_t FX = XMajor ? X : X + I;
-            int32_t FY = XMajor ? Y + I : Y;
+            int32_t FX = XMajor ? Px : Px + I;
+            int32_t FY = XMajor ? Py + I : Py;
             QuadCorner TL{
                 {float(FX), float(FY)}, InvWt, Deptht, &Vt, 0.0f, Arc};
             QuadCorner TR{
                 {float(FX + 1), float(FY)}, InvWt, Deptht, &Vt, 0.0f, Arc};
-            QuadCorner BR{{float(FX + 1), float(FY + 1)},
-                          InvWt,
-                          Deptht,
-                          &Vt,
-                          0.0f,
-                          Arc};
+            QuadCorner BR{
+                {float(FX + 1), float(FY + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
             QuadCorner BL{
                 {float(FX), float(FY + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
             pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/true);
             pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/true);
           }
           StippleCounter += 1.0f;
-          if (AtEnd)
+        };
+        auto TryCandidate = [&](int32_t Px, int32_t Py) {
+          uint64_t Key =
+              (static_cast<uint64_t>(static_cast<uint32_t>(Px)) << 32) |
+              static_cast<uint32_t>(Py);
+          if (!EmittedPixels.insert(Key).second)
+            return;
+          if (feme::graphics::doesLineSegmentExitDiamond(
+                  SubLine, PixelCenter(Px, Py), Bits))
+            EmitPixel(Px, Py);
+        };
+        int32_t MajorSteps = std::max(StepDx, -StepDy);
+        for (int32_t Step = 0;; ++Step) {
+          if (XMajor) {
+            for (int32_t D = -CandidateWindow; D <= CandidateWindow; ++D)
+              TryCandidate(X, Y + D);
+          } else {
+            for (int32_t D = -CandidateWindow; D <= CandidateWindow; ++D)
+              TryCandidate(X + D, Y);
+          }
+          if (Step == MajorSteps)
             break;
           int32_t E2 = 2 * Err;
           if (E2 >= StepDy) {
