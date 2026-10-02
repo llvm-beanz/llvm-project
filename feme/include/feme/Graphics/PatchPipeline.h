@@ -151,6 +151,25 @@ struct PatchPipelineLinkage {
   /// own comment for what produces one).
   llvm::SmallVector<LinkedStageElement, 4> PatchConstantToDomainInput;
   bool HasPatchConstantVertexOutputs = false;
+  /// (Roadmap L346) Hull control-point phase `Output` -> the *same*
+  /// per-vertex attribute's slot in `PatchPipelineResult::
+  /// PatchConstantVertexOutputs`, used only to seed that storage with the
+  /// control-point phase's own pre-barrier value before the patch-constant
+  /// phase runs. Unlike every other link in this struct, both sides name
+  /// an `Output`-direction element: this is not a producer/consumer
+  /// hand-off between two different storage roles, it is "the same
+  /// conceptual value, now also writable post-barrier" getting a second,
+  /// independently-allocated storage block that starts out blank.
+  /// Without this seed, a post-barrier masked store that only conditionally
+  /// rewrites part of the value (e.g. `gl_out[i].gl_Position.xy` alone,
+  /// never touching `.zw`, or a store only some invocations' lanes take)
+  /// would read back zero instead of the real pre-barrier value for every
+  /// row/component/lane it does not itself touch -- see
+  /// `runPatchPipeline`'s own comment at the seeding call site. Empty when
+  /// `HasPatchConstantVertexOutputs` is false, or when none of the
+  /// patch-constant phase's own genuine per-control-point `Output`
+  /// elements have a matching hull-phase producer.
+  llvm::SmallVector<LinkedStageElement, 4> HullToPatchConstantVertexOutputSeed;
 };
 
 /// Links \p VertexOutputSig's outputs and the three compiled stages'

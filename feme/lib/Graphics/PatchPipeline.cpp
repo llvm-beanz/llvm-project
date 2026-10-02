@@ -375,6 +375,38 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
     if (!PatchConstantToDomainInput)
       return PatchConstantToDomainInput.takeError();
     Link.PatchConstantToDomainInput = std::move(*PatchConstantToDomainInput);
+
+    // (Roadmap L346) Only a `PatchConstantSig` `Output` element the hull
+    // control-point phase's own `Output` signature also names gets a seed
+    // link here -- an ordinary, Location-addressed element with no hull
+    // producer at all is not a seeding gap this link needs to fill: it
+    // means the control-point phase never referenced that global in the
+    // first place (so there is no "pre-barrier value" to preserve), the
+    // same "write is always optional" rule `LinkedStageElement::
+    // HasProducer`'s own comment already documents for a system-value
+    // consumer with no producer.
+    auto HasHullProducer = [&Link](const SignatureElement &Elt) {
+      if (Elt.SystemValue != SignatureSystemValue::None)
+        return findElement(Link.HullSig, SignatureDirection::Output,
+                           Elt.SystemValue) != nullptr;
+      if (!Elt.Location)
+        return false;
+      return findElementByLocation(Link.HullSig, SignatureDirection::Output,
+                                   *Elt.Location, Elt.Index,
+                                   Elt.FirstComponent) != nullptr;
+    };
+    Expected<SmallVector<LinkedStageElement, 4>>
+        HullToPatchConstantVertexOutputSeed = linkStageElements(
+            Link.HullSig, SignatureDirection::Output, Link.PatchConstantSig,
+            SignatureDirection::Output,
+            "hull stage output -> patch-constant per-vertex output (seed)",
+            [&](const SignatureElement &Elt) {
+              return isForwardedFromProducerStage(Elt) && HasHullProducer(Elt);
+            });
+    if (!HullToPatchConstantVertexOutputSeed)
+      return HullToPatchConstantVertexOutputSeed.takeError();
+    Link.HullToPatchConstantVertexOutputSeed =
+        std::move(*HullToPatchConstantVertexOutputSeed);
   }
 
   return Link;
@@ -480,6 +512,23 @@ Expected<PatchPipelineResult> runPatchPipeline(
     if (!PatchConstantVertexOutput)
       return PatchConstantVertexOutput.takeError();
     Result.PatchConstantVertexOutputs = std::move(*PatchConstantVertexOutput);
+    // (Roadmap L346) `buildStageStorage` above zero-fills this block; seed
+    // it with the hull control-point phase's own pre-barrier value for
+    // every element `Link.HullToPatchConstantVertexOutputSeed` covers,
+    // *before* invoking the patch-constant phase below. Without this, a
+    // post-barrier masked store that only conditionally/partially
+    // rewrites this value (e.g. `gl_out[i].gl_Position.xy` alone, or a
+    // store some lanes' own mask skips) reads back zero instead of the
+    // real pre-barrier value for every row/component/lane it does not
+    // itself touch -- `PatchConstantWrapper.cpp`'s own
+    // `lowerPatchConstantOutputStore` loads `OldVal` straight out of this
+    // same storage for exactly that case. See `PatchPipelineLinkage::
+    // HullToPatchConstantVertexOutputSeed`'s own comment for why this is
+    // a same-direction (`Output` -> `Output`) link, unlike every other
+    // one in this struct.
+    copyLinkedElements(Result.OutputPatch, Result.PatchConstantVertexOutputs,
+                       Link.HullToPatchConstantVertexOutputSeed,
+                       Tess.OutputControlPointCount);
   }
   {
     cpu::FemeStageLayout InLayout = PatchConstantInput->layout();

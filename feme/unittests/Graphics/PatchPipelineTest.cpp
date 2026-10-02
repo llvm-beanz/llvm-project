@@ -419,6 +419,137 @@ TEST(PatchPipelineTest, MaterializedInputPatchSelfIndexSurvivesPaddingLane) {
   EXPECT_FLOAT_EQ(Result->OutputPatch.readFloat(1, 0, 2), 2.5f);
 }
 
+/// (Roadmap L346) Reproduces `dEQP-VK.tessellation.misc_draw.
+/// tess_factor_barrier_bug`'s own shape in miniature: the hull
+/// control-point phase unconditionally writes a genuine per-control-point
+/// `Output` element (both of its two components) *before* the barrier;
+/// the patch-constant phase, compiled as a separate phase the same way a
+/// real barrier split produces one, only rewrites that same element's
+/// *first* component, and only for control point 0 (a masked store, since
+/// `OutputControlPointID` is lane-varying) -- component 1 of control
+/// point 0, and *both* components of every other control point, are
+/// never touched post-barrier at all. Before `PatchPipelineLinkage::
+/// HullToPatchConstantVertexOutputSeed` seeded `Result::
+/// PatchConstantVertexOutputs` from `Result::OutputPatch`, every one of
+/// those untouched slots read back 0.0f instead of the hull phase's own
+/// real pre-barrier value.
+TEST(PatchPipelineTest,
+     PatchConstantVertexOutputRetainsPreBarrierValueForUntouchedLanes) {
+  Context Ctx;
+
+  constexpr char HullIR[] = R"(
+    define void @hs_seed_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      %idf = uitofp i32 %id to float
+      %c0 = fadd float %idf, 100.0
+      %c1 = fadd float %idf, 200.0
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %c0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %c1, i32 0)
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+  )";
+
+  constexpr char PatchConstantIR[] = R"(
+    define void @pc_seed_main() #0 {
+      %id = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 1, i32 0, float 1.0, i32 0)
+      %cond = icmp eq i32 %id, 0
+      br i1 %cond, label %then, label %end
+    then:
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 999.0, i32 0)
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" }
+  )";
+
+  EntrySignature HullSig;
+  HullSig.Elements = {makeOutputControlPointIDInput(0),
+                       makeFloatOutput(1, /*Location=*/3)};
+  HullSig.Elements[1].ComponentCount = 2;
+  Expected<std::unique_ptr<CompiledStage>> Hull = compileGraphicsStage(
+      Ctx, HullIR, "hs_seed_main", HullSig, ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(Hull, Succeeded());
+
+  EntrySignature PatchConstantSig;
+  PatchConstantSig.Elements = {
+      makeOutputControlPointIDInput(0), makeFloatOutput(1, /*Location=*/3),
+      makeTessFactorEdgePatchOutput(2, /*RowCount=*/2)};
+  PatchConstantSig.Elements[1].ComponentCount = 2;
+  Expected<std::unique_ptr<CompiledStage>> PatchConstant = compileGraphicsStage(
+      Ctx, PatchConstantIR, "pc_seed_main", PatchConstantSig,
+      ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(PatchConstant, Succeeded());
+
+  // No real domain stage output is exercised by this test -- a trivial
+  // one-input passthrough is enough to satisfy `linkPatchPipeline`.
+  EntrySignature DomainSig;
+  DomainSig.Elements = {makeDomainLocationInput(0)};
+  constexpr char TrivialDomainIR[] = R"(
+    define void @ds_trivial_main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="domain" }
+  )";
+  Expected<std::unique_ptr<CompiledStage>> Domain = compileGraphicsStage(
+      Ctx, TrivialDomainIR, "ds_trivial_main", DomainSig, ShaderStage::Domain);
+  ASSERT_THAT_EXPECTED(Domain, Succeeded());
+
+  EntrySignature VertexSig;
+  PatchPipelineStages Stages{**Hull, **PatchConstant, **Domain};
+  Expected<PatchPipelineLinkage> Link = linkPatchPipeline(VertexSig, Stages);
+  ASSERT_THAT_EXPECTED(Link, Succeeded());
+  ASSERT_FALSE(Link->HullToPatchConstantVertexOutputSeed.empty());
+
+  Expected<StageStorage> VertexOutputs =
+      buildStageStorage(VertexSig, SignatureDirection::Output, 4);
+  ASSERT_THAT_EXPECTED(VertexOutputs, Succeeded());
+
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Isoline;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::Line;
+  Tess.InputControlPointCount = 4;
+  Tess.OutputControlPointCount = 4;
+
+  std::vector<uint32_t> ControlPointInvocations = {0, 1, 2, 3};
+  Expected<PatchPipelineResult> Result = runPatchPipeline(
+      Stages, *Link, Tess, *VertexOutputs, ControlPointInvocations);
+  ASSERT_THAT_EXPECTED(Result, Succeeded());
+
+  // Control point 0: component 0 was genuinely overwritten post-barrier
+  // (999.0); component 1 was never touched post-barrier and must still
+  // read back the hull phase's own pre-barrier value (200.0), not 0.0f.
+  EXPECT_FLOAT_EQ(
+      Result->PatchConstantVertexOutputs.readFloat(1, /*Component=*/0,
+                                                     /*Invocation=*/0),
+      999.0f);
+  EXPECT_FLOAT_EQ(
+      Result->PatchConstantVertexOutputs.readFloat(1, /*Component=*/1,
+                                                     /*Invocation=*/0),
+      200.0f);
+  // Control points 1-3: the masked store's condition never held, so
+  // neither component was touched post-barrier at all -- both must read
+  // back the hull phase's own pre-barrier values (100+id, 200+id).
+  for (uint32_t Id = 1; Id != 4; ++Id) {
+    EXPECT_FLOAT_EQ(
+        Result->PatchConstantVertexOutputs.readFloat(1, /*Component=*/0, Id),
+        100.0f + Id)
+        << "control point " << Id;
+    EXPECT_FLOAT_EQ(
+        Result->PatchConstantVertexOutputs.readFloat(1, /*Component=*/1, Id),
+        200.0f + Id)
+        << "control point " << Id;
+  }
+}
+
 TEST(PatchPipelineTest, RejectsAnUnlinkableStageInterface) {
   Context Ctx;
 
