@@ -10271,3 +10271,132 @@ needed -- an internal correctness fix to already-exposed core Vulkan 1.0/
 `VK_KHR_dynamic_rendering_local_read`/
 `VK_EXT_rasterization_order_attachment_access` behavior, no new feature/
 extension surface.
+
+## L331: fixed -- `depth_bias.d24_unorm_constant_one_greater`: per-vertex bias application silently rounded away by compounded float32 interpolation
+
+Picked up the prior session's handoff item (the last remaining untriaged
+`rasterization` failure after `L330`): `dEQP-VK.rasterization.depth_bias.
+d24_unorm_constant_one_greater`, a `D24_UNORM_S8_UINT` fixed-point
+depth-attachment test with the minimal useful bias
+(`depthBiasConstantFactor == 1.0`, `depthBiasSlopeFactor == 0.0`,
+`CompareOp::Greater`).
+
+**Investigation (two false starts recorded for posterity, both
+instructive negative results):**
+
+Temporary `fprintf`/`getenv`-gated debug instrumentation (added and fully
+removed before this commit, not part of the final diff) at the
+per-fragment depth-compare site showed `NewDepth` (the freshly
+interpolated, biased depth) and `OldDepth` (the stored, already-quantized
+depth from the unbiased base pass) as **bit-for-bit identical float32
+values** -- despite the bias being demonstrably non-zero and correctly
+added somewhere upstream (confirmed via a second probe at the
+per-vertex bias-application site, and a third at the per-fragment
+bary-interpolation site: `Tri.Depth[0..2]` does carry the bias, and the
+interpolated depths for biased vs. unbiased draws genuinely differ by
+~1 float32 ULP at this pixel, `0.3285156488` vs `0.3285156786`).
+
+**False start 1**: hypothesized the spec's literal `r = 2^-N` depth-bias
+constant (`depthBiasR`, computed via `std::ldexp(1.0f, -24)` for a
+24-bit depth format) was "a hair" smaller than the true UNORM
+quantization step `1/(2^N-1)`, and that this tiny discrepancy was
+enough to make the bias round away. Verified in Python double-precision
+math that both the unbiased and (old-formula) biased depth value quantize
+to the same 24-bit storage integer at this pixel -- seemingly confirming
+the hypothesis. Changed `depthBiasR`'s formula to `1.0f/16777215.0f`/
+`1.0f/65535.0f` (24-bit/16-bit cases) with an extensive doc comment,
+rebuilt, reverted all debug instrumentation, re-ran: **still failed**,
+with the exact same failing-pixel count (6,910) before and after the
+change -- a complete no-op. Root-caused via a standalone `g++ -O2`
+C++ test program (not part of the repo) that although the two `r`
+candidates genuinely differ as float32 bit patterns (`0x33800001` vs
+`0x33800000`), adding either to a real per-vertex depth value (around
+`0.3`) rounds to the **exact same float32 result** (`0x3e99999c`) --
+the ~7e-15 difference between the two `r` candidates is far below
+float32's ~3e-8 rounding granularity at that magnitude. **Lesson**:
+always verify a numeric fix against actual float32 arithmetic, not
+double-precision or Python math, before trusting it. Reverted this
+change in full.
+
+**False start 2**: added a `quantizeDepthForCompare()` helper that
+rounds `NewDepth` onto the same storage-quantization grid as `OldDepth`
+before comparing, reasoning that comparing a continuous interpolated
+float against an already-quantized stored value was itself unsound.
+This genuinely changed behavior, but **regressed**: the target case
+still failed, and a previously-passing sibling
+(`d24_unorm_constant_one_less`) newly failed -- net 11/13, worse than
+baseline. Diagnosed as the wrong mental model entirely: quantizing both
+comparison operands does not address the real root cause (which is
+about where in the pipeline the bias itself gets rounded away, not
+about the comparison's domain). Fully removed.
+
+**Real root cause**: `Executor.cpp`'s fill-triangle setup applied
+`depthBiasEnable`'s computed bias by mutating all 3 per-vertex `Depth[]`
+values *before* handing them to `ScreenTriangle`, which later
+bary-interpolates them per-fragment
+(`B0*Tri.Depth[0] + B1*Tri.Depth[1] + B2*Tri.Depth[2]`). Adding a
+constant to each of 3 vertices and then interpolating is mathematically
+equivalent, in exact arithmetic, to interpolating the unbiased vertices
+first and adding the same constant once to the result (linear
+interpolation commutes with a uniform additive shift) -- but this
+equivalence does **not** hold exactly in float32: three independently
+rounded multiply-and-sum terms can lose a small bias that a single
+scalar addition to the final result would have reliably preserved. A
+standalone C++ arithmetic test confirmed this directly: interpolating
+the CTS case's real **unbiased** per-vertex depths first and adding the
+bias once as a final scalar addition produces `0.3285157084`
+(`0x3ea83336`), strictly greater than the stored quantized `OldDepth`
+(`0.3285156786`, `0x3ea83335`) as the test requires -- while the
+old per-vertex-bias-then-interpolate approach produces a bit-identical
+result to `OldDepth`. This is invisible at a single vertex (where the
+bias correctly shows a measurable ULP shift) but appears specifically on
+sloped (non-uniform-depth) geometry after interpolation -- exactly the
+shape of the real CTS test quad (depth `0.3` to `0.5` across x).
+
+**Fix** (`feme/lib/Graphics/Executor.cpp`): reworked the bias-application
+block to compute `FragmentBias` as a local scalar without mutating the
+shared `Depth[]` array. `PolygonMode::Point`/`Line` (which consume
+`Depth[K]` directly, with no further bary-interpolation of their own to
+compound rounding through) now add `FragmentBias` inline at their own
+`emitPointQuad`/`emitLineSegment` call sites, preserving their prior
+(already-correct, single-float-add) behavior unchanged. Added a new
+`float DepthBiasOffset = 0.0f;` field to `struct ScreenTriangle`, set to
+`FragmentBias` at construction for the `Fill` path. At the per-fragment
+bary-interpolation site, added `Depth += Tri.DepthBiasOffset;`
+immediately after the weighted sum and before the `DepthClampEnable`
+clamp, preserving the pre-existing bias-before-clamp ordering.
+
+Added `DrawTest.MinimalDepthBiasSurvivesSlopedInterpolationOnFixedPointDepth`
+(`feme/unittests/Vulkan/DrawTest.cpp`): a new `SlopedDepthVertexSource`
+vertex shader (depth varying `0.3` to `0.5` across x, modeled on the
+existing `MixedDepthVertexSource` pattern) drives a `D24_UNORM_S8_UINT`
+combined depth/stencil attachment through a base (red, unbiased,
+`CompareOp::Less`) pass followed by a biased (green,
+`depthBiasConstantFactor=1.0`, `CompareOp::Greater`) pass over the same
+sloped geometry, asserting green fully covers the surface. Confirmed via
+a `git stash`-based A/B test: stashing just the `Executor.cpp` fix and
+rebuilding reproduces the failure (several pixels, e.g. `(1,1)`/`(1,3)`,
+show red/missing-green); popping the stash and rebuilding restores a
+clean pass.
+
+`ninja check-feme`: 3,481/3,542 Passed (+1 new test), 61 Unsupported, 0
+Failed, 0 regressions.
+
+**CTS impact**: re-ran `dEQP-VK.rasterization.depth_bias.*` (13 cases):
+**13 Pass/0 Fail** (was 12 Pass/1 Fail before this fix) -- the targeted
+case now passes, and its sibling `d24_unorm_constant_one_less`
+(passing before, exercising the same interpolation path with a negated
+bias) still passes, confirming no regression from the deferred-bias
+change. Re-ran the full `rasterization` group (15,019 cases): 475
+Pass/9 Fail/14,535 NotSupported (was 474/10/14,535 after `L330`) --
+exactly the expected +1 Pass/-1 Fail, 0 regressions elsewhere. The
+remaining 9 failures are the pre-existing scattered cluster
+(`flatshading.{triangle_fan,triangle_strip}`,
+`line_continuity.{line-strip,polygon-mode-lines}`,
+`maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
+`provoking_vertex.draw.default.triangle_fan`), unchanged, each
+individually untriaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a correctness fix to an already-exposed core Vulkan 1.0
+feature (`depthBiasEnable`), no new feature/extension surface.
