@@ -9401,3 +9401,109 @@ do not. **No action needed**; same conclusion as every prior session
 this check has been run.
 
 Tracked as `L317` (now `done`) in the roadmap.
+
+## L321: `texture.multisample.invalid_sample_index.*` root-caused and fixed -- `isLinearChain` didn't accept a barrier-free diamond inside a loop body
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`.
+
+Picked up `L316`'s `texture.multisample` cluster (5 failures, carried
+forward from `L313`'s untriaged item 3). Re-ran the group first:
+
+```
+dEQP-VK.texture.multisample.*: 0 Pass / 5 Fail / 5 NotSupported
+```
+
+The 5 NotSupported are `atomic.storage_image_r64{i,ui}` (needs
+`shaderInt64`, unimplemented, unrelated) and
+`invalid_sample_index.sample_count_{16,32,64}` (sample counts beyond
+this device's rasterizer floor, unrelated). Of the 5 real failures,
+3 (`invalid_sample_index.sample_count_{2,4,8}`) all hit the identical
+pipeline-creation diagnostic:
+
+```
+error: feme-cpu-wrap-entry: function 'main' has a barrier inside
+non-linear control flow (a surviving branch not part of a supported
+loop); region splitting only supports a straight-line wave body or a
+single uniform loop (roadmap milestone 9 deviation)
+```
+
+Reproduced standalone via the documented `FEME_DUMP_IR` recipe
+(`feme/.instructions.md`): dumped the real post-`SIMDizePass`/
+post-`JumpThreadingPass` module for `sample_count_4`, extracted it, and
+fed it straight to `feme-opt --llvm -passes=feme-cpu-wrap-entry` --
+reproduced the exact diagnostic with no CTS/Vulkan involvement at all.
+
+The dumped IR showed the shader's real shape: an "initialize" loop
+(header block 19) whose body is a plain `if (s >= 0 && s < numSamples)
+color = ndxColors[s % 4];` -- a barrier-free, single-sided diamond
+(`21` -> `26`/`Flow27._crit_edge` -> backedge to `19`) -- followed by a
+group-sync barrier, then a structurally identical "verify" loop. No
+barrier sits inside either loop's body at all.
+
+Root cause: `EntryWrapper.cpp`'s `walkBarrierFreeArm` (used by
+`isLinearChain` to recognize a loop whose body is itself a barrier-free
+straight chain before closing back to its header) only tolerated a
+`CondBr` mid-arm in one narrow shape (roadmap H94b: exactly one
+successor already a backedge to an established block -- `SIMDizePass`'s
+own widened "is any lane still active" reduction shape). A loop body
+containing a genuine barrier-free `if` with no `else` hit neither that
+shape nor a fresh exit, so the walk failed outright -- a real
+diagnostic-scope gap (the loop is fully barrier-free and splittable),
+not an actual unsupported shader shape.
+
+Fix: `walkBarrierFreeArm` now falls back to `matchBarrierFreeRegion`
+(the existing general acyclic-region matcher, roadmap H163) whenever a
+mid-arm `CondBr`'s neither successor is already a backedge, absorbing
+the nested diamond/region and continuing the walk from its exit. This
+required loosening the walk's own "stop at a 2+-predecessor block"
+rule: a region's own internal merge block legitimately has 2+
+predecessors, all of them blocks this same arm just walked, which must
+not be mistaken for an external reconvergence.
+
+New `EntryWrapperTest.SplitsLoopWithDiamondBodyBeforeBarrier` reduces
+the real shape to two sequential loops (each with a diamond body)
+joined by one barrier -- confirmed via `git stash` A/B to fail without
+the fix (the region split never happens, `main.region0` is never
+created) and pass with it.
+
+`ninja check-feme` (ccache + assertions, full target-dependency build):
+3,465/3,526 Passed (+1 new test), 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact:** re-ran `dEQP-VK.texture.multisample.*` (10 cases):
+**3 Pass (was 0), 2 Fail (was 5), 5 NotSupported** (unchanged) -- all 3
+`invalid_sample_index.sample_count_{2,4,8}` cases now Pass. The
+remaining 2 Fails are `atomic.storage_image_r32{i,ui}`, a distinct,
+unrelated resource-handle-normalization gap (see `L322` below).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal compiler diagnostic-scope/control-flow-matching
+correctness fix, no feature/extension-surface change.
+
+### Side discoveries, not fixed this session
+
+**`L322`** (new): `texture.multisample.atomic.storage_image_r32{i,ui}`
+now the only real failures left in this group.
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` shows a distinct pipeline-creation
+rejection: a register-bound, multisampled (`image2DMS`) storage-image
+handle used only for `imageAtomicExchange`-family ops fails FeMe's
+resource-handle normalization outright (`"... is a register-bound
+resource handle the FeMe CPU target cannot normalize ..."`). Not yet
+root-caused.
+
+**`L323`** (new): while A/B-testing `L321`'s fix with a *single*-loop
+variant of the same diamond-body shape (barrier only in a block
+*after* the loop, not inside it, so it instead goes through the
+separate `matchLoopShape`/`buildWrapperForLoop` path rather than
+`splitAtGroupSyncBarriers`), discovered `buildWrapperForLoop` crashes
+with an LLVM IR-verifier assertion (`Uses remain when a value is
+destroyed!`, `Value.cpp:99`) -- reproduced identically with and without
+`L321`'s own fix in place, confirming it is a separate, pre-existing
+bug, not a regression. The real CTS shape (two separate loops, not
+one) never hits this path, so it did not block `L321`'s own fix, but
+it is a real, user-triggerable crash in a sibling code path and is
+carried forward for its own future session.
+
+Tracked as `L321` (now `done`), `L322`, `L323` (both `not started`) in
+the roadmap.
