@@ -3129,6 +3129,25 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
         int32_t Err = StepDx + StepDy;
         int32_t X = X0, Y = Y0;
+        // (roadmap L325) The spec's "Line Stipple" section defines the
+        // Bresenham stipple counter `s` as an *integer*, incremented by
+        // exactly 1 "after production of each fragment of a line
+        // segment" -- a per-fragment step count, not a continuous
+        // arc-length/distance measure (unlike `Rectangular`/
+        // `RectangularSmooth` mode below, whose own stipple parameter is
+        // explicitly distance-based: "the rectangular region is
+        // subdivided into adjacent unit-length rectangles"). Confirmed
+        // against CTS's own reference rasterizer
+        // (`SingleSampleLineRasterizer::rasterize`, `rrRasterizer.cpp`):
+        // `m_stippleCounter` increments by exactly 1 per diamond-exit-
+        // rule-produced pixel, shared by every one of that pixel's own
+        // `W`-wide replicated fragments (a wide line's whole row/column
+        // counts as one step, not `W` steps). `StippleCounter` starts at
+        // `ArcAccum` so a `LineStrip`'s own stipple continuity across
+        // segments (the spec's "preferred" carry-over behavior) is
+        // preserved exactly as before, just now counting fragments
+        // instead of accumulating distance.
+        float StippleCounter = ArcAccum;
         for (;;) {
           // (roadmap L324) The spec's diamond-exit rule is explicitly
           // "half-open": the final fragment (corresponding to `p1`) is
@@ -3149,7 +3168,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           RasterVertex Vt = lerpVertex(V0, V1, T, Varyings);
           float InvWt = InvW0 + (InvW1 - InvW0) * T;
           float Deptht = Depth0 + (Depth1 - Depth0) * T;
-          float Arc = ArcAccum + T * Len;
+          float Arc = StippleCounter;
           for (int32_t I = 0; I < W; ++I) {
             int32_t FX = XMajor ? X : X + I;
             int32_t FY = XMajor ? Y + I : Y;
@@ -3168,6 +3187,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/true);
             pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/true);
           }
+          StippleCounter += 1.0f;
           if (AtEnd)
             break;
           int32_t E2 = 2 * Err;
@@ -3180,6 +3200,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             Y += Sy;
           }
         }
+        return StippleCounter;
       } else {
         // `Rectangular`/`RectangularSmooth`: a screen-space rectangle
         // `Raster.LineWidth` pixels wide, generalizing the fixed 1-pixel-

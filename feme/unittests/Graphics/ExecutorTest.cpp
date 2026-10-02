@@ -2666,6 +2666,56 @@ TEST(ExecutorTest, RendersAStippledLine) {
   EXPECT_EQ(texel(3, 2)[3], 255);
 }
 
+// roadmap L325: unlike `Rectangular`/`RectangularSmooth` mode (whose
+// stipple parameter is a continuous arc-length measure, exercised by
+// `RendersAStippledLine` above), the spec's own "Line Stipple" section
+// defines `Bresenham`'s own stipple counter `s` as an *integer*,
+// incremented by exactly 1 per produced fragment -- not a continuous
+// distance. A 45-degree diagonal line makes this observable: the
+// Euclidean distance between consecutive Bresenham-walked pixel centers
+// is `sqrt(2)` (~1.414) per step, not 1, so a (bugged) distance-based
+// stipple parameter diverges from the correct per-fragment integer
+// count after only a few steps -- by the 4th walked pixel (index 3),
+// `floor(3 * sqrt(2)) == 4`, not `3`.
+TEST(ExecutorTest, BresenhamStippleCounterCountsFragmentsNotDistance) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineMode = LineRasterizationMode::Bresenham;
+  Raster.StippledLineEnable = true;
+  Raster.StippleFactor = 1;
+  Raster.StipplePattern = 0b1000; // only bit 3 ("step index 3") on.
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // A 45-degree diagonal from screen (0.5, 0.5) to exactly (4.0, 4.0)
+  // (NDC (1,1), the view-volume boundary itself, needing no clipping):
+  // the Bresenham walk visits pixels (0,0),(1,1),(2,2),(3,3),(4,4) in
+  // order (step indices 0-4), with the half-open diamond-exit rule
+  // (roadmap L324) excluding the final one, (4,4) -- leaving exactly 4
+  // emitted fragments, step indices 0-3, all within this 4x4 target.
+  Scene.VertexData = {
+      -0.75f, -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,   1.0f,   0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Only step index 3 (pixel (3,3)) passes the stipple test (bit 3 is
+  // the only "on" bit); a distance-based counter would instead compute
+  // `floor(3 * sqrt(2)) == 4` for this same pixel, landing on bit 4
+  // (off), incorrectly leaving it unlit.
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(1, 1)[3], 0);
+  EXPECT_EQ(texel(2, 2)[3], 0);
+  EXPECT_EQ(texel(3, 3)[3], 255);
+}
+
 // roadmap F5: `LineRasterizationMode::RectangularSmooth` feathers the
 // line's edge over 1 pixel, writing a fractional coverage into the
 // fragment's alpha instead of `Rectangular`'s binary in/out test.
