@@ -99,6 +99,7 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -123,6 +124,11 @@ constexpr StringLiteral InputPatchControlPointCountParamName =
     "stage_input_patch_control_point_count";
 constexpr StringLiteral PrimitiveIDParamName = "stage_primitive_id";
 constexpr StringLiteral ViewIndexParamName = "stage_view_index";
+// (Roadmap L339) A genuine per-control-point output's own storage/layout --
+// see `FemePatchConstantArgs::PerVertexOutputLayout`'s own comment.
+constexpr StringLiteral PerVertexOutputLayoutParamName =
+    "stage_per_vertex_output_layout";
+constexpr StringLiteral PerVertexOutputsParamName = "stage_per_vertex_outputs";
 
 const SignatureElement *findElement(const EntrySignature &Sig,
                                     uint32_t ElementID,
@@ -143,6 +149,10 @@ struct PatchConstantStageEnv {
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
   Value *ViewIndex = nullptr;
+  // (Roadmap L339) Present only when this phase's signature declares a
+  // genuine per-control-point output; see `buildWrapperEnv`'s own comment.
+  Value *PerVertexOutputLayout = nullptr;
+  Value *PerVertexOutputs = nullptr;
 };
 
 std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
@@ -167,6 +177,10 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
       Env.PrimitiveID = &Arg, Found = true;
     else if (Arg.getName() == ViewIndexParamName)
       Env.ViewIndex = &Arg, Found = true;
+    else if (Arg.getName() == PerVertexOutputLayoutParamName)
+      Env.PerVertexOutputLayout = &Arg, Found = true;
+    else if (Arg.getName() == PerVertexOutputsParamName)
+      Env.PerVertexOutputs = &Arg, Found = true;
   }
   if (!Found)
     return std::nullopt;
@@ -177,8 +191,9 @@ Function *appendPatchConstantStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
-  SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty, I32Ty});
+  SmallVector<Type *, 14> ParamTypes(F.getFunctionType()->params());
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I32Ty, I32Ty,
+                     I32Ty, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -207,6 +222,8 @@ Function *appendPatchConstantStageParams(Function &F) {
   (&*ArgIt++)->setName(InputPatchControlPointCountParamName);
   (&*ArgIt++)->setName(PrimitiveIDParamName);
   (&*ArgIt++)->setName(ViewIndexParamName);
+  (&*ArgIt++)->setName(PerVertexOutputLayoutParamName);
+  (&*ArgIt++)->setName(PerVertexOutputsParamName);
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -367,9 +384,29 @@ Value *lowerPatchConstantSystemValue(CallInst &CI, const SignatureElement &Elt,
                                      const PatchConstantStageEnv &PEnv) {
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   IRBuilder<> Builder(&CI);
-  Value *Scalar = Elt.SystemValue == SignatureSystemValue::OutputControlPointID
-                      ? Builder.getInt32(0)
-                  : Elt.SystemValue == SignatureSystemValue::PatchVertices &&
+  // (Roadmap L339) `OutputControlPointID` (`gl_InvocationID`) is this
+  // lane's own flat invocation index, exactly like `lowerPatchConstant
+  // InputLoad`'s `CapturedSelfIndex` case just above -- not the constant
+  // `0` every prior (single-invocation-only) shape here read. In the
+  // legacy single-invocation case this still always evaluates to `0`
+  // (`WEnv.WaveIndex` is always `0` and only lane `0` is ever active
+  // there -- see `buildWrapper`'s own comment), so this is a pure
+  // generalization, not a behavior change, for every shape that does not
+  // declare a genuine per-control-point output.
+  if (Elt.SystemValue == SignatureSystemValue::OutputControlPointID) {
+    Value *Result = PoisonValue::get(CI.getType());
+    for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+      Value *Active =
+          Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+      Value *FlatIndex = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+      Value *LaneResult =
+          Builder.CreateSelect(Active, FlatIndex, Builder.getInt32(0));
+      Result = Builder.CreateInsertElement(Result, LaneResult,
+                                           Builder.getInt32(Lane));
+    }
+    return Result;
+  }
+  Value *Scalar = Elt.SystemValue == SignatureSystemValue::PatchVertices &&
                           Elt.FromInputPatch
                       ? PEnv.InputPatchControlPointCount
                   // (Roadmap L82) A patch-constant function's own
@@ -405,29 +442,38 @@ Value *lowerPatchConstantSystemValue(CallInst &CI, const SignatureElement &Elt,
   return Result;
 }
 
-/// Lowers a `feme.stage.output.store` writing a tessellation factor or patch
-/// constant. Storage is per-patch, not per-control-point (see this file's
-/// comment): every lane's write always uses invocation index 0, addressing
-/// the same single patch record rather than a structure-of-arrays slot of
-/// its own.
+/// Lowers a `feme.stage.output.store` writing either a tessellation
+/// factor/patch constant (\p PerVertex false: storage is per-patch, every
+/// lane's write uses invocation index 0, addressing the same single patch
+/// record) or a genuine per-control-point output (\p PerVertex true,
+/// roadmap L339: storage is structure-of-arrays, each lane's write uses
+/// *its own* flat invocation index -- see `buildWrapper`'s own comment on
+/// why this phase's compiled body is re-invoked once per control point
+/// whenever such an element exists, exactly like `HullWrapper.cpp`'s own
+/// per-control-point output store).
 void lowerPatchConstantOutputStore(CallInst &CI, const SignatureElement &Elt,
                                    const WaveBodyEnv &WEnv,
-                                   const PatchConstantStageEnv &PEnv) {
+                                   const PatchConstantStageEnv &PEnv,
+                                   bool PerVertex) {
   IRBuilder<> Builder(&CI);
   unsigned WaveSize =
       cast<FixedVectorType>(CI.getArgOperand(3)->getType())->getNumElements();
-  Value *InvocationIndex = Builder.getInt32(0);
+  Value *OutputLayout = PerVertex ? PEnv.PerVertexOutputLayout : PEnv.OutputLayout;
+  Value *Outputs = PerVertex ? PEnv.PerVertexOutputs : PEnv.Outputs;
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(5), Lane);
     auto *MaskConst = dyn_cast<ConstantInt>(Mask);
     if (MaskConst && MaskConst->isZero())
       continue;
 
+    Value *InvocationIndex =
+        PerVertex ? getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane)
+                  : Builder.getInt32(0);
     Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
-    Value *Addr = computeStageStorageAddress(Builder, PEnv.OutputLayout,
-                                             PEnv.Outputs, Elt.ElementID, Elt,
-                                             Row, Component, InvocationIndex);
+    Value *Addr = computeStageStorageAddress(Builder, OutputLayout, Outputs,
+                                             Elt.ElementID, Elt, Row, Component,
+                                             InvocationIndex);
     Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
     LaneVal = widenForStageStorageStore(Builder, LaneVal);
     if (!(MaskConst && MaskConst->isOne())) {
@@ -481,18 +527,30 @@ bool lowerPatchConstantStageOps(Function &F) {
       continue;
     if (isMaskedOutputStoreCall(*CI)) {
       auto *EltID = dyn_cast<ConstantInt>(CI->getArgOperand(0));
+      // (Roadmap L339) A masked output store addresses either the
+      // existing per-patch `PatchOutput`-direction element or a genuine
+      // per-control-point `Output`-direction one (`classifySPIRVElement`
+      // now distinguishes the two -- see its own comment); try both,
+      // dispatching `lowerPatchConstantOutputStore`'s `PerVertex` flag
+      // accordingly.
       const SignatureElement *Elt =
           EltID
               ? findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
                             SignatureDirection::PatchOutput)
               : nullptr;
+      bool PerVertex = false;
+      if (!Elt && EltID) {
+        Elt = findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                          SignatureDirection::Output);
+        PerVertex = Elt != nullptr;
+      }
       if (!Elt) {
         F.getContext().emitError(
             CI, "feme-cpu-wrap-patch-constant: masked output store "
                 "references an unknown patch-output signature element");
         return false;
       }
-      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv);
+      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv, PerVertex);
       CI->eraseFromParent();
       continue;
     }
@@ -559,16 +617,24 @@ bool lowerPatchConstantStageOps(Function &F) {
       break;
     }
     case StageOpKind::OutputStore: {
+      // (Roadmap L339) Same `PatchOutput`-or-`Output` dispatch as the
+      // masked-store case just above.
       const SignatureElement *Elt =
           findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
                       SignatureDirection::PatchOutput);
+      bool PerVertex = false;
+      if (!Elt) {
+        Elt = findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                          SignatureDirection::Output);
+        PerVertex = Elt != nullptr;
+      }
       if (!Elt) {
         F.getContext().emitError(
             CI, "feme-cpu-wrap-patch-constant: output store refers to an "
                 "unknown patch-output signature element");
         return false;
       }
-      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv);
+      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv, PerVertex);
       CI->eraseFromParent();
       break;
     }
@@ -600,6 +666,13 @@ struct WrapperEnv {
   Value *InputPatchControlPointCount = nullptr;
   Value *PrimitiveID = nullptr;
   Value *ViewIndex = nullptr;
+  // (Roadmap L339) Loaded unconditionally now -- previously present in the
+  // ABI but never read, since nothing here needed a runtime trip count
+  // before a genuine per-control-point output existed. See `buildWrapper`'s
+  // own comment for why this is now the wave loop's trip count.
+  Value *OutputControlPointCount = nullptr;
+  Value *PerVertexOutputLayout = nullptr;
+  Value *PerVertexOutputs = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -627,6 +700,14 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
       Builder, ArgsTy, Args, PatchConstantArgsFieldPrimitiveID, I32Ty);
   Env.ViewIndex = loadStructField(
       Builder, ArgsTy, Args, PatchConstantArgsFieldViewIndex, I32Ty);
+  Env.OutputControlPointCount = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldOutputControlPointCount,
+      I32Ty);
+  Env.PerVertexOutputLayout =
+      loadStructField(Builder, ArgsTy, Args,
+                      PatchConstantArgsFieldPerVertexOutputLayout, PtrTy);
+  Env.PerVertexOutputs = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldPerVertexOutputs, PtrTy);
 
   Value *ResourcesRaw = loadStructField(Builder, ArgsTy, Args,
                                         PatchConstantArgsFieldResources, PtrTy);
@@ -667,6 +748,21 @@ Function *buildWrapper(Function &Body) {
 
   StructType *ArgsTy = getPatchConstantArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+
+  // (Roadmap L339) A genuine per-control-point output forces this phase's
+  // compiled body to be re-invoked once per output control point --
+  // `HullWrapper.cpp`'s own wave loop, mirrored below -- rather than the
+  // single, lane-0-only call every other (patch-frequency-only) shape
+  // still gets. Detected from the body's own attached signature: a
+  // `PatchOutput`-direction element never needs this (patch-frequency
+  // values are safely rewritten redundantly by every invocation, see this
+  // file's own top comment), only a true `Output`-direction one does.
+  std::optional<EntrySignature> Sig = feme::dxil::getEntrySignature(Body);
+  bool HasPerVertexOutput =
+      Sig && any_of(Sig->Elements, [](const SignatureElement &Elt) {
+        return Elt.Direction == SignatureDirection::Output;
+      });
 
   std::string WrapperName = getEntrySymbolName(Body.getName());
   Function *Wrapper =
@@ -675,17 +771,118 @@ Function *buildWrapper(Function &Body) {
   Argument *Args = Wrapper->getArg(0);
   Args->setName("args");
 
+  if (!HasPerVertexOutput) {
+    // A single, non-batched invocation (this file's own comment): one call
+    // to the widened body, with only lane 0 marked active -- there is no
+    // wave loop over some batch count the way every other stage's wrapper
+    // has.
+    BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
+    IRBuilder<> Entry(EntryBB);
+    WrapperEnv Env = buildWrapperEnv(Entry, ArgsTy, Args);
+
+    SmallVector<Constant *, 8> LaneIsZero;
+    for (unsigned I = 0; I != WaveSize; ++I)
+      LaneIsZero.push_back(Entry.getInt1(I == 0));
+    Value *Mask = ConstantVector::get(LaneIsZero);
+
+    SmallVector<Value *, 16> CallArgs;
+    for (const Argument &Arg : Body.args()) {
+      if (Arg.getName() == "resource_heap")
+        CallArgs.push_back(Env.ResourceHeap);
+      else if (Arg.getName() == "resource_heap_count")
+        CallArgs.push_back(Env.ResourceHeapCount);
+      else if (Arg.getName() == "sampler_heap")
+        CallArgs.push_back(Env.SamplerHeap);
+      else if (Arg.getName() == "sampler_heap_count")
+        CallArgs.push_back(Env.SamplerHeapCount);
+      else if (Arg.getName() == "root_constants")
+        CallArgs.push_back(Env.RootConstants);
+      else if (Arg.getName() == "root_constant_size")
+        CallArgs.push_back(Env.RootConstantSize);
+      else if (Arg.getName() == "image_heap")
+        CallArgs.push_back(Env.ImageHeap);
+      else if (Arg.getName() == "image_heap_count")
+        CallArgs.push_back(Env.ImageHeapCount);
+      else if (Arg.getName() == "wave_group_id_x" ||
+               Arg.getName() == "wave_group_id_y" ||
+               Arg.getName() == "wave_group_id_z")
+        CallArgs.push_back(Entry.getInt32(0));
+      else if (Arg.getName() == "wave_group_count_x" ||
+               Arg.getName() == "wave_group_count_y" ||
+               Arg.getName() == "wave_group_count_z")
+        CallArgs.push_back(Entry.getInt32(1));
+      else if (Arg.getName() == "wave_index")
+        CallArgs.push_back(Entry.getInt32(0));
+      else if (Arg.getName() == "wave_entry_mask" ||
+               Arg.getName() == "wave_sideeffect_mask")
+        CallArgs.push_back(Mask);
+      else if (Arg.getName() == "wave_groupshared")
+        CallArgs.push_back(
+            ConstantPointerNull::get(cast<PointerType>(Arg.getType())));
+      else if (Arg.getName() == InputLayoutParamName)
+        CallArgs.push_back(Env.InputLayout);
+      else if (Arg.getName() == InputsParamName)
+        CallArgs.push_back(Env.Inputs);
+      else if (Arg.getName() == InputPatchLayoutParamName)
+        CallArgs.push_back(Env.InputPatchLayout);
+      else if (Arg.getName() == InputPatchParamName)
+        CallArgs.push_back(Env.InputPatch);
+      else if (Arg.getName() == OutputLayoutParamName)
+        CallArgs.push_back(Env.OutputLayout);
+      else if (Arg.getName() == OutputsParamName)
+        CallArgs.push_back(Env.Outputs);
+      else if (Arg.getName() == InputPatchControlPointCountParamName)
+        CallArgs.push_back(Env.InputPatchControlPointCount);
+      else if (Arg.getName() == PrimitiveIDParamName)
+        CallArgs.push_back(Env.PrimitiveID);
+      else if (Arg.getName() == ViewIndexParamName)
+        CallArgs.push_back(Env.ViewIndex);
+      else if (Arg.getName() == PerVertexOutputLayoutParamName)
+        CallArgs.push_back(Env.PerVertexOutputLayout);
+      else if (Arg.getName() == PerVertexOutputsParamName)
+        CallArgs.push_back(Env.PerVertexOutputs);
+      else
+        llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
+    }
+    Entry.CreateCall(&Body, CallArgs);
+    Entry.CreateRetVoid();
+
+    Body.setLinkage(GlobalValue::InternalLinkage);
+    return Wrapper;
+  }
+
+  // (Roadmap L339) `HullWrapper.cpp`'s own wave loop, mirrored verbatim:
+  // re-invoke the widened body `ceil(OutputControlPointCount/WaveSize)`
+  // times, each iteration computing this wave's flat invocation indices
+  // and an in-bounds mask from them.
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
+  BasicBlock *HeaderBB = BasicBlock::Create(Ctx, "wave.loop.header", Wrapper);
+  BasicBlock *BodyBB = BasicBlock::Create(Ctx, "wave.loop.body", Wrapper);
+  BasicBlock *ExitBB = BasicBlock::Create(Ctx, "wave.loop.exit", Wrapper);
+
   IRBuilder<> Entry(EntryBB);
   WrapperEnv Env = buildWrapperEnv(Entry, ArgsTy, Args);
+  Value *Waves = Entry.CreateUDiv(Entry.CreateAdd(Env.OutputControlPointCount,
+                                                  Entry.getInt32(WaveSize - 1)),
+                                  Entry.getInt32(WaveSize), "waves");
+  Entry.CreateBr(HeaderBB);
 
-  // A single, non-batched invocation (this file's own comment): one call to
-  // the widened body, with only lane 0 marked active -- there is no wave
-  // loop over some batch count the way every other stage's wrapper has.
-  SmallVector<Constant *, 8> LaneIsZero;
+  IRBuilder<> Header(HeaderBB);
+  PHINode *W = Header.CreatePHI(I32Ty, 2, "w");
+  W->addIncoming(Header.getInt32(0), EntryBB);
+  Value *Cond = Header.CreateICmpULT(W, Waves, "wave.cond");
+  Header.CreateCondBr(Cond, BodyBB, ExitBB);
+
+  IRBuilder<> BodyIR(BodyBB);
+  Value *Base = BodyIR.CreateMul(W, BodyIR.getInt32(WaveSize));
+  Value *WideBase = BodyIR.CreateVectorSplat(WaveSize, Base);
+  SmallVector<Constant *, 8> Lanes;
   for (unsigned I = 0; I != WaveSize; ++I)
-    LaneIsZero.push_back(Entry.getInt1(I == 0));
-  Value *Mask = ConstantVector::get(LaneIsZero);
+    Lanes.push_back(BodyIR.getInt32(I));
+  Value *Indices = BodyIR.CreateAdd(WideBase, ConstantVector::get(Lanes));
+  Value *WideCount =
+      BodyIR.CreateVectorSplat(WaveSize, Env.OutputControlPointCount);
+  Value *Mask = BodyIR.CreateICmpULT(Indices, WideCount, "wave.mask");
 
   SmallVector<Value *, 16> CallArgs;
   for (const Argument &Arg : Body.args()) {
@@ -708,19 +905,13 @@ Function *buildWrapper(Function &Body) {
     else if (Arg.getName() == "wave_group_id_x" ||
              Arg.getName() == "wave_group_id_y" ||
              Arg.getName() == "wave_group_id_z")
-      CallArgs.push_back(Entry.getInt32(0));
-    // Roadmap H6o: NumWorkgroups is meaningless for a non-compute-
-    // family stage (SPIR-V does not permit this builtin outside
-    // compute/mesh/task), so this widened function's own
-    // wave_group_count_x/y/z parameters are dead here -- 1 rather
-    // than 0 avoids encoding a nonsensical "0 workgroups" default,
-    // mirroring this same file's own wave_group_id_x/y/z dummy above.
+      CallArgs.push_back(BodyIR.getInt32(0));
     else if (Arg.getName() == "wave_group_count_x" ||
              Arg.getName() == "wave_group_count_y" ||
              Arg.getName() == "wave_group_count_z")
-      CallArgs.push_back(Entry.getInt32(1));
+      CallArgs.push_back(BodyIR.getInt32(1));
     else if (Arg.getName() == "wave_index")
-      CallArgs.push_back(Entry.getInt32(0));
+      CallArgs.push_back(W);
     else if (Arg.getName() == "wave_entry_mask" ||
              Arg.getName() == "wave_sideeffect_mask")
       CallArgs.push_back(Mask);
@@ -745,12 +936,19 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.PrimitiveID);
     else if (Arg.getName() == ViewIndexParamName)
       CallArgs.push_back(Env.ViewIndex);
+    else if (Arg.getName() == PerVertexOutputLayoutParamName)
+      CallArgs.push_back(Env.PerVertexOutputLayout);
+    else if (Arg.getName() == PerVertexOutputsParamName)
+      CallArgs.push_back(Env.PerVertexOutputs);
     else
       llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
   }
-  Entry.CreateCall(&Body, CallArgs);
-  Entry.CreateRetVoid();
+  BodyIR.CreateCall(&Body, CallArgs);
+  Value *WNext = BodyIR.CreateAdd(W, BodyIR.getInt32(1), "w.next");
+  BodyIR.CreateBr(HeaderBB);
+  W->addIncoming(WNext, BodyBB);
 
+  IRBuilder<>(ExitBB).CreateRetVoid();
   Body.setLinkage(GlobalValue::InternalLinkage);
   return Wrapper;
 }
