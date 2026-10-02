@@ -6759,6 +6759,227 @@ TEST_F(DrawTest, SubpassLoadReadsBackTheStencilAttachmentItWrote) {
   vkFreeMemory(Device, StencilMemory, nullptr);
 }
 
+/// (Roadmap L330) `SubpassLoadReadsBackTheStencilAttachmentItWrote` above
+/// reads back an attachment loaded with a *fixed* clear value no draw in
+/// that test itself ever writes -- it cannot catch a bug in the ordering
+/// between a draw's *own* depth/stencil test/write and that same draw's
+/// own `subpassLoad` of the identical attachment
+/// (`VK_EXT_rasterization_order_attachment_access`'s "feedback loop"
+/// pattern, see `dEQP-VK.rasterization.rasterization_order_attachment_
+/// access.*`). This test closes that gap directly: two back-to-back draws
+/// in the *same* subpass, both covering the whole attachment, with
+/// `VK_COMPARE_OP_ALWAYS`/`VK_STENCIL_OP_INCREMENT_AND_WRAP` turning the
+/// stencil attachment into a pure "how many draws have touched this pixel
+/// so far" accumulator (exactly the CTS family's own shader pattern). The
+/// first draw's own `subpassLoad` must observe the attachment's clear
+/// value (`0`), not its own just-applied increment (`1`) -- an early
+/// depth/stencil test (performed, by default, before the fragment stage
+/// runs) would let a self-referencing input-attachment read see its own
+/// fragment's test outcome, which this subpass's self-reference must rule
+/// out by forcing the late path (`Executor.cpp`'s `HasSelfReferencingDepth
+/// StencilInput`). The second draw's own `subpassLoad` must then observe
+/// the *first* draw's increment (`1`), not its own (`2`) -- proving
+/// ordering between draws is preserved while each draw's own self-read
+/// still excludes its own effect. Final stored value is therefore `1`,
+/// never `2` (buggy early-test behavior) or `0` (no ordering at all
+/// between draws).
+TEST_F(DrawTest, SubpassLoadOfASelfReferencingStencilAttachmentExcludesItsOwnWrite) {
+  VkImage StencilImage = VK_NULL_HANDLE;
+  VkImageView StencilView = VK_NULL_HANDLE;
+  VkDeviceMemory StencilMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_S8_UINT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_STENCIL_BIT, StencilImage, StencilView, StencilMemory);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule SubpassFragment =
+      createModule(SubpassLoadStencilFragmentSource);
+
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo SubpassLayoutInfo{};
+  SubpassLayoutInfo.setLayoutCount = 1;
+  SubpassLayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout SubpassLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &SubpassLayoutInfo, nullptr,
+                                   &SubpassLayout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.imageView = StencilView;
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  Rendering.stencilAttachmentFormat = VK_FORMAT_S8_UINT;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = SubpassFragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  // A pure stencil accumulator: always pass, always increment, matching
+  // this test's own leading comment and the CTS family's own shader
+  // pattern (`VkStencilOpState::compareOp = ALWAYS`, `passOp = INCREMENT_
+  // AND_WRAP`).
+  VkStencilOpState StencilOp{};
+  StencilOp.failOp = VK_STENCIL_OP_KEEP;
+  StencilOp.passOp = VK_STENCIL_OP_INCREMENT_AND_WRAP;
+  StencilOp.depthFailOp = VK_STENCIL_OP_KEEP;
+  StencilOp.compareOp = VK_COMPARE_OP_ALWAYS;
+  StencilOp.compareMask = 0xFF;
+  StencilOp.writeMask = 0xFF;
+  VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+  DepthStencil.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  DepthStencil.stencilTestEnable = VK_TRUE;
+  DepthStencil.front = StencilOp;
+  DepthStencil.back = StencilOp;
+  VkGraphicsPipelineCreateInfo SubpassInfo{};
+  SubpassInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  SubpassInfo.stageCount = 2;
+  SubpassInfo.pStages = Stages;
+  SubpassInfo.pVertexInputState = &VertexInput;
+  SubpassInfo.pInputAssemblyState = &InputAssembly;
+  SubpassInfo.pViewportState = &ViewportState;
+  SubpassInfo.pRasterizationState = &Raster;
+  SubpassInfo.pMultisampleState = &Multisample;
+  SubpassInfo.pDepthStencilState = &DepthStencil;
+  SubpassInfo.pColorBlendState = &Blend;
+  SubpassInfo.layout = SubpassLayout;
+  SubpassInfo.pNext = &Rendering;
+  VkPipeline SubpassPipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &SubpassInfo,
+                                      nullptr, &SubpassPipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = ColorView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachment.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+
+  VkRenderingAttachmentInfo StencilAttachment{};
+  StencilAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  StencilAttachment.imageView = StencilView;
+  StencilAttachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  StencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  StencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  StencilAttachment.clearValue.depthStencil.stencil = 0;
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+  RenderingInfo.pStencilAttachment = &StencilAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+
+  uint32_t StencilIndex = 0;
+  VkRenderingInputAttachmentIndexInfo IndexInfo{};
+  IndexInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO;
+  IndexInfo.pStencilInputAttachmentIndex = &StencilIndex;
+  vkCmdSetRenderingInputAttachmentIndices(Cmd, &IndexInfo);
+
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassPipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, SubpassLayout,
+                          0, 1, &Set, 0, nullptr);
+  // Two back-to-back draws in the same subpass, no barrier between them
+  // (this test's own leading comment): the first must see the clear value
+  // (0), the second the first's own increment (1), matching this subpass's
+  // `VK_EXT_rasterization_order_attachment_access`-style self-reference.
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 1) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, SubpassPipe, nullptr);
+  vkDestroyShaderModule(Device, SubpassFragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, SubpassLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyImageView(Device, StencilView, nullptr);
+  vkDestroyImage(Device, StencilImage, nullptr);
+  vkFreeMemory(Device, StencilMemory, nullptr);
+}
+
 /// (Roadmap F8c) The last piece `dynamicRenderingLocalReadMultisampled
 /// Attachments` needed: a multisample color attachment's own samples are
 /// seeded with 4 distinct, known values directly through its backing

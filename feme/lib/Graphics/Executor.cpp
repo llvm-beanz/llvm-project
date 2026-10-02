@@ -2640,11 +2640,46 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // L111(b)) An explicit `gl_SampleMask`/`SV_Coverage` output forces it for
   // the identical reason -- the narrowed mask it produces is not known
   // until the fragment stage itself has run.
+  // (roadmap L330) A subpass whose fragment stage reads its *own*
+  // depth/stencil attachment back as an input attachment
+  // (`subpassLoad(in_ds)`/`usubpassInput`/`isubpassInput`,
+  // `VK_EXT_rasterization_order_attachment_access`'s "feedback loop"
+  // pattern, see `dEQP-VK.rasterization.rasterization_order_attachment_
+  // access.*`) also needs the late path, for a reason none of the checks
+  // above cover: an early test's write (this very fragment's own
+  // depth/stencil update) would already be visible to this *same*
+  // invocation's `subpassLoad` of that attachment if the test ran before
+  // the fragment stage, even though the extension's whole contract is
+  // that such a read observes only *earlier*-ordered fragments' writes,
+  // never its own -- exactly the "read-before-write" ordering a
+  // `VK_STENCIL_OP_INCREMENT_AND_WRAP`-as-accumulator shader like this
+  // one depends on. Detected generically (not just for this one CTS
+  // family) by comparing `Draw.SubpassInputHeap` entries' own `Data`
+  // pointers against the depth/stencil attachment's own -- `resolve
+  // AttachmentView` (RenderPass.cpp) never copies attachment bytes, so a
+  // self-referencing input attachment's heap entry and `Draw.DepthStencil.
+  // Depth`/`Stencil` always share the identical base pointer when they
+  // name the same image.
+  bool HasSelfReferencingDepthStencilInput = false;
+  if (NeedsDepthStencil) {
+    const uint8_t *DepthData = Draw.DepthStencil.Depth.Data.data();
+    const uint8_t *StencilData = Draw.DepthStencil.Stencil.Data.data();
+    for (const cpu::FemeImageDescriptor &Entry : Draw.SubpassInputHeap) {
+      if (!Entry.Data)
+        continue;
+      if ((DepthData && Entry.Data == DepthData) ||
+          (StencilData && Entry.Data == StencilData)) {
+        HasSelfReferencingDepthStencilInput = true;
+        break;
+      }
+    }
+  }
   bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
                               !FSStencilRefOut && !FSMayDiscard &&
                               !FSHasMemorySideEffects &&
                               !Pipeline.getAlphaToCoverageEnable() &&
-                              !FSSampleMaskOut;
+                              !FSSampleMaskOut &&
+                              !HasSelfReferencingDepthStencilInput;
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A
   // patch-list pipeline's own topology says nothing about that -- the
   // tessellator's `TessOutputPrimitive` does -- so this is the
