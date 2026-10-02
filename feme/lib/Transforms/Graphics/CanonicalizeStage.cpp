@@ -1292,6 +1292,32 @@ private:
 Value *loadStageIOValue(IRBuilderBase &B, Type *Ty, uint32_t ElementID,
                         Value *Row, Value *Component, Value *Zero,
                         const Twine &Name, ShadowValueMap *Shadow) {
+  // (Roadmap L345) A tight-vector marker struct (see
+  // `getTightVectorMarkerInnerType`) must decompose its inner array one
+  // *component* at a time, exactly like an ordinary `FixedVectorType`
+  // below -- not fall through to the generic single-member-struct peel
+  // just below, which hands its inner `[N x Scalar]` array to the plain
+  // `ArrayType` branch instead, decomposing it one *row* at a time. That
+  // mismatched the `ComponentCount`/`RowCount` split `getStageIORowShape`
+  // (which does recognize this marker) computes for the element this
+  // value belongs to, so every row past the first silently addressed a
+  // `Row` well outside the element's real `RowCount` -- out-of-bounds
+  // relative to the buffer `buildStageStorage` sized for it (e.g. a
+  // `mat4x3[OUTPUT_PATCH_SIZE]` patch array's per-row tight-vector column,
+  // `getTightVectorMarkerInnerType`'s own `[3 x float]`, addressing up to
+  // `Row * 3`-ish instead of 3 separate `Component`s of the same `Row`).
+  if (Type *Inner = getTightVectorMarkerInnerType(Ty)) {
+    auto *ArrTy = cast<ArrayType>(Inner);
+    Value *InnerVal = PoisonValue::get(ArrTy);
+    for (unsigned C = 0, CE = ArrTy->getNumElements(); C != CE; ++C) {
+      Value *CombinedComponent =
+          Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
+      Value *Elt = loadStageIOValue(B, ArrTy->getElementType(), ElementID, Row,
+                                    CombinedComponent, Zero, Name, Shadow);
+      InnerVal = B.CreateInsertValue(InnerVal, Elt, C);
+    }
+    return B.CreateInsertValue(PoisonValue::get(Ty), InnerVal, 0);
+  }
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 1) {
       Value *Inner = loadStageIOValue(B, ST->getElementType(0), ElementID, Row,
@@ -1375,6 +1401,24 @@ void storeStageIOValue(IRBuilderBase &B, Value *Val, Type *Ty,
                        uint32_t ElementID, Value *Row, Value *Component,
                        Value *Zero, ShadowValueMap *Shadow,
                        const DenseSet<uint32_t> &SignedInt16ElementIDs) {
+  // (Roadmap L345) See `loadStageIOValue`'s own mirrored comment: a
+  // tight-vector marker struct's inner array must decompose one
+  // *component* at a time, not fall through to the generic single-member
+  // peel immediately below (which would hand it to the plain `ArrayType`
+  // branch, decomposing it one *row* at a time instead -- out-of-bounds
+  // `Row`-addressing relative to this element's real `RowCount`).
+  if (Type *Inner = getTightVectorMarkerInnerType(Ty)) {
+    auto *ArrTy = cast<ArrayType>(Inner);
+    Value *InnerVal = B.CreateExtractValue(Val, 0);
+    for (unsigned C = 0, CE = ArrTy->getNumElements(); C != CE; ++C) {
+      Value *CombinedComponent =
+          Component ? B.CreateAdd(Component, B.getInt32(C)) : B.getInt32(C);
+      storeStageIOValue(B, B.CreateExtractValue(InnerVal, C),
+                        ArrTy->getElementType(), ElementID, Row,
+                        CombinedComponent, Zero, Shadow, SignedInt16ElementIDs);
+    }
+    return;
+  }
   if (auto *ST = dyn_cast<StructType>(Ty)) {
     if (ST->getNumElements() == 1) {
       storeStageIOValue(B, B.CreateExtractValue(Val, 0), ST->getElementType(0),
