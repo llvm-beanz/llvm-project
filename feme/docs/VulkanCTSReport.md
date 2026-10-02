@@ -11386,6 +11386,74 @@ needed -- an internal tessellation coordinate-generation correctness
 fix to an already-exposed core feature, no new feature/extension
 surface.
 
+## L343: fixed -- `invariance.inner_triangle_set` fractional-odd fast-path hazard (2 cases)
+
+Picked up `L341`'s next-step #2: `inner_triangle_set` (2 failing cases,
+`quads`/`triangles_fractional_odd_spacing`).
+
+Root-caused to a hazard in `H7x`'s own "fully unsubdivided factor" fast
+path in `tessellateTriangle`/`tessellateQuad` (the shortcut that emits a
+plain, un-subdivided triangle/two-triangle output whenever every outer
+edge and inside factor rounds to exactly 1 segment, added to avoid a
+spurious `gl_CullDistance` whole-primitive cull). That shortcut
+unconditionally bypassed each domain's own fractional-odd-spacing
+epsilon rule ("if the inside factor rounds to 1, treat it as `1 +
+epsilon`"), which always forces a real, non-degenerate 3-segment inner
+ring/grid -- regardless of whether the outer edges are *also* exactly
+1.
+
+Under `Integer`/`FractionalEven` spacing this discrepancy is harmless:
+their own epsilon rule forces a *degenerate* 2-segment ring, which
+collapses to a fan-to-centroid contributing zero strictly-interior
+("inner") triangles -- the same zero-inner-triangle result the fast
+path itself produces. Under `FractionalOdd`, though, the forced
+3-segment ring produces a real, strictly-interior core triangle for
+every *other* outer-edge combination sharing the same (rounds-to-1)
+inside factor, except the all-outer-edges-exactly-1 case -- which took
+the fast path instead and produced none. `invariance.inner_triangle_set`
+requires the "inner" triangle set to depend only on the inside factor,
+never the outer edges, so this was a genuine invariance violation
+exactly at that corner case (matching `inner_triangle_set`'s own first
+`basicTessLevelCases` entry, `{{1,1},{1,1,1,1}}`, whose "vary only the
+outer edges" sub-cases include exactly this transition).
+
+Fixed by excluding `Partitioning == FractionalOdd` from both fast
+paths' trigger conditions, so the all-ones case now falls through to
+the same epsilon-forced interior ring every other outer-edge
+combination already uses. Added two focused regression tests
+(`TriangleFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd`/
+`QuadFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd`)
+confirming `FractionalOdd` still subdivides at the all-ones factor,
+with a strictly-interior core point/triangle present.
+
+`FeMeGraphicsTests`: 399/399 Passed (+2 new tests), 0 regressions.
+`ninja check-feme`: 3,490/3,551 Passed, 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact**: `dEQP-VK.tessellation.invariance.inner_triangle_set.*`
+(6 cases): 6/6 Pass (was 4/6). Re-ran `dEQP-VK.clipping.user_defined.*`
+(256 cases) specifically to confirm `H7x`'s own original clip/cull-
+distance fix (the reason this fast path exists at all) is unaffected:
+256/256 Pass, unchanged -- those tests use `equal_spacing` (`Integer`),
+never `FractionalOdd`, so they never reach the now-excluded branch.
+Full `tessellation` group (1,114 cases, 676 applicable): 619 Pass/57
+Fail (was 577/99 before this session's combined `L342`+`L343` work,
+exactly -42/-42), 0 regressions. Remaining 57 failures, confirmed via
+the `.qpa` log's own `CasePath` breakdown: `invariance.
+outer_edge_symmetry` 24 (`L341`, mutually irreconcilable with `L336`'s
+property), `misc_draw` 13 (`L339`/`L340` scope), `shader_input_output`
+13, `tesscoord` 4, `common_edge` 3 -- all pre-existing, untouched by
+this fix (the `shader_input_output`/`tesscoord` counts are slightly
+lower than previously-handed-off figures of 15/6; not investigated
+further this session since they only decreased, consistent with this
+project's recurring "stale handoff count" pattern rather than a new
+issue).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal tessellation coordinate-generation correctness
+fix to an already-exposed core feature, no new feature/extension
+surface.
+
 ### Re-confirmed this session (no change)
 
 - Branch-drift check on `offload-test-suite`'s `feme` branch: local
