@@ -2376,6 +2376,53 @@ Value *combineDynamicRowTerms(
   return Row;
 }
 
+/// (Roadmap L345) `collectDynamicRowTerms`'s own `It == End` base case
+/// folds the *entire remaining* `RowCount` of whatever type is left over
+/// at that point into the returned term's multiplier, on the assumption
+/// that the dynamic index(es) it threads through `Terms` always resolve
+/// all the way down to a genuine scalar/vector leaf (matching every
+/// existing H115/H117/H118 example in this file's own comments, e.g.
+/// `blockSa[i].z[j]`) -- so the flat `Row` `combineDynamicRowTerms`
+/// produces is meant to be used AS-IS, with no further per-level
+/// `Row * RE + R` scaling expected from `storeStageIOValue`/
+/// `loadStageIOValue`'s own recursion (they will simply hit their scalar
+/// base case immediately). That assumption breaks for a self-indexed
+/// dynamic array whose *element* type is itself still a matrix/array
+/// (e.g. `in_te_data0[gl_InvocationID] = someMat4x3`, where
+/// `in_te_data0`'s declared type is `[N x [4 x vec3]]`): there,
+/// `collectDynamicRowTerms` returns after consuming only the outer `[N x
+/// ...]` dimension (its own `It == End` base case fires on the *inner*
+/// `[4 x vec3]` mat4x3 type, which is not a leaf), folding that inner
+/// type's own `RowCount` (4) into the term's multiplier -- so `RowIndex`
+/// comes out as `gl_InvocationID * 4` already. `storeStageIOValue`/
+/// `loadStageIOValue` then independently recurse into that *same*
+/// `[4 x vec3]` `ValueTy` to decompose its own 4 matrix columns, which
+/// (by design, for the unrelated "array of block instances" shape
+/// `resolveOffsetWithinElement`'s own `BlockInstance` folding feeds a
+/// deliberately *unscaled* coarse instance index into) multiplies
+/// whatever `Row` it is given by that same `RowCount` (4) *again* before
+/// adding each column's own index -- a double-scaling that silently
+/// produces `gl_InvocationID * 16` instead of `gl_InvocationID * 4`,
+/// overrunning the element's real storage (`RowCount == 12`, i.e. `3
+/// invocations * 4 columns`) and corrupting whatever follows it. Since
+/// every existing (working) multi-term use of `combineDynamicRowTerms`
+/// resolves to a genuine leaf (`getStageIORowShape(ValueTy).RowCount ==
+/// 1`, a no-op division below), it is always safe to divide the combined
+/// `Row` back down by `ValueTy`'s own `RowCount` whenever that is not 1,
+/// undoing exactly the one extra scaling step
+/// `storeStageIOValue`/`loadStageIOValue`'s own recursion is about to
+/// re-apply, recovering the plain, unscaled `gl_InvocationID` seed their
+/// `Row * RE + R` convention actually expects.
+Value *unscaleDynamicRowForValueTy(IRBuilderBase &B, Value *Row,
+                                   Type *ValueTy) {
+  if (!Row)
+    return Row;
+  uint32_t ValueRowCount = getStageIORowShape(ValueTy).RowCount;
+  if (ValueRowCount <= 1)
+    return Row;
+  return B.CreateUDiv(Row, B.getInt32(ValueRowCount));
+}
+
 struct DynamicRowIndexedAccess {
   GlobalVariable *GV;
   /// The index into \p GV's own per-member `ElementIDs` slice (in
@@ -4460,7 +4507,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       // `DynamicRowIndexedAccess::Member`'s identically-named field.
       if (Dyn->Member >= It->second.size())
         return std::nullopt;
-      Value *Row = combineDynamicRowTerms(B, Dyn->RowTerms);
+      Value *Row = unscaleDynamicRowForValueTy(
+          B, combineDynamicRowTerms(B, Dyn->RowTerms), ValueTy);
       return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1), Row,
                            nullptr, Dyn->VertexIndex,
                            OutputGlobals.contains(Dyn->GV)};
@@ -4498,7 +4546,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
         return std::nullopt;
       if (Dyn->Member >= It->second.size())
         return std::nullopt;
-      Value *RowIndex = combineDynamicRowTerms(B, Dyn->Terms);
+      Value *RowIndex = unscaleDynamicRowForValueTy(
+          B, combineDynamicRowTerms(B, Dyn->Terms), ValueTy);
       // (Roadmap L138) `Dyn->DynamicComponent` may still carry whatever
       // integer width the original `getelementptr`'s own dynamic index
       // happened to use (e.g. `i64`, matching the real compiled CTS
