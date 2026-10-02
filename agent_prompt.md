@@ -63,27 +63,27 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, largest scoped bucket, 14 cases, carried over
-   many sessions)** `L339` -- TCS barrier-splitting architectural gap
-   (`shader_input_output`'s `barrier`/`cross_invocation_per_
-   {vertex,patch}_*` + `misc_draw`'s `tess_factor_barrier_bug`). Still
-   the single biggest real-work item on the board. Start with a
-   minimal standalone reproducer, not the full CTS shaders.
-2. **(a few hours each, 2 buckets, ~12 cases)** `L340` --
-   `misc_draw.fill_overlap_*` (needs `--deqp-log-images=enable` first)
-   and `misc_draw.switch_domain_origin_*_fast_lib`. Untouched again
-   this session.
-3. **(re-triage first, numbers may have moved)** `shader_input_output`
-   (13, was reported 15) and `tesscoord` (4, was reported 6) --
-   re-confirm exact current failing case names with a fresh run before
-   trusting either count, same lesson as `user_defined_io` a few
-   sessions back. `common_edge` (3 cases) still untriaged too.
+1. **(a few hours)** `L344` item 1: `cross_invocation_per_patch_*`.
+   Start with `--deqp-log-images=enable` to see the actual pixel diff,
+   then trace the `Patch`-direction (not `Output`-direction) read/write
+   codegen path specifically -- it's a different code path from what
+   this session touched.
+2. **(finish what this session started, ~20 min)** Finish the
+   broader `tessellation` group CTS sweep -- only ~800 of 1,114 cases
+   were swept this session (ran out of time budget partway through
+   `tess_io.max_in_out.*`, which is slow: ~600 cases, one pipeline
+   compile each). No regressions found in the swept portion; just need
+   to confirm the remaining ~300.
+3. **(unknown, design session)** `L344` item 2: the "only one barrier
+   supported" limitation. Needs scoping whether `CanonicalizeStage.cpp`'s
+   barrier-splitting logic fundamentally assumes exactly one barrier,
+   and if so what a 2-phase-into-N-phase extension would need. Same
+   subsystem/scope class as the long-carried-over `L335`
+   (`line_continuity` region-splitting gap) -- consider tackling
+   together in one dedicated session, since both need the same kind of
+   control-flow-restructuring survey.
 4. **(a few hours, lowest priority, many sessions carried over)**
-   `L265` -- ASTC alpha-decode tie-break. Untouched again.
-5. **(dedicated session, deferred many sessions, same subsystem class
-   as `L339`)** `L335` -- `line_continuity.{line-strip,polygon-mode-
-   lines}` region-splitting pass gap. Consider tackling alongside
-   `L339` if a phase-split redesign session happens.
-6. **(low priority, out of scope)** `offload-test-suite`'s own
-   lit-annotation issues (`spec_const_32_bits.test`/
-   `WaveActiveMax.test`/`array_of_matrices.test`).
+   `L265` -- ASTC alpha-decode tie-break. Untouched again this session.
+5. **(low priority, out of scope)** `offload-test-suite`'s own
+   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
+   `array_of_matrices.test`).
