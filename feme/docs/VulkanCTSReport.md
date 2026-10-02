@@ -12019,3 +12019,115 @@ N-phase scoping, open).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal TCS codegen/ABI extension (a new `feme.stage.*`
 op kind), no feature/extension-surface change.
+
+## L348: fixed -- `switch_domain_origin_*_fast_lib` pipeline-library domain-origin drop (4 cases); `fill_overlap_*` deepened, still open (10 cases)
+
+### Root cause
+
+`captureGraphicsPipelineLibraryState` (`feme/lib/Vulkan/GraphicsPipeline.cpp`),
+which deep-copies a `VK_EXT_graphics_pipeline_library` part's state for
+later fast-link reconstruction, captured
+`VkPipelineTessellationStateCreateInfo` via `Copy.pNext = nullptr;` --
+unconditionally stripping the chain, which is exactly where an
+application's `VkPipelineTessellationDomainOriginStateCreateInfo` lives.
+A pre-rasterization-shaders library part built with a non-default
+(`LOWER_LEFT`) domain origin request silently lost it once fast-linked,
+falling back to the spec default (`UPPER_LEFT`) -- the exact symptom the
+real CTS cases hit (a small, winding/channel-specific pixel mismatch).
+
+### Fix
+
+Followed the existing precedent in the same file for the structurally
+identical `VkPipelineRenderingCreateInfo` problem
+(`GraphicsPipelineLibraryState::RenderingCreateInfo`): added a new
+`GraphicsPipelineLibraryState::TessellationDomainOrigin`
+(`std::optional<VkTessellationDomainOrigin>`) field, populated in
+`captureGraphicsPipelineLibraryState` via a new shared
+`findTessellationDomainOrigin` helper (refactored out of the existing
+`hasLowerLeftTessellationDomainOrigin`, which now just compares this
+optional against `LOWER_LEFT`), folded across linked library parts in
+`foldLinkedLibraryState`, and re-chained onto the reconstructed
+pipeline's `VkPipelineTessellationStateCreateInfo::pNext` at
+final-pipeline-reconstruction time (a new
+`Storage.TessellationDomainOriginState` member).
+
+### Testing
+
+Added `GraphicsPipelineTest.LinksLibraryWithLowerLeftTessellationDomainOrigin`
+(`feme/unittests/Vulkan/GraphicsPipelineTest.cpp`): links all four
+graphics-pipeline-library parts, with the pre-rasterization-shaders part's
+`pTessellationState` chaining a `LOWER_LEFT` domain origin, and confirms
+the final linked pipeline's `TessellationState::OutputPrimitive` is
+correctly flipped. Confirmed (via a `git stash`-isolated A/B of just the
+`GraphicsPipeline.{h,cpp}` fix, keeping the new test) that it fails
+against the pre-fix code (`OutputPrimitive` stays `TriangleCcw` instead
+of flipping to `TriangleCw`) and passes with it.
+
+`ninja -C build check-feme`: 3,499/3,560 Passed, 61 Unsupported, 0
+Failed, 0 regressions (+1 new unit test vs. `L347`'s baseline).
+
+### CTS impact
+
+`dEQP-VK.tessellation.misc_draw.switch_domain_origin_*_fast_lib`: **4/4
+Pass** (was 0/4 Fail -- note the real surface is 4 cases, both
+directions `{upper_left_to_lower_left,lower_left_to_upper_left}` x
+`{,_with_geom_shader}`, not the 2 a prior handoff had named).
+
+Re-ran the full `misc_draw` group (109 applicable cases): 75 Pass / 10
+Fail / 24 Not Supported -- the only 10 remaining failures are
+`fill_overlap_*` (see below), 0 regressions elsewhere.
+
+Re-ran the broader `dEQP-VK.pipeline.pipeline_library.graphics_library.*`
+group (836 cases) before and after the fix, to rule out regressions in
+the much larger non-tessellation pipeline-library surface this fix's own
+code path sits inside: **520 Pass / 28 Fail / 287 Not Supported, both
+before and after**, bit-for-bit identical failing-case set (28
+pre-existing `optimize.*` `VK_ERROR_INITIALIZATION_FAILED` cases,
+untouched/out of scope for this fix) -- 0 regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal `VK_EXT_graphics_pipeline_library` state-capture
+correctness fix, no feature/extension-surface change.
+
+### `fill_overlap_*` (10 cases): deepened, still open
+
+Investigated `misc_draw.fill_overlap_{quads,triangles}_{equal_spacing,
+fractional_even_spacing,fractional_odd_spacing}_draw{,_indirect}` at
+length before pivoting to the `switch_domain_origin_*_fast_lib` fix
+above. Confirmed via `web_search` that the Vulkan spec explicitly leaves
+a quad domain's interior-grid diagonal-split direction
+implementation-defined, and FeMe's `tessellateQuad`
+(`feme/lib/Graphics/Tessellator.cpp`) always splits every grid cell
+along the same `A-C` diagonal -- a spec-legal but possibly
+CTS-reference-oracle-mismatching choice.
+
+Tested this hypothesis directly: temporarily alternated the diagonal by
+`(I+J)%2` parity (both phases tried), rebuilt `feme_vulkan`, and
+re-ran `fill_overlap_quads_equal_spacing_draw` via
+`--deqp-log-images=enable` -- neither alternation meaningfully reduced
+the reference-image `difference` (18.1/17.6/6.0 unmodified vs.
+18.1/15.6/5.5 and 19.2/15.7/6.8 for the two alternation phases). Reverted
+cleanly (`git checkout --`, confirmed empty `git diff --stat`).
+
+Ruled out a `round()`/`RoundEven` SPIR-V-lowering ambiguity as an
+alternative explanation: compiled the real TES shader standalone
+(`glslangValidator`, newly `apt-get install`'d for this) and
+disassembled it (`spirv-dis`), confirming it uses `GLSLstd450 Round`
+(round-half-away-from-zero, unambiguous), which upstream MLIR's
+`spirv::GLRoundOp -> LLVM::RoundOp` lowers correctly -- not FeMe-specific
+code, not modified.
+
+A per-pixel ASCII heatmap of the highest-error image set showed a
+multi-cell "staircase" pattern along the domain diagonal, not a thin
+hairline -- suggesting either a several-cell-wide divergence not yet
+found, or the diagonal-choice ambiguity compounding more severely with
+the test's own concentric-phase-band coloring scheme than a single
+ambiguous triangle would.
+
+Concluded that bit-exact matching would require literally porting the
+CTS reference's own interior-triangulation algorithm (confirmed
+structurally different from FeMe's simple rectangular-grid approach via
+a partial read of Mesa's vendored `tessellator.cpp`, itself derived from
+Microsoft's D3D reference `CHWTessellator`) -- a dedicated-session-scale
+task, out of scope here. No fix attempted; see `agent_thoughts.md` for
+the full numeric/pixel-level narrative.
