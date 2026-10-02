@@ -63,27 +63,24 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L316` remainder (a few hours, best next pick)**:
-   `texture.explicit_lod.2d.sizes.*`'s 16 failures (all NPOT sizes
-   `31x55`/`57x35`, `*linear_mipmap*_repeat*`) -- this is a `Fail (Verification
-   failed)` image-mismatch, not a pipeline-creation rejection, so it needs
-   `--deqp-log-images=enable` plus a mip-chain/wrap-mode numerical investigation
-   (same class of work as `L265`'s ASTC tie-break), not a quick diagnostic-scope
-   fix like `L321` was.
-2. **`L322` (unknown, newly split out)**:
-   `texture.multisample.atomic.storage_image_r32{i,ui}` -- a register-bound
-   multisampled storage-image handle used only for atomic ops fails FeMe's
-   resource-handle normalization outright. Likely a `SPIRVResourceLowering.cpp`
-   classification gap (missing an atomic-only use pattern), by analogy with past
-   `H19l`/`H19m`-shaped gaps, but unconfirmed.
-3. **`L323` (unknown, newly split out)**: a loop with a barrier-free diamond
-   body, barrier only *after* the loop (not inside it), crashes
-   `buildWrapperForLoop` with an IR-verifier use-after-erase assertion. Needs
-   its own standalone IR reduction (the minimal shape is already known -- see
-   this session's abandoned first test draft) and a step through
-   `buildWrapperForLoop`'s block-cloning/erasure order.
-4. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
-   alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
-   reference-decoder comparison.
-5. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
-   hours, carried over, unchanged)**.
+1. **`L323` (a few hours, best next pick, repro already in hand)**: step
+   through `buildWrapperForLoop` with the repro IR already recorded in
+   `Roadmap.md`/`VulkanCTSReport.md` (copy-paste directly into a local,
+   uncommitted gtest) to find which block-cloning/erasure step drops
+   `%merge` without rewriting/removing `%true`'s own `br label %merge`
+   terminator first.
+2. **`L265` (a few hours, lowest priority, many sessions carried over,
+   unchanged)**: ASTC alpha-decode tie-break (4 block sizes). Needs a
+   Mesa/lavapipe reference-decoder comparison. The `vktSampleVerifier.cpp`
+   mechanics learned this session while root-causing `L316` (quantized
+   tolerance-band search, `calcTexelGridCoordRange`/
+   `wrapTexelGridCoordLinear`) may be directly relevant if ASTC's verifier
+   uses a similar quantized-candidate search -- worth checking first before
+   diving into the decoder math itself.
+3. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a
+   few hours, carried over, unchanged)**.
+4. **`offload-test-suite`'s own lit-annotation issues**
+   (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`)
+   -- low priority, pre-existing, outside this project's scope.
+5. **Branch-drift housekeeping**: not re-checked this session -- overdue by
+   one more session now (last confirmed non-issue several sessions ago).
