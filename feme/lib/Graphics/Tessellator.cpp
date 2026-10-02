@@ -614,10 +614,31 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
   // fast path above already covers the one case (both `M == 1` and
   // `N == 1`, alongside every outer edge also `== 1`) where neither axis
   // would need the bump.
+  // (Roadmap L337) `M` is this function's own V-axis interior resolution
+  // (it paces `Patch.Points`' `J / M` term below) and `N` is the U-axis
+  // one (`I / N`), but the *spec's* own "first"/"second" inner
+  // tessellation level naming is the opposite of what that might
+  // suggest: per the real CTS reference generator
+  // (`generateReferenceQuadTessCoords` in `vktTessellationUtil.cpp`,
+  // ground truth here since the spec prose's own "u = 0/u = 1 ... first
+  // ... v = 0/v = 1 ... second" wording is ambiguous enough that the
+  // real conformance tests settle it the other way), the interior grid
+  // point's own `u` coordinate is `(x + 1) / inner0` and `v` is
+  // `(y + 1) / inner1` -- i.e. `Factors.Inside[0]` (the shader's
+  // `gl_TessLevelInner[0]`) paces the *u*-axis resolution (`N` here) and
+  // `Factors.Inside[1]` paces the *v*-axis one (`M`), the reverse of
+  // this function's prior (wrong) assignment. Found via
+  // `dEQP-VK.tessellation.tesscoord.quads_equal_spacing` (and its
+  // `fractional_even`/`fractional_odd` siblings, each with and without
+  // `_execution_mode_in_tesc`; 6 cases total): with asymmetric inner
+  // levels (e.g. `{3, 2}`) the interior grid's points came out with `u`
+  // and `v` transposed relative to the reference, visible as "no
+  // matching result/reference point" pairs that are exact `(a, b)` vs.
+  // `(b, a)` swaps.
   uint32_t M =
-      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
-  uint32_t N =
       computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor);
+  uint32_t N =
+      computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
   if (M == 1)
     M = Partitioning == TessPartitioning::FractionalOdd ? 3 : 2;
   if (N == 1)
