@@ -1482,6 +1482,81 @@ TEST(EntryWrapperTest, SplitsBarrierFreeLoopWithNestedCondBr) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L321 (feme/docs/Roadmap.md): a loop's own body is not always a
+// plain straight chain before it closes back to the header -- real DXC
+// output routinely puts a barrier-free `if` (with no `else`, a single-
+// sided diamond merging straight into the loop's own latch) ahead of the
+// backedge, e.g. `for (...) { if (cond) ...; <store>; }`. This is exactly
+// `dEQP-VK.texture.multisample.invalid_sample_index.*`'s own shape once
+// reduced: two such loops in sequence (an "initialize" loop, then a
+// barrier, then a "verify" loop), each with its own barrier-free diamond
+// body. The first loop's own merge block (`merge1` below) has two
+// predecessors (`true1`/`body1`) purely from its own diamond, not a
+// genuine external reconvergence, so it must not be mistaken for one by
+// `walkBarrierFreeArm`'s usual "stop at a 2+-predecessor block" rule --
+// this is `splitAtGroupSyncBarriers`'s own straight-line-of-regions path
+// (two loops joined by one barrier is not a single uniform loop, so
+// `matchLoopShape` does not apply here).
+TEST(EntryWrapperTest, SplitsLoopWithDiamondBodyBeforeBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header1
+    header1:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %merge1 ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %body1, label %barrier
+    body1:
+      %cond = icmp eq i32 %i, 0
+      br i1 %cond, label %true1, label %merge1
+    true1:
+      br label %merge1
+    merge1:
+      %i.next = add i32 %i, 1
+      br label %header1
+    barrier:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %header2
+    header2:
+      %j = phi i32 [ 0, %barrier ], [ %j.next, %merge2 ]
+      %cmp2 = icmp ult i32 %j, 4
+      br i1 %cmp2, label %body2, label %exit
+    body2:
+      %cond2 = icmp eq i32 %j, 0
+      br i1 %cond2, label %true2, label %merge2
+    true2:
+      br label %merge2
+    merge2:
+      %j.next = add i32 %j, 1
+      br label %header2
+    exit:
+      ret void
+    }
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  // Not diagnosed: both loops (each barrier-free on its own) are split
+  // into two separate region functions around the one group-sync
+  // barrier, same as any other two-region split.
+  EXPECT_TRUE(M->getFunction("main.region0"));
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  bool FoundFence = false;
+  for (Instruction &I : instructions(*Wrapper))
+    if (isa<FenceInst>(&I))
+      FoundFence = true;
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap step R24 (feme/docs/Roadmap.md): a `phi` live across a
 // `..._with_group_sync` barrier is spilled exactly like any other value
 // (see "A `phi` live across a barrier" in EntryWrapper.cpp's file

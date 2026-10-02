@@ -655,6 +655,13 @@ appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
   return {NewF, Extra};
 }
 
+// Forward declaration: `walkBarrierFreeArm` (roadmap L321) absorbs a
+// nested barrier-free diamond/region via `matchBarrierFreeRegion`, defined
+// further below.
+BasicBlock *matchBarrierFreeRegion(BasicBlock *BB,
+                                   SmallPtrSetImpl<BasicBlock *> &Visited,
+                                   SmallVectorImpl<BasicBlock *> &Order);
+
 /// Walks from \p Start following only single-successor unconditional
 /// branches, appending every block visited to \p Order, stopping as soon
 /// as a block already present in \p Visited is reached (either an arm's
@@ -689,13 +696,30 @@ appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
 /// itself is appended to \p Order like any other barrier-free block
 /// (still barrier-checked above), and whatever this walk eventually
 /// reconverges or closes to afterward is unaffected.
+///
+/// Roadmap L321: a loop body is not always a plain straight chain before
+/// it closes -- real DXC output routinely puts a barrier-free `if`/`if`-
+/// `else` (or deeper nest) ahead of the backedge, e.g. `for (...) { if
+/// (cond) ...; <store>; }`. When this walk's current block is itself a
+/// barrier-free diamond/region header (neither successor already a
+/// backedge to an established block -- `matchBarrierFreeRegion`'s own
+/// shape), the whole region is absorbed into this arm and the walk
+/// continues from its exit, rather than failing outright. The exit may
+/// itself have more than one predecessor (the region's own internal
+/// merge block) without that meaning a genuine external reconvergence:
+/// the usual "stop at a 2+-predecessor block" rule only applies once none
+/// of those predecessors were blocks this same arm just walked.
 BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
                                const SmallPtrSetImpl<BasicBlock *> &Visited,
                                SmallVectorImpl<BasicBlock *> &Order) {
   SmallPtrSet<BasicBlock *, 8> LocalVisited;
   BasicBlock *BB = Start;
   while (true) {
-    if (BB->hasNPredecessorsOrMore(2) || Visited.contains(BB))
+    bool StopsHere =
+        BB->hasNPredecessorsOrMore(2) &&
+        any_of(predecessors(BB),
+               [&](BasicBlock *P) { return !LocalVisited.contains(P); });
+    if (StopsHere || Visited.contains(BB))
       return BB;
     if (!LocalVisited.insert(BB).second)
       return nullptr;
@@ -714,11 +738,29 @@ BasicBlock *walkBarrierFreeArm(BasicBlock *Start,
       return nullptr;
     bool Succ0Seen = Visited.contains(CondBr->getSuccessor(0));
     bool Succ1Seen = Visited.contains(CondBr->getSuccessor(1));
-    if (Succ0Seen == Succ1Seen)
-      return nullptr; // Neither a nested backedge nor a fresh exit --
-                      // some other, unsupported branch shape.
+    if (Succ0Seen != Succ1Seen) {
+      Order.push_back(BB);
+      BB = Succ0Seen ? CondBr->getSuccessor(1) : CondBr->getSuccessor(0);
+      continue;
+    }
+    // Roadmap L321: neither successor is a backedge yet -- try this as a
+    // nested barrier-free diamond/region before giving up; its exit
+    // becomes this arm's next block to examine.
+    SmallPtrSet<BasicBlock *, 8> Combined(Visited.begin(), Visited.end());
+    Combined.insert(LocalVisited.begin(), LocalVisited.end());
+    SmallVector<BasicBlock *, 8> RegionOrder;
+    BasicBlock *Exit = matchBarrierFreeRegion(BB, Combined, RegionOrder);
+    if (!Exit)
+      return nullptr; // Neither a nested backedge, a fresh exit, nor a
+                      // barrier-free region -- some other, unsupported
+                      // branch shape.
     Order.push_back(BB);
-    BB = Succ0Seen ? CondBr->getSuccessor(1) : CondBr->getSuccessor(0);
+    for (BasicBlock *RB : RegionOrder) {
+      if (!LocalVisited.insert(RB).second)
+        return nullptr; // A region block reachable from elsewhere too.
+      Order.push_back(RB);
+    }
+    BB = Exit;
   }
 }
 
