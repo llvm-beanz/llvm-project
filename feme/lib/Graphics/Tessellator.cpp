@@ -445,25 +445,36 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
   uint32_t N =
       computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
 
-  // (Roadmap L343) `Partitioning != FractionalOdd` is required here, not
-  // just the plain all-ones check below: `FractionalOdd`'s own "N == 1"
-  // epsilon rule (a few lines further down) *always* forces a real,
-  // non-degenerate `N0 == 3` inner ring when the inside factor rounds to
-  // 1, regardless of whether the outer edges are also exactly 1 --
-  // unlike `Integer`/`FractionalEven`, whose equivalent `N0 == 2` case
-  // collapses to a plain fan-to-centroid that still contributes zero
-  // "inner" (fully edge-free) triangles, matching this fast path's own
-  // single-triangle (also zero "inner" triangles) result. Short-circuiting
-  // here for `FractionalOdd` too would make the truly-all-ones patch
-  // produce zero inner triangles while every other outer-edge combination
-  // sharing the same (rounds-to-1) inside factor produces a real one via
-  // the epsilon rule below -- an `invariance.inner_triangle_set`
-  // violation (the inner triangle set must depend only on the inside
-  // factor, never on the outer edges) found via
-  // `dEQP-VK.tessellation.invariance.inner_triangle_set.
-  // triangles_fractional_odd_spacing`.
-  if (E01 == 1 && E12 == 1 && E20 == 1 && N == 1 &&
-      Partitioning != TessPartitioning::FractionalOdd) {
+  // (Roadmap L343, reverted by L346) `L343` briefly excluded
+  // `Partitioning == FractionalOdd` from this fast path, on the theory
+  // that `FractionalOdd`'s own "N == 1" epsilon rule (a few lines
+  // further down) always forcing a real, non-degenerate `N0 == 3` inner
+  // ring whenever the inside factor rounds to 1 (regardless of the outer
+  // edges) meant the truly-all-ones patch had to keep using that same
+  // ring too, to satisfy `invariance.inner_triangle_set`'s requirement
+  // that the inner-triangle set depend only on the inside factor, never
+  // the outer edges. That exclusion did fix `inner_triangle_set` (2
+  // cases), but a later, broader CTS sweep (`L346`) found it regressed
+  // `dEQP-VK.tessellation.tesscoord.{quads,triangles}_fractional_odd_
+  // spacing(_execution_mode_in_tesc)` (4 cases): dEQP's own domain-point
+  // reference oracle (`generateReferenceTriangleTessCoords`/
+  // `generateReferenceQuadTessCoords` in `vktTessellationUtil.cpp`)
+  // explicitly special-cases the *literally* all-ones patch (every outer
+  // edge *and* the inside factor exactly 1) to the plain, unsubdivided
+  // corner set, for every partitioning mode including `FractionalOdd` --
+  // contradicting `inner_triangle_set`'s own requirement for that exact
+  // same input. A minimal, direct toggle test (flip this condition back
+  // and forth, rebuild, re-run both CTS groups) confirms this is a
+  // genuine, deterministic either/or with no middle ground: excluding
+  // `FractionalOdd` yields `inner_triangle_set` 6/6 but `tesscoord`
+  // 14/18; including it (this fast path's current, restored condition)
+  // yields the reverse, `inner_triangle_set` 4/6 but `tesscoord` 18/18 --
+  // a net +2 passing cases for `tesscoord` over `inner_triangle_set`, and
+  // consistent with the precedent `L341` set for an irreconcilable CTS
+  // property tension (favor not regressing a broader, already-passing
+  // group over a narrower one). See `L346`'s own `VulkanCTSReport.md`
+  // entry for the full analysis.
+  if (E01 == 1 && E12 == 1 && E20 == 1 && N == 1) {
     // (roadmap H7x) At the minimum, fully unsubdivided factor (every edge
     // and the interior both at 1 segment), the general inset+bridge path
     // below still synthesizes a 7-triangle core+annulus split out of this
@@ -642,24 +653,26 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
   // alongside a degenerate (bumped-to-2) interior axis correctly (see
   // `UDegenerate`/`VDegenerate` below).
   //
-  // (Roadmap L343) As in `tessellateTriangle`'s equivalent fast path,
-  // `Partitioning != FractionalOdd` is required too: `FractionalOdd`'s
-  // own "M/N == 1" epsilon rule just below always bumps to 3 (a real,
-  // non-degenerate interior grid), not 2 (a degenerate, zero-"inner"
-  // one like `Integer`/`FractionalEven` use), regardless of the outer
-  // edges -- so the truly-all-ones patch must keep using that same
-  // bumped-to-3 interior grid too, not this shortcut's zero-interior
-  // result, to stay consistent with every other outer-edge combination
-  // sharing the same (rounds-to-1) inside factors. Found the same way as
-  // the triangle-domain case, via
-  // `dEQP-VK.tessellation.invariance.inner_triangle_set.
-  // quads_fractional_odd_spacing`.
+  // (Roadmap L343, reverted by L346) As in `tessellateTriangle`'s
+  // equivalent fast path, `L343` briefly excluded `Partitioning ==
+  // FractionalOdd` from this shortcut, to fix `invariance.
+  // inner_triangle_set.quads_fractional_odd_spacing`. A later, broader
+  // CTS sweep (`L346`) found this regressed `tesscoord.{quads,
+  // triangles}_fractional_odd_spacing(_execution_mode_in_tesc)` (dEQP's
+  // own domain-point reference oracle special-cases the literally
+  // all-ones patch to the unsubdivided corner set for every partitioning
+  // mode, including `FractionalOdd`) -- an irreconcilable tension between
+  // the two CTS groups for this exact input, not a FeMe bug either
+  // direction can cleanly fix. Reverted to favor `tesscoord`'s net +2
+  // passing cases over `inner_triangle_set`'s, matching `L341`'s own
+  // established precedent for this class of tension; see
+  // `tessellateTriangle`'s equivalent comment and `L346`'s own
+  // `VulkanCTSReport.md` entry for the full analysis.
   if (computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) ==
           1 &&
       computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) ==
           1 &&
-      Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1 &&
-      Partitioning != TessPartitioning::FractionalOdd) {
+      Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1) {
     TessellatedPatch Patch;
     RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);
     uint32_t P0 = OuterRing[0][0], P1 = OuterRing[1][0], P2 = OuterRing[2][0],
