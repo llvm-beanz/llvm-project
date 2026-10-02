@@ -2061,13 +2061,16 @@ Error translateFixedFunctionState(
   return Error::success();
 }
 
-/// Whether \p Tessellation's own `pNext` chains a
-/// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
-/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` -- the only domain origin
-/// `flipTessellationWindingForDomainOrigin` (below) needs to know about.
-/// Absent entirely, a pipeline keeps the spec's own default,
-/// `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT`.
-bool hasLowerLeftTessellationDomainOrigin(
+/// Finds a `VkPipelineTessellationDomainOriginStateCreateInfo` chained off
+/// \p Tessellation's own `pNext`, if any. Shared by
+/// `hasLowerLeftTessellationDomainOrigin` (below) and
+/// `captureGraphicsPipelineLibraryState`'s own `PRE_RASTERIZATION_SHADERS_
+/// BIT` capture, which needs the raw `VkTessellationDomainOrigin` (not
+/// just the lower-left/upper-left boolean) so a graphics-pipeline-library
+/// part can carry it independently of `TessellationState`'s own
+/// `pNext`-stripped copy (see `GraphicsPipelineLibraryState::
+/// TessellationDomainOrigin`'s own comment for why).
+std::optional<VkTessellationDomainOrigin> findTessellationDomainOrigin(
     const VkPipelineTessellationStateCreateInfo &Tessellation) {
   for (const VkBaseInStructure *Next =
            reinterpret_cast<const VkBaseInStructure *>(Tessellation.pNext);
@@ -2077,10 +2080,21 @@ bool hasLowerLeftTessellationDomainOrigin(
       continue;
     const auto *DomainOrigin = reinterpret_cast<
         const VkPipelineTessellationDomainOriginStateCreateInfo *>(Next);
-    return DomainOrigin->domainOrigin ==
-           VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+    return DomainOrigin->domainOrigin;
   }
-  return false;
+  return std::nullopt;
+}
+
+/// Whether \p Tessellation's own `pNext` chains a
+/// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` -- the only domain origin
+/// `flipTessellationWindingForDomainOrigin` (below) needs to know about.
+/// Absent entirely, a pipeline keeps the spec's own default,
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT`.
+bool hasLowerLeftTessellationDomainOrigin(
+    const VkPipelineTessellationStateCreateInfo &Tessellation) {
+  return findTessellationDomainOrigin(Tessellation) ==
+         VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
 }
 
 /// (roadmap H4i) `feme::graphics::TessOutputPrimitive::TriangleCw`/
@@ -2859,6 +2873,7 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
     Out.ViewportState = Child.ViewportState;
     Out.RasterizationState = Child.RasterizationState;
     Out.TessellationState = Child.TessellationState;
+    Out.TessellationDomainOrigin = Child.TessellationDomainOrigin;
   }
   if (New & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
     Out.FragmentStage = Child.FragmentStage;
@@ -2932,6 +2947,7 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
       Out.RasterizationState = Copy;
     }
     if (const auto *TS = CreateInfo.pTessellationState) {
+      Out.TessellationDomainOrigin = findTessellationDomainOrigin(*TS);
       VkPipelineTessellationStateCreateInfo Copy = *TS;
       Copy.pNext = nullptr;
       Out.TessellationState = Copy;
@@ -3051,6 +3067,11 @@ struct LinkedPipelineStorage {
   VkPipelineViewportStateCreateInfo ViewportState{};
   VkPipelineRasterizationStateCreateInfo RasterizationState{};
   VkPipelineTessellationStateCreateInfo TessellationState{};
+  /// Re-chained onto `TessellationState.pNext` when the captured part's
+  /// own `GraphicsPipelineLibraryState::TessellationDomainOrigin` is set;
+  /// see that field's own comment.
+  VkPipelineTessellationDomainOriginStateCreateInfo
+      TessellationDomainOriginState{};
   VkPipelineDepthStencilStateCreateInfo DepthStencilState{};
   VkPipelineColorBlendStateCreateInfo ColorBlendState{};
   VkPipelineMultisampleStateCreateInfo MultisampleState{};
@@ -3283,6 +3304,21 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
     }
     if (S.TessellationState) {
       Storage.TessellationState = *S.TessellationState;
+      // (roadmap L340) Re-chain this part's own captured domain origin,
+      // lost from `TessellationState` itself when it was captured (see
+      // `GraphicsPipelineLibraryState::TessellationDomainOrigin`'s own
+      // comment) -- without this, a pre-rasterization-shaders library
+      // part created with a non-default `VkPipelineTessellationDomain
+      // OriginStateCreateInfo` silently reverts to the spec's default
+      // (`UPPER_LEFT`) once linked into a full pipeline.
+      if (S.TessellationDomainOrigin) {
+        Storage.TessellationDomainOriginState.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;
+        Storage.TessellationDomainOriginState.domainOrigin =
+            *S.TessellationDomainOrigin;
+        Storage.TessellationState.pNext =
+            &Storage.TessellationDomainOriginState;
+      }
       Result.pTessellationState = &Storage.TessellationState;
     }
     // (roadmap L110) This part's own creation-time flags -- not

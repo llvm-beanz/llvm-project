@@ -643,6 +643,19 @@ struct GraphicsPipelineLibraryState {
   std::optional<VkPipelineViewportStateCreateInfo> ViewportState;
   std::optional<VkPipelineRasterizationStateCreateInfo> RasterizationState;
   std::optional<VkPipelineTessellationStateCreateInfo> TessellationState;
+  /// (roadmap L340) `TessellationState` above is captured with its own
+  /// `pNext` unconditionally nulled out, per this struct's own
+  /// "nested `pNext` chains... are deliberately not chased here" comment
+  /// -- but a chained `VkPipelineTessellationDomainOriginStateCreateInfo`
+  /// *does* carry pipeline-meaningful state (`translateFixedFunctionState`
+  /// reads it to pick the tessellator's output winding), so it is
+  /// re-captured here independently and re-chained back onto
+  /// `TessellationState.pNext` when a linked pipeline is reconstructed,
+  /// rather than silently lost (the bug `dEQP-VK.tessellation.misc_draw.
+  /// switch_domain_origin_*_fast_lib` caught: a `VK_EXT_graphics_pipeline_
+  /// library` pre-rasterization-shaders part requesting `LOWER_LEFT` was
+  /// silently treated as the default `UPPER_LEFT` once linked).
+  std::optional<VkTessellationDomainOrigin> TessellationDomainOrigin;
 
   /// Populated only for `FRAGMENT_SHADER_BIT`.
   std::optional<VkPipelineDepthStencilStateCreateInfo> DepthStencilState;
