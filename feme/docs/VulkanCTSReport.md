@@ -10400,3 +10400,112 @@ individually untriaged.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- a correctness fix to an already-exposed core Vulkan 1.0
 feature (`depthBiasEnable`), no new feature/extension surface.
+
+## L332: fixed -- tessellation patch-list draws with a trailing incomplete patch were losing the whole device
+
+Picked up the prior session's handoff item 1 (tessellation
+`user_defined_io`, "27 untriaged cases"). Rebuilt `libfeme_vulkan.so`
+fresh and re-ran `dEQP-VK.tessellation.user_defined_io.*` (54 cases)
+directly: **54/54 Pass, 0 Fail** -- the handoff's count was stale. A
+search of this report (`L225`) confirmed `user_defined_io` was already
+fixed several sessions ago (131 failures -> 0), with only
+`geometry_interaction.passthrough` (1 case) noted as remaining in that
+cluster at the time.
+
+Rather than trust the stale number, re-ran the full `tessellation`
+group from the fresh build to confirm the actual current state. The run
+**aborted early** (only 24 of 1,114 cases completed) with:
+
+```
+VK_ERROR_DEVICE_LOST at vkCmdUtil.cpp:296 (vk.waitForFences(...))
+```
+
+on `dEQP-VK.tessellation.geometry_interaction.passthrough.
+tessellate_triangles_passthrough_geometry_no_change`. Isolated the case
+directly and re-ran with `FEME_VULKAN_LOG_CREATION_ERRORS=1`, which
+surfaced the real error masked by the generic device-lost symptom:
+
+```
+vkQueueSubmit: a patch-list draw's vertex count (4) must be a non-zero
+multiple of the pipeline's patch control point count (3)
+```
+
+**Root cause**: `Executor.cpp`'s tessellation draw-validation path
+(inside `executeDraws`'s `if (TessLink)` block) rejected -- as a hard
+`Error` -- any patch-list draw whose vertex count wasn't an exact
+multiple of the pipeline's control-point count. That `Error` propagates
+up through the command-buffer execution path into `Sync.cpp`'s
+`makeSubmissionTask`, which calls `Dev.markLost()` on any non-success
+result. So a single spec-legal-but-"irregular" draw didn't just fail --
+it **permanently marked the entire `VkDevice` lost**, turning every
+subsequent `vkWaitForFences`/etc. call in that test (and potentially any
+later test sharing the same device) into `VK_ERROR_DEVICE_LOST`,
+exactly matching the observed symptom.
+
+Confirmed via the Vulkan spec (web search) that this is explicitly
+legal, not an error: a patch-list draw's trailing incomplete patch
+(vertex count not a multiple of `patchControlPoints`) is simply
+**discarded**, never raised as an error. FeMe's own existing integer
+division when computing `PatchesPerInstance` (`PerInstance /
+Tess.InputControlPointCount`) already implements exactly this "discard
+the remainder" semantics -- the bug was purely the overly-strict
+validation check sitting in front of it, rejecting input the rest of
+the pipeline already handled correctly.
+
+The failing case itself:
+`vktTessellationGeometryPassthroughTests.cpp`'s
+`IdentityTessellationShaderTestCase`, which for one of its
+triangle-primitive configurations legitimately issues a draw whose
+vertex count doesn't align to a 3-control-point boundary.
+
+**Fix**: removed the `PerInstance % Tess.InputControlPointCount != 0`
+rejection from `Executor.cpp`, keeping only the
+`Tess.InputControlPointCount == 0` check (a genuine pipeline-state
+error -- a zero control-point count is nonsensical regardless of vertex
+count -- unrelated to the vertex-count-divisibility question that was
+wrongly being rejected). Added a doc comment referencing this entry.
+
+**Tests**: added
+`ExecutorTest.PatchListDrawDiscardsATrailingIncompletePatch` (a 4-vertex
+draw against a 3-control-point pipeline, asserting the draw succeeds and
+renders identically to the normal 3-vertex case, ignoring the 4th
+padding vertex). Also found and fixed a now-stale pre-existing test,
+`RejectsAPatchListDrawWithAPartialPatch`, which asserted the *old*
+(buggy) reject-on-error behavior for a 2-vertex draw; renamed to
+`APatchListDrawWithOnlyAPartialPatchRendersNothing` and changed its
+assertion from `Failed()` to `Succeeded()` plus an all-zero-attachment
+check (2 vertices form zero complete 3-control-point patches, so
+nothing should rasterize, but the draw itself must not error).
+
+`FeMeGraphicsTests`: 391/391 Passed (+1 net test), 0 regressions.
+`ninja check-feme`: 3,482/3,543 Passed, 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact**: the previously-crashing case now Passes in isolation.
+`dEQP-VK.tessellation.geometry_interaction.passthrough.*` (5 cases):
+5/5 Pass. The full `dEQP-VK.tessellation.*` group (1,114 cases) now
+completes cleanly with no aborts: **577 Pass/99 Fail/438 NotSupported**.
+The 99 failures are all pre-existing, already-documented residual
+categories, confirmed via a category breakdown against the qpa log:
+
+- `invariance.outer_edge_symmetry`: 36
+- `invariance.outer_edge_index_independence`: 24
+- `invariance.inner_triangle_set`: 2
+- `shader_input_output.*` (`cross_invocation_per_{patch,vertex}_*`,
+  `barrier`, `patch_vertices_*`): 15
+- `misc_draw.*` (`fill_overlap_*`, `switch_domain_origin_*`,
+  `tess_factor_barrier_bug`): 13
+- `tesscoord.quads_*_spacing*`: 6
+- `common_edge.quads_*_spacing_precise`: 3
+
+Zero new/unexpected failures versus this already-documented residual
+list.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a crash/correctness fix to already-exposed core tessellation
+draw validation, no feature/extension-surface change.
+
+**Lesson for future sessions**: trust a fresh, full CTS re-run over a
+handoff's stale pass/fail counts -- this bug was found purely as a side
+effect of double-checking a stale claim instead of accepting it at face
+value.
