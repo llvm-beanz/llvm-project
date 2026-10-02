@@ -5469,6 +5469,84 @@ TEST_F(GraphicsPipelineTest, LinksLibraryWithInlineVertexShaderModule) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
 }
 
+/// (roadmap L340) A `PRE_RASTERIZATION_SHADERS_BIT` library part whose
+/// `pTessellationState` chains a
+/// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
+/// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` must still produce the
+/// winding-flip `FlipsTessellationWindingForLowerLeftDomainOrigin` (above)
+/// confirms for a monolithic pipeline, once linked. Before this fix,
+/// `captureGraphicsPipelineLibraryState` stripped `pTessellationState`'s
+/// entire `pNext` chain when deep-copying it for later relinking --
+/// including this very struct -- so the domain origin request was
+/// silently dropped and the linked pipeline fell back to the spec
+/// default (`UPPER_LEFT`), reproducing the real CTS failure in
+/// `dEQP-VK.tessellation.misc_draw.switch_domain_origin_*_fast_lib`.
+TEST_F(GraphicsPipelineTest,
+       LinksLibraryWithLowerLeftTessellationDomainOrigin) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule TessControl = createModule(TessControlSource);
+  VkShaderModule TessEval = createModule(TessEvalSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Vertex, TessControl, TessEval, Fragment);
+  VkPipelineTessellationDomainOriginStateCreateInfo DomainOrigin{};
+  DomainOrigin.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO;
+  DomainOrigin.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+  Tessellation.pNext = &DomainOrigin;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  // Mirrors an application freeing its own pCreateInfos[I] (and
+  // everything it points to, including DomainOrigin) before linking --
+  // the library part's own capture must have already deep-copied
+  // whatever it needs from this struct.
+  Tessellation.pNext = nullptr;
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, TessEval, nullptr);
+  vkDestroyShaderModule(Device, TessControl, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H29c) `VkPipelineLibraryCreateInfoKHR::pLibraries` must each
 /// name a real `GraphicsPipelineLibrary` -- naming an already-complete,
 /// non-library `VkPipeline` is a creation-time error, not something the
