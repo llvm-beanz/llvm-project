@@ -67,12 +67,12 @@ next steps are:
    architectural gap, 14 cases. Still the biggest real-work item on the
    board, carried over many sessions. Start with a minimal standalone
    reproducer, not the full CTS shader.
-2. **`L344` item 2** (~a dedicated implementation session, now
-   *scoped* -- see `FeMeGraphicsDesign.md`'s new Status subsection
-   before starting) -- generalizing the one-barrier split to N
-   barriers. Same subsystem/scope class as `L335`; consider doing both
-   in the same session since they need the same kind of control-flow
-   region-splitting survey.
+2. **`L344` item 2** (~a dedicated implementation session, already
+   scoped -- see `FeMeGraphicsDesign.md`'s Status subsection) --
+   generalizing the one-barrier split to N barriers. Only remaining
+   case needing this is `shader_input_output.barrier` (1 case) now
+   that `tess_factor_barrier_bug` turned out to be a separate bug.
+   Same subsystem/scope class as `L335`; consider doing both together.
 3. **`L340`** (~a few hours each, 12 cases) -- `misc_draw.fill_overlap_*`
    (needs `--deqp-log-images=enable` first) and
    `misc_draw.switch_domain_origin_*_fast_lib`. Untouched many
@@ -81,6 +81,8 @@ next steps are:
    `line_continuity.{line-strip,polygon-mode-lines}` region-splitting
    gap. Same class as `L344` item 2 above.
 5. **`L265`** (~a few hours, lowest priority, many sessions carried
-   over) -- ASTC alpha-decode tie-break. Deep-dived once already (see
-   its own `Roadmap.md`/`VulkanCTSReport.md` entries), still
-   unresolved, still lowest priority. Untouched again this session.
+   over) -- ASTC alpha-decode tie-break. Untouched again this session.
+6. `offload-test-suite`'s own lit-annotation issues
+   (`spec_const_32_bits.test`/`WaveActiveMax.test`/
+   `array_of_matrices.test`) -- low priority, out of scope, noted again
+   for completeness.
