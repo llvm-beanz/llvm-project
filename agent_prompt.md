@@ -63,20 +63,14 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L325` (a few hours, best next pick, newly scoped)**: the
-   `static_stipple`/`dynamic_stipple`/`dynamic_stipple_and_topology`
-   cluster, 49 of the remaining 70 `rasterization` failures. Likely a
-   stipple-arc-length-computation bug, distinct from `L324`'s
-   half-open-rule fix (adjacency topology vs. stipple-pattern
-   application along the line). Start the same way `L324` did: pick one
-   failing case (e.g. `dynamic_stipple.bresenham_lines`), run with
-   `--deqp-log-images=enable`, extract the embedded PNGs (see this
-   session's and `L324`'s own technique: regex `.qpa` XML by
-   `<ImageSet>` boundary, base64-decode, diff with PIL/numpy), and
-   compare fragment-count/position against the spec's own stipple
-   pattern math (`gl_FragDepth`... actually spec section on
-   "Line Stipple" -- check `primsrast.adoc`'s stipple subsection, not
-   yet read this session).
+1. **`L326` (a few hours, best next pick, newly scoped, repro in
+   hand)**: the 9 remaining `*stipple*.bresenham_line_strip_wide`
+   failures. Likely the half-open diamond-exit rule (`L324`)
+   interacting with the width-replication offset (`L312`) at a strip
+   join, causing a one-row overlap between consecutive wide segments.
+   Start with a 2-segment, non-axis-aligned, small wide Bresenham strip
+   reduction and hand-check the walked pixel set against
+   `rrRasterizer.cpp`'s own strip-join handling.
 2. **`L265` (a few hours, lowest priority, many sessions carried over,
    unchanged)**: ASTC alpha-decode tie-break (4 block sizes). Needs a
    Mesa/lavapipe reference-decoder comparison.
@@ -86,9 +80,8 @@ next steps are:
    `depth_bias`, `provoking_vertex`, `flatshading`, `line_continuity`,
    `frag_side_effects`, `maintenance5`,
    `d24_unorm_constant_one_greater`, `draw`, `depth`) -- confirmed
-   pre-existing (not new regressions from `L324`), individually
-   untriaged, likely several distinct small bugs. Not yet scoped into
-   its own roadmap item; do that first if picked up.
+   pre-existing, individually untriaged. Not yet scoped into its own
+   roadmap item; do that first if picked up.
 4. **`offload-test-suite`'s own lit-annotation issues**
    (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`)
    -- low priority, pre-existing, outside this project's scope.
