@@ -151,6 +151,43 @@ TEST(TessellatorTest, IsolineGeneratesADetailByDensityGrid) {
   }
 }
 
+TEST(TessellatorTest, IsolineLineIndexSatisfiesShaderMirrorSymmetry) {
+  // Roadmap L341 regression test. The Vulkan CTS's
+  // `invariance.outer_edge_symmetry` isoline cases compile a TES shader
+  // that computes a literal single-precision `1.0 - V` for any generated
+  // point whose own `V` (which-line) coordinate is `> 0.5`, and requires
+  // the result to bit-exactly match another line's own independently
+  // generated `V` (exact `std::set<Vec3>` equality, no tolerance). A
+  // segment count whose reciprocal isn't exactly representable in binary
+  // floating point is essential to catch this (powers of two would mask
+  // it, since `I / L` is then always exact and trivially its own exact
+  // mirror).
+  //
+  // Unlike the equivalent triangle/quad boundary-ring fix (reverted, see
+  // `L341`'s roadmap entry), isolines have no competing
+  // `outer_edge_index_independence`-style cross-edge/cross-patch
+  // requirement, so this property is fixable without any such tension.
+  for (uint32_t Lines : {3u, 5u, 6u, 7u, 9u, 12u, 17u}) {
+    TessFactors Factors;
+    Factors.Edges = {static_cast<float>(Lines), 1.0f, 1.0f, 1.0f};
+    TessellatedPatch Patch =
+        tessellate(TessellatorDomain::Isoline, TessPartitioning::Integer,
+                   TessOutputPrimitive::Line, Factors);
+    std::set<float> LineVs;
+    for (const DomainPoint &P : Patch.Points)
+      LineVs.insert(P.V);
+    ASSERT_EQ(LineVs.size(), Lines) << "Lines=" << Lines;
+    for (float V : LineVs) {
+      if (V <= 0.5f)
+        continue;
+      float Mirrored = 1.0f - V;
+      EXPECT_TRUE(LineVs.count(Mirrored))
+          << "Lines=" << Lines << " V=" << V
+          << " mirrored=" << Mirrored << " has no exact partner";
+    }
+  }
+}
+
 TEST(TessellatorTest, IsolinePointModeGeneratesNoIndices) {
   TessFactors Factors;
   Factors.Edges = {2.0f, 2.0f, 1.0f, 1.0f};

@@ -36,6 +36,47 @@ bool anyFactorCullsPatch(const float *Factors, size_t Count) {
                      [](float F) { return F <= 0.0f; });
 }
 
+/// (Roadmap L341) Computes line index \p I's own `V` (line-density)
+/// coordinate out of \p L total lines, for `tessellateIsoline`, such that
+/// `invariance.outer_edge_symmetry`'s isoline cases' shader-side mirror
+/// (a literal `float` `1.0 - y` on any line with `y > 0.5`, compared via
+/// exact equality to another line's own directly-generated `V`) is
+/// guaranteed to bit-match -- *without* the ULP-level conflict that
+/// blocks the equivalent fix for the triangle/quad boundary rings (see
+/// `appendTriangleBoundaryRing`'s own doc comment and the roadmap `L341`
+/// entry for the full derivation): isolines have no
+/// `outer_edge_index_independence`-style cross-edge/cross-patch exact-set
+/// requirement at all (confirmed against the CTS's own `createInvariance
+/// Tests`, which only ever registers `outer_edge_index_independence`
+/// cases for `TESSPRIMITIVETYPE_TRIANGLES`/`_QUADS`), so unlike those two
+/// domains, isolines are free to make *either* half's value depend on the
+/// other's, rather than needing both to independently equal the plain
+/// direct-division formula.
+///
+/// The shader only ever mirrors the *large* half (`y > 0.5`, i.e.
+/// `2*I > L`) by applying one literal `1.0f - V` to its own
+/// already-generated value; this function keeps that large half as the
+/// ordinary direct division `I / L` (unchanged), and instead defines the
+/// *small* half's value (`2*I < L`) as `1.0f - V(L - I)` -- a single
+/// `float` subtraction of the large partner's own already-computed direct
+/// value. Since the shader performs the exact same single subtraction on
+/// that exact same operand, the two results are bit-identical by
+/// construction (not merely "usually" -- there is no double-rounding
+/// step here at all, unlike naively trying to make *both* halves
+/// independently satisfy the mirror property). The degenerate `I == 0`
+/// line (which has no valid large partner, `L - 0 == L` is out of range)
+/// is excluded from this redefinition since its direct value is already
+/// the exact `0.0f` the test expects, and it's never a mirror target
+/// anyway (the shader's own `y > 0.5` condition is never true for it).
+float computeIsolineIndexFraction(uint32_t I, uint32_t L) {
+  if (I > 0 && 2 * I < L) {
+    uint32_t Partner = L - I;
+    float PartnerDirect = static_cast<float>(Partner) / L;
+    return 1.0f - PartnerDirect;
+  }
+  return static_cast<float>(I) / L;
+}
+
 /// Appends one triangle's indices to \p Patch, honoring \p Cw the same way
 /// every other triangle emitter in this file does: `Cw` keeps the operand
 /// order, while the "Ccw" case swaps the last two operands.
@@ -355,8 +396,11 @@ TessellatedPatch tessellateIsoline(const TessFactors &Factors,
     // instead, silently swapping the two coordinates' real meaning (see
     // `DomainPoint`'s own doc comment) and producing an all-zero
     // along-line coordinate for every point of a single-line patch, since
-    // `Lines == 1` always makes this a constant `0.0f`.
-    float LineIndex = Lines > 1 ? static_cast<float>(I) / Lines : 0.0f;
+    // `Lines == 1` always makes this a constant `0.0f`. (Roadmap L341)
+    // `computeIsolineIndexFraction` (not a plain `I / Lines` division)
+    // for the mirror-symmetry fix -- see its own doc comment.
+    float LineIndex =
+        Lines > 1 ? computeIsolineIndexFraction(I, Lines) : 0.0f;
     uint32_t RowStart = static_cast<uint32_t>(Patch.Points.size());
     for (uint32_t J = 0; J <= Segments; ++J) {
       // (Roadmap L24(b)) The position along this one line -- `DomainPoint::U`.
