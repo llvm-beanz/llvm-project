@@ -9714,3 +9714,100 @@ module clean.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal compiler correctness fix (a miscompile/crash in
 region-outlining control flow), no feature/extension-surface change.
+
+## L324: fixed -- Bresenham half-open diamond-exit rule (adjacency double-counting)
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+Picked up `L312`'s own carried-forward rasterization backlog (82
+failures, dominated by stipple/adjacency Bresenham cases). Extracted all
+12 `no_stipple` failures: all are
+`bresenham_line{s,_strip}_with_adjacency*` variants (plain/`_factor_0`/
+`_factor_large` x narrow/wide). Ran the first with
+`--deqp-log-images=enable`: "Diamond-exit rule: 127 fragments. Result
+image: 131 fragments" -- a consistent +4 excess (+1 per drawn line
+segment; this test draws 4 independent line segments via the adjacency
+topology).
+
+Reviewed `GraphicsPipeline.cpp`'s `mapTopology`, `Executor.cpp`'s
+adjacency-stripping code, and `Pipeline.cpp`'s
+`stripAdjacency`/`getListPrimitiveVertexCount`/
+`splitListPrimitiveAdjacency`/`getStripPrimitiveCount`/
+`splitStripPrimitiveAdjacency` -- all already correct (adjacency vertex
+stripping only ever exposes the 2 "core" vertices per window to the
+rasterizer).
+
+Root-caused by re-reading the real Vulkan spec's own "Bresenham Line
+Segment Rasterization" section (`primsrast.adoc`, fetched from the
+`KhronosGroup/Vulkan-Docs` source): the diamond-exit rule is explicitly
+**half-open**: "the final fragment (corresponding to `p_b`) is not
+drawn. This means that when rasterizing a series of connected line
+segments, shared endpoints will be produced only once rather than twice
+(as would occur with Bresenham's algorithm)." `Executor.cpp`'s
+`emitLineSegment` Bresenham branch drew every pixel from `(X0,Y0)`
+through `(X1,Y1)` **inclusive**, violating this rule.
+
+For a single isolated line segment this produces one extra fragment,
+which falls within the CTS's own documented tolerance ("must not differ
+...  by more than one"), masking the bug for every previously-passing
+single-line Bresenham case (including `L312`'s own plain `_wide`
+cases). But `lines_with_adjacency`/`line_strip_with_adjacency` tests
+draw 2+ independent line segments per draw, each contributing its own +1
+excess, exceeding the tolerance cumulatively -- exactly matching the
+"Invalid fragment count" symptom and the 12-case scope (all and only the
+adjacency-topology Bresenham cases).
+
+**Fix** (`feme/lib/Graphics/Executor.cpp`, `emitLineSegment`'s Bresenham
+branch): moved the segment's own end-of-walk check (`X == X1 && Y ==
+Y1`) to occur *before* fragment emission rather than after, skipping
+emission of the segment's own final pixel -- except in the degenerate
+single-pixel case (`X0 == X1 && Y0 == Y1`), where that one pixel is
+still drawn since it represents both `p0` and `p1` at once.
+
+**Why this doesn't break `LineStrip` continuity**: previously, a shared
+vertex between consecutive strip segments was double-drawn (once as
+segment *i*'s own inclusive endpoint, once as segment *i+1*'s own
+starting pixel). The fix makes segment *i* exclude its own endpoint, so
+the shared pixel is drawn exactly once -- as segment *i+1*'s starting
+pixel. Verified with a new additive-blending test, since plain coverage
+can't distinguish "drawn once" from "drawn twice" at a pixel.
+
+**Tests**:
+- Updated `ExecutorTest.RendersABresenhamDiagonalLine`: previously
+  asserted all 4 diagonal pixels lit; now asserts only 3, with the
+  segment's own final pixel `(3,0)` explicitly excluded.
+- Added `ExecutorTest.BresenhamLineStripDoesNotDoubleDrawASharedVertex`:
+  a 2-segment `LineStrip` along the same diagonal path, split at the
+  shared midpoint vertex, rendered with additive blending
+  (`BlendOp::Add`, both factors `One`) to confirm the shared vertex
+  pixel accumulates exactly one unit of color, not two.
+
+**Verification**:
+- `FeMeGraphicsTests`: 384/384 Passed (+1 new test), 0 regressions.
+- `ninja check-feme` (ccache + assertions, full target-dependency
+  build): 3,468/3,528 Passed (+1 new test), 61 Unsupported, 0 Failed, 0
+  regressions.
+- CTS: re-ran the full `dEQP-VK.rasterization.*` group (15,019 cases):
+  **414 Pass (+12) / 70 Fail (-12) / 14,535 NotSupported**, was
+  402/82/14,535. Confirmed via an exact Python set-diff between the
+  original 82-case failure list and the post-fix 70-case list: exactly
+  the 12 targeted `no_stipple.bresenham_*_with_adjacency*` cases are
+  newly Pass, 0 cases newly Fail -- 0 regressions anywhere else in the
+  group.
+
+The remaining 70 failures are dominated by
+`static_stipple`/`dynamic_stipple`/`dynamic_stipple_and_topology` (49/70
+-- likely a related but distinct stipple-arc-length-computation bug, not
+investigated this session; tracked as `L325`), plus smaller scattered
+groups already present in the original 82-case list (`stencil`,
+`color_at_beginning`/`color_at_end`, `non_strict_line*`,
+`triangle_fan`/`triangle_strip`, `line-strip`, `polygon-mode-lines`,
+`depth_bias`, `provoking_vertex`, `flatshading`, `line_continuity`,
+`frag_side_effects`, `maintenance5`,
+`d24_unorm_constant_one_greater`, `draw`, `depth`) -- all confirmed
+pre-existing, not new regressions from this fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a correctness fix to an already-exposed, already-advertised
+line-rasterization mode, no new feature/extension surface.
