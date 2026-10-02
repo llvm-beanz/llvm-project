@@ -63,21 +63,19 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, 15 cases, best next pick)** The remaining scattered
-   `rasterization` failures, now down from 21 to 15 after this session:
-   `depth_bias.d24_unorm_constant_one_greater`,
+1. **(unknown, 27 cases, largest untriaged chunk, best next pick)**
+   Tessellation `user_defined_io` triage -- still not started, carried
+   over many sessions now. Also still open:
+   `shader_input_output`/`misc_draw`/`common_edge`/
+   `matrix_multiplication`/`geometry_interaction`.
+2. **(a few hours each, 9 cases)** Remaining scattered `rasterization`
+   failures, now down to 9 after this session:
    `flatshading.{triangle_fan,triangle_strip}`,
    `line_continuity.{line-strip,polygon-mode-lines}`,
    `maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
-   `provoking_vertex.draw.default.triangle_fan`,
-   `rasterization_order_attachment_access.{depth,stencil}.*` (5 cases).
-   Still individually untriaged -- `rasterization_order_attachment_access`
-   is the largest same-looking cluster (5 cases, probably one bug), pick
-   that first.
-2. **(unknown, 27 cases, largest untriaged chunk)** Tessellation
-   `user_defined_io` triage -- still not started, carried over several
-   sessions now. Also still open: `shader_input_output`/`misc_draw`/
-   `common_edge`/`matrix_multiplication`/`geometry_interaction`.
+   `provoking_vertex.draw.default.triangle_fan`. Still individually
+   untriaged -- `maintenance5.non_strict_line*` is the largest
+   same-looking cluster (4 cases), pick that first.
 3. **(a few hours, lowest priority, many sessions carried over)** `L265`
    -- ASTC alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
    reference-decoder comparison.
@@ -85,5 +83,5 @@ next steps are:
    lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
    `array_of_matrices.test`).
 5. **Branch-drift housekeeping**: confirmed non-issue again this
-   session (see above) -- re-check again next session per standing
-   protocol, but no action expected until content genuinely diverges.
+   session (`854cc3f`, unchanged) -- re-check again next session per
+   standing protocol.
