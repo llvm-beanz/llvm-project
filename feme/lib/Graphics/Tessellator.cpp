@@ -162,6 +162,16 @@ void bridgeRingsByEdge(
 /// edges, where `P0 = (1, 0, 0)`, `P1 = (0, 1, 0)`, `P2 = (0, 0, 1)`.
 /// Returns the CCW ring (see `RingEdges`), one edge per entry, in walking
 /// order starting at `P0`.
+///
+/// (Roadmap L336) Each edge's "leading" component here needs the
+/// complementary fraction `1 - K / N` of its own direct `T = K / N`.
+/// Computed as a float subtraction, this does not generally round to the
+/// same bit pattern as directly computing `K' / N` for the complementary
+/// index `K' = N - K` on another edge with the same segment count -- see
+/// `appendQuadBoundaryRing`'s own doc comment for the full explanation and
+/// the exact-equality CTS comparisons this broke. Fixed the same way:
+/// compute the complementary numerator `N - K` as an integer subtraction
+/// before the single division.
 RingEdges appendTriangleBoundaryRing(TessellatedPatch &Patch, uint32_t E01,
                                      uint32_t E12, uint32_t E20) {
   RingEdges Edges(3);
@@ -171,15 +181,18 @@ RingEdges appendTriangleBoundaryRing(TessellatedPatch &Patch, uint32_t E01,
   };
   for (uint32_t K = 0; K < E01; ++K) {
     float T = static_cast<float>(K) / E01;
-    AddPoint(0, 1.0f - T, T, 0.0f);
+    float InvT = static_cast<float>(E01 - K) / E01;
+    AddPoint(0, InvT, T, 0.0f);
   }
   for (uint32_t K = 0; K < E12; ++K) {
     float T = static_cast<float>(K) / E12;
-    AddPoint(1, 0.0f, 1.0f - T, T);
+    float InvT = static_cast<float>(E12 - K) / E12;
+    AddPoint(1, 0.0f, InvT, T);
   }
   for (uint32_t K = 0; K < E20; ++K) {
     float T = static_cast<float>(K) / E20;
-    AddPoint(2, T, 0.0f, 1.0f - T);
+    float InvT = static_cast<float>(E20 - K) / E20;
+    AddPoint(2, T, 0.0f, InvT);
   }
   return Edges;
 }
@@ -214,17 +227,23 @@ RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
                             Third + Scale * (V - Third),
                             Third + Scale * (W - Third)});
   };
+  // (Roadmap L336) Same complementary-fraction exact-equality concern as
+  // `appendTriangleBoundaryRing` -- compute the complementary numerator
+  // as an integer subtraction, not a float subtraction after dividing.
   for (uint32_t K = 0; K < Resolution; ++K) {
     float T = static_cast<float>(K) / Resolution;
-    AddPoint(0, 1.0f - T, T, 0.0f);
+    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    AddPoint(0, InvT, T, 0.0f);
   }
   for (uint32_t K = 0; K < Resolution; ++K) {
     float T = static_cast<float>(K) / Resolution;
-    AddPoint(1, 0.0f, 1.0f - T, T);
+    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    AddPoint(1, 0.0f, InvT, T);
   }
   for (uint32_t K = 0; K < Resolution; ++K) {
     float T = static_cast<float>(K) / Resolution;
-    AddPoint(2, T, 0.0f, 1.0f - T);
+    float InvT = static_cast<float>(Resolution - K) / Resolution;
+    AddPoint(2, T, 0.0f, InvT);
   }
   return Edges;
 }
@@ -274,6 +293,23 @@ void fanRingToPoint(TessellatedPatch &Patch, const RingEdges &Ring,
 /// `v == 0`, `u == 1`, `v == 1`, `u == 0` edges. Returns the CCW ring (see
 /// `RingEdges`), one edge per entry, in walking order starting at
 /// `(0, 0)`.
+///
+/// (Roadmap L336) Edges 2/3 walk their shared coordinate axis backwards
+/// (from `1` down to `0`) to keep the ring's overall CCW winding, so each
+/// of their points needs the *complementary* fraction of the edge's own
+/// direct `K / N` formula (edges 0/1 use directly). Computing that as a
+/// float subtraction (`1.0f - K / N`) does not, in general, round to the
+/// same bit pattern as directly computing `K' / N` for the complementary
+/// index `K' = N - K` on another edge with the same segment count `N` --
+/// e.g. for `N = 3`, `1.0f - 2.0f / 3.0f` and `1.0f / 3.0f` differ by a
+/// ULP. `dEQP-VK.tessellation.invariance.outer_edge_index_independence`/
+/// `common_edge` compare two edges' vertex coordinate *sets* with exact
+/// (not approximate) floating-point equality, so this ULP-level mismatch
+/// alone failed 28 + 3 cases despite the two sets printing identically at
+/// the log's 6-digit precision. Fixed by computing the complementary
+/// numerator `N - K` as an *integer* subtraction before the single
+/// division, which is bit-identical to computing `K' / N` directly for
+/// `K' = N - K` (unlike subtracting the two already-divided floats).
 RingEdges appendQuadBoundaryRing(TessellatedPatch &Patch, uint32_t Ev0,
                                  uint32_t Eu1, uint32_t Ev1, uint32_t Eu0) {
   RingEdges Edges(4);
@@ -286,9 +322,9 @@ RingEdges appendQuadBoundaryRing(TessellatedPatch &Patch, uint32_t Ev0,
   for (uint32_t K = 0; K < Eu1; ++K)
     AddPoint(1, 1.0f, static_cast<float>(K) / Eu1);
   for (uint32_t K = 0; K < Ev1; ++K)
-    AddPoint(2, 1.0f - static_cast<float>(K) / Ev1, 1.0f);
+    AddPoint(2, static_cast<float>(Ev1 - K) / Ev1, 1.0f);
   for (uint32_t K = 0; K < Eu0; ++K)
-    AddPoint(3, 0.0f, 1.0f - static_cast<float>(K) / Eu0);
+    AddPoint(3, 0.0f, static_cast<float>(Eu0 - K) / Eu0);
   return Edges;
 }
 

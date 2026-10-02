@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -589,6 +590,85 @@ TEST(TessellatorTest, QuadSharedEdgeVerticesMatchAcrossPatches) {
   ASSERT_EQ(VsA.size(), VsB.size());
   for (size_t I = 0; I != VsA.size(); ++I)
     EXPECT_NEAR(VsA[I], VsB[I], Epsilon) << "index " << I;
+}
+
+TEST(TessellatorTest, QuadOppositeEdgesProduceBitExactlyEqualCoordinateSets) {
+  // Roadmap L335 regression test. `appendQuadBoundaryRing` walks the
+  // `v == 1`/`u == 0` edges backwards (to keep the ring's CCW winding),
+  // so each of their points needs the complementary fraction of the
+  // "forwards" `K / N` formula the `v == 0`/`u == 1` edges use directly.
+  // Computing that complementary fraction as a float subtraction
+  // (`1.0f - K / N`) does not, in general, round to the same bit pattern
+  // as directly computing `K' / N` for the complementary index
+  // `K' = N - K` -- only an *integer* subtraction before the division
+  // guarantees that. A segment count whose reciprocal isn't exactly
+  // representable in binary floating point (`3`, not a power of two) is
+  // essential to catch this: the Vulkan CTS's own
+  // `invariance.outer_edge_index_independence`/`common_edge` tests
+  // compare two edges' coordinate sets with *exact* equality (not a
+  // tolerance), and failed here despite the two sets printing
+  // identically at 6-digit precision.
+  TessFactors Factors;
+  Factors.Inside = {3.0f, 3.0f};
+  Factors.Edges = {3.0f, 3.0f, 3.0f, 3.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+
+  std::set<float> V0EdgeUs, V1EdgeUs, U0EdgeVs, U1EdgeVs;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.V == 0.0f)
+      V0EdgeUs.insert(P.U);
+    if (P.V == 1.0f)
+      V1EdgeUs.insert(P.U);
+    if (P.U == 0.0f)
+      U0EdgeVs.insert(P.V);
+    if (P.U == 1.0f)
+      U1EdgeVs.insert(P.V);
+  }
+  EXPECT_FALSE(V0EdgeUs.empty());
+  EXPECT_EQ(V0EdgeUs, V1EdgeUs);
+  EXPECT_FALSE(U0EdgeVs.empty());
+  EXPECT_EQ(U0EdgeVs, U1EdgeVs);
+}
+
+TEST(TessellatorTest, TriangleEdgesProduceBitExactlyEqualCoordinateSets) {
+  // Roadmap L335 regression test, triangle-domain analog of
+  // `QuadOppositeEdgesProduceBitExactlyEqualCoordinateSets` above. Each
+  // of `appendTriangleBoundaryRing`'s 3 edges computes one of its two
+  // non-zero barycentric components as a direct `K / N` and the other as
+  // the complementary `1 - K / N`; with a uniform, non-power-of-two
+  // segment count (3) across all 3 edges, every barycentric component of
+  // every boundary point must be bit-for-bit exactly one of the 4
+  // canonical values `{0, 1 / 3, 2 / 3, 1}` -- not merely "close to" one
+  // of them, matching the Vulkan CTS's own exact-equality comparison in
+  // `invariance.outer_edge_index_independence`/`common_edge`.
+  TessFactors Factors;
+  Factors.Inside = {3.0f, 0.0f};
+  Factors.Edges = {3.0f, 3.0f, 3.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+
+  const float Third = 1.0f / 3.0f;
+  const float TwoThirds = 2.0f / 3.0f;
+  const std::set<float> Canonical = {0.0f, Third, TwoThirds, 1.0f};
+  // Only the outer boundary ring's points are checked here: the interior
+  // concentric ring's own points (inset towards the centroid by a
+  // homothety, see `appendTriangleRingBoundary`) are expected to land on
+  // different, non-canonical values and aren't what this regression
+  // guards. Every outer boundary point has exactly one barycentric
+  // component exactly `0.0f` (its edge's own "zero selector").
+  size_t NumBoundaryPoints = 0;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U != 0.0f && P.V != 0.0f && P.W != 0.0f)
+      continue;
+    ++NumBoundaryPoints;
+    EXPECT_EQ(Canonical.count(P.U), 1u) << "U=" << P.U;
+    EXPECT_EQ(Canonical.count(P.V), 1u) << "V=" << P.V;
+    EXPECT_EQ(Canonical.count(P.W), 1u) << "W=" << P.W;
+  }
+  EXPECT_GT(NumBoundaryPoints, 0u);
 }
 
 TEST(TessellatorTest, QuadPointModeGeneratesNoIndices) {
