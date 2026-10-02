@@ -604,6 +604,8 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
   if (::getenv("FEME_DUMP_IR_PRECANON"))
     AsLLVMIR->getLLVMModule().print(llvm::errs(), nullptr);
   feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
+  if (::getenv("FEME_DUMP_IR_POSTCANON"))
+    AsLLVMIR->getLLVMModule().print(llvm::errs(), nullptr);
 
   if (OutState || OutGeometryState || OutMeshState) {
     llvm::Function *Entry = AsLLVMIR->getLLVMModule().getFunction(EntryPoint);
