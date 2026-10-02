@@ -7288,5 +7288,256 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(OutDataCount, 1u);
 }
 
+/// Evaluates \p V (a pure integer arithmetic DAG of `add`/`mul`/`udiv`/
+/// `zext`/`ConstantInt` built from `combineDynamicRowTerms`/
+/// `unscaleDynamicRowForValueTy`) with \p Arg substituted for \p ArgVal --
+/// used below to confirm a self-indexed dynamic array store's own
+/// materialized `Row` stays within its element's real `RowCount` for
+/// every invocation index, not just structurally "uses `Arg`" the way
+/// `usesArgTransitively` above only checks.
+static uint64_t evalConstIntExpr(Value *V, Argument *Arg, uint64_t ArgVal) {
+  if (V == Arg)
+    return ArgVal;
+  if (auto *CI = dyn_cast<ConstantInt>(V))
+    return CI->getZExtValue();
+  auto *I = cast<Instruction>(V);
+  switch (I->getOpcode()) {
+  case Instruction::ZExt:
+  case Instruction::Trunc:
+    return evalConstIntExpr(I->getOperand(0), Arg, ArgVal);
+  case Instruction::Add:
+    return evalConstIntExpr(I->getOperand(0), Arg, ArgVal) +
+          evalConstIntExpr(I->getOperand(1), Arg, ArgVal);
+  case Instruction::Mul:
+    return evalConstIntExpr(I->getOperand(0), Arg, ArgVal) *
+          evalConstIntExpr(I->getOperand(1), Arg, ArgVal);
+  case Instruction::UDiv:
+    return evalConstIntExpr(I->getOperand(0), Arg, ArgVal) /
+          evalConstIntExpr(I->getOperand(1), Arg, ArgVal);
+  default:
+    ADD_FAILURE() << "unexpected opcode in Row expression: "
+                  << I->getOpcodeName();
+    return 0;
+  }
+}
+
+/// (Roadmap L345) The real shape `dEQP-VK.tessellation.shader_input_
+/// output.cross_invocation_per_patch_mat4x3`'s own tessellation-control
+/// shader store takes: a `patch`-frequency array whose element type is
+/// itself still an array/matrix (`in_te_data0[gl_InvocationID] =
+/// someMat4x3`, i.e. `[3 x [4 x <3 x float>]]` self-indexed by just one
+/// dynamic index, storing the *whole* inner `[4 x <3 x float>]` value in
+/// one store). Before this fix, `collectDynamicRowTerms`'s own `It == End`
+/// base case folded the remaining `[4 x <3 x float>]` type's own
+/// `RowCount` (4) into the dynamic index's multiplier (`Row = inv * 4`),
+/// and `storeStageIOValue`'s own recursion through that same remaining
+/// type then multiplied by that same `RowCount` *again* while decomposing
+/// its own 4 matrix columns, double-scaling the materialized `Row` to
+/// `inv * 16` -- overrunning the element's real storage (`RowCount ==
+/// 12`, `3 invocations * 4 columns`) for every `inv > 0`. Fixed by
+/// `unscaleDynamicRowForValueTy`, which divides the combined `Row` back
+/// down by the stored value's own `RowCount` before it reaches
+/// `storeStageIOValue`.
+TEST(CanonicalizeStageTest,
+     DoesNotDoubleScaleDynamicRowForSelfIndexedMatrixArrayStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_te_data0 = external addrspace(8) global [3 x [4 x <3 x float>]], !spirv.Decorations !0
+
+    define void @main(i32 %inv, [4 x <3 x float>] %v) #0 {
+      %p = getelementptr inbounds [3 x [4 x <3 x float>]], ptr addrspace(8) @in_te_data0, i32 0, i32 %inv
+      store [4 x <3 x float>] %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1, !2}
+    !1 = !{i32 35, i32 32}
+    !2 = !{i32 15}
+  )");
+  // (Roadmap L345) `!2`'s `Patch` decoration (code 15) is essential here,
+  // not incidental: without it, `addElements`' own `PerInvocationOutputArray`
+  // peel (a *different*, unrelated code path -- see its own comment) fires
+  // for this plain `Hull`/`AddrSpace == 8` global instead, sidestepping
+  // `getDynamicRowIndexedAccess`/`collectDynamicRowTerms` entirely. Real
+  // `in_te_data0`/`in_te_data1` globals are always genuinely `patch
+  // out`-qualified (hence always `Patch`-decorated in real SPIR-V), so this
+  // matches the actual bug's own shape precisely.
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  // This entry point has no barrier at all and writes only a
+  // `Patch`-frequency output, so `classifyTessControlOutputs`'s own
+  // auto-classification (roadmap H9c) treats its whole body as the
+  // patch-constant phase, moving it into a separate `main.patchconstant`
+  // function (leaving `main` itself an empty passthrough) -- query that
+  // split function's own signature/body, not `main`'s.
+  Function *F = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(F);
+  Argument *IArg = F->getArg(0);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 12u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 3u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    Value *Row = CI->getArgOperand(1);
+    EXPECT_FALSE(isa<Constant>(Row));
+    // For every real invocation index (0, 1, 2), the materialized `Row`
+    // must stay within `RowCount` (12) -- `inv * 16` (the pre-fix bug)
+    // would read `32` for `inv == 2`, well out of bounds.
+    for (uint64_t Inv = 0; Inv != 3; ++Inv) {
+      uint64_t RowVal = evalConstIntExpr(Row, IArg, Inv);
+      EXPECT_LT(RowVal, Sig->Elements[0].RowCount)
+          << "inv=" << Inv << " row-expr=" << *Row;
+    }
+  }
+  // 4 matrix columns, each fully scalar-decomposed into its own 3
+  // components (one `OutputStore` call per scalar).
+  EXPECT_EQ(SeenStores, 12u);
+}
+
+/// (Roadmap L345) The real shape `dEQP-VK.tessellation.shader_input_
+/// output.cross_invocation_per_patch_mat4x3`'s own TCS local `d` (`d =
+/// mat4x3(...); in_te_data0[gl_InvocationID] = d; barrier(); ... = d +
+/// in_te_data0[...]`) takes once optimized: a plain, matrix-typed SSA
+/// value computed before the one group-sync barrier, read back again
+/// after it, with no further array indexing of its own at the capture
+/// site -- forcing `canonicalizeSPIRVHullStage`'s "capture the value
+/// through a synthetic global" mechanism (`patchconst.capture.N`) to
+/// thread it across the control-point/patch-constant split. Before this
+/// fix, `addElements`' own `PerInvocationOutputArray` peel (meant for a
+/// genuine per-control-point output array like `gl_out[].gl_Position`)
+/// wrongly also fired for this synthetic capture global -- it is
+/// `Hull`/`AddrSpace == 8`/un-`Patch`-decorated, exactly like a real
+/// per-invocation array, purely by coincidence of its own matrix type
+/// *structurally* looking like one -- peeling its outer (matrix-column)
+/// array dimension away entirely and collapsing its `RowCount` from the
+/// correct `4` down to `1`. That undersized `buildStageStorage`'s
+/// allocation for it, and JIT-emitted stores for columns 1-3 overran the
+/// allocated block (observed as glibc heap corruption for this exact CTS
+/// case).
+TEST(CanonicalizeStageTest,
+     DoesNotPeelArrayDimensionFromACapturedMatrixValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @patch_out = external addrspace(8) global [4 x <3 x float>], !spirv.Decorations !0
+
+    define void @main([4 x <3 x float>] %mat) #0 {
+      %d = freeze [4 x <3 x float>] %mat
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      store [4 x <3 x float>] %d, ptr addrspace(8) @patch_out
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1, !2}
+    !1 = !{i32 35, i32 0}
+    !2 = !{i32 15}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  // The control-point phase (`main`) now carries the synthetic capture
+  // global's own `Output` write -- its `RowCount`/`ComponentCount` must
+  // match the captured value's real matrix shape (one row per column, 3
+  // components per row), not the degenerate `RowCount == 1` the
+  // `PerInvocationOutputArray` peel wrongly produced before this fix.
+  Function *ControlPoint = M->getFunction("main");
+  ASSERT_TRUE(ControlPoint);
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  ASSERT_EQ(CPSig->Elements.size(), 1u);
+  EXPECT_EQ(CPSig->Elements[0].RowCount, 4u);
+  EXPECT_EQ(CPSig->Elements[0].ComponentCount, 3u);
+
+  // The patch-constant phase reads the same capture global back (its own
+  // `Input` element) with the identical shape, plus the real `patch_out`
+  // write.
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(PatchConstant);
+  std::optional<EntrySignature> PCSig =
+      dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 2u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::Input);
+  EXPECT_EQ(PCSig->Elements[0].RowCount, 4u);
+  EXPECT_EQ(PCSig->Elements[0].ComponentCount, 3u);
+}
+
+/// (Roadmap L345) `SPIRVToLLVMPatterns.cpp` may substitute a matrix
+/// column/array-of-vectors element's own type with a "tight vector
+/// marker" struct (`getTightVectorMarkerInnerType`) whenever a tightly-
+/// packed `array<M x Scalar>` is needed in place of the ordinarily-
+/// aligned `vector<M x Scalar>` to reproduce its real declared offset.
+/// Before this fix, a store/load of a *whole* marker-typed value (e.g. a
+/// `mat4x3[4]` array's own per-row column, read/written in one piece
+/// rather than component-by-component) fell through
+/// `storeStageIOValue`/`loadStageIOValue`'s generic single-member-struct
+/// peel into the plain `ArrayType` branch, decomposing the marker's own
+/// inner `[3 x float]` one *row* at a time (`Row = Row * 3 + R`) instead
+/// of one *component* at a time -- mismatching `getStageIORowShape`'s own
+/// `ComponentCount == 3, RowCount == 4` split for this same element, and
+/// addressing `Row` values well outside its real `RowCount`.
+TEST(CanonicalizeStageTest,
+     DecomposesTightVectorMarkerStoreByComponentNotByRow) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %"feme.tight_vector.3xfloat" = type { [3 x float] }
+    @mat_arr = external addrspace(8) global [4 x %"feme.tight_vector.3xfloat"], !spirv.Decorations !0
+
+    define void @main(%"feme.tight_vector.3xfloat" %v) #0 {
+      %p = getelementptr inbounds [4 x %"feme.tight_vector.3xfloat"], ptr addrspace(8) @mat_arr, i32 0, i32 2
+      store %"feme.tight_vector.3xfloat" %v, ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 35, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 4u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 3u);
+
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // Every one of the marker's 3 components lands at the *same* row
+    // (2, the constant array index), each with its own distinct
+    // `Component` (0, 1, 2) -- never `Row == 2 * 3 + Component` (6, 7, 8),
+    // the pre-fix "one row per inner array element" misclassification.
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(), 2u);
+  }
+  EXPECT_EQ(SeenStores, 3u);
+
+  DenseSet<uint64_t> SeenComponents;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    SeenComponents.insert(cast<ConstantInt>(CI->getArgOperand(2))->getZExtValue());
+  }
+  EXPECT_EQ(SeenComponents.size(), 3u);
+  for (uint64_t C = 0; C != 3; ++C)
+    EXPECT_TRUE(SeenComponents.contains(C));
+}
+
 } // namespace
 
