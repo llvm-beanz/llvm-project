@@ -787,6 +787,16 @@ struct ScreenTriangle {
   /// depth clamp is disabled, since it's simply never consulted then.
   float DepthClampLo = 0.0f;
   float DepthClampHi = 1.0f;
+  /// (roadmap L331) `depthBiasEnable`'s constant/slope offset for this
+  /// triangle, applied *once* to the already bary-interpolated
+  /// per-fragment depth (not baked into `Depth[0..2]` before
+  /// interpolation) -- see the bias-application block's own comment in
+  /// the triangle-setup loop above for why: three independently-rounded
+  /// per-vertex additions followed by a bary-interpolated sum can
+  /// silently swallow a small bias that a single post-interpolation
+  /// addition reliably preserves. `0.0f` (a no-op addition) when depth
+  /// bias is disabled.
+  float DepthBiasOffset = 0.0f;
   std::array<const uint32_t *, 3> Varyings; // pointer into owning storage
   bool FrontFacing;
   uint32_t PrimitiveID;
@@ -3414,17 +3424,29 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             (Cull == CullMode::Back && !FrontFacing))
           continue;
 
-        // (roadmap H7d) `depthBiasEnable`: applies uniformly to a
+        // (roadmap H7d, L331) `depthBiasEnable`: applies uniformly to a
         // `PolygonMode::Fill`/`Line`/`Point` triangle alike (confirmed via
         // real CTS test data, `vktDrawDepthBiasTests.cpp`'s
-        // `depth_bias_triangle_list_{fill,line,point}` cases) -- mutating
-        // `Depth` here, before the `PolygonMode` branch below runs, means
-        // every one of those three paths inherits the biased depth for
-        // free. The bias is a single constant added uniformly to all
-        // three vertices, which commutes with linear interpolation, so
-        // this is mathematically equivalent to biasing the whole
-        // interpolated surface -- matching how a real GPU computes it
-        // once per polygon rather than per-fragment.
+        // `depth_bias_triangle_list_{fill,line,point}` cases). `Point`/
+        // `Line` (below) consume `Depth[K]` directly, with no further
+        // interpolation of their own beyond what `emitPointQuad`/
+        // `emitLineSegment` already do internally, so baking the bias
+        // into a *copy* of `Depth` for them is exact (a single float
+        // addition, no compounding rounding). `Fill`, in contrast,
+        // bary-interpolates `Tri.Depth[0..2]` per-fragment (see the quad
+        // loop below) -- baking the same bias into *that* array before
+        // interpolation would add it three times over (once per vertex)
+        // through three independently-rounded multiplications and a sum,
+        // which is only mathematically equivalent to "bias the whole
+        // interpolated surface once" in exact arithmetic, not float32: a
+        // real CTS failure (`dEQP-VK.rasterization.depth_bias.
+        // d24_unorm_constant_one_greater`) showed the compounded rounding
+        // silently swallowing a `depthBiasConstantFactor == 1.0` bias
+        // entirely for some fragments. Deferring `Fill`'s bias to a
+        // single post-interpolation addition (`ST.DepthBiasOffset`,
+        // applied once to the already-interpolated scalar depth) avoids
+        // that compounding and fixed the failure.
+        float FragmentBias = 0.0f;
         if (Pipeline.getRasterState().DepthBiasEnable) {
           const RasterState &Bias = Pipeline.getRasterState();
           // `maxSlope` reuses the same directed-edge-function shape as
@@ -3445,14 +3467,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           }
           float MaxZ = std::max({Depth[0], Depth[1], Depth[2]});
           float R = depthBiasR(Draw.DepthStencil.Depth.Format, MaxZ);
-          float FragmentBias = Bias.DepthBiasConstantFactor * R +
-                               Bias.DepthBiasSlopeFactor * MaxSlope;
+          FragmentBias = Bias.DepthBiasConstantFactor * R +
+                        Bias.DepthBiasSlopeFactor * MaxSlope;
           if (Bias.DepthBiasClamp > 0.0f)
             FragmentBias = std::min(FragmentBias, Bias.DepthBiasClamp);
           else if (Bias.DepthBiasClamp < 0.0f)
             FragmentBias = std::max(FragmentBias, Bias.DepthBiasClamp);
-          for (float &D : Depth)
-            D += FragmentBias;
         }
 
         // (roadmap H7c) `fillModeNonSolid`: a surviving (post-cull)
@@ -3467,14 +3487,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         PolygonMode Polygon = Pipeline.getRasterState().Polygon;
         if (Polygon == PolygonMode::Point) {
           for (unsigned K = 0; K != 3; ++K)
-            emitPointQuad(Screen[K], InvW[K], Depth[K], *Poly[K], *Primitive);
+            emitPointQuad(Screen[K], InvW[K], Depth[K] + FragmentBias,
+                         *Poly[K], *Primitive);
           continue;
         }
         if (Polygon == PolygonMode::Line) {
           for (unsigned K = 0; K != 3; ++K) {
             unsigned N = (K + 1) % 3;
-            emitLineSegment(Screen[K], InvW[K], Depth[K], *Poly[K], Screen[N],
-                            InvW[N], Depth[N], *Poly[N], *Primitive,
+            emitLineSegment(Screen[K], InvW[K], Depth[K] + FragmentBias,
+                            *Poly[K], Screen[N], InvW[N],
+                            Depth[N] + FragmentBias, *Poly[N], *Primitive,
                             /*ArcAccum=*/0.0f);
           }
           continue;
@@ -3500,6 +3522,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                    Primitive->Viewport->MaxDepth);
         ST.DepthClampHi = std::max(Primitive->Viewport->MinDepth,
                                    Primitive->Viewport->MaxDepth);
+        ST.DepthBiasOffset = FragmentBias;
         size_t Stride = Poly[0]->Varyings.size();
         for (unsigned K = 0; K != 3; ++K)
           ST.Varyings[K] = VaryingBits->data() + K * Stride;
@@ -3840,6 +3863,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                 ? Tri.Depth[0]
                                 : B0 * Tri.Depth[0] + B1 * Tri.Depth[1] +
                                       B2 * Tri.Depth[2];
+              // (roadmap L331) `depthBiasEnable`'s offset, applied once
+              // to this single already-interpolated scalar -- see
+              // `ScreenTriangle::DepthBiasOffset`'s own comment.
+              Depth += Tri.DepthBiasOffset;
               // (roadmap H7d) `depthClampEnable`'s single choke point:
               // clamps the *interpolated* per-fragment depth, not any
               // per-vertex value -- see `projectVertex`'s comment.

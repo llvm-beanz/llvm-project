@@ -551,6 +551,44 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap L331) The same oversized triangle, but with a depth that
+/// varies linearly across its surface (`0.3` at the `x = -1` corners,
+/// `0.5` at the `x = 3` corner) instead of a single flat value -- unlike
+/// `NearDepthVertexSource`'s uniform depth, this exercises
+/// `depthBiasEnable`'s per-fragment bary-interpolated depth path (not
+/// just a per-vertex one), matching `dEQP-VK.rasterization.depth_bias.
+/// d24_unorm_constant_one_{greater,less}`'s own sloped quad.
+constexpr llvm::StringLiteral SlopedDepthVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z03 = spirv.Constant 0.3 : f32
+    %z05 = spirv.Constant 0.5 : f32
+    %zb = spirv.Select %is1, %z05, %z03 : i1, f32
+    %z = spirv.Select %is0, %z03, %zb : i1, f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos
+}
+)mlir";
+
 /// The same oversized triangle, at a fixed depth of 0.8 (farther from the
 /// viewer under `CompareOp::Less`).
 constexpr llvm::StringLiteral FarDepthVertexSource = R"mlir(
@@ -4419,6 +4457,182 @@ TEST_F(DrawTest, DepthBiasShiftsOverlappingDepth) {
   vkDestroyImageView(Device, DepthView, nullptr);
   vkDestroyImage(Device, DepthImage, nullptr);
   vkFreeMemory(Device, DepthMemory, nullptr);
+}
+
+/// (roadmap L331) A minimal `depthBiasConstantFactor == 1.0` -- the
+/// smallest useful bias, exactly one "minimum resolvable difference"
+/// (`depthBiasR`) -- must still reliably separate a `D24_UNORM_S8_UINT`
+/// fixed-point depth's quantization grid, even on a sloped (not flat)
+/// surface: the base (red) draw writes the unbiased, sloped depth (`0.3`
+/// to `0.5` across x, `SlopedDepthVertexSource`); the second (green) draw,
+/// at the exact same geometry with `depthBiasConstantFactor = 1.0` and
+/// `CompareOp::Greater`, must pass everywhere the base draw covered,
+/// proving the bias survived both the bary-interpolation and the
+/// attachment's own round-trip quantization. Reproduces
+/// `dEQP-VK.rasterization.depth_bias.d24_unorm_constant_one_greater`'s own
+/// failure mode: biasing each vertex's depth *before* interpolating (so
+/// bary-interpolation independently re-rounds three already-biased
+/// values) could silently swallow this minimal bias for some fragments,
+/// even though the exact same bias survives perfectly well at any single
+/// vertex in isolation.
+TEST_F(DrawTest, MinimalDepthBiasSurvivesSlopedInterpolationOnFixedPointDepth) {
+  VkImage DepthStencilImage = VK_NULL_HANDLE;
+  VkImageView DepthStencilView = VK_NULL_HANDLE;
+  VkDeviceMemory DepthStencilMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_D24_UNORM_S8_UINT,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                     DepthStencilImage, DepthStencilView, DepthStencilMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_D24_UNORM_S8_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference DepthStencilRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &DepthStencilRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {ColorView, DepthStencilView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  auto makePipeline = [&](llvm::StringRef FragmentSource, bool BiasEnable,
+                          VkCompareOp Compare) {
+    VkShaderModule Vertex = createModule(SlopedDepthVertexSource);
+    VkShaderModule Fragment = createModule(FragmentSource);
+    VkPipelineShaderStageCreateInfo Stages[2]{};
+    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    Stages[0].module = Vertex;
+    Stages[0].pName = "main";
+    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[1].module = Fragment;
+    Stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo VertexInput{};
+    VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+    VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+    VkPipelineViewportStateCreateInfo ViewportState{};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    VkPipelineRasterizationStateCreateInfo Raster{};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    Raster.depthBiasEnable = BiasEnable;
+    // The smallest useful bias: exactly one `depthBiasR` unit, matching
+    // the CTS's own `d24_unorm_constant_one_{greater,less}` cases (hence
+    // this test's own name).
+    Raster.depthBiasConstantFactor = 1.0f;
+    VkPipelineMultisampleStateCreateInfo Multisample{};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+    DepthStencil.depthTestEnable = VK_TRUE;
+    DepthStencil.depthWriteEnable = VK_TRUE;
+    DepthStencil.depthCompareOp = Compare;
+    VkPipelineColorBlendAttachmentState BlendAttachment{};
+    BlendAttachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo Blend{};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = 2;
+    Info.pStages = Stages;
+    Info.pVertexInputState = &VertexInput;
+    Info.pInputAssemblyState = &InputAssembly;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pDepthStencilState = &DepthStencil;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = LocalPass;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                        nullptr, &Pipe),
+              VK_SUCCESS);
+    vkDestroyShaderModule(Device, Fragment, nullptr);
+    vkDestroyShaderModule(Device, Vertex, nullptr);
+    return Pipe;
+  };
+  VkPipeline Base =
+      makePipeline(RedFragmentSource, /*BiasEnable=*/false,
+                  VK_COMPARE_OP_LESS);
+  VkPipeline Biased = makePipeline(GreenFragmentSource, /*BiasEnable=*/true,
+                                   VK_COMPARE_OP_GREATER);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].depthStencil = {1.0f, 0};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  // The base (red) draw writes the unbiased, sloped depth first; the
+  // biased (green) draw re-tests the identical sloped geometry with a
+  // minimal `+1 depthBiasR` bias and `CompareOp::Greater` -- it must pass
+  // (and overwrite with green) everywhere, since the bias should strictly
+  // separate every fragment's depth from what was just stored.
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Base);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Biased);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Biased, nullptr);
+  vkDestroyPipeline(Device, Base, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, DepthStencilView, nullptr);
+  vkDestroyImage(Device, DepthStencilImage, nullptr);
+  vkFreeMemory(Device, DepthStencilMemory, nullptr);
 }
 
 /// (roadmap H7d) `DepthState::BoundsTestEnable`: the depth bounds test
