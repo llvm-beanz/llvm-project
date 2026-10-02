@@ -31,6 +31,7 @@ struct StageOpInfo {
 constexpr StageOpInfo StageOpTable[] = {
     {StageOpKind::InputLoad, "feme.stage.input.load", true},
     {StageOpKind::OutputStore, "feme.stage.output.store", true},
+    {StageOpKind::OutputLoad, "feme.stage.output.load", true},
     {StageOpKind::Discard, "feme.stage.discard", false},
     {StageOpKind::Demote, "feme.stage.demote", false},
     {StageOpKind::IsHelper, "feme.stage.is_helper", false},
@@ -196,6 +197,16 @@ CallInst *feme::createStageOutputStore(IRBuilderBase &B, uint32_t ElementID,
   Value *Element = ConstantInt::get(I32, ElementID);
   return createCall(B, StageOpKind::OutputStore, B.getVoidTy(),
                     {Element, Row, Component, Val, Vertex});
+}
+
+CallInst *feme::createStageOutputLoad(IRBuilderBase &B, Type *ResultTy,
+                                      uint32_t ElementID, Value *Row,
+                                      Value *Component, Value *Vertex,
+                                      const Twine &Name) {
+  Type *I32 = B.getInt32Ty();
+  Value *Element = ConstantInt::get(I32, ElementID);
+  return createCall(B, StageOpKind::OutputLoad, ResultTy,
+                    {Element, Row, Component, Vertex}, Name);
 }
 
 CallInst *feme::createStageDiscard(IRBuilderBase &B, Value *Condition) {

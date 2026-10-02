@@ -68,6 +68,22 @@ enum class StageOpKind : uint8_t {
   /// `feme.stage.output.store(element, row, component, value, vertex)`:
   /// writes one scalar component of a signature output element.
   OutputStore,
+  /// `feme.stage.output.load(element, row, component, vertex) -> value`
+  /// (roadmap L347): reads back this invocation's own already-written
+  /// value of a signature *output* element -- the load-side counterpart
+  /// of `OutputStore` just above, needed only by
+  /// `CanonicalizeStage.cpp`'s own `ShadowValueMap` seeding for a hull
+  /// entry's patch-constant phase (see that file's own comment on why a
+  /// genuine self-indexed `gl_out[gl_InvocationID]`-style read-after-
+  /// barrier-write of a per-vertex output has no same-function dominating
+  /// store to recover an SSA value from, unlike every other shape
+  /// `ShadowValueMap` already handles). Unlike `InputLoad`, \c vertex is
+  /// always a constant `0` at every call site this op is ever emitted
+  /// from -- `PatchConstantWrapper.cpp`'s own `lowerPatchConstantOutputLoad`
+  /// always addresses this lane's own flat invocation index instead,
+  /// exactly like `lowerPatchConstantInputLoad`'s `CapturedSelfIndex`
+  /// case.
+  OutputLoad,
   /// `feme.stage.discard(condition)`: kills the invocation when
   /// \c condition is true, clearing both its live and side-effect masks.
   Discard,
@@ -285,6 +301,16 @@ llvm::CallInst *createStageOutputStore(llvm::IRBuilderBase &B,
                                        uint32_t ElementID, llvm::Value *Row,
                                        llvm::Value *Component, llvm::Value *Val,
                                        llvm::Value *Vertex);
+
+/// `feme.stage.output.load(element, row, component, vertex) -> value`
+/// (roadmap L347): see `StageOpKind::OutputLoad`'s own comment. \p Vertex
+/// is conventionally a constant `0` at every call site -- see that
+/// comment for why.
+llvm::CallInst *createStageOutputLoad(llvm::IRBuilderBase &B,
+                                      llvm::Type *ResultTy, uint32_t ElementID,
+                                      llvm::Value *Row, llvm::Value *Component,
+                                      llvm::Value *Vertex,
+                                      const llvm::Twine &Name = "");
 
 llvm::CallInst *createStageDiscard(llvm::IRBuilderBase &B,
                                    llvm::Value *Condition);

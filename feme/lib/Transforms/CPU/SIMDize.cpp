@@ -2467,6 +2467,7 @@ void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
   SmallVector<Type *, 8> WideArgTys;
   bool FirstOperandIsElementID =
       Kind == feme::StageOpKind::InputLoad ||
+      Kind == feme::StageOpKind::OutputLoad ||
       Kind == feme::StageOpKind::InterpolateAtCentroid ||
       Kind == feme::StageOpKind::InterpolateAtSample ||
       Kind == feme::StageOpKind::InterpolateAtOffset;
@@ -4997,6 +4998,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     if (isStageOpCall(*CI, &StageKind)) {
       switch (StageKind) {
       case feme::StageOpKind::InputLoad:
+      case feme::StageOpKind::OutputLoad:
       case feme::StageOpKind::IsHelper:
       case feme::StageOpKind::DerivativeXFine:
       case feme::StageOpKind::DerivativeYFine:

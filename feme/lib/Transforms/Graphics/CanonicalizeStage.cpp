@@ -1205,7 +1205,34 @@ void storeTaskPayloadValue(IRBuilderBase &B, Value *Val, Type *Ty,
 /// registers).
 class ShadowValueMap {
 public:
-  ShadowValueMap(Function &F, const EntrySignature &Sig) : F(F), Sig(Sig) {}
+  /// \p SeedFromOutputLoad (roadmap L347): true only for a hull entry's
+  /// patch-constant-phase function. That phase's own `Output`-direction
+  /// elements are, structurally, always written later in *this* function
+  /// too (`classifySPIRVElement` only ever returns `Output` here when
+  /// `HasStoreInPhase` is set) -- but a genuine self-indexed read of the
+  /// *same* element before that write (e.g. GLSL's `gl_out[gl_
+  /// InvocationID].gl_Position.xy = ... + gl_out[gl_InvocationID].gl_
+  /// Position.xy`) has no dominating store within this function's own
+  /// clone to recover an SSA value from: `splitTessellationControlEntry`
+  /// left the real pre-barrier write behind in the *other* (control-
+  /// point) phase's clone. Left unseeded, `PromoteMemToReg` correctly (by
+  /// plain SSA rules) synthesizes `undef` for that read, which is the
+  /// exact poison/NaN root cause this flag fixes: seed every such scalar
+  /// shadow alloca, once, right after it is first created, with this
+  /// invocation's own already-committed value (`feme.stage.output.load`,
+  /// reading back the same per-vertex storage the sibling `feme.stage.
+  /// output.store` writes -- see `PatchConstantWrapper.cpp`'s own
+  /// `lowerPatchConstantOutputLoad`). Unconditional and safe even when no
+  /// real self-read exists for a given element: the later store this
+  /// phase is guaranteed to perform just overwrites the seed, which
+  /// `PromoteMemToReg` then folds away as a dead store with no surviving
+  /// use, exactly as if it had never been seeded. Only the *scalar*
+  /// (`ScalarAllocas`) path is seeded; the non-promotable
+  /// `DynamicAllocas` fallback below is not (see this class's own
+  /// `getOrCreate` comment on that gap).
+  ShadowValueMap(Function &F, const EntrySignature &Sig,
+                bool SeedFromOutputLoad = false)
+      : F(F), Sig(Sig), SeedFromOutputLoad(SeedFromOutputLoad) {}
 
   Value *getOrCreate(uint32_t ElementID, Value *Row, Value *Component, Type *Ty,
                      IRBuilderBase &B) {
@@ -1219,6 +1246,14 @@ public:
                                  F.getEntryBlock().getFirstInsertionPt());
         Slot =
             EntryBuilder.CreateAlloca(Ty, nullptr, "feme.stage.output.shadow");
+        if (SeedFromOutputLoad &&
+            ElementID < Sig.Elements.size() &&
+            Sig.Elements[ElementID].Direction == SignatureDirection::Output) {
+          Value *Seed = createStageOutputLoad(
+              EntryBuilder, Ty, ElementID, RowC, ComponentC,
+              EntryBuilder.getInt32(0), "feme.stage.output.shadow.seed");
+          EntryBuilder.CreateStore(Seed, Slot);
+        }
       }
       return Slot;
     }
@@ -1274,6 +1309,7 @@ private:
   using Key = std::tuple<uint32_t, uint64_t, uint64_t>;
   Function &F;
   const EntrySignature &Sig;
+  bool SeedFromOutputLoad;
   DenseMap<Key, AllocaInst *> ScalarAllocas;
   DenseMap<uint32_t, AllocaInst *> DynamicAllocas;
 };
@@ -6155,7 +6191,10 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // alloca that lives in a wholly different function, invalid IR
   // `verifyModule` would reject outright.
   for (Function *Fn : Functions) {
-    ShadowValueMap ShadowValues(*Fn, Sig);
+    ShadowValueMap ShadowValues(
+        *Fn, Sig,
+        /*SeedFromOutputLoad=*/Stage == ShaderStage::Hull &&
+            Phase == SPIRVCanonicalPhase::HullPatchConstant);
 
     // `AtomicCmpXchgInst`'s own `{ old, i1 }` result is only ever consumed
     // through `ExtractValueInst` users, which necessarily sit *later* in

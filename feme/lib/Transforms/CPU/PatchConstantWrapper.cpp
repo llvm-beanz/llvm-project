@@ -484,6 +484,46 @@ void lowerPatchConstantOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
+/// (Roadmap L347) The load-side counterpart of `lowerPatchConstantOutputStore`
+/// just above, for `StageOpKind::OutputLoad`'s own self-read-back shape: a
+/// genuine per-vertex `Output`-direction element's own already-written
+/// value, read back by this same invocation within the same patch-constant
+/// phase (e.g. GLSL's `gl_out[gl_InvocationID].gl_Position.xy = ... +
+/// gl_out[gl_InvocationID].gl_Position.xy`, see `CanonicalizeStage.cpp`'s
+/// own `ShadowValueMap` seeding comment). Unlike `lowerPatchConstantInput
+/// Load`, \p CI's own `vertex` operand (always a constant `0`, per
+/// `createStageOutputLoad`'s own comment) is never used for addressing --
+/// every lane reads back its *own* flat invocation index's value, the
+/// same `PerVertexOutputs`/`PerVertexOutputLayout` storage
+/// `lowerPatchConstantOutputStore`'s own `PerVertex` case writes.
+Value *lowerPatchConstantOutputLoad(CallInst &CI, const SignatureElement &Elt,
+                                    const WaveBodyEnv &WEnv,
+                                    const PatchConstantStageEnv &PEnv) {
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
+    Value *InvocationIndex =
+        getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+    Value *Addr = computeStageStorageAddress(
+        Builder, PEnv.PerVertexOutputLayout, PEnv.PerVertexOutputs,
+        Elt.ElementID, Elt, Row, Component, InvocationIndex);
+    Value *LaneResult =
+        Builder.CreateLoad(stageStorageLoadType(ScalarTy), Addr);
+    LaneResult = narrowStageStorageLoad(Builder, LaneResult, ScalarTy);
+    LaneResult = Builder.CreateSelect(Active, LaneResult,
+                                      Constant::getNullValue(ScalarTy));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 bool lowerPatchConstantStageOps(Function &F) {
   // A single invocation has no sibling to synchronize with; see this file's
   // comment for why a group-sync barrier here is diagnosed rather than
@@ -635,6 +675,26 @@ bool lowerPatchConstantStageOps(Function &F) {
         return false;
       }
       lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv, PerVertex);
+      CI->eraseFromParent();
+      break;
+    }
+    case StageOpKind::OutputLoad: {
+      // (Roadmap L347) Always the genuine per-vertex `Output`-direction
+      // element -- `OutputLoad` is only ever emitted by
+      // `CanonicalizeStage.cpp`'s own `ShadowValueMap` seeding for exactly
+      // that shape (see `StageOpKind::OutputLoad`'s own comment), never
+      // for a `PatchOutput`-direction (tess-factor/patch-constant) one.
+      const SignatureElement *Elt =
+          findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                      SignatureDirection::Output);
+      if (!Elt) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-patch-constant: output load refers to an "
+                "unknown patch-output signature element");
+        return false;
+      }
+      Value *Lowered = lowerPatchConstantOutputLoad(*CI, *Elt, *WEnv, *PEnv);
+      CI->replaceAllUsesWith(Lowered);
       CI->eraseFromParent();
       break;
     }

@@ -108,6 +108,7 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
     if (Callee && feme::isStageOpCall(*CI, &Kind)) {
       switch (Kind) {
       case StageOpKind::InputLoad:
+      case StageOpKind::OutputLoad:
       case StageOpKind::IsHelper:
       case StageOpKind::DerivativeXFine:
       case StageOpKind::DerivativeYFine:

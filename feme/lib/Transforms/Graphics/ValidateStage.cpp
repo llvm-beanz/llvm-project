@@ -45,6 +45,12 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
     // `ValidateStagePass::run` below validates `ShaderStage::Mesh` too.
     return Stage == ShaderStage::Vertex || Stage == ShaderStage::Fragment ||
            Stage == ShaderStage::Mesh;
+  case StageOpKind::OutputLoad:
+    // (Roadmap L347) Not yet reachable: `ValidateStagePass` does not
+    // validate the hull stage yet (the only stage `CanonicalizeStage.cpp`
+    // ever emits this op for), mirroring `TaskPayloadStore`'s own
+    // identical "not yet reachable" note below.
+    return Stage == ShaderStage::Hull;
   case StageOpKind::Discard:
   case StageOpKind::Demote:
   case StageOpKind::IsHelper:
@@ -286,6 +292,22 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
     validateRow(CI, /*RowOperand=*/1, *Elt, OpName);
     validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
     validateVertex(CI, /*VertexOperand=*/4, Stage, OpName);
+    break;
+  }
+  case StageOpKind::OutputLoad: {
+    // (Roadmap L347) Same operand layout as `InputLoad` above (element,
+    // row, component, vertex), but against the `Output`-direction
+    // signature instead -- not yet reachable (see
+    // `isStageOpLegalForStage`'s own comment on this kind), kept for
+    // switch exhaustiveness and in case hull validation is wired up here
+    // later.
+    const SignatureElement *Elt = validateElement(
+        CI, /*ElementOperand=*/0, Sig, SignatureDirection::Output, OpName);
+    if (!Elt)
+      return;
+    validateRow(CI, /*RowOperand=*/1, *Elt, OpName);
+    validateComponent(CI, /*ComponentOperand=*/2, *Elt, OpName);
+    validateVertex(CI, /*VertexOperand=*/3, Stage, OpName);
     break;
   }
   case StageOpKind::Discard:
