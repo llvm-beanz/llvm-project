@@ -3130,6 +3130,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         int32_t Err = StepDx + StepDy;
         int32_t X = X0, Y = Y0;
         for (;;) {
+          // (roadmap L324) The spec's diamond-exit rule is explicitly
+          // "half-open": the final fragment (corresponding to `p1`) is
+          // never drawn, precisely so a connected strip's shared
+          // endpoints are produced once rather than twice. Check that
+          // *before* emitting the walked pixel below -- not just as the
+          // loop's own exit condition after emitting it -- except when
+          // the whole segment degenerates to a single pixel (`X0==X1 &&
+          // Y0==Y1`), where that one pixel is `p0` as much as `p1` and
+          // must still be drawn.
+          bool AtEnd = X == X1 && Y == Y1;
+          if (AtEnd && !(X0 == X1 && Y0 == Y1))
+            break;
           std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
           float T = ((Center[0] - P0a[0]) * Dx + (Center[1] - P0a[1]) * Dy) /
                     (Len * Len);
@@ -3156,7 +3168,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             pushQuadTriangle(TL, TR, BR, Primitive, /*IsLine=*/true);
             pushQuadTriangle(TL, BR, BL, Primitive, /*IsLine=*/true);
           }
-          if (X == X1 && Y == Y1)
+          if (AtEnd)
             break;
           int32_t E2 = 2 * Err;
           if (E2 >= StepDy) {

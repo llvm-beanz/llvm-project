@@ -2505,6 +2505,10 @@ TEST(ExecutorTest, RendersAWideRectangularLine) {
 // roadmap F5: `LineRasterizationMode::Bresenham` walks the integer pixel
 // grid directly rather than expanding a width-dependent quad, so a
 // perfectly diagonal line lights exactly the diagonal pixels.
+//
+// roadmap L324: the spec's diamond-exit rule is "half-open" -- the final
+// fragment (`p1`'s own pixel) is never drawn, so only 3 of the 4 diagonal
+// pixels are lit here, not all 4.
 TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
   Context Ctx;
   RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
@@ -2527,11 +2531,67 @@ TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
   auto texel = [&](uint32_t X, uint32_t Y) {
     return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
   };
-  for (uint32_t D = 0; D != 4; ++D)
+  for (uint32_t D = 0; D != 3; ++D)
     EXPECT_EQ(texel(D, 3 - D)[3], 255) << "d=" << D;
+  // `p1`'s own pixel (3, 0) is the segment's final fragment, so the
+  // half-open rule excludes it.
+  EXPECT_EQ(texel(3, 0)[3], 0);
   // A pixel off the diagonal is untouched.
   EXPECT_EQ(texel(0, 0)[3], 0);
   EXPECT_EQ(texel(3, 3)[3], 0);
+}
+
+// roadmap L324: the spec's diamond-exit rule's "half-open" segment --
+// excluding the final fragment -- exists precisely so a connected strip's
+// shared vertex is produced once, not twice. `v1` below is both segment
+// 0's own final pixel and segment 1's own first pixel; additive blending
+// (rather than plain coverage) distinguishes "drawn once" from "drawn
+// twice" at that one shared pixel, since a coverage-only check can't tell
+// the two apart.
+TEST(ExecutorTest, BresenhamLineStripDoesNotDoubleDrawASharedVertex) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineMode = LineRasterizationMode::Bresenham;
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::One;
+  Blend.DstColorFactor = BlendFactor::One;
+  Blend.ColorOp = BlendOp::Add;
+  Blend.SrcAlphaFactor = BlendFactor::One;
+  Blend.DstAlphaFactor = BlendFactor::One;
+  Blend.AlphaOp = BlendOp::Add;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, Raster, PrimitiveTopology::LineStrip, DepthState{}, StencilState{},
+      Blend);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Same diagonal pixel path (0,3)->(1,2)->(2,1)->(3,0) as
+  // `RendersABresenhamDiagonalLine`, split into two strip segments at
+  // pixel (2, 1)'s own NDC center so that pixel is `v1` -- segment 0's
+  // final pixel and segment 1's first pixel.
+  Scene.VertexData = {
+      -0.75f, 0.75f,  0.0f, 0.4f, 0.0f, 0.0f, 1.0f,
+      0.25f,  -0.25f, 0.0f, 0.4f, 0.0f, 0.0f, 1.0f,
+      0.75f,  -0.75f, 0.0f, 0.4f, 0.0f, 0.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Every non-shared diagonal pixel got one 0.4-red fragment.
+  EXPECT_EQ(texel(0, 3)[0], 102) << "v0's own pixel";
+  EXPECT_EQ(texel(1, 2)[0], 102) << "segment 0's own interior pixel";
+  // The shared vertex's own pixel must also read exactly one 0.4-red
+  // fragment, not two (204) -- the bug this test guards against.
+  EXPECT_EQ(texel(2, 1)[0], 102) << "the shared vertex's own pixel";
+  // `v2`'s own pixel is segment 1's own final fragment, so the half-open
+  // rule excludes it too, exactly as `RendersABresenhamDiagonalLine`'s
+  // own single-segment `p1` is excluded.
+  EXPECT_EQ(texel(3, 0)[0], 0) << "v2's own pixel (segment 1's final one)";
 }
 
 // roadmap L312: a `Bresenham` line with `LineWidth > 1` offsets its 1-
