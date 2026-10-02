@@ -11460,3 +11460,85 @@ surface.
   `feme` still at `d0974dd`, `llvm-beanz/feme` still at `854cc3f` --
   unchanged from last session's confirmed-benign rebase-only
   divergence. No action taken or needed.
+
+## L339: fixed -- TCS per-vertex patch-constant output architecture, plus a dangling-pointer segfault it exposed (5 of 13 cases)
+
+Implemented the per-vertex-output extension to the patch-constant
+phase's architecture that `L339`'s own prior triage scoped: the
+patch-constant phase (the post-`barrier()` half of a split
+tessellation-control entry point) can now genuinely write a
+per-control-point (`Output`-direction, not `PatchOutput`-direction)
+value, re-invoking the compiled body once per output control point
+(mirroring `HullWrapper.cpp`'s own wave loop) whenever the signature
+declares such an element, instead of the previous always-single-
+invocation call.
+
+Landing this surfaced and required fixing two bugs:
+
+1. **Double classification.** `canonicalizeSPIRVStage`'s `addElement`
+   lambda calls `classifySPIRVElement` a second time, independently of
+   the coarse discovery loop that first decides `Input` vs.
+   `Output`/`PatchOutput` -- this second call was silently passing the
+   default `HasStoreInPhase=false`, overriding the correct
+   discovery-time classification with `Input` for every genuine
+   per-vertex output and masking the whole feature.
+
+2. **A real dangling-pointer/use-after-free segfault**, root-caused via
+   `gdb -batch -ex run -ex "x/10i $pc" -ex "info registers"` (a
+   disassembly-level crash dump, since this build has no debug symbols
+   for JIT-generated code) plus `FEME_DUMP_IR_PRENORM=1`/`FEME_DUMP_IR=1`
+   IR dumps at two different pipeline stages: a shader-source-level
+   local variable written before a `barrier()` and read back after it
+   (e.g. the CTS shaders' own `T d = T(gl_InvocationID); ...;
+   barrier(); ... = d + ...;`) compiles to an `alloca` with *mixed*
+   users straddling the barrier -- neither of the two existing
+   cross-barrier capture paths (ordinary-SSA-value-by-copy, or
+   all-in-Region-alloca-clone-fresh) applies to this shape, so it fell
+   through to the generic path, which captured the alloca's own raw
+   *address* through a synthetic global. By the time the patch-constant
+   phase (a genuinely separate call) runs, the producing phase's stack
+   frame has already unwound, making the reloaded pointer dangling.
+   This "worked" by timing accident while the patch-constant phase was
+   single-invocation (only one lane dereferenced the freshly-freed
+   memory, before anything else overwrote it); it became a hard,
+   reproducible multi-lane segfault once genuinely multi-invocation.
+   Fixed by capturing the alloca's *value* (loaded at the barrier
+   instruction itself, guaranteed to run after every pre-barrier store)
+   through the global, then cloning a fresh, independent alloca into
+   the patch-constant phase pre-populated with that captured value.
+
+New unit test: `CanonicalizeStageTest.SplitsHullEntryCapturingMixedUseAlloca`
+(the dangling-pointer fix), plus the pre-existing
+`SplitsHullEntryThreadingCapturedSSAValue`/`SplitsHullEntryCloningCapturedAlloca`
+tests re-confirmed unaffected. `FeMeTransformsGraphicsTests`: 128/128
+Passed (+1 new test), 0 regressions. `ninja check-feme`: 3,491/3,552
+Passed, 61 Unsupported, 0 Failed, 0 regressions (up from the pre-session
+3,490/3,551 baseline).
+
+**CTS impact**: `dEQP-VK.tessellation.shader_input_output.
+cross_invocation_per_vertex_{int,uint,float,vec3,vec4}`: 5/5 Pass (was
+0/5, all 5 previously segfaulting the whole `deqp-vk` process). Also
+re-ran the broader `tessellation` group (1,114 cases): confirmed all 5
+`cross_invocation_per_patch_*` cases are unaffected (unchanged
+`Fail (Failure)` image-comparison mismatches, not regressed) and swept
+roughly 800 of the remaining 1,114 cases with 0 new regressions found
+before stopping for session time budget (the `tess_io.max_in_out.*`
+subgroup alone is ~600 cases and runs very slowly, one pipeline
+compile per case; the known pre-existing `cross_invocation_per_{vertex,
+patch}_mat4x3` SIMDize hang -- out of scope, carried over from a much
+earlier session -- was hit and skipped during this sweep, consistent
+with its prior characterization). The full sweep's remaining ~300
+cases are still owed to a future session.
+
+Two sub-failures `L339`'s own original 13-case scope included are
+**not** fixed by this session's work, confirmed unaffected (not
+regressed) and split out as new row `L344`:
+`cross_invocation_per_patch_*` (5 cases, a real image-comparison
+mismatch, likely a separate bug in the `Patch`-qualified
+cross-invocation read/write path) and `barrier` (1 case, a distinct
+"only one group-sync barrier supported" diagnostic, unrelated to the
+per-vertex-output architecture just landed).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal TCS codegen/ABI extension to an already-exposed
+core feature (tessellation shaders), no new feature/extension surface.
