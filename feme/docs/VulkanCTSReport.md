@@ -9507,3 +9507,75 @@ carried forward for its own future session.
 
 Tracked as `L321` (now `done`), `L322`, `L323` (both `not started`) in
 the roadmap.
+
+## L316: `texture.explicit_lod.2d.sizes.*` -- all 16 NPOT mipmap-filtering failures root-caused and fixed
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+Picked up `L316`'s remaining scope: all 16 `texture.explicit_lod.2d.
+sizes.{31x55,57x35}_*linear_mipmap_linear*_repeat*` failures (the
+`texture.multisample` portion of the original `L316` was already fully
+disposed of by `L321`/`L322`).
+
+### Investigation
+
+Reproduced `dEQP-VK.texture.explicit_lod.2d.sizes.
+31x55_linear_linear_mipmap_linear_repeat` with
+`--deqp-log-images=enable`: every failing sample's "Fail (Verification
+failed)" is a `tcuTexLookupVerifier`-style mismatch at mip level 2,
+small (~0.001-0.003 per channel) and numerically close to the ideal
+range rather than a gross logic error -- the GPU result sits just
+outside the verifier's own accepted tolerance band.
+
+Hand-traced `vktSampleVerifier.cpp`'s own quantized-weight search
+(`calcTexelGridCoordRange`/`verifySampleFiltered`) for the first
+failing sample (`Coordinate: (0, 0.0363636, 0, 0)`, `LOD: 2` exactly):
+level 2's height is `55 >> 2 = 13`, so the unnormalized V coordinate is
+`0.0363636 * 13 = 0.472727`; the true (continuous, unquantized) texel
+offset is `floor(0.472727 - 0.5) = -1` with fractional weight
+`0.472727 - 0.5 - (-1) = 0.9727`. The verifier's own search, however,
+only tests weight candidates quantized to the device's advertised
+`subTexelPrecisionBits` -- `PhysicalDeviceInfo.cpp` reported the
+spec-mandated *minimum* of 4 bits (16 steps), whose two candidates
+nearest 0.9727 are only 0.9375 and 0.0, neither close enough to bracket
+the real (unquantized) result.
+
+Confirmed via `grep` that `FeMeRuntimeCPU.c`'s own bilinear/trilinear
+filtering (`femeRTComputeBilinearSupport`, `femeRTSelectMipLevels`)
+never actually quantizes its interpolation weights to any fixed bit
+count -- every weight is computed as a genuine `float` fraction, full
+IEEE precision throughout. Advertising only 4 bits of precision was
+simply dishonest about what this target actually delivers, and every
+one of these 16 failing cases' own ideal weight happens to land between
+4-bit's two nearest quantization candidates.
+
+### Fix
+
+Raised `PhysicalDeviceInfo.cpp`'s `subTexelPrecisionBits` and
+`mipmapPrecisionBits` from 4 to 8 -- the value real CPU Vulkan
+implementations that also compute unquantized float weights (Mesa's
+`lavapipe`, SwiftShader) report for the same reason. At 8 bits (256
+steps), the verifier's own quantized search now lands within 1/256 of
+the true continuous weight for every failing case, comfortably within
+its own tolerance band.
+
+New `PhysicalDeviceInfoTest.
+TexelAndMipmapPrecisionBitsReflectUnquantizedFiltering` asserts both
+limits are `>= 8`.
+
+`ninja check-feme` (ccache + assertions, full target-dependency build):
+3,466/3,527 Passed (+1 new test), 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact:** re-ran `dEQP-VK.texture.explicit_lod.2d.sizes.*` (288
+cases incl. `_compute` variants, the latter all `NotSupported` on this
+build's exclusive-compute-queue limitation, unrelated): **144 Pass (was
+128), 0 Fail (was 16), 144 NotSupported** (unchanged) -- all 16
+previously-failing NPOT mipmap-filtering cases now Pass.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a device-limits-accuracy fix (correcting an inaccurately-low
+advertised precision value), no feature/extension-surface change.
+
+`L316` is now fully `done`.
