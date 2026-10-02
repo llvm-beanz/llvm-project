@@ -9811,3 +9811,115 @@ pre-existing, not new regressions from this fix.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- a correctness fix to an already-exposed, already-advertised
 line-rasterization mode, no new feature/extension surface.
+
+## L325: fixed (40/49 cases) -- Bresenham stipple counter must be an integer per-fragment count, not a distance
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+Picked up `L324`'s dominant carried-forward cluster: `static_stipple`/
+`dynamic_stipple`/`dynamic_stipple_and_topology` (49/70 of `L324`'s
+remaining rasterization failures). Ran
+`dEQP-VK.rasterization.primitives.dynamic_stipple.bresenham_lines` with
+`--deqp-log-images=enable`: "Diamond-exit rule: 233 fragments. Result
+image: 224 fragments" in one iteration (missing fragments, beyond
+tolerance) and position-deviation failures even where counts were
+within tolerance in others -- a *position* bug (wrong fragments kept
+vs. discarded), not a count-off-by-N bug like `L324`'s.
+
+Root-caused via the real Vulkan spec's own "Line Stipple" section
+(`primsrast.adoc`): the stipple counter `s` is an **integer**, with
+**mode-dependent** increment rules:
+- **Bresenham**: `s` is incremented by exactly 1 "after production of
+  each fragment of a line segment" -- a pure per-walked-pixel step
+  count, independent of the line's slope/length.
+- **Rectangular**/**RectangularSmooth**: `s` is incremented once per
+  "adjacent unit-length rectangle" the line is subdivided into -- a
+  continuous-distance measure.
+
+Cross-confirmed against `VK-GL-CTS`'s own reference software
+rasterizer, `framework/referencerenderer/rrRasterizer.cpp`'s
+`SingleSampleLineRasterizer::rasterize` (the authoritative generator of
+each test's "expected" verification image): `m_stippleCounter++`
+increments exactly once per walked diamond-exit-rule position, *outside
+and after* the inner width-replication loop -- i.e. shared across all
+of a wide line's replicated fragments at one step, not incremented once
+per individual fragment.
+
+`Executor.cpp`'s `emitLineSegment` used the same continuous
+Euclidean-distance `Arc = ArcAccum + T * Len` formula for *both* modes
+-- correct for Rectangular, but wrong for Bresenham on any
+non-axis-aligned line (e.g. a 45-degree line's per-step distance is
+`sqrt(2) ≈ 1.414`, not `1`), causing the wrong stipple-pattern bit to be
+tested (and thus the wrong fragments kept/discarded) on many walked
+pixels -- explaining the "missing fragments"/position-deviation
+symptom.
+
+**Fix** (`feme/lib/Graphics/Executor.cpp`, `emitLineSegment`'s Bresenham
+branch): added a dedicated `float StippleCounter = ArcAccum;` (reusing
+`ArcAccum`, now reinterpreted for Bresenham mode as an integer
+fragment-count carried from a prior connected strip segment, consistent
+with the spec's own carry-over rule, rather than a distance). Replaced
+`float Arc = ArcAccum + T * Len;` with `float Arc = StippleCounter;`.
+Added `StippleCounter += 1.0f;` immediately after the width-replication
+loop (`for (int32_t I = 0; I < W; ++I)`), matching the reference
+rasterizer's per-step (not per-fragment) increment. Added
+`return StippleCounter;` as an early return bypassing the function's
+shared `return ArcEnd;`, which remains the Rectangular/RectangularSmooth
+branch's own correct distance-based continuity value, unchanged.
+
+**Tests**: added `ExecutorTest.BresenhamStippleCounterCountsFragmentsNotDistance`
+-- a 45-degree diagonal Bresenham line from NDC `(-0.75,-0.75)` to
+`(1.0,1.0)` in a 4x4 viewport, `StippleFactor=1`,
+`StipplePattern=0b1000` (only bit 3 on). With the fix, only the 4th
+walked pixel, `(3,3)`, is lit (`Arc=3` → bit 3 → on); the first 3 are
+not (`Arc=0,1,2` → bits 0,1,2 → off). Confirmed via `git stash` A/B
+that this test fails pre-fix exactly as hand-predicted: the buggy
+Euclidean-distance formula computes `Arc ≈ 3*sqrt(2) ≈ 4.243` for the
+4th pixel → `floor(4.243) % 16 == 4`, not `3` → bit 4 (off) →
+incorrectly left unlit. `FeMeGraphicsTests`: 385/385 Passed (+1 new
+test), 0 regressions.
+
+**CTS impact**: re-ran the full `rasterization` group (15,019 cases):
+454 Pass / 30 Fail / 14,535 NotSupported (was 414/70/14,535 before this
+fix). Of the 49 cases originally scoped into this cluster, 40 now Pass.
+The remaining 9 all share a distinct, unrelated root cause -- see
+`L326` below.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a correctness fix to an already-exposed, already-advertised
+stipple feature (`VK_EXT_line_rasterization`), no new feature/extension
+surface.
+
+## L326: remaining 9 `*stipple*.bresenham_line_strip_wide` failures -- distinct wide-line-strip join overlap, not yet fixed
+
+Split out of `L325`'s remaining 9 failures, all of the shape
+`dEQP-VK.rasterization.{primitives,primitives_multisample_{2,4,8}_bit}.{static_stipple,dynamic_stipple,dynamic_stipple_and_topology}.bresenham_line_strip_wide`.
+
+Ran `primitives.static_stipple.bresenham_line_strip_wide` with
+`--deqp-log-images=enable`: its 3 test iterations (widths 5, 10, 64)
+all report "No invalid deviations found" and (where fragment-count
+verification isn't skipped due to overdraw at higher widths) "Fragment
+count is valid" -- i.e. this is **not** a stipple-pattern bug, FeMe's
+`L325` fix is working correctly here too. The actual failure is in the
+subsequent **line-width verification** step, specific to the
+width-64 iteration (a 4-vertex strip): "Invalid line width at (212, 85)
+- (212, 149). Detected width of 65, expected 64" -- a one-row/column
+overlap, most likely at the join between two consecutive wide Bresenham
+line-strip segments (a single-segment wide Bresenham line, exercised by
+`L312`'s own regression test, is unaffected).
+
+Not yet root-caused. Likely candidate: the half-open diamond-exit rule
+(`L324`) combined with the width-replication offset (`L312`) may
+interact incorrectly specifically at a strip join, double-covering one
+row/column where the previous segment's trailing replicated band and
+the next segment's leading replicated band both land on the same pixel
+row, one pixel wider than either alone. Needs its own standalone
+reduction (a 2-segment wide Bresenham strip, non-axis-aligned, small
+enough to hand-check the walked pixel set against the reference
+rasterizer's own strip-join handling in `rrRasterizer.cpp`).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+anticipated once fixed -- expected to be a correctness fix to an
+already-exposed, already-advertised wide-line-strip rendering path, no
+new feature/extension surface.
