@@ -5337,13 +5337,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     SmallVector<std::array<uint32_t, 2>, 8> TessLines;
     if (TessLink) {
       const TessellationState &Tess = Pipeline.getTessellationState();
-      if (Tess.InputControlPointCount == 0 ||
-          PerInstance % Tess.InputControlPointCount != 0)
-        return createStringError(inconvertibleErrorCode(),
-                                 "a patch-list draw's vertex count (%u) must "
-                                 "be a non-zero multiple of the pipeline's "
-                                 "patch control point count (%u)",
-                                 PerInstance, Tess.InputControlPointCount);
+      if (Tess.InputControlPointCount == 0)
+        return createStringError(
+            inconvertibleErrorCode(),
+            "a patch-list draw requires a non-zero patch control point "
+            "count, got 0");
+      // (Roadmap L332) The spec permits a patch-list draw's vertex count
+      // to not be an exact multiple of the pipeline's control point
+      // count: any trailing incomplete patch is simply discarded, not an
+      // error. Integer division below already drops that remainder.
       PatchPipelineStages Stages{Pipeline.getHullStage(),
                                  Pipeline.getPatchConstantStage(),
                                  Pipeline.getDomainStage()};

@@ -6916,14 +6916,27 @@ Expected<GraphicsPipeline> buildTessellatedPipeline(Context &Ctx,
 }
 
 /// Renders one full-viewport red patch through \p Pipeline into an
-/// \p Size x \p Size R8G8B8A8 attachment.
+/// \p Size x \p Size R8G8B8A8 attachment. \p VertexCount defaults to the
+/// pipeline's own 3-control-point patch size; a caller may pass a larger,
+/// non-multiple-of-3 count (roadmap L332) to exercise a patch-list draw's
+/// trailing incomplete patch, which the vertex buffer below pads out with
+/// extra (otherwise-unused) control points so the draw has real backing
+/// storage to read, even though they are never incorporated into a whole
+/// patch and so must not affect the rendered result.
 std::vector<uint8_t> renderTessellatedPatch(const GraphicsPipeline &Pipeline,
-                                            uint32_t Size) {
+                                            uint32_t Size,
+                                            uint32_t VertexCount = 3) {
   std::vector<float> VertexData = {
       -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 0
       3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 1
       -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 2
   };
+  for (uint32_t I = 3; I < VertexCount; ++I) {
+    // Padding control point(s) belonging to the trailing incomplete patch;
+    // position is irrelevant since they must never reach the domain stage.
+    VertexData.insert(VertexData.end(),
+                       {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f});
+  }
   std::vector<VertexAttribute> Attributes = {
       {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
       {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
@@ -6944,7 +6957,7 @@ std::vector<uint8_t> renderTessellatedPatch(const GraphicsPipeline &Pipeline,
   Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
   Draw.VertexBuffers = Bindings;
   DrawCommand Cmd;
-  Cmd.VertexCount = 3;
+  Cmd.VertexCount = VertexCount;
   Cmd.InstanceCount = 1;
   std::array<DrawCommand, 1> Draws = {Cmd};
   Draw.Draws = Draws;
@@ -9201,6 +9214,32 @@ TEST(ExecutorTest, TessellationFactorZeroCullsTheWholePatch) {
     EXPECT_EQ(Texel, 0);
 }
 
+TEST(ExecutorTest, PatchListDrawDiscardsATrailingIncompletePatch) {
+  // (Roadmap L332) The spec permits a patch-list draw's vertex count to
+  // not be an exact multiple of the pipeline's control point count -- any
+  // trailing incomplete patch is silently discarded, not an error
+  // (reproduces `dEQP-VK.tessellation.geometry_interaction.passthrough.
+  // tessellate_triangles_passthrough_geometry_no_change`'s own 4-vertex/
+  // 3-control-point draw shape, which previously made `executeDraws`
+  // return an `Error` and the real Vulkan ICD latch the whole device
+  // lost). A 4-vertex draw against this 3-control-point-per-patch
+  // pipeline must succeed and render exactly the same single full-
+  // viewport patch the ordinary 3-vertex draw does, ignoring the 4th,
+  // padding-only vertex entirely.
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessellatedPipeline(Ctx, "1.0", /*AttachmentSize=*/8);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+  std::vector<uint8_t> Storage = renderTessellatedPatch(
+      *Pipeline, /*Size=*/8, /*VertexCount=*/4);
+  for (uint32_t I = 0; I != 8u * 8u; ++I) {
+    EXPECT_EQ(Storage[I * 4 + 0], 255) << "texel " << I;
+    EXPECT_EQ(Storage[I * 4 + 1], 0);
+    EXPECT_EQ(Storage[I * 4 + 2], 0);
+    EXPECT_EQ(Storage[I * 4 + 3], 255);
+  }
+}
+
 TEST(ExecutorTest, RejectsAPatchListWithoutTessellationStages) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline =
@@ -9216,7 +9255,15 @@ TEST(ExecutorTest, RejectsAPatchListWithoutTessellationStages) {
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
 }
 
-TEST(ExecutorTest, RejectsAPatchListDrawWithAPartialPatch) {
+TEST(ExecutorTest, APatchListDrawWithOnlyAPartialPatchRendersNothing) {
+  // (Roadmap L332) Two vertices is not a whole three-control-point patch.
+  // The spec permits this (any trailing incomplete patch of a patch-list
+  // draw is discarded, not an error, roadmap L332), so the draw must
+  // succeed; since zero complete patches exist here, nothing is
+  // rasterized at all -- the attachment stays at its cleared value,
+  // mirroring `TessellationFactorZeroCullsTheWholePatch`'s own "nothing
+  // rasterized" shape for a different reason (a culled factor there, a
+  // wholly-incomplete patch here).
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline =
       buildTessellatedPipeline(Ctx, "1.0", /*AttachmentSize=*/4);
@@ -9242,13 +9289,15 @@ TEST(ExecutorTest, RejectsAPatchListDrawWithAPartialPatch) {
   Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
   Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
   Draw.VertexBuffers = Bindings;
-  // Two vertices is not a whole three-control-point patch.
   DrawCommand Cmd;
   Cmd.VertexCount = 2;
   Cmd.InstanceCount = 1;
   std::array<DrawCommand, 1> Draws = {Cmd};
   Draw.Draws = Draws;
-  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1), Failed());
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+  for (uint8_t Texel : Storage)
+    EXPECT_EQ(Texel, 0);
 }
 
 // (Roadmap H5d) A geometry-stage passthrough: reads all three of a
