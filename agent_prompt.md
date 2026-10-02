@@ -63,29 +63,27 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours)** `L265` -- ASTC alpha-decode tie-break (4 block
-   sizes). Lowest priority, many sessions carried over, unchanged.
-   Needs a Mesa/lavapipe reference-decoder comparison.
-2. **(a few hours each, 21 cases total)** Rasterization's remaining
-   scattered failures, now fully enumerated this session:
-   `conservative.overestimate.*.lines.degenerate.0_00`,
-   `depth_bias.d24_unorm_constant_one_less`,
-   `flatshading.{triangle_strip,triangles}`,
-   `frag_side_effects.color_at_{beginning,end}.{depth_never,kill,
-   terminate_invocation}` (6 cases), `line_continuity.polygon-mode-lines`,
-   `maintenance5.non_strict_line*` (4 cases),
-   `polygon_as_large_points.mesh_dynamic_polygon_mode`,
-   `provoking_vertex.draw.default.triangle_list`,
-   `rasterization_order_attachment_access.{depth,stencil}.*` (4 cases).
-   Not yet individually triaged -- pick one cluster (e.g.
-   `frag_side_effects`, 6 cases, looks like the largest same-cause
-   group) and start there.
-3. **(unknown)** Tessellation triage still open from several sessions
-   back: `user_defined_io` (27 cases), `shader_input_output`/
-   `misc_draw`/`common_edge`/`matrix_multiplication`/
-   `geometry_interaction` groups. Not touched this session.
+1. **(a few hours, 15 cases, best next pick)** The remaining scattered
+   `rasterization` failures, now down from 21 to 15 after this session:
+   `depth_bias.d24_unorm_constant_one_greater`,
+   `flatshading.{triangle_fan,triangle_strip}`,
+   `line_continuity.{line-strip,polygon-mode-lines}`,
+   `maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
+   `provoking_vertex.draw.default.triangle_fan`,
+   `rasterization_order_attachment_access.{depth,stencil}.*` (5 cases).
+   Still individually untriaged -- `rasterization_order_attachment_access`
+   is the largest same-looking cluster (5 cases, probably one bug), pick
+   that first.
+2. **(unknown, 27 cases, largest untriaged chunk)** Tessellation
+   `user_defined_io` triage -- still not started, carried over several
+   sessions now. Also still open: `shader_input_output`/`misc_draw`/
+   `common_edge`/`matrix_multiplication`/`geometry_interaction`.
+3. **(a few hours, lowest priority, many sessions carried over)** `L265`
+   -- ASTC alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
+   reference-decoder comparison.
 4. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
    `array_of_matrices.test`).
-5. **Branch-drift housekeeping**: re-checked this session, still a
-   non-issue (`854cc3f`, unchanged).
+5. **Branch-drift housekeeping**: confirmed non-issue again this
+   session (see above) -- re-check again next session per standing
+   protocol, but no action expected until content genuinely diverges.
