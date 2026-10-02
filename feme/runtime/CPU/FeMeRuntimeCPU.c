@@ -3043,6 +3043,32 @@ femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR16G16Sint(Raw);
   }
+  // (Roadmap L330) `S8_UINT`/`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`:
+  // unlike `femeRTUnpackImageTexel` above, whose combined-format cases
+  // always mean "the depth aspect, read as float" (a depth-stencil
+  // image's depth aspect is the only one Vulkan ever lets a shader read
+  // through a float-typed `subpassInput`/sampler), an *integer*-typed
+  // read (`usubpassInput`/`isubpassInput`, or an integer-format combined
+  // sampler) of one of these three formats can only ever mean "the
+  // stencil aspect, read as uint" -- a depth aspect is never bound to an
+  // integer-typed descriptor, so there is no aspect ambiguity here the
+  // way there is on the float side. Byte layout matches `ImageFixture.
+  // cpp`'s own `unpackStencil`: `S8_UINT`'s single byte directly;
+  // `D24_UNORM_S8_UINT`'s shared 4-byte word's high byte; `D32_FLOAT_
+  // S8X24_UINT`'s *second* 4-byte word's low byte (its first word is the
+  // depth aspect's own float, never read here).
+  case 35: // S8_UINT
+    return (FemeRTv4i32){*Ptr, 0, 0, 1};
+  case 33: { // D24_UNORM_S8_UINT: stencil is the shared word's high byte.
+    uint32_t Word;
+    __builtin_memcpy(&Word, Ptr, sizeof(Word));
+    return (FemeRTv4i32){(int32_t)(Word >> 24), 0, 0, 1};
+  }
+  case 34: { // D32_FLOAT_S8X24_UINT: stencil is the second word's low byte.
+    uint32_t Word;
+    __builtin_memcpy(&Word, Ptr + 4, sizeof(Word));
+    return (FemeRTv4i32){(int32_t)(Word & 0xFFu), 0, 0, 1};
+  }
   default:
     return Zero;
   }

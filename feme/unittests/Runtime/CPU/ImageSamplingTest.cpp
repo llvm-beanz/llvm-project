@@ -3738,6 +3738,88 @@ TEST_F(ImageSamplingTest, LoadFetchesD32FloatS8X24UintDepthAspect) {
   EXPECT_FLOAT_EQ(Out1[0], 0.25f);
 }
 
+// Roadmap L330: the integer-typed counterpart of the two depth-aspect
+// tests above. Unlike a float-typed `subpassInput`/sampler (which, per
+// `L308`, only ever means "the depth aspect" for a combined
+// depth-stencil format), an integer-typed one (`usubpassInput`/
+// `isubpassInput`, or an integer-format combined sampler) can only ever
+// mean "the stencil aspect" -- Vulkan never lets a depth aspect bind to
+// an integer-typed descriptor. Before this row, neither combined format
+// had a case in `femeRTUnpackImageTexelI32`, so every such read fell
+// through to that function's `default: return Zero` -- exactly the
+// `dEQP-VK.rasterization.rasterization_order_attachment_access.stencil.*`
+// (4 cases) symptom this regression test guards: a stencil `subpassLoad`
+// that always reads back `0` regardless of the real stencil value.
+TEST_F(ImageSamplingTest, LoadI32FetchesD24UnormS8UintStencilAspect) {
+  // Texel 0: low 24 bits (depth) = 0x800000 (deliberately nonzero, to
+  // confirm it is masked off rather than leaking into the decoded
+  // stencil), high byte (stencil) = 0x7A. Texel 1: a different stencil
+  // byte (0x11) with a different depth value, confirming the second
+  // texel's stencil is read from its own word, not aliased onto the
+  // first.
+  uint32_t Storage[1][2] = {{0x7A800000u, 0x11400000u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 1,
+                 ResourceFormat::D24_UNORM_S8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_EQ(Out0[0], 0x7A);
+  EXPECT_EQ(Out0[1], 0);
+  EXPECT_EQ(Out0[2], 0);
+  EXPECT_EQ(Out0[3], 1);
+  EXPECT_EQ(Out1[0], 0x11);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesD32FloatS8X24UintStencilAspect) {
+  // Texel 0: depth word = 0.75f (deliberately nonzero, to confirm it
+  // never leaks into the decoded stencil), stencil word = 0x7A. Texel 1:
+  // a different stencil byte (0x11), confirming the 8-byte (not 4-byte)
+  // texel stride this format's own two-separate-word layout needs.
+  struct Texel {
+    float Depth;
+    uint32_t Stencil;
+  };
+  Texel Storage[1][2] = {{{0.75f, 0x7Au}, {0.25f, 0x11u}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 1,
+                 ResourceFormat::D32_FLOAT_S8X24_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_EQ(Out0[0], 0x7A);
+  EXPECT_EQ(Out0[1], 0);
+  EXPECT_EQ(Out0[2], 0);
+  EXPECT_EQ(Out0[3], 1);
+  EXPECT_EQ(Out1[0], 0x11);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesS8UintStencilAspect) {
+  uint8_t Storage[1][2] = {{0x7Au, 0x11u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 2, 1, ResourceFormat::S8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out0[4], Out1[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out0);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out1);
+  EXPECT_EQ(Out0[0], 0x7A);
+  EXPECT_EQ(Out0[1], 0);
+  EXPECT_EQ(Out0[2], 0);
+  EXPECT_EQ(Out0[3], 1);
+  EXPECT_EQ(Out1[0], 0x11);
+}
+
 // Roadmap F8b: a multisampled image (`SampleCount > 1`) packs every
 // sample of one texel contiguously; `femeRTFetchTexel2D`'s addressing
 // must skip `SampleCount` samples' worth of bytes per texel step along a
