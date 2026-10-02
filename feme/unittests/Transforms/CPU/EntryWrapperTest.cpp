@@ -1557,6 +1557,58 @@ TEST(EntryWrapperTest, SplitsLoopWithDiamondBodyBeforeBarrier) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L323: a loop whose entire body is a barrier-free diamond (no
+// `else`, merging straight back into the latch), with the group-sync
+// barrier only in a block strictly *after* the loop -- not
+// `SplitsLoopWithDiamondBodyBeforeBarrier`'s two-sequential-loops shape
+// above, but a single loop matched by `matchLoopShape`/
+// `buildWrapperForLoop` instead of `isLinearChain`. Previously crashed
+// with an IR-verifier "use after def destroyed" assertion: outlining the
+// loop's body chain (`body`/`true`) only patched the chain's own last
+// block's (`true`'s) terminator, leaving `body`'s own `CondBr`'s "false"
+// arm (straight to `merge`, the loop's own latch, since the diamond's
+// false arm is empty) still referencing a block that had just been
+// spliced into a different (and, for `body`, no longer even the
+// containing) function.
+TEST(EntryWrapperTest, WrapsLoopWithDiamondBodyBeforeTrailingBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %merge ]
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %body, label %afterloop
+    body:
+      %cond = icmp eq i32 %i, 0
+      br i1 %cond, label %true, label %merge
+    true:
+      br label %merge
+    merge:
+      %i.next = add i32 %i, 1
+      br label %header
+    afterloop:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %exit
+    exit:
+      ret void
+    }
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 // Roadmap step R24 (feme/docs/Roadmap.md): a `phi` live across a
 // `..._with_group_sync` barrier is spilled exactly like any other value
 // (see "A `phi` live across a barrier" in EntryWrapper.cpp's file

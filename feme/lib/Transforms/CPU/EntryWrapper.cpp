@@ -2120,10 +2120,27 @@ std::optional<BranchShape> matchBranchShape(Function &F) {
 
 /// into its own new function named \p WaveBody's name + \p NameSuffix,
 /// splicing those blocks out of \p WaveBody and, unless \p EndsInRet
-/// (the chain's last block already ends with a `ret`), replacing the
-/// chain's trailing unconditional branch with one. Every reference to one
-/// of \p WaveBody's own parameters is rewritten to the new function's
-/// corresponding one (see `splitAtGroupSyncBarriers`'s identical rewrite).
+/// (the chain's last block already ends with a `ret`), redirecting every
+/// terminator edge that leaves \p Chain to a `ret void`. Every reference
+/// to one of \p WaveBody's own parameters is rewritten to the new
+/// function's corresponding one (see `splitAtGroupSyncBarriers`'s
+/// identical rewrite).
+///
+/// Roadmap L323: the chain's *last* block is not always the only one
+/// whose terminator leaves \p Chain. A uniform safe diamond
+/// (`matchSafeDiamond`) inside the chain may have an empty "false" arm,
+/// in which case its header block branches straight from inside the
+/// chain to the chain's own external successor (e.g. a loop's `Latch`)
+/// -- a real, pre-existing block earlier than `Chain.back()`, not the
+/// synthetic single exit a plain linear chain always ends with. Only
+/// ever patching `Chain.back()`'s own terminator left that earlier
+/// block's edge dangling, referencing a `BasicBlock` that had just been
+/// spliced into a *different* function -- invalid IR that only
+/// surfaced later, as an IR-verifier "use after def destroyed" assertion
+/// once something finally tried to erase that now-cross-function-
+/// referenced block. Every such edge is now found and redirected,
+/// however many blocks it spans, not just assumed to be exactly one and
+/// exactly last.
 Function *outlineChain(Function &WaveBody, ArrayRef<BasicBlock *> Chain,
                        const Twine &NameSuffix, bool EndsInRet) {
   Function *Fn =
@@ -2143,14 +2160,47 @@ Function *outlineChain(Function &WaveBody, ArrayRef<BasicBlock *> Chain,
   // silently carry along unrelated blocks physically in between, or (for
   // a not-yet-observed `Chain` whose own blocks aren't ilist-contiguous)
   // leave some of `Chain`'s own blocks behind instead.
+  SmallPtrSet<BasicBlock *, 8> ChainBlocks(Chain.begin(), Chain.end());
   for (BasicBlock *BB : Chain)
     Fn->splice(Fn->end(), &WaveBody, BB->getIterator());
 
   if (!EndsInRet) {
-    Instruction *Term = Fn->back().getTerminator();
-    assert(isa<UncondBrInst>(Term));
-    Term->eraseFromParent();
-    IRBuilder<>(&Fn->back()).CreateRetVoid();
+    // A lazily-created, single shared `ret void` block every out-of-chain
+    // edge is redirected to -- only materialized if a `CondBr` actually
+    // needs one (see below); a plain `UncondBr` whose sole successor
+    // leaves `Chain` is instead rewritten in place, exactly as before,
+    // needing no extra block at all.
+    BasicBlock *RetBB = nullptr;
+    auto GetRetBB = [&]() -> BasicBlock * {
+      if (!RetBB) {
+        RetBB = BasicBlock::Create(Fn->getContext(), "exit", Fn);
+        IRBuilder<>(RetBB).CreateRetVoid();
+      }
+      return RetBB;
+    };
+    bool FoundExit = false;
+    for (BasicBlock &BB : *Fn) {
+      Instruction *Term = BB.getTerminator();
+      if (auto *UBr = dyn_cast<UncondBrInst>(Term)) {
+        if (ChainBlocks.contains(UBr->getSuccessor(0)))
+          continue;
+        FoundExit = true;
+        Term->eraseFromParent();
+        IRBuilder<>(&BB).CreateRetVoid();
+        continue;
+      }
+      auto *CBr = dyn_cast<CondBrInst>(Term);
+      if (!CBr)
+        continue;
+      for (unsigned S = 0; S != 2; ++S) {
+        if (ChainBlocks.contains(CBr->getSuccessor(S)))
+          continue;
+        FoundExit = true;
+        CBr->setSuccessor(S, GetRetBB());
+      }
+    }
+    assert(FoundExit &&
+          "no out-of-chain terminator edge found in a !EndsInRet chain");
   }
 
   for (Instruction &I : instructions(*Fn))
