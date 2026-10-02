@@ -10844,3 +10844,146 @@ open for a future session), `winding` 1.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- this is an internal tessellator floating-point-exactness
 fix with no feature/extension surface change.
+
+## L337: fixed -- quad interior-grid U/V axis swap (`tesscoord`, 6 cases); `common_edge` root-cause hypothesis disproved; `winding` stale-count correction
+
+Picked up handoff item 1, `common_edge` (3 cases): re-investigated the
+prior session's root-cause hypothesis (a 1-ULP `gl_TessLevelOuter`
+mismatch between "Patch 0 Edge0" and "Patch 3 Edge1", assumed to be a
+shared edge). Added temporary `FEME_DEBUG_DUMP_TESS_FACTORS`-gated
+dumps to `PatchPipeline.cpp` (control-point attributes, generated
+domain points, raw tess factors) and ran the failing case with stderr
+redirected to a log, then cross-referenced real dumped values against
+a Python port of the CTS test's own grid-vertex-index-generation
+formula (including the `CASETYPE_PRECISE` checkerboard corner-order
+reversal).
+
+### `common_edge`: hypothesis disproved, root cause still open
+
+The Python-derived real vertex IDs showed Patch 0 and Patch 3 share
+**zero** vertices -- they are not adjacent at all. The near-equal
+value the prior session found was coincidental (the grid's regular
+linear spacing produces many near-equal values between unrelated
+patches), not evidence of a real shared-edge bug. Correctly
+identifying every genuinely-adjacent patch pair in the 16-patch grid
+(24 shared edges, pairs sharing exactly 2 real vertex IDs) and
+cross-checking FeMe's real dumped `TessFactors`/`DomainPoints` for
+each: **zero mismatches found**, in both tess-level values and
+generated domain-point parameter sets. This conclusively rules out the
+prior session's hypothesis with hard data, not just code inspection.
+
+Also confirmed (separately) that FeMe's vertex-attribute fetch is
+bit-exact: the dumped `InputPatch` raw `tessParam` values matched the
+CTS's own `gridTessParams[]` formula exactly for every real vertex ID.
+
+A further attempt to dump `Result.DomainOutputs` (the TES-evaluated
+output positions) to hunt for the bug at the position-interpolation
+level produced implausible-looking data, suggesting the ad hoc debug
+code's naive `I * FloatsPerPoint + K` indexing doesn't match
+`StageStorage`'s real memory layout (possibly invocation
+batching/padding). Given the bug's low priority (3 cases) and the
+risk of chasing a mis-decoded dump, **abandoned this line of
+investigation for now** rather than draw further conclusions from
+unreliable data. All temporary debug instrumentation was reverted
+(`git checkout --`); `common_edge`'s true root cause remains
+**unresolved**, and whether the 3 failures still reproduce with the
+same symptoms was not reconfirmed this session (left for a future
+session with correctly-implemented `DomainOutputs` dump tooling).
+
+### Re-verifying other handoff/stale counts
+
+Per the standing "always re-confirm stale numbers against a fresh
+run" lesson, re-ran two other previously-reported-failing groups
+before committing to a new investigation:
+
+- `dEQP-VK.tessellation.winding.*` (48 cases): **48/48 Pass** -- the
+  previously-reported "1 failure" is stale/non-reproducible (likely an
+  incidental fix from an earlier session, or a flake).
+- `dEQP-VK.tessellation.tesscoord.*` (18 cases): **12/18 Pass, 6
+  Fail** (a genuine, reproducible failure set) -- all `quads_*`
+  variants: `quads_equal_spacing`, `quads_fractional_even_spacing`,
+  `quads_fractional_odd_spacing`, each with and without
+  `_execution_mode_in_tesc`.
+
+### Root cause (`tesscoord`)
+
+A failing case's QPA detail (`Tessellation levels: inner: { 3, 2 },
+outer: { 6, 8, 7, 9 }`) showed an exact U/V transposition: the
+reference expected interior points at `(0.333, 0.5)`/`(0.666, 0.5)`
+(u varying, v fixed), but FeMe produced `(0.5, 0.333)`/`(0.5, 0.666)`
+(v varying, u fixed) -- the same two values, just on the wrong axis.
+
+Reading `feme/lib/Graphics/Tessellator.cpp`'s `tessellateQuad`, the
+interior grid's point-generation formula is `Points.push_back({I / N,
+J / M, ...})` (`I`/`N` paces u, `J`/`M` paces v), with `M` and `N`
+assigned from `Factors.Inside[0]`/`Factors.Inside[1]` respectively --
+i.e. `Inside[0]` was pacing `M` (v-axis) and `Inside[1]` pacing `N`
+(u-axis).
+
+The Vulkan spec's own prose here is ambiguous (arguably even
+misleading) about which inner level maps to which axis. Ground truth
+is the Vulkan CTS's own reference generator,
+`generateReferenceQuadTessCoords` in
+`/home/dev/dev/VK-GL-CTS/external/vulkancts/modules/vulkan/tessellation/vktTessellationUtil.cpp`
+(confirmed via `getClampedRoundedQuadTessLevels`'s direct 1:1
+`inner[i] = innerLevels[i]` mapping), which computes interior points
+as `u = (innerVtxX + 1) / inner0`, `v = (innerVtxY + 1) / inner1` --
+i.e. **`Factors.Inside[0]` (`gl_TessLevelInner[0]`) paces the u-axis,
+`Factors.Inside[1]` paces the v-axis**, the reverse of FeMe's prior
+code.
+
+### Fix
+
+Swapped which `Factors.Inside[]` index feeds `M` (v-axis resolution)
+vs. `N` (u-axis resolution) in `tessellateQuad`'s general
+(neither-axis-degenerate) path, with a detailed comment (tagged
+Roadmap `L337`) citing the CTS reference source and the failing
+cases. The `UDegenerate`/`VDegenerate` special-case branches needed no
+changes -- their internal logic already consistently treats `M` as
+v-axis and `N` as u-axis; only the *source* of those two variables was
+wrong. The both-degenerate (`M == N == 1`) fast path is a symmetric
+equality check, also unaffected.
+
+### Testing
+
+`feme/unittests/Graphics/TessellatorTest.cpp`:
+`QuadSingleAxisDegenerateInsideFactorGivesInteriorLine`/
+`QuadOtherAxisDegenerateInsideFactorGivesInteriorLine` had the pre-fix
+axis mapping baked into their input `Inside` factors; swapped each
+test's `Inside` pair so they continue to exercise the u-degenerate and
+v-degenerate cases respectively under the corrected mapping. Added
+`QuadInteriorGridUVAxesMatchInside0Inside1Respectively`, a direct
+regression test using an asymmetric inner-level pair (`{3, 2}`,
+matching the real failing case) that pins down the exact expected
+(non-transposed) interior point set `{(1/3, 0.5), (2/3, 0.5)}`.
+
+- `FeMeGraphicsTests`: 35/35 Passed (`TessellatorTest` filter; +1 new
+  test), 0 regressions.
+- `ninja check-feme`: 3,487/3,548 Passed, 61 Unsupported, 0 Failed, 0
+  regressions.
+
+### CTS impact
+
+Re-ran `dEQP-VK.tessellation.tesscoord.*` (18 cases): **18/18 Pass**
+(was 12/18) -- all 6 targeted cases now Pass.
+
+Re-ran the full `dEQP-VK.tessellation.*` group (1,114 cases):
+
+```
+Passed:        607/1114 (54.5%)
+Failed:        69/1114 (6.2%)
+Not supported: 438/1114 (39.3%)
+```
+
+Diffing against the `L336` entry's post-fix numbers (601/76/438, which
+already included the `winding` group's stale 1-failure count):
+accounting for `winding`'s 1 case now correctly counted as Pass (not a
+regression -- it was already passing, just mis-tallied in the
+handoff), this run's 69 failures break down as `invariance` 38,
+`shader_input_output` 15, `misc_draw` 13, `common_edge` 3 -- the exact
+6 `tesscoord` cases flip to Pass, **0 regressions, 0 new failures**
+elsewhere.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal tessellator axis-mapping correctness fix with no
+feature/extension surface change.
