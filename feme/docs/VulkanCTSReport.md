@@ -10648,3 +10648,51 @@ failures, pre-existing and still untriaged:
 needed -- an internal correctness fix to already-exposed core Vulkan
 1.0 primitive assembly/flat shading, no new feature/extension
 surface.
+
+## L335: `line_continuity` triage (investigation only, not fixed)
+
+Triage of the 2 remaining `rasterization` group failures after L334:
+`line_continuity.{line-strip,polygon-mode-lines}`.
+
+Both are Amber-script tests
+(`rasterization/line_continuity/{line-strip,polygon-mode-lines}.amber`)
+whose pass/fail verdict comes from a separate **compute-shader
+verification pass** -- a flood-fill-style connectivity check reading
+back the rendered framebuffer via a storage image -- not from the
+rendered draw itself. That compute shader calls `barrier()` from
+*inside* nested `if`/`while` control flow:
+
+- A seed-pixel guard: `if (gl_LocalInvocationIndex == 0) { ... }`
+  followed immediately by `barrier()`.
+- A flood-fill loop: `while (!done) { if (...) { ... } barrier();
+  if (...) { ... } barrier(); }` -- multiple barriers at different
+  nesting depths inside the loop body.
+
+This trips FeMe's CPU-backend wave-region-splitting pass's documented
+limitation:
+
+```
+error: feme-cpu-wrap-entry: function 'main' has a barrier inside
+non-linear control flow (a surviving branch not part of a supported
+loop); region splitting only supports a straight-line wave body or a
+single uniform loop (roadmap milestone 9 deviation)
+```
+
+This is **not** a rendering-correctness bug like L333/L334 -- it's a
+compiler/backend control-flow-restructuring gap. The region-splitting
+pass currently supports only a straight-line wave body or a single
+uniform loop; this shader needs support for a sequence of
+independently-barrier-guarded `if` blocks, plus a barrier-guarded loop
+body. This is the same general limitation category previously
+narrowed by R24 (diagnosing, rather than supporting, a barrier inside
+a surviving branch) and partially addressed by H72 for a different
+`misc.*` shader shape.
+
+**No code changes made this entry** -- scope (a compiler/backend
+control-flow-restructuring change) is too large for the remainder of
+this session. See `Roadmap.md`'s `L335` entry for the recommended
+breakdown of future work: (1) extract a minimal standalone
+HLSL/SPIR-V reproducer isolating just the barrier-in-nested-if-and-
+while pattern; (2) survey the region-splitting pass's supported vs.
+needed shapes to scope the change; (3) add unit test coverage for the
+new shape(s) before touching CTS.
