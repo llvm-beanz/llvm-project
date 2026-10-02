@@ -63,29 +63,29 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L328` (a few hours, best next pick, design now concrete)**: wire
-   `doesLineSegmentExitDiamond` into `emitLineSegment`'s Bresenham
-   branch using the narrowed-candidate-window approach from
-   `Roadmap.md`'s `L328` entry (not the reference's brute-force bbox
-   sweep). Validate against the known 9-case `L326` failure list
-   first, then the full `rasterization` CTS group for regressions.
-   Needs `feme`'s advertised `subPixelPrecisionBits` (currently `4`,
-   `PhysicalDeviceInfo.cpp`) threaded through as the fixed-point
-   precision parameter.
-2. **`L265` (a few hours, lowest priority, many sessions carried over,
-   unchanged)**: ASTC alpha-decode tie-break (4 block sizes). Needs a
-   Mesa/lavapipe reference-decoder comparison.
-3. **Rasterization's remaining 21 scattered failures** (`stencil`,
-   `color_at_beginning`/`color_at_end`, `non_strict_line*`,
-   `triangle_fan`/`triangle_strip`, `line-strip`, `polygon-mode-lines`,
-   `depth_bias`, `provoking_vertex`, `flatshading`, `line_continuity`,
-   `frag_side_effects`, `maintenance5`,
-   `d24_unorm_constant_one_greater`, `draw`, `depth`) -- confirmed
-   pre-existing, individually untriaged. Not yet scoped into its own
-   roadmap item; do that first if picked up.
-4. **`offload-test-suite`'s own lit-annotation issues**
-   (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`)
-   -- low priority, pre-existing, outside this project's scope.
+1. **(a few hours)** `L265` -- ASTC alpha-decode tie-break (4 block
+   sizes). Lowest priority, many sessions carried over, unchanged.
+   Needs a Mesa/lavapipe reference-decoder comparison.
+2. **(a few hours each, 21 cases total)** Rasterization's remaining
+   scattered failures, now fully enumerated this session:
+   `conservative.overestimate.*.lines.degenerate.0_00`,
+   `depth_bias.d24_unorm_constant_one_less`,
+   `flatshading.{triangle_strip,triangles}`,
+   `frag_side_effects.color_at_{beginning,end}.{depth_never,kill,
+   terminate_invocation}` (6 cases), `line_continuity.polygon-mode-lines`,
+   `maintenance5.non_strict_line*` (4 cases),
+   `polygon_as_large_points.mesh_dynamic_polygon_mode`,
+   `provoking_vertex.draw.default.triangle_list`,
+   `rasterization_order_attachment_access.{depth,stencil}.*` (4 cases).
+   Not yet individually triaged -- pick one cluster (e.g.
+   `frag_side_effects`, 6 cases, looks like the largest same-cause
+   group) and start there.
+3. **(unknown)** Tessellation triage still open from several sessions
+   back: `user_defined_io` (27 cases), `shader_input_output`/
+   `misc_draw`/`common_edge`/`matrix_multiplication`/
+   `geometry_interaction` groups. Not touched this session.
+4. **(low priority, out of scope)** `offload-test-suite`'s own
+   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
+   `array_of_matrices.test`).
 5. **Branch-drift housekeeping**: re-checked this session, still a
-   non-issue (`d0974dd` cherry-pick content matches
-   `llvm-beanz/feme`'s `854cc3f`).
+   non-issue (`854cc3f`, unchanged).
