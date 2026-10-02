@@ -3871,6 +3871,86 @@ TEST(CanonicalizeStageTest, SplitsHullEntryCapturingMixedUseAlloca) {
                "defined in the control-point phase";
 }
 
+/// (Roadmap L347) A per-vertex `Output` global written pre-barrier and then
+/// *self-read* (read back, then partially overwritten) post-barrier --
+/// `misc_draw.tess_factor_barrier_bug`'s own exact shape
+/// (`gl_out[gl_InvocationID].gl_Position = ...;` pre-barrier, then
+/// `gl_out[gl_InvocationID].gl_Position.xy = (... + gl_out[gl_InvocationID]
+/// .gl_Position.xy) / ...;` post-barrier). Unlike `OutputReadBackResolves
+/// ToStoredValueStraightLine` above (the same shape in a single,
+/// unsplit function, which already worked), `splitTessellationControlEntry`
+/// here moves the pre-barrier store into the control-point phase's own
+/// function clone and the self-read + final store into a *separate*
+/// `.patchconstant` function clone: the self-read has no dominating store
+/// left in its own function for `PromoteMemToReg` to recover an SSA value
+/// from, and would (before this row's `ShadowValueMap::SeedFromOutputLoad`
+/// fix) resolve to `poison`/`undef` instead of the real captured value.
+TEST(CanonicalizeStageTest, SplitsHullEntryPatchConstantPhaseOutputSelfRead) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    define void @main() #0 {
+      store <4 x float> <float 1.000000e+00, float 1.000000e+00, float 1.000000e+00, float 1.000000e+00>, ptr addrspace(8) @gl_out_pos
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      %reloaded = load <4 x float>, ptr addrspace(8) @gl_out_pos
+      %doubled = fadd <4 x float> %reloaded, %reloaded
+      store <4 x float> %doubled, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  std::string VerifyErrors;
+  raw_string_ostream VerifyOS(VerifyErrors);
+  EXPECT_FALSE(verifyModule(*M, &VerifyOS)) << VerifyErrors;
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The element is classified `Output` (it has a real store in the
+  // patch-constant phase), never `Input`.
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  ASSERT_EQ(PCSig->Elements.size(), 1u);
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::Output);
+
+  // The core regression check: no `undef`/`poison` value is actually
+  // *inserted* into a vector (as opposed to the idiomatic `poison` base
+  // operand every `insertelement` chain starts from while building up a
+  // vector one lane at a time, which is not itself a bug) -- the
+  // self-read must resolve to a real seeded `feme.stage.output.load`
+  // value, not a synthesized placeholder.
+  for (Instruction &I : instructions(PatchConstant)) {
+    if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
+      EXPECT_FALSE(isa<UndefValue>(IE->getOperand(1)))
+          << "patch-constant phase must not insert undef for a "
+             "self-indexed Output read: " << I;
+      continue;
+    }
+    for (Value *Op : I.operands())
+      EXPECT_FALSE(isa<UndefValue>(Op))
+          << "patch-constant phase must not read back undef for a "
+             "self-indexed Output read: " << I;
+  }
+
+  // A `feme.stage.output.load` call seeds the self-read.
+  unsigned OutputLoads = 0;
+  for (Instruction &I : instructions(PatchConstant)) {
+    StageOpKind Kind;
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && isStageOpCall(*CI, &Kind) && Kind == StageOpKind::OutputLoad)
+      ++OutputLoads;
+  }
+  EXPECT_GT(OutputLoads, 0u);
+}
+
 /// (Roadmap H4f) A no-barrier tessellation-control entry point whose only
 /// stage-IO writes are patch-frequency (`Patch`-decorated or a tess-factor
 /// `BuiltIn`) is legally the case whenever `OutputVertices == 1`
