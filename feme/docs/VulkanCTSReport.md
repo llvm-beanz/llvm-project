@@ -12131,3 +12131,71 @@ a partial read of Mesa's vendored `tessellator.cpp`, itself derived from
 Microsoft's D3D reference `CHWTessellator`) -- a dedicated-session-scale
 task, out of scope here. No fix attempted; see `agent_thoughts.md` for
 the full numeric/pixel-level narrative.
+
+## L349: `fill_overlap_*` reference-tessellator-port scoping confirmed (no FeMe code change); three `offload-test-suite` lit fixes (0 remaining)
+
+Continuing the handed-off `L340` item 2 / `L344` item 2 / `L335` / `L265`
+priority list. No `feme/` code changed this session -- all three
+architecturally-deep items were re-confirmed as multi-session-scale or
+already-irreconcilable (see `FeMeGraphicsDesign.md`'s new `L340` item 2 /
+`L348` / `L349` Status subsection for the full `fill_overlap_*`
+reference-tessellator-reading narrative, and `Roadmap.md`'s `L349` row for
+the `L344` item 2 / `L265` summaries). This session's actual deliverable
+was three small, self-contained `offload-test-suite` fixes (each its own
+commit, none touching `feme/`):
+
+1. **`spec_const_32_bits.test`'s `OutBool` fix**: `parseSpecializationConstant`
+   (`lib/API/VK/Device.cpp`) built its `DataFormat::Bool`
+   `VkSpecializationMapEntry` with `Entry.size = sizeof(bool)` (1 byte on
+   this platform). The Vulkan spec requires boolean specialization
+   constants to use `sizeof(VkBool32)` (4 bytes); FeMe's own
+   `buildSpecializationOverrides` (`Pipeline.cpp`) correctly requires at
+   least 4 bytes at the given offset before reading a value, so the 1-byte
+   entry silently resolved to the default `0` regardless of the requested
+   YAML value. Fixed to use `VkBool32`; verified via `offloader
+   -debug-layer` that `OutBool` now reads back `1` as requested.
+2. **`WaveActiveMax.test`'s `NegInfs` XFAIL**: verified via a standalone
+   `offloader -debug-layer` run that FeMe's `WaveActiveMax` over an
+   all-`-inf` input correctly produces the mathematically-consistent
+   `-inf` (the FMax identity value folded with itself), not the `0` every
+   other currently-tested driver happens to return for this specific
+   all-identity-value case. Added `XFAIL: FeMe && host-arm64`, mirroring
+   the test's own pre-existing `Lavapipe && host-arm64` entry (both are
+   software Vulkan implementations on the same architecture producing the
+   same spec-permitted, non-hardware-convention result).
+3. **`array_of_matrices.test`'s stale `XFAIL: DXC`**: the test was
+   observed Unexpectedly-Passed. Confirmed the checked-out DXC
+   (`libdxcompiler.so 1.11(5553-4781bc21)(1.9.0.15506)`) now emits the
+   correct row-major push-constant matrix-array layout; the upstream bug
+   this XFAIL referenced (`microsoft/DirectXShaderCompiler#8080`) appears
+   fixed in this DXC version. Removed the stale annotation.
+
+`check-hlsl-feme-vk` required reconfiguring `llvm-project/build` (`cmake
+.`) first -- the target had silently disappeared from the ninja build
+graph (not a repeat of the historical `feme`-branch content-loss bug this
+time; `git branch -vv`/`git log` confirmed the local `feme` branch's
+FeMe-enabling CMake content was intact, just a stale build graph). After
+reconfiguring and applying all three fixes: **488 Pass / 32 XFAIL / 207
+Unsupported / 0 Failed / 0 Unexpectedly-Passed** (was 485/31/207/2/1) -- a
+fully clean baseline for the first time across many sessions' worth of
+carried-over notes about this residual. (One transient `Mandelbrot.test`
+failure was observed once under default parallel-worker scheduling and
+did not reproduce on a serial re-run; consistent with prior sessions'
+documented `Mandelbrot`-under-parallelism flakiness, not a regression.)
+
+No `llvm-project`/`feme` code changed this session, so no `ninja
+check-feme` or Vulkan-CTS re-run was needed; `Vulkan14FeatureInventory.md`
+/ `VulkanExtensionInventory.md`: no change needed (none of this session's
+fixes touch FeMe's own Vulkan feature/extension surface).
+
+**`L265` (ASTC alpha-decode tie-break, 12 cases): resumed, no new angle
+found.** Explored whether the two conflicting format groups
+(`astc_5x5`, needing ties-to-even, vs. `astc_{8x8,10x5,12x12}`, needing
+ties-away-from-zero) differ structurally in blit geometry: checked
+`vktApiBlittingTests.cpp`'s region-construction code and confirmed every
+`all_formats` blit test case uses the same fixed `defaultSize = 64`,
+1:1-scale (`{0,0,0}-{64,64,1}` to `{0,0,0}-{64,64,1}`) blit region --
+there is no scale-factor or geometric difference between the passing and
+failing format groups to explain the tie-direction conflict. Did not find
+a new diagnostic lead before time ran out this session; still deferred,
+no regression risk taken (no code change made).

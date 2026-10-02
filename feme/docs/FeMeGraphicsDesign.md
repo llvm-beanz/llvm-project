@@ -4246,6 +4246,60 @@ L82 entry for the full real-ICD repro/root-cause narrative). See
 `QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords` for the regression
 coverage.
 
+#### Status (roadmap L340 item 2 / L348 / L349): `fill_overlap_*` scoping -- a literal reference-tessellator port is required, no smaller fix exists
+
+`dEQP-VK.tessellation.misc_draw.fill_overlap_{quads,triangles}_*` (10
+cases) is not a bug reachable by a targeted fix to FeMe's existing
+`tessellateQuad`/`tessellateTriangle` interior-generation approach. This
+was confirmed by directly reading Mesa's vendored reference
+`CHWTessellator` (`src/gallium/auxiliary/tessellator/tessellator.cpp`,
+fetched via `curl` from `gitlab.freedesktop.org/mesa/mesa` -- itself a
+close derivative of Microsoft's D3D reference tessellator, the same
+algorithm the Vulkan CTS's own reference renderer is built against):
+
+- **Quad domain** (`QuadGeneratePoints`/`QuadGenerateConnectivity`): the
+  reference generates interior points as **concentric rings spiraling
+  inward from the boundary**, not a rectangular `(N-1)x(M-1)` grid like
+  FeMe's `tessellateQuad`. Degenerate axis-parity mismatches between
+  adjacent rings are special-cased as a final middle row/strip.
+  Connectivity between rings (and across edges with differing point
+  counts) is built by `StitchRegular`/`StitchTransition`, the latter
+  driven by a 33-entry `finalPointPositionTable` "ruler function vertex
+  split ordering" lookup table with no simple closed-form equivalent.
+- **The reference's diagonal-split direction is itself
+  position-dependent**: `StitchRegular`'s `DIAGONALS_MIRRORED` mode
+  splits the first half of a ring-trapezoid strip one way and the second
+  half the opposite way, not a single global convention. This explains
+  why `L348`'s own `(I+J)%2` parity-alternation experiment on FeMe's
+  existing rectangular grid failed to meaningfully reduce the
+  reference-image diff: there is no diagonal convention expressible
+  within FeMe's current grid topology that can replicate the reference's
+  output, because the reference doesn't even tile the domain into the
+  same cells FeMe does -- the mismatch is in which edges/cells exist, not
+  merely how a shared cell is split.
+- **Triangle domain** (`TriGeneratePoints`) is also ring-spiral-based, but
+  with its own distinct fixed-point barycentric math (`FXP_TWO_THIRDS`
+  scaling, per-edge perpendicular-offset derivation) -- a second,
+  independently complex algorithm, not a simple variant of the quad path.
+  FeMe's own triangle tessellator (`appendTriangleRingBoundary`) already
+  uses a conceptually similar ring-based approach, but with different
+  point-ordering/diagonal conventions, so `fill_overlap_triangles_*`'s 5
+  cases need their own careful point-ordering alignment work, independent
+  of the quad path's 5.
+
+**Conclusion**: a literal port (both domains' interior-point generation,
+their differing fixed-point arithmetic conventions, and the table-driven
+`StitchTransition` logic) is multi-session-scale work, not "a dedicated
+session" as earlier handoffs hoped, and is definitively not a smaller
+targeted fix -- there is no diagonal-convention tweak, epsilon adjustment,
+or grid-density change within FeMe's current architecture that can close
+this gap. A future dedicated effort should treat the quad and triangle
+domains as two separate porting tasks (quad first, since
+`fill_overlap_quads_*` and `fill_overlap_triangles_*` could then be
+verified independently), and should budget for porting
+`StitchRegular`/`StitchTransition`'s table-driven connectivity logic as
+its own sub-step before attempting to match point generation alone.
+
 ### G6: Amplification and mesh shading
 
 - Import and canonicalize DXIL amplification/mesh and SPIR-V task/mesh stages.
