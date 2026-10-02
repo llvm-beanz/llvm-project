@@ -16,6 +16,8 @@
 #include "ProcAddr.h"
 #include "Surface.h"
 
+#include "feme/Graphics/LineRasterization.h"
+
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -691,15 +693,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES: {
       auto *Props14 =
           reinterpret_cast<VkPhysicalDeviceVulkan14Properties *>(Base);
-      // (roadmap F5) `VK_KHR_line_rasterization` is implemented; `4` is
-      // the same conservative, honest floor `subPixelPrecisionBits`/
+      // (roadmap F5) `VK_KHR_line_rasterization` is implemented;
+      // `feme::graphics::LineSubPixelPrecisionBits` is the same
+      // conservative, honest floor `subPixelPrecisionBits`/
       // `subTexelPrecisionBits` (`PhysicalDeviceInfo.cpp`) already use --
       // this software rasterizer's line positions are full `float`
       // screen-space coordinates with no separate fixed-point snapping
       // grid of their own, so no higher bit count is independently
       // verified. Must agree with the dedicated
       // `VkPhysicalDeviceLineRasterizationPropertiesKHR` case below.
-      Props14->lineSubPixelPrecisionBits = 4;
+      Props14->lineSubPixelPrecisionBits =
+          feme::graphics::LineSubPixelPrecisionBits;
       // (roadmap F6) `maxVertexAttribDivisor` is a real, verified limit --
       // the fetch-index division it bounds is a plain 32-bit integer
       // divide with no narrower bound of its own (see
@@ -831,7 +835,8 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       auto *LineRasterization =
           reinterpret_cast<VkPhysicalDeviceLineRasterizationPropertiesKHR *>(
               Base);
-      LineRasterization->lineSubPixelPrecisionBits = 4;
+      LineRasterization->lineSubPixelPrecisionBits =
+          feme::graphics::LineSubPixelPrecisionBits;
       break;
     }
     // (roadmap F6) `VK_KHR_vertex_attribute_divisor`'s own properties

@@ -8,6 +8,7 @@
 
 #include "PhysicalDeviceInfo.h"
 
+#include "feme/Graphics/LineRasterization.h"
 #include "feme/Target/CPU/WaveSize.h"
 
 #include "llvm/ADT/StringMap.h"
@@ -323,7 +324,7 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // workgroup's invocation limit.
   Info.MaxComputeWorkgroupSubgroups =
       Limits.maxComputeWorkGroupInvocations / Info.MinSubgroupSize;
-  Limits.subPixelPrecisionBits = 4;
+  Limits.subPixelPrecisionBits = feme::graphics::LineSubPixelPrecisionBits;
   // (Roadmap L316) `subTexelPrecisionBits`/`mipmapPrecisionBits` tell
   // `VK-GL-CTS`'s own `vktSampleVerifier.cpp` how coarsely an
   // implementation is allowed to *quantize* a texel-filtering weight

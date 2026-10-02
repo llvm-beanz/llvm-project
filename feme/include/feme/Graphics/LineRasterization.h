@@ -37,6 +37,17 @@
 
 namespace feme::graphics {
 
+/// The fixed-point subpixel precision this device advertises for exact
+/// line rasterization (`VkPhysicalDeviceLimits::subPixelPrecisionBits`,
+/// `VkPhysicalDeviceLineRasterizationPropertiesKHR::
+/// lineSubPixelPrecisionBits`): the single source of truth both
+/// `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` (what the device reports)
+/// and `Executor.cpp`'s Bresenham-mode rasterizer (what it actually
+/// computes with, via `doesLineSegmentExitDiamond` below) must agree on,
+/// so the two can never silently drift apart the way three independently
+/// hardcoded `4` literals previously could.
+constexpr unsigned LineSubPixelPrecisionBits = 4;
+
 /// Converts a floating-point pixel-space coordinate into a fixed-point
 /// subpixel coordinate with \p Bits fractional bits, rounding to nearest
 /// (ties away from zero) -- the Vulkan spec's exact-rasterization
