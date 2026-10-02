@@ -63,18 +63,21 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L326` (a few hours, best next pick, newly scoped, repro in
-   hand)**: the 9 remaining `*stipple*.bresenham_line_strip_wide`
-   failures. Likely the half-open diamond-exit rule (`L324`)
-   interacting with the width-replication offset (`L312`) at a strip
-   join, causing a one-row overlap between consecutive wide segments.
-   Start with a 2-segment, non-axis-aligned, small wide Bresenham strip
-   reduction and hand-check the walked pixel set against
-   `rrRasterizer.cpp`'s own strip-join handling.
-2. **`L265` (a few hours, lowest priority, many sessions carried over,
+1. **`L327` (a few hours, best next pick, newly scoped, standalone)**:
+   port `doesLineSegmentExitDiamond` + its helpers
+   (`toSubpixelCoord`/`SubpixelLineSegment`/corner-case table) from
+   `rrRasterizer.cpp` into a new `feme/lib/Graphics/` file. Unit test
+   each of the 4 corner-exit/start/end sub-cases independently before
+   moving to `L328`. Do not touch `emitLineSegment` yet.
+2. **`L328` (a few hours, depends on `L327`)**: replace
+   `emitLineSegment`'s Bresenham DDA walk with a
+   bounding-box-and-diamond-test walk using `L327`'s primitive.
+   Validate against the known 9-case `L326` failure list first, then
+   the full `rasterization` CTS group for regressions.
+3. **`L265` (a few hours, lowest priority, many sessions carried over,
    unchanged)**: ASTC alpha-decode tie-break (4 block sizes). Needs a
    Mesa/lavapipe reference-decoder comparison.
-3. **Rasterization's remaining 21 scattered failures** (`stencil`,
+4. **Rasterization's remaining 21 scattered failures** (`stencil`,
    `color_at_beginning`/`color_at_end`, `non_strict_line*`,
    `triangle_fan`/`triangle_strip`, `line-strip`, `polygon-mode-lines`,
    `depth_bias`, `provoking_vertex`, `flatshading`, `line_continuity`,
@@ -82,9 +85,9 @@ next steps are:
    `d24_unorm_constant_one_greater`, `draw`, `depth`) -- confirmed
    pre-existing, individually untriaged. Not yet scoped into its own
    roadmap item; do that first if picked up.
-4. **`offload-test-suite`'s own lit-annotation issues**
+5. **`offload-test-suite`'s own lit-annotation issues**
    (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`)
    -- low priority, pre-existing, outside this project's scope.
-5. **Branch-drift housekeeping**: confirmed unchanged again this
-   session (`854cc3f`) -- no action needed until content actually
-   diverges.
+6. **Branch-drift housekeeping**: not re-checked this session --
+   overdue by one more session now (last confirmed non-issue at
+   `854cc3f`, two sessions ago).
