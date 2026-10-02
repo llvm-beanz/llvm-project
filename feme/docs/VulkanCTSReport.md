@@ -11133,3 +11133,83 @@ re-validate against these 13 CTS cases.
 No code change this session (investigation/scoping only).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed (not yet fixed).
+
+## L340: `misc_draw` triage -- 13 failures, partially scoped
+
+### Findings
+
+Triaged the 13 `dEQP-VK.tessellation.misc_draw.*` failures into three
+distinct buckets:
+
+1. **`tess_factor_barrier_bug` (1 case)**: hits the exact same
+   `feme-cpu-wrap-patch-constant: masked output store references an
+   unknown patch-output signature element` diagnostic as `L339`. Its
+   TCS writes `gl_out[gl_InvocationID].gl_Position.xy` (a per-vertex
+   output) conditionally, inside an `if (wave32_in_workgroup == 7)`
+   branch that runs *after* `barrier()` -- the identical
+   per-vertex-write-after-barrier shape `L339` already scoped. Folded
+   into `L339`'s scope; no separate fix needed once `L339` lands.
+2. **`fill_overlap_{quads,triangles}_{equal_spacing,
+   fractional_even_spacing,fractional_odd_spacing}_draw{,_indirect}`
+   (10 cases)** -- `triangles_fractional_odd_spacing` is notably
+   *not* among the failures. Reference-image comparison fails with a
+   large difference (up to ~18 against a 0.002 threshold). The test
+   renders tessellated triangles/quads colored by concentric phase
+   bands derived from `gl_TessLevelInner`/`gl_TessLevelOuter` mirrored
+   into an SSBO (`sb_levels`), verifying no obvious interior-triangle
+   overlap. Not yet root-caused -- needs `--deqp-log-images=enable` to
+   diff reference vs result directly (the same technique used for
+   `L326`) to determine whether this is a `Tessellator.cpp`
+   interior-triangulation bug (distinct from the already-fixed `L337`
+   U/V-axis bug) or an `sb_levels` SSBO-mirroring/layout bug causing
+   the TES's own phase-color computation to disagree with the real
+   tess levels used for geometry.
+3. **`switch_domain_origin_upper_left_to_lower_left{,_with_geom_shader}_fast_lib`
+   (2 cases)** -- a localized reference-image mismatch
+   (`max difference = (0, 1, 1, 0)`, green/blue channels only) in a
+   test exercising pipeline relinking with a domain-origin flip between
+   draws (`_fast_lib` suggests a fast-link/precompiled-library path).
+   The small, channel-specific difference suggests a narrow
+   edge-of-domain-flip region, not a wholesale domain-origin bug, but
+   not yet root-caused.
+
+No code change this session for (2) or (3) -- investigation/triage
+only. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+change needed (not yet fixed).
+
+### Also re-confirmed this session (no change needed)
+
+- `dEQP-VK.tessellation.tesscoord.*`: 18/18 Pass (re-verified after
+  `L338`'s `HullWrapper.cpp` change -- no regression).
+- `dEQP-VK.tessellation.winding.*`: 48/48 Pass (re-verified -- no
+  regression).
+- `dEQP-VK.tessellation.common_edge.*`: 9/12 Pass, 3 Fail, unchanged
+  from `L337`'s count (`quads_{equal_spacing,fractional_even_spacing,
+  fractional_odd_spacing}_precise`). Looked into this further this
+  session: all 3 failures are specifically the `_precise`-qualified
+  variants (`CASETYPE_PRECISE`, using GLSL `precise gl_TessLevelOuter`/
+  `precise gl_Position`, which lowers to SPIR-V `NoContraction`
+  decorations), while their non-`_precise` siblings all Pass. Checked
+  whether FeMe's SPIR-V-to-LLVM pipeline actually propagates
+  `NoContraction` through to the generated LLVM IR (e.g. as a
+  `fast-math` flags suppression) and found MLIR's own upstream SPIR-V
+  deserializer (`mlir/lib/Target/SPIRV/Deserialization/
+  DeserializeOps.cpp`) *does* attach a `no_contraction` unit attribute
+  to the deserialized op from the decoration -- so the information is
+  not dropped at the SPIR-V-import boundary. However, this doesn't
+  cleanly explain the failure direction: if FeMe's LLVM-IR lowering
+  ignored this attribute and relied on LLVM's default (non-fast-math)
+  codegen being safe regardless, the `_precise` and non-`_precise`
+  cases should behave identically (both already free of unwanted
+  contraction/reassociation by default) -- contradicting the observed
+  pattern where only `_precise` fails. This means the real cause is
+  something else entirely (not an ignored-`NoContraction` issue) --
+  possibly in how the `precise`-qualified GLSL compiles differently at
+  the glslang front-end (invariance/evaluation-order choices tied to
+  the `GL_EXT_gpu_shader5` extension these cases require), not a FeMe
+  defect at all. Not re-opened as a new root-cause thread this
+  session given the contradiction; left as `L337`'s already-open
+  `common_edge` crack for a future dedicated session with
+  `--deqp-log-images=enable` plus a `glslang`/`spirv-dis` comparison
+  of the `_precise` vs non-`_precise` SPIR-V to find the actual
+  divergent computation.
