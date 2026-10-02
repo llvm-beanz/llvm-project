@@ -63,25 +63,29 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(4 cases, best next pick, a few hours)**
-   `maintenance5.non_strict_line{s,_strip}_{narrow,wide}` -- largest
-   same-looking cluster of the 9 remaining scattered `rasterization`
-   failures. Still untriaged.
-2. **(8 cases remaining after #1, a few hours each)** Rest of the
-   scattered `rasterization` failures:
-   `flatshading.{triangle_fan,triangle_strip}`,
-   `line_continuity.{line-strip,polygon-mode-lines}`,
-   `provoking_vertex.draw.default.triangle_fan`. Re-verify this count
-   is still exactly 9 before starting -- it wasn't touched by this
-   session's fix (different CTS group), but always re-confirm against
-   a fresh build/run rather than trusting the old number (see this
-   session's own `user_defined_io` lesson above).
-3. **(a few hours, lowest priority, many sessions carried over)**
+1. **(dedicated session, compiler/backend work)** `L335` --
+   `line_continuity.{line-strip,polygon-mode-lines}` (2 cases). Extract
+   a minimal standalone HLSL/SPIR-V reproducer isolating just the
+   barrier-in-nested-if-and-while pattern (skip the full Amber
+   flood-fill algorithm, too slow to iterate on). Then survey the
+   region-splitting pass's current supported shapes (straight-line,
+   single uniform loop) vs. what's needed (sequential multi-branch-
+   then-barrier, barrier-guarded loop body) to scope the change. Add
+   unit tests for the new shape(s) before touching CTS again.
+2. **(a few hours, lowest priority, many sessions carried over)**
    `L265` -- ASTC alpha-decode tie-break (4 block sizes). Needs a
-   Mesa/lavapipe reference-decoder comparison.
+   Mesa/lavapipe reference-decoder comparison. Untouched again this
+   session.
+3. **(unknown, 27 cases, largest untriaged chunk, still not started)**
+   Tessellation `user_defined_io` triage. Also still open:
+   `shader_input_output`/`misc_draw`/`common_edge`/
+   `matrix_multiplication`/`geometry_interaction`. This has been
+   carried over many sessions now without anyone picking it up --
+   worth prioritizing over `L265` next time there's a multi-hour
+   session, since it's the single largest known-untriaged bucket.
 4. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
    `array_of_matrices.test`).
-5. **Branch-drift housekeeping**: confirmed non-issue again this
-   session (`854cc3f`, unchanged) -- re-check again next session per
-   standing protocol.
+5. **Branch-drift housekeeping**: not re-checked this session (ran out
+   of time after the `rasterization` triage work) -- re-check next
+   session per standing protocol.
