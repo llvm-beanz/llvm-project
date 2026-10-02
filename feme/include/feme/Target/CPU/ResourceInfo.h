@@ -84,6 +84,18 @@ std::array<uint32_t, 3> getDeclaredGroupSize(const llvm::Function &F);
 /// introduces such a call), but the scan itself is stage-agnostic, so this
 /// is ready for roadmap R27/R28 to reuse once `CompiledStage` compiles
 /// those stages too.
+///
+/// Also reports `FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS` (roadmap L329):
+/// whether \p F's body contains a genuine observable memory write -- a
+/// `StoreInst`/`AtomicRMWInst`/`AtomicCmpXchgInst` through a pointer that
+/// does not trace back to a local `alloca` (through any chain of `GEP`/
+/// bitcast/addrspacecast instructions). At the point this runs (before
+/// `CanonicalizeStagePass`), stage I/O (`SV_Position`/`SV_Target`/etc.)
+/// reads and writes are already `feme.stage.{input,output}.load`/`.store`
+/// calls, not raw loads/stores (see `StageOps.h`), so any raw store/atomic
+/// still present can only be a write through a real resource pointer (an
+/// SSBO/UAV buffer or image descriptor) or a local-variable spill -- this
+/// scan's only job is telling those two apart.
 uint32_t computeSideEffectFlags(const llvm::Function &F);
 
 /// Which of the three physical heaps a `BoundResourceRange`'s slots belong
@@ -236,6 +248,15 @@ enum ArtifactFlagBits : uint32_t {
   /// Set if the entry point calls `feme.stage.is_helper` anywhere in its
   /// body.
   FEME_CPU_ARTIFACT_USES_HELPER = 1u << 3,
+  /// Set if the entry point's body contains any `StoreInst`/
+  /// `AtomicRMWInst`/`AtomicCmpXchgInst` writing through a pointer that
+  /// does not trace back to a local `alloca` (see `computeSideEffectFlags`'s
+  /// own comment for why this, specifically, is the signal that
+  /// distinguishes an observable memory side effect -- e.g. an SSBO/UAV
+  /// buffer or image store, or an atomic against one -- from an ordinary
+  /// local-variable spill/scratch write the early depth/stencil-test
+  /// optimization can still safely skip).
+  FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS = 1u << 4,
 };
 
 /// The versioned, object-file-friendly artifact `emitArtifactGlobal` writes

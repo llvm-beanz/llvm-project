@@ -75,6 +75,36 @@ readBoundResourceMetadata(const Module &M, StringRef EntryName) {
 
 } // namespace
 
+namespace {
+/// Walks \p Ptr back through any chain of `GEP`/bitcast/addrspacecast
+/// instructions to find the value it is ultimately derived from, so
+/// `computeSideEffectFlags` can tell a local-variable write (the base
+/// is an `AllocaInst`) apart from a write through a real resource pointer
+/// (the base is anything else -- a `GlobalVariable`, a function
+/// argument carrying a descriptor pointer, a `load` of a handle, etc.).
+/// Deliberately not `llvm::getUnderlyingObject`: that routine lives in
+/// `Analysis`, a library this target does not otherwise link, and this
+/// scan only ever needs to distinguish "an alloca" from "anything else",
+/// not full points-to precision.
+const Value *stripToBase(const Value *Ptr) {
+  for (;;) {
+    if (const auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+      Ptr = GEP->getPointerOperand();
+      continue;
+    }
+    if (const auto *BC = dyn_cast<BitCastInst>(Ptr)) {
+      Ptr = BC->getOperand(0);
+      continue;
+    }
+    if (const auto *ASC = dyn_cast<AddrSpaceCastInst>(Ptr)) {
+      Ptr = ASC->getOperand(0);
+      continue;
+    }
+    return Ptr;
+  }
+}
+} // namespace
+
 std::array<uint32_t, 3> feme::cpu::getDeclaredGroupSize(const Function &F) {
   std::array<uint32_t, 3> Size{1, 1, 1};
   if (!F.hasFnAttribute("hlsl.numthreads"))
@@ -95,25 +125,38 @@ uint32_t feme::cpu::computeSideEffectFlags(const Function &F) {
   uint32_t Flags = 0;
   for (const BasicBlock &BB : F) {
     for (const Instruction &I : BB) {
-      const auto *CI = dyn_cast<CallInst>(&I);
-      if (!CI)
+      if (const auto *CI = dyn_cast<CallInst>(&I)) {
+        StageOpKind Kind;
+        if (!isStageOpCall(*CI, &Kind))
+          continue;
+        switch (Kind) {
+        case StageOpKind::Discard:
+          Flags |= FEME_CPU_ARTIFACT_USES_DISCARD;
+          break;
+        case StageOpKind::Demote:
+          Flags |= FEME_CPU_ARTIFACT_USES_DEMOTE;
+          break;
+        case StageOpKind::IsHelper:
+          Flags |= FEME_CPU_ARTIFACT_USES_HELPER;
+          break;
+        default:
+          break;
+        }
         continue;
-      StageOpKind Kind;
-      if (!isStageOpCall(*CI, &Kind))
-        continue;
-      switch (Kind) {
-      case StageOpKind::Discard:
-        Flags |= FEME_CPU_ARTIFACT_USES_DISCARD;
-        break;
-      case StageOpKind::Demote:
-        Flags |= FEME_CPU_ARTIFACT_USES_DEMOTE;
-        break;
-      case StageOpKind::IsHelper:
-        Flags |= FEME_CPU_ARTIFACT_USES_HELPER;
-        break;
-      default:
-        break;
       }
+      // (roadmap L329) Any raw store/atomic surviving this early (stage
+      // I/O is already `feme.stage.*` calls, see this function's own
+      // declaration comment) writes through a real resource pointer
+      // unless it traces back to a local `alloca` -- see `stripToBase`.
+      const Value *Ptr = nullptr;
+      if (const auto *SI = dyn_cast<StoreInst>(&I))
+        Ptr = SI->getPointerOperand();
+      else if (const auto *RMW = dyn_cast<AtomicRMWInst>(&I))
+        Ptr = RMW->getPointerOperand();
+      else if (const auto *CX = dyn_cast<AtomicCmpXchgInst>(&I))
+        Ptr = CX->getPointerOperand();
+      if (Ptr && !isa<AllocaInst>(stripToBase(Ptr)))
+        Flags |= FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS;
     }
   }
   return Flags;

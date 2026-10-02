@@ -2586,21 +2586,32 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // An early test -- performed before the fragment stage runs, using the
   // rasterizer's own interpolated depth and each face's fixed stencil
   // reference -- is only correct when the fragment stage cannot override
-  // either (no `SV_Depth`/`SV_StencilRef` output) and cannot conditionally
-  // suppress its own side effects (no discard/demote): "An early depth
-  // pass may reject side-effect invocations before fragment execution only
-  // when the source API permits it" ("Early and late tests" in
-  // feme/docs/FeMeGraphicsDesign.md). Every other case defers the test
-  // until after the fragment stage returns, matching output merge's own
-  // "depth, stencil, blend, and attachment writes in specification order".
+  // either (no `SV_Depth`/`SV_StencilRef` output), cannot conditionally
+  // suppress its own side effects (no discard/demote), and has no *other*
+  // observable side effects (no UAV/SSBO/image store or atomic) that must
+  // run regardless of what the test decides: "An early depth pass may
+  // reject side-effect invocations before fragment execution only when the
+  // source API permits it" ("Early and late tests" in
+  // feme/docs/FeMeGraphicsDesign.md). Per the Vulkan spec's own "Early
+  // Fragment Tests" section (roadmap L329), an implementation may only
+  // skip a rejected fragment's shader invocation as an *optimization* of
+  // the late-test default when doing so would not change any effect the
+  // API guarantees is observable -- a `fragmentStoresAndAtomics` write is
+  // exactly such an effect, since it is not gated on the depth/stencil
+  // test's own outcome (unlike the color/depth/stencil writes an early
+  // test's own rejection already correctly suppresses). Every other case
+  // defers the test until after the fragment stage returns, matching
+  // output merge's own "depth, stencil, blend, and attachment writes in
+  // specification order".
   const SignatureElement *FSDepthOut = findElement(
       FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
   const SignatureElement *FSStencilRefOut = findElement(
       FSSig, SignatureDirection::Output, SignatureSystemValue::StencilRef);
   // (roadmap H2j) A fragment-less pipeline can neither write `SV_Depth`/
   // `SV_StencilRef` (its empty `FSSig` above already guarantees `FSDepthOut`/
-  // `FSStencilRefOut` are null) nor discard/demote, so `UseEarlyDepthStencil`
-  // below is unconditionally true whenever depth/stencil testing is needed
+  // `FSStencilRefOut` are null) nor discard/demote/store, so
+  // `UseEarlyDepthStencil` below is unconditionally true whenever
+  // depth/stencil testing is needed at all
   // at all -- matching "only vertex-stage clip/rasterize/early-depth-test,
   // no per-fragment shading" exactly.
   uint32_t FSFlags = Pipeline.hasFragmentStage()
@@ -2608,6 +2619,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                          : 0;
   bool FSMayDiscard = (FSFlags & (cpu::FEME_CPU_ARTIFACT_USES_DISCARD |
                                   cpu::FEME_CPU_ARTIFACT_USES_DEMOTE)) != 0;
+  // (roadmap L329) See this block's own leading comment: a storage
+  // buffer/image write or atomic the fragment stage performs is an
+  // observable effect the Vulkan spec requires regardless of the
+  // depth/stencil test's own outcome, so it rules out the early-test path
+  // exactly like a discard/demote or an `SV_Depth`/`SV_StencilRef` write
+  // does.
+  bool FSHasMemorySideEffects =
+      (FSFlags & cpu::FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
   // (roadmap H7d) `BoundsTestEnable` also needs the depth-read path active
   // even when neither the regular depth test nor a depth write is
@@ -2623,6 +2642,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // until the fragment stage itself has run.
   bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
                               !FSStencilRefOut && !FSMayDiscard &&
+                              !FSHasMemorySideEffects &&
                               !Pipeline.getAlphaToCoverageEnable() &&
                               !FSSampleMaskOut;
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A

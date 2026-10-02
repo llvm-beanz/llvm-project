@@ -452,4 +452,78 @@ TEST(ResourceInfoTest, ComputeSideEffectFlagsFindsDiscardDemoteHelper) {
   EXPECT_EQ(computeSideEffectFlags(*M->getFunction("plain")), 0u);
 }
 
+TEST(ResourceInfoTest, ComputeSideEffectFlagsIgnoresLocalAllocaStores) {
+  LLVMContext Ctx;
+  // A store through a pointer derived from a local `alloca` -- directly,
+  // and through a `getelementptr`/`bitcast` chain on top of one -- is an
+  // ordinary local-variable write (a scratch/spill slot), not an
+  // observable resource write, so none of these should set the new flag.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @directAlloca(i32 %v) {
+      %p = alloca i32
+      store i32 %v, ptr %p
+      ret void
+    }
+    define void @gepOfAlloca(i32 %v) {
+      %p = alloca [4 x i32]
+      %gep = getelementptr [4 x i32], ptr %p, i32 0, i32 2
+      store i32 %v, ptr %gep
+      ret void
+    }
+    define void @bitcastOfAlloca(i64 %v) {
+      %p = alloca i32
+      store i64 %v, ptr %p
+      ret void
+    }
+  )");
+  ASSERT_TRUE(M);
+
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("directAlloca")), 0u);
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("gepOfAlloca")), 0u);
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("bitcastOfAlloca")), 0u);
+}
+
+TEST(ResourceInfoTest, ComputeSideEffectFlagsFindsResourceStoresAndAtomics) {
+  LLVMContext Ctx;
+  // A store or atomic through a pointer that does *not* trace back to a
+  // local `alloca` -- a function argument (standing in for a bound
+  // resource/descriptor pointer, as a real SSBO/image store's pointer
+  // would be at the point this scan runs, see `computeSideEffectFlags`'s
+  // own comment) or a global -- is an observable memory side effect, and
+  // must set `FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS`.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @g = global i32 0
+
+    define void @storesThroughArgument(ptr %res, i32 %v) {
+      store i32 %v, ptr %res
+      ret void
+    }
+    define void @storesThroughGepOfArgument(ptr %res, i32 %v) {
+      %gep = getelementptr i32, ptr %res, i32 1
+      store i32 %v, ptr %gep
+      ret void
+    }
+    define void @storesThroughGlobal(i32 %v) {
+      store i32 %v, ptr @g
+      ret void
+    }
+    define i32 @atomicRmwThroughArgument(ptr %res, i32 %v) {
+      %old = atomicrmw add ptr %res, i32 %v seq_cst
+      ret i32 %old
+    }
+    define { i32, i1 } @atomicCmpXchgThroughArgument(ptr %res, i32 %cmp, i32 %new) {
+      %r = cmpxchg ptr %res, i32 %cmp, i32 %new seq_cst seq_cst
+      ret { i32, i1 } %r
+    }
+  )");
+  ASSERT_TRUE(M);
+
+  for (StringRef Name : {"storesThroughArgument", "storesThroughGepOfArgument",
+                         "storesThroughGlobal", "atomicRmwThroughArgument",
+                         "atomicCmpXchgThroughArgument"})
+    EXPECT_EQ(computeSideEffectFlags(*M->getFunction(Name)),
+              static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS))
+        << Name;
+}
+
 } // namespace
