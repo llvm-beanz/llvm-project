@@ -223,10 +223,34 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
     return HullToPatchConstant.takeError();
   Link.HullToPatchConstant = std::move(*HullToPatchConstant);
 
+  // (Roadmap L339) A domain-stage `Input` consumer element this phase's
+  // own `Output`-direction (genuine per-vertex, post-barrier) signature
+  // elements cover is linked by `PatchConstantToDomainInput` below
+  // instead -- `HullToDomain` must skip it here, since the hull
+  // control-point phase's own output never wrote it (that's precisely
+  // what makes it a `cross_invocation_per_vertex`-shaped varying rather
+  // than an ordinary one) and would otherwise make this an unconditional
+  // hard "no matching producer element" link failure.
+  auto IsCoveredByPatchConstantVertexOutput =
+      [&Link](const SignatureElement &Elt) {
+        if (Elt.SystemValue != SignatureSystemValue::None)
+          return findElement(Link.PatchConstantSig,
+                             SignatureDirection::Output,
+                             Elt.SystemValue) != nullptr;
+        if (!Elt.Location)
+          return false;
+        return findElementByLocation(Link.PatchConstantSig,
+                                     SignatureDirection::Output,
+                                     *Elt.Location, Elt.Index,
+                                     Elt.FirstComponent) != nullptr;
+      };
   Expected<SmallVector<LinkedStageElement, 4>> HullToDomain = linkStageElements(
       Link.HullSig, SignatureDirection::Output, Link.DomainSig,
       SignatureDirection::Input, "hull stage output -> domain stage input",
-      isForwardedFromProducerStage);
+      [&](const SignatureElement &Elt) {
+        return isForwardedFromProducerStage(Elt) &&
+               !IsCoveredByPatchConstantVertexOutput(Elt);
+      });
   if (!HullToDomain)
     return HullToDomain.takeError();
   Link.HullToDomain = std::move(*HullToDomain);
@@ -242,6 +266,38 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
     if (!PatchConstantToDomain)
       return PatchConstantToDomain.takeError();
     Link.PatchConstantToDomain = std::move(*PatchConstantToDomain);
+  }
+
+  // (Roadmap L339) A genuine per-control-point output the patch-constant
+  // phase's own body writes after a barrier (e.g. GLSL's
+  // `cross_invocation_per_vertex` shape) -- unlike `PatchOutput` above,
+  // this is `SignatureDirection::Output`, structure-of-arrays over
+  // `OutputControlPointCount`, and links into the domain stage's
+  // *ordinary* per-vertex `Input` (the same direction `HullToDomain`
+  // feeds, see `runPatchPipeline`'s own comment on why copying into that
+  // same `DomainInput` storage from two different `Src` blocks is safe).
+  // Mirrors `HullToDomain`'s own `IsCoveredByPatchConstantVertexOutput`
+  // filter above: only a domain-stage `Input` consumer this phase's own
+  // `Output`-direction elements actually cover belongs to this link --
+  // every other ordinary varying (already linked by `HullToDomain`
+  // instead) must be excluded here, or this would unconditionally
+  // require *every* domain input to find a patch-constant producer,
+  // hard-failing on any one `HullToDomain` already covers.
+  Link.HasPatchConstantVertexOutputs =
+      hasDirection(Link.PatchConstantSig, SignatureDirection::Output);
+  if (Link.HasPatchConstantVertexOutputs) {
+    Expected<SmallVector<LinkedStageElement, 4>> PatchConstantToDomainInput =
+        linkStageElements(
+            Link.PatchConstantSig, SignatureDirection::Output, Link.DomainSig,
+            SignatureDirection::Input,
+            "patch-constant per-vertex output -> domain stage input",
+            [&](const SignatureElement &Elt) {
+              return isForwardedFromProducerStage(Elt) &&
+                     IsCoveredByPatchConstantVertexOutput(Elt);
+            });
+    if (!PatchConstantToDomainInput)
+      return PatchConstantToDomainInput.takeError();
+    Link.PatchConstantToDomainInput = std::move(*PatchConstantToDomainInput);
   }
 
   return Link;
@@ -331,10 +387,25 @@ Expected<PatchPipelineResult> runPatchPipeline(
   if (!PatchConstantOutput)
     return PatchConstantOutput.takeError();
   Result.PatchConstants = std::move(*PatchConstantOutput);
+
+  // (Roadmap L339) A genuine per-control-point output is
+  // structure-of-arrays over `OutputControlPointCount`, exactly like
+  // `Result.OutputPatch` above, unlike `Result.PatchConstants`'s single
+  // per-patch slot.
+  if (Link.HasPatchConstantVertexOutputs) {
+    Expected<StageStorage> PatchConstantVertexOutput = buildStageStorage(
+        Link.PatchConstantSig, SignatureDirection::Output,
+        Tess.OutputControlPointCount);
+    if (!PatchConstantVertexOutput)
+      return PatchConstantVertexOutput.takeError();
+    Result.PatchConstantVertexOutputs = std::move(*PatchConstantVertexOutput);
+  }
   {
     cpu::FemeStageLayout InLayout = PatchConstantInput->layout();
     cpu::FemeStageLayout InPatchLayout = InputPatch.layout();
     cpu::FemeStageLayout OutLayout = Result.PatchConstants.layout();
+    cpu::FemeStageLayout PerVertexOutLayout =
+        Result.PatchConstantVertexOutputs.layout();
     cpu::PatchConstantResources Res;
     applyResources(Res, Resources);
     Res.InputLayout = &InLayout;
@@ -346,6 +417,10 @@ Expected<PatchPipelineResult> runPatchPipeline(
     }
     Res.OutputLayout = &OutLayout;
     Res.Outputs = Result.PatchConstants.Data.data();
+    if (Link.HasPatchConstantVertexOutputs) {
+      Res.PerVertexOutputLayout = &PerVertexOutLayout;
+      Res.PerVertexOutputs = Result.PatchConstantVertexOutputs.Data.data();
+    }
     Res.OutputControlPointCount = Tess.OutputControlPointCount;
     Res.PrimitiveID = PrimitiveID;
     Res.ViewIndex = ViewIndex;
@@ -382,6 +457,16 @@ Expected<PatchPipelineResult> runPatchPipeline(
     return DomainInput.takeError();
   copyLinkedElements(Result.OutputPatch, *DomainInput, Link.HullToDomain,
                      Tess.OutputControlPointCount);
+  // (Roadmap L339) A second, independent source feeding the same
+  // `DomainInput` storage: safe because `Link.HullToDomain` and
+  // `Link.PatchConstantToDomainInput` address disjoint `DomainSig`
+  // element IDs (one stage's `Output`-direction signature never shares an
+  // element ID with another's, per `linkPatchPipeline`'s own element-ID
+  // bookkeeping).
+  if (Link.HasPatchConstantVertexOutputs)
+    copyLinkedElements(Result.PatchConstantVertexOutputs, *DomainInput,
+                       Link.PatchConstantToDomainInput,
+                       Tess.OutputControlPointCount);
 
   StageStorage DomainPatchConstants;
   if (Link.HasDomainPatchConstants) {
