@@ -2780,7 +2780,9 @@ bool isSPIRVGroupSyncBarrier(const CallInst &CI) {
 SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
                                       SPIRVCanonicalPhase Phase,
                                       unsigned AddrSpace,
-                                      const ParsedSPIRVDecorations &D) {
+                                      const ParsedSPIRVDecorations &D,
+                                      const GlobalVariable *GV = nullptr,
+                                      bool HasStoreInPhase = false) {
   SPIRVElementInfo Info;
   Info.Frequency = D.PerPrimitive ? SignatureFrequency::PerPrimitive
                    : D.Patch      ? SignatureFrequency::PerPatch
@@ -2823,7 +2825,37 @@ SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
       Info.IsOutput = true;
       return Info;
     }
-    Info.Direction = SignatureDirection::Input;
+    // (Roadmap L339) An address-space-8 global here that is *not*
+    // `patch`-decorated (so not a true tess-factor/patch-constant output)
+    // is one of three shapes: a synthetic cross-barrier "captured value"
+    // global `splitTessellationControlEntry` itself created to forward a
+    // pre-barrier per-vertex value back into this phase as a read-only
+    // input (tagged `feme.captured.self.index`, see that function's own
+    // comment) -- still correctly `Input`; a genuine cross-invocation
+    // *read* of another (already-completed) control point's own
+    // per-vertex output -- e.g. GLSL's `cross_invocation_per_vertex`
+    // shape's own `in_te_data0[(gl_InvocationID + 1) % N]`, defined
+    // behavior once the one barrier this phase sits after has run --
+    // also `Input` (this phase's own body never *stores* to it, only
+    // reads it back, so it is never actually this phase's own output);
+    // or a genuine per-vertex output this phase's own body *writes* after
+    // the barrier (that same shape's `in_te_data1`). Only \p
+    // HasStoreInPhase (whether this phase's own body stores to \p GV at
+    // all) distinguishes the latter two -- previously every such global
+    // fell into the "input" case unconditionally, silently misclassifying
+    // every genuine per-vertex write as an `Input` the output-store
+    // lowering could never find a producer direction for
+    // (`PatchConstantWrapper.cpp`'s own "masked output store references
+    // an unknown patch-output signature element").
+    bool IsCapturedValue =
+        GV && GV->getMetadata("feme.captured.self.index") != nullptr;
+    if (IsCapturedValue || !HasStoreInPhase) {
+      Info.Direction = SignatureDirection::Input;
+      return Info;
+    }
+    Info.Direction = SignatureDirection::Output;
+    Info.Frequency = SignatureFrequency::PerVertex;
+    Info.IsOutput = true;
     return Info;
   }
 
@@ -3435,14 +3467,63 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
       // a global; every cloned use inside \p Region already gets
       // redirected to it via \p VMap, exactly like any other value this
       // loop maps.
-      if (auto *AI = dyn_cast<AllocaInst>(V);
-          AI && all_of(AI->users(), [&](User *U) {
-            auto *UI = dyn_cast<Instruction>(U);
-            return UI && Region.contains(UI->getParent());
-          })) {
+      if (auto *AI = dyn_cast<AllocaInst>(V)) {
+        bool AllUsersInRegion = all_of(AI->users(), [&](User *U) {
+          auto *UI = dyn_cast<Instruction>(U);
+          return UI && Region.contains(UI->getParent());
+        });
+        if (AllUsersInRegion) {
+          Instruction *Clone = AI->clone();
+          Clone->setName(AI->getName());
+          Clone->insertInto(CaptureEntry, CaptureEntry->end());
+          VMap[V] = Clone;
+          continue;
+        }
+
+        // (Roadmap L339) A *mixed*-use alloca -- e.g. an ordinary HLSL
+        // local written before the barrier (in the control-point phase)
+        // and read back after it (within \p Region), such as a value
+        // computed from `gl_InvocationID` and reused once more in the
+        // patch-constant function body -- is unsound to route through
+        // the generic "capture the value through a global" mechanism
+        // just below exactly as written: that mechanism would capture
+        // \p AI's own *address*, not its content, and \p PatchConstant
+        // Phase (a separate call, dispatched once control-point outputs
+        // become visible, never inlined back into \p F) would then
+        // dereference a pointer into \p F's own stack frame, which has
+        // already unwound by then -- the same use-after-free this
+        // function's own comment above describes for the inlined-callee-
+        // local shape, just for an ordinary multi-region local instead.
+        // Captured here by *value* instead (read right at the barrier,
+        // after every pre-barrier store to it has already run), then
+        // written into a fresh, independent alloca cloned into
+        // \p PatchConstantPhase and pre-populated with that captured
+        // value -- every in-Region load from \p AI keeps working
+        // unmodified once \p VMap redirects it to this fresh alloca.
+        Type *AllocatedTy = AI->getAllocatedType();
+        unsigned Location = NextLocation++;
+        MDNode *Decoration = createLocationDecoration(F.getContext(), Location);
+        auto *GV = new GlobalVariable(
+            *F.getParent(), AllocatedTy, /*isConstant=*/false,
+            GlobalValue::PrivateLinkage, UndefValue::get(AllocatedTy),
+            F.getName() + ".patchconst.capture." + Twine(Location),
+            /*InsertBefore=*/nullptr, GlobalValue::NotThreadLocal,
+            /*AddressSpace=*/8);
+        GV->setMetadata("spirv.Decorations", Decoration);
+        GV->setMetadata("feme.captured.self.index",
+                        MDNode::get(F.getContext(), {}));
+
+        IRBuilder<> BarrierBuilder(Barrier);
+        Value *CurrentValue = BarrierBuilder.CreateLoad(
+            AllocatedTy, AI, AI->getName() + ".capture.val");
+        BarrierBuilder.CreateStore(CurrentValue, GV);
+
+        Value *CapturedValue =
+            CaptureBuilder.CreateLoad(AllocatedTy, GV, AI->getName() + ".captured");
         Instruction *Clone = AI->clone();
         Clone->setName(AI->getName());
         Clone->insertInto(CaptureEntry, CaptureEntry->end());
+        CaptureBuilder.CreateStore(CapturedValue, Clone);
         VMap[V] = Clone;
         continue;
       }
@@ -4694,6 +4775,30 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // formats' numbering conventions consistent.
   SmallVector<GlobalVariable *> InputGlobals, OutputGlobals;
   DenseSet<GlobalVariable *> Seen;
+  // (Roadmap L339) A pre-scan of every `StoreInst` reachable in \p F /
+  // its helpers, so the discovery loop below can tell a genuine
+  // per-vertex *write* this phase's own body performs (e.g.
+  // `cross_invocation_per_vertex`'s own `in_te_data1`) apart from a
+  // genuine cross-invocation *read* of another, already-completed
+  // control point's own output (`in_te_data0` in that same shape,
+  // `gl_InvocationID + 1`-indexed -- SPIR-V gives that defined behavior
+  // once the one barrier this phase sits after has run) -- both are
+  // address-space-8, non-`Patch`-decorated, non-captured-value globals,
+  // and only this scan tells them apart; `classifySPIRVElement` itself
+  // sees one `GlobalVariable*` with no notion of "this particular use".
+  DenseSet<GlobalVariable *> StoredInPhase;
+  {
+    const DataLayout &StoreScanDL = F.getParent()->getDataLayout();
+    for (Function *Fn : Functions)
+      for (Instruction &I : instructions(Fn))
+        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+          SmallVector<GlobalVariable *, 2> GVs;
+          collectStageIOGlobalsThroughSelect(SI->getPointerOperand(),
+                                             StoreScanDL, Stage, GVs);
+          for (GlobalVariable *GV : GVs)
+            StoredInPhase.insert(GV);
+        }
+  }
   // (Roadmap L270) `BuiltIn HelperInvocation` (`gl_HelperInvocation`)
   // globals discovered below -- routed to `createStageIsHelper()` by the
   // load-rewriting loop further down, never through the ordinary
@@ -4762,8 +4867,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           HelperInvocationGlobals.insert(GV);
           continue;
         }
-        SPIRVElementInfo Info =
-            classifySPIRVElement(Stage, Phase, AddrSpace, D);
+        SPIRVElementInfo Info = classifySPIRVElement(
+            Stage, Phase, AddrSpace, D, GV, StoredInPhase.contains(GV));
         (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(GV);
       }
     }
@@ -4884,7 +4989,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       if (D.BuiltIn || !D.Location)
         continue;
       Seen.insert(&GV);
-      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
+      SPIRVElementInfo Info =
+          classifySPIRVElement(Stage, Phase, AddrSpace, D, &GV);
       (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(&GV);
     }
   }
@@ -4926,7 +5032,19 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                           const ParsedSPIRVDecorations &D, Type *ValueTy,
                           bool RowCountIsVertexArray = false,
                           uint32_t XfbBufferArrayStride = 0) {
-      SPIRVElementInfo Info = classifySPIRVElement(Stage, Phase, AddrSpace, D);
+      // (Roadmap L339) This is the *final* per-element classification --
+      // unlike the coarse discovery-time call above (which only decides
+      // the `InputGlobals`/`OutputGlobals` ordering bucket, and for a
+      // block-typed global sees block-level decorations that can differ
+      // from a member's own), this call's `Info.Direction` is what
+      // actually lands in the built `SignatureElement`. It must see the
+      // same `HasStoreInPhase` the discovery-time call above computed for
+      // \p GV (not the default `false`), or every genuine per-vertex
+      // output store the discovery loop correctly bucketed into
+      // `OutputGlobals` would still be built as an `Input` element here,
+      // silently discarding that bucketing decision.
+      SPIRVElementInfo Info = classifySPIRVElement(
+          Stage, Phase, AddrSpace, D, GV, StoredInPhase.contains(GV));
       SignatureElement Elt;
       Elt.ElementID = NextID;
       Elt.Direction = Info.Direction;
