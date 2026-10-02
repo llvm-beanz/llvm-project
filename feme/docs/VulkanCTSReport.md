@@ -10097,3 +10097,92 @@ unrelated to Bresenham line rasterization, each individually untriaged.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- a correctness fix to an already-exposed feature
 (`lineRasterizationMode=Bresenham`), no new feature/extension surface.
+
+## L329: fixed -- `frag_side_effects` early-depth/stencil-test spec gap
+
+Root-caused all 6 `dEQP-VK.rasterization.frag_side_effects.color_at_
+{beginning,end}.{depth_bounds,depth_never,stencil_never}` failures
+(`"Unexpected value in storage buffer element 0"`) by reading
+`vktRasterizationFragShaderSideEffectsTests.cpp` directly: these three
+case types' fragment shader unconditionally writes `outBuffer.val
+[bufferIndex] = 1` with no `discard`/`demote`/`SV_Depth`/`SV_StencilRef`
+of its own, and the pipeline is deliberately configured so the
+depth/stencil test rejects every fragment (`VK_COMPARE_OP_NEVER`, or
+depth-bounds parameters outside the mesh's own depth range). The test
+still requires every pixel's SSBO write to have happened regardless.
+
+This is a direct instance of the Vulkan spec's "Early Fragment Tests"
+rule: an implementation may only skip invoking the fragment shader for a
+depth/stencil-test-rejected fragment, as an optimization of the (spec-
+default) late-test path, when doing so cannot change any API-guaranteed
+observable effect -- which explicitly excludes a
+`fragmentStoresAndAtomics`-class write, since that write must happen
+regardless of the test's own outcome (unlike the color/depth/stencil
+writes an early-test rejection already correctly, and observably,
+suppresses). FeMe's `UseEarlyDepthStencil` heuristic (`Executor.cpp`)
+checked only for `SV_Depth`/`SV_StencilRef` output, discard/demote,
+alpha-to-coverage, and explicit sample-mask output -- all cases where
+the *test itself* depends on the shader -- with no check at all for the
+orthogonal condition of the shader having independent memory side
+effects that must run regardless.
+
+Fixed by adding a new `FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS` flag
+bit to `ResourceInfo.h`'s artifact-flags enum (no `ArtifactAbiVersion`
+bump needed -- `Flags` was already a generic serialized `uint32_t`, so a
+new bit is backward compatible). `computeSideEffectFlags`
+(`ResourceInfo.cpp`) now also scans every `StoreInst`/`AtomicRMWInst`/
+`AtomicCmpXchgInst` in the entry function's body (not just
+`feme.stage.*` calls, as it already did for discard/demote/is_helper),
+checking via a new local `stripToBase` helper whether the instruction's
+pointer operand traces back, through any chain of `GEP`/bitcast/
+addrspacecast instructions, to a local `alloca` (a benign scratch/spill
+write, excluded) or to anything else (a real resource/descriptor
+pointer, flagged). Deliberately did not use `llvm::getUnderlyingObject`
+(`Analysis`) for this -- `FeMeTargetCPU` does not otherwise link that
+library, and the scan only ever needs to distinguish "an alloca" from
+"anything else", not full points-to precision.
+
+This is safe at the point `computeSideEffectFlags` runs -- right after
+SPIR-V-to-LLVM translation, before `CanonicalizeStagePass` (confirmed by
+re-reading `Driver.cpp`/`CompiledStage.cpp`'s call sites, and
+`SPIRVToLLVMPatterns.cpp`'s conversion patterns): stage I/O (color/
+depth/stencil output, vertex attributes) is already represented as
+`feme.stage.{input,output}.load`/`.store` intrinsic calls at this stage,
+not raw `StoreInst`s, while storage-buffer (SSBO) stores and atomics
+lower to ordinary `LLVM::StoreOp`/`AtomicRMWOp`. So any raw store/atomic
+still present in the entry function at this point can only be a genuine
+resource write or a local-variable write -- exactly the two cases this
+scan needs to tell apart.
+
+Wired the new flag into `Executor.cpp`'s `UseEarlyDepthStencil`
+computation (`FSHasMemorySideEffects`), alongside the existing
+`FSMayDiscard` check, with an updated explanatory comment citing the
+spec rule this closes the gap on.
+
+Added two new tests to `ResourceInfoTest.cpp`:
+`ComputeSideEffectFlagsIgnoresLocalAllocaStores` (direct, GEP-derived,
+and differently-sized stores through an `alloca`, all expected to leave
+the flag unset) and `ComputeSideEffectFlagsFindsResourceStoresAndAtomics`
+(a store/`atomicrmw`/`cmpxchg` through a function-argument pointer, a
+GEP of one, and a global, all expected to set the flag).
+`FeMeTargetCPUTests`: 32/32 Passed (+2 new tests, 0 regressions);
+`FeMeGraphicsTests`: 390/390 Passed, 0 regressions. `ninja check-feme`:
+3,476/3,537 Passed, 61 Unsupported, 0 Failed, 0 regressions.
+
+**CTS impact**: re-ran `dEQP-VK.rasterization.frag_side_effects.*` (20
+cases): **20 Pass/0 Fail** (was 14 Pass/6 Fail before this fix) -- all 6
+targeted cases now Pass. Re-ran the full `rasterization` group (15,019
+cases): 469 Pass/15 Fail/14,535 NotSupported (was 463/21/14,535 after
+`L328`) -- exactly the expected +6 Pass/-6 Fail, 0 regressions
+elsewhere. The remaining 15 failures are the pre-existing scattered
+cluster (`depth_bias.d24_unorm_constant_one_greater`,
+`flatshading.{triangle_fan,triangle_strip}`,
+`line_continuity.{line-strip,polygon-mode-lines}`,
+`maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
+`provoking_vertex.draw.default.triangle_fan`,
+`rasterization_order_attachment_access.{depth,stencil}.*` (5 cases)),
+unchanged, each individually untriaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a correctness fix to already-exposed core Vulkan 1.0
+early-fragment-test behavior, no new feature/extension surface.
