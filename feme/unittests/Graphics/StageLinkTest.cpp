@@ -624,4 +624,65 @@ TEST(StageLinkTest, GathersPatchFrequencyDiagonalAndReplicatesToEveryDest) {
           << "Dest=" << Dest << " Row=" << Row;
 }
 
+// (Roadmap L345) Same diagonal-gather shape as
+// `GathersPatchFrequencyDiagonalAndReplicatesToEveryDest` above, but for a
+// matrix-typed `patch`-frequency array element (e.g. `mat4x3
+// in_te_data0[OUTPUT_PATCH_SIZE]`), where `Link.RowCount` (12) is a
+// multiple of `SourceInvocationCount` (3), not equal to it: each producing
+// invocation's own diagonal "slot" spans a contiguous block of 4 rows (one
+// per matrix column), not a single row. Confirms
+// `copyLinkedPatchFrequencyElements` identifies each row's real producing
+// invocation by `Row / RowsPerInvocation`.
+TEST(StageLinkTest, GathersPatchFrequencyDiagonalBlockForAMatrixArray) {
+  EntrySignature Producer;
+  SignatureElement PatchArrayOut =
+      makeElement(0, SignatureDirection::Output, 0, /*ComponentCount=*/3);
+  PatchArrayOut.RowCount = 12;
+  PatchArrayOut.Frequency = SignatureFrequency::PerPatch;
+  Producer.Elements = {PatchArrayOut};
+
+  EntrySignature Consumer;
+  SignatureElement PatchArrayIn =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/3);
+  PatchArrayIn.RowCount = 12;
+  PatchArrayIn.Frequency = SignatureFrequency::PerPatch;
+  Consumer.Elements = {PatchArrayIn};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "hull stage output -> patch-constant stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+
+  // 3 real Hull control-point invocations, each with its own full-sized
+  // (12-row) per-invocation copy, but only ever writing its own 4-row
+  // (one matrix's worth of columns) diagonal block.
+  Expected<StageStorage> From = buildStageStorage(
+      Producer, SignatureDirection::Output, /*InvocationCount=*/3);
+  ASSERT_THAT_EXPECTED(From, Succeeded());
+  for (uint32_t Invocation = 0; Invocation != 3; ++Invocation)
+    for (uint32_t Col = 0; Col != 4; ++Col)
+      for (uint32_t C = 0; C != 3; ++C)
+        From->writeFloat(0, C, Invocation,
+                         static_cast<float>(Invocation * 100 + Col * 10 + C),
+                         /*Row=*/Invocation * 4 + Col);
+
+  Expected<StageStorage> To = buildStageStorage(
+      Consumer, SignatureDirection::Input, /*InvocationCount=*/2);
+  ASSERT_THAT_EXPECTED(To, Succeeded());
+
+  copyLinkedPatchFrequencyElements(*From, *To, *Links,
+                                   /*SourceInvocationCount=*/3,
+                                   /*DestInvocationCount=*/2);
+  for (uint32_t Dest = 0; Dest != 2; ++Dest)
+    for (uint32_t Invocation = 0; Invocation != 3; ++Invocation)
+      for (uint32_t Col = 0; Col != 4; ++Col)
+        for (uint32_t C = 0; C != 3; ++C)
+          EXPECT_FLOAT_EQ(
+              To->readFloat(0, C, Dest, Invocation * 4 + Col),
+              static_cast<float>(Invocation * 100 + Col * 10 + C))
+              << "Dest=" << Dest << " Invocation=" << Invocation
+              << " Col=" << Col << " C=" << C;
+}
+
 } // namespace

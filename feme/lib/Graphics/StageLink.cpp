@@ -163,16 +163,37 @@ void copyLinkedPatchFrequencyElements(const StageStorage &From,
                                      uint32_t SourceInvocationCount,
                                      uint32_t DestInvocationCount) {
   for (const LinkedStageElement &Link : Links) {
+    // (Roadmap L345) `Link.RowCount` is NOT always equal to
+    // `SourceInvocationCount`: `getStageIORowShape` (`CanonicalizeStage.cpp`)
+    // flattens a matrix-typed `PerPatch` array element's own row/column
+    // dimension into the same `RowCount` it computes for the array's own
+    // instance dimension (e.g. a `mat4x3[OUTPUT_PATCH_SIZE]` array's
+    // `RowCount` is `OUTPUT_PATCH_SIZE * 4`, not just `OUTPUT_PATCH_SIZE`).
+    // `RowsPerInvocation` is how many of those flattened rows belong to a
+    // single producing invocation's own contiguous block (1 for the plain
+    // scalar/vector case this function originally only handled, matching
+    // the previous unconditional `SourceInvocation == Row`).
+    uint32_t RowsPerInvocation =
+        SourceInvocationCount != 0 ? Link.RowCount / SourceInvocationCount : 0;
+    assert((SourceInvocationCount == 0 ||
+            Link.RowCount % SourceInvocationCount == 0) &&
+           "Link.RowCount must be an exact multiple of SourceInvocationCount: "
+           "every producing invocation's own block of flattened rows must be "
+           "the same size");
     for (uint32_t Row = 0; Row != Link.RowCount; ++Row)
       for (uint32_t C = 0; C != Link.ComponentCount; ++C) {
-        // `Row` doubles as its own producing invocation's own index here
-        // (the diagonal `HullWrapper.cpp`'s `lowerHullOutputStore`
-        // leaves behind -- see this function's own header comment);
-        // every other row of that same source invocation's own copy was
-        // never written, so only the `Row == SourceInvocation` entry is
-        // ever read.
+        // `Row / RowsPerInvocation` identifies which producing invocation's
+        // own per-invocation storage copy holds the real (non-garbage)
+        // value at this flattened `Row` (the diagonal `HullWrapper.cpp`'s
+        // `lowerHullOutputStore` leaves behind -- see this function's own
+        // header comment); every other row of that same source invocation's
+        // own copy was never written, so only this invocation's own
+        // contiguous row block is ever read.
         uint32_t SourceInvocation =
-            Link.HasProducer && Row < SourceInvocationCount ? Row : 0;
+            Link.HasProducer && RowsPerInvocation != 0 &&
+                    Row / RowsPerInvocation < SourceInvocationCount
+                ? Row / RowsPerInvocation
+                : 0;
         uint32_t Value =
             Link.HasProducer
                 ? From.readRaw(Link.SourceElementID,

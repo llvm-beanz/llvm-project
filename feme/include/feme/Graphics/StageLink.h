@@ -99,15 +99,23 @@ void copyLinkedElements(const StageStorage &From, StageStorage &To,
                         uint32_t InvocationCount,
                         llvm::ArrayRef<uint32_t> SourceInvocations = {});
 
-/// (Roadmap L344) Gathers each \p Links entry's `Row == Invocation`
-/// diagonal out of \p From's `SourceInvocationCount` per-invocation
-/// copies -- the shape a `patch`-frequency array a hull control-point
-/// phase writes one index at a time ends up in (see
-/// `linkPatchPipeline`'s own `HullToPatchConstantDiagonal` comment: each
-/// invocation only ever writes its own `Row`, within its own
-/// per-invocation copy, leaving every other `Row` there unwritten) --
-/// into one real, complete array, replicated across every one of \p To's
+/// (Roadmap L344, L345) Gathers each \p Links entry's diagonal out of
+/// \p From's `SourceInvocationCount` per-invocation copies -- the shape a
+/// `patch`-frequency array a hull control-point phase writes one block at
+/// a time ends up in (see `linkPatchPipeline`'s own
+/// `HullToPatchConstantDiagonal` comment: each invocation only ever
+/// writes its own contiguous row block, within its own per-invocation
+/// copy, leaving every other row there unwritten) -- into one real,
+/// complete array, replicated across every one of \p To's
 /// \p DestInvocationCount destination invocation slots.
+///
+/// A `Link`'s own `RowCount` is not always equal to
+/// `SourceInvocationCount`: a matrix-typed array element (e.g.
+/// `mat4x3[OUTPUT_PATCH_SIZE]`) flattens its own row/column dimension
+/// into the same `RowCount` `getStageIORowShape` computes for the
+/// array's instance dimension, so each producing invocation's own block
+/// spans `Link.RowCount / SourceInvocationCount` contiguous rows (one row
+/// for the plain scalar/vector case) rather than exactly one row.
 void copyLinkedPatchFrequencyElements(const StageStorage &From,
                                      StageStorage &To,
                                      llvm::ArrayRef<LinkedStageElement> Links,
