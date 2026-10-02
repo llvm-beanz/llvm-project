@@ -63,30 +63,27 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(30 min, do this first)** Re-read this entry's proof section
-   before attempting `outer_edge_symmetry` again -- don't re-derive
-   the tension from scratch, it costs a full session (this one).
-2. **(unknown, not attempted)** `inner_triangle_set` (2 cases) --
-   check whether it's the same double-rounding bug class or something
-   distinct. Independent of the quad/triangle tension above since it's
-   about interior points, not boundary ones.
-3. **(unknown, not attempted)** Isoline `outer_edge_symmetry` (8
-   cases) -- `tessellateIsoline`'s own code path, never reviewed for
-   this bug class. May or may not hit the same tension (isolines don't
-   have the same cross-edge-swizzle `outer_edge_index_independence`
-   requirement fighting it, so this might actually be fixable in
-   isolation -- worth checking before assuming it's blocked too).
-4. **(dedicated session, largest scoped bucket, 14 cases)** `L339` --
-   TCS barrier-splitting architectural gap. Carried over many
-   sessions, still top real-work priority.
-5. **(a few hours each, 12 cases)** `L340` -- `misc_draw.fill_overlap_*`
-   (10) + `misc_draw.switch_domain_origin_*_fast_lib` (2). Untouched
+1. **(dedicated session, largest scoped bucket, 14 cases, carried over
+   many sessions)** `L339` -- TCS barrier-splitting architectural gap
+   (`shader_input_output`'s `barrier`/`cross_invocation_per_
+   {vertex,patch}_*` + `misc_draw`'s `tess_factor_barrier_bug`). Still
+   the single biggest real-work item on the board. Start with a
+   minimal standalone reproducer, not the full CTS shaders.
+2. **(a few hours each, 2 buckets, ~12 cases)** `L340` --
+   `misc_draw.fill_overlap_*` (needs `--deqp-log-images=enable` first)
+   and `misc_draw.switch_domain_origin_*_fast_lib`. Untouched again
    this session.
-6. **(a few hours, lowest priority, many sessions carried over)**
+3. **(re-triage first, numbers may have moved)** `shader_input_output`
+   (13, was reported 15) and `tesscoord` (4, was reported 6) --
+   re-confirm exact current failing case names with a fresh run before
+   trusting either count, same lesson as `user_defined_io` a few
+   sessions back. `common_edge` (3 cases) still untriaged too.
+4. **(a few hours, lowest priority, many sessions carried over)**
    `L265` -- ASTC alpha-decode tie-break. Untouched again.
-7. **(low priority, out of scope)** `offload-test-suite`'s own
+5. **(dedicated session, deferred many sessions, same subsystem class
+   as `L339`)** `L335` -- `line_continuity.{line-strip,polygon-mode-
+   lines}` region-splitting pass gap. Consider tackling alongside
+   `L339` if a phase-split redesign session happens.
+6. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/
    `WaveActiveMax.test`/`array_of_matrices.test`).
-8. **(dedicated session, deferred many sessions)** `L335` --
-   `line_continuity.{line-strip,polygon-mode-lines}` region-splitting
-   pass gap. Same subsystem class as `L339` -- consider together.
