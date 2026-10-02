@@ -10987,3 +10987,149 @@ elsewhere.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal tessellator axis-mapping correctness fix with no
 feature/extension surface change.
+
+## L338: `shader_input_output` triage -- `HullWrapper.cpp` dynamic control-point-index input reads
+
+### Root cause
+
+Continuing the handoff's `shader_input_output` triage (15 of 28 cases
+failing), found two distinct bug classes:
+
+1. **`patch_vertices_{10_in_5_out,5_in_10_out}` (2 cases, fixed this
+   section)**: the TCS reads
+   `in_tc_attr[gl_InvocationID * inPatchSize / outPatchSize]` -- a
+   genuinely dynamic, but per-lane-local (no cross-lane dependency)
+   control-point index on an **input** read. `HullWrapper.cpp`'s
+   `lowerHullInputLoad` hard-rejected any index that wasn't exactly a
+   lowered `OutputControlPointID` self-reference or a literal
+   `ConstantInt`, diagnosing `feme-cpu-wrap-hull: control-point phase
+   only supports a control point reading its own input control point's
+   attributes, or a literal-constant control point`.
+2. **`barrier`/`cross_invocation_per_{vertex,patch}_*` (13 cases, not
+   fixed -- see `L339` below)**.
+
+For (1): this restriction was overly conservative, not a real
+correctness limit. Every input control point's attributes are fully
+materialized up front, before the control-point phase runs at all --
+so *any* per-lane-computed index, not just self or a literal constant,
+can be read safely with no cross-lane gather, since each lane's own
+index value only ever depends on that lane's own invocation
+ID/state, never another lane's not-yet-computed output.
+
+### Fix
+
+`feme/lib/Transforms/CPU/HullWrapper.cpp`:
+
+- Rewrote the file-level header comment and `lowerHullInputLoad`'s own
+  doc comment to describe the generalized behavior.
+- Added a `DynamicReference` case: extracts each lane's own index value
+  via `extractLaneOrScalar`, clamps it via `llvm::Intrinsic::umin`
+  against `HEnv.InputPatchControlPointCount - 1` (mirroring
+  `MeshOutputWrapper.cpp`'s existing umin-clamp precedent for
+  defensive array-index bounds-checking), and uses that as the
+  per-lane `InvocationIndex`.
+- Extended the inactive-lane-masking condition to
+  `if (SelfReference || DynamicReference)`, since a dynamic index --
+  like a self-index -- is only meaningful for active lanes.
+
+`lowerHullOutputStore` (output writes) is deliberately **unchanged**
+and still requires a self-only index: this remains a genuine
+structural correctness restriction, since one invocation cannot see
+another's not-yet-computed output. Only the input side's restriction
+was overly conservative.
+
+### Testing
+
+Rewrote `HullWrapperTest`'s `DiagnosesDynamicNonSelfControlPointInputLoad`
+(which locked in the old reject-and-diagnose behavior for a shader
+reading `in_tc_attr[gl_PatchVerticesIn]`) as
+`LowersDynamicNonSelfControlPointInputLoad`, asserting the new
+supported lowering instead (module verifies cleanly,
+`feme_cpu_entry_hs_main` exists, no stage-op calls remain in the
+original entry function).
+
+- `FeMeTransformsCPUTests` (`*Hull*` filter): 10/10 Passed.
+- `ninja check-feme`: 3,487/3,548 Passed, 61 Unsupported, 0 Failed, 0
+  regressions.
+
+### CTS impact
+
+Re-ran `dEQP-VK.tessellation.shader_input_output.patch_vertices_*`
+(4 cases): **4/4 Pass** (was 2/4).
+
+Re-ran the full `dEQP-VK.tessellation.shader_input_output.*` group
+(28 cases): **15 Pass / 13 Fail** (was 13/15) -- the remaining 13
+failures are all `barrier`/`cross_invocation_per_{vertex,patch}_*`
+cases, scoped as `L339` below.
+
+Re-ran the full `dEQP-VK.tessellation.*` group (1,114 cases):
+
+```
+Passed:        609/1114 (54.7%)
+Failed:        67/1114 (6.0%)
+Not supported: 438/1114 (39.3%)
+```
+
+Exactly +2/-2 against `L337`'s baseline (607/69/438), 0 regressions
+elsewhere.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal CPU-backend hull-wrapper lowering fix, no
+feature/extension surface change.
+
+## L339: `shader_input_output` `barrier`/`cross_invocation_*` -- architectural gap, scoped not fixed
+
+### Root cause
+
+The remaining 13 `dEQP-VK.tessellation.shader_input_output.*` failures
+(`barrier`, `cross_invocation_per_vertex_{float,int,mat4x3,uint,vec3,
+vec4}`, `cross_invocation_per_patch_{float,int,mat4x3,uint,vec3,
+vec4}`) are a single architectural gap in FeMe's TCS barrier-splitting
+model, not a localized bug.
+
+`CanonicalizeStage.cpp`'s `splitTessellationControlEntry` splits a
+barrier-containing TCS entry point into a "control-point phase" (runs
+once per output control point -- the pre-barrier code) and a
+"patch-constant phase" (the post-barrier code). `PatchPipeline.cpp`'s
+`runPatchPipeline` invokes the patch-constant phase with
+`InvocationCount=1` -- i.e. it is architecturally assumed to be
+single-invocation/uniform, suitable only for writing true per-patch
+scalars like `gl_TessLevelInner`/`gl_TessLevelOuter`.
+
+These CTS cases' TCS shaders write **per-vertex**
+(`gl_InvocationID`-indexed) outputs both before *and* after the
+barrier (e.g.
+`in_te_data1[gl_InvocationID] = d + in_te_data0[(gl_InvocationID+1) % N]`
+immediately after `barrier()`), which is legal GLSL/SPIR-V (every
+invocation keeps running post-barrier, not just invocation 0) but
+incompatible with FeMe's "patch-constant phase runs once" model. The
+failure surfaces in `PatchConstantWrapper.cpp`'s
+`lowerPatchConstantStageOps` as "masked output store references an
+unknown patch-output signature element", because the referenced
+element is actually a per-vertex (`Output`-direction, not
+`PatchOutput`-direction) element the single-invocation phase has no
+business writing under the current architecture.
+
+### Scope for a real fix
+
+A real fix needs either:
+
+(a) invoking the patch-constant phase `OutputControlPointCount` times
+(once per invocation) with per-invocation per-vertex output writes
+threaded through correctly alongside the single shared patch-constant
+output, or
+
+(b) some other restructuring of the phase split itself.
+
+This is the same subsystem/scope class as the carried-over `L335`
+(`line_continuity` barrier-in-nested-if/while region-splitting gap) --
+genuine, non-trivial architecture extension work, not a localized bug
+fix. Needs its own dedicated session: first extract a minimal
+standalone reproducer (skip the full CTS shader's unrelated
+complexity), then design the phase-split extension, add unit tests for
+the new per-invocation-patch-constant-phase shape, and only then
+re-validate against these 13 CTS cases.
+
+No code change this session (investigation/scoping only).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (not yet fixed).
