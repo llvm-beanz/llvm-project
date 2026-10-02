@@ -5926,9 +5926,34 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // (one segment) instead of the real authored value -- exactly
         // the "masked"-looking gap `Graphics/IsolineDomainTessellation.
         // test` (Roadmap L24(b)) surfaced.
+        //
+        // (Roadmap L345) A `feme.captured.self.index`-marked global (see
+        // its own metadata comment near where `patchconst.capture.N`
+        // globals are created, above) is a synthetic, per-invocation
+        // *scalar* capture -- its own invocation addressing is handled
+        // entirely by that separate lane/invocation-index dimension
+        // (`getFlatInvocationIndex`, `lowerPatchConstantInputLoad`'s
+        // `CapturedSelfIndex` case), never by folding an "array of per-
+        // invocation values" dimension into `Row`. Its `ValueTy` is
+        // whatever HLSL/IR type the captured SSA value itself has --
+        // e.g. a plain `mat4x3` (`[4 x <3 x float>]`) -- which just
+        // happens to *structurally* look like an array, exactly like a
+        // genuine per-control-point output array this peeling exists
+        // for. Before this exclusion, such a captured matrix's outer
+        // (column) array dimension was wrongly peeled here as if it
+        // were that unrelated per-invocation dimension, collapsing its
+        // `RowCount` from the correct `4` (one row per matrix column)
+        // down to `1` -- undersizing its `buildStageStorage` allocation
+        // and causing JIT-emitted stores for columns 1-3 to run past
+        // the end of the allocated block (observed as glibc heap-
+        // corruption / out-of-bounds writes for
+        // `cross_invocation_per_patch_mat4x3`, since a `vec3`-shaped,
+        // one-row element both looks plausible at a glance and matches
+        // this case's own `ComponentCount == 3`).
         bool PerInvocationOutputArray =
             (Stage == ShaderStage::Mesh || Stage == ShaderStage::Hull) &&
-            AddrSpace == 8 && !D.Patch;
+            AddrSpace == 8 && !D.Patch &&
+            !GV->getMetadata("feme.captured.self.index");
         if (PerInvocationOutputArray) {
           if (auto *ArrTy = dyn_cast<ArrayType>(ValueTy))
             ValueTy = ArrTy->getElementType();
