@@ -10186,3 +10186,88 @@ unchanged, each individually untriaged.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- a correctness fix to already-exposed core Vulkan 1.0
 early-fragment-test behavior, no new feature/extension surface.
+
+## L330: fixed -- `rasterization_order_attachment_access` (5 cases): stacked texel-decode gap + early/late-test self-reference ordering gap
+
+Picked up the prior session's handoff item 1, the 5-case
+`rasterization_order_attachment_access` cluster
+(`depth.samples_1.multi_draw_barriers`,
+`stencil.samples_{1,2,4,8}.multi_draw_barriers`) left over from `L328`'s
+own CTS re-run. Root-caused **two** separate, stacked bugs -- fixing only
+one does not resolve the CTS failures.
+
+**Bug 1 (runtime texel decode, confirmed already fixed in the immediately
+prior session, reconfirmed correct this session via live `fprintf`
+instrumentation inside the JIT-executed runtime):**
+`femeRTUnpackImageTexelI32` (`feme/runtime/CPU/FeMeRuntimeCPU.c`) had no
+decode cases for the stencil-bearing integer formats
+`D24_UNORM_S8_UINT`(33)/`D32_FLOAT_S8X24_UINT`(34)/`S8_UINT`(35), so any
+`usubpassInput`/`isubpassInput` read of these formats always returned
+zero.
+
+**Bug 2 (the one that actually produced the CTS symptom even with bug 1
+fixed, newly found/fixed this session):** the CTS test's fragment shader
+reads its own subpass's depth/stencil attachment back via `subpassLoad`
+while that attachment's own `stencilOpState` is
+`compareOp=VK_COMPARE_OP_ALWAYS`/`passOp=depthFailOp=
+VK_STENCIL_OP_INCREMENT_AND_WRAP` -- i.e. the shader uses the attachment
+as a per-fragment ordered accumulator, exactly the
+`VK_EXT_rasterization_order_attachment_access` self-reference ("feedback
+loop") pattern. Confirmed via a temporary debug patch to the CTS's own
+`validateResults` (reverted after use, no diff remains) that the shader's
+`ds.x == curIndex` comparison never succeeded for any draw -- consistent
+with the shader always observing a stencil value one step ahead of what
+it should, i.e. its own write already applied. `Executor.cpp`'s
+`UseEarlyDepthStencil` heuristic (already extended by `L329` for
+independent shader side effects) had no check for this self-reference
+case, so FeMe applied the depth/stencil test+write *before* running the
+fragment shader; a self-referencing `subpassLoad` then observed its own
+fragment's just-applied increment instead of only strictly-earlier-
+ordered fragments' writes.
+
+Fixed by adding a new `HasSelfReferencingDepthStencilInput` check
+(`Executor.cpp`): compares each `Draw.SubpassInputHeap` entry's `Data`
+pointer against `Draw.DepthStencil.Depth.Data.data()`/
+`Stencil.Data.data()` -- a cheap, universally-correct test because
+`feme/lib/Vulkan/RenderPass.cpp`'s `resolveAttachmentView` never copies
+attachment bytes, always returning a direct view into the backing
+`Image`'s own storage, so two views of the same image always share an
+identical base pointer -- and forces the late-test path when true,
+alongside the existing discard/demote/`SV_Depth`/`SV_StencilRef`-output/
+alpha-to-coverage/sample-mask-output/memory-side-effects conditions.
+
+Added
+`DrawTest.SubpassLoadOfASelfReferencingStencilAttachmentExcludesItsOwnWrite`
+(`feme/unittests/Vulkan/DrawTest.cpp`): two back-to-back `vkCmdDraw`
+calls in one subpass, both covering the whole attachment, with
+`ALWAYS`/`INCREMENT_AND_WRAP` stencil state, reusing the existing
+`SubpassLoadStencilFragmentSource`/`FullscreenVertexSource` shaders;
+asserts the first draw's own read sees the clear value (`0`, not its own
+write of `1`) and the final stored value after both draws is `1` (the
+first draw's own increment), never `2` (its own second draw's
+increment). Confirmed via a `git stash`-based A/B test that this test
+fails without the `Executor.cpp` fix (observed `2`) and passes with it.
+
+`ninja check-feme`: 3,480/3,541 Passed (+1 new test), 61 Unsupported, 0
+Failed, 0 regressions.
+
+**CTS impact**: re-ran
+`dEQP-VK.rasterization.rasterization_order_attachment_access.*` (24
+applicable cases, 256 NotSupported for unrelated unsupported extensions/
+sample counts): **24 Pass/0 Fail** (was 19 Pass/5 Fail before this fix)
+-- all 5 targeted cases now Pass. Re-ran the full `rasterization` group
+(15,019 cases): 474 Pass/10 Fail/14,535 NotSupported (was 469/15/14,535
+after `L329`) -- exactly the expected +5 Pass/-5 Fail, 0 regressions
+elsewhere. The remaining 10 failures are the pre-existing scattered
+cluster (`depth_bias.d24_unorm_constant_one_greater`,
+`flatshading.{triangle_fan,triangle_strip}`,
+`line_continuity.{line-strip,polygon-mode-lines}`,
+`maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
+`provoking_vertex.draw.default.triangle_fan`), unchanged, each
+individually untriaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal correctness fix to already-exposed core Vulkan 1.0/
+`VK_KHR_dynamic_rendering_local_read`/
+`VK_EXT_rasterization_order_attachment_access` behavior, no new feature/
+extension surface.

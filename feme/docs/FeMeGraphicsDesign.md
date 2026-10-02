@@ -3696,6 +3696,27 @@ sample after the fragment stage returns, honoring a shader-written
 `SV_Depth`/`SV_StencilRef` and gating output merge's color write exactly as
 this section specifies.
 
+Status (roadmap L329): the early/late choice also forces the late path
+whenever the fragment stage has its own independent memory side effects
+(`FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS`, a storage-buffer/image write or
+atomic reachable from a non-`alloca` pointer) -- the Vulkan "Early Fragment
+Tests" rule only permits skipping shader invocation for a test-rejected
+fragment when doing so cannot change any API-guaranteed observable effect,
+which excludes such writes.
+
+Status (roadmap L330): the early/late choice additionally forces the late
+path whenever the fragment stage reads one of the draw's own depth/stencil
+attachments back as a subpass input attachment
+(`HasSelfReferencingDepthStencilInput`, detected by comparing the subpass
+input heap's backing pointers against the draw's depth/stencil attachment
+pointers -- always safe because attachment views are never byte copies, only
+direct views into the backing image). This is required by
+`VK_EXT_rasterization_order_attachment_access`'s ordering guarantee: a
+fragment's own `subpassLoad` of its own subpass's depth/stencil attachment
+must observe only strictly-earlier-ordered fragments' writes, never its own
+fragment's write, which an early test (applied before the fragment stage
+runs) would otherwise violate.
+
 ## Determinism and Reference Execution
 
 The graphics library should provide a deterministic mode that fixes:
