@@ -9980,3 +9980,52 @@ Deferred to a dedicated future session; broken down into sub-items in
 anticipated once fixed -- expected to be a correctness fix to an
 already-exposed, already-advertised wide-line-strip rendering path, no
 new feature/extension surface.
+
+## L327: standalone exact diamond-exit-rule primitive ported, not yet wired in
+
+Split out of `L326`'s own root-cause finding (above): a direct,
+bit-for-bit port of VK-GL-CTS's `LineRasterUtil::doesLineSegmentExitDiamond`
+and its helpers into `feme::graphics::doesLineSegmentExitDiamond`
+(`feme/lib/Graphics/LineRasterization.cpp` +
+`feme/include/feme/Graphics/LineRasterization.h`), including the
+4-entry diamond-bound table, the 4-entry diamond-corner
+edge/start/end-case table, `vertexOnLeftSideOfLine`/
+`vertexOnRightSideOfLine`/`vertexOnLine`/`vertexOnLineSegment`/
+`getVertexSide`, and `lineInCornerAngleRange`/
+`lineInCornerOutsideAngleRange`, all operating on `int64_t`
+fixed-point subpixel coordinates exactly as the reference does.
+`llvm::countl_zero` (`llvm/ADT/bit.h`) replaces the reference's own
+`deClz64` for the broad-reject overflow check -- the only
+non-mechanical substitution in the port.
+
+New `LineRasterizationTest.cpp`: axis-aligned horizontal/vertical
+half-open-rule tests, a 45-degree diagonal cross-validated directly
+against `ExecutorTest.RendersABresenhamDiagonalLine`'s own
+CTS-confirmed output (identical screen endpoints, identical expected
+lit/unlit pixel set), a shallow non-45-degree slope matching `L326`'s
+own failing-segment shape (expected pixel selection independently
+derived from standard Bresenham rounding interpolation by hand, then
+confirmed to match the ported exact algorithm's own output -- not
+simply asserting whatever the implementation happened to produce),
+and the function's own early broad-reject-distance path. `ninja
+check-feme`: 3,474/3,535 Passed (+5 new tests), 61 Unsupported, 0
+Failed, 0 regressions.
+
+**Not yet wired into `emitLineSegment`** -- `L326`'s CTS failures are
+therefore still open; this commit adds the primitive only, with no
+behavior change to the existing renderer. Tracked as `L328`.
+
+**Performance caveat found while studying the reference's full
+`rasterize()` body for port fidelity**: the reference's own per-segment
+walk is a brute-force nested sweep testing every `(x, y)` combination
+in the segment's entire bounding box, not one candidate per
+major-axis step -- cheap for a reference-only software rasterizer,
+but a literal port of that loop structure into a real driver would
+make `emitLineSegment` `O(length^2)` for long, near-45-degree lines,
+a correctness-for-performance regression `L328` needs to design
+around (see `Roadmap.md`'s `L328` entry for the proposed narrowed
+per-major-step candidate window instead).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal, not-yet-wired-in geometric primitive, no
+feature/extension-surface change.
