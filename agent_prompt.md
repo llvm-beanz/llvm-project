@@ -63,27 +63,20 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours)** `L344` item 1: `cross_invocation_per_patch_*`.
-   Start with `--deqp-log-images=enable` to see the actual pixel diff,
-   then trace the `Patch`-direction (not `Output`-direction) read/write
-   codegen path specifically -- it's a different code path from what
-   this session touched.
-2. **(finish what this session started, ~20 min)** Finish the
-   broader `tessellation` group CTS sweep -- only ~800 of 1,114 cases
-   were swept this session (ran out of time budget partway through
-   `tess_io.max_in_out.*`, which is slow: ~600 cases, one pipeline
-   compile each). No regressions found in the swept portion; just need
-   to confirm the remaining ~300.
-3. **(unknown, design session)** `L344` item 2: the "only one barrier
-   supported" limitation. Needs scoping whether `CanonicalizeStage.cpp`'s
-   barrier-splitting logic fundamentally assumes exactly one barrier,
-   and if so what a 2-phase-into-N-phase extension would need. Same
-   subsystem/scope class as the long-carried-over `L335`
-   (`line_continuity` region-splitting gap) -- consider tackling
-   together in one dedicated session, since both need the same kind of
-   control-flow-restructuring survey.
+1. **(dedicated session, new, real memory-safety bug)** `L345` —
+   `cross_invocation_per_patch_mat4x3` heap corruption. Start with
+   `MALLOC_CHECK_=3` or ASan to catch the actual out-of-bounds write
+   near its real site (the crash site is far downstream), not just
+   `gdb bt` on the final abort.
+2. **(unknown, 300 cases)** The broader `tessellation` group sweep is
+   still ~300 cases short of complete (handed over from a prior
+   session, untouched this session — focus was entirely on `L344`).
+3. **(design session, carried over many sessions)** `L344` item (2) —
+   "only one group-sync barrier supported." Same subsystem/scope
+   class as `L335` (`line_continuity` region-splitting gap) —
+   consider tackling together.
 4. **(a few hours, lowest priority, many sessions carried over)**
-   `L265` -- ASTC alpha-decode tie-break. Untouched again this session.
+   `L265` — ASTC alpha-decode tie-break. Untouched again.
 5. **(low priority, out of scope)** `offload-test-suite`'s own
-   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
-   `array_of_matrices.test`).
+   lit-annotation issues (`spec_const_32_bits.test`/
+   `WaveActiveMax.test`/`array_of_matrices.test`).
