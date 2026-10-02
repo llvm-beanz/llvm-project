@@ -311,8 +311,8 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | limit | VK_VERSION_1_4 | `earlyFragmentSampleMaskTestBeforeSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `depthStencilSwizzleOneSupport` | n/a |  |
 | limit | VK_VERSION_1_4 | `polygonModePointSize` | n/a |  |
-| limit | VK_VERSION_1_4 | `nonStrictSinglePixelWideLinesUseParallelogram` | n/a |  |
-| limit | VK_VERSION_1_4 | `nonStrictWideLinesUseParallelogram` | n/a |  |
+| limit | VK_VERSION_1_4 | `nonStrictSinglePixelWideLinesUseParallelogram` | n/a | roadmap L333: VK_TRUE, matching GraphicsPipeline.cpp's real Rectangular-mode default |
+| limit | VK_VERSION_1_4 | `nonStrictWideLinesUseParallelogram` | n/a | roadmap L333: VK_TRUE, matching GraphicsPipeline.cpp's real Rectangular-mode default |
 | limit | VK_VERSION_1_4 | `blockTexelViewCompatibleMultipleLayers` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxCombinedImageSamplerDescriptorCount` | n/a |  |
 | limit | VK_VERSION_1_4 | `fragmentShadingRateClampCombinerInputs` | n/a |  |

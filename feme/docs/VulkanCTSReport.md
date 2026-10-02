@@ -10509,3 +10509,58 @@ draw validation, no feature/extension-surface change.
 handoff's stale pass/fail counts -- this bug was found purely as a side
 effect of double-checking a stale claim instead of accepting it at face
 value.
+
+## L333: fixed -- `maintenance5.non_strict_line*` (4 cases): advertised line-rasterization algorithm didn't match actual rendering
+
+Picked up the prior session's handoff item 1: `maintenance5.
+non_strict_line{s,_strip}_{narrow,wide}`, the largest same-looking
+cluster of the 9 remaining scattered `rasterization` failures.
+
+**Root cause**: these 4 CTS cases construct their pipeline with no
+`VkPipelineRasterizationLineStateCreateInfo` chained at all (`VK_LINE_
+RASTERIZATION_MODE_LAST` internally, meaning "use the implementation's
+own default"), then build their reference image using whichever line
+algorithm `VkPhysicalDeviceMaintenance5PropertiesKHR`'s
+`nonStrictSinglePixelWideLinesUseParallelogram`/
+`nonStrictWideLinesUseParallelogram` properties claim this
+implementation uses: `VK_TRUE` means parallelogram-style rasterization,
+`VK_FALSE` means Bresenham's algorithm.
+
+`EntryPoints.cpp` reported both fields as `VK_FALSE` for both the
+dedicated `VkPhysicalDeviceMaintenance5PropertiesKHR` struct and the
+aggregate `VkPhysicalDeviceVulkan14Properties` mirror -- but
+`GraphicsPipeline.cpp`'s `RasterState::LineMode` actually defaults to
+`Rectangular` (the parallelogram-style algorithm) whenever no explicit
+line rasterization mode is chained, which is exactly the situation
+these two properties describe and exactly what these 4 CTS cases
+exercise. The properties were simply lying about which algorithm this
+driver actually uses -- not a rendering bug at all, just a
+self-reporting mismatch.
+
+**Fix**: changed both fields to `VK_TRUE` in both structs
+(`EntryPoints.cpp`), matching `Executor.cpp`'s real `emitLineSegment`
+behavior. Updated the two pre-existing `PhysicalDeviceInfoTest.cpp`
+assertions that encoded the old (wrong) `VK_FALSE` expectation -- no
+new unit test needed, since this fix only corrects existing property
+assertions, not new behavior.
+
+`FeMeVulkanTests`: 778/778 Passed, 0 regressions.
+`ninja check-feme`: 3,482/3,543 Passed, 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact**: `maintenance5.non_strict_line*` (4 cases): 4/4 Pass
+(was 0/4). Full `maintenance5.*` group (4 cases total): 4/4 Pass. Full
+`rasterization` group (15,019 cases): 479 Pass/5 Fail/14,535
+NotSupported (was 475/9/14,535), exactly +4/-4, 0 regressions
+elsewhere. The remaining 5 failures, all pre-existing and individually
+untriaged:
+
+- `flatshading.{triangle_fan,triangle_strip}` (2 cases)
+- `line_continuity.{line-strip,polygon-mode-lines}` (2 cases)
+- `provoking_vertex.draw.default.triangle_fan` (1 case)
+
+`Vulkan14FeatureInventory.md`: updated the two affected limit rows'
+description column to note the real `VK_TRUE` value. `Vulkan
+ExtensionInventory.md`: no change needed -- `VK_KHR_maintenance5` was
+already advertised; this is a property-value correctness fix, not an
+advertisement-surface change.
