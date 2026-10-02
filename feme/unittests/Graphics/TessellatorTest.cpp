@@ -892,13 +892,17 @@ TEST(TessellatorTest, QuadAlignedInnerAndOuterFactorsGiveUnitGridTriangles) {
 }
 
 TEST(TessellatorTest, QuadSingleAxisDegenerateInsideFactorGivesInteriorLine) {
-  // Roadmap L221: when exactly one axis's clamped inner tessellation
-  // level is 2 (`N == 2` here, the "u-degenerate" case, `M == 5 != 2`),
-  // the interior collapses to a line of `M - 1` points at the lone
-  // interior u-grid-index (`u == 0.5`), rather than a 2D grid or a single
-  // point.
+  // Roadmap L221 (axis mapping corrected by L337): when exactly one
+  // axis's clamped inner tessellation level is 2 (`N == 2` here, the
+  // "u-degenerate" case, `M == 5 != 2`), the interior collapses to a
+  // line of `M - 1` points at the lone interior u-grid-index
+  // (`u == 0.5`), rather than a 2D grid or a single point. (Roadmap
+  // L337) `Factors.Inside[0]` paces the *u*-axis resolution (`N`) and
+  // `Factors.Inside[1]` paces the *v*-axis one (`M`), per the real CTS
+  // reference generator -- so `Inside[1] == 2` is what makes `N == 2`
+  // here, the reverse of this test's prior (pre-L337) `{5, 2}`.
   TessFactors Factors;
-  Factors.Inside = {5.0f, 2.0f};
+  Factors.Inside = {2.0f, 5.0f};
   Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
   TessellatedPatch Patch =
       tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
@@ -920,8 +924,11 @@ TEST(TessellatorTest, QuadSingleAxisDegenerateInsideFactorGivesInteriorLine) {
 TEST(TessellatorTest, QuadOtherAxisDegenerateInsideFactorGivesInteriorLine) {
   // Mirror of the above with `u`/`v` (and `Inside[0]`/`Inside[1]`)
   // swapped (`M == 2`, the "v-degenerate" case, `N == 5 != 2`).
+  // (Roadmap L337) `Inside[1] == 2` paces `M`, so this case's `Inside`
+  // is `{5, 2}` (the reverse of the above test's `{2, 5}`), the opposite
+  // of this test's prior (pre-L337) `{2, 5}`.
   TessFactors Factors;
-  Factors.Inside = {2.0f, 5.0f};
+  Factors.Inside = {5.0f, 2.0f};
   Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
   TessellatedPatch Patch =
       tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
@@ -937,6 +944,45 @@ TEST(TessellatorTest, QuadOtherAxisDegenerateInsideFactorGivesInteriorLine) {
     EXPECT_LT(P.U, 1.0f);
   }
   EXPECT_EQ(InteriorCount, N - 1);
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
+}
+
+/// Roadmap L337 regression: `dEQP-VK.tessellation.tesscoord.
+/// quads_equal_spacing` (and its `fractional_even`/`fractional_odd`
+/// siblings, each with and without `_execution_mode_in_tesc`) failed with
+/// an asymmetric pair of inner tessellation levels (e.g. `{3, 2}`,
+/// matching this test's own `{Inner0, Inner1}`): `tessellateQuad` had
+/// `Factors.Inside[0]` (the shader's `gl_TessLevelInner[0]`) pacing the
+/// *interior grid's own v-axis* resolution and `Inside[1]` pacing its
+/// u-axis one, the reverse of the real CTS reference generator
+/// (`generateReferenceQuadTessCoords` in `vktTessellationUtil.cpp`):
+/// `Inside[0]` paces u (`(x + 1) / inner0`), `Inside[1]` paces v
+/// (`(y + 1) / inner1`). With a symmetric inner-level pair this swap is
+/// invisible (the generated point *set* is identical either way); an
+/// asymmetric pair exposes it as every interior point's `u`/`v`
+/// transposed relative to the correct grid.
+TEST(TessellatorTest, QuadInteriorGridUVAxesMatchInside0Inside1Respectively) {
+  constexpr uint32_t Inner0 = 3, Inner1 = 2;
+  TessFactors Factors;
+  Factors.Inside = {static_cast<float>(Inner0), static_cast<float>(Inner1)};
+  Factors.Edges = {6.0f, 8.0f, 7.0f, 9.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // `Inner1 == 2` collapses the interior grid's own v-axis to a single
+  // row (`v == 0.5`), leaving a line of `Inner0 - 1` points that vary
+  // over `u` at `u == i / Inner0` for `i` in `1 .. Inner0 - 1` -- i.e.
+  // `u == 1/3` and `u == 2/3` here, each at `v == 0.5`, never the
+  // transposed `u == 0.5, v == 1/3 or 2/3` the pre-L337 bug produced.
+  std::set<std::pair<float, float>> InteriorPoints;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U == 0.0f || P.U == 1.0f || P.V == 0.0f || P.V == 1.0f)
+      continue;
+    InteriorPoints.insert({P.U, P.V});
+  }
+  EXPECT_EQ(InteriorPoints,
+            (std::set<std::pair<float, float>>{{1.0f / 3.0f, 0.5f},
+                                               {2.0f / 3.0f, 0.5f}}));
   EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
 }
 
