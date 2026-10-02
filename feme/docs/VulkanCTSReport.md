@@ -11744,3 +11744,153 @@ remaining failure is the already-tracked `L344` item (2) single-barrier
 limitation, unrelated to this fix). `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change -- an internal TCS codegen/
 storage-sizing fix, no feature/extension-surface change.
+
+## L346: fixed -- `tesscoord` fractional-odd regression from `L343`, reverted (irreconcilable with `inner_triangle_set`)
+
+### Discovery
+
+Picked up the handed-off priority of finishing the full
+`dEQP-VK.tessellation.*` group CTS sweep (1,114 cases), overdue since
+`L344`/carried over 2 prior sessions. Ran it in full for the first
+time since `L337`: **631 Pass, 45 Fail, 438 NotSupported.** Cross-
+referencing the 45 failures against already-tracked roadmap items, all
+but 4 mapped cleanly onto known, open issues (`L337`'s `common_edge`,
+`L341`'s `outer_edge_symmetry`, `L339`/`L340`/`L344` item 2's
+`misc_draw`/`shader_input_output.barrier`). The remaining 4 --
+`tesscoord.{quads,triangles}_fractional_odd_spacing(_execution_mode_in_
+tesc)` -- directly contradicted `L337`'s own roadmap entry, which
+explicitly claimed the full `tesscoord` group at 18/18 Pass. Re-ran
+`dEQP-VK.tessellation.tesscoord.*` directly to rule out a fluke:
+confirmed **14/18 Pass, 4 Fail** -- a genuine, reproducible regression.
+
+### Root cause
+
+`git log -- feme/lib/Graphics/Tessellator.cpp` since `L337` showed two
+later commits: `L342` (isoline `outer_edge_symmetry`) and `L343`
+(`invariance.inner_triangle_set`, this session's suspect). Re-reading
+`L343`'s own entry: it excluded `Partitioning == FractionalOdd` from
+`tessellateTriangle`/`tessellateQuad`'s "fully unsubdivided factor"
+fast path (every outer edge *and* the inside factor == 1), reasoning
+that `FractionalOdd`'s own inside-factor epsilon rule always forces a
+real, non-degenerate 3-segment interior ring whenever the inside
+factor rounds to 1 -- so the literally-all-ones case needed that same
+ring too, to satisfy `inner_triangle_set`'s requirement that the inner
+triangle set depend only on the inside factor, never the outer edges.
+
+Dumped the actual generated coordinate count for the failing
+`tesscoord.triangles_fractional_odd_spacing` case's literally-all-ones
+sub-case (`inner: {1}, outer: {1,1,1}`): FeMe produced **6** domain
+points where dEQP expected **3**. Fetched and read dEQP-VK's own
+reference-oracle functions directly
+(`generateReferenceTriangleTessCoords`/`generateReferenceQuadTessCoords`
+in `vktTessellationUtil.cpp`): both explicitly special-case the
+*literally* all-ones patch (every outer edge *and* the inside factor
+exactly 1) to the plain, unsubdivided corner set, for *every*
+partitioning mode -- including `FractionalOdd`. This directly
+contradicts what `L343`'s fix assumed/required for that exact same
+input shape.
+
+Proved this is a genuine, deterministic irreconcilability (not merely
+an unlucky test-ordering artifact) via a direct A/B toggle: temporarily
+re-added `L343`'s `Partitioning != FractionalOdd` exclusion, rebuilt
+`feme_vulkan`, and ran both CTS groups; then removed it again and
+re-ran both:
+
+| State | `tesscoord` | `invariance.inner_triangle_set` |
+|---|---|---|
+| `L343` as committed (exclude `FractionalOdd`) | 14/18 | 6/6 |
+| Reverted (pre-`L343`, this session's fix) | 18/18 | 4/6 |
+
+No third behavior exists that satisfies both simultaneously for the
+literally-all-ones `FractionalOdd` input: `tesscoord`'s own oracle
+requires the plain corner set; `inner_triangle_set` requires the
+subdivided ring. This is the same shape of tension `L341` found and
+documented between `outer_edge_symmetry` and
+`outer_edge_index_independence`/`common_edge` -- a genuine conflict
+between two independent CTS test groups' own invariance assumptions
+for one specific degenerate input, not a bug with a clean fix.
+
+### Decision
+
+Following `L341`'s established precedent (favor not regressing a
+broader, already-passing group over a narrower one; document the
+tension as a permanent, acknowledged limitation rather than trading one
+set of failures for another), reverted `L343`'s exclusion entirely.
+Net case count also favors the revert: 18 (`tesscoord`) + 4
+(`inner_triangle_set`) = 22 passing vs. 14 + 6 = 20 passing with
+`L343`'s exclusion kept -- a net +2 gain.
+
+### Fix
+
+Removed the `Partitioning != TessPartitioning::FractionalOdd` condition
+from both fast paths (`tessellateTriangle`/`tessellateQuad`),
+restoring the pre-`L343` unconditional "literally all-ones -> plain
+corner set" shortcut for every partitioning mode. Replaced both sites'
+`L343`-era doc comments with new ones explaining the discovered
+tension and crediting `L341`'s precedent for the resolution approach.
+Renamed/rewrote `L343`'s two regression tests
+(`TriangleFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd`/
+`QuadFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd` ->
+`...EmitsOneRealTriangleUnderFractionalOdd`/
+`...EmitsTwoRealTrianglesUnderFractionalOdd`) to assert the restored
+behavior (exactly 3/4 points, no interior subdivision) instead of the
+now-incorrect "must still subdivide" assertions.
+
+### Testing
+
+`ninja check-feme`: 3,496/3,557 Passed, 61 Unsupported, 0 Failed, 0
+regressions.
+
+### CTS impact
+
+`dEQP-VK.tessellation.tesscoord.*`: 18/18 Pass (was 14/18).
+`dEQP-VK.tessellation.invariance.inner_triangle_set.*`: 4/6 Pass (was
+6/6, reverting to the pre-`L343` state; the 2 failures are the
+irreconcilable `{quads,triangles}_fractional_odd_spacing` cases this
+entry documents).
+
+Completed the full `dEQP-VK.tessellation.*` group re-sweep against the
+final, post-revert code (the handed-off "~300-case remaining sweep,"
+now fully closed out): **633/1,114 Pass, 43/1,114 Fail, 438/1,114
+NotSupported** (net +2 Pass/-2 Fail vs. the pre-revert 631/45/438
+baseline, confirming the revert's effect was isolated to exactly the 6
+cases analyzed above, with 0 other regressions anywhere in the group).
+The remaining 43 failures, all cross-referenced against existing
+tracked items:
+
+- `common_edge.{quads,triangles unaffected}_*_spacing_precise` (3 --
+  `L337`, open)
+- `invariance.outer_edge_symmetry.*` (24 -- `L341`, confirmed
+  irreconcilable, open)
+- `invariance.inner_triangle_set.*` (2 -- this entry, confirmed
+  irreconcilable, open)
+- `misc_draw.fill_overlap_*` (10 -- `L340`, open)
+- `misc_draw.switch_domain_origin_*_fast_lib` (2 -- `L340`, open)
+- `misc_draw.tess_factor_barrier_bug` (1 -- `L339`/`L344` item 2
+  subsystem, open)
+- `shader_input_output.barrier` (1 -- `L344` item 2, open)
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- an internal tessellation coordinate-generation correctness
+fix/revert, no feature/extension-surface change.
+
+### `L344` item 2 design scoping (no code change)
+
+Also used this session to scope `L344` item 2 (the "only one
+group-sync barrier supported" limitation) into a new Status subsection
+in `FeMeGraphicsDesign.md`. Confirmed via direct inspection of a real
+CTS shader (`vktTessellationShaderInputOutputTests.cpp`'s `Barrier`
+test, the `shader_input_output.barrier` case) that real
+tessellation-control shaders use up to 6 sequential barriers with
+genuine cross-phase data dependencies, not just 2 -- a substantial
+N-phase pipeline generalization. Surveyed every touch point a real fix
+would need: `splitTessellationControlEntry`'s own single-split loop
+becoming an N-way split; per-boundary capture threading (including
+values that must relay through an intermediate phase); `PatchPipeline
+Stages`/`PatchPipelineLinkage` becoming N-phase rather than fixed
+2-phase structs; `classifySPIRVElement`'s/`copyLinkedPatchFrequency
+Elements`'s phase-K-aware classification; and `GraphicsPipeline.cpp`'s
+hard-coded `<entry>.patchconstant` sibling-name compile-path lookup.
+Design/scoping only -- no code change, this remains a dedicated
+implementation session's worth of work (same subsystem/scope class as
+the long-carried-over `L335` line_continuity region-splitting gap).
