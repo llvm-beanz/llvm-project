@@ -919,6 +919,84 @@ and `BuiltIn` `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/
 literal enumerator aliases, matching SPIR-V's spelling to the existing
 D3D-derived system values one-for-one rather than adding parallel ones).
 
+#### Status (roadmap L344 item 2 / L346): scoping a multiple-group-sync-barrier tessellation-control entry
+
+`splitTessellationControlEntry` (above) requires *exactly* one group-sync
+barrier, diagnosing (`F.getContext().emitError`) any entry with more than
+one. A real GLSL tessellation-control shader is not required to have only
+one: `dEQP-VK.tessellation.shader_input_output.barrier`/
+`misc_draw.tess_factor_barrier_bug` both compile a shader with several
+(the former's has 6), each pair of barriers bracketing a region that reads
+back another invocation's own write from the region before it -- a
+genuine N-phase pipeline, not just the 2-phase (control-point,
+patch-constant) split this pass currently performs. This item scopes what
+supporting that would need, without implementing it (see `L344`'s/`L346`'s
+own `VulkanCTSReport.md`/`Roadmap.md` entries for status).
+
+**What currently hard-codes "exactly 2 phases":**
+
+- `splitTessellationControlEntry` itself: finds *all* barriers but only
+  ever splits at exactly one, erroring otherwise (`CanonicalizeStage.cpp`).
+  Generalizing this to split at every barrier, in order, producing N+1
+  regions (not just 2), is mechanically the smallest piece of this
+  item -- the existing single-split machinery (block-splitting,
+  reachability-flood region detection, one-entry-edge validation) already
+  generalizes per-boundary with no new algorithm needed, just a loop over
+  barriers instead of a single `Barriers[0]`.
+- The "captured value" mechanism (threading a pre-barrier SSA value across
+  the *one* boundary via a synthetic global) is currently anchored
+  entirely to the single hull-to-patchconstant boundary. Each of the N-1
+  boundaries in an N-phase split needs its own independent capture pass:
+  a value defined in phase K and used in phase K+1 (or any later phase)
+  needs its own synthetic global at that specific boundary, not
+  necessarily the same one another boundary's own capture might reuse.
+  Values captured across *multiple* boundaries (phase K's value read in
+  phase K+2, skipping K+1 entirely) need either re-threading through an
+  intermediate phase's own synthetic global (store/load-through, a
+  "relay" global) or a separate global visible across the whole span --
+  the former matches the existing per-boundary mechanism better, at the
+  cost of one extra store/load pair per intermediate phase for a
+  value that outlives it.
+- `PatchPipelineStages`/`PatchPipelineLinkage` (`PatchPipeline.h`) are
+  fixed, 2-member structs (`Hull`/`PatchConstant` compiled stages, a fixed
+  set of named link tables between exactly those two). An N-phase split
+  needs these generalized to an ordered list of N compiled phases plus
+  N-1 link tables (one per adjacent boundary), with `runPatchPipeline`
+  (`PatchPipeline.cpp`) looping over that list instead of its current
+  fixed two-step sequence (build hull input storage, invoke hull, build
+  patch-constant input storage via the hull-to-patchconstant links,
+  invoke patch-constant).
+- `classifySPIRVElement`'s `HullPatchConstant`-phase branch
+  (`CanonicalizeStage.cpp`) and `copyLinkedPatchFrequencyElements`'s own
+  diagonal-gather (`StageLink.cpp`, roadmap `L344` item 1) both reason
+  about "the hull phase" and "the patch-constant phase" as the only two
+  possible phases a stage-IO element's read/write can belong to. Each
+  would need to become phase-K-aware (which of the N phases produced this
+  element's value, which phase(s) read it back) rather than a fixed
+  two-way distinction.
+- `GraphicsPipeline.cpp`'s compile path (~line 2213) hard-codes the
+  `<entry>.patchconstant` sibling name/count when assembling a compiled
+  tessellation-control stage. Generalizing to N phases needs either N
+  distinct, predictably-named siblings (`<entry>.patchconstant.0`,
+  `.1`, ...) or a single list-valued metadata/naming scheme
+  `compileAndValidateStages` can discover without hard-coding a count.
+
+**Recommended approach for a future dedicated session:** implement the
+block-splitting generalization first (smallest, most mechanical piece),
+behind a size check that still diagnoses N>1 *unless* a to-be-added
+opt-in demonstrates the rest of the pipeline (capture threading, phase
+list plumbing, classification) has also been generalized -- i.e. land the
+splitting change inert/untested-by-CTS first, then build the storage/
+linkage/classification generalization on top incrementally, each piece
+independently unit-testable the same way the existing 2-phase split's
+individual pieces are (`CanonicalizeStageTest.cpp`'s existing coverage of
+`splitTessellationControlEntry`/capture-threading is a direct template).
+Same subsystem/scope class as the long-carried-over `L335`
+(`line_continuity` region-splitting pass gap) -- both need a similar
+control-flow-region-generalization survey, and tackling them in the same
+session may surface shared infrastructure worth factoring out once
+rather than building twice.
+
 #### Status (roadmap L37/L77): this section's own "never co-occur" premise is wrong for real DXC output; fixed by a merge, not an import-time change
 
 Roadmap L37 closed `HullWrapperPass`'s own masked-input-read gap (see
