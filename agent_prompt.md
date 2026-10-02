@@ -63,20 +63,26 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, new, real memory-safety bug)** `L345` —
-   `cross_invocation_per_patch_mat4x3` heap corruption. Start with
-   `MALLOC_CHECK_=3` or ASan to catch the actual out-of-bounds write
-   near its real site (the crash site is far downstream), not just
-   `gdb bt` on the final abort.
-2. **(unknown, 300 cases)** The broader `tessellation` group sweep is
-   still ~300 cases short of complete (handed over from a prior
-   session, untouched this session — focus was entirely on `L344`).
-3. **(design session, carried over many sessions)** `L344` item (2) —
-   "only one group-sync barrier supported." Same subsystem/scope
-   class as `L335` (`line_continuity` region-splitting gap) —
-   consider tackling together.
-4. **(a few hours, lowest priority, many sessions carried over)**
-   `L265` — ASTC alpha-decode tie-break. Untouched again.
-5. **(low priority, out of scope)** `offload-test-suite`'s own
+1. **(unknown, ~300 cases, carried over 2 sessions)** The broader
+   `tessellation` group CTS sweep is still ~300 cases short of
+   complete. Nobody has picked this up in 2 sessions running — next
+   session should actually start it, not defer again.
+2. **(design session, carried over many sessions)** `L344` item 2 —
+   "only one group-sync barrier supported." Same subsystem/scope class
+   as `L335` (`line_continuity` region-splitting gap) — consider
+   tackling together, since both need the same control-flow-
+   restructuring survey of `CanonicalizeStage.cpp`'s barrier-splitting
+   logic.
+3. **(a few hours, lowest priority, many sessions carried over)**
+   `L265` — ASTC alpha-decode tie-break. Untouched again this session.
+4. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/
-   `WaveActiveMax.test`/`array_of_matrices.test`).
+   `WaveActiveMax.test`/`array_of_matrices.test`), plus its 1-commit
+   drift behind `llvm-beanz/feme` noted above.
+5. **(process note for future sessions)** When splitting a multi-fix
+   diff into commits with `git add -p` + `git commit`: never pass a
+   pathspec to the `git commit` invocation once hunks are staged — it
+   silently re-includes the full unstaged diff for that path. Always
+   double-check with `git show --stat HEAD` immediately after each
+   commit in a split sequence, not just `git diff --cached --stat`
+   beforehand.
