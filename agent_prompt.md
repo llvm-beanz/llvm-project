@@ -63,16 +63,37 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session)** `fill_overlap_*` -- port/compare against the
-   `CHWTessellator` reference algorithm's quad-interior generation. Start by
-   reading Mesa's `tessellator.cpp` quad-domain code I didn't get to, then
-   decide if a literal port or a smaller targeted fix is feasible.
-2. **(design session, carried over many sessions)** `L344` item 2 /
-   `L335` -- the one-barrier-split-to-N-barrier generalization. Scoped
-   already in `FeMeGraphicsDesign.md`'s Status subsection. Only remaining
-   case needing it: `shader_input_output.barrier` (1 case).
-3. **(a few hours, lowest priority, many sessions carried over)** `L265` --
-   ASTC alpha-decode tie-break. Untouched again.
-4. **(low priority, out of scope)** `offload-test-suite`'s own
-   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
-   `array_of_matrices.test`).
+1. **(dedicated session)** Start the `fill_overlap_quads_*` port: implement
+   Mesa's `QuadGeneratePoints`/`QuadGenerateConnectivity` concentric-ring
+   generation in FeMe's `Tessellator.cpp`, including the
+   `StitchRegular`/`StitchTransition` table-driven connectivity. Tackle the
+   quad domain first and verify it in isolation before touching the
+   triangle domain -- they're independent fixes per the scoping above.
+   `/tmp/mesa_tess.cpp` (this session's fetch) is gone (cleaned up at
+   session end); re-fetch from
+   `https://gitlab.freedesktop.org/mesa/mesa/-/raw/main/src/gallium/auxiliary/tessellator/tessellator.cpp`.
+2. **(separate dedicated session)** Port `TriGeneratePoints`'s fixed-point
+   barycentric math for `fill_overlap_triangles_*`, once the quad port is
+   done and stable -- don't conflate the two, they're genuinely separate
+   algorithms in the reference.
+3. **(design session, carried over many sessions, unchanged)** `L344` item
+   2 / `L335` -- N-barrier generalization, 1 case
+   (`shader_input_output.barrier`). Already fully scoped in
+   `FeMeGraphicsDesign.md`; still needs someone to actually spend the
+   multi-file implementation session.
+4. **(lowest priority, many sessions carried over, unchanged)** `L265` --
+   ASTC alpha-decode tie-break, 12 cases. Blit-geometry hypothesis ruled
+   out this session. Next angle to try: compare the actual decoded
+   4-texel neighborhoods feeding the bilinear blend for `astc_5x5` vs.
+   `astc_8x8` pixel-by-pixel (not just confirm the tie-landing mechanism,
+   which is already proven) -- look for a structural property (texel
+   position within its source block, e.g.) that correlates with which tie
+   direction each group needs.
+5. **(process note)** The `offload-test-suite` lit-annotation backlog
+   (item 4 on handoff lists for ~6+ sessions) is now zero. If new
+   `check-hlsl-feme-vk` failures appear in future sessions, triage them
+   the same way this session did (standalone `offloader -debug-layer` run
+   plus reading the actual VK API bridging code) rather than deferring
+   them as "out of scope" by default -- two of this session's three turned
+   out to be a real, fixable bug and a real, fixable stale annotation, not
+   environment noise.
