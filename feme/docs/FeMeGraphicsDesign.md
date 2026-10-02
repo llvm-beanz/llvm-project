@@ -919,19 +919,103 @@ and `BuiltIn` `TessLevelOuter`/`TessLevelInner`/`TessCoord`/`PatchVertices`/
 literal enumerator aliases, matching SPIR-V's spelling to the existing
 D3D-derived system values one-for-one rather than adding parallel ones).
 
+#### Status (roadmap L347): a genuine self-indexed read-then-write of a per-vertex `Output` across the barrier split
+
+`classifySPIRVElement`'s `HullPatchConstant`-phase branch (for a
+non-`patch`-decorated address-space-8 global) only ever recognized two
+shapes: a pure cross-barrier read-back of another invocation's own
+already-written value (`Input`), or this phase's own, newly-produced
+per-vertex write (`Output`, when `HasStoreInPhase`). It had no case for a
+*third* shape: a genuine self-indexed *read-then-partial-write* of the
+*same* per-vertex `Output`, entirely within the patch-constant phase
+itself -- GLSL's `gl_out[gl_InvocationID].gl_Position.xy = (... +
+gl_out[gl_InvocationID].gl_Position.xy) / ...`, found via `misc_draw.
+tess_factor_barrier_bug`. Such an element still correctly classified
+`Output` (its own later write is real and must still be visible to the
+domain stage, exactly like any other per-vertex output), but the read
+*before* that write has no dominating store to recover an SSA value from
+within this phase's own function: `splitTessellationControlEntry` left
+the real pre-barrier write behind in the *other* (control-point) phase's
+own function clone, so `ShadowValueMap`'s per-function shadow alloca,
+promoted via `PromoteMemToReg`, correctly (per plain SSA rules)
+synthesized `undef` for that read -- directly observed as `NaN` in this
+test's own rendered output (confirmed via a new `FEME_DUMP_IR_POSTCANON`
+env-gated dump, `GraphicsPipeline.cpp`, of FeMe's own post-canonicalization
+LLVM IR immediately after `CanonicalizeStagePass` runs, mirroring the
+pre-existing `FEME_DUMP_IR_PRECANON`).
+
+**Fix**: rather than changing `classifySPIRVElement`'s classification
+(the element genuinely *is* `Output` -- that direction is correct), seed
+`ShadowValueMap`'s scalar shadow alloca with this invocation's own
+already-committed value the first time it is created, for exactly this
+phase. A new `StageOpKind::OutputLoad`
+(`feme.stage.output.load(element,row,component,vertex) -> value`,
+`StageOps.h`/`.cpp`) is the load-side counterpart of the existing
+`OutputStore`: unlike an ordinary `InputLoad`, its `vertex` operand is
+always a constant `0` at every call site it is ever emitted from --
+`PatchConstantWrapper.cpp`'s new `lowerPatchConstantOutputLoad` always
+addresses *this lane's own* flat invocation index instead (mirroring
+`lowerPatchConstantSystemValue`'s `OutputControlPointID` self-addressing),
+reading back the *same* `PerVertexOutputs`/`PerVertexOutputLayout`
+structure-of-arrays storage (`L339`'s own addition) the sibling
+`lowerPatchConstantOutputStore`'s `PerVertex` case writes. `ShadowValueMap`
+gained a `SeedFromOutputLoad` constructor flag (set only when `Stage ==
+Hull && Phase == HullPatchConstant`): the first time its scalar
+(constant-`Row`/`Component`) alloca path creates an entry for an
+`Output`-direction element (per `Sig.Elements[ElementID].Direction`), it
+immediately stores a `createStageOutputLoad(...)` result into it, right
+after the `alloca` itself, before any rewritten load/store in the
+function body runs. This is unconditional -- every `Output`-direction
+element reaching this phase's classification is, by construction,
+guaranteed a real store later in this same function
+(`classifySPIRVElement` only reaches that branch when `HasStoreInPhase`),
+so a genuinely never-self-read element's seed is just a dead store
+`PromoteMemToReg` folds away with no surviving use, identical to if it
+had never been seeded. Only the scalar (promotable) shadow-alloca path
+is seeded; `ShadowValueMap`'s non-promotable `DynamicAllocas` fallback
+(for genuinely dynamic `Row`/`Component` indices) is not -- a documented
+remaining gap, not yet hit by any known CTS case.
+
+Four other files needed a matching case added for the new op kind, all
+exhaustive `switch`es over `StageOpKind`: `SIMDize.cpp` (`widenStageOp`'s
+own dispatch switch, treating `OutputLoad` exactly like `InputLoad` --
+plain per-lane widening, its `element` operand kept scalar via
+`FirstOperandIsElementID`), `ValidateStage.cpp` (`isStageOpLegalForStage`
+and its own per-kind operand-validation switch -- not yet reachable,
+since `ValidateStagePass` does not validate the hull stage at all, mirroring
+existing "not yet reachable" entries for other hull/task-only kinds), and
+`WaveUniformity.cpp` (treated identically to `InputLoad`: a per-lane
+divergent read, `NeverUniform`). `Linearize.cpp`/`ReferenceLowering.cpp`
+needed no change: neither lists `InputLoad` either, confirming a plain
+value-producing stage-IO load is already handled generically by both.
+
 #### Status (roadmap L344 item 2 / L346): scoping a multiple-group-sync-barrier tessellation-control entry
 
 `splitTessellationControlEntry` (above) requires *exactly* one group-sync
 barrier, diagnosing (`F.getContext().emitError`) any entry with more than
 one. A real GLSL tessellation-control shader is not required to have only
-one: `dEQP-VK.tessellation.shader_input_output.barrier`/
-`misc_draw.tess_factor_barrier_bug` both compile a shader with several
-(the former's has 6), each pair of barriers bracketing a region that reads
+one: `dEQP-VK.tessellation.shader_input_output.barrier` compiles a shader
+with several (6), each pair of barriers bracketing a region that reads
 back another invocation's own write from the region before it -- a
 genuine N-phase pipeline, not just the 2-phase (control-point,
 patch-constant) split this pass currently performs. This item scopes what
 supporting that would need, without implementing it (see `L344`'s/`L346`'s
 own `VulkanCTSReport.md`/`Roadmap.md` entries for status).
+
+(Roadmap L347 correction: an earlier revision of this section also listed
+`misc_draw.tess_factor_barrier_bug` here, alongside `shader_input_output.
+barrier`, as if both needed this same N-phase generalization. That was
+wrong: `tess_factor_barrier_bug`'s own TCS has exactly *one* group-sync
+barrier -- `splitTessellationControlEntry` already accepts it without
+diagnosing anything. Its real, distinct bug (fixed by `L347`) was
+`classifySPIRVElement`'s `HullPatchConstant` branch having no case for a
+genuine *self-indexed read-then-write* of the same per-vertex `Output`
+within the post-barrier phase itself (`gl_out[gl_InvocationID].gl_
+Position.xy` read back, then partially overwritten, both after the one
+barrier) -- see that section's own new `ShadowValueMap`/`StageOpKind::
+OutputLoad` write-up below. `shader_input_output.barrier` remains the
+only CTS case genuinely requiring the N-phase (more-than-one-barrier)
+generalization this section still scopes.)
 
 **What currently hard-codes "exactly 2 phases":**
 

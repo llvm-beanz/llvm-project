@@ -11894,3 +11894,128 @@ hard-coded `<entry>.patchconstant` sibling-name compile-path lookup.
 Design/scoping only -- no code change, this remains a dedicated
 implementation session's worth of work (same subsystem/scope class as
 the long-carried-over `L335` line_continuity region-splitting gap).
+
+## L347: fixed -- `misc_draw.tess_factor_barrier_bug`, self-indexed read-after-barrier-write poison (1 case)
+
+### Discovery
+
+Picked up from the handed-off priority list (headed by `L339`'s TCS
+barrier-splitting subsystem). `L340`'s own triage of `misc_draw` had
+folded `tess_factor_barrier_bug` into `L339`'s scope, assuming it was
+the same "per-vertex write after barrier" shape `L339`'s per-invocation
+patch-constant-phase re-invocation already fixed. Re-confirmed the case
+still fails after `L339`/`L344`/`L346` all landed -- a genuinely
+different, more specific bug remained.
+
+### Root cause
+
+Rate-limited debug instrumentation in `Executor.cpp` (this session's
+own, removed before the final commit) pinpointed
+`PatchConstantVertexOutputs`'s `Position.x` becoming `NaN` after the
+patch-constant phase runs. A new `FEME_DUMP_IR_POSTCANON` env-gated
+dump (`GraphicsPipeline.cpp`, mirroring the pre-existing
+`FEME_DUMP_IR_PRECANON`) of FeMe's own post-`CanonicalizeStagePass` LLVM
+IR -- not just the upstream SPIR-V disassembly -- found the smoking
+gun directly: the code reading back `gl_out[gl_InvocationID].gl_
+Position.xy` compiled to literal `insertelement <4 x float> poison,
+float undef, ...` followed by a `shufflevector` down to `<2 x float>`
+-- the read was replaced entirely with poison/undef, directly
+explaining the observed `NaN`.
+
+Traced through `CanonicalizeStage.cpp`: the shader's TCS does `gl_out
+[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;`
+pre-barrier, then (inside an `if (wave32_in_workgroup == 7)` branch)
+`vec2 pos = (gridBase + gl_out[gl_InvocationID].gl_Position.xy); gl_out
+[gl_InvocationID].gl_Position.xy = pos / float(grid_size) * 2.0 - 1.0;`
+post-barrier -- a genuine self-indexed *read-then-partial-write* of the
+same per-vertex `Output`, confirmed against the GLSL source
+(`vktTessellationMiscDrawTests.cpp` lines ~1917, ~1937-1938).
+`classifySPIRVElement`'s `HullPatchConstant`-phase branch (extended by
+`L339`/`L344`) only recognized two shapes for a non-`patch`-decorated
+address-space-8 global: a pure `Input` cross-barrier read-back, or this
+phase's own pure `Output` write. It had no third case for "both read
+and written within this phase." Because `splitTessellationControlEntry`
+splits a barrier-containing TCS entry into two *separate* LLVM
+functions, the pre-barrier store to this global stays in the
+control-point phase's own function clone -- never in the
+patch-constant phase's. So when the patch-constant phase's own
+`ShadowValueMap`-routed self-read ran, there was no dominating store
+within *that* function for `PromoteMemToReg` to recover an SSA value
+from, and it correctly (per plain SSA rules) synthesized `undef`.
+
+Ruled out the existing `Link.HullToPatchConstant`/`PatchConstantInput`
+mechanism (which feeds patch-constant's `Input`-direction elements from
+the hull's `OutputPatch`) as already covering this: this element has no
+`Input`-direction `SignatureElement` at all, since it is correctly
+classified purely `Output` (the later write is real).
+
+### Fix
+
+A new `StageOpKind::OutputLoad`
+(`feme.stage.output.load(element,row,component,vertex) -> value`,
+`StageOps.h`/`.cpp`) -- the load-side counterpart of the existing
+`OutputStore`. Unlike `InputLoad`, its `vertex` operand is always a
+constant `0`: `PatchConstantWrapper.cpp`'s new
+`lowerPatchConstantOutputLoad` always addresses this lane's own flat
+invocation index instead (mirroring `lowerPatchConstantSystemValue`'s
+`OutputControlPointID` self-addressing), reading back the *same*
+`PerVertexOutputs`/`PerVertexOutputLayout` storage (`L339`'s own
+structure-of-arrays addition) the sibling `lowerPatchConstantOutputStore`'s
+`PerVertex` case writes.
+
+`CanonicalizeStage.cpp`'s `ShadowValueMap` gained a `SeedFromOutputLoad`
+constructor flag, set only for a hull entry's patch-constant-phase
+function. The first time its scalar (constant-`Row`/`Component`) shadow
+alloca is created for an `Output`-direction element in that phase, it
+is immediately seeded, at function entry, with a
+`createStageOutputLoad(...)` result -- before any rewritten load/store
+in the function body runs, and before `PromoteMemToReg` promotes the
+alloca to SSA. This is unconditional and safe even when no real
+self-read exists for a given element: every `Output`-direction element
+reaching this classification is, by construction, guaranteed a real
+store later in this same function (`classifySPIRVElement` only
+classifies `Output` when `HasStoreInPhase`), so an unnecessary seed is
+just a dead store `PromoteMemToReg` folds away with no surviving use.
+Only the scalar shadow-alloca path is seeded; the non-promotable
+`DynamicAllocas` fallback (genuinely dynamic `Row`/`Component`) is not
+-- a documented, not-yet-hit remaining gap.
+
+Four other files needed a matching case for the new, exhaustively-
+switched-over op kind: `SIMDize.cpp` (`widenStageOp`'s dispatch switch,
+treating `OutputLoad` exactly like `InputLoad`), `ValidateStage.cpp`
+(`isStageOpLegalForStage` and its operand-validation switch -- not yet
+reachable, since `ValidateStagePass` does not validate the hull stage),
+and `WaveUniformity.cpp` (`NeverUniform`, like `InputLoad`).
+`Linearize.cpp`/`ReferenceLowering.cpp` needed no change (neither lists
+`InputLoad` either, confirming a plain stage-IO load is already handled
+generically by both).
+
+### Testing
+
+`ninja -C build feme_vulkan`: clean build, no new warnings (confirmed
+every newly-touched exhaustive `switch` over `StageOpKind` was updated).
+`ninja -C build check-feme`: 3,497/3,558 Passed, 61 Unsupported, 0
+Failed, 0 regressions (identical to the pre-fix baseline).
+
+### CTS impact
+
+`dEQP-VK.tessellation.misc_draw.tess_factor_barrier_bug`: **Pass** (was
+`Fail`), confirmed with `--deqp-log-images=enable` (the default).
+
+Completed the full `dEQP-VK.tessellation.*` group re-sweep this item's
+own handoff -- and `L344`/`L346` before it -- had each deferred or only
+partially run: 1,114 total, **634 Pass / 42 Fail / 438 Not Supported**
+(net +1 Pass / -1 Fail vs. `L346`'s own 633/43/438 baseline, confirming
+no other regressions exist anywhere in the group beyond this session's
+own fix). Remaining 42 failures, fully cross-referenced against
+existing tracked items, none newly discovered: `common_edge` 3 (`L337`,
+open), `invariance.outer_edge_symmetry` 24 (`L341`, irreconcilable,
+open), `invariance.inner_triangle_set` 2 (`L346`, irreconcilable, open),
+`misc_draw.fill_overlap_*` 10 (`L340` item 2, open),
+`misc_draw.switch_domain_origin_*_fast_lib` 2 (`L340` item 3, open),
+`shader_input_output.barrier` 1 (`L344` item 2 / `FeMeGraphicsDesign.md`'s
+N-phase scoping, open).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal TCS codegen/ABI extension (a new `feme.stage.*`
+op kind), no feature/extension-surface change.
