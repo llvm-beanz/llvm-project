@@ -11322,3 +11322,73 @@ the net code change is zero (fix fully reverted, confirmed via
   that the bulk of the diff is unrelated upstream churn the local
   branch picked up by rebasing forward, not a divergence in the
   FeMe-specific commit itself. No action taken or needed.
+
+## L342: fixed -- isoline `outer_edge_symmetry` via small-half redefinition (12 cases)
+
+Picked up `L341`'s own next-step #3: whether isoline `outer_edge_symmetry`
+is fixable in isolation, since isolines are structurally excluded from
+the `outer_edge_index_independence`/`common_edge` requirements that made
+`L341`'s equivalent quad/triangle fix irreconcilable (confirmed via
+`createInvarianceTests`'s `if (triOrQuad)` gating and
+`createCommonEdgeTests`'s primitive-type list, both in the CTS source).
+
+Note the actual isoline/non-isoline split of `L341`'s "36 `outer_edge_
+symmetry` cases" figure was **24 quad/triangle + 12 isoline** (not "28 +
+8" as `L341` estimated before a full case-by-case breakdown) -- confirmed
+directly by this session's own before/after CTS numbers (38 failing
+before, 26 after, exactly -12).
+
+Two wrong first attempts, both numerically disproved via Python
+simulation before touching real code: (1) reusing `L341`'s reverted
+pair-based `computeEdgeFraction` helper for isolines' single-scalar `V`
+value (15,225/22,201 simulated mismatches across `L` 2..500); (2) a
+mis-posed round-trip check that accidentally required `1.0f - (1.0f -
+x) == x`, which is not a general float32 identity (42,213/62,001
+mismatches) -- the same double-rounding hazard `L341` had already
+identified, re-encountered here from mis-framing the problem as a
+round-trip rather than a single operation.
+
+**Correct framing**: the CTS isoline shader applies `1.0f - V` **exactly
+once**, only to the large half (`V > 0.5`, i.e. `2*I > Lines`), and
+requires the result to bit-match another line's own independently
+generated `V`. FeMe is free to *define* that other line's value as
+literally the same single subtraction of the large half's own direct
+value -- not re-derive or re-verify it as an identity -- making the two
+bit-identical by construction. Validated with zero mismatches across
+62,001 simulated `(I, L)` pairs (`L` 2..500) before writing any C++.
+
+Implemented `computeIsolineIndexFraction(I, L)` in `Tessellator.cpp`:
+the large/exact-half branch (`2*I >= L`, including the degenerate `I ==
+0`, which has no valid large partner and must keep its already-correct
+direct `0.0f`) is unchanged; the small half (`0 < I`, `2*I < L`) becomes
+`1.0f - (static_cast<float>(L - I) / L)`. `tessellateIsoline`'s
+`LineIndex` computation now calls this helper instead of a plain `I /
+Lines` division. Added `TessellatorTest.
+IsolineLineIndexSatisfiesShaderMirrorSymmetry` (several non-power-of-2
+line counts, asserting every generated large-half `V` has an exact
+small-half mirror partner in the same patch).
+
+`FeMeGraphicsTests`: 397/397 Passed (+1 new test), 0 regressions.
+`ninja check-feme`: 3,488/3,549 Passed, 61 Unsupported, 0 Failed, 0
+regressions.
+
+**CTS impact**: `dEQP-VK.tessellation.invariance.outer_edge_symmetry.
+isolines_*` (12 cases): 12/12 Pass (was 0/12). Full `invariance` group
+(192 cases): 166 Pass/26 Fail (was 154/38), exactly +12/-0, 0
+regressions elsewhere. The remaining 26 failures are `L341`'s
+already-triaged, mutually-irreconcilable quad/triangle `outer_edge_
+symmetry` (24 cases) and the still-untriaged `inner_triangle_set` (2
+cases) -- confirmed via the `.qpa` log's own `CasePath` breakdown, not
+assumed.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal tessellation coordinate-generation correctness
+fix to an already-exposed core feature, no new feature/extension
+surface.
+
+### Re-confirmed this session (no change)
+
+- Branch-drift check on `offload-test-suite`'s `feme` branch: local
+  `feme` still at `d0974dd`, `llvm-beanz/feme` still at `854cc3f` --
+  unchanged from last session's confirmed-benign rebase-only
+  divergence. No action taken or needed.
