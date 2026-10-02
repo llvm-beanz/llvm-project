@@ -332,6 +332,7 @@ PreparedPatchConstantBatch::PreparedPatchConstantBatch(
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *InputPatchLayout,
     const void *InputPatch, const FemeStageLayout *OutputLayout, void *Outputs,
+    const FemeStageLayout *PerVertexOutputLayout, void *PerVertexOutputs,
     uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount,
     uint32_t PrimitiveID, uint32_t ViewIndex)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
@@ -339,6 +340,8 @@ PreparedPatchConstantBatch::PreparedPatchConstantBatch(
       InputLayout(InputLayout), Inputs(Inputs),
       InputPatchLayout(InputPatchLayout), InputPatch(InputPatch),
       OutputLayout(OutputLayout), Outputs(Outputs),
+      PerVertexOutputLayout(PerVertexOutputLayout),
+      PerVertexOutputs(PerVertexOutputs),
       OutputControlPointCount(OutputControlPointCount),
       InputPatchControlPointCount(InputPatchControlPointCount),
       PrimitiveID(PrimitiveID), ViewIndex(ViewIndex) {
@@ -367,7 +370,8 @@ PreparedPatchConstantBatch::create(const ResourceInfo &Info,
                              Resources.SamplerHeap),
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.InputPatchLayout, Resources.InputPatch, Resources.OutputLayout,
-      Resources.Outputs, Resources.OutputControlPointCount,
+      Resources.Outputs, Resources.PerVertexOutputLayout,
+      Resources.PerVertexOutputs, Resources.OutputControlPointCount,
       Resources.InputPatchControlPointCount, Resources.PrimitiveID,
       Resources.ViewIndex);
 }
@@ -386,6 +390,8 @@ FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
   Args.InputPatch = InputPatch;
   Args.OutputLayout = OutputLayout;
   Args.Outputs = Outputs;
+  Args.PerVertexOutputLayout = PerVertexOutputLayout;
+  Args.PerVertexOutputs = PerVertexOutputs;
   return Args;
 }
 

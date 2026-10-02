@@ -353,6 +353,12 @@ struct PatchConstantResources {
   const void *InputPatch = nullptr;
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
+  /// (Roadmap L339) A genuine per-control-point output this phase's body
+  /// writes -- see `FemePatchConstantArgs::PerVertexOutputLayout`'s own
+  /// comment. Null/empty if the patch-constant function writes no such
+  /// element.
+  const FemeStageLayout *PerVertexOutputLayout = nullptr;
+  void *PerVertexOutputs = nullptr;
   uint32_t OutputControlPointCount = 0;
   uint32_t InputPatchControlPointCount = 0;
   /// (Roadmap L82) This patch's `SV_PrimitiveID`/`gl_PrimitiveID` -- see
@@ -384,6 +390,8 @@ private:
                              const FemeStageLayout *InputPatchLayout,
                              const void *InputPatch,
                              const FemeStageLayout *OutputLayout, void *Outputs,
+                             const FemeStageLayout *PerVertexOutputLayout,
+                             void *PerVertexOutputs,
                              uint32_t OutputControlPointCount,
                              uint32_t InputPatchControlPointCount,
                              uint32_t PrimitiveID, uint32_t ViewIndex);
@@ -399,6 +407,8 @@ private:
   const void *InputPatch = nullptr;
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
+  const FemeStageLayout *PerVertexOutputLayout = nullptr;
+  void *PerVertexOutputs = nullptr;
   uint32_t OutputControlPointCount = 0;
   uint32_t InputPatchControlPointCount = 0;
   uint32_t PrimitiveID = 0;

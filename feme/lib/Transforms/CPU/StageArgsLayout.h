@@ -162,7 +162,10 @@ enum PatchConstantArgsField : unsigned {
   PatchConstantArgsFieldInputPatch = 10,
   PatchConstantArgsFieldOutputLayout = 11,
   PatchConstantArgsFieldOutputs = 12,
-  PatchConstantArgsFieldReserved = 13,
+  // (Roadmap L339) Consumed from this struct's own former `Reserved[1]` --
+  // see `FemePatchConstantArgs::PerVertexOutputLayout`'s own comment.
+  PatchConstantArgsFieldPerVertexOutputLayout = 13,
+  PatchConstantArgsFieldPerVertexOutputs = 14,
 };
 
 enum DomainInvocationField : unsigned {
@@ -323,7 +326,7 @@ inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
                                      PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
-                                     PtrTy, llvm::ArrayType::get(PtrTy, 1)});
+                                     PtrTy, PtrTy, PtrTy});
 }
 
 /// Mirrors `FemeDomainInvocation`: the tessellator-generated domain

@@ -1421,10 +1421,29 @@ struct FemePatchConstantArgs {
   /// over a control-point count: there is exactly one patch's worth of
   /// storage, addressed by row/component alone.
   void *Outputs;
-  /// ABI headroom for later patch-constant-batch metadata. Was
-  /// `Reserved[2]` before roadmap L109 donated one slot to `ViewIndex`/
-  /// `Reserved32` above.
-  void *Reserved[1];
+  /// Layout describing `PerVertexOutputs` (roadmap L339): a genuine
+  /// per-control-point (non-`patch`) output this phase's body writes --
+  /// e.g. GLSL's `cross_invocation_per_vertex` shape, where a single
+  /// `barrier()`-delimited region of an otherwise-ordinary tessellation-
+  /// control entry point writes one per-vertex varying before the barrier
+  /// and a *second* per-vertex varying after it, reading a sibling
+  /// invocation's own pre-barrier value back (legal: by the time this
+  /// phase runs, every invocation's pre-barrier output is already fully
+  /// materialized in `Inputs`/`InputPatch`, see this struct's own `Inputs`
+  /// comment). Unlike `Outputs` above (`SignatureDirection::PatchOutput`,
+  /// uniform for the whole patch), this block is structure-of-arrays over
+  /// `OutputControlPointCount` control points, exactly like `FemePatchArgs::
+  /// Outputs` -- see `PatchConstantWrapper.cpp`'s `buildWrapper`, which
+  /// re-invokes this phase's compiled body once per control point (rather
+  /// than the single, lane-0-only call every other patch-constant-only
+  /// shape still gets) whenever the signature declares any such element.
+  /// Null if the patch-constant function writes no genuine per-vertex
+  /// output.
+  const FemeStageLayout *PerVertexOutputLayout;
+  /// Structure-of-arrays storage for `PerVertexOutputLayout`'s elements,
+  /// one slot per output control point. Null under the same condition as
+  /// `PerVertexOutputLayout`.
+  void *PerVertexOutputs;
 };
 
 /// One domain/evaluation-stage invocation record: the tessellator-generated

@@ -124,6 +124,13 @@ struct PatchPipelineLinkage {
   /// reads no patch constant or tessellation factor.
   llvm::SmallVector<LinkedStageElement, 4> PatchConstantToDomain;
   bool HasDomainPatchConstants = false;
+  /// (Roadmap L339) Patch-constant phase genuine per-control-point
+  /// `Output` -> domain stage ordinary per-vertex `Input`. Empty, and
+  /// `HasPatchConstantVertexOutputs` false, when the patch-constant phase
+  /// writes no such element (the common case -- see `classifySPIRVElement`'s
+  /// own comment for what produces one).
+  llvm::SmallVector<LinkedStageElement, 4> PatchConstantToDomainInput;
+  bool HasPatchConstantVertexOutputs = false;
 };
 
 /// Links \p VertexOutputSig's outputs and the three compiled stages'
@@ -144,6 +151,11 @@ struct PatchPipelineResult {
   /// The patch-constant phase's per-patch output (tessellation factors and
   /// patch constants), in that phase's own output layout.
   StageStorage PatchConstants;
+  /// (Roadmap L339) The patch-constant phase's genuine per-control-point
+  /// output, structure-of-arrays over `OutputControlPointCount`, in that
+  /// phase's own layout. Empty when `PatchPipelineLinkage::
+  /// HasPatchConstantVertexOutputs` is false (the common case).
+  StageStorage PatchConstantVertexOutputs;
   /// The fixed-function tessellator's generated domain coordinates and
   /// primitive connectivity for this patch.
   TessellatedPatch Tessellated;
