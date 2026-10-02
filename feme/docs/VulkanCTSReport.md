@@ -11650,3 +11650,97 @@ session and is unrelated to the fix just landed. Out of scope for
 `L344`; tracked as a new `L345` for a future dedicated root-cause
 session (needs a heap-corruption-catching tool, since the crash site
 is far downstream of whatever write actually corrupts the heap).
+
+## L345: fixed -- `cross_invocation_per_patch_mat4x3` heap corruption, 4 independent sub-bugs
+
+### Root cause
+
+`cross_invocation_per_patch_mat4x3` crashed the entire `deqp-vk`
+process with a glibc heap-metadata-corruption assertion (see `L344`'s
+own discovery entry above). Root-causing it via `gdb`'s `bt`, `git
+stash` A/B testing, and targeted `addElement` debug instrumentation
+(printing each stage-IO element's `GV` name/`ElementID`/`Direction`/
+`RowCount`/`ComponentCount`/`D.Patch`/`Stage`/`Phase`) uncovered four
+independent, previously-latent bugs, each triggered by a different
+part of this one case's shape (a `patch`-frequency array of `mat4x3`
+elements, cross-invocation-written, with its own value threaded across
+the one group-sync barrier via the capture mechanism):
+
+1. **`StageLink.cpp`'s `copyLinkedPatchFrequencyElements`** assumed
+   `Link.RowCount == SourceInvocationCount` (treating `Row` itself as
+   the producing invocation's own index). Breaks for a matrix-typed
+   patch-frequency array: `getStageIORowShape` flattens the matrix's
+   own row dimension into the same `RowCount` as the array's instance
+   dimension, so `Link.RowCount` is a multiple of
+   `SourceInvocationCount`, and each invocation's own diagonal "slot"
+   spans a contiguous *block* of rows (one per matrix column), not a
+   single row.
+2. **`CanonicalizeStage.cpp`'s `loadStageIOValue`/`storeStageIOValue`**
+   fell through a tight-vector-marker-wrapped struct to the generic
+   `ArrayType` peel, decomposing its inner array one *row* at a time
+   instead of one *component* at a time -- mismatching
+   `getStageIORowShape`'s own split for the same element.
+3. **`collectDynamicRowTerms`'s base case** folds a leftover type's
+   full `RowCount` into its returned term's multiplier, assuming the
+   dynamic index always resolves all the way to a scalar/vector leaf.
+   Breaks for a self-indexed dynamic array whose element is itself
+   still a matrix (`in_te_data0[gl_InvocationID] = someMat4x3`):
+   `collectDynamicRowTerms` returns after only the outer array
+   dimension, pre-scaling `Row` by the matrix's own `RowCount`, and
+   `storeStageIOValue`/`loadStageIOValue`'s own recursion then
+   multiplies by that same `RowCount` *again* -- a double-scaling that
+   silently overran the element's real storage.
+4. **`addElements`'s `PerInvocationOutputArray` peel** (meant only for
+   a genuine per-control-point output array like
+   `gl_out[].gl_Position`) also wrongly matched a synthetic
+   `patchconst.capture.N` global the barrier-splitting mechanism
+   creates to thread a `mat4x3`-typed HLSL local (computed before the
+   one group-sync barrier, read back after it) into the
+   patch-constant phase. Such a capture global is genuinely
+   `Patch=false` (it carries no real SPIR-V decorations) and lives in
+   address space 8 for a `Hull` stage, coincidentally matching the
+   heuristic's three conditions -- wrongly peeling the matrix's own
+   column-array dimension and collapsing `RowCount` from the correct
+   `4` down to `1`, undersizing its `buildStageStorage` allocation and
+   causing stores for columns 1-3 to run past the end of the block.
+
+### Fix
+
+- (1): identify each row's real producing invocation via
+  `Row / RowsPerInvocation` (`RowsPerInvocation = Link.RowCount /
+  SourceInvocationCount`), a no-op for every existing plain
+  scalar/vector per-patch array.
+- (2): added an explicit tight-vector-marker branch to both functions,
+  ahead of the generic peel, mirroring the existing `FixedVectorType`
+  handling.
+- (3): added `unscaleDynamicRowForValueTy`, dividing the combined
+  `Row` back down by the stored/loaded value's own `RowCount`
+  whenever `> 1`, undoing exactly the one extra scaling step about to
+  be re-applied.
+- (4): excluded any global carrying `feme.captured.self.index`
+  metadata from the `PerInvocationOutputArray` peel.
+
+### Testing
+
+New unit tests: `StageLinkTest.
+GathersPatchFrequencyDiagonalBlockForAMatrixArray` (fix 1),
+`CanonicalizeStageTest.
+DecomposesTightVectorMarkerStoreByComponentNotByRow` (fix 2),
+`CanonicalizeStageTest.
+DoesNotDoubleScaleDynamicRowForSelfIndexedMatrixArrayStore` (fix 3),
+`CanonicalizeStageTest.
+DoesNotPeelArrayDimensionFromACapturedMatrixValue` (fix 4).
+`FeMeTransformsGraphicsTests`: 131/131 pass. `FeMeGraphicsTests`:
+401/401 pass. `ninja check-feme`: 3,496/3,557 Passed, 61 Unsupported,
+0 Failed, 0 regressions.
+
+### CTS impact
+
+`cross_invocation_per_patch_{float,int,uint,vec3,vec4,mat4x3}`: 6/6
+Pass (was 5/6, with `mat4x3` crashing the entire `deqp-vk` process
+rather than merely failing). Broader
+`dEQP-VK.tessellation.shader_input_output.*`: 27/28 Pass (the 1
+remaining failure is the already-tracked `L344` item (2) single-barrier
+limitation, unrelated to this fix). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- an internal TCS codegen/
+storage-sizing fix, no feature/extension-surface change.
