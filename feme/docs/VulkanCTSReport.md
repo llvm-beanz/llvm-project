@@ -9651,3 +9651,66 @@ session to step through `buildWrapperForLoop` with a debugger.
 as the session's build-health confirmation. `Vulkan14FeatureInventory.
 md`/`VulkanExtensionInventory.md`: no change -- investigation only, no
 fix.
+
+## L323: fixed -- `outlineChain` dangling cross-function terminator edge
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+Picked up directly from the prior session's confirmed minimal IR
+reduction (recorded above in this same file). Root-caused to
+`outlineChain` (`feme/lib/Transforms/CPU/EntryWrapper.cpp`, used by
+`splitLoopBodyAtBarriers`/`outlineChainAtBarriers` to outline a
+`LoopShape`'s body chain into its own per-wave region function): it only
+ever patched *the chain's own last block's* terminator when redirecting
+the chain's external successor edge to a `ret void`. This assumption
+holds for a plain linear chain, but not for a chain containing a uniform
+safe diamond (`matchSafeDiamond`) whose "false" arm is empty -- in the
+repro IR, `body`'s own `CondBr` (`br i1 %cond, label %true, label
+%merge`) branches *directly* from inside the chain to the chain's
+external successor (`merge`, the loop's own `Latch`), while the chain's
+actual last block (`true`) branches only to the diamond's own internal
+merge point, which happens to be that same `merge`/`Latch` block already
+excluded from the chain by `matchLoopShape`. Patching only `true`'s
+terminator left `body`'s own `CondBr` still referencing `merge` as a
+label operand after `merge` was spliced away into a different function
+-- invalid cross-function IR, surfacing only later as the observed
+IR-verifier "use after def destroyed" assertion once something tried to
+erase/replace `merge`.
+
+**Fix**: generalized `outlineChain`'s terminator-fixup step to scan
+every block of the newly-outlined chain (not just the last one) for a
+terminator operand pointing outside the chain, redirecting each such
+edge to one shared, lazily-created `ret void` block:
+- A `CondBr` with one in-chain and one out-of-chain successor has only
+  the out-of-chain operand retargeted via `setSuccessor`, leaving the
+  in-chain edge (and the branch condition) untouched.
+- A plain `UncondBr` whose sole successor is out-of-chain is still
+  rewritten in place exactly as before (erase + `CreateRetVoid` in the
+  same block), with no new block created at all -- every chain that was
+  already passing keeps producing byte-identical IR.
+
+New test: `EntryWrapperTest.WrapsLoopWithDiamondBodyBeforeTrailingBarrier`,
+using the exact minimal repro IR captured in the prior session's
+investigation (one loop, `header`→`body`→(`true`/`merge`)→`header`, with
+the group-sync barrier only in a block after the loop). Confirmed the
+test no longer crashes and `verifyModule` reports the resulting wrapper
+module clean.
+
+**Verification**:
+- `FeMeTransformsCPUTests` (`*EntryWrapper*`): 38/38 Passed, 0
+  regressions (the new test plus all 37 existing).
+- `ninja check-feme` (ccache + assertions, full target-dependency
+  build): 3,467/3,528 Passed (+1 new test), 61 Unsupported, 0 Failed, 0
+  regressions.
+- CTS: no specific failing CTS case was ever isolated exercising exactly
+  this IR shape -- the bug was found via an abstract IR reduction during
+  `L321`'s own A/B testing in a prior session, not a concrete CTS
+  failure. As a broad correctness/no-crash sanity check, re-ran the full
+  `dEQP-VK.compute.*` group (61,460 cases): 686 Pass/0 Fail/60,774
+  NotSupported (unrelated missing `VK_EXT_shader_object`), no crash, no
+  regression from before this fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal compiler correctness fix (a miscompile/crash in
+region-outlining control flow), no feature/extension-surface change.
