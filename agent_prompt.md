@@ -63,26 +63,24 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(unknown, ~300 cases, carried over 2 sessions)** The broader
-   `tessellation` group CTS sweep is still ~300 cases short of
-   complete. Nobody has picked this up in 2 sessions running — next
-   session should actually start it, not defer again.
-2. **(design session, carried over many sessions)** `L344` item 2 —
-   "only one group-sync barrier supported." Same subsystem/scope class
-   as `L335` (`line_continuity` region-splitting gap) — consider
-   tackling together, since both need the same control-flow-
-   restructuring survey of `CanonicalizeStage.cpp`'s barrier-splitting
-   logic.
-3. **(a few hours, lowest priority, many sessions carried over)**
-   `L265` — ASTC alpha-decode tie-break. Untouched again this session.
-4. **(low priority, out of scope)** `offload-test-suite`'s own
-   lit-annotation issues (`spec_const_32_bits.test`/
-   `WaveActiveMax.test`/`array_of_matrices.test`), plus its 1-commit
-   drift behind `llvm-beanz/feme` noted above.
-5. **(process note for future sessions)** When splitting a multi-fix
-   diff into commits with `git add -p` + `git commit`: never pass a
-   pathspec to the `git commit` invocation once hunks are staged — it
-   silently re-includes the full unstaged diff for that path. Always
-   double-check with `git show --stat HEAD` immediately after each
-   commit in a split sequence, not just `git diff --cached --stat`
-   beforehand.
+1. **`L339`** (~a dedicated session) -- TCS barrier-splitting
+   architectural gap, 14 cases. Still the biggest real-work item on the
+   board, carried over many sessions. Start with a minimal standalone
+   reproducer, not the full CTS shader.
+2. **`L344` item 2** (~a dedicated implementation session, now
+   *scoped* -- see `FeMeGraphicsDesign.md`'s new Status subsection
+   before starting) -- generalizing the one-barrier split to N
+   barriers. Same subsystem/scope class as `L335`; consider doing both
+   in the same session since they need the same kind of control-flow
+   region-splitting survey.
+3. **`L340`** (~a few hours each, 12 cases) -- `misc_draw.fill_overlap_*`
+   (needs `--deqp-log-images=enable` first) and
+   `misc_draw.switch_domain_origin_*_fast_lib`. Untouched many
+   sessions running.
+4. **`L335`** (~a dedicated session, deferred many sessions) --
+   `line_continuity.{line-strip,polygon-mode-lines}` region-splitting
+   gap. Same class as `L344` item 2 above.
+5. **`L265`** (~a few hours, lowest priority, many sessions carried
+   over) -- ASTC alpha-decode tie-break. Deep-dived once already (see
+   its own `Roadmap.md`/`VulkanCTSReport.md` entries), still
+   unresolved, still lowest priority. Untouched again this session.
