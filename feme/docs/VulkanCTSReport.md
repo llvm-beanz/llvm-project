@@ -9579,3 +9579,75 @@ needed -- a device-limits-accuracy fix (correcting an inaccurately-low
 advertised precision value), no feature/extension-surface change.
 
 `L316` is now fully `done`.
+
+## L323: minimal IR reduction confirmed (not yet fixed)
+
+Mandatory device check: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device`, confirmed.
+
+While wrapping up `L316`/`L322` this session, re-confirmed `L323`
+(carried over from `L321`'s own A/B testing) with a minimal, standalone
+IR reduction added temporarily to `EntryWrapperTest.cpp`, run, observed
+to crash, then reverted via `git checkout --` (never committed, since
+it aborts the process rather than failing an `EXPECT_` check, which
+would break `check-feme` if left in the suite):
+
+```llvm
+define void @main() #0 {
+entry:
+  br label %header
+header:
+  %i = phi i32 [ 0, %entry ], [ %i.next, %merge ]
+  %cmp = icmp ult i32 %i, 4
+  br i1 %cmp, label %body, label %afterloop
+body:
+  %cond = icmp eq i32 %i, 0
+  br i1 %cond, label %true, label %merge
+true:
+  br label %merge
+merge:
+  %i.next = add i32 %i, 1
+  br label %header
+afterloop:
+  call void @llvm.dx.group.memory.barrier.with.group.sync()
+  br label %exit
+exit:
+  ret void
+}
+declare void @llvm.dx.group.memory.barrier.with.group.sync()
+attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+```
+
+Running `SIMDizePass(4).run(*M, MAM)` → `WaveLoweringPass().run(*M,
+MAM)` → `EntryWrapperPass().run(*M, MAM)` over this module crashes
+with:
+
+```
+While deleting: label %merge
+Use still stuck around after Def is destroyed:  br i1 %cond, label %true, label %merge
+Uses remain when a value is destroyed!
+UNREACHABLE executed at llvm/lib/IR/Value.cpp:99!
+  ...
+  buildWrapperForLoop(llvm::Function&, (anonymous namespace)::LoopShape, ...) EntryWrapper.cpp:0:0
+  buildWrapper(llvm::Function&) EntryWrapper.cpp:0:0
+  feme::cpu::EntryWrapperPass::run(...)
+```
+
+i.e. `%true`'s own terminator (a plain `br label %merge`) still
+references `%merge` as a label operand at the point something tries to
+erase `%merge` -- whatever outlines/clones the diamond's wave region
+moves or erases `%merge` without first rewriting (or itself erasing)
+`%true`'s own terminator.
+
+Not fixed this session (scoped as "a few hours, standalone IR-reduction
+investigation" in the roadmap, and the remaining session time went to
+`L316`/`L322` instead). The repro above is copy-pasteable directly into
+a local, uncommitted `TEST(EntryWrapperTest, ...)` for the next
+session to step through `buildWrapperForLoop` with a debugger.
+
+`ninja check-feme` not re-run for this item specifically (no
+`feme/` source change made) -- the `L316`/`L322` commits' own
+`check-feme` runs (3,466/3,527 Passed, 61 Unsupported, 0 Failed) stand
+as the session's build-health confirmation. `Vulkan14FeatureInventory.
+md`/`VulkanExtensionInventory.md`: no change -- investigation only, no
+fix.
