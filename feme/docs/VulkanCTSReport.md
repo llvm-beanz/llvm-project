@@ -10696,3 +10696,151 @@ HLSL/SPIR-V reproducer isolating just the barrier-in-nested-if-and-
 while pattern; (2) survey the region-splitting pass's supported vs.
 needed shapes to scope the change; (3) add unit test coverage for the
 new shape(s) before touching CTS.
+
+## L336: fixed -- tessellator boundary-ring ULP-exactness bug (`invariance.outer_edge_index_independence`, 24 cases)
+
+Picked up handoff item 3 ("largest untriaged chunk, best next pick"):
+tessellation `user_defined_io` triage. Re-running
+`dEQP-VK.tessellation.user_defined_io.*` showed **54/54 Pass, 0
+Fail** -- the handoff's "27 cases" figure was stale; it had already
+been fixed as a side effect of an earlier session's `L332`/`L333`/
+`L334` work (which exact fix is responsible was not pinned down).
+
+Per the standing "always re-verify stale handoff numbers against a
+fresh run" lesson, pivoted to re-triaging the *entire*
+`dEQP-VK.tessellation.*` group from scratch rather than trusting any
+single stale subgroup number:
+
+```
+Passed:        577/1114 (51.8%)
+Failed:        99/1114 (8.9%)   [deqp-vk's own summary tally]
+Not supported: 438/1114 (39.3%)
+```
+
+The deqp-vk summary's own "99" undercounts by one case relative to
+the individually-enumerated failure list (100 cases), apparently due
+to an off-by-one in its own tally vs. per-case log entries -- not
+investigated further; the 100-case enumerated list (accurately
+extracted by scanning the `.qpa`/log backwards from each `Fail` line
+to its owning `Test case` line, since a naive `grep -B1` undercounts
+when multi-line messages intervene) is the authoritative one used for
+before/after diffing in this entry.
+
+Breakdown of the 100 failures: `invariance` 62, `shader_input_output`
+15, `misc_draw` 13, `tesscoord` 6, `common_edge` 3, `winding` 1 --
+matching the previously-documented residual buckets exactly, so this
+is a stable re-confirmation, not a new regression.
+
+### Root cause
+
+Investigated the largest same-looking subgroup:
+`invariance.outer_edge_index_independence` (24 of the 62 `invariance`
+cases -- 12 quad-domain + 12 triangle-domain spacing/winding/point-
+mode variants). This CTS test rotates a tessellated domain's generated
+vertices through each of its symmetric outer edges (4 for quads, 3 for
+triangles), applies a coordinate swizzle to normalize each edge's
+orientation, and checks that the resulting vertex-position **sets**
+are *exactly* (not epsilon-tolerant) equal across all edges --
+`std::set<Vec3>` equality.
+
+A specific failure's detailed `.qpa` log output showed two sets
+printing as visually identical at 6 significant figures (`{0,
+0.333333, 0.666667, 1}` on both sides of the failed comparison) yet
+failing exact equality -- a strong signal this was a floating-point
+ULP-level mismatch, not a logic bug, since a real logic bug would
+produce visibly different values.
+
+Reading `feme/lib/Graphics/Tessellator.cpp`'s boundary-ring builders
+(`appendQuadBoundaryRing`, `appendTriangleBoundaryRing`, and the
+interior-ring counterpart `appendTriangleRingBoundary`) found each
+builds its "forwards"-walking edges' parametric/barycentric
+coordinate via a direct division, `static_cast<float>(K) / N`, but
+its "backwards"-walking edges' complementary coordinate (needed to
+preserve a ring's CCW winding, or a barycentric coordinate's
+complementary value) via `1.0f - static_cast<float>(K) / N` -- a
+float division followed by a float subtraction.
+
+Confirmed via a Python float32 `struct.pack`/`unpack` experiment that
+these two expressions are **not**, in general, bit-identical for the
+same complementary index `K' = N - K`:
+
+```
+N=3, K=2:
+  1.0f - 2.0f/3.0f  -> 0.3333333134651184   (float32 0x3EAAAAAA)
+  1.0f/3.0f (direct) -> 0.3333333432674408   (float32 0x3EAAAAAB)
+```
+
+A 1-ULP difference between the "backwards" edge's complementary value
+and the "forwards" edge's direct value for the same logical position
+-- invisible when printed at 6 significant figures, but enough to
+fail an exact `std::set` equality comparison. Computing the
+complementary numerator via **integer** subtraction first (`N - K`,
+exact for small integers) before a single float division IS confirmed
+bit-identical to the direct computation:
+
+```
+N=3, K'=1 (= N-K): static_cast<float>(1) / 3.0f -> 0.3333333432674408  (matches)
+```
+
+### Fix
+
+Rewrote all three affected functions'
+complementary-coordinate expressions to compute the complementary
+numerator via integer subtraction before dividing, instead of
+dividing then subtracting from `1.0f`. Added doc comments citing
+`Roadmap.md`'s `L336` entry explaining the ULP-mismatch root cause.
+
+### Testing
+
+Added two new regression unit tests to
+`feme/unittests/Graphics/TessellatorTest.cpp`:
+`QuadOppositeEdgesProduceBitExactlyEqualCoordinateSets` and
+`TriangleEdgesProduceBitExactlyEqualCoordinateSets`. Both use a
+non-power-of-two segment count (3), since a power-of-two count (e.g.
+4) would mask the bug -- `1/4`, `2/4`, `3/4` are all exactly
+representable and their complements happen to round the same way.
+The triangle test scopes its canonical-value check to only the
+domain's outer-boundary points (points with at least one barycentric
+component exactly `0.0f`); an early draft checked every generated
+point including the interior concentric ring's, which are legitimately
+inset towards the centroid and aren't expected to land on the same
+four canonical boundary values -- this chased a false lead for a time
+before the scoping fix. Both tests were confirmed via a `git
+stash`-isolated A/B test (stashing only the `Tessellator.cpp` code
+change, keeping the new tests) to fail against the pre-fix code and
+pass against the fix.
+
+- `FeMeGraphicsTests`: 395/395 Passed (+2 new tests), 0 regressions.
+- `FeMeVulkanTests`: 778/778 Passed (unchanged).
+- `ninja check-feme`: 3486/3547 Passed (+2 new tests), 61 Unsupported,
+  0 Failed, 0 regressions.
+
+### CTS impact
+
+Re-running the full `dEQP-VK.tessellation.*` group:
+
+```
+Passed:        601/1114 (53.9%)
+Failed:        75/1114 (6.7%)
+Not supported: 438/1114 (39.3%)
+```
+
+Diffing the accurately-enumerated before/after failure lists: exactly
+the 24 `outer_edge_index_independence` cases (12 quad + 12 triangle
+variants) flip from Fail to Pass, **0 regressions, 0 new failures**
+elsewhere in the group.
+
+Remaining 76 failures (unchanged, still open): `invariance` 38 (down
+from 62 -- the non-`outer_edge_index_independence` invariance
+sub-cases are untriaged), `shader_input_output` 15, `misc_draw` 13,
+`tesscoord` 6, `common_edge` 3 (same complementary-fraction formula
+class suspected but **not confirmed** to be the cause here -- this is
+a *cross-patch* comparison, between a shared edge's vertices as seen
+from two separately-tessellated adjacent patches, not a *within-
+patch* complementary-edge comparison like
+`outer_edge_index_independence`, so it may be a distinct bug; left
+open for a future session), `winding` 1.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this is an internal tessellator floating-point-exactness
+fix with no feature/extension surface change.
