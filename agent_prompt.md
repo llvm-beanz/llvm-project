@@ -63,24 +63,35 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L323` (a few hours, best next pick, repro already in hand)**: step
-   through `buildWrapperForLoop` with the repro IR already recorded in
-   `Roadmap.md`/`VulkanCTSReport.md` (copy-paste directly into a local,
-   uncommitted gtest) to find which block-cloning/erasure step drops
-   `%merge` without rewriting/removing `%true`'s own `br label %merge`
-   terminator first.
+1. **`L325` (a few hours, best next pick, newly scoped)**: the
+   `static_stipple`/`dynamic_stipple`/`dynamic_stipple_and_topology`
+   cluster, 49 of the remaining 70 `rasterization` failures. Likely a
+   stipple-arc-length-computation bug, distinct from `L324`'s
+   half-open-rule fix (adjacency topology vs. stipple-pattern
+   application along the line). Start the same way `L324` did: pick one
+   failing case (e.g. `dynamic_stipple.bresenham_lines`), run with
+   `--deqp-log-images=enable`, extract the embedded PNGs (see this
+   session's and `L324`'s own technique: regex `.qpa` XML by
+   `<ImageSet>` boundary, base64-decode, diff with PIL/numpy), and
+   compare fragment-count/position against the spec's own stipple
+   pattern math (`gl_FragDepth`... actually spec section on
+   "Line Stipple" -- check `primsrast.adoc`'s stipple subsection, not
+   yet read this session).
 2. **`L265` (a few hours, lowest priority, many sessions carried over,
    unchanged)**: ASTC alpha-decode tie-break (4 block sizes). Needs a
-   Mesa/lavapipe reference-decoder comparison. The `vktSampleVerifier.cpp`
-   mechanics learned this session while root-causing `L316` (quantized
-   tolerance-band search, `calcTexelGridCoordRange`/
-   `wrapTexelGridCoordLinear`) may be directly relevant if ASTC's verifier
-   uses a similar quantized-candidate search -- worth checking first before
-   diving into the decoder math itself.
-3. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a
-   few hours, carried over, unchanged)**.
+   Mesa/lavapipe reference-decoder comparison.
+3. **Rasterization's remaining 21 scattered failures** (`stencil`,
+   `color_at_beginning`/`color_at_end`, `non_strict_line*`,
+   `triangle_fan`/`triangle_strip`, `line-strip`, `polygon-mode-lines`,
+   `depth_bias`, `provoking_vertex`, `flatshading`, `line_continuity`,
+   `frag_side_effects`, `maintenance5`,
+   `d24_unorm_constant_one_greater`, `draw`, `depth`) -- confirmed
+   pre-existing (not new regressions from `L324`), individually
+   untriaged, likely several distinct small bugs. Not yet scoped into
+   its own roadmap item; do that first if picked up.
 4. **`offload-test-suite`'s own lit-annotation issues**
    (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`)
    -- low priority, pre-existing, outside this project's scope.
-5. **Branch-drift housekeeping**: not re-checked this session -- overdue by
-   one more session now (last confirmed non-issue several sessions ago).
+5. **Branch-drift housekeeping**: confirmed unchanged again this
+   session (`854cc3f`) -- no action needed until content actually
+   diverges.
