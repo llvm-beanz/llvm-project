@@ -63,25 +63,35 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(best next pick, small, plausibly related)** `common_edge` (3
-   cases). Check whether it's the same ULP-mismatch class
-   (cross-patch instead of within-patch) before assuming it needs a
-   separate root-cause session.
-2. **(unknown, 15 cases)** `shader_input_output` -- untriaged, carried
-   over many sessions.
-3. **(unknown, 13 cases)** `misc_draw` -- untriaged.
-4. **(unknown, 38 cases, now the largest bucket)** Remaining
-   `invariance` failures (non-`outer_edge_index_independence`
-   sub-cases) -- re-triage these specifically, since the general
-   `invariance` CTS group clearly has more than one test shape in it.
-5. **(small, 6 and 1 cases)** `tesscoord` (6), `winding` (1) --
-   smallest untriaged clusters, good quick wins between bigger items.
-6. **(a few hours, lowest priority, many sessions carried over)**
+1. **(dedicated session, now the largest scoped bucket, 14 cases)**
+   `L339` -- the TCS barrier-splitting architectural gap
+   (`shader_input_output`'s `barrier`/`cross_invocation_per_
+   {vertex,patch}_*` + `misc_draw`'s `tess_factor_barrier_bug`). Needs
+   design work: either invoke the patch-constant phase once per
+   invocation with per-invocation per-vertex writes threaded through,
+   or restructure the phase split differently. Start with a minimal
+   standalone reproducer, not the full CTS shaders.
+2. **(a few hours each, 2 buckets, 12 cases)** `L340` --
+   `misc_draw.fill_overlap_*` (10 cases, likely a `Tessellator.cpp`
+   interior-triangulation bug or an `sb_levels` SSBO-mirroring bug --
+   use `--deqp-log-images=enable` first) and
+   `misc_draw.switch_domain_origin_*_fast_lib` (2 cases, localized
+   green/blue-only mismatch, likely a graphics-pipeline-library
+   relink/domain-origin-flip edge case).
+3. **(unknown, 38 cases, still the largest *untriaged* bucket)**
+   Remaining `invariance` failures (non-
+   `outer_edge_index_independence`) -- still not picked up despite
+   being flagged as top priority for several sessions running. Worth
+   actually starting next time instead of deferring again.
+4. **(a few hours, lowest priority, many sessions carried over)**
    `L265` -- ASTC alpha-decode tie-break. Untouched again this
    session.
-7. **(low priority, out of scope)** `offload-test-suite`'s own
+5. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/
    `WaveActiveMax.test`/`array_of_matrices.test`).
-8. **(dedicated session, deferred many sessions)** `L335` --
+6. **(dedicated session, deferred many sessions)** `L335` --
    `line_continuity.{line-strip,polygon-mode-lines}` compiler/backend
-   region-splitting-pass gap. Untouched this session.
+   region-splitting-pass gap. Same subsystem/scope class as `L339` --
+   consider tackling both in the same future dedicated session, since
+   whatever phase-split redesign fixes `L339` may also inform `L335`'s
+   region-splitting-pass extension.
