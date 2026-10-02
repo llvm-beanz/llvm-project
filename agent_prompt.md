@@ -63,26 +63,16 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L339`** (~a dedicated session) -- TCS barrier-splitting
-   architectural gap, 14 cases. Still the biggest real-work item on the
-   board, carried over many sessions. Start with a minimal standalone
-   reproducer, not the full CTS shader.
-2. **`L344` item 2** (~a dedicated implementation session, already
-   scoped -- see `FeMeGraphicsDesign.md`'s Status subsection) --
-   generalizing the one-barrier split to N barriers. Only remaining
-   case needing this is `shader_input_output.barrier` (1 case) now
-   that `tess_factor_barrier_bug` turned out to be a separate bug.
-   Same subsystem/scope class as `L335`; consider doing both together.
-3. **`L340`** (~a few hours each, 12 cases) -- `misc_draw.fill_overlap_*`
-   (needs `--deqp-log-images=enable` first) and
-   `misc_draw.switch_domain_origin_*_fast_lib`. Untouched many
-   sessions running.
-4. **`L335`** (~a dedicated session, deferred many sessions) --
-   `line_continuity.{line-strip,polygon-mode-lines}` region-splitting
-   gap. Same class as `L344` item 2 above.
-5. **`L265`** (~a few hours, lowest priority, many sessions carried
-   over) -- ASTC alpha-decode tie-break. Untouched again this session.
-6. `offload-test-suite`'s own lit-annotation issues
-   (`spec_const_32_bits.test`/`WaveActiveMax.test`/
-   `array_of_matrices.test`) -- low priority, out of scope, noted again
-   for completeness.
+1. **(dedicated session)** `fill_overlap_*` -- port/compare against the
+   `CHWTessellator` reference algorithm's quad-interior generation. Start by
+   reading Mesa's `tessellator.cpp` quad-domain code I didn't get to, then
+   decide if a literal port or a smaller targeted fix is feasible.
+2. **(design session, carried over many sessions)** `L344` item 2 /
+   `L335` -- the one-barrier-split-to-N-barrier generalization. Scoped
+   already in `FeMeGraphicsDesign.md`'s Status subsection. Only remaining
+   case needing it: `shader_input_output.barrier` (1 case).
+3. **(a few hours, lowest priority, many sessions carried over)** `L265` --
+   ASTC alpha-decode tie-break. Untouched again.
+4. **(low priority, out of scope)** `offload-test-suite`'s own
+   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
+   `array_of_matrices.test`).
