@@ -8,6 +8,7 @@ add_feme_library(FeMeGraphics
   GeometryStreamCollection.cpp
   ImageFixture.cpp
   LayeredRendering.cpp
+  LineRasterization.cpp
   Mesh.cpp
   Meshlet.cpp
   MeshOutput.cpp
