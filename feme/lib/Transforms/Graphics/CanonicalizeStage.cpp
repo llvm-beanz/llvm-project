@@ -2820,6 +2820,45 @@ SPIRVElementInfo classifySPIRVElement(ShaderStage Stage,
       return Info;
     }
     if (isPatchOutputDecoration(D)) {
+      // (Roadmap L344) Mirrors the non-`Patch` cross-invocation-read fix
+      // just below (roadmap L339): a `patch`-qualified global this
+      // phase's own body never *stores* to (`!HasStoreInPhase`) is a
+      // genuine cross-invocation *read* of a value the earlier
+      // control-point phase already wrote to real, shared patch storage
+      // before the one barrier this phase sits after ran (e.g.
+      // `cross_invocation_per_patch`'s own
+      // `in_te_data0[(gl_InvocationID + 1) % N]`) -- not an output this
+      // phase itself produces, so it is classified `Input`/`PerPatch`
+      // here (`isOutputPatchElement` in `PatchPipeline.cpp`'s own
+      // sense: the completed, already-committed `OutputPatch` half of
+      // this phase's `Input` block, exactly like an ordinary
+      // non-`Patch` `InputPatch`/`OutputPatch` varying), which routes
+      // the read through `PatchConstantWrapper.cpp`'s own
+      // `lowerPatchConstantInputLoad` against real storage
+      // (`PatchPipeline.cpp`'s own `HullToPatchConstant`/
+      // `PatchConstantInput`, already built and populated from the
+      // control-point phase's own output storage for exactly this
+      // purpose) instead of the per-function-local, never-written-in-
+      // this-phase `ShadowValueMap` the unconditional `PatchOutput`
+      // classification below used to force every read of this global
+      // through -- the all-or-nothing solid-black-vs-solid-white CTS
+      // failure `--deqp-log-images=enable` confirmed.
+      //
+      // This still leaves the domain stage's own matching `patch in`
+      // consumer (reading the *same* `patch out` variable directly, a
+      // separate GLSL linking relationship from this phase's own
+      // internal read) with no `PatchOutput`-direction producer in
+      // *this* phase's own signature at all when `!HasStoreInPhase` --
+      // `PatchPipeline.cpp`'s own `PatchConstantToDomain` linking is
+      // extended with a hull-stage-output fallback producer search for
+      // exactly this case (see its own comment) rather than this
+      // classification keeping a second, `PatchOutput`-direction
+      // signature element around for it.
+      if (!HasStoreInPhase) {
+        Info.Direction = SignatureDirection::Input;
+        Info.Frequency = SignatureFrequency::PerPatch;
+        return Info;
+      }
       Info.Direction = SignatureDirection::PatchOutput;
       Info.Frequency = SignatureFrequency::PerPatch;
       Info.IsOutput = true;
