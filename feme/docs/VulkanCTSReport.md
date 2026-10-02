@@ -11542,3 +11542,111 @@ per-vertex-output architecture just landed).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal TCS codegen/ABI extension to an already-exposed
 core feature (tessellation shaders), no new feature/extension surface.
+
+## L344 item (1): `cross_invocation_per_patch_*` -- hull per-invocation diagonal-write gather
+
+Root-caused and fixed the 5 `dEQP-VK.tessellation.shader_input_output.
+cross_invocation_per_patch_{int,uint,float,vec3,vec4}` cases `L339`'s
+own 13-case scope left open (`L344` item 1).
+
+`HullWrapper.cpp`'s `lowerHullOutputStore` always addresses a store
+using `getFlatInvocationIndex` (this invocation's own flat index) for
+the "Invocation" dimension, regardless of the element's Frequency
+(`PerPatch` vs `PerVertex`). For an ordinary per-vertex output this is
+correct: each invocation writes its own single value into its own
+dedicated per-invocation storage slot. For a `patch`-qualified array
+written per-invocation (GLSL's `in_te_data0[gl_InvocationID] = value`
+idiom, legal despite the `patch` qualifier -- the array is logically
+shared, but each invocation only ever writes its own index into it),
+this instead causes each invocation's own per-invocation storage copy
+to hold only a single real value at `Row == that invocation's own
+index`, with every other row in that same copy left unwritten/garbage.
+Downstream, `PatchConstantWrapper.cpp`'s `lowerPatchConstantInputLoad`
+always reads such an element at invocation-slot 0 (confirmed via a new
+`FEME_DUMP_IR_PRESIMD=1` IR dump showing a constant `0` 4th operand),
+so the existing `HullToPatchConstant`/`copyLinkedElements` machinery
+(built for ordinary per-vertex forwarding, which blindly copies each
+invocation's own single-value copy into its own matching destination
+slot) was copying invocation-slot 0's own copy only -- which, under the
+diagonal-write pattern, contains the real value only at `Row == 0`,
+garbage everywhere else.
+
+Diagnosed via `FEME_VULKAN_LOG_CREATION_ERRORS=1` (pipeline-creation
+errors otherwise silently swallowed) and the new
+`FEME_DUMP_IR_PRESIMD=1` technique (dumps LLVM IR right before
+SIMDization -- shows the exact `feme.stage.input.load`/`feme.cpu.
+masked.stage.output.store` call shapes, critical for seeing the
+constant-`0` 4th operand above).
+
+Fix, in three parts:
+1. `classifySPIRVElement` (`CanonicalizeStage.cpp`): a `patch`-qualified
+   global the patch-constant phase's own body never stores to
+   (`!HasStoreInPhase`) is now classified `Input`/`PerPatch` (a genuine
+   cross-invocation read-back of the control-point phase's own
+   committed value) instead of unconditionally `PatchOutput`, routing
+   the read through real storage instead of the per-function-local
+   `ShadowValueMap` this global is never actually stored into during
+   this phase.
+2. `copyLinkedPatchFrequencyElements` (new, `StageLink.cpp`/`.h`):
+   gathers the `Row == SourceInvocation` diagonal out of the hull
+   stage's per-invocation storage into one real, complete array, then
+   replicates that single array into every destination invocation
+   slot -- so reading any destination slot at any row correctly
+   retrieves the right value regardless of which hull invocation
+   originally wrote it. Wired in via a new `HullToPatchConstantDiagonal`
+   link in `linkPatchPipeline` (`PatchPipeline.cpp`/`.h`), split out of
+   the pre-existing `HullToPatchConstant` link (now filtered to exclude
+   `PerPatch`-frequency elements, which still want the ordinary
+   per-vertex copy path).
+3. `HullToPatchConstantDomain` fallback link (new, `PatchPipeline.cpp`/
+   `.h`): reclassifying the global as `Input` removes it from
+   `PatchConstantSig`'s own `PatchOutput` set, which the existing
+   `PatchConstantToDomain` linking relied on to serve the domain
+   stage's own matching `patch in` consumer (a distinct GLSL linking
+   relationship -- the TES directly reading the TCS's `patch out`, not
+   the patch-constant phase's own internal cross-invocation read). For
+   any domain `PatchInput` consumer not covered by `PatchConstantSig`'s
+   own `PatchOutput` elements, this searches the hull stage's own
+   `Output` elements as a producer instead (it committed the same real
+   value to patch storage, which never changes across invocations by
+   construction).
+
+New unit test: `StageLinkTest.
+GathersPatchFrequencyDiagonalAndReplicatesToEveryDest`, covering
+`copyLinkedPatchFrequencyElements`'s diagonal-gather-and-replicate
+behavior directly (3 producer invocations each writing only their own
+diagonal row, gathered into 2 destination invocation slots, both
+verified to read back the full, correct 3-element array at every row).
+`FeMeGraphicsTests`: all passing (+1 new test), 0 regressions.
+`ninja check-feme`: 3,492/3,552 Passed, 61 Unsupported, 0 Failed, 0
+regressions (up from the pre-session 3,491/3,552 baseline).
+
+**CTS impact**: `cross_invocation_per_patch_{int,uint,float,vec3,
+vec4}`: 5/5 Pass (was 0/5, all 5 previously `Fail (Failure)`
+image-comparison mismatches). Re-ran the broader `dEQP-VK.
+tessellation.shader_input_output.*` group (26 of its 28 cases,
+excluding the pre-existing `mat4x3` crash discussed below): 25/26
+Pass, the one remaining failure being `L344` item (2) (the
+already-tracked "only one group-sync barrier supported" limitation,
+confirmed still present and unrelated to this fix).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal TCS codegen/ABI extension to an already-exposed
+core feature (tessellation shaders), no new feature/extension surface.
+
+### New discovery during the sweep, split out as `L345`
+
+`cross_invocation_per_patch_mat4x3` crashes the entire `deqp-vk`
+process with a glibc `Fatal glibc error: malloc.c:2371 (sysmalloc):
+assertion failed` (heap metadata corruption) -- not a graceful test
+failure, and not the "SIMDize hang" `L339`'s own report had previously
+characterized this case (and its `cross_invocation_per_vertex_mat4x3`
+sibling) as when encountered during a broader sweep; this session's
+direct `gdb -batch -ex run -ex bt` backtrace shows a hard abort inside
+`buildFilteredStorage`/`runPatchPipeline`, not an infinite loop, and
+`git stash` confirmed the crash reproduces byte-for-byte identically
+with none of this session's changes applied -- it predates this
+session and is unrelated to the fix just landed. Out of scope for
+`L344`; tracked as a new `L345` for a future dedicated root-cause
+session (needs a heap-corruption-catching tool, since the crash site
+is far downstream of whatever write actually corrupts the heap).
