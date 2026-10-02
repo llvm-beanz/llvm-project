@@ -11213,3 +11213,112 @@ change needed (not yet fixed).
   `--deqp-log-images=enable` plus a `glslang`/`spirv-dis` comparison
   of the `_precise` vs non-`_precise` SPIR-V to find the actual
   divergent computation.
+
+## L341: `invariance.outer_edge_symmetry` -- root-caused, found irreconcilable with `L336`'s property, reverted (no net change)
+
+### Findings
+
+Picked up the prior handoff's top priority: the `invariance` group's 38
+failing cases, of which 36 are `outer_edge_symmetry` (28 quad/triangle
+variants + 8 isoline variants) and 2 are `inner_triangle_set`.
+
+Root-caused `outer_edge_symmetry` (quad/triangle variants) via Python
+float32 bit-pattern experiments against the CTS's own `mirrorCoords`
+GLSL (`vktTessellationInvarianceTests.cpp`'s `addDefaultPrograms`): the
+TES shader computes a literal single-precision `1.0 - x` on one half of
+a boundary edge's tess coordinates and the test compares this, via
+exact (not epsilon-tolerant) `std::set` equality, against FeMe's own
+independently-generated coordinate on the complementary half. The
+mismatch is a genuine double-rounding artifact: `1.0f - K/N` does not,
+in general, bit-match `(N-K)/N` for non-power-of-2 `N` (e.g. `N=3,K=2`:
+`1.0f - 2.0f/3.0f` = `0.33333331`, direct `1.0f/3.0f` = `0.33333334`).
+
+Implemented a candidate fix (`computeEdgeFraction(K, N,
+SourceIsSmallHalf)` in `Tessellator.cpp`): compute each edge's "target"
+half via the exact same `1.0f - <source-half's own direct value>`
+operation the shader performs (with `T`/`InvT` swapped, since mirroring
+also swaps which "end" the fraction is measured from). This **did**
+fix all 28 non-isoline `outer_edge_symmetry` cases in isolation
+(re-run of `dEQP-VK.tessellation.invariance.*`: 166/192 Pass, up from
+154/192).
+
+**However, this fix is a dead end.** It regressed 12 previously-passing
+`outer_edge_index_independence.triangles_*` cases (fixed by `L336`) and
+broke `TessellatorTest.cpp`'s existing
+`TriangleEdgesProduceBitExactlyEqualCoordinateSets` regression test.
+
+Built a minimal, precise reproducer -- a scratch gtest calling
+`tessellate()` directly with one edge's factor fixed at a non-power-of-2
+segment count and the other two edges'/inside factors randomized,
+reading `DomainPoint::{U,V,W}` directly (an early draft of this
+reproducer re-derived `W` as `1.0f - U - V` instead, which introduced
+an extra rounding step that briefly looked like a genuine edge-to-edge
+inconsistency before being traced back to the reproducer itself, not
+the tessellator) -- and used it to rigorously prove **these two CTS
+invariance properties are mathematically irreconcilable** for any
+segment count where the double-rounding naturally occurs, not merely
+difficult to satisfy simultaneously:
+
+- `outer_edge_index_independence`/`common_edge` (the property `L336`
+  fixed) require a boundary point's value to be the literal direct
+  division `(N-K)/N` (via integer-subtraction-before-divide), so every
+  edge/patch sharing a segment count produces bit-identical sets after
+  the test's own component swizzle.
+- `outer_edge_symmetry` (this item) requires that same point's value,
+  after the shader applies its own `1.0f - x`, to bit-match the
+  complementary direct-division value.
+
+For `N=3`, these two required values for the same `(K,N)` differ by 1
+ULP whenever the original `outer_edge_symmetry` failure existed in the
+first place (`1.0f - (1.0f/3.0f) = 0.66666663` vs. direct
+`(3-1)/3 = 0.66666669`) -- i.e. *every* case needing the symmetry fix
+necessarily breaks the index-independence property for that exact
+`(K, N)`, with no safe subset where both can hold simultaneously.
+Also confirmed algebraically that no cleverer single-function
+reformulation can satisfy both: doing so would require
+`K/N + (N-K)/N == 1.0f` exactly for all `K, N` (both computed via
+direct division) -- false for the large majority of non-power-of-2 `N`
+tested (84,426 of 125,249 `(K, N)` pairs checked up to `N=500`, using
+exact double-precision arithmetic to avoid an earlier, incorrect
+version of this check that re-rounded the sum through `float32` and
+spuriously reported 0 mismatches).
+
+**Reverted the fix entirely**
+(`git checkout -- feme/lib/Graphics/Tessellator.cpp
+feme/unittests/Graphics/TessellatorTest.cpp`) rather than trade 12+
+regressions -- which also undermine actual crack-free-rendering
+guarantees across shared patch edges, a more operationally important
+property than this one symmetry test -- for 28 fixes. Confirmed the
+tree rebuilds back to the exact pre-session baseline:
+`FeMeGraphicsTests`: 396/396 Passed, 0 regressions.
+
+**No fix landed, no regression introduced.** `outer_edge_symmetry` (36
+cases: 28 quad/triangle + 8 isoline) and `L336`/`L337`'s already-fixed
+properties remain mutually exclusive under FeMe's current
+plain-division tessellation coordinate algorithm. Resolving this would
+need either (a) accepting `outer_edge_symmetry` as a permanent,
+documented architectural limitation, or (b) a fundamentally different
+(non-division-based) coordinate algorithm proven to satisfy both CTS
+invariance rules simultaneously -- out of scope for a single session.
+
+`inner_triangle_set` (2 cases) and the isoline `outer_edge_symmetry`
+cases (8 cases) were not investigated this session, deferred pending
+the quad/triangle tension's resolution (which did not happen).
+
+No CTS re-run beyond the targeted `invariance` group was needed since
+the net code change is zero (fix fully reverted, confirmed via
+`git status --short` clean). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed.
+
+### Re-confirmed this session (no change)
+
+- Branch-drift check on `offload-test-suite`'s `feme` branch: local
+  `feme` (`d0974dd`) has diverged from `llvm-beanz/feme` (`854cc3f`) --
+  both carry the identical "`[Vulkan][FeMe] Add FeMe test targets`"
+  commit message/content, but local has been rebased onto a newer
+  upstream `main` than the remote branch currently is. This is
+  expected local-only rebase bookkeeping (not a real content
+  conflict); confirmed via `git diff feme llvm-beanz/feme --stat`
+  that the bulk of the diff is unrelated upstream churn the local
+  branch picked up by rebasing forward, not a divergence in the
+  FeMe-specific commit itself. No action taken or needed.
