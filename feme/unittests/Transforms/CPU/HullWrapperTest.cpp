@@ -196,12 +196,16 @@ TEST(HullWrapperTest, LowersLiteralConstantControlPointInputLoad) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-/// A genuinely dynamic, non-self, non-constant control-point index (here,
-/// `gl_PatchVerticesIn`'s own runtime value, not `OutputControlPointID`)
-/// still needs a real cross-lane gather this milestone does not build --
-/// distinct from the literal-constant case
-/// `LowersLiteralConstantControlPointInputLoad` above now supports.
-TEST(HullWrapperTest, DiagnosesDynamicNonSelfControlPointInputLoad) {
+/// (roadmap L338) A genuinely dynamic, non-self, non-constant control-point
+/// index (here, a function of `gl_PatchVerticesIn`'s own runtime value, not
+/// `OutputControlPointID`) is now supported on an **input** read, just like
+/// the literal-constant case `LowersLiteralConstantControlPointInputLoad`
+/// above: every input control point's attributes are fully materialized up
+/// front, so no shape of input read needs a real cross-lane gather. See
+/// `lowerHullInputLoad`'s own comment for the full reasoning and the
+/// `dEQP-VK.tessellation.shader_input_output.patch_vertices_*_in_*_out`
+/// motivating CTS shape.
+TEST(HullWrapperTest, LowersDynamicNonSelfControlPointInputLoad) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @hs_main() #0 {
@@ -241,8 +245,12 @@ TEST(HullWrapperTest, DiagnosesDynamicNonSelfControlPointInputLoad) {
 
   HullWrapperPass().run(*M, MAM);
 
-  // The wrapper is not built for a diagnosed shader.
-  EXPECT_FALSE(M->getFunction("feme_cpu_entry_hs_main"));
+  EXPECT_TRUE(M->getFunction("feme_cpu_entry_hs_main"));
+  for (const Instruction &I : instructions(*M->getFunction("hs_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
 TEST(HullWrapperTest, DiagnosesGroupSyncBarrier) {

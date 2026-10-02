@@ -24,40 +24,29 @@
 // OutputControlPointCount`) instead of vertices. See RuntimeABI.h's
 // `FemePatchArgs` comment for the ABI this produces.
 //
-// Two real hull-shader shapes are deliberately out of scope, and diagnosed
+// One real hull-shader shape is deliberately out of scope, and diagnosed
 // rather than silently mishandled:
 //
-//  - **A genuinely dynamic control-point index (not the invocation's own,
-//    and not a literal constant) on an output write.** A hull main
-//    function's `InputPatch<T, N>` parameter may legally be indexed by any
-//    expression, not just `SV_OutputControlPointID` -- and, for an
-//    **input** read, `lowerHullInputLoad` (roadmap L37) now addresses any
-//    literal-constant control point directly (every input control point's
-//    attributes are fully materialized up front, before this phase runs at
-//    all, so reading a fixed, compile-time-known control point needs no
-//    cross-lane communication -- exactly the "materialize-then-select"
-//    shape a real dynamically-indexed `InputPatch` read unrolls into once
-//    SPIR-V import/legalization has expanded it into one constant-indexed
-//    load per (component, control-point) pair). What remains out of scope
-//    is a genuinely *dynamic* (non-constant, non-self) index, which would
-//    need a real runtime cross-lane gather this milestone does not build,
-//    and any non-self index at all on an **output** write (a real,
-//    structural correctness restriction unlike the input case: one
-//    invocation cannot see another's not-yet-computed output). So
-//    `lowerHullInputLoad` accepts the load's control-point-index operand
-//    when it is one of the invocation's own lowered `OutputControlPointID`
-//    reads (the common, and structurally required for embarrassingly-
-//    parallel per-control-point processing, case; there may be several
-//    equivalent such values, since a real SPIR-V shader reads
-//    `gl_InvocationID` once per use) or *any* literal constant (addressed
-//    directly, the same value for every lane, mirroring
-//    `PatchConstantWrapper.cpp`'s `lowerPatchConstantInputLoad`, which has
-//    no self-indexing restriction at all for the same underlying reason) --
-//    and is diagnosed otherwise. `lowerHullOutputStore` still requires an
+//  - **A genuinely dynamic control-point index on an output write.** A hull
+//    main function's `InputPatch<T, N>` parameter may legally be indexed by
+//    any expression, not just `SV_OutputControlPointID` -- and, for an
+//    **input** read, `lowerHullInputLoad` addresses every such shape without
+//    restriction (see its own comment and roadmap L37/L338): every input
+//    control point's attributes are fully materialized up front, before this
+//    phase runs at all, so reading any control point's own input -- whether
+//    the invocation's own index, a literal constant, or a genuinely dynamic
+//    per-invocation expression (e.g. GLSL's `in_tc_attr[gl_InvocationID * M
+//    / N]`, the `dEQP-VK.tessellation.shader_input_output.
+//    patch_vertices_*_in_*_out` shape) -- needs no cross-lane communication:
+//    each lane's own index expression value only ever depends on *that*
+//    lane's own invocation ID, never another lane's not-yet-computed state.
+//    An output write has no such luxury: one invocation cannot see another's
+//    not-yet-computed output, a real structural correctness restriction, not
+//    a missing-feature one. So `lowerHullOutputStore` still requires an
 //    output write's control-point-index operand to be the invocation's own,
-//    matching `VertexWrapperPass`'s own precedent for its analogous
-//    "vertex" operand, since a literal constant there would let one
-//    invocation clobber another's output.
+//    matching `VertexWrapperPass`'s own precedent for its analogous "vertex"
+//    operand, since a literal (or otherwise non-self) index there would let
+//    one invocation clobber another's output -- and is diagnosed otherwise.
 //  - **A group-sync barrier inside the control-point phase.** A control
 //    point that must read a *sibling* control point's output (rather than
 //    only its own input) needs one after writing its own output and before
@@ -112,6 +101,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 
 using namespace llvm;
@@ -398,42 +388,55 @@ Value *lowerHullViewIndex(CallInst &CI, const WaveBodyEnv &WEnv,
   return Result;
 }
 
-/// Lowers an ordinary (non-system-value) `feme.stage.input.load`, requiring
-/// the load's control-point-index operand (`CI`'s 4th argument) to be either
-/// one of \p SelfIndices (a lowered `OutputControlPointID` read, i.e. the
-/// invocation's own control point index, already lowered by
-/// `lowerOutputControlPointID` above and therefore already present at every
-/// use by the time this runs) or a literal constant -- see the file
-/// comment's scope note. Returns null (having emitted a diagnostic) for any
-/// other operand (e.g. a genuinely dynamic, non-self, non-constant index,
-/// which would need a runtime cross-lane gather this milestone does not
-/// build).
+/// Lowers an ordinary (non-system-value) `feme.stage.input.load`. The load's
+/// control-point-index operand (`CI`'s 4th argument) may be one of \p
+/// SelfIndices (a lowered `OutputControlPointID` read, i.e. the invocation's
+/// own control point index, already lowered by `lowerOutputControlPointID`
+/// above and therefore already present at every use by the time this runs),
+/// a literal constant, or (roadmap L338) a genuinely dynamic per-invocation
+/// expression (e.g. GLSL's `in_tc_attr[gl_InvocationID * M / N]`) -- every
+/// shape is addressed the same lane-local way, since no input-read shape
+/// here ever needs cross-lane communication; see this function's own
+/// "materialize-then-select"/"fully materialized up front" reasoning below
+/// and the file comment's scope note.
 ///
 /// (roadmap H29g) There is a *set* of self indices rather than a single one
 /// because a real SPIR-V shader reads `gl_InvocationID` once per use rather
 /// than once per function, so a hull entry point indexing several attributes
 /// by it lowers to several distinct, equivalent values.
 ///
-/// (roadmap L37) A literal-constant *other* control point is always legal
-/// for an **input** read (unlike the same restriction on **output** data,
-/// which genuinely has a same-invocation-only correctness reason -- see the
-/// file comment): every input control point's attributes are fully
-/// materialized up front, before this phase runs at all, so reading a fixed,
-/// compile-time-known control point's own input needs no cross-lane
-/// communication, just addressing storage at that literal control point's
-/// own fixed offset instead of this invocation's own. This is exactly the
-/// "materialize-then-select" pattern a real dynamically-indexed
-/// `InputPatch<T, N>` read lowers to once SPIR-V import/legalization has
-/// unrolled it into one constant-indexed load per (component, control-point)
-/// pair, which the shader's own code then selects among *after* loading
-/// using the real dynamic index -- `computeStageStorageAddress` never
-/// actually depends on *which* invocation performs the read (only on the
-/// `InvocationIndex` value passed to it), so every active lane in the wave
-/// reads the identical literal control point's own data here, mirroring
+/// (roadmap L37, generalized by L338) Any *other* control point -- whether a
+/// literal constant or a genuinely dynamic expression -- is always legal for
+/// an **input** read (unlike the same restriction on **output** data, which
+/// genuinely has a same-invocation-only correctness reason -- see the file
+/// comment): every input control point's attributes are fully materialized
+/// up front, before this phase runs at all, so reading any control point's
+/// own input needs no cross-lane communication, just addressing storage at
+/// that control point's own offset instead of this invocation's own.
+/// `computeStageStorageAddress` never actually depends on *which*
+/// invocation performs the read (only on the `InvocationIndex` value passed
+/// to it), so this holds regardless of whether the index operand is the
+/// same literal for every lane (the "materialize-then-select" pattern a
+/// real dynamically-indexed `InputPatch<T, N>` read lowers to once SPIR-V
+/// import/legalization has unrolled it into one constant-indexed load per
+/// (component, control-point) pair) or a genuinely per-lane-distinct
+/// expression (roadmap L338's own motivating shape, `dEQP-VK.tessellation.
+/// shader_input_output.patch_vertices_*_in_*_out`, where each lane's own
+/// affine function of its own invocation ID reads a *different* control
+/// point per lane -- still safe, since each lane's own expression value
+/// only ever depends on that lane's own invocation ID, never another
+/// lane's not-yet-computed state): `extractLaneOrScalar` below already
+/// extracts the correct per-lane value for either case uniformly, mirroring
 /// `PatchConstantWrapper.cpp`'s `lowerPatchConstantInputLoad`, which already
 /// has no self-indexing restriction at all for the same underlying reason
 /// (its own `InvocationIndex` is simply the load's own control-point operand
-/// with no substitution).
+/// with no substitution). The one remaining hazard a genuinely dynamic
+/// expression introduces that a literal constant cannot -- an out-of-range
+/// computed index, which a literal constant's own producer (SPIR-V
+/// import/legalization) already guarantees is in-bounds -- is defended
+/// against with a `llvm::Intrinsic::umin` clamp against \p
+/// HEnv.InputPatchControlPointCount, mirroring `MeshOutputWrapper.cpp`'s own
+/// precedent for a raw, otherwise-unchecked output-array index.
 Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
                           const WaveBodyEnv &WEnv, const HullStageEnv &HEnv,
                           const SmallPtrSetImpl<Value *> &SelfIndices) {
@@ -454,13 +457,10 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
                                   ControlPointCst->getSplatValue())
                             : dyn_cast<ConstantInt>(ControlPointCst);
   }
-  if (!SelfReference && !ControlPointConst) {
-    CI.getContext().emitError(
-        &CI, "feme-cpu-wrap-hull: control-point phase only supports a "
-             "control point reading its own input control point's "
-             "attributes, or a literal-constant control point");
-    return nullptr;
-  }
+  // (roadmap L338) Neither self nor a literal constant: a genuinely dynamic,
+  // per-invocation control-point index. Clamped (not diagnosed) per this
+  // function's own comment above.
+  bool DynamicReference = !SelfReference && !ControlPointConst;
 
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
@@ -468,32 +468,45 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
-    Value *InvocationIndex =
-        SelfReference
-            ? getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane)
-            : Builder.getInt32(ControlPointConst->getZExtValue());
+    Value *InvocationIndex;
+    if (SelfReference) {
+      InvocationIndex = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+    } else if (ControlPointConst) {
+      InvocationIndex = Builder.getInt32(ControlPointConst->getZExtValue());
+    } else {
+      // (roadmap L338) A genuinely dynamic, per-lane control-point index:
+      // extract this lane's own value of the index expression and clamp it
+      // into range, mirroring `MeshOutputWrapper.cpp`'s own `umin`-based
+      // defensive clamp for an otherwise-unchecked output-array index.
+      Value *Raw = extractLaneOrScalar(Builder, ControlPoint, Lane);
+      Value *MaxIndex = Builder.CreateSub(HEnv.InputPatchControlPointCount,
+                                          Builder.getInt32(1));
+      InvocationIndex =
+          Builder.CreateBinaryIntrinsic(Intrinsic::umin, Raw, MaxIndex);
+    }
     Value *Addr = computeStageStorageAddress(Builder, HEnv.InputLayout,
                                              HEnv.Inputs, Elt.ElementID, Elt,
                                              Row, Component, InvocationIndex);
     Value *LaneResult =
         Builder.CreateLoad(stageStorageLoadType(ScalarTy), Addr);
     LaneResult = narrowStageStorageLoad(Builder, LaneResult, ScalarTy);
-    // (roadmap L78) Only null out an inactive (padding) lane's result when
-    // this is a self-index read: `InvocationIndex` there is *this* lane's
-    // own flat index, which is only guaranteed in-bounds for an active
-    // lane, so an inactive lane's own attribute is unsafe/meaningless to
-    // return unmasked. A literal-constant control point's `InvocationIndex`
-    // is a fixed, always-in-bounds constant that every lane -- active or
-    // not -- reads identically; masking it to zero here is not just
-    // unnecessary, it is actively wrong whenever a real DXC-compiled
-    // `InputPatch<T, N>` self-index read has been unrolled by SPIR-V
-    // import/legalization into exactly this literal-constant-per-(row,
-    // component, control-point) materializing shape (see this function's
-    // own file comment on the "materialize-then-select" pattern): the
-    // scalar shader source stores each such literal-constant read into a
-    // single local array slot shared by every lane (the address does not
-    // depend on which lane computes it), so `SIMDizePass` widens that
-    // single store into a sequential per-lane scatter to the *same*
+    // (roadmap L78, extended by L338) Only null out an inactive (padding)
+    // lane's result when this is a self-index or (roadmap L338) a genuinely
+    // dynamic per-lane index read: `InvocationIndex` in both cases is
+    // derived from *this* lane's own state, which is only guaranteed
+    // meaningful for an active lane, so an inactive lane's own attribute is
+    // unsafe/meaningless to return unmasked. A literal-constant control
+    // point's `InvocationIndex` is a fixed, always-in-bounds constant that
+    // every lane -- active or not -- reads identically; masking it to zero
+    // here is not just unnecessary, it is actively wrong whenever a real
+    // DXC-compiled `InputPatch<T, N>` self-index read has been unrolled by
+    // SPIR-V import/legalization into exactly this literal-constant-per-
+    // (row, component, control-point) materializing shape (see this
+    // function's own file comment on the "materialize-then-select"
+    // pattern): the scalar shader source stores each such literal-constant
+    // read into a single local array slot shared by every lane (the address
+    // does not depend on which lane computes it), so `SIMDizePass` widens
+    // that single store into a sequential per-lane scatter to the *same*
     // address. Zeroing an inactive lane's value here made its scatter
     // iteration the last to run and clobber every active lane's real data
     // with zero, since the destination address is identical across lanes
@@ -502,7 +515,7 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
     // points' own `position` attribute came back entirely zero despite a
     // correctly-populated `Inputs` block and a correctly self-indexed
     // gather reading it back.
-    if (SelfReference)
+    if (SelfReference || DynamicReference)
       LaneResult = Builder.CreateSelect(Active, LaneResult,
                                         Constant::getNullValue(ScalarTy));
     Result =
