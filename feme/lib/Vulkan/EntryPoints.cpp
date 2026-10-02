@@ -757,8 +757,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->earlyFragmentSampleMaskTestBeforeSampleCounting = VK_FALSE;
       Props14->depthStencilSwizzleOneSupport = VK_FALSE;
       Props14->polygonModePointSize = VK_FALSE;
-      Props14->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
-      Props14->nonStrictWideLinesUseParallelogram = VK_FALSE;
+      // (roadmap L333) These two *are* a real, verified guarantee, unlike
+      // this group's other fields above: `GraphicsPipeline.cpp`'s
+      // `RasterState::LineMode` defaults to `Rectangular` (the
+      // parallelogram-style algorithm) whenever no
+      // `VkPipelineRasterizationLineStateCreateInfo` is chained at
+      // pipeline-creation time -- which is exactly the case these two
+      // properties describe (non-strict lines with no explicit line
+      // rasterization mode requested). `VK_TRUE` here means "parallelogram",
+      // matching `Executor.cpp`'s actual `emitLineSegment` behavior for
+      // both single-pixel-wide and wide lines.
+      Props14->nonStrictSinglePixelWideLinesUseParallelogram = VK_TRUE;
+      Props14->nonStrictWideLinesUseParallelogram = VK_TRUE;
       // (roadmap E6's `VK_KHR_maintenance6`) `blockTexelViewCompatibleMultiple
       // Layers` and `fragmentShadingRateClampCombinerInputs` describe
       // fixed-function guarantees this ICD hasn't verified (out of this
@@ -854,11 +864,12 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // (roadmap E5) `VK_KHR_maintenance5`'s own properties struct, agreeing
     // with the aggregate `VkPhysicalDeviceVulkan14Properties` case above
     // exactly like `VkPhysicalDeviceMaintenance4Properties` (1.3) already
-    // does for its own fields: every one of this group's fixed-function
-    // rasterizer guarantees remains an honest `VK_FALSE` -- E5 itself adds
+    // does for its own fields: most of this group's fixed-function
+    // rasterizer guarantees remain an honest `VK_FALSE` -- E5 itself adds
     // a null dynamic-rendering attachment view, two new formats, and
     // `vkCmdBindIndexBuffer2`, none of which this struct's own fields
-    // describe.
+    // describe. The two `nonStrict*LinesUseParallelogram` fields are the
+    // one exception (roadmap L333): see their own comment below.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR: {
       auto *Maintenance5 =
           reinterpret_cast<VkPhysicalDeviceMaintenance5PropertiesKHR *>(Base);
@@ -867,8 +878,14 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Maintenance5->earlyFragmentSampleMaskTestBeforeSampleCounting = VK_FALSE;
       Maintenance5->depthStencilSwizzleOneSupport = VK_FALSE;
       Maintenance5->polygonModePointSize = VK_FALSE;
-      Maintenance5->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
-      Maintenance5->nonStrictWideLinesUseParallelogram = VK_FALSE;
+      // (roadmap L333) `RasterState::LineMode` defaults to `Rectangular`
+      // (the parallelogram-style algorithm) whenever no
+      // `VkPipelineRasterizationLineStateCreateInfo` is chained -- the
+      // actual, verified behavior for both single-pixel-wide and wide
+      // non-strict lines; must agree with the aggregate 1.4 properties
+      // case above.
+      Maintenance5->nonStrictSinglePixelWideLinesUseParallelogram = VK_TRUE;
+      Maintenance5->nonStrictWideLinesUseParallelogram = VK_TRUE;
       break;
     }
     // (roadmap E6) `VK_KHR_maintenance6`'s own properties struct, whose

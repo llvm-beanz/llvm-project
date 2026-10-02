@@ -823,8 +823,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props14.earlyFragmentSampleMaskTestBeforeSampleCounting, VK_FALSE);
   EXPECT_EQ(Props14.depthStencilSwizzleOneSupport, VK_FALSE);
   EXPECT_EQ(Props14.polygonModePointSize, VK_FALSE);
-  EXPECT_EQ(Props14.nonStrictSinglePixelWideLinesUseParallelogram, VK_FALSE);
-  EXPECT_EQ(Props14.nonStrictWideLinesUseParallelogram, VK_FALSE);
+  // (roadmap L333) `Rectangular` (parallelogram-style) is this driver's
+  // real default line-rasterization algorithm, agreeing with
+  // `GraphicsPipeline.cpp`'s `RasterState::LineMode` default.
+  EXPECT_EQ(Props14.nonStrictSinglePixelWideLinesUseParallelogram, VK_TRUE);
+  EXPECT_EQ(Props14.nonStrictWideLinesUseParallelogram, VK_TRUE);
   EXPECT_EQ(Props14.blockTexelViewCompatibleMultipleLayers, VK_FALSE);
   // Roadmap E6: a real value -- with no multi-planar/YCbCr sampler support,
   // a combined image sampler descriptor always consumes exactly one
@@ -1524,9 +1527,10 @@ TEST_F(
             VK_FALSE);
   EXPECT_EQ(Maintenance5Props.depthStencilSwizzleOneSupport, VK_FALSE);
   EXPECT_EQ(Maintenance5Props.polygonModePointSize, VK_FALSE);
+  // (roadmap L333) Agrees with the aggregate 1.4 properties test above.
   EXPECT_EQ(Maintenance5Props.nonStrictSinglePixelWideLinesUseParallelogram,
-            VK_FALSE);
-  EXPECT_EQ(Maintenance5Props.nonStrictWideLinesUseParallelogram, VK_FALSE);
+            VK_TRUE);
+  EXPECT_EQ(Maintenance5Props.nonStrictWideLinesUseParallelogram, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
