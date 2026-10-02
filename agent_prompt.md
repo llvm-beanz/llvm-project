@@ -63,29 +63,25 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, compiler/backend work)** `L335` --
-   `line_continuity.{line-strip,polygon-mode-lines}` (2 cases). Extract
-   a minimal standalone HLSL/SPIR-V reproducer isolating just the
-   barrier-in-nested-if-and-while pattern (skip the full Amber
-   flood-fill algorithm, too slow to iterate on). Then survey the
-   region-splitting pass's current supported shapes (straight-line,
-   single uniform loop) vs. what's needed (sequential multi-branch-
-   then-barrier, barrier-guarded loop body) to scope the change. Add
-   unit tests for the new shape(s) before touching CTS again.
-2. **(a few hours, lowest priority, many sessions carried over)**
-   `L265` -- ASTC alpha-decode tie-break (4 block sizes). Needs a
-   Mesa/lavapipe reference-decoder comparison. Untouched again this
+1. **(best next pick, small, plausibly related)** `common_edge` (3
+   cases). Check whether it's the same ULP-mismatch class
+   (cross-patch instead of within-patch) before assuming it needs a
+   separate root-cause session.
+2. **(unknown, 15 cases)** `shader_input_output` -- untriaged, carried
+   over many sessions.
+3. **(unknown, 13 cases)** `misc_draw` -- untriaged.
+4. **(unknown, 38 cases, now the largest bucket)** Remaining
+   `invariance` failures (non-`outer_edge_index_independence`
+   sub-cases) -- re-triage these specifically, since the general
+   `invariance` CTS group clearly has more than one test shape in it.
+5. **(small, 6 and 1 cases)** `tesscoord` (6), `winding` (1) --
+   smallest untriaged clusters, good quick wins between bigger items.
+6. **(a few hours, lowest priority, many sessions carried over)**
+   `L265` -- ASTC alpha-decode tie-break. Untouched again this
    session.
-3. **(unknown, 27 cases, largest untriaged chunk, still not started)**
-   Tessellation `user_defined_io` triage. Also still open:
-   `shader_input_output`/`misc_draw`/`common_edge`/
-   `matrix_multiplication`/`geometry_interaction`. This has been
-   carried over many sessions now without anyone picking it up --
-   worth prioritizing over `L265` next time there's a multi-hour
-   session, since it's the single largest known-untriaged bucket.
-4. **(low priority, out of scope)** `offload-test-suite`'s own
-   lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
-   `array_of_matrices.test`).
-5. **Branch-drift housekeeping**: not re-checked this session (ran out
-   of time after the `rasterization` triage work) -- re-check next
-   session per standing protocol.
+7. **(low priority, out of scope)** `offload-test-suite`'s own
+   lit-annotation issues (`spec_const_32_bits.test`/
+   `WaveActiveMax.test`/`array_of_matrices.test`).
+8. **(dedicated session, deferred many sessions)** `L335` --
+   `line_continuity.{line-strip,polygon-mode-lines}` compiler/backend
+   region-splitting-pass gap. Untouched this session.
