@@ -10564,3 +10564,87 @@ description column to note the real `VK_TRUE` value. `Vulkan
 ExtensionInventory.md`: no change needed -- `VK_KHR_maintenance5` was
 already advertised; this is a property-value correctness fix, not an
 advertisement-surface change.
+
+## L334: TriangleStrip/TriangleFan provoking-vertex position fix
+
+Picked up from the prior session's handoff: 3 of the then-5 remaining
+scattered `rasterization` failures --
+`flatshading.{triangle_fan,triangle_strip}` and
+`provoking_vertex.draw.default.triangle_fan` -- all shared a single
+root cause in primitive assembly, not three separate bugs.
+
+**Root cause**: `Executor.cpp`'s `emitStripSegment`/`emitFanSegment`
+assembled each triangle's `TriIndices` with the wrong vertex in
+position 0 -- the slot this project's flat-shading/default-provoking-
+vertex consumer (`Tri.Varyings[0]`, see the `Flat`-interpolation
+handling in `Executor.cpp`) unconditionally reads. Confirmed against
+the Vulkan spec's own primitive-assembly equations
+(`vertexpostproc.adoc`/`drawing.adoc` in the Vulkan-Docs repository),
+cross-checked against `vktRasterizationProvokingVertexTests.cpp`'s own
+hardcoded expected-provoking-vertex-per-triangle test data (which
+encodes exactly these equations):
+
+- **`TriangleStrip`**: `p_i = {v_i, v_{i+(1+i%2)}, v_{i+(2-i%2)}}`. The
+  first emitted vertex is always `v_i`; only the *second and third*
+  positions swap on odd `i` (to keep front-facing winding consistent
+  across the strip, per the spec's own note: "the ordering of the
+  vertices in each successive triangle is reversed"). FeMe's old code
+  instead swapped the *first two* positions (`{T+1, T, T+2}` for odd
+  triangles), putting `v_{i+1}` in position 0 instead of `v_i` --
+  every other triangle in a flat-shaded strip read the wrong vertex's
+  attribute.
+- **`TriangleFan`**: `p_i = {v_{i+1}, v_{i+2}, v_0}`. The pivot `v_0`
+  is the *last* emitted vertex, not the first, and the provoking
+  vertex is `v_{i+1}`. FeMe's old code emitted `{Start, T, T+1}`
+  (pivot first), always using the pivot's attribute as the
+  flat-shading source for *every* triangle in the fan, instead of the
+  spec-mandated `v_{i+1}` -- this also explains why
+  `provoking_vertex.draw.default.triangle_fan` failed even though the
+  fan's own geometry/winding was already correct: the test only
+  checks the flat-shaded color, which was wrong for the same reason.
+
+Both fixes are pure relabelings of which vertex lands in position 0,
+not geometry changes: the strip fix swaps positions 1/2 instead of
+0/1 for odd triangles (an equally-odd permutation, so the winding
+alternation this project relies on for consistent front-facing is
+unaffected); the fan fix is a cyclic rotation of the old ordering (an
+even permutation, so the triangle's actual shape/orientation is
+unchanged) -- only which vertex is called "position 0" changes.
+
+**Fix**: changed `emitStripSegment`'s odd-triangle case from
+`{T + 1, T, T + 2}` to `{T, T + 2, T + 1}`, and `emitFanSegment`'s
+per-triangle emission from `{Start, T, T + 1}` to `{T, T + 1, Start}`.
+
+Added `ExecutorTest.cpp`'s
+`FlatShadesTriangleStripWithCorrectProvokingVertex`/
+`FlatShadesTriangleFanWithCorrectProvokingVertex`: a new
+`buildFlatColorPipeline` helper builds a `Flat`-interpolated color
+varying, then each test draws a quad (strip) or fan with every vertex
+a distinct color, chosen so the old buggy code, the fix, and a third,
+plausible-but-wrong guess (e.g. the fan's pivot) all produce
+distinguishable colors. Confirmed via a `git stash`-based A/B test:
+both new tests fail against the pre-fix code (with the exact wrong
+colors the bug predicts) and pass against the fix.
+
+`FeMeGraphicsTests`: 393/393 Passed (+2 new tests), 0 regressions.
+`FeMeVulkanTests`: 778/778 Passed (unchanged).
+`ninja check-feme`: 3,484/3,545 Passed (+2 new tests), 61 Unsupported,
+0 Failed, 0 regressions.
+
+**CTS impact**: targeted cases
+(`flatshading.{triangle_fan,triangle_strip}`,
+`provoking_vertex.draw.default.triangle_fan`): 3/3 Pass (was 0/3).
+Full `rasterization.provoking_vertex.*`/`rasterization.flatshading.*`:
+20/20 supported cases Pass, 0 Fail. Full `rasterization` group
+(15,019 cases): 482 Pass/2 Fail/14,535 NotSupported (was
+479/5/14,535), exactly +3/-3, 0 regressions elsewhere. The 2 remaining
+failures, pre-existing and still untriaged:
+
+- `line_continuity.{line-strip,polygon-mode-lines}` (2 cases) -- a
+  `feme-cpu-wrap-entry` error ("function 'main' has a barrier inside
+  non-linear control flow"), unrelated to this fix.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal correctness fix to already-exposed core Vulkan
+1.0 primitive assembly/flat shading, no new feature/extension
+surface.
