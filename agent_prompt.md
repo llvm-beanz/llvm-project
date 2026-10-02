@@ -63,20 +63,27 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **`L316` (a few hours, best next pick)**: `texture.explicit_lod.2d.sizes.*`
-   (16 cases) and `texture.multisample` (5 cases) -- untouched many sessions
-   running, now the largest scoped-but-unstarted item.
-2. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
+1. **`L316` remainder (a few hours, best next pick)**:
+   `texture.explicit_lod.2d.sizes.*`'s 16 failures (all NPOT sizes
+   `31x55`/`57x35`, `*linear_mipmap*_repeat*`) -- this is a `Fail (Verification
+   failed)` image-mismatch, not a pipeline-creation rejection, so it needs
+   `--deqp-log-images=enable` plus a mip-chain/wrap-mode numerical investigation
+   (same class of work as `L265`'s ASTC tie-break), not a quick diagnostic-scope
+   fix like `L321` was.
+2. **`L322` (unknown, newly split out)**:
+   `texture.multisample.atomic.storage_image_r32{i,ui}` -- a register-bound
+   multisampled storage-image handle used only for atomic ops fails FeMe's
+   resource-handle normalization outright. Likely a `SPIRVResourceLowering.cpp`
+   classification gap (missing an atomic-only use pattern), by analogy with past
+   `H19l`/`H19m`-shaped gaps, but unconfirmed.
+3. **`L323` (unknown, newly split out)**: a loop with a barrier-free diamond
+   body, barrier only *after* the loop (not inside it), crashes
+   `buildWrapperForLoop` with an IR-verifier use-after-erase assertion. Needs
+   its own standalone IR reduction (the minimal shape is already known -- see
+   this session's abandoned first test draft) and a step through
+   `buildWrapperForLoop`'s block-cloning/erasure order.
+4. **`L265` (a few hours, lowest priority, many sessions carried over)**: ASTC
    alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
    reference-decoder comparison.
-3. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
+5. **Rasterization's 82 stipple/adjacency Bresenham failures (~21 cases, a few
    hours, carried over, unchanged)**.
-4. **`offload-test-suite`'s own lit-annotation issues**
-   (`spec_const_32_bits.test`/`WaveActiveMax.test`/`array_of_matrices.test`) --
-   low priority, pre-existing, outside this project's scope.
-5. **`L318`'s own item (d)** (optional, low priority, carried over several
-   sessions): add a committed `Dim1D`+`Grad`+`Dref` FileCheck case to
-   `spirv-to-llvm-sample-dref-and-query-lod.mlir` for coverage completeness --
-   not blocking anything.
-6. **Branch-drift housekeeping**: confirmed a non-issue again this session; no
-   action needed until it actually diverges in content, not just hash.
