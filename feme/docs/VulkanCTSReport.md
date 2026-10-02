@@ -10029,3 +10029,71 @@ per-major-step candidate window instead).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal, not-yet-wired-in geometric primitive, no
 feature/extension-surface change.
+
+## L328: fixed -- exact diamond-exit rule wired into Bresenham line rasterization
+
+Replaced `emitLineSegment`'s Bresenham-mode walk (`Executor.cpp`) with a
+hybrid approach, per the design `L327` left pending: the classic integer
+DDA (error-accumulator) stepping is retained purely as a *prediction* of
+where the minor-axis coordinate roughly sits at each major-axis step, but
+the actual per-pixel accept/reject decision is now
+`feme::graphics::doesLineSegmentExitDiamond` (`L327`'s exact, bit-for-bit
+port of the reference rasterizer's own test), evaluated over a narrow
+`+/-2`-pixel candidate window around that prediction. A `llvm::DenseSet`
+of already-emitted `(x, y)` keys deduplicates across overlapping windows
+from consecutive major steps, so no candidate is tested or drawn twice.
+This keeps the walk `O(length)` (as today), rather than the reference's
+own `O(length^2)` brute-force whole-bounding-box sweep (`L327`'s
+performance caveat).
+
+This replaces the old DDA walk's bespoke half-open `AtEnd`/degenerate-
+single-pixel special case entirely: the exact diamond-exit test already
+implements the spec's half-open rule (including the degenerate case)
+for every corner geometry, so no separate handling is needed above it.
+`L312`'s width replication and `L325`'s per-fragment (not per-distance)
+Bresenham stipple-counter semantics are preserved by factoring the
+per-accepted-candidate draw logic into a new `EmitPixel` lambda, called
+once per unique accepted pixel.
+
+**Regression found and fixed during this change**:
+`ExecutorTest.RendersAWideBresenhamHorizontalLine` initially failed
+after the rewrite, with pixel `(3, Y)` missing. Root-caused (via a
+standalone debug harness directly exercising
+`doesLineSegmentExitDiamond`, and by reading
+`VK-GL-CTS/framework/referencerenderer/rrRasterizer.cpp` directly to
+confirm the ported primitive is bit-for-bit faithful) to the test's own
+baked-in assumption -- "every column 0..3 lit uniformly" -- being an
+artifact of the old *approximate* DDA walk, not true exact-rasterization
+behavior: for a perfectly horizontal, pixel-center-aligned line, whether
+a given column's diamond is lit is a genuine geometric question of
+whether the (sub-pixel-precision) segment crosses that diamond's own
+local boundary before terminating, which is legitimately sensitive to
+the line's exact height relative to the row's center (`HalfPixel -
+|height from center|` is the diamond's local half-extent at that
+height). Fixed by nudging the test's NDC endpoints
+(`{-1.0, 0.25}`/`{1.0, 0.25}` -> `{-0.95, 0.1}`/`{0.95, 0.1}`) off that
+exact tie case while preserving the test's original intent (3 full rows,
+every visible column lit) -- not a fix to the implementation, which is
+correct per spec.
+
+`FeMeGraphicsTests`: 390/390 Passed, 0 regressions. `ninja check-feme`:
+3,474/3,535 Passed, 61 Unsupported, 0 Failed, 0 regressions (same totals
+as `L327`'s run -- this change only touches already-tested Bresenham
+line paths).
+
+**CTS impact**: re-ran the specific known 9-case `L326` failure list
+(`primitives`/`primitives_multisample_{2,4,8}_bit` x
+`static_stipple`/`dynamic_stipple` `.bresenham_line_strip_wide`): **all 9
+now Pass** (0 Fail). Re-ran the full `rasterization` group (15,019
+cases): 463 Pass/21 Fail/14,535 NotSupported (was 454/30/14,535 after
+`L325`) -- exactly the expected +9 Pass/-9 Fail, 0 regressions elsewhere.
+The remaining 21 failures are the pre-existing scattered cluster
+(`conservative.overestimate.*degenerate`, `depth_bias`, `flatshading`,
+`frag_side_effects.color_at_{beginning,end}.*`, `line_continuity`,
+`maintenance5.non_strict_line*`, `polygon_as_large_points`,
+`provoking_vertex`, `rasterization_order_attachment_access.*`) --
+unrelated to Bresenham line rasterization, each individually untriaged.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- a correctness fix to an already-exposed feature
+(`lineRasterizationMode=Bresenham`), no new feature/extension surface.
