@@ -350,6 +350,51 @@ buildPipeline(Context &Ctx, RasterState Raster,
                           Logic, BlendConstants, PrimitiveRestartEnable);
 }
 
+/// (Roadmap L334) Like `buildPipeline` above, but the color varying
+/// (location 0, element 3 on the vertex side / element 0 on the fragment
+/// side) is `Flat`-interpolated rather than the default `Perspective`, so
+/// a test can observe exactly which vertex a `TriangleStrip`/`TriangleFan`
+/// primitive's assembly picks as its provoking vertex (`Executor.cpp`'s
+/// `Flat`-interpolation consumer always reads `Tri.Varyings[0]`, i.e.
+/// whichever vertex primitive assembly placed first).
+Expected<GraphicsPipeline>
+buildFlatColorPipeline(Context &Ctx, RasterState Raster,
+                       PrimitiveTopology Topology,
+                       bool PrimitiveRestartEnable = false) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  VSSig.Elements[3].Interpolation = SignatureInterpolationMode::Flat;
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  FSSig.Elements[0].Interpolation = SignatureInterpolationMode::Flat;
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  return GraphicsPipeline(std::move(*VS), std::move(*FS), Topology, Raster,
+                          DepthState{}, BlendMode::Replace,
+                          /*SampleCount=*/1, std::move(Attachments),
+                          StencilState{}, std::vector<BlendState>{BlendState{}},
+                          /*LogicOpEnable=*/false, LogicOp::Copy,
+                          std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+                          PrimitiveRestartEnable);
+}
+
 /// Like `buildPipeline` above, but with an `R32G32B32A32_FLOAT` color
 /// attachment instead of `R8G8B8A8_UNORM`, so a test can read back its
 /// fragment output's exact bit pattern rather than an 8-bit-quantized
@@ -1896,6 +1941,99 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleFan) {
   const uint8_t *Green = texel(3, 1);
   EXPECT_EQ(Green[0], 0);
   EXPECT_EQ(Green[1], 255);
+}
+
+/// (Roadmap L334) Per the Vulkan spec's own "Triangle Strips" equation
+/// (`p_i = {v_i, v_{i+(1+i%2)}, v_{i+(2-i%2)}}`), the provoking vertex for
+/// every triangle `p_i` -- even or odd -- is `v_i`: the odd-triangle
+/// reorder only swaps the *other two* vertices (to keep front-facing
+/// winding consistent across the strip), never the first. A quad built
+/// from one `TriangleStrip` (`v0..v3`) with all-distinct per-vertex
+/// colors exercises both triangles: `p0 = (v0, v1, v2)` (provoking `v0`)
+/// and `p1 = (v1, v3, v2)` (provoking `v1`, *not* `v2`/`v3` -- the bug
+/// this test guards against put `v2` in `p1`'s provoking position by
+/// swapping the *first two* vertices instead of the last two).
+TEST(ExecutorTest, FlatShadesTriangleStripWithCorrectProvokingVertex) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildFlatColorPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleStrip);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A strip spanning the whole [-1, 1] NDC square, split by the diagonal
+  // from v1 (1, -1) to v2 (-1, 1): p0 = (v0, v1, v2) is the lower-left
+  // half, p1 = (v1, v3, v2) is the upper-right half.
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0: red (p0's provoking)
+      1.0f,  -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v1: green (p1's provoking)
+      -1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // v2: blue (never provoking)
+      1.0f,  1.0f,  0.0f, 1.0f, 1.0f, 0.0f, 1.0f, // v3: yellow (never provoking)
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Deep in p0 (lower-left corner, near v0 itself): flat-shaded red.
+  const uint8_t *P0 = texel(0, 0);
+  EXPECT_EQ(P0[0], 255);
+  EXPECT_EQ(P0[1], 0);
+  EXPECT_EQ(P0[2], 0);
+  // Deep in p1 (upper-right corner, near v3): flat-shaded green (v1's
+  // color), not blue (v2's, the bug's wrong answer) or yellow (v3's).
+  const uint8_t *P1 = texel(3, 3);
+  EXPECT_EQ(P1[0], 0);
+  EXPECT_EQ(P1[1], 255);
+  EXPECT_EQ(P1[2], 0);
+}
+
+/// (Roadmap L334) Per the Vulkan spec's own "Triangle Fans" equation
+/// (`p_i = {v_{i+1}, v_{i+2}, v_0}`), the pivot `v0` is the *last*
+/// assembled vertex of every triangle, not the first -- the provoking
+/// vertex for `p_i` is `v_{i+1}`. A fan built from `v0..v3` with
+/// all-distinct per-vertex colors exercises both triangles: `p0 = (v1,
+/// v2, v0)` (provoking `v1`) and `p1 = (v2, v3, v0)` (provoking `v2`,
+/// *not* the pivot `v0` -- the bug this test guards against always used
+/// the pivot's color for every triangle in the fan).
+TEST(ExecutorTest, FlatShadesTriangleFanWithCorrectProvokingVertex) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildFlatColorPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleFan);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A fan pivoting on v0 (-1, -1), spanning the whole [-1, 1] NDC square,
+  // split by the diagonal from v0 to v2 (1, 1): p0 = (v1, v2, v0) is the
+  // lower-right half, p1 = (v2, v3, v0) is the upper-left half.
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, // v0: white (never provoking, the pivot)
+      1.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1: red (p0's provoking)
+      1.0f,  1.0f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v2: green (p1's provoking)
+      -1.0f, 1.0f,  0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // v3: blue (never provoking)
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Deep in p0 (lower-right corner, near v1): flat-shaded red.
+  const uint8_t *P0 = texel(3, 0);
+  EXPECT_EQ(P0[0], 255);
+  EXPECT_EQ(P0[1], 0);
+  EXPECT_EQ(P0[2], 0);
+  // Deep in p1 (upper-left corner, near v3): flat-shaded green (v2's
+  // color), not white (the pivot's, the bug's wrong answer) or blue
+  // (v3's).
+  const uint8_t *P1 = texel(0, 3);
+  EXPECT_EQ(P1[0], 0);
+  EXPECT_EQ(P1[1], 255);
+  EXPECT_EQ(P1[2], 0);
 }
 
 // roadmap C4: a `PointList` draws a point `RasterState::MaxPointSize`

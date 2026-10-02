@@ -5428,24 +5428,41 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // Assembles one strip segment [Start, End)'s triangles, alternating
     // winding order starting fresh at each segment -- exactly what a
     // restart does to an unindexed strip, and what a strip with no restart
-    // markers does over its one whole segment.
+    // markers does over its one whole segment. (Roadmap L334) Per the spec's
+    // own equation ("Triangle Strips": `p_i = {v_i, v_{i+(1+i%2)},
+    // v_{i+(2-i%2)}}`), the *first* emitted vertex is always `v_i` --
+    // *only* the second/third positions swap on odd `i`, so `TriIndices[0]`
+    // (and thus `Tri.Varyings[0]`, this project's flat-shading/default-
+    // provoking-vertex source, see the `Flat`-interpolation consumer below)
+    // is always `T` regardless of parity; swapping `T+1` and `T+2` (not `T`
+    // and `T+1`) still flips the triangle's orientation every other
+    // triangle (an odd permutation either way), so the winding-alternation
+    // this project relies on for consistent front-facing is unaffected.
     auto emitStripSegment = [](uint32_t Start, uint32_t End,
                                SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
       uint32_t Local = 0;
       for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
         Out.push_back(Local % 2 == 0
                           ? std::array<uint32_t, 3>{T, T + 1, T + 2}
-                          : std::array<uint32_t, 3>{T + 1, T, T + 2});
+                          : std::array<uint32_t, 3>{T, T + 2, T + 1});
     };
 
     // Assembles one fan segment [Start, End)'s triangles: `Start` (the
     // segment's first vertex) is every triangle's shared pivot, exactly
     // as an unindexed fan pivots on its first vertex and a restart begins
-    // a fresh fan (with a fresh pivot) at the next segment.
+    // a fresh fan (with a fresh pivot) at the next segment. (Roadmap L334)
+    // Per the spec's own equation ("Triangle Fans": `p_i = {v_{i+1}, v_{i+2},
+    // v_0}`), the pivot is the *last* emitted vertex, not the first -- the
+    // provoking vertex for `p_i` is `v_{i+1}` (`T` below), so `TriIndices[0]`
+    // must be `T`, not the pivot, for this project's flat-shading/default-
+    // provoking-vertex source (`Tri.Varyings[0]`) to match the spec. This is
+    // a cyclic rotation of the prior `{Start, T, T+1}` ordering (an even
+    // permutation), so the triangle's actual geometry/orientation is
+    // unchanged -- only which vertex lands in position 0 changes.
     auto emitFanSegment = [](uint32_t Start, uint32_t End,
                              SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
       for (uint32_t T = Start + 1; T + 2 <= End; ++T)
-        Out.push_back({Start, T, T + 1});
+        Out.push_back({T, T + 1, Start});
     };
 
     SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
