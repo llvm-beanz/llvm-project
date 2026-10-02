@@ -117,6 +117,14 @@ struct PatchPipelineLinkage {
   /// Hull control-point phase output -> patch-constant phase `OutputPatch`
   /// input.
   llvm::SmallVector<LinkedStageElement, 4> HullToPatchConstant;
+  /// (Roadmap L344) The `patch`-frequency subset of the same hull
+  /// control-point phase output -> patch-constant `OutputPatch` input
+  /// relationship `HullToPatchConstant` above covers for ordinary
+  /// per-control-point elements -- see `linkPatchPipeline`'s own comment
+  /// for why these need `copyLinkedPatchFrequencyElements`'s diagonal
+  /// gather instead of `copyLinkedElements`' ordinary per-invocation
+  /// copy.
+  llvm::SmallVector<LinkedStageElement, 4> HullToPatchConstantDiagonal;
   /// Hull control-point phase output -> domain stage control-point input.
   llvm::SmallVector<LinkedStageElement, 4> HullToDomain;
   /// Patch-constant phase `PatchOutput` -> domain stage `PatchInput`.
@@ -124,6 +132,18 @@ struct PatchPipelineLinkage {
   /// reads no patch constant or tessellation factor.
   llvm::SmallVector<LinkedStageElement, 4> PatchConstantToDomain;
   bool HasDomainPatchConstants = false;
+  /// (Roadmap L344) A domain stage `PatchInput` consumer this phase's own
+  /// `PatchOutput`-direction elements do *not* cover -- a `patch`-
+  /// qualified varying the hull control-point phase itself wrote and the
+  /// patch-constant phase's own body only ever reads back, never stores
+  /// to (e.g. `cross_invocation_per_patch`'s own `in_te_data0`, classified
+  /// `Input`/`PerPatch` rather than `PatchOutput` here precisely because
+  /// `!HasStoreInPhase` -- see `classifySPIRVElement`'s own comment) --
+  /// forwarded straight from the hull stage's own genuine `Output`
+  /// producer instead, mirroring `PatchConstantToDomain` above but
+  /// sourced from `HullSig`/`Result.OutputPatch` rather than
+  /// `PatchConstantSig`/`Result.PatchConstants`.
+  llvm::SmallVector<LinkedStageElement, 4> HullToPatchConstantDomain;
   /// (Roadmap L339) Patch-constant phase genuine per-control-point
   /// `Output` -> domain stage ordinary per-vertex `Input`. Empty, and
   /// `HasPatchConstantVertexOutputs` false, when the patch-constant phase

@@ -217,11 +217,51 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
                         "hull stage output -> patch-constant OutputPatch",
                         [](const SignatureElement &Elt) {
                           return isOutputPatchElement(Elt) &&
-                                 isForwardedFromProducerStage(Elt);
+                                 isForwardedFromProducerStage(Elt) &&
+                                 Elt.Frequency != SignatureFrequency::PerPatch;
                         });
   if (!HullToPatchConstant)
     return HullToPatchConstant.takeError();
   Link.HullToPatchConstant = std::move(*HullToPatchConstant);
+
+  // (Roadmap L344) A `patch`-frequency `OutputPatch` consumer element
+  // (e.g. `cross_invocation_per_patch`'s own `in_te_data0`, classified
+  // `Input`/`PerPatch` rather than `PatchOutput` here precisely because
+  // `!HasStoreInPhase` -- see `classifySPIRVElement`'s own comment) is
+  // *not* an ordinary per-control-point value `HullToPatchConstant`
+  // above's generic per-invocation `copyLinkedElements` call already
+  // handles correctly: the hull control-point phase's own compiled body
+  // writes such a `patch`-qualified array one index at a time, from
+  // every invocation (`HullWrapper.cpp`'s `lowerHullOutputStore` always
+  // addresses a store by *this invocation's own* flat index, regardless
+  // of the element's `Frequency`), each invocation writing only its own
+  // *diagonal* `(Invocation == Row)` entry of `Result.OutputPatch`'s
+  // per-invocation storage, leaving every other `Row` in that same
+  // invocation's own copy unwritten. Reading that storage back the same
+  // (generic, single-invocation-indexed) way `HullToPatchConstant` does
+  // would see only one real element (wherever `Invocation == Row`) and
+  // garbage everywhere else -- exactly the systematic, mostly-wrong
+  // readback this roadmap entry's own CTS image diff (`--deqp-log-
+  // images=enable`) first showed. `runPatchPipeline`'s own
+  // `copyLinkedPatchFrequencyElements` call gathers this diagonal into
+  // one real, complete array instead, replicated across every
+  // destination `OutputPatch` invocation slot (since `PatchConstantWrapper
+  // .cpp`'s own `lowerPatchConstantInputLoad` always reads such a
+  // `PerPatch`-frequency element at `ControlPoint == 0`, any slot works,
+  // as long as every slot agrees).
+  Expected<SmallVector<LinkedStageElement, 4>> HullToPatchConstantDiagonal =
+      linkStageElements(
+          Link.HullSig, SignatureDirection::Output, Link.PatchConstantSig,
+          SignatureDirection::Input,
+          "hull stage output -> patch-constant OutputPatch (patch-frequency)",
+          [](const SignatureElement &Elt) {
+            return isOutputPatchElement(Elt) &&
+                   isForwardedFromProducerStage(Elt) &&
+                   Elt.Frequency == SignatureFrequency::PerPatch;
+          });
+  if (!HullToPatchConstantDiagonal)
+    return HullToPatchConstantDiagonal.takeError();
+  Link.HullToPatchConstantDiagonal = std::move(*HullToPatchConstantDiagonal);
 
   // (Roadmap L339) A domain-stage `Input` consumer element this phase's
   // own `Output`-direction (genuine per-vertex, post-barrier) signature
@@ -258,14 +298,51 @@ linkPatchPipeline(const EntrySignature &VertexOutputSig,
   Link.HasDomainPatchConstants =
       hasDirection(Link.DomainSig, SignatureDirection::PatchInput);
   if (Link.HasDomainPatchConstants) {
+    // (Roadmap L344) A domain `patch in` consumer this phase's own
+    // `PatchOutput` elements cover (`HasPatchConstantOutputProducer`)
+    // goes through the ordinary link below; any other one is, instead,
+    // a `patch`-qualified varying the hull control-point phase itself
+    // wrote, with the patch-constant phase's own body only ever reading
+    // it back (`classifySPIRVElement`'s own `isPatchOutputDecoration`
+    // comment) -- `HullToPatchConstantDomain` below forwards it straight
+    // from the hull stage's own genuine `Output` producer so it is not
+    // left as an unconditional hard "no matching producer element"
+    // error merely because this phase's own signature has no
+    // `PatchOutput`-direction element for it.
+    auto HasPatchConstantOutputProducer =
+        [&Link](const SignatureElement &Elt) {
+          if (Elt.SystemValue != SignatureSystemValue::None)
+            return findElement(Link.PatchConstantSig,
+                               SignatureDirection::PatchOutput,
+                               Elt.SystemValue) != nullptr;
+          if (!Elt.Location)
+            return false;
+          return findElementByLocation(Link.PatchConstantSig,
+                                       SignatureDirection::PatchOutput,
+                                       *Elt.Location, Elt.Index,
+                                       Elt.FirstComponent) != nullptr;
+        };
     Expected<SmallVector<LinkedStageElement, 4>> PatchConstantToDomain =
         linkStageElements(Link.PatchConstantSig,
                           SignatureDirection::PatchOutput, Link.DomainSig,
                           SignatureDirection::PatchInput,
-                          "patch-constant output -> domain stage patch input");
+                          "patch-constant output -> domain stage patch input",
+                          HasPatchConstantOutputProducer);
     if (!PatchConstantToDomain)
       return PatchConstantToDomain.takeError();
     Link.PatchConstantToDomain = std::move(*PatchConstantToDomain);
+
+    Expected<SmallVector<LinkedStageElement, 4>> HullToPatchConstantDomain =
+        linkStageElements(
+            Link.HullSig, SignatureDirection::Output, Link.DomainSig,
+            SignatureDirection::PatchInput,
+            "hull stage output -> domain stage patch input (forwarded)",
+            [&](const SignatureElement &Elt) {
+              return !HasPatchConstantOutputProducer(Elt);
+            });
+    if (!HullToPatchConstantDomain)
+      return HullToPatchConstantDomain.takeError();
+    Link.HullToPatchConstantDomain = std::move(*HullToPatchConstantDomain);
   }
 
   // (Roadmap L339) A genuine per-control-point output the patch-constant
@@ -368,6 +445,10 @@ Expected<PatchPipelineResult> runPatchPipeline(
     return PatchConstantInput.takeError();
   copyLinkedElements(Result.OutputPatch, *PatchConstantInput,
                      Link.HullToPatchConstant, Tess.OutputControlPointCount);
+  copyLinkedPatchFrequencyElements(
+      Result.OutputPatch, *PatchConstantInput, Link.HullToPatchConstantDiagonal,
+      /*SourceInvocationCount=*/Tess.OutputControlPointCount,
+      /*DestInvocationCount=*/Tess.OutputControlPointCount);
 
   StageStorage InputPatch;
   if (Link.HasInputPatch) {
@@ -478,6 +559,16 @@ Expected<PatchPipelineResult> runPatchPipeline(
     DomainPatchConstants = std::move(*Built);
     copyLinkedElements(Result.PatchConstants, DomainPatchConstants,
                        Link.PatchConstantToDomain, /*InvocationCount=*/1);
+    // (Roadmap L344) `Result.OutputPatch`'s own `PerPatch`-frequency
+    // elements (e.g. `cross_invocation_per_patch`'s own `in_te_data0`,
+    // written per-index by the control-point phase's own per-invocation
+    // body but into one shared, patch-wide array -- see
+    // `classifySPIRVElement`'s own comment) are addressed the same way
+    // regardless of which control-point invocation wrote them, so
+    // `InvocationCount=1` here reads the one shared copy correctly, the
+    // same as the ordinary `PatchConstantToDomain` copy just above.
+    copyLinkedElements(Result.OutputPatch, DomainPatchConstants,
+                       Link.HullToPatchConstantDomain, /*InvocationCount=*/1);
   }
 
   std::vector<cpu::FemeDomainInvocation> Invocations =

@@ -157,4 +157,34 @@ void copyLinkedElements(const StageStorage &From, StageStorage &To,
     }
 }
 
+void copyLinkedPatchFrequencyElements(const StageStorage &From,
+                                     StageStorage &To,
+                                     ArrayRef<LinkedStageElement> Links,
+                                     uint32_t SourceInvocationCount,
+                                     uint32_t DestInvocationCount) {
+  for (const LinkedStageElement &Link : Links) {
+    for (uint32_t Row = 0; Row != Link.RowCount; ++Row)
+      for (uint32_t C = 0; C != Link.ComponentCount; ++C) {
+        // `Row` doubles as its own producing invocation's own index here
+        // (the diagonal `HullWrapper.cpp`'s `lowerHullOutputStore`
+        // leaves behind -- see this function's own header comment);
+        // every other row of that same source invocation's own copy was
+        // never written, so only the `Row == SourceInvocation` entry is
+        // ever read.
+        uint32_t SourceInvocation =
+            Link.HasProducer && Row < SourceInvocationCount ? Row : 0;
+        uint32_t Value =
+            Link.HasProducer
+                ? From.readRaw(Link.SourceElementID,
+                               Link.SourceFirstComponent + C,
+                               SourceInvocation, Row)
+                : 0;
+        for (uint32_t Invocation = 0; Invocation != DestInvocationCount;
+            ++Invocation)
+          To.writeRaw(Link.DestElementID, Link.DestFirstComponent + C,
+                      Invocation, Value, Row);
+      }
+  }
+}
+
 } // namespace feme::graphics

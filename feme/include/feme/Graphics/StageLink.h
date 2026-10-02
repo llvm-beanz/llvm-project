@@ -99,6 +99,21 @@ void copyLinkedElements(const StageStorage &From, StageStorage &To,
                         uint32_t InvocationCount,
                         llvm::ArrayRef<uint32_t> SourceInvocations = {});
 
+/// (Roadmap L344) Gathers each \p Links entry's `Row == Invocation`
+/// diagonal out of \p From's `SourceInvocationCount` per-invocation
+/// copies -- the shape a `patch`-frequency array a hull control-point
+/// phase writes one index at a time ends up in (see
+/// `linkPatchPipeline`'s own `HullToPatchConstantDiagonal` comment: each
+/// invocation only ever writes its own `Row`, within its own
+/// per-invocation copy, leaving every other `Row` there unwritten) --
+/// into one real, complete array, replicated across every one of \p To's
+/// \p DestInvocationCount destination invocation slots.
+void copyLinkedPatchFrequencyElements(const StageStorage &From,
+                                     StageStorage &To,
+                                     llvm::ArrayRef<LinkedStageElement> Links,
+                                     uint32_t SourceInvocationCount,
+                                     uint32_t DestInvocationCount);
+
 } // namespace feme::graphics
 
 #endif // FEME_GRAPHICS_STAGELINK_H

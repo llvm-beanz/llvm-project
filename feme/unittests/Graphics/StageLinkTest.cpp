@@ -568,4 +568,60 @@ TEST(StageLinkTest, CopiesLinkedGeometryInputSystemValue) {
       EXPECT_FLOAT_EQ(To->readFloat(0, C, I), static_cast<float>(I * 4 + C));
 }
 
+// (Roadmap L344) `copyLinkedPatchFrequencyElements` end-to-end: `From`
+// mimics `HullWrapper.cpp`'s diagonal write pattern for a `patch`-frequency
+// array indexed per-invocation (`in_te_data0[gl_InvocationID] = value`) --
+// each of 3 producer invocations only ever wrote its own `Row == Invocation`
+// slot, leaving every other row within its own per-invocation copy as zero.
+// Gathering that diagonal should recover the full 3-element array and
+// replicate it identically into every one of `To`'s destination invocation
+// slots, regardless of which row is later read back from.
+TEST(StageLinkTest, GathersPatchFrequencyDiagonalAndReplicatesToEveryDest) {
+  EntrySignature Producer;
+  SignatureElement PatchArrayOut =
+      makeElement(0, SignatureDirection::Output, 0, /*ComponentCount=*/1);
+  PatchArrayOut.RowCount = 3;
+  PatchArrayOut.Frequency = SignatureFrequency::PerPatch;
+  Producer.Elements = {PatchArrayOut};
+
+  EntrySignature Consumer;
+  SignatureElement PatchArrayIn =
+      makeElement(0, SignatureDirection::Input, 0, /*ComponentCount=*/1);
+  PatchArrayIn.RowCount = 3;
+  PatchArrayIn.Frequency = SignatureFrequency::PerPatch;
+  Consumer.Elements = {PatchArrayIn};
+
+  Expected<SmallVector<LinkedStageElement, 4>> Links = linkStageElements(
+      Producer, SignatureDirection::Output, Consumer, SignatureDirection::Input,
+      "hull stage output -> patch-constant stage input");
+  ASSERT_THAT_EXPECTED(Links, Succeeded());
+  ASSERT_EQ(Links->size(), 1u);
+
+  // 3 real Hull control-point invocations, each with its own full-sized
+  // (3-row) per-invocation copy, but only ever writing its own diagonal row.
+  Expected<StageStorage> From = buildStageStorage(
+      Producer, SignatureDirection::Output, /*InvocationCount=*/3);
+  ASSERT_THAT_EXPECTED(From, Succeeded());
+  for (uint32_t Invocation = 0; Invocation != 3; ++Invocation)
+    From->writeFloat(0, 0, Invocation, static_cast<float>(Invocation) + 1.0f,
+                     /*Row=*/Invocation);
+
+  // The patch-constant phase only ever reads invocation-slot 0 (there is
+  // exactly one logical patch-constant invocation), but allocate 2
+  // destination slots to confirm the gathered array is replicated, not
+  // just written once.
+  Expected<StageStorage> To = buildStageStorage(
+      Consumer, SignatureDirection::Input, /*InvocationCount=*/2);
+  ASSERT_THAT_EXPECTED(To, Succeeded());
+
+  copyLinkedPatchFrequencyElements(*From, *To, *Links,
+                                   /*SourceInvocationCount=*/3,
+                                   /*DestInvocationCount=*/2);
+  for (uint32_t Dest = 0; Dest != 2; ++Dest)
+    for (uint32_t Row = 0; Row != 3; ++Row)
+      EXPECT_FLOAT_EQ(To->readFloat(0, 0, Dest, Row),
+                      static_cast<float>(Row) + 1.0f)
+          << "Dest=" << Dest << " Row=" << Row;
+}
+
 } // namespace
