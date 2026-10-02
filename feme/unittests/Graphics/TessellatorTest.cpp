@@ -344,6 +344,42 @@ TEST(TessellatorTest, TriangleFullyUnsubdividedFactorEmitsOneRealTriangle) {
   EXPECT_TRUE(HasCorner(0.0f, 0.0f, 1.0f));
 }
 
+TEST(TessellatorTest,
+    TriangleFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd) {
+  // Roadmap L343 regression test. Unlike `Integer`/`FractionalEven`,
+  // `FractionalOdd`'s own "inside factor rounds to 1" epsilon rule always
+  // forces a real, non-degenerate 3-segment inner ring, regardless of the
+  // outer edges -- so the all-1s fast path above (added for H7x) must
+  // *not* apply here, or the all-outer-edges-exactly-1 patch would
+  // produce a different (degenerate) inner-triangle structure than every
+  // other outer-edge combination sharing the same (rounds-to-1) inside
+  // factor, violating `invariance.inner_triangle_set`.
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 0.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::FractionalOdd,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // The degenerate (H7x) fast path would emit exactly 1 triangle (3
+  // points); the real `FractionalOdd` epsilon-forced interior ring
+  // produces strictly more geometry than that.
+  EXPECT_GT(Patch.Points.size(), 3u);
+  // The interior (1/3, 1/3, 1/3)-scaled core triangle's own 3 vertices
+  // must all be strictly interior (nonzero in every barycentric
+  // component) -- this is exactly what `invariance.inner_triangle_set`
+  // checks for, and must hold here just as it does when the outer edges
+  // are not exactly 1.
+  bool FoundInteriorTriangle = false;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U > Epsilon && P.U < 1.0f - Epsilon && P.V > Epsilon &&
+        P.V < 1.0f - Epsilon && P.W > Epsilon && P.W < 1.0f - Epsilon) {
+      FoundInteriorTriangle = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(FoundInteriorTriangle);
+}
+
 /// The signed area of triangle (A, B, C)'s (U, V) projection: positive for
 /// a counter-clockwise winding, negative for clockwise. Every domain point
 /// this file generates has a well-defined (U, V) (a triangle domain's `W`
@@ -521,6 +557,32 @@ TEST(TessellatorTest, QuadFullyUnsubdividedFactorEmitsTwoRealTriangles) {
   EXPECT_TRUE(HasCorner(1.0f, 0.0f));
   EXPECT_TRUE(HasCorner(1.0f, 1.0f));
   EXPECT_TRUE(HasCorner(0.0f, 1.0f));
+}
+
+TEST(TessellatorTest,
+    QuadFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd) {
+  // Roadmap L343 regression test, quad-domain counterpart of
+  // `TriangleFullyUnsubdividedFactorStillSubdividesUnderFractionalOdd`
+  // above -- see its own comment for the full rationale.
+  TessFactors Factors;
+  Factors.Inside = {1.0f, 1.0f};
+  Factors.Edges = {1.0f, 1.0f, 1.0f, 1.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::FractionalOdd,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  // The degenerate (L219) fast path would emit exactly the 4 real
+  // corners; `FractionalOdd`'s epsilon-forced interior grid produces
+  // strictly more points than that.
+  EXPECT_GT(Patch.Points.size(), 4u);
+  bool FoundInteriorPoint = false;
+  for (const DomainPoint &P : Patch.Points) {
+    if (P.U > Epsilon && P.U < 1.0f - Epsilon && P.V > Epsilon &&
+        P.V < 1.0f - Epsilon) {
+      FoundInteriorPoint = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(FoundInteriorPoint);
 }
 
 TEST(TessellatorTest,

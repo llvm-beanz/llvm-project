@@ -445,7 +445,25 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
   uint32_t N =
       computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor);
 
-  if (E01 == 1 && E12 == 1 && E20 == 1 && N == 1) {
+  // (Roadmap L343) `Partitioning != FractionalOdd` is required here, not
+  // just the plain all-ones check below: `FractionalOdd`'s own "N == 1"
+  // epsilon rule (a few lines further down) *always* forces a real,
+  // non-degenerate `N0 == 3` inner ring when the inside factor rounds to
+  // 1, regardless of whether the outer edges are also exactly 1 --
+  // unlike `Integer`/`FractionalEven`, whose equivalent `N0 == 2` case
+  // collapses to a plain fan-to-centroid that still contributes zero
+  // "inner" (fully edge-free) triangles, matching this fast path's own
+  // single-triangle (also zero "inner" triangles) result. Short-circuiting
+  // here for `FractionalOdd` too would make the truly-all-ones patch
+  // produce zero inner triangles while every other outer-edge combination
+  // sharing the same (rounds-to-1) inside factor produces a real one via
+  // the epsilon rule below -- an `invariance.inner_triangle_set`
+  // violation (the inner triangle set must depend only on the inside
+  // factor, never on the outer edges) found via
+  // `dEQP-VK.tessellation.invariance.inner_triangle_set.
+  // triangles_fractional_odd_spacing`.
+  if (E01 == 1 && E12 == 1 && E20 == 1 && N == 1 &&
+      Partitioning != TessPartitioning::FractionalOdd) {
     // (roadmap H7x) At the minimum, fully unsubdivided factor (every edge
     // and the interior both at 1 segment), the general inset+bridge path
     // below still synthesizes a 7-triangle core+annulus split out of this
@@ -623,11 +641,25 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
   // `M`/`N` path below, which already handles arbitrary outer edges
   // alongside a degenerate (bumped-to-2) interior axis correctly (see
   // `UDegenerate`/`VDegenerate` below).
+  //
+  // (Roadmap L343) As in `tessellateTriangle`'s equivalent fast path,
+  // `Partitioning != FractionalOdd` is required too: `FractionalOdd`'s
+  // own "M/N == 1" epsilon rule just below always bumps to 3 (a real,
+  // non-degenerate interior grid), not 2 (a degenerate, zero-"inner"
+  // one like `Integer`/`FractionalEven` use), regardless of the outer
+  // edges -- so the truly-all-ones patch must keep using that same
+  // bumped-to-3 interior grid too, not this shortcut's zero-interior
+  // result, to stay consistent with every other outer-edge combination
+  // sharing the same (rounds-to-1) inside factors. Found the same way as
+  // the triangle-domain case, via
+  // `dEQP-VK.tessellation.invariance.inner_triangle_set.
+  // quads_fractional_odd_spacing`.
   if (computeSegmentCount(Factors.Inside[0], Partitioning, MaxTessFactor) ==
           1 &&
       computeSegmentCount(Factors.Inside[1], Partitioning, MaxTessFactor) ==
           1 &&
-      Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1) {
+      Eu0 == 1 && Eu1 == 1 && Ev0 == 1 && Ev1 == 1 &&
+      Partitioning != TessPartitioning::FractionalOdd) {
     TessellatedPatch Patch;
     RingEdges OuterRing = appendQuadBoundaryRing(Patch, Ev0, Eu1, Ev1, Eu0);
     uint32_t P0 = OuterRing[0][0], P1 = OuterRing[1][0], P2 = OuterRing[2][0],
