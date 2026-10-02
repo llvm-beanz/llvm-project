@@ -309,6 +309,27 @@ TEST(PhysicalDeviceInfo, LineWidthAndPointSizeRangesSupportWideLinesAndLargePoin
   EXPECT_GT(Limits.pointSizeGranularity, 0.0f);
 }
 
+// Roadmap L316: `subTexelPrecisionBits`/`mipmapPrecisionBits` tell
+// `VK-GL-CTS`'s own `vktSampleVerifier.cpp` how coarsely to quantize its
+// own tolerance band around an ideal filtered-sample weight -- this
+// target's runtime (`FeMeRuntimeCPU.c`'s `femeRTComputeBilinearSupport`/
+// `femeRTSelectMipLevels`) never quantizes its own interpolation weights
+// at all (every weight is a genuine unquantized `float` fraction), so
+// advertising the spec-mandated *minimum* of 4 bits here made the
+// verifier's own tolerance band narrower than what this target actually
+// delivers -- confirmed broken by a real `dEQP-VK.texture.explicit_lod.
+// 2d.sizes.31x55_linear_linear_mipmap_linear_repeat` failure whose ideal
+// mip-level-2 bilinear weight (0.9727) fell between 4-bit's only two
+// nearby quantization candidates (0.9375, 0.0). Raised to 8, the value
+// real CPU Vulkan implementations that also compute unquantized float
+// weights (Mesa's `lavapipe`, SwiftShader) report for the same reason.
+TEST(PhysicalDeviceInfo, TexelAndMipmapPrecisionBitsReflectUnquantizedFiltering) {
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  EXPECT_GE(Limits.subTexelPrecisionBits, 8u);
+  EXPECT_GE(Limits.mipmapPrecisionBits, 8u);
+}
+
 // Roadmap H7a: `maxDrawIndirectCount` must be raised alongside
 // `multiDrawIndirect` -- a spec-required floor of 1 whenever the feature is
 // false would make an indirect `drawCount > 1` call illegal even though

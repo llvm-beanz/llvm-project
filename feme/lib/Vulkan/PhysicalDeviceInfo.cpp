@@ -324,8 +324,35 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.MaxComputeWorkgroupSubgroups =
       Limits.maxComputeWorkGroupInvocations / Info.MinSubgroupSize;
   Limits.subPixelPrecisionBits = 4;
-  Limits.subTexelPrecisionBits = 4;
-  Limits.mipmapPrecisionBits = 4;
+  // (Roadmap L316) `subTexelPrecisionBits`/`mipmapPrecisionBits` tell
+  // `VK-GL-CTS`'s own `vktSampleVerifier.cpp` how coarsely an
+  // implementation is allowed to *quantize* a texel-filtering weight
+  // before comparing against its own ideal sample -- the verifier builds
+  // its accept/reject tolerance band directly from this advertised bit
+  // count (`SampleVerifier::getMipmapStepBounds`'s own `1 <<
+  // m_mipmapBits`/`calcTexelGridCoordRange`'s own `1 << coordBits`), not
+  // from any property of the hardware the verifier can observe
+  // independently. `FeMeRuntimeCPU.c`'s own bilinear/trilinear filtering
+  // (`femeRTComputeBilinearSupport`, `femeRTSelectMipLevels`) never
+  // quantizes its interpolation weights at all -- every weight is a
+  // genuine `float` fraction computed directly from the sample
+  // coordinate, no rounding to any fixed bit count -- so advertising the
+  // Vulkan-mandated *minimum* of 4 bits here was simply inaccurate: it
+  // told the verifier to expect coarse, quantized weights nowhere near
+  // as precise as what this target actually delivers, so a real sample
+  // whose ideal weight falls near a 4-bit quantization boundary (every
+  // `texture.explicit_lod.2d.sizes.*` NPOT case's own mip level 2
+  // bilinear weight does, e.g. `31x55`'s own `V` coordinate landing at
+  // weight 0.9727 against 4-bit's only nearby candidates 0.9375/0.0)
+  // fails outright, the verifier's own tolerance band too narrow to
+  // bracket this target's real (unquantized, full-float-precision)
+  // result. Raised to 8 -- the value real CPU Vulkan implementations
+  // that also compute unquantized float weights (Mesa's `lavapipe`,
+  // SwiftShader) report for the same reason -- confirmed via a real
+  // `dEQP-VK.texture.explicit_lod.2d.sizes.*` re-run that every one of
+  // this group's 16 remaining NPOT failures now passes.
+  Limits.subTexelPrecisionBits = 8;
+  Limits.mipmapPrecisionBits = 8;
   Limits.maxDrawIndexedIndexValue = (1u << 24) - 1;
   // Roadmap H7a: `multiDrawIndirect` is now advertised `VK_TRUE` (below) --
   // `CommandBuffer.cpp`'s `readIndirectDraws`/`readIndirectMeshDraws`
