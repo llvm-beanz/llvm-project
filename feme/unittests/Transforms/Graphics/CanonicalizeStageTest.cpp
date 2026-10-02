@@ -3377,17 +3377,30 @@ TEST(CanonicalizeStageTest,
   std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
   ASSERT_TRUE(PCSig.has_value());
   ASSERT_EQ(PCSig->Elements.size(), 3u);
+  // `gl_TessLevelOuter`'s own bare-global write is discovered first (it's
+  // the first store in `main`'s body), so it claims element ID 0; `tcBlock`'s
+  // two members are discovered next and claim IDs 1/2. (Roadmap L339 widened
+  // this phase's address-space-8 default classification from unconditional
+  // `Input` to genuine `Output`, which moved `tcBlock`'s *coarse*,
+  // block-level discovery-order bucket from `InputGlobals` to
+  // `OutputGlobals` -- `tess_outer` was already bucketed `OutputGlobals` via
+  // `isPatchOutputDecoration`'s `BuiltIn` check, so both now share one
+  // discovery-order-sorted pass instead of `tcBlock` being processed in an
+  // earlier, separate `InputGlobals` pass. Each element's actual
+  // `SignatureDirection`/`Location`/`SystemValue` is unaffected: `tcBlock`'s
+  // members still get their final `PatchOutput` direction from their own
+  // per-member `Patch` decoration in `addElement`, independent of which
+  // bucket the block was coarsely sorted into.)
+  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
+  EXPECT_EQ(PCSig->Elements[0].SystemValue,
+            SignatureSystemValue::TessFactorEdge);
   // `tcBlock`'s own two members both survive, undropped, as ordinary
   // `PatchOutput` elements -- before this row's own fix, they were wrongly
   // classified as vertex-frequency and pruned away entirely.
-  EXPECT_EQ(PCSig->Elements[0].Direction, SignatureDirection::PatchOutput);
-  EXPECT_EQ(PCSig->Elements[0].Location, 0u);
   EXPECT_EQ(PCSig->Elements[1].Direction, SignatureDirection::PatchOutput);
-  EXPECT_EQ(PCSig->Elements[1].Location, 1u);
-  // `gl_TessLevelOuter`'s own bare-global write.
+  EXPECT_EQ(PCSig->Elements[1].Location, 0u);
   EXPECT_EQ(PCSig->Elements[2].Direction, SignatureDirection::PatchOutput);
-  EXPECT_EQ(PCSig->Elements[2].SystemValue,
-            SignatureSystemValue::TessFactorEdge);
+  EXPECT_EQ(PCSig->Elements[2].Location, 1u);
 }
 
 /// (Roadmap H4a) The real shape a GLSL tessellation-control shader's
@@ -3762,6 +3775,100 @@ TEST(CanonicalizeStageTest, SplitsHullEntryCloningCapturedAlloca) {
   // stage-IO signature of its own for this shape (its only content was
   // the hoisted alloca and the barrier, both consumed by the split).
   EXPECT_FALSE(dxil::getEntrySignature(*ControlPoint).has_value());
+}
+
+/// (Roadmap L339) An ordinary HLSL/GLSL local variable computed *before*
+/// the barrier and read back *after* it (`dEQP-VK.tessellation.shader_
+/// input_output.cross_invocation_per_{vertex,patch}_*`'s own `<type> d =
+/// <type>(gl_InvocationID); ...; barrier(); ... = d + ...;` shape) can
+/// fail to be promoted to a pure SSA value by an earlier mem2reg pass
+/// (e.g. when a structured-CFG lowering leaves conditional stores to it),
+/// leaving a real `alloca` whose users are split across *both* sides of
+/// the barrier -- neither `SplitsHullEntryThreadingCapturedSSAValue`'s
+/// ordinary-SSA-value path (`V` here is a `ptr`, not the real scalar
+/// value) nor `SplitsHullEntryCloningCapturedAlloca`'s all-in-Region
+/// clone-only path (some of `%tmp`'s users, the store, lie outside \c
+/// Region) applies. Routing the alloca's own *address* through a
+/// synthetic global (the generic capture mechanism, applied naively)
+/// would have the patch-constant phase -- a separate call, dispatched
+/// once the control-point phase's own call has already returned and its
+/// stack frame has unwound -- dereference a dangling pointer: a real
+/// segfault reproduced by every `cross_invocation_per_vertex_*` CTS case
+/// once the patch-constant phase became genuinely multi-invocation
+/// (roadmap L339) and this dangling read stopped "working" by sheer
+/// accidental timing. The fix captures the alloca's *value* (read right
+/// at the barrier, after the one store that precedes it) by value
+/// through the same synthetic-global mechanism, then clones a fresh,
+/// independent alloca into the patch-constant phase pre-populated with
+/// that captured value -- every in-Region load keeps working unmodified.
+TEST(CanonicalizeStageTest, SplitsHullEntryCapturingMixedUseAlloca) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = external addrspace(8) global [4 x float], !spirv.Decorations !0
+    define void @main() #0 {
+    entry:
+      %tmp = alloca float
+      store float 3.000000e+00, ptr %tmp
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      %reloaded = load float, ptr %tmp
+      store float %reloaded, ptr addrspace(8) @gl_TessLevelOuter
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  std::string VerifyErrors;
+  raw_string_ostream VerifyOS(VerifyErrors);
+  EXPECT_FALSE(verifyModule(*M, &VerifyOS)) << VerifyErrors;
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // Unlike the all-in-Region alloca case, this *does* need a synthetic
+  // capture global -- a matching `Output` (control-point side) /
+  // `Input`, non-`FromInputPatch` (patch-constant side) element pair --
+  // since the alloca's own store lies outside `Region`.
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  const SignatureElement *CapturedOutput = nullptr;
+  for (const SignatureElement &Elt : CPSig->Elements)
+    if (Elt.Direction == SignatureDirection::Output)
+      CapturedOutput = &Elt;
+  ASSERT_TRUE(CapturedOutput);
+  EXPECT_EQ(CapturedOutput->ComponentType, SignatureComponentType::Float);
+
+  std::optional<EntrySignature> PCSig = dxil::getEntrySignature(*PatchConstant);
+  ASSERT_TRUE(PCSig.has_value());
+  const SignatureElement *CapturedInput = nullptr;
+  for (const SignatureElement &Elt : PCSig->Elements)
+    if (Elt.Direction == SignatureDirection::Input)
+      CapturedInput = &Elt;
+  ASSERT_TRUE(CapturedInput);
+  EXPECT_FALSE(CapturedInput->FromInputPatch);
+  EXPECT_EQ(CapturedInput->ComponentType, SignatureComponentType::Float);
+
+  // The patch-constant phase owns a real, independent local `alloca` of
+  // its own, pre-populated with the captured value -- not a reload of
+  // any pointer defined in the control-point phase.
+  const AllocaInst *ClonedAlloca = nullptr;
+  for (Instruction &I : instructions(PatchConstant))
+    if (auto *AI = dyn_cast<AllocaInst>(&I))
+      ClonedAlloca = AI;
+  ASSERT_TRUE(ClonedAlloca);
+
+  for (Instruction &I : instructions(PatchConstant))
+    for (Value *Op : I.operands())
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        EXPECT_EQ(OpI->getFunction(), PatchConstant)
+            << "patch-constant phase must not reference any value still "
+               "defined in the control-point phase";
 }
 
 /// (Roadmap H4f) A no-barrier tessellation-control entry point whose only
