@@ -60,6 +60,8 @@ file.
 
 # Request
 
+The previous agent lost connection.
+
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
