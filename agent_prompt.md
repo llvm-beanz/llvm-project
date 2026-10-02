@@ -60,27 +60,25 @@ file.
 
 # Request
 
-The previous agent lost connection.
-
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(unknown, 27 cases, largest untriaged chunk, best next pick)**
-   Tessellation `user_defined_io` triage -- still not started, carried
-   over many sessions now. Also still open:
-   `shader_input_output`/`misc_draw`/`common_edge`/
-   `matrix_multiplication`/`geometry_interaction`.
-2. **(a few hours each, 9 cases)** Remaining scattered `rasterization`
-   failures, now down to 9 after this session:
+1. **(4 cases, best next pick, a few hours)**
+   `maintenance5.non_strict_line{s,_strip}_{narrow,wide}` -- largest
+   same-looking cluster of the 9 remaining scattered `rasterization`
+   failures. Still untriaged.
+2. **(8 cases remaining after #1, a few hours each)** Rest of the
+   scattered `rasterization` failures:
    `flatshading.{triangle_fan,triangle_strip}`,
    `line_continuity.{line-strip,polygon-mode-lines}`,
-   `maintenance5.non_strict_line{s,_strip}_{narrow,wide}` (4 cases),
-   `provoking_vertex.draw.default.triangle_fan`. Still individually
-   untriaged -- `maintenance5.non_strict_line*` is the largest
-   same-looking cluster (4 cases), pick that first.
-3. **(a few hours, lowest priority, many sessions carried over)** `L265`
-   -- ASTC alpha-decode tie-break (4 block sizes). Needs a Mesa/lavapipe
-   reference-decoder comparison.
+   `provoking_vertex.draw.default.triangle_fan`. Re-verify this count
+   is still exactly 9 before starting -- it wasn't touched by this
+   session's fix (different CTS group), but always re-confirm against
+   a fresh build/run rather than trusting the old number (see this
+   session's own `user_defined_io` lesson above).
+3. **(a few hours, lowest priority, many sessions carried over)**
+   `L265` -- ASTC alpha-decode tie-break (4 block sizes). Needs a
+   Mesa/lavapipe reference-decoder comparison.
 4. **(low priority, out of scope)** `offload-test-suite`'s own
    lit-annotation issues (`spec_const_32_bits.test`/`WaveActiveMax.test`/
    `array_of_matrices.test`).
