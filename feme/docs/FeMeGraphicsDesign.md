@@ -4280,28 +4280,76 @@ cases -- `fractional_odd_spacing` already passed) remains open.** It is
 a distinct algorithm (FeMe's `appendTriangleRingBoundary` uses its own
 ring-based point ordering, unrelated to the quad grid `tessellateQuad`
 fixed above), so this same diagonal-mirroring technique does not
-directly transfer; it needs its own independent root-cause pass. The
-`--deqp-log-images=enable` diagnostic *has* now been run for
-`fill_overlap_triangles_equal_spacing_draw` (this session, after the
-quad fix landed), and the result is a **different shape of defect**
-than the quad domain's: the `ErrorMask` is a single small, solid,
-compact red triangle centered on the domain centroid (roughly a
-40x35px blob out of a 256px-tall image), not a thin staircase strung
-along a discontinuity line. That shape is consistent with the
-*innermost* ring(s) -- where `bridgeRingsByEdge`'s proportional-
-arc-length annulus triangulation is bridging the smallest, most
-visually-compressed bands -- being the most sensitive to any small
-geometric or ordering deviation, but it was not fully root-caused this
-session; `bridgeRingsByEdge`/`bridgeEdge`'s own zigzag strip
-triangulation (`Tessellator.cpp` ~line 141) is the next place to look,
-specifically whether its proportional-arc-length vertex walk between
-two concentric rings produces the same per-triangle `gl_TessCoord`
-interpolation as dEQP's own reference oracle near the centroid, where
-the ring spacing (`CumulativeScale`'s per-ring product) shrinks
-fastest. Re-running the diagnostic was cheap (minutes) and is strongly
-recommended as the *first* step of that future session, to confirm or
-refute this hypothesis with the actual pixel data before writing any
-code. The
+directly transfer; it needs its own independent root-cause pass.
+
+**Update (`L351`): the "diagonal/ordering mismatch at the innermost
+rings" hypothesis this subsection ended on has been tested directly
+and ruled out.** `bridgeRingsByEdge`/`bridgeEdge`'s own proportional-
+arc-length annulus triangulation *is* measurably asymmetric for a
+constant `Mo == Mi + 2` ring-to-ring edge (every bridge in
+`tessellateTriangle`'s own ring recursion except the first,
+boundary-to-first-ring one): it fans nearly the entire edge toward the
+inner ring's own *leading* corner, only reaching the trailing corner
+via one final transition triangle. Mesa's reference `CHWTessellator`
+(`StitchRegular`'s `DIAGONALS_MIRRORED` mode, traced by hand against
+its actual source, including resolving an initially-confusing
+point-count convention difference -- Mesa's own
+`numPointsForOutsideEdge`/`numPointsForInsideEdge` include the shared
+trailing corner as an implicit `+1`, unlike FeMe's own `RingEdges`,
+which excludes it and threads the corner separately as
+`OuterNextCorner`/`InnerNextCorner`) instead splits allegiance evenly:
+a leading trapezoid cap, a first half of diagonals toward the leading
+corner, a mirrored second half toward the trailing corner, a trailing
+trapezoid cap. Implementing this exact pattern as a new
+`bridgeEdgeMirrored`/`bridgeRingsByEdgeMirrored` pair and wiring it
+into every ring-to-ring bridge (keeping the general `bridgeEdge` only
+for the first, boundary-to-first-ring bridge, whose 3 edges can have
+unrelated factors of their own, matching Mesa's own
+`StitchTransition`-vs-`StitchRegular` split) was structurally
+correct -- re-confirmed via the same Euler-formula triangle-count and
+no-triangle-spans-more-than-one-ring-step checks a standalone dump
+tool already used to validate the un-mirrored baseline -- but **did
+not improve the actual CTS result**: still 4/6 failing, and the
+diagnostic's own flagged-pixel count was unchanged or slightly larger
+(956px vs. the prior session's ~770px). More tellingly, the defect's
+own *character* changed: instead of a red/green blend-*ratio*
+mismatch (both sides summing to the same `R+G`), the mismatch became
+an exact green/blue *channel swap* at identical magnitude (e.g.
+`Result=(9,0,246)` vs. `Reference=(9,246,0)`) -- the shared, exactly-
+matching red channel rules out a sub-pixel interpolation-*position*
+difference (which would perturb the magnitude, not just the channel)
+and instead points to the *phase bucket* itself
+(`int(d * numConcentricTriangles) % 3`, the TES's own channel
+selector) flipping between adjacent values for pixels whose
+interpolated `d` sits almost exactly on a phase-band boundary
+(`d == k / 5` for this test's tess levels, vs. FeMe's own ring
+boundaries at `d == k * 2/9` -- different, only-coincidentally-close
+numbers, see this subsection's own earlier note on this). That is a
+**floating-point boundary-tie issue at a ring-seam boundary, not a
+diagonal/topology choice**: the mirrored rewrite changed *which*
+specific triangles straddle such a boundary pixel without eliminating
+the class of boundary itself. This is the same *class* of bug as the
+long-open `L265` ASTC alpha-decode tie-break (a near-exact-boundary
+floating-point rounding disagreement with the reference, not a
+coverage/topology defect), not a smaller variant of the quad domain's
+own `L350` fix. The speculative `bridgeEdgeMirrored` code was
+reverted (no net improvement, and a small regression in this specific
+diagnostic's own pixel count) -- **no code change landed from this
+investigation.** The next session should start from the "floating-
+point boundary tie" angle directly (e.g. instrumenting the exact
+interpolated `d` value and the two candidate phase buckets at a few
+known-mismatching pixels, the same `--deqp-log-images=enable` +
+pixel-sampling methodology already established, to confirm which
+specific floating-point step -- the ring `CumulativeScale` product,
+the barycentric interpolation itself, or the TES's own `int(d * 5)`
+cast -- actually produces the disagreement) rather than the ring-
+spiral/table-driven port plan below, which this update's own negative
+result suggests is very unlikely to be the real fix either (a literal
+port would reproduce Mesa's own topology exactly, but the boundary-tie
+hypothesis predicts the mismatch is about *numerical* agreement at a
+shared boundary value, not which triangles meet there).
+
+The
 rest of this section's analysis of Mesa's reference `CHWTessellator`
 (fetched via `curl` from `gitlab.freedesktop.org/mesa/mesa`, a close
 derivative of Microsoft's D3D reference tessellator) is retained below
@@ -4351,11 +4399,15 @@ was the only path forward. `L350`'s own diagnostic step has now been
 repeated for the triangle domain too (`fill_overlap_triangles_equal_
 spacing_draw`, `--deqp-log-images=enable`): the ErrorMask is a small,
 compact, centroid-centered blob, not a large-scale topology mismatch --
-so a literal port is **not** expected to be needed here either. Start
-the next triangle-domain session by auditing `bridgeRingsByEdge`/
-`bridgeEdge`'s proportional-arc-length zigzag triangulation (see the
-Status subsection above) before reaching for this section's ring-
-spiral/table-driven port plan below.
+so a literal port is **not** expected to be needed here either. That
+audit has since happened (`L351`, see the Status subsection above): a
+mirrored-topology rewrite matching the reference's own
+`StitchRegular`/`DIAGONALS_MIRRORED` connectivity did not improve the
+actual CTS result, redirecting the leading hypothesis to a floating-
+point boundary-tie issue (same class as `L265`) rather than a
+diagonal/topology choice -- a literal port of this section's own
+ring-spiral/table-driven plan remains unlikely to be the fix for the
+same reason.
 
 ### G6: Amplification and mesh shading
 

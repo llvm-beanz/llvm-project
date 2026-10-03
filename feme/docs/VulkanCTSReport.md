@@ -12312,3 +12312,105 @@ open). 0 new regressions anywhere in the group.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal tessellation-triangulation correctness fix, no
 feature/extension-surface change.
+
+## L351: `fill_overlap_triangles_*` mirrored-stitch hypothesis tested and ruled out (4 cases, still open)
+
+Picked up handoff item 1 ("root-cause `fill_overlap_triangles_*`'s
+centroid-blob defect") following `L350`'s own next-step guidance:
+re-ran the `--deqp-log-images=enable` diagnostic for
+`fill_overlap_triangles_equal_spacing_draw` and sampled pixel colors
+directly inside the ErrorMask blob, confirming `Result`/`Reference`
+are both same-magnitude red/green blends (`R + G == 255` on both
+sides) -- a blend-*ratio* mismatch, not a topology gap/overlap/wrong-
+terminal-color. A standalone dump tool, calling
+`feme::graphics::tessellate` directly against FeMe's own
+`libFeMeGraphics.a`, confirmed the generated ring/point/triangle
+structure for the failing case's tess levels satisfies the
+Euler-formula invariant (`B + 2*I - 2`) exactly, and that no generated
+triangle spans more than one ring's worth of the TES's own
+`gl_TessCoord`-derived phase coordinate `d` -- ruling out any gross
+span anomaly.
+
+### Tracing the reference algorithm
+
+Fetched Mesa's reference `CHWTessellator`
+(`gitlab.freedesktop.org/mesa/mesa`, `src/gallium/auxiliary/
+tessellator/tessellator.cpp`) and traced `TriGenerateConnectivity`'s
+`StitchRegular`/`DIAGONALS_MIRRORED` connectivity pattern by hand,
+including resolving an initially-confusing point-count convention
+mismatch: Mesa's own `numPointsForOutsideEdge`/`numPointsForInsideEdge`
+counts include the shared trailing corner as an implicit `+1` (per
+`TriGeneratePoints`'s own "don't include end, since next edge starts
+with it" comment), unlike FeMe's own `RingEdges`, which excludes the
+corner and threads it separately as `OuterNextCorner`/
+`InnerNextCorner`. Once that convention difference was accounted for,
+the reference's actual pattern for a `Mo == Mi + 2` ring-to-ring edge
+(the shape every bridge in `tessellateTriangle`'s own ring recursion
+has, except the first, boundary-to-first-ring one) is: a leading
+"trapezoid" cap triangle, a first half of diagonals fanning toward the
+*leading* shared corner, a mirrored second half fanning toward the
+*trailing* corner instead, and a trailing trapezoid cap -- a
+genuinely symmetric pattern. FeMe's existing `bridgeEdge`, by
+contrast, uses a single, non-mirrored monotonic arc-length walk that,
+for this same constant-offset shape, ends up fanning nearly the
+*entire* edge toward the leading corner alone (the trailing corner
+only entering via one final transition triangle) -- a real, confirmed
+topological asymmetry versus the reference.
+
+### Testing the hypothesis -- ruled out
+
+Implemented the reference's exact pattern as a new
+`bridgeEdgeMirrored`/`bridgeRingsByEdgeMirrored` pair in
+`Tessellator.cpp`, wired into `tessellateTriangle`'s main ring loop
+for every ring-to-ring bridge except the first (which keeps the
+general `bridgeEdge`, matching the reference's own
+`StitchTransition`-vs-`StitchRegular` split, since the first bridge's
+3 edges can have unrelated factors of their own). `ninja check-feme`:
+3,500 Passed/61 Unsupported/0 Failed, 0 regressions, and the new
+function's own structural correctness was re-confirmed via the same
+Euler-formula/span-anomaly dump-tool checks used on the baseline.
+
+**Re-running the actual failing CTS case showed no improvement**:
+still 4/6 `fill_overlap_triangles_*` failing
+(`equal_spacing`/`fractional_even_spacing`, each `_draw`/
+`_draw_indirect`), and the diagnostic's own flagged-pixel count was
+unchanged or slightly larger (956px vs. the prior session's ~770px).
+More tellingly, the defect's own *character* changed: instead of a
+red/green blend-ratio mismatch, the mismatch became an exact
+green/blue *channel swap* at identical magnitude (e.g.
+`Result=(9,0,246)` vs. `Reference=(9,246,0)` at one sampled pixel,
+`(18,0,237)` vs. `(18,237,0)` at another) -- the shared, exactly-
+matching red channel across both rules out a sub-pixel interpolation-
+*position* difference (which would perturb the magnitude too, not
+just the channel) and instead points to the *phase bucket* itself
+(`int(d * numConcentricTriangles) % 3`, the TES's own color-channel
+selector) flipping between adjacent values for pixels whose
+interpolated `d` sits almost exactly on a phase-band boundary
+(`d == k / 5` for this test's own tess levels, vs. FeMe's ring
+boundaries at `d == k * 2/9` -- different, only coincidentally close
+numbers). That is a **floating-point boundary-tie issue at a
+ring-seam boundary, not a diagonal/topology choice**: the mirrored
+rewrite changed *which* specific triangles straddle such a boundary
+pixel, without eliminating the class of boundary itself. This is the
+same *class* of bug as the long-open `L265` ASTC alpha-decode
+tie-break (a near-exact-boundary floating-point rounding disagreement
+with the reference, not a coverage/topology defect).
+
+The speculative `bridgeEdgeMirrored` change was reverted (`git
+checkout --`, confirmed clean `git diff --stat`) since it provided no
+measurable improvement on the actual target and slightly regressed
+this specific diagnostic's own pixel count -- **no code change landed
+from this investigation.**
+
+### CTS impact
+
+No change: `fill_overlap_triangles_*` remains 2/6 Pass (was 2/6),
+4 still Fail. `ninja check-feme` baseline re-confirmed unaffected
+(3,500 Passed/61 Unsupported/0 Failed) since the speculative change
+was reverted before any commit.
+
+`FeMeGraphicsDesign.md`'s own Status subsection updated with the full
+ruled-out-hypothesis writeup and the new leading hypothesis (a
+floating-point boundary-tie issue, same class as `L265`) for the next
+session. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed -- no code landed.
