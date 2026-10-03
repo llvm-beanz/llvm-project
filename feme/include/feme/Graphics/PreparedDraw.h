@@ -229,6 +229,19 @@ struct PreparedDraw {
   /// rule. Empty for a single-sample pipeline, which has nothing to
   /// resolve.
   llvm::MutableArrayRef<AttachmentView> ResolveAttachments;
+  /// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own resolve targets,
+  /// mirroring `ResolveAttachments`' role for color but for depth/stencil:
+  /// a non-empty `Depth`/`Stencil::Data` names the single-sample
+  /// attachment half that half of `DepthStencil` resolves into once every
+  /// draw in this `PreparedDraw` completes. Only
+  /// `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` is implemented -- sample 0's own
+  /// stored value is copied directly (`Executor.cpp`'s resolve step reuses
+  /// `readDepth`/`writeDepth`/`readStencil`/`writeStencil`'s existing
+  /// per-sample addressing rather than any new averaging path, unlike
+  /// color's box filter). Default-constructed (empty `Data`) for a
+  /// single-sample pipeline or a multisample one with no depth/stencil
+  /// resolve attachment bound.
+  DepthStencilAttachment DepthStencilResolve;
   /// Optional accumulator for the exact number of samples this draw's
   /// fragments leave surviving the final depth/stencil test -- the quantity
   /// `VK_QUERY_TYPE_OCCLUSION` queries report. Null when no caller needs it.

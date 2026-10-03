@@ -1385,6 +1385,18 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
       Binding.Depth = makeView(Index, /*UseStencilOps=*/false);
     if (isSupportedStencilAttachmentFormat(Format))
       Binding.Stencil = makeView(Index, /*UseStencilOps=*/true);
+    // (Roadmap K6) `VK_KHR_depth_stencil_resolve`: each half independently
+    // gets a `ResolveView` only when its own resolve mode is not
+    // `VK_RESOLVE_MODE_NONE`, matching `VkSubpassDescriptionDepthStencilResolve`'s
+    // per-aspect semantics (e.g. a depth-only resolve on a combined
+    // `D24_UNORM_S8_UINT` attachment leaves the stencil half un-resolved).
+    if (Desc.DepthStencilResolveAttachment != VK_ATTACHMENT_UNUSED) {
+      ImageView *ResolveTarget = Attachments[Desc.DepthStencilResolveAttachment];
+      if (Binding.Depth && Desc.DepthResolveMode != VK_RESOLVE_MODE_NONE)
+        Binding.Depth->ResolveView = ResolveTarget;
+      if (Binding.Stencil && Desc.StencilResolveMode != VK_RESOLVE_MODE_NONE)
+        Binding.Stencil->ResolveView = ResolveTarget;
+    }
   }
   return Binding;
 }
@@ -1823,6 +1835,13 @@ struct ResolvedDrawAttachments {
   std::vector<feme::graphics::AttachmentView> Attachments;
   std::vector<feme::graphics::AttachmentView> ResolveAttachments;
   feme::graphics::DepthStencilAttachment DepthStencil;
+  /// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own resolve targets,
+  /// mirroring `ResolveAttachments`' role for color but for depth/stencil:
+  /// `Depth`/`Stencil` are each either the resolved `AttachmentView` for
+  /// that half (its own `RenderTargetView::ResolveView` was set, `Binding.
+  /// Depth`/`Binding.Stencil` non-null) or left default-constructed (empty
+  /// `Data`) when that half is not resolving.
+  feme::graphics::DepthStencilAttachment DepthStencilResolve;
   std::vector<feme::graphics::AttachmentView> SubpassInputs;
   /// (Roadmap H7p) `SubpassInputs[I]`'s own real sample count -- see
   /// `buildSubpassInputHeap`'s own comment for why this cannot be assumed
@@ -1908,6 +1927,13 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     if (!Attachment)
       return Attachment.takeError();
     Resolved.DepthStencil.Depth = *Attachment;
+    if (Gfx.Binding.Depth->ResolveView) {
+      Expected<feme::graphics::AttachmentView> ResolveAttachment =
+          resolveAttachmentView(Gfx.Binding.Depth->ResolveView);
+      if (!ResolveAttachment)
+        return ResolveAttachment.takeError();
+      Resolved.DepthStencilResolve.Depth = *ResolveAttachment;
+    }
   }
   if (Gfx.Binding.Stencil) {
     Expected<feme::graphics::AttachmentView> Attachment =
@@ -1915,6 +1941,13 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     if (!Attachment)
       return Attachment.takeError();
     Resolved.DepthStencil.Stencil = *Attachment;
+    if (Gfx.Binding.Stencil->ResolveView) {
+      Expected<feme::graphics::AttachmentView> ResolveAttachment =
+          resolveAttachmentView(Gfx.Binding.Stencil->ResolveView);
+      if (!ResolveAttachment)
+        return ResolveAttachment.takeError();
+      Resolved.DepthStencilResolve.Stencil = *ResolveAttachment;
+    }
   }
 
   // (Roadmap H2h) `Gfx.Binding.Inputs` -- a classic `VkRenderPass`'s
@@ -1970,6 +2003,8 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
       Resolved.ResolveAttachments;
   const feme::graphics::DepthStencilAttachment &DepthStencil =
       Resolved.DepthStencil;
+  const feme::graphics::DepthStencilAttachment &DepthStencilResolve =
+      Resolved.DepthStencilResolve;
   const std::vector<feme::graphics::AttachmentView> &SubpassInputs =
       Resolved.SubpassInputs;
   const std::vector<uint32_t> &SubpassInputSampleCounts =
@@ -2061,6 +2096,7 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
     std::vector<feme::graphics::AttachmentView> ViewSubpassInputs;
     std::vector<feme::graphics::AttachmentView> ViewResolveAttachments;
     feme::graphics::DepthStencilAttachment ViewDepthStencil;
+    feme::graphics::DepthStencilAttachment ViewDepthStencilResolve;
     if (IsMultiview) {
       ViewAttachments.reserve(Attachments.size());
       for (const feme::graphics::AttachmentView &A : Attachments)
@@ -2084,11 +2120,16 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
           sliceAttachmentLayer(DepthStencil.Depth, ViewIndex);
       ViewDepthStencil.Stencil =
           sliceAttachmentLayer(DepthStencil.Stencil, ViewIndex);
+      ViewDepthStencilResolve.Depth =
+          sliceAttachmentLayer(DepthStencilResolve.Depth, ViewIndex);
+      ViewDepthStencilResolve.Stencil =
+          sliceAttachmentLayer(DepthStencilResolve.Stencil, ViewIndex);
     } else {
       ViewAttachments = Attachments;
       ViewSubpassInputs = SubpassInputs;
       ViewResolveAttachments = ResolveAttachments;
       ViewDepthStencil = DepthStencil;
+      ViewDepthStencilResolve = DepthStencilResolve;
     }
 
     std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
@@ -2107,6 +2148,7 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
     Prepared.Attachments = ViewAttachments;
     Prepared.ResolveAttachments = ViewResolveAttachments;
     Prepared.DepthStencil = ViewDepthStencil;
+    Prepared.DepthStencilResolve = ViewDepthStencilResolve;
     Prepared.SubpassInputHeap = SubpassInputHeap;
     Prepared.ViewIndex = ViewIndex;
 

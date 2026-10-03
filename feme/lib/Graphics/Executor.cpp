@@ -6175,6 +6175,62 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
   }
 
+  // --- Depth/stencil resolve (roadmap K6): `VK_KHR_depth_stencil_resolve`'s
+  // `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`, the only mode this executor
+  // implements (and the only one every implementation must support) --
+  // sample 0's own stored value is copied directly into the single-sample
+  // resolve attachment, once every draw above has run. Unlike color's box-
+  // filter average above, this reuses `readDepth`/`writeDepth`/
+  // `readStencil`/`writeStencil`'s existing per-sample addressing rather
+  // than a new unpack/pack path, since "copy sample 0 verbatim" needs no
+  // format-specific arithmetic. Depth and stencil resolve independently
+  // (one may be bound without the other, matching
+  // `VkSubpassDescriptionDepthStencilResolve`'s per-aspect modes).
+  if (!Draw.DepthStencilResolve.Depth.Data.empty()) {
+    if (Draw.DepthStencil.Depth.Data.empty())
+      return createStringError(inconvertibleErrorCode(),
+                               "the draw has a depth resolve attachment but "
+                               "no depth attachment to resolve from");
+    const AttachmentView &Src = Draw.DepthStencil.Depth;
+    AttachmentView Dst = Draw.DepthStencilResolve.Depth;
+    for (uint32_t Layer = 0; Layer != Src.ArrayLayers; ++Layer) {
+      AttachmentView SrcLayer = sliceAttachmentLayer(Src, Layer);
+      AttachmentView DstLayer = sliceAttachmentLayer(Dst, Layer);
+      for (uint32_t PY = 0; PY != Src.Height; ++PY)
+        for (uint32_t PX = 0; PX != Src.Width; ++PX) {
+          Expected<float> Value =
+              readDepth(SrcLayer, SampleCount, PX, PY, /*Sample=*/0);
+          if (!Value)
+            return Value.takeError();
+          if (Error E = writeDepth(DstLayer, /*SampleCount=*/1, PX, PY,
+                                   /*Sample=*/0, *Value))
+            return E;
+        }
+    }
+  }
+  if (!Draw.DepthStencilResolve.Stencil.Data.empty()) {
+    if (Draw.DepthStencil.Stencil.Data.empty())
+      return createStringError(inconvertibleErrorCode(),
+                               "the draw has a stencil resolve attachment "
+                               "but no stencil attachment to resolve from");
+    const AttachmentView &Src = Draw.DepthStencil.Stencil;
+    AttachmentView Dst = Draw.DepthStencilResolve.Stencil;
+    for (uint32_t Layer = 0; Layer != Src.ArrayLayers; ++Layer) {
+      AttachmentView SrcLayer = sliceAttachmentLayer(Src, Layer);
+      AttachmentView DstLayer = sliceAttachmentLayer(Dst, Layer);
+      for (uint32_t PY = 0; PY != Src.Height; ++PY)
+        for (uint32_t PX = 0; PX != Src.Width; ++PX) {
+          Expected<uint8_t> Value =
+              readStencil(SrcLayer, SampleCount, PX, PY, /*Sample=*/0);
+          if (!Value)
+            return Value.takeError();
+          if (Error E = writeStencil(DstLayer, /*SampleCount=*/1, PX, PY,
+                                     /*Sample=*/0, *Value))
+            return E;
+        }
+    }
+  }
+
   return Error::success();
 }
 
