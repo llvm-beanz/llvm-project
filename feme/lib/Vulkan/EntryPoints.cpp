@@ -338,18 +338,25 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: {
-      // (roadmap C6) The promoted twin of the resolve-mode half of
+      // (roadmap K6) The promoted twin of the resolve-mode half of
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
-      // both must agree -- `VK_KHR_depth_stencil_resolve` itself is not
-      // implemented (only the ordinary color-attachment resolve this ICD
-      // already supports is), so `VK_RESOLVE_MODE_NONE` is the honest
-      // value rather than the `SAMPLE_ZERO` bit a real implementation
-      // would need.
+      // both must agree. Only `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` is
+      // implemented (`RenderPass.cpp`'s `vkCreateRenderPass2`/
+      // `Executor.cpp`'s depth/stencil resolve step) -- the one mode every
+      // `VK_KHR_depth_stencil_resolve` implementation must support, so
+      // advertising only it is truthful even though `AVERAGE`/`MIN`/`MAX`
+      // remain unimplemented. `independentResolveNone`/`independentResolve`
+      // stay `VK_FALSE`: with only one non-`NONE` mode to choose from,
+      // this ICD never lets the stencil resolve mode differ from the
+      // depth one when both are requested, the most conservative legal
+      // answer.
       auto *DepthStencilResolve =
           reinterpret_cast<VkPhysicalDeviceDepthStencilResolveProperties *>(
               Base);
-      DepthStencilResolve->supportedDepthResolveModes = VK_RESOLVE_MODE_NONE;
-      DepthStencilResolve->supportedStencilResolveModes = VK_RESOLVE_MODE_NONE;
+      DepthStencilResolve->supportedDepthResolveModes =
+          VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+      DepthStencilResolve->supportedStencilResolveModes =
+          VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
       DepthStencilResolve->independentResolveNone = VK_FALSE;
       DepthStencilResolve->independentResolve = VK_FALSE;
       break;
@@ -363,19 +370,21 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   sizeof(Info.DriverName));
       std::memcpy(Props12->driverInfo, Info.DriverInfo,
                   sizeof(Info.DriverInfo));
-      // (roadmap C6) Every remaining field is written explicitly, for the
-      // same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
-      // VULKAN_1_2_FEATURES` documents. None of these reflect a real
+      // (roadmap C6/K6) Every remaining field is written explicitly, for
+      // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // VULKAN_1_2_FEATURES` documents. Most of these reflect no real
       // capability this ICD implements (no explicit SPIR-V float-controls
-      // handling, no `VK_EXT_descriptor_indexing`, no
-      // `VK_KHR_depth_stencil_resolve`), so every one is the conservative
-      // "least capable, always-safe" value rather than an aspirational
-      // one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE` (every bit
-      // width must share the same float-controls execution mode) and
-      // `VK_RESOLVE_MODE_NONE` (no resolve mode beyond the ordinary color
-      // resolve this ICD already implements) rather than the `SAMPLE_ZERO`
-      // bit a real `VK_KHR_depth_stencil_resolve` implementation would
-      // need to support. See `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // handling, no `VK_EXT_descriptor_indexing`), so every one of those
+      // is the conservative "least capable, always-safe" value rather than
+      // an aspirational one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE`
+      // (every bit width must share the same float-controls execution
+      // mode). `supportedDepthResolveModes`/`supportedStencilResolveModes`
+      // below are the one exception: `VK_KHR_depth_stencil_resolve` (roadmap
+      // K6) is now implemented for `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`, so
+      // these advertise that one real bit rather than `NONE` -- see
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES`
+      // above's comment, which both structs must agree with. See
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
       // FLOAT_CONTROLS_PROPERTIES` above's comment for why
       // `shaderRoundingModeRTZFloat{16,32,64}`/
       // `shaderDenormFlushToZeroFloat{16,32,64}` stay `VK_FALSE` too, despite
@@ -451,8 +460,8 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->maxDescriptorSetUpdateAfterBindSampledImages = 96;
       Props12->maxDescriptorSetUpdateAfterBindStorageImages = 24;
       Props12->maxDescriptorSetUpdateAfterBindInputAttachments = 0;
-      Props12->supportedDepthResolveModes = VK_RESOLVE_MODE_NONE;
-      Props12->supportedStencilResolveModes = VK_RESOLVE_MODE_NONE;
+      Props12->supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+      Props12->supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
       Props12->independentResolveNone = VK_FALSE;
       Props12->independentResolve = VK_FALSE;
       Props12->filterMinmaxSingleComponentFormats = VK_FALSE;
