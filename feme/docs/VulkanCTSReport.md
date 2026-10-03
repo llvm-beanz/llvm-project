@@ -13042,3 +13042,46 @@ device). The remaining 4 `Fail` cases are exactly the CTS
 test-registration gap above (`*_testing_depth` compatibility variants
 against the unsupported `X8_D24_UNORM_PACK32` format) -- out of scope,
 not a regression, not something FeMe needs to address.
+
+## L358: fixed -- `Event::Signaled` data race (found via code audit, no CTS failure)
+
+While auditing other Vulkan-layer objects for the same
+"stale synchronous-execution assumption" bug class previously found in
+`QueryPool` (`L354`), `class Event` in `Sync.h` was found to have a plain
+unsynchronized `bool Signaled` member. It is written from the host thread
+(`vkSetEvent`/`vkResetEvent` in `Sync.cpp`) and from a `QueueExecutor`
+worker thread (`Cmd.Events[0]->set()`/`reset()` in `CommandBuffer.cpp`, as
+part of a submitted command buffer's deferred execution), and read from
+both sides too (`vkGetEventStatus` on the host, `runWaitEvents`'s
+`isSignaled()` poll on the worker). This is a genuine C++ data race
+(undefined behavior), unlike `Semaphore` right below it in the same file,
+which already correctly uses `std::mutex` + `std::condition_variable` for
+the identical host/worker cross-thread shape.
+
+This was **not** caught by any CTS failure -- plain `bool` read/write
+races on x86-64 happen to "work" in practice far more often than not, and
+no flaky `dEQP-VK.synchronization.*event*` failure had ever been observed.
+It was found purely by proactively auditing for the bug class, not by
+triaging a failure.
+
+Fixed by changing `Signaled` to `std::atomic<bool>` with
+acquire/release ordering (a full mutex isn't needed since
+`vkCmdWaitEvents`'s `runWaitEvents` only does a single
+poll-and-error-if-unsignaled; it never blocks/spins).
+
+New unit test: `EventTest.SetFromAnotherThreadIsObservedByIsSignaled` in
+`SyncTest.cpp`, mirroring the `QueryPoolTest` precedent (`L354`): a
+`std::thread` setter with a short delay, polled by the main thread until
+`isSignaled()` observes `true` or a 5-second timeout elapses.
+`ninja check-feme`: 3,518 Passed/61 Unsupported/0 Failed (3,579 total, +1
+new test), 0 regressions.
+
+### CTS impact
+
+`dEQP-VK.synchronization.*event*` (1,642 cases): 1642/1642 Pass, 0
+Fail/NotSupported. `dEQP-VK.api.*event*` (31 cases): 11 Pass/20
+NotSupported (unrelated optional extensions)/0 Fail. No count change
+from before the fix in either group -- expected, since this is a pure
+thread-safety hardening fix with no behavioral change in the
+already-synchronized-by-luck single-threaded case; its value is
+eliminating undefined behavior, not fixing an observed CTS failure.
