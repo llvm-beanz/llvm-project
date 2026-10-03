@@ -1008,6 +1008,52 @@ Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
   }
 }
 
+/// (roadmap L353) Rounds \p Value to the exact float it would become after
+/// a store-then-load round trip through \p Format's native representation
+/// -- a no-op for `D32_FLOAT` (no quantization at all), but a real, lossy
+/// snap-to-grid for every fixed-point depth format (`D16_UNORM`'s 16-bit
+/// grid, `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`'s 24-bit one). The
+/// depth *test* (`testDepthStencil` below) must run this on the incoming
+/// fragment's own interpolated depth before comparing it against the
+/// attachment's already-quantized stored value: comparing an unquantized
+/// float against a quantized one means a fragment that re-renders the
+/// exact same surface in a later pass (same conceptual depth, freshly
+/// interpolated) can spuriously fail a `>=`/`<=` test purely because the
+/// *stored* value happened to round away from the *new* value's own
+/// direction -- not because the surfaces actually differ in depth. Real
+/// fixed-point depth hardware avoids this by testing in the storage
+/// format's own quantized domain on both sides, which this mirrors.
+Expected<float> quantizeDepthForFormat(cpu::ResourceFormat Format,
+                                      float Value) {
+  switch (Format) {
+  case cpu::ResourceFormat::D32_FLOAT:
+    return Value;
+  case cpu::ResourceFormat::D16_UNORM: {
+    uint16_t V = static_cast<uint16_t>(
+        std::lround(std::clamp(Value, 0.0f, 1.0f) * 65535.0f));
+    return V / 65535.0f;
+  }
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT:
+  case cpu::ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    size_t Size =
+        Format == cpu::ResourceFormat::D24_UNORM_S8_UINT ? 4 : 8;
+    std::array<uint8_t, 8> Scratch{};
+    if (Error E = packDepthClear(
+            Format, Value, MutableArrayRef<uint8_t>(Scratch.data(), Size)))
+      return std::move(E);
+    double D;
+    if (Error E = unpackDepth(
+            Format, ArrayRef<uint8_t>(Scratch.data(), Size), D))
+      return std::move(E);
+    return static_cast<float>(D);
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth attachment format is not yet supported "
+                             "(mechanical, added on demand)");
+  }
+}
+
 Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
                  int32_t PY, uint32_t Sample, float Value) {
   size_t Idx = ((size_t)PY * Depth.Width + PX) * SampleCount + Sample;
@@ -1229,7 +1275,15 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
         readDepth(DepthAttachment, SampleCount, PX, PY, Sample);
     if (!OldDepth)
       return OldDepth.takeError();
-    DepthPass = compareOp(Depth.Compare, NewDepth, *OldDepth);
+    // (roadmap L353) Quantize the incoming fragment's own depth to the
+    // attachment's storage domain before comparing -- see
+    // `quantizeDepthForFormat`'s own comment for why comparing it
+    // unquantized against the already-quantized `OldDepth` is wrong.
+    Expected<float> NewDepthQuantized =
+        quantizeDepthForFormat(DepthAttachment.Format, NewDepth);
+    if (!NewDepthQuantized)
+      return NewDepthQuantized.takeError();
+    DepthPass = compareOp(Depth.Compare, *NewDepthQuantized, *OldDepth);
   }
 
   if (!DepthPass) {

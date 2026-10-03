@@ -3621,6 +3621,59 @@ TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
 }
 
+// Roadmap L353: a `D16_UNORM` depth attachment already holding the
+// 16-bit-UNORM-quantized value of 0.5 (0x8000/65535 ~= 0.500007629, the
+// nearest representable grid point above the exact 32767.5 tie) must
+// still pass a `GREATER_OR_EQUAL` depth test against a fresh draw whose
+// own interpolated (unquantized) depth is the exact float 0.5 -- the two
+// values represent the same conceptual depth, re-rendering the same
+// surface in a later pass, and the incoming fragment's depth must be
+// quantized to the attachment's own storage grid before the comparison
+// for the test to see that (`dEQP-VK.query_pool.occlusion_query.
+// get_results_conservative_size_32_wait_query_with_availability_draw_
+// triangles`'s own failure mode before this fix: the redraw's `d=0.5`
+// spuriously compared less than the stored `0.500007629`).
+TEST(ExecutorTest, DepthTestQuantizesIncomingDepthBeforeComparingAgainstD16UnormAttachment) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::GreaterEqual;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.5f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.5f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  // A 4x4 `D16_UNORM` depth attachment, pre-seeded with the exact
+  // on-disk representation an earlier draw of depth 0.5 would have
+  // produced via `writeDepth`'s own `lround(0.5 * 65535)` rounding --
+  // 32768, not the unreachable exact tie 32767.5.
+  std::array<uint16_t, 16> Depth16Storage;
+  Depth16Storage.fill(32768);
+
+  PreparedDraw Draw = Scene.prepare();
+  Draw.DepthStencil.Depth = AttachmentView{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(Depth16Storage.data()),
+                      Depth16Storage.size() * sizeof(uint16_t)),
+      cpu::ResourceFormat::D16_UNORM, 4, 4};
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // The depth test must pass (0.5's own quantized form is
+    // greater-or-equal to itself), so every texel is shaded red...
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    // ...and the depth attachment is rewritten to the very same
+    // quantized value, not left or corrupted.
+    EXPECT_EQ(Depth16Storage[I], 32768) << "texel " << I;
+  }
+}
+
 // Roadmap H2b: a depth-only pipeline (zero color attachments, no fragment
 // shader color output) is legal Vulkan (`dEQP-VK.multiview.depth_without_
 // fragment_shader`'s own shape) and must render successfully rather than
