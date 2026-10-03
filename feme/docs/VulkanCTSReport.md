@@ -12555,3 +12555,182 @@ group, and no `fill_overlap_*` case appears in the failure list.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal tessellator floating-point correctness fix, no
 new feature/extension surface.
+
+## L353: fixed -- `D16_UNORM` depth-test quantization asymmetry, `query_pool.occlusion_query.*` (181 of a 343-case broader sweep)
+
+### Background
+
+The prior handoff's item 4 (an overdue broader-than-tessellation CTS
+sweep) had never run to completion. This session launched it against
+~30 never-before-sampled top-level groups (excluding `binding_model`,
+whose own case count is enormous enough to need a dedicated run). The
+background process died mid-run across an earlier context-compaction
+boundary, but the partial log (240,182 cases) was still useful: 343
+Fail/6,326 Pass/233,510 NotSupported, with `dEQP-VK.query_pool.
+occlusion_query.*` the single largest cluster by far (181 of 343).
+
+### Root cause
+
+Instrumented `testDepthStencil` (`Executor.cpp`) with an env-var-gated
+`fprintf` dump of every depth comparison's old/new values, rebuilt
+(ccache, single-TU + link, ~20s), and ran one isolated failing case
+(`copy_results_conservative_size_32_wait_query_with_availability_draw_
+triangles`) with the var set. `awk`/`sort`/`uniq -c` on ~16,500
+resulting lines found the exact pattern: `old=0.500007629` vs.
+`new=0.5`. The test draws a triangle at depth 0.5, then redraws part
+of it (inside the query-1 scope) at the same depth 0.5 with a
+`VK_COMPARE_OP_GREATER_OR_EQUAL` test. `0.5 * 65535 = 32767.5` is an
+exact tie; `writeDepth`'s own `std::lround`-based `D16_UNORM`
+quantization rounds half-away-from-zero, storing `32768`
+(`0.500007629`), not `32767`. The redraw's freshly-interpolated
+(unquantized) `0.5` then compares `0.5 >= 0.500007629`, which is
+false -- a spurious depth-test failure even though both draws
+represent the exact same conceptual depth. Real fixed-point depth
+hardware avoids this entirely by testing in the storage format's own
+quantized domain on both sides, never comparing a raw float against an
+already-quantized stored value.
+
+### Fix
+
+Added `quantizeDepthForFormat(ResourceFormat, float) -> Expected<float>`
+(`Executor.cpp`, just before `writeDepth`): a no-op for `D32_FLOAT`
+(no quantization grid), the same `lround`-based 16-bit UNORM snap
+`writeDepth` itself already uses for `D16_UNORM`, and a
+`packDepthClear`/`unpackDepth` round-trip through a scratch buffer for
+the two combined depth-stencil formats (`D24_UNORM_S8_UINT`/
+`D32_FLOAT_S8X24_UINT`). `testDepthStencil`'s depth-test branch now
+quantizes the incoming fragment's own interpolated depth through this
+helper before calling `compareOp`, instead of comparing the raw
+unquantized value against the attachment's already-quantized
+`OldDepth`.
+
+Added `ExecutorTest.
+DepthTestQuantizesIncomingDepthBeforeComparingAgainstD16UnormAttachment`:
+a `D16_UNORM` attachment pre-seeded with `32768` (`0.5`'s own
+quantized storage representation), then a draw at raw depth `0.5`
+with `GreaterEqual` -- confirmed it fails without the fix (temporary
+one-line revert of the quantization call) and passes with it.
+`ninja check-feme`: 3,506 Passed/61 Unsupported/0 Failed (+1 new
+test), 0 regressions.
+
+### CTS impact
+
+See `L354` below for the combined re-run of the full group: this fix
+alone resolves the `copy_results_*` sub-family (device-side
+`vkCmdCopyQueryPoolResults`); the `get_results_*` sub-family (host-side
+`vkGetQueryPoolResults`) hit a separate crash (`L354`) that blocked a
+clean full-group confirmation until both fixes landed together.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal depth-test correctness fix, no feature/
+extension-surface change.
+
+## L354: fixed -- `vkGetQueryPoolResults` `VK_QUERY_RESULT_WAIT_BIT` race/crash, `query_pool.occlusion_query.get_results_*` (remaining cases)
+
+### Background
+
+Verifying `L353`'s fix against the full `query_pool.occlusion_query.*`
+group crashed partway through, on a different sub-case:
+`get_results_conservative_size_32_wait_query_with_availability_draw_
+triangles`. Reproduced deterministically in isolation (5/5 runs
+segfaulted, exit 139).
+
+### Investigation
+
+A first `gdb -batch -ex run -ex "bt full"` pass (release build, no
+debug info) showed the crash inside `feme::vulkan::QueryPool::begin`,
+called from a `QueueExecutor::run()` worker thread -- consistent with
+either a null/dangling `QueryPool*` or a genuine cross-thread race,
+since FeMe's queue-submission execution model has been genuinely
+asynchronous (one worker thread per `VkQueue`) since roadmap
+`L228(h)/(i)`. Added a temporary diagnostic
+`assert(Cmd.TargetQueryPool && ...)` in `CommandBuffer.cpp`'s
+`BeginQuery` case; it never fired, and the crash signature then became
+non-deterministic (sometimes a clean exit 0 with a truncated `.qpa`,
+sometimes the same segfault) -- pointing away from a simple null
+pointer and toward either a timing-sensitive race or stale on-disk
+state.
+
+Found and removed a stale `shadercache.bin` in `deqp-vk`'s own working
+directory (a leftover shader-compile cache from an earlier,
+differently-built run in this same session) -- after removing it, the
+crash became **fully deterministic**: always a `SIGABRT` via
+`llvm_unreachable("unhandled VkImageViewType")` in
+`ImageView::dimension()` (`Image.cpp`), not a segfault. Rebuilt the
+two relevant translation units (`CommandBuffer.cpp`, manually, with
+`-O0 -g`, via a captured-and-edited `ninja -t commands` compile line,
+then a manual relink -- avoiding a full `-g` reconfigure) to get a real
+backtrace: `applyClear` (clearing the depth attachment on
+`BeginRendering`) -> `resolveAttachmentView` -> `ImageView::dimension()`
+reading a corrupted `ViewType` from a dangling `ImageView*`, running on
+a `QueueExecutor` worker thread mid-command-buffer-execution while
+some other code had already destroyed that attachment.
+
+Traced the actual root cause to `QueryPool.cpp`'s own
+`vkGetQueryPoolResults`: its comment claimed "this ICD's synchronous
+execution model ... never needs to actually wait" for
+`VK_QUERY_RESULT_WAIT_BIT` -- true before `L228(h)/(i)`, stale since.
+The function sampled `QueryPool::isAvailable` exactly once on the
+calling host thread and returned `VK_NOT_READY` if the query's ending
+command buffer hadn't finished executing on its own worker thread yet
+-- exactly this test's own observed failure text
+("`getQueryPoolResults returned VK_NOT_READY, but results should be
+already available`"). The CTS test then destroyed its render targets
+believing all submitted work had completed (a spec-legal "submit, then
+call `vkGetQueryPoolResults` with `WAIT_BIT`" idiom), while the worker
+thread was still genuinely executing a command buffer referencing
+them -- the crash. Separately, `QueryPool`'s own mutable state
+(`Available`/`Active`/`Values`) had **zero** cross-thread
+synchronization at all -- the same class of gap `Sync.h`'s own file
+comment already documents was fixed for `Fence`/`Semaphore` under
+`L228(h)/(i)`, just never applied here.
+
+### Fix
+
+Gave `QueryPool` (`QueryPool.h`) a mutex/condition-variable pair
+mirroring `Fence`'s own pattern in `Sync.h`: every mutating method
+(`reset`/`begin`/`markAvailable`/`accumulate*`) and every reading
+method (`isAvailable`/`value`/`values`) now takes the lock;
+`markAvailable` notifies after releasing it. `values()` now returns an
+owned `llvm::SmallVector<uint64_t, 11>` copy instead of an
+`llvm::ArrayRef` that would otherwise alias the locked vector's own
+storage across the unlock. Added a genuinely blocking
+`waitAvailable(FirstQuery, QueryCount, TimeoutNs)`, clamped by its
+caller to the same `getSafetyNetTimeoutNs()` every other `Sync.h` wait
+uses. `vkGetQueryPoolResults` (`QueryPool.cpp`) now calls it when
+`VK_QUERY_RESULT_WAIT_BIT` is set, before sampling `isAvailable` in its
+per-query loop. Removed the temporary diagnostic `assert` added
+mid-investigation (it never fired; the real bug was the race above,
+not a null pointer).
+
+Added a new `QueryPoolTest.cpp` (4 tests): immediate availability
+(no wait needed), a genuine timeout (a query that's reset but never
+begun/ended), a real cross-thread `std::thread`
+blocks-until-another-thread-signals case (mirroring `SyncTest.cpp`'s
+own `TimelineSemaphoreWaitBlocksUntilHostSignal`, asserting the
+elapsed wait time is at least the signaling thread's own injected
+delay), and a multi-query-range case confirming a wait only succeeds
+once *every* query in range is available, not just the first.
+`ninja check-feme`: 3,506 Passed/61 Unsupported/0 Failed (+4 new tests
+on top of `L353`'s own +1), 0 regressions.
+
+### CTS impact
+
+Re-ran the previously-crashing case 5x consecutively: always a clean
+`Pass`, 0 crashes (was 5/5 segfault/abort before the fix). Re-ran the
+full `dEQP-VK.query_pool.occlusion_query.*` group (441 cases, 385
+applicable): **385 Pass/0 Fail/56 NotSupported**, 0 crashes -- both
+`L353` and `L354` together fully close this cluster (was 181 Fail
+plus this crash, out of the original 343-case broader-sweep sample).
+
+The remaining smaller clusters the broader sweep surfaced
+(`memory.binding.maintenance6.*` 56, `fragment_operations.
+early_fragment` 10, `device_group` 7,
+`geometry.input.triangle_strip_adjacency` 6, assorted
+`memory_model.*` message-passing/write-after-read races ~24) are
+still untriaged -- deferred to a future session; see
+`agent_thoughts.md`'s next steps.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal query-pool synchronization correctness fix, no
+feature/extension-surface change.

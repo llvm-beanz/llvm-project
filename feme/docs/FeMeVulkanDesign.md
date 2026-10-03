@@ -1890,6 +1890,16 @@ condition variable:
   consumed by a wait.
 - A timeline semaphore stores a monotonically increasing 64-bit value.
 - An event stores device-set/reset state and participates in command execution.
+- (Roadmap `L354`) A query pool's own per-query `Available`/`Active`/`Values`
+  state is likewise kept under a mutex and condition variable: `vkCmdBeginQuery`/
+  `vkCmdEndQuery` mutate it from a `QueueExecutor` worker thread while
+  `vkGetQueryPoolResults` observes it from the calling host thread, genuinely
+  concurrently since `L228(h)`/`L228(i)` made submission asynchronous.
+  `VK_QUERY_RESULT_WAIT_BIT` performs a real blocking wait (the same
+  `getSafetyNetTimeoutNs()`-bounded pattern every other wait in this section
+  uses) rather than sampling availability once and reporting `VK_NOT_READY`
+  for a query whose ending command buffer simply hasn't finished executing
+  yet on its own worker thread.
 
 The queue executor waits without holding object-global locks needed by another
 queue to signal. Device loss is latched once: subsequent queue/device operations
