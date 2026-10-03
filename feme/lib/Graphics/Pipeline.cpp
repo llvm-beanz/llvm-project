@@ -206,9 +206,15 @@ uint32_t feme::graphics::getStripPrimitiveCount(PrimitiveTopology Topology,
   case PrimitiveTopology::LineStripWithAdjacency:
     return IndexCount < 4 ? 0 : IndexCount - 3;
   case PrimitiveTopology::TriangleStripWithAdjacency:
-    if (IndexCount < 6 || (IndexCount - 4) % 2 != 0)
-      return 0;
-    return (IndexCount - 4) / 2;
+    // (Roadmap L359) An odd `IndexCount` is not actually illegal -- it
+    // simply leaves one trailing vertex unconsumed by any complete
+    // 6-vertex window (exactly like a plain `TriangleStrip`'s own
+    // trailing vertex when `IndexCount` is odd), so this must floor
+    // rather than reject: unsigned integer division by 2 already floors
+    // for an odd `(IndexCount - 4)` numerator (e.g. `3 / 2 == 1`), so no
+    // explicit rounding is needed once the `% 2 != 0`-rejecting early
+    // return (this function's own pre-`L359` behavior) is removed.
+    return IndexCount < 6 ? 0 : (IndexCount - 4) / 2;
   case PrimitiveTopology::PointList:
   case PrimitiveTopology::LineList:
   case PrimitiveTopology::LineStrip:
@@ -243,15 +249,52 @@ SplitPrimitiveAdjacency feme::graphics::splitStripPrimitiveAdjacency(
     break;
   }
   case PrimitiveTopology::TriangleStripWithAdjacency: {
-    // Window [2i, 2i+5]: (v0, adj01, v1, adj12, v2, adj20), advancing by 2
-    // each primitive ("leading vertices are 0, 2, 4, ...").
-    uint32_t Base = 2 * PrimitiveIndex;
-    Split.Primitive.push_back(FetchedIndices[Base]);
-    Split.Adjacent.push_back(FetchedIndices[Base + 1]);
-    Split.Primitive.push_back(FetchedIndices[Base + 2]);
-    Split.Adjacent.push_back(FetchedIndices[Base + 3]);
-    Split.Primitive.push_back(FetchedIndices[Base + 4]);
-    Split.Adjacent.push_back(FetchedIndices[Base + 5]);
+    // (Roadmap L359 follow-up) NOT a simple sliding window of 6 -- unlike
+    // every other strip-with-adjacency topology here, GL_EXT_geometry_shader
+    // section 10.1.7tsa's own Table 10.X1 special-cases the *first*,
+    // *last*, and (for every interior primitive) the *odd-vs-even* primitive
+    // index, because a strip triangle's two "sideways" adjacent vertices
+    // come from whichever neighboring triangle hasn't already been visited
+    // by the previous primitive's own window -- which neighbor that is
+    // flips every other triangle. Concretely (0-indexed, table's own
+    // 1-indexed vertex numbers minus 1), for primitive `i` of `N`:
+    //   only (N == 1):           primitive {0, 2, 4},       adjacent {1, 5, 3}
+    //   first (i == 0, N > 1):   primitive {0, 2, 4},       adjacent {1, 6, 3}
+    //   middle, i odd:           primitive {2i+2, 2i, 2i+4}, adjacent {2i-2, 2i+3, 2i+6}
+    //   middle, i even:          primitive {2i, 2i+2, 2i+4}, adjacent {2i-2, 2i+6, 2i+3}
+    //   last, i odd:             primitive {2i+2, 2i, 2i+4}, adjacent {2i-2, 2i+3, 2i+5}
+    //   last, i even:            primitive {2i, 2i+2, 2i+4}, adjacent {2i-2, 2i+5, 2i+3}
+    // Getting this wrong doesn't just misorder vertices (which a
+    // geometry shader could tolerate) -- it changes the *set* of 6
+    // vertices read entirely, which is externally visible even to a
+    // shader that doesn't care about `gl_in[]` order.
+    uint32_t N = getStripPrimitiveCount(
+        Topology, static_cast<uint32_t>(FetchedIndices.size()));
+    uint32_t I = PrimitiveIndex;
+    auto At = [&](uint32_t Idx) { return FetchedIndices[Idx]; };
+    if (N == 1) {
+      Split.Primitive = {At(0), At(2), At(4)};
+      Split.Adjacent = {At(1), At(5), At(3)};
+    } else if (I == 0) {
+      Split.Primitive = {At(0), At(2), At(4)};
+      Split.Adjacent = {At(1), At(6), At(3)};
+    } else if (I == N - 1) {
+      if (I % 2 == 1) {
+        Split.Primitive = {At(2 * I + 2), At(2 * I), At(2 * I + 4)};
+        Split.Adjacent = {At(2 * I - 2), At(2 * I + 3), At(2 * I + 5)};
+      } else {
+        Split.Primitive = {At(2 * I), At(2 * I + 2), At(2 * I + 4)};
+        Split.Adjacent = {At(2 * I - 2), At(2 * I + 5), At(2 * I + 3)};
+      }
+    } else { // interior ("middle")
+      if (I % 2 == 1) {
+        Split.Primitive = {At(2 * I + 2), At(2 * I), At(2 * I + 4)};
+        Split.Adjacent = {At(2 * I - 2), At(2 * I + 3), At(2 * I + 6)};
+      } else {
+        Split.Primitive = {At(2 * I), At(2 * I + 2), At(2 * I + 4)};
+        Split.Adjacent = {At(2 * I - 2), At(2 * I + 6), At(2 * I + 3)};
+      }
+    }
     break;
   }
   case PrimitiveTopology::PointList:

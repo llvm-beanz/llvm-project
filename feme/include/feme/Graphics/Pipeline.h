@@ -143,8 +143,14 @@ splitListPrimitiveAdjacency(PrimitiveTopology Topology,
 /// 4-vertex window by 1 each primitive (`IndexCount - 3` primitives, 0 if
 /// \p IndexCount < 4); a triangle strip with adjacency advances its
 /// 6-vertex window by 2 each primitive (`(IndexCount - 4) / 2` primitives,
-/// 0 if \p IndexCount < 6 or `IndexCount` is not `4 + 2 * primitiveCount`
-/// for a whole number of primitives, i.e. `(IndexCount - 4)` is odd).
+/// 0 if \p IndexCount < 6). (Roadmap L359) An odd \p IndexCount is legal,
+/// not an error -- it simply leaves one trailing vertex that belongs to
+/// no complete window unconsumed, exactly like a plain `TriangleStrip`'s
+/// own odd-vertex-count trailing vertex; the division above already
+/// floors a whole-triangle count out of that case (e.g. `IndexCount ==
+/// 7` yields 1 primitive, the same as `IndexCount == 6`), so this must
+/// *not* additionally reject `IndexCount` values that aren't `4 + 2 *
+/// primitiveCount`.
 uint32_t getStripPrimitiveCount(PrimitiveTopology Topology,
                                 uint32_t IndexCount);
 
@@ -153,12 +159,24 @@ uint32_t getStripPrimitiveCount(PrimitiveTopology Topology,
 /// per `SplitPrimitiveAdjacency`'s own comment, following the same
 /// Vulkan/Direct3D vertex order `splitListPrimitiveAdjacency` documents
 /// (line adjacency `(adj0, v0, v1, adj1)`; triangle adjacency `(v0, adj01,
-/// v1, adj12, v2, adj20)`), just windowed rather than partitioned:
-/// primitive \p PrimitiveIndex's window starts at \p PrimitiveIndex for a
-/// line strip (the shared "leading vertices are 1, 2, 3, ..." convention)
-/// or `2 * PrimitiveIndex` for a triangle strip ("leading vertices are 0,
-/// 2, 4, ..."), matching Microsoft's "Winding Direction and Leading Vertex
-/// Positions" documentation for D3D_PRIMITIVE_TOPOLOGY_*_ADJ.
+/// v1, adj12, v2, adj20)`).
+///
+/// A line strip with adjacency is a simple sliding window: primitive \p
+/// PrimitiveIndex's window starts at \p PrimitiveIndex (the "leading
+/// vertices are 1, 2, 3, ..." convention), matching Microsoft's "Winding
+/// Direction and Leading Vertex Positions" documentation for
+/// D3D_PRIMITIVE_TOPOLOGY_*_ADJ.
+///
+/// (Roadmap L359 follow-up) A triangle strip with adjacency is *not* a
+/// simple sliding window, despite its "leading vertices are 0, 2, 4, ..."
+/// documentation reading similarly -- GL_EXT_geometry_shader section
+/// 10.1.7tsa's own Table 10.X1 special-cases the first primitive, the
+/// last primitive, and every interior primitive's odd-vs-even index,
+/// because the two "sideways" adjacent vertices of a strip triangle come
+/// from whichever neighboring triangle hasn't already been covered by the
+/// previous primitive's own window -- which neighbor that is flips every
+/// other triangle. See `splitStripPrimitiveAdjacency`'s own
+/// implementation comment in Pipeline.cpp for the full case table.
 ///
 /// \p Topology must be `LineStripWithAdjacency` or
 /// `TriangleStripWithAdjacency`; a non-adjacency or list topology's strip
