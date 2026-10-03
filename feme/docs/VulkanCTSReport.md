@@ -12985,3 +12985,60 @@ not anything new to this change.
 
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: updated,
 `VK_KHR_depth_stencil_resolve` now "Implemented (SAMPLE_ZERO_BIT only)".
+
+## L357: fixed -- `depth_stencil_resolve.*.compatibility_*_testing_stencil` `DeviceLost`
+
+The handoff item 1 target from the prior session: the `compatibility_*`
+subset's `DeviceLost`, explicitly left out of scope above because it was
+believed to be purely the *unsupported-format* gap (resolving against
+`X8_D24_UNORM_PACK32`/`D16_UNORM_S8_UINT`, neither of which FeMe supports,
+both genuinely optional per spec since FeMe's `D32_SFLOAT`/
+`D32_SFLOAT_S8_UINT` support already satisfies the mandatory "at least
+one of" rules). Root-caused to **two separate causes**, only one of which
+is an actual FeMe bug:
+
+1. **CTS test-registration gap (out of scope, not a FeMe bug)**: in
+   `vktRenderPassDepthStencilResolveTests.cpp`, the compatibility-test
+   variant's `CheckSupport::Args` is constructed from the *original*
+   `testConfig`, not `compatibilityTestConfig` -- so the alternate
+   format's own support is never actually validated by `checkSupport`
+   before the test runs, meaning an ICD that legitimately doesn't support
+   `X8_D24_UNORM_PACK32`/`D16_UNORM_S8_UINT` just falls through to
+   `vkCreateImage`, which correctly fails with
+   `VK_ERROR_FORMAT_NOT_SUPPORTED` -- a `Fail`, not `NotSupported`, for
+   the `*_testing_depth` compatibility variant. This is believed to be a
+   latent CTS gap that never manifests on real GPU drivers (which
+   virtually always support `X8_D24_UNORM_PACK32`); not fixable from
+   FeMe's side and out of scope (external repository, not an in-tree LLVM
+   subproject).
+2. **The real, in-scope `CommandBuffer.cpp` bug** (see `L357`'s commits):
+   both `buildRenderTargetBinding` (classic render-pass path) and
+   `normalizeRenderingAttachment` (dynamic-rendering path) populated a
+   depth/stencil resolve `ResolveView` purely from the resolve *mode*
+   being non-`NONE`, never checking whether the resolve attachment's own
+   *format* actually has that aspect. The `*_testing_stencil` compatibility
+   variant's compatible format (`S8_UINT`, which FeMe *does* support) hit
+   exactly this: a depth resolve requested against a stencil-only format
+   reached `Executor.cpp`'s depth read/write with a format it has no case
+   for, hard-erroring the whole draw and latching `DeviceLost`. Fixed by
+   gating `ResolveView` assignment on `isSupportedDepthAttachmentFormat`/
+   `isSupportedStencilAttachmentFormat` of the resolve attachment's own
+   format, matching the per-aspect binding already done for the primary
+   depth/stencil attachment.
+
+New unit test: `DrawTest.DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave`
+(verified it fails with `VK_ERROR_DEVICE_LOST` against the pre-fix code
+and passes, with a correct stencil-half resolve readback, against the
+fix). `ninja check-feme`: 3,517 Passed/61 Unsupported/0 Failed (3,578
+total, +1 new test), 0 regressions.
+
+### CTS impact
+
+Full `dEQP-VK.renderpasses.*.depth_stencil_resolve.*` group, including the
+`compatibility_*` subset this time (22,611 cases total): **750 Pass/4
+Fail/21,857 NotSupported**, 0 `DeviceLost` anywhere in the group (down
+from the `compatibility_*testing_stencil` cases previously crashing the
+device). The remaining 4 `Fail` cases are exactly the CTS
+test-registration gap above (`*_testing_depth` compatibility variants
+against the unsupported `X8_D24_UNORM_PACK32` format) -- out of scope,
+not a regression, not something FeMe needs to address.
