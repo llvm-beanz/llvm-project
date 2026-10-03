@@ -63,30 +63,29 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours)** Triage the smaller clusters the broader sweep already found
-   and left untouched: `memory.binding.maintenance6.*` (56 cases),
-   `fragment_operations.early_fragment` (10), `device_group` (7),
-   `geometry.input.triangle_strip_adjacency` (6), `memory_model.*` races (~24).
-   None investigated yet -- just counts from the partial 240K-case sample.
-2. **(systematic grep, ~1 hour)** Audit other Vulkan-layer objects for the same
-   "stale synchronous-execution assumption" bug class `QueryPool` just had. Grep
-   for comments mentioning "synchronous" near any object that's mutated by a
-   `QueueExecutor` worker thread and read by the host (`Event`?
-   `vkGetDeviceGroupPresentCapabilitiesKHR`-style queries? anything touching
-   `vkCmdCopyQueryPoolResults`'s buffer-write path for completeness?).
-   `Fence`/`Semaphore`/now `QueryPool` are confirmed fine; nothing else has been
-   checked.
-3. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
+1. **(a few hours, new this session)** The 6
+   `samplemask_{early,no_early}_fragment_tests_depth_samples_{2,4,8}` failures
+   above -- a distinct MSAA depth-resolve bug, not an `early_fragment_tests`
+   issue (the `no_early` variant fails too). Start by instrumenting/dumping the
+   per-sample depth values at a few pixels right after the draw, before resolve,
+   to see whether the bug is in the per-sample test/write itself or in the
+   resolve step afterward.
+2. **(a few hours)** Continue handoff item 1's remaining untriaged clusters:
+   `device_group` (7 cases), `geometry.input.triangle_strip_adjacency` (6
+   cases), `memory_model.*` races (~24 cases). None investigated yet.
+3. **(systematic grep, ~1 hour, carried over)** Audit other Vulkan-layer objects
+   for the "stale synchronous-execution assumption" bug class `QueryPool` had
+   (fixed as `L354`). `Fence`/`Semaphore`/`QueryPool` confirmed fine; nothing
+   else has been checked.
+4. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
    / `L335` -- N-barrier generalization, 1 case (`shader_input_output.barrier`).
    Fully scoped in `FeMeGraphicsDesign.md`; still needs the actual multi-file
    implementation session.
-4. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
+5. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
    alpha-decode tie-break, 12 cases. Next angle (still unattempted): compare
    decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5`/`astc_8x8`
    for a structural property correlating with tie direction.
-5. **(a few hours)** Resume/complete the broader-than-tessellation CTS sweep
-   itself -- this session's own run only covered 240,182 of the full suite (died
-   mid-run across a context-compaction boundary); worth relaunching the
-   remaining groups (especially `binding_model`, explicitly skipped this session
-   for being too large) in the background early next session so it's done by the
-   time other work wraps up.
+6. **(a few hours, overdue, carried over)** Resume/complete the
+   broader-than-tessellation CTS sweep -- still only covered 240,182 cases from
+   several sessions back (died mid-run). `binding_model` was explicitly skipped
+   for being too large; worth relaunching in the background early next session.
