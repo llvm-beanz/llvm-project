@@ -4280,10 +4280,28 @@ cases -- `fractional_odd_spacing` already passed) remains open.** It is
 a distinct algorithm (FeMe's `appendTriangleRingBoundary` uses its own
 ring-based point ordering, unrelated to the quad grid `tessellateQuad`
 fixed above), so this same diagonal-mirroring technique does not
-directly transfer; it needs its own independent root-cause pass (most
-likely also a localized interpolation-discontinuity artifact rather
-than a full topology mismatch, given the quad domain's own experience,
-but not yet confirmed via its own `--deqp-log-images=enable` diff). The
+directly transfer; it needs its own independent root-cause pass. The
+`--deqp-log-images=enable` diagnostic *has* now been run for
+`fill_overlap_triangles_equal_spacing_draw` (this session, after the
+quad fix landed), and the result is a **different shape of defect**
+than the quad domain's: the `ErrorMask` is a single small, solid,
+compact red triangle centered on the domain centroid (roughly a
+40x35px blob out of a 256px-tall image), not a thin staircase strung
+along a discontinuity line. That shape is consistent with the
+*innermost* ring(s) -- where `bridgeRingsByEdge`'s proportional-
+arc-length annulus triangulation is bridging the smallest, most
+visually-compressed bands -- being the most sensitive to any small
+geometric or ordering deviation, but it was not fully root-caused this
+session; `bridgeRingsByEdge`/`bridgeEdge`'s own zigzag strip
+triangulation (`Tessellator.cpp` ~line 141) is the next place to look,
+specifically whether its proportional-arc-length vertex walk between
+two concentric rings produces the same per-triangle `gl_TessCoord`
+interpolation as dEQP's own reference oracle near the centroid, where
+the ring spacing (`CumulativeScale`'s per-ring product) shrinks
+fastest. Re-running the diagnostic was cheap (minutes) and is strongly
+recommended as the *first* step of that future session, to confirm or
+refute this hypothesis with the actual pixel data before writing any
+code. The
 rest of this section's analysis of Mesa's reference `CHWTessellator`
 (fetched via `curl` from `gitlab.freedesktop.org/mesa/mesa`, a close
 derivative of Microsoft's D3D reference tessellator) is retained below
@@ -4329,14 +4347,15 @@ table-driven `StitchTransition` logic would be multi-session-scale work
 real defect was a much smaller, localized triangulation-diagonal choice,
 found only by first confirming (via `--deqp-log-images=enable`) that the
 test tolerates any correct topology rather than assuming a literal port
-was the only path forward. **Before starting a literal triangle-domain
-port, repeat `L350`'s own diagnostic step first** -- run
-`fill_overlap_triangles_equal_spacing_draw` (or
-`_fractional_even_spacing_draw`) with `--deqp-log-images=enable` and
-inspect the actual ErrorMask; only fall back to this section's
-ring-spiral/table-driven port plan below if that diff shows a genuine
-large-scale topology mismatch the threshold can't tolerate, rather than
-another small, localized interpolation-discontinuity artifact.
+was the only path forward. `L350`'s own diagnostic step has now been
+repeated for the triangle domain too (`fill_overlap_triangles_equal_
+spacing_draw`, `--deqp-log-images=enable`): the ErrorMask is a small,
+compact, centroid-centered blob, not a large-scale topology mismatch --
+so a literal port is **not** expected to be needed here either. Start
+the next triangle-domain session by auditing `bridgeRingsByEdge`/
+`bridgeEdge`'s proportional-arc-length zigzag triangulation (see the
+Status subsection above) before reaching for this section's ring-
+spiral/table-driven port plan below.
 
 ### G6: Amplification and mesh shading
 
