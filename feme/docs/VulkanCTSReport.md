@@ -13607,3 +13607,62 @@ crashes remain open, carried over for a dedicated future session (see
 steps). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
 change needed for any of the above (all internal correctness bugs, no
 feature/extension surface affected).
+
+## Fixed: `basic_arrays.1` heap corruption (`L364`) -- lone leading-pad struct byte-offset remap gap
+
+Root-caused and fixed the `basic_arrays.1` crash left open by the section
+above. The shape is a *lone* (non-array-of-instances) stage-IO global
+whose one real member (a plain `vec3 var3[4][2]` XFB output, needing its
+own tight-vector ABI substitution at a non-zero `xfb_offset`) gets an
+LLVM-level leading `[64 x i8]` pad synthesized ahead of it -- confirmed
+directly against the real compiled IR via `FEME_DUMP_IR_PRECANON`
+(`@spirv_var_34 = external addrspace(8) global <{ [64 x i8],
+[4 x [2 x <3 x float>]] }>`). This is exactly the "(or lone-instance)"
+case `getEffectiveStageIOValueType`'s own comment already named, but
+`resolveStageIOAccess`'s byte-offset remap never actually implemented:
+its guard (`isa<ArrayType>(GV->getValueType())`) only ever fired for the
+array-of-block-instances shape (`remapByteOffsetPastLeadingPad`'s own
+concern), leaving a lone padded struct's `ByteOffset` still `Gap` bytes
+too large by the time `resolveRowComponent` walked the pad-stripped
+`EffectiveTy`. `resolveRowComponent`'s own self-discovering stride
+mechanism still "succeeded" at dividing this inflated offset (the pad
+happened to be an exact multiple of the real per-row stride), silently
+landing two rows deeper than row 0 for every store -- an out-of-bounds
+`StageStorage` write once the last, otherwise-in-range store's own
+over-shifted row pushed past the element's allocated bounds.
+
+**Fix**: handle the lone-struct case alongside the existing array-of-
+instances one: when `GV`'s real value type is a `StructType` (not an
+`ArrayType`) with a leading pad, subtract the pad's own constant `Gap`
+from `ByteOffset` once -- no per-instance stride division needed, since
+there is only one instance.
+
+**Verification**:
+- `valgrind`: the crash is gone -- the case now either passes or fails
+  with an ordinary content mismatch, never a heap-corruption crash.
+- New unit test
+  (`CanonicalizeStageTest.RewritesLoneLeadingPadBeforeTightArrayOfVectorsMember`)
+  exercises the exact shape this bug broke, confirming all 4 rows
+  (`0`-`3`) are covered exactly once at the correct pad-adjusted offsets.
+- `dEQP-VK.transform_feedback.fuzz.random_geometry.basic_arrays.1`: no
+  longer crashes (was: `double free or corruption`). Now fails with a
+  plain content mismatch (`Mismatch at offset 64 expected 72 received
+  0`) -- a separate, not-yet-root-caused bug (the `received 0` pattern
+  suggests an unwritten/zero-initialized row, possibly a geometry-shader
+  multi-vertex-emission capture-ordering issue), left open for a
+  follow-up session.
+- No regression: `all_instance_array.12` (pre-existing, unrelated
+  `Mismatch at offset 68` failure, confirmed unchanged by this fix),
+  `2_level_array.mat2.geometry` (still **Pass**), `basic_arrays.0` (still
+  **Pass**).
+- `ninja check-feme`: 3521/3582 discovered tests Passed (61 Unsupported,
+  0 Failed) -- regression-free (one additional test vs. the prior
+  session's 3520/3581 baseline, from this session's own new unit test).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- an internal correctness fix, no feature/extension-surface
+  change.
+
+`nested_structs_instance_arrays.31`'s own crash (architecturally
+distinct -- an array-of-block-instances shape, not a lone-instance one)
+remains open and untouched this session; see `L363`'s roadmap row for
+its own still-unresolved second under-sizing bug.
