@@ -2716,16 +2716,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // `dEQP-VK.fragment_operations.early_fragment.discard_early_fragment_
   // tests_depth`/`.early_fragment_tests_depth`/the `samplemask_*_depth_
   // samples_*` family, all of which write/atomic or discard *after*
-  // relying on exactly this). The four checks this still shares with the
-  // automatic path below (`FSDepthOut`/`FSStencilRefOut`/`alphaToCoverage
-  // Enable`/`FSSampleMaskOut`) are not optional even for an explicit
-  // declaration: a fragment stage that writes `SV_Depth`/`SV_StencilRef`
-  // can't coherently combine with `early_fragment_tests` at all (the GLSL
-  // spec disallows exactly this pairing, SPIR-V's own validator rejects
-  // it), and alpha-to-coverage/an explicit `SampleMask` output both narrow
-  // coverage using a value the fragment stage itself computes, which is
-  // definitionally not yet known before that stage runs regardless of
-  // what the application declared.
+  // relying on exactly this).
+  //
+  // Unlike the implicit/automatic path, an explicit declaration also
+  // overrides `FSDepthOut`/`FSStencilRefOut`/`FSSampleMaskOut`: it is
+  // entirely legal GLSL/SPIR-V to combine `early_fragment_tests` with a
+  // `gl_FragDepth`/`gl_FragStencilRefARB`/`gl_SampleMask` write in the same
+  // shader (`discard_early_fragment_tests_depth`'s own fragment shader
+  // does exactly this, see `vktFragmentOperationsEarlyFragmentTests.cpp`)
+  // -- the spec simply says any such write is *ignored* for the test/write
+  // that already happened early, using the rasterizer's own interpolated
+  // depth, the pipeline's fixed stencil reference, and the rasterizer's
+  // own full per-sample coverage, respectively (the early path below never
+  // reads `FSDepthOut`/`FSStencilRefOut`/`FSSampleMaskOut` at all, so this
+  // is automatically what happens once `UseEarlyDepthStencil` is allowed
+  // to become `true` here). `alphaToCoverageEnable` and a self-referencing
+  // depth/stencil input attachment remain unconditional disqualifiers even
+  // for an explicit declaration: the former is a fixed-function behavior
+  // keyed off the shaded color's alpha, not a value the application could
+  // have promised to ignore, and the latter needs the fragment stage's own
+  // `subpassLoad` to observe only earlier-ordered fragments' writes, never
+  // this invocation's own early one.
   bool FSExplicitEarlyFragmentTests =
       (FSFlags & cpu::FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
@@ -2775,13 +2786,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
     }
   }
-  bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
-                              !FSStencilRefOut &&
-                              (FSExplicitEarlyFragmentTests ||
-                               (!FSMayDiscard && !FSHasMemorySideEffects)) &&
-                              !Pipeline.getAlphaToCoverageEnable() &&
-                              !FSSampleMaskOut &&
-                              !HasSelfReferencingDepthStencilInput;
+  bool UseEarlyDepthStencil =
+      NeedsDepthStencil &&
+      (FSExplicitEarlyFragmentTests ||
+       (!FSDepthOut && !FSStencilRefOut && !FSMayDiscard &&
+        !FSHasMemorySideEffects && !FSSampleMaskOut)) &&
+      !Pipeline.getAlphaToCoverageEnable() &&
+      !HasSelfReferencingDepthStencilInput;
   // (roadmap H4) Which primitive class actually reaches the rasterizer. A
   // patch-list pipeline's own topology says nothing about that -- the
   // tessellator's `TessOutputPrimitive` does -- so this is the
