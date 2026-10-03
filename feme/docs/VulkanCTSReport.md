@@ -12414,3 +12414,144 @@ ruled-out-hypothesis writeup and the new leading hypothesis (a
 floating-point boundary-tie issue, same class as `L265`) for the next
 session. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
 no change needed -- no code landed.
+
+## L352: fixed -- `fill_overlap_triangles_*` IEEE754 centroid tie (4 cases, now 6/6 Pass)
+
+Picked up handoff item 1 ("a new angle on `fill_overlap_triangles_*`'s
+defect -- floating-point boundary tie, not topology") following
+`L351`'s own closing hypothesis.
+
+### A process-correction discovery first
+
+Before finding the real bug, this session found a critical mistake in
+*how* the previous `L350`/`L351` sessions had been diagnosing this
+test: both had extracted and analyzed the `--deqp-log-images=enable`
+`Result`/`Reference`/`ErrorMask` images from tess-level **case 0**
+(`inner={9}, outer={9,9,9}`) -- but reading the raw `.qpa` log's own
+`<Text>Tessellation levels...</Text>` entries directly (rather than
+assuming image-index ordering matches tess-level-index ordering)
+showed case 0 actually **passes**. The real failing case, the one
+whose images were actually being extracted and misattributed, is
+**case 1** (`inner={8}, outer={13,15,18}`) -- an *asymmetric* set of
+outer factors. This single correction immediately explained a
+standing puzzle from prior sessions (why the observed error region was
+a single solid, non-3-fold-symmetric wedge instead of the 3-fold
+symmetric pattern case 0's fully-symmetric tess factors would imply):
+the real case's outer factors genuinely differ per edge, so no
+symmetry should be expected at all.
+
+### Cross-validating with a standalone software re-implementation
+
+Built a standalone CPU-only re-implementation (`render.cpp`, linked
+directly against `libFeMeGraphics.a`/`libLLVMSupport.a`/
+`libLLVMDemangle.a`) of the entire test's rendering pipeline:
+`feme::graphics::tessellate`'s own point/triangle generation, the
+exact CTS TES color/position formula, and a plain affine-barycentric
+software rasterizer (matching the TES's own `gl_Position = vec4(pos,
+0, 1)`, no perspective divide) -- bypassing SPIR-V/Vulkan entirely.
+Comparing this pure-CPU render against FeMe's actual GPU `Result`
+image for the correct failing case (`inner=8, outer={13,15,18}`) found
+only **2 pixels differing out of 65,536** (sub-pixel rounding only) --
+definitively proving the defect lives entirely in `Tessellator.cpp`'s
+own domain-point/triangle generation, not in any later SPIR-V/shader/
+rasterizer stage. This cross-validation technique (a from-scratch CPU
+re-implementation of a CTS test's full rendering formula, linked
+directly against FeMe's own tessellator library) is a strong,
+reusable tool for any future "does this live in the tessellator or
+somewhere later in the pipeline" question -- much more conclusive than
+hand-tracing or Euler-formula/span-anomaly checks alone.
+
+Comparing the same software render against the CTS golden `Reference`
+image reproduced the known defect (~897 differing pixels). Extending
+`render.cpp` with a diagnostic-dump mode (print every triangle whose
+screen bounding box overlaps a given rectangle, with each vertex's
+U/V/W/`d`/phase/screen-position) and pointing it at the defect region
+found the exact bug.
+
+### Root cause
+
+The 6 triangles fanning the triangle domain's degenerate center point
+all reference a centroid vertex constructed as
+`(1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f)`. In IEEE754 float32,
+`1.0f / 3.0f` rounds to `0.3333333432674408` (slightly *above* the
+true `1/3`) -- and critically, `3.0f * 0.3333333432674408` itself
+rounds to **exactly** `1.0f` (confirmed via Python `struct`/float32 bit
+manipulation), not slightly above as the slightly-too-large input value
+would naively suggest. `fill_overlap_triangles_*`'s own TES computes
+each vertex's ring-color phase via `d = 3.0 * min(u, v, w)`, then
+`phase = int(d * numConcentricTriangles) % 3` (this test's tess levels
+give `numConcentricTriangles = 5`), implicitly relying on the
+centroid's own `d` landing *strictly below* `1.0` (matching real/
+conformant hardware's typical non-exact centroid construction, which
+rarely produces a perfectly tied float value at a barycentric center).
+FeMe's exact `d == 1.0` causes `int(1.0 * 5) == 5` -- one bucket past
+the valid `[0, 5)` range -- flipping that single centroid vertex's
+color from the intended green (`phase 1`, i.e. `4 % 3`) to blue
+(`phase 2`, i.e. `5 % 3`), and visibly truncating the adjacent red
+ring's own blend toward green near the domain's center.
+
+This bug is systemic across *all* even inner-tessellation-factor
+triangle-domain patches (the degenerate single-point center, reached
+when `tessellateTriangle`'s ring-reduction sequence `N0, N0-2, N0-4,
+...` terminates at exactly `CurrentN == 2`, only happens for even
+`N0`; odd `N0` terminates at `CurrentN == 3`, a real non-degenerate
+inner triangle with no literal centroid point generated at all) --
+`fill_overlap_triangles_*`'s color-phase shader is simply what makes
+this particular bug *visible* as a CTS failure for this specific tess
+level combination.
+
+Fetched the real Vulkan spec text (`tessellation.adoc` from
+`KhronosGroup/Vulkan-Docs`) and confirmed FeMe's existing ring-
+recursion structure (uniform homothety via `CumulativeScale` per ring,
+degenerate-point termination at `CurrentN == 2`) is fully spec-
+conformant -- the bug is purely in the exact float value chosen for
+the centroid, not an architectural/topological gap, contradicting
+several previous sessions' working hypothesis (`L349`) that a full
+Mesa-reference-tessellator port might be required for this test
+family.
+
+### Fix
+
+Added a new named constant `CentroidThird` (one float ULP below
+`1.0f / 3.0f`, i.e. `0.333333313f`) in `Tessellator.cpp`'s anonymous
+namespace, with a doc comment explaining the IEEE754 tie. Replaced
+both places the triangle domain's centroid barycentric coordinate was
+constructed from a local `1.0f / 3.0f` (`appendTriangleRingBoundary`'s
+`AddPoint` lambda and `tessellateTriangle`'s own `CurrentN == 2`
+degenerate-center push) to use this shared constant instead. This
+keeps `3.0f * CentroidThird` strictly below `1.0f`
+(`0.9999999404...`), fixing the phase-bucket overflow, while moving
+the centroid's own screen position by an unobservable sub-pixel
+(~1e-7 relative) amount. The quad domain's own center
+(`(0.5, 0.5)`, exact in float, no analogous tie) is unaffected.
+
+Added `TessellatorTest.TriangleCenterPointThreeTimesMinIsStrictlyBelowOne`,
+using the exact reproducing tess levels (`Inside={8,0}`,
+`Edges={13,15,18,0}`), asserting `3.0f * min(U, V, W) < 1.0f` at the
+found center point. `FeMeGraphicsTests`: 404/404 Passed (was 403/403).
+`ninja check-feme`: 3,501 Passed/61 Unsupported/0 Failed (+1 new test),
+0 regressions.
+
+### CTS impact
+
+Re-ran `fill_overlap_triangles_equal_spacing_draw` standalone: now
+**Passes** (was Fail). Ran all 6 `fill_overlap_triangles_*` cases
+(`equal_spacing`/`fractional_odd_spacing`/`fractional_even_spacing`,
+each `_draw`/`_draw_indirect`): **6/6 Pass** (was 2/6) -- the entire
+`fill_overlap_*` cluster (`L340` item 2, 10 cases total across both
+quad and triangle domains) is now fully closed.
+
+Re-ran the full `dEQP-VK.tessellation.*` group (1,114 cases) as a
+regression check: 646 Pass/30 Fail/438 NotSupported (was 642/34/438) --
+confirmed via `.qpa` inspection that the 30 remaining failures are
+precisely the same previously-tracked, still-open issues minus the 4
+fixed here: `common_edge.quads_*_spacing_precise` (3, `L337`, open),
+`invariance.inner_triangle_set.*_fractional_odd_spacing` (2, `L346`,
+confirmed irreconcilable, open), `invariance.outer_edge_symmetry.*`
+(24, `L341`, confirmed irreconcilable, open), `shader_input_output.
+barrier` (1, `L344` item 2, open). 0 new regressions anywhere in the
+group, and no `fill_overlap_*` case appears in the failure list.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal tessellator floating-point correctness fix, no
+new feature/extension surface.

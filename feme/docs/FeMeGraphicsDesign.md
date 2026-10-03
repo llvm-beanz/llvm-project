@@ -4246,7 +4246,7 @@ L82 entry for the full real-ICD repro/root-cause narrative). See
 `QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords` for the regression
 coverage.
 
-#### Status (roadmap L340 item 2 / L348 / L349 / L350): `fill_overlap_*` scoping -- quad domain fixed; triangle domain still needs its own independent fix
+#### Status (roadmap L340 item 2 / L348 / L349 / L350 / L352): `fill_overlap_*` -- both quad and triangle domains fixed
 
 **Correction (L350):** this section's own prior conclusion ("a literal
 port is required, no smaller fix exists") was reached by comparing the
@@ -4408,6 +4408,47 @@ point boundary-tie issue (same class as `L265`) rather than a
 diagonal/topology choice -- a literal port of this section's own
 ring-spiral/table-driven plan remains unlikely to be the fix for the
 same reason.
+
+**Resolved (`L352`): `fill_overlap_triangles_*` (4 cases) -- the degenerate
+center point's exact `(1/3, 1/3, 1/3)` barycentric coordinate overflowed
+the TES's own `int(3.0 * min(u,v,w) * numConcentricTriangles)` phase-
+bucket formula by exactly one bucket at that single vertex.** `L351`'s
+own closing hypothesis ("floating-point boundary tie at a ring-seam
+boundary") was the right class of bug, but the wrong specific location:
+a standalone software re-implementation of `Tessellator.cpp`'s own
+point/triangle generation plus the TES's exact color formula (bypassing
+the whole SPIR-V/Vulkan pipeline entirely) reproduced FeMe's actual GPU
+output almost bit-for-bit (2/65536 px difference, pure rounding),
+*proving* the defect lives in `Tessellator.cpp`'s own domain-point
+generation, not in any later shader/rasterizer stage. Re-running the
+*correct* failing case (this session discovered that two prior
+sessions' own diagnostic dumps had accidentally analyzed tess-level
+case 0, `inner={9},outer={9,9,9}`, which actually **passes** -- the
+real failing case is tess-level case 1, `inner={8},outer={13,15,18}`,
+logged with `Reference`/`ErrorMask` images precisely because it's the
+one that fails) through that same software re-implementation isolated
+the defect to the 6 triangles fanning the exact domain centroid: in
+IEEE754 float, `1.0f / 3.0f` (the nearest float to `1/3`) multiplied by
+`3.0f` rounds to *exactly* `1.0f`, so the TES's own
+`int(d * numConcentricTriangles)` (`d == 3.0 * min(u,v,w)`) evaluates
+to `numConcentricTriangles` itself at that one vertex (a phantom
+"bucket 5" for this test's `numConcentricTriangles == 5`) instead of
+the intended terminal bucket (`numConcentricTriangles - 1 == 4`),
+flipping that vertex's color from green (`phase 1`) to blue
+(`phase 2`) and visibly truncating the adjacent red ring's own
+blend-toward-green near the centroid. **Fix:** `Tessellator.cpp` now
+uses a shared `CentroidThird` constant (one float ULP below
+`1.0f / 3.0f`) everywhere the triangle domain's centroid barycentric
+coordinate is constructed (`appendTriangleRingBoundary`'s per-ring
+homothety base point and `tessellateTriangle`'s own degenerate-center
+push), keeping `3.0f * CentroidThird` strictly below `1.0f` while
+moving the centroid's own screen position by an unobservable
+sub-pixel (~1e-7 relative) amount. All 6 `fill_overlap_triangles_*`
+cases now pass (0 regressions in a full `tessellation.*` CTS re-run);
+see `VulkanCTSReport.md`'s own `L352` entry for the full investigation,
+including the software-rasterizer cross-check methodology, which is
+now the recommended first move for any future "does this defect live
+in the tessellator or somewhere later in the pipeline" question.
 
 ### G6: Amplification and mesh shading
 
