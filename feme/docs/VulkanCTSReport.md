@@ -13458,3 +13458,52 @@ with the background-wait tooling gotcha noted in the prior session).
 Relaunched the remaining groups (`glsl` onward) as `run_sweep2.sh`,
 this time using the bash tool's native async mode, which should survive
 cleanly for the rest of this session.
+
+**Also re-confirmed `mesh_shader.ext.misc.many_mesh_work_groups_{x,y,z}`
+one more time** (handoff item 4), isolated, this time running
+*concurrently* with the resumed sweep's `glsl` group in the background
+(a real, non-contrived concurrent-load scenario, not an idle machine):
+still **3/3 Pass**. This is now the strongest evidence yet that the
+earlier in-sweep `VK_TIMEOUT`/truncated-log failure was purely
+contention-induced, not a real bug -- closing this out, no further
+re-run planned.
+
+**`glsl` group finished: 19442 Pass / 15 Fail / 8963 NotSupported
+(28,420 total).** All 15 failures triaged this session, see roadmap
+`L362`:
+
+| Group | Pass | Fail | NotSupported |
+|---|---|---|---|
+| `glsl` | 19442 | 15 | 8963 |
+
+- **12 of 15**: `feme-cpu-linearize: ... has an internal branch in
+  'Flow' ...` -- the already-tracked `L294`/`L295` "two divergent
+  decisions sharing one dispatch block" linearizer gap. 8 are exactly
+  `L294`/`L295`'s own known set (`loops.special.*_dynamic_iterations.
+  {elseblock,ifblock}_{fragment,vertex}`); 4 are a newly-confirmed
+  instance of the identical bug shape in a `switch` containing a
+  `for`/`while` loop (`switch.{for_loop_in_switch_dynamic,
+  while_loop_in_switch_dynamic}_{fragment,vertex}`) -- same root cause,
+  no new investigation needed, widens `L294`/`L295`'s known scope from
+  8 to 12 cases.
+- **3 of 15, new**: `derivate.{fwidth,fwidthcoarse,fwidthfine}.
+  fbo_float.vec4_highp` -- reproduced standalone
+  (`--deqp-log-images=enable`), all three fail identically: a tiny,
+  1-4-pixel `Image comparison failed` exactly at a 2x2 quad boundary
+  (pixels `(78,38)`/`(79,38)`/`(78,39)`/`(79,39)` depending on variant),
+  with the *same* computed value regardless of `fwidth`/`fwidthcoarse`/
+  `fwidthfine` (FeMe's CPU backend appears to compute all three
+  identically, which is spec-legal). Only the alpha channel is over
+  threshold, and only barely: `diff = 3.40529e-05` vs.
+  `threshold = 3.05171e-05` (~12% over). `vec4_lowp`/`vec4_mediump`
+  (much looser thresholds) both Pass. Shape strongly resembles a
+  ULP-level floating-point rounding disagreement at a quad-boundary
+  discontinuity, same general flavor as the long-open `L265` ASTC
+  tie-break -- not proven past this single-pixel diagnostic; new
+  roadmap row `L362` scopes a next angle if picked up later. No fix
+  attempted, no regression risk (investigation only).
+
+14 of ~39 groups now fully triaged (12 clean -- the 13 prior groups
+plus `draw` -- and `glsl` itself triaged to 2 known-bug clusters, no
+new unexplained issues). Sweep continues unattended on `texture` as of
+this writing.
