@@ -303,8 +303,11 @@ TEST(PrimitiveTopologyTest, StripPrimitiveCountForLines) {
 
 TEST(PrimitiveTopologyTest, StripPrimitiveCountForTriangles) {
   // A triangle strip with adjacency needs at least 6 indices (one
-  // primitive) and advances its window by 2 indices per primitive, so an
-  // odd `IndexCount - 4` describes no whole number of primitives.
+  // primitive) and advances its window by 2 indices per primitive.
+  // (Roadmap L359) An odd `IndexCount` is legal, not an error -- it just
+  // leaves one trailing vertex unconsumed by any complete window, so the
+  // primitive count is floored (not rejected outright) the same way a
+  // plain `TriangleStrip`'s own odd-vertex-count case is.
   EXPECT_EQ(
       getStripPrimitiveCount(PrimitiveTopology::TriangleStripWithAdjacency, 0),
       0u);
@@ -315,8 +318,11 @@ TEST(PrimitiveTopologyTest, StripPrimitiveCountForTriangles) {
       getStripPrimitiveCount(PrimitiveTopology::TriangleStripWithAdjacency, 6),
       1u);
   EXPECT_EQ(
+      getStripPrimitiveCount(PrimitiveTopology::TriangleStripWithAdjacency, 7),
+      1u);
+  EXPECT_EQ(
       getStripPrimitiveCount(PrimitiveTopology::TriangleStripWithAdjacency, 9),
-      0u);
+      2u);
   EXPECT_EQ(
       getStripPrimitiveCount(PrimitiveTopology::TriangleStripWithAdjacency, 10),
       3u);
@@ -338,18 +344,49 @@ TEST(PrimitiveTopologyTest, SplitStripPrimitiveAdjacencyForLines) {
 }
 
 TEST(PrimitiveTopologyTest, SplitStripPrimitiveAdjacencyForTriangles) {
-  // Two triangles sharing an edge: 8 indices, 2 primitives.
+  // (Roadmap L359 follow-up) Unlike a sliding window, triangle-strip
+  // adjacency special-cases the only/first/last primitive and every
+  // interior primitive's odd-vs-even index -- see
+  // `splitStripPrimitiveAdjacency`'s own comment in Pipeline.cpp for the
+  // full case table (from GL_EXT_geometry_shader's Table 10.X1).
+
+  // One triangle only (N == 1): uses the "only" case, not "first".
+  llvm::SmallVector<uint32_t, 6> OnlyIndices = {0, 1, 2, 3, 4, 5};
+  SplitPrimitiveAdjacency Only = splitStripPrimitiveAdjacency(
+      PrimitiveTopology::TriangleStripWithAdjacency, OnlyIndices, 0);
+  EXPECT_EQ(Only.Primitive, (llvm::SmallVector<uint32_t, 3>{0, 2, 4}));
+  EXPECT_EQ(Only.Adjacent, (llvm::SmallVector<uint32_t, 3>{1, 5, 3}));
+
+  // Two triangles sharing an edge: 8 indices, 2 primitives (first + last,
+  // i == 1 is odd).
   llvm::SmallVector<uint32_t, 8> Indices = {0, 1, 2, 3, 4, 5, 6, 7};
   SplitPrimitiveAdjacency Split0 = splitStripPrimitiveAdjacency(
       PrimitiveTopology::TriangleStripWithAdjacency, Indices, 0);
   EXPECT_EQ(Split0.Primitive, (llvm::SmallVector<uint32_t, 3>{0, 2, 4}));
-  EXPECT_EQ(Split0.Adjacent, (llvm::SmallVector<uint32_t, 3>{1, 3, 5}));
+  EXPECT_EQ(Split0.Adjacent, (llvm::SmallVector<uint32_t, 3>{1, 6, 3}));
 
-  // Primitive 1's window slides by two.
   SplitPrimitiveAdjacency Split1 = splitStripPrimitiveAdjacency(
       PrimitiveTopology::TriangleStripWithAdjacency, Indices, 1);
-  EXPECT_EQ(Split1.Primitive, (llvm::SmallVector<uint32_t, 3>{2, 4, 6}));
-  EXPECT_EQ(Split1.Adjacent, (llvm::SmallVector<uint32_t, 3>{3, 5, 7}));
+  EXPECT_EQ(Split1.Primitive, (llvm::SmallVector<uint32_t, 3>{4, 2, 6}));
+  EXPECT_EQ(Split1.Adjacent, (llvm::SmallVector<uint32_t, 3>{0, 5, 7}));
+
+  // Three triangles: 10 indices -- first (i=0), middle odd (i=1), last
+  // even (i=2, since N - 1 == 2 is even).
+  llvm::SmallVector<uint32_t, 10> Indices3 = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  SplitPrimitiveAdjacency Tri0 = splitStripPrimitiveAdjacency(
+      PrimitiveTopology::TriangleStripWithAdjacency, Indices3, 0);
+  EXPECT_EQ(Tri0.Primitive, (llvm::SmallVector<uint32_t, 3>{0, 2, 4}));
+  EXPECT_EQ(Tri0.Adjacent, (llvm::SmallVector<uint32_t, 3>{1, 6, 3}));
+
+  SplitPrimitiveAdjacency Tri1 = splitStripPrimitiveAdjacency(
+      PrimitiveTopology::TriangleStripWithAdjacency, Indices3, 1);
+  EXPECT_EQ(Tri1.Primitive, (llvm::SmallVector<uint32_t, 3>{4, 2, 6}));
+  EXPECT_EQ(Tri1.Adjacent, (llvm::SmallVector<uint32_t, 3>{0, 5, 8}));
+
+  SplitPrimitiveAdjacency Tri2 = splitStripPrimitiveAdjacency(
+      PrimitiveTopology::TriangleStripWithAdjacency, Indices3, 2);
+  EXPECT_EQ(Tri2.Primitive, (llvm::SmallVector<uint32_t, 3>{4, 6, 8}));
+  EXPECT_EQ(Tri2.Adjacent, (llvm::SmallVector<uint32_t, 3>{2, 9, 7}));
 }
 
 } // namespace
