@@ -5754,6 +5754,90 @@ TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
   EXPECT_EQ(ResolveStorage[3 * 4], 0);        // pixel 3 black
 }
 
+// (roadmap K6) `VK_KHR_depth_stencil_resolve`'s `VK_RESOLVE_MODE_SAMPLE_
+// ZERO_BIT`: unlike color's box-filter average above, the depth/stencil
+// resolve step must pick exactly sample 0's own stored value, dropping
+// every other sample entirely. This test pre-populates a 4-sample depth
+// and stencil attachment with a different value in every sample slot (no
+// geometry is drawn -- `Draw.Draws` is empty -- so nothing but the resolve
+// step itself can change what ends up in the single-sample resolve
+// targets), then checks the resolve targets hold exactly sample 0's own
+// values, not an average or any other sample's.
+TEST(ExecutorTest, DepthStencilResolveCopiesSampleZeroNotAnAverage) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 2, 2}});
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> ColorStorage(2u * 2u * Samples * 4u, 0);
+  AttachmentView Color{ColorStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 2, 2};
+  std::array<AttachmentView, 1> Attachs{Color};
+
+  // D16_UNORM depth: one 2-byte sample per texel-sample, sample 0 of every
+  // pixel set to a distinct 0.25, every other sample set to 0.75 -- a
+  // box-filter average would land near 0.625, not 0.25.
+  std::vector<uint8_t> DepthStorage(2u * 2u * Samples * 2u, 0);
+  for (uint32_t Pixel = 0; Pixel != 4; ++Pixel)
+    for (uint32_t Sample = 0; Sample != Samples; ++Sample) {
+      uint16_t V = Sample == 0 ? 16384 : 49152; // 0.25 / 0.75 in D16_UNORM.
+      std::memcpy(DepthStorage.data() + (Pixel * Samples + Sample) * 2, &V, 2);
+    }
+  std::vector<uint8_t> DepthResolveStorage(2u * 2u * 2u, 0);
+
+  // S8_UINT stencil: sample 0 of every pixel set to 7, every other sample
+  // set to 3.
+  std::vector<uint8_t> StencilStorage(2u * 2u * Samples, 0);
+  for (uint32_t Pixel = 0; Pixel != 4; ++Pixel)
+    for (uint32_t Sample = 0; Sample != Samples; ++Sample)
+      StencilStorage[Pixel * Samples + Sample] = Sample == 0 ? 7 : 3;
+  std::vector<uint8_t> StencilResolveStorage(4u, 0);
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.DepthStencil.Depth =
+      AttachmentView{DepthStorage, cpu::ResourceFormat::D16_UNORM, 2, 2};
+  Draw.DepthStencil.Stencil =
+      AttachmentView{StencilStorage, cpu::ResourceFormat::S8_UINT, 2, 2};
+  Draw.DepthStencilResolve.Depth = AttachmentView{
+      DepthResolveStorage, cpu::ResourceFormat::D16_UNORM, 2, 2};
+  Draw.DepthStencilResolve.Stencil = AttachmentView{
+      StencilResolveStorage, cpu::ResourceFormat::S8_UINT, 2, 2};
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 2, 2};
+  // No vertex buffers/draw commands: nothing is rasterized, isolating the
+  // resolve step from the raster/depth-test paths already covered by other
+  // tests in this file.
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  for (uint32_t Pixel = 0; Pixel != 4; ++Pixel) {
+    uint16_t ResolvedDepth;
+    std::memcpy(&ResolvedDepth, DepthResolveStorage.data() + Pixel * 2, 2);
+    EXPECT_EQ(ResolvedDepth, 16384) << "pixel " << Pixel;
+    EXPECT_EQ(StencilResolveStorage[Pixel], 7) << "pixel " << Pixel;
+  }
+}
+
 // A fragment shader that reads `SV_SampleIndex` (element 0, no location -- a
 // pure system value) and writes `SampleIndex / 3.0` into its red channel. Its
 // sample-index input requires a separate invocation for every covered sample,

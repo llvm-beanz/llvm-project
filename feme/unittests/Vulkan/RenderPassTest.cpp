@@ -476,6 +476,110 @@ TEST_F(RenderPassTest, RenderPass2AcceptsNonZeroDependencyViewOffset) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
+/// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own
+/// `VkSubpassDescriptionDepthStencilResolve`, chained onto `pNext`, must be
+/// parsed and recorded on the compiled subpass -- previously silently
+/// dropped entirely (neither parsed nor applied at draw time), which left
+/// a multisample depth/stencil resolve attachment with whatever
+/// uninitialized memory its backing allocation happened to hold.
+TEST_F(RenderPassTest, RenderPass2RecordsDepthStencilResolveAttachment) {
+  VkAttachmentDescription2 Attachments[2]{};
+  for (VkAttachmentDescription2 &A : Attachments)
+    A.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+  Attachments[0].format = VK_FORMAT_D16_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[1].format = VK_FORMAT_D16_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkAttachmentReference2 DepthRef{};
+  DepthRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  DepthRef.attachment = 0;
+  DepthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+  VkAttachmentReference2 DepthResolveRef{};
+  DepthResolveRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  DepthResolveRef.attachment = 1;
+  DepthResolveRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+  VkSubpassDescriptionDepthStencilResolve Resolve{};
+  Resolve.sType =
+      VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+  Resolve.depthResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+  Resolve.stencilResolveMode = VK_RESOLVE_MODE_NONE;
+  Resolve.pDepthStencilResolveAttachment = &DepthResolveRef;
+
+  VkSubpassDescription2 Subpass{};
+  Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+  Subpass.pNext = &Resolve;
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.pDepthStencilAttachment = &DepthRef;
+
+  VkRenderPassCreateInfo2 Info{};
+  Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  Info.attachmentCount = 2;
+  Info.pAttachments = Attachments;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  ASSERT_NE(Pass, VK_NULL_HANDLE);
+  const auto *Obj = fromHandle<RenderPass>(Pass);
+  ASSERT_EQ(Obj->subpasses().size(), 1u);
+  EXPECT_EQ(Obj->subpasses()[0].DepthStencilResolveAttachment, 1u);
+  EXPECT_EQ(Obj->subpasses()[0].DepthResolveMode,
+            VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
+  EXPECT_EQ(Obj->subpasses()[0].StencilResolveMode, VK_RESOLVE_MODE_NONE);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+/// Every `VK_KHR_depth_stencil_resolve` implementation must support
+/// `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`, but this ICD implements no other
+/// mode (`EntryPoints.cpp`'s `supportedDepthResolveModes` advertises only
+/// that one bit) -- requesting `AVERAGE`/`MIN`/`MAX` must fail render-pass
+/// creation rather than silently falling back to an unrequested mode.
+TEST_F(RenderPassTest, RenderPass2RejectsUnsupportedDepthResolveMode) {
+  VkAttachmentDescription2 Attachments[2]{};
+  for (VkAttachmentDescription2 &A : Attachments)
+    A.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+  Attachments[0].format = VK_FORMAT_D16_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[1].format = VK_FORMAT_D16_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkAttachmentReference2 DepthRef{};
+  DepthRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  DepthRef.attachment = 0;
+  DepthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+  VkAttachmentReference2 DepthResolveRef{};
+  DepthResolveRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  DepthResolveRef.attachment = 1;
+  DepthResolveRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+  VkSubpassDescriptionDepthStencilResolve Resolve{};
+  Resolve.sType =
+      VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+  Resolve.depthResolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+  Resolve.stencilResolveMode = VK_RESOLVE_MODE_NONE;
+  Resolve.pDepthStencilResolveAttachment = &DepthResolveRef;
+
+  VkSubpassDescription2 Subpass{};
+  Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+  Subpass.pNext = &Resolve;
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.pDepthStencilAttachment = &DepthRef;
+
+  VkRenderPassCreateInfo2 Info{};
+  Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  Info.attachmentCount = 2;
+  Info.pAttachments = Attachments;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
 TEST_F(RenderPassTest, FramebufferBindsMatchingViews) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
