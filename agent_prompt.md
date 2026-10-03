@@ -63,38 +63,32 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, unchanged, now the single largest `memory_model.*`
-   blocker)** The `OpSpecConstantOp`-as-`OpSpecConstantComposite`-
-   constituent MLIR dialect gap, 52 cases. Needs an upstream-MLIR-style
-   design change (new module-scope symbol form for
-   `spirv.SpecConstantOperation`, or extending `SpecConstantCompositeOp`'s
-   constituents to accept SSA operands). Consider posting to the MLIR
-   list before attempting solo, per the prior session's note.
-2. **(a few hours)** The 3 `message_passing.permuted_index.*`-adjacent
-   item from an earlier handoff is now done (this session). Next
-   untouched cluster: `geometry_interaction`/`matrix_multiplication`/
-   `shader_input_output`/`misc_draw`/`common_edge` groups from the much
-   older 136-case tessellation residual list -- still not re-checked
-   this session; given today's device_group/user_defined_io surprise,
-   **re-run these first** before assuming they're still broken.
-3. **(worth investigating once, low cost, carried over many sessions)**
-   Wire up ThreadSanitizer for a one-off manual `FeMeVulkanTests` run.
-   Lower urgency now that the thread-safety audit (item above) turned
-   up nothing across every remaining object class, but still worth
-   doing once as a second, stronger confirmation.
-4. **(dedicated session, carried over many sessions, unchanged)** `L344`
-   item 2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`). Fully scoped in
-   `FeMeGraphicsDesign.md`; still needs the actual implementation
-   session.
-5. **(lowest priority, many sessions carried over, unchanged)** `L265`
-   -- ASTC alpha-decode tie-break, 12 cases. Next angle, still
-   unattempted: compare decoded 4-texel neighborhoods pixel-by-pixel
-   between `astc_5x5`/`astc_8x8` for a structural property correlating
-   with tie direction.
-6. **(a few hours, still overdue)** The broader-than-tessellation CTS
-   sweep (`api`/`pipeline`/`shader_render`/`synchronization`,
-   `binding_model` explicitly skipped for size) is still not done --
-   carried over many, many sessions now without anyone picking it up.
-   Worth relaunching in the background early next session specifically
-   so it's not deferred again.
+1. **(2 minutes, do this first)** Check `/tmp/cts_sweep/progress.log` and `tail
+   -c 2000` the newest `.stdout.log` -- the sweep was running unattended when
+   this session ended. Parse whatever new groups finished (`draw` was in
+   progress; `glsl`/`texture`/`ycbcr` etc. likely done or close by now) and
+   append to `VulkanCTSReport.md`. Keep going down the `CTS_GROUPS` list in
+   `run_sweep.sh` -- `api`/`pipeline`/`binding_model`/`shader_object`/`image`
+   are the last 5, deliberately saved for last (large/slow).
+2. **(a few hours, carried over, unchanged)** `L344` item 2 / `L335` -- the
+   N-barrier-generalization implementation session. Now confirmed by *two*
+   independent CTS findings (`shader_input_output.barrier` and, this session,
+   `rasterization.line_continuity.*`) to be the same root cause blocking real
+   cases. Scoped already in `FeMeGraphicsDesign.md`. Worth bumping priority
+   given it's now blocking 2+ known clusters, not 1.
+3. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
+   alpha-decode tie-break, 12 cases. Next angle, still unattempted: compare
+   decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5`/`astc_8x8`.
+4. **(worth doing once, low cost)** Re-run
+   `mesh_shader.ext.misc.many_mesh_work_groups_*` one more time with zero other
+   concurrent heavy processes running, purely to rule out a genuine (vs.
+   contention-induced) timing bug with full confidence. Current evidence (clean
+   3/3 isolated repro) already favors "not a real bug," so this is a
+   belt-and-suspenders check, not an urgent one.
+5. **(process note for future sessions)** `build-tsan/` is a legitimate,
+   reusable asset -- don't rebuild it from scratch next time TSan is needed;
+   just `ninja -C build-tsan FeMeVulkanTests` after any
+   `Sync.h`/`QueryPool.h`/similar change to get a fast confirmation. It shares
+   ccache with the main `build/` dir but needs its own object cache entries
+   (sanitizer flags change the cache key), so expect the *first* rebuild after a
+   code change to take a bit, not zero time.
