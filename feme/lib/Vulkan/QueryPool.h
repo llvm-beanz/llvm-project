@@ -65,7 +65,10 @@
 #ifndef FEME_LIB_VULKAN_QUERYPOOL_H
 #define FEME_LIB_VULKAN_QUERYPOOL_H
 
+#include "Sync.h"
+
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/Support/Error.h"
 
@@ -73,8 +76,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace feme::vulkan {
@@ -111,6 +117,21 @@ enum class PipelineStatisticIndex : uint32_t {
 /// order, LSB first"). An occlusion or pipeline-statistics query may
 /// additionally be active between `vkCmdBeginQuery` and `vkCmdEndQuery`,
 /// accumulating passed-sample counts or per-bit statistics respectively.
+///
+/// (Roadmap L354) Genuinely cross-thread since roadmap L228(h)/(i) made
+/// `vkQueueSubmit` enqueue work onto a `VkQueue`'s own `QueueExecutor`
+/// worker thread instead of running it synchronously: `begin`/
+/// `markAvailable`/`accumulate*` below all run on that worker thread as
+/// it executes a submitted command buffer, while `isAvailable`/`value`/
+/// `values` (via `vkGetQueryPoolResults`, `QueryPool.cpp`) run on
+/// whichever host thread calls them -- concurrently with that same
+/// worker thread for any query whose ending command buffer hasn't
+/// finished executing yet. Kept behind a mutex and condition variable
+/// like `Fence`/`Semaphore` (`Sync.h`) for exactly that reason, with a
+/// genuinely blocking `waitAvailable` `vkGetQueryPoolResults` uses to
+/// honor `VK_QUERY_RESULT_WAIT_BIT` instead of racily sampling
+/// `isAvailable` once and reporting `VK_NOT_READY` for a query whose
+/// value the worker thread simply hasn't written yet.
 class QueryPool {
 public:
   QueryPool(uint32_t QueryCount, VkQueryType Type,
@@ -141,6 +162,7 @@ public:
   /// `[FirstQuery, FirstQuery+QueryCount)` unavailable again and discards any
   /// in-flight accumulation for them.
   void reset(uint32_t FirstQuery, uint32_t QueryCount) {
+    std::lock_guard<std::mutex> Lock(Mutex);
     for (uint32_t I = 0; I != QueryCount && FirstQuery + I < Available.size();
          ++I) {
       Available[FirstQuery + I] = false;
@@ -157,6 +179,7 @@ public:
   /// multiview query rule (see `QueryPool.h`'s file comment) -- rather
   /// than the single index a non-multiview `vkCmdBeginQuery` uses.
   void begin(uint32_t Query, uint32_t ViewCount = 1) {
+    std::lock_guard<std::mutex> Lock(Mutex);
     for (uint32_t I = 0; I != ViewCount && Query + I < Available.size(); ++I) {
       Available[Query + I] = false;
       Active[Query + I] = true;
@@ -168,10 +191,15 @@ public:
   /// multiview, its following \p ViewCount-1 implicit indices -- see
   /// `begin`'s own comment) available.
   void markAvailable(uint32_t Query, uint32_t ViewCount = 1) {
-    for (uint32_t I = 0; I != ViewCount && Query + I < Available.size(); ++I) {
-      Active[Query + I] = false;
-      Available[Query + I] = true;
+    {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      for (uint32_t I = 0; I != ViewCount && Query + I < Available.size();
+           ++I) {
+        Active[Query + I] = false;
+        Available[Query + I] = true;
+      }
     }
+    CV.notify_all();
   }
 
   /// Adds \p Samples to occlusion query index \p Query alone -- the one
@@ -183,6 +211,7 @@ public:
   /// passed-sample count instead of every slot sharing the sum across all
   /// views.
   void accumulateOcclusionSamples(uint32_t Query, uint64_t Samples) {
+    std::lock_guard<std::mutex> Lock(Mutex);
     if (Type != VK_QUERY_TYPE_OCCLUSION || Samples == 0 ||
         Query >= Values.size())
       return;
@@ -203,6 +232,7 @@ public:
       const std::array<uint64_t, static_cast<size_t>(
                                       PipelineStatisticIndex::Count)>
           &Counters) {
+    std::lock_guard<std::mutex> Lock(Mutex);
     if (Type != VK_QUERY_TYPE_PIPELINE_STATISTICS || Query >= Values.size())
       return;
     uint32_t Slot = 0;
@@ -220,12 +250,14 @@ public:
   /// no-op for any other query type, mirroring `accumulatePipelineStatistics`'s
   /// own type guard.
   void accumulatePrimitivesGenerated(uint32_t Query, uint64_t Primitives) {
+    std::lock_guard<std::mutex> Lock(Mutex);
     if (Type != VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT || Query >= Values.size())
       return;
     Values[Query][0] += Primitives;
   }
 
   bool isAvailable(uint32_t Query) const {
+    std::lock_guard<std::mutex> Lock(Mutex);
     return Query < Available.size() && Available[Query];
   }
 
@@ -233,21 +265,48 @@ public:
   /// holds -- callers writing a pipeline-statistics query's own
   /// `componentCount()`-many values use `values(Query)` instead.
   uint64_t value(uint32_t Query) const {
+    std::lock_guard<std::mutex> Lock(Mutex);
     return Query < Values.size() && !Values[Query].empty() ? Values[Query][0]
                                                             : 0;
   }
 
   /// Every one of query \p Query's own `componentCount()` result values,
   /// in `vkGetQueryPoolResults`'s own write order.
-  llvm::ArrayRef<uint64_t> values(uint32_t Query) const {
-    return Query < Values.size() ? llvm::ArrayRef<uint64_t>(Values[Query])
-                                  : llvm::ArrayRef<uint64_t>();
+  llvm::SmallVector<uint64_t, 11> values(uint32_t Query) const {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    return Query < Values.size()
+               ? llvm::SmallVector<uint64_t, 11>(Values[Query].begin(),
+                                                 Values[Query].end())
+               : llvm::SmallVector<uint64_t, 11>();
+  }
+
+  /// (Roadmap L354) `vkGetQueryPoolResults`'s own `VK_QUERY_RESULT_WAIT_
+  /// BIT` support: blocks the calling host thread until every query in
+  /// `[FirstQuery, FirstQuery+QueryCount)` is available, or \p TimeoutNs
+  /// nanoseconds elapse (clamped to `getSafetyNetTimeoutNs()` by the
+  /// caller, matching every other blocking wait in `Sync.h`). Returns
+  /// whether every query in range was actually observed available (false
+  /// only on a genuine timeout -- e.g. a query that was never begun/
+  /// ended, which legitimately never becomes available).
+  bool waitAvailable(uint32_t FirstQuery, uint32_t QueryCount,
+                     uint64_t TimeoutNs) const {
+    std::unique_lock<std::mutex> Lock(Mutex);
+    return CV.wait_for(Lock, std::chrono::nanoseconds(TimeoutNs), [&] {
+      for (uint32_t I = 0; I != QueryCount; ++I) {
+        uint32_t Query = FirstQuery + I;
+        if (Query >= Available.size() || !Available[Query])
+          return false;
+      }
+      return true;
+    });
   }
 
 
 private:
   VkQueryType Type;
   VkQueryPipelineStatisticFlags PipelineStatistics;
+  mutable std::mutex Mutex;
+  mutable std::condition_variable CV;
   std::vector<bool> Available;
   std::vector<bool> Active;
   std::vector<std::vector<uint64_t>> Values;
@@ -286,7 +345,7 @@ inline void writeQueryResult(const QueryPool &Pool, uint32_t Query,
                              uint8_t *Dst, bool WriteValues = true) {
   VkDeviceSize ResultWidth = Is64Bit ? sizeof(uint64_t) : sizeof(uint32_t);
   if (WriteValues) {
-    llvm::ArrayRef<uint64_t> Values = Pool.values(Query);
+    llvm::SmallVector<uint64_t, 11> Values = Pool.values(Query);
     for (uint32_t C = 0; C != Pool.componentCount(); ++C) {
       uint64_t Value = C < Values.size() ? Values[C] : 0;
       uint8_t *Out = Dst + ResultWidth * C;

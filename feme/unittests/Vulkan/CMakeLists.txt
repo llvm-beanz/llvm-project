@@ -28,6 +28,7 @@ add_feme_unittest(FeMeVulkanTests
   PipelineCacheTest.cpp
   PrivateDataTest.cpp
   ProcAddrTest.cpp
+  QueryPoolTest.cpp
   RenderPassTest.cpp
   SpecializationPatchTest.cpp
   SurfaceTest.cpp

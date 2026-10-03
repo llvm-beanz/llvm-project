@@ -72,6 +72,24 @@ vkGetQueryPoolResults(VkDevice, VkQueryPool queryPool, uint32_t firstQuery,
   bool WithAvailability = (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0;
   VkDeviceSize EntrySize = queryResultEntrySize(*Pool, Is64Bit, WithAvailability);
 
+  // (Roadmap L354) `VK_QUERY_RESULT_WAIT_BIT`: block the calling host
+  // thread until every query in range is available, or a safety-net
+  // timeout elapses, before sampling `isAvailable`/`values` below --
+  // since roadmap L228(h)/(i), a query's ending command buffer may still
+  // be executing on its own `VkQueue`'s `QueueExecutor` worker thread
+  // when this host-thread call runs, so a single racy `isAvailable`
+  // sample can observe "not yet available" even though the application
+  // did everything right (submitted the ending command buffer, then
+  // called this with WAIT_BIT, exactly the spec-legal idiom this bit
+  // exists for) -- seen concretely as
+  // `dEQP-VK.query_pool.occlusion_query.get_results_*_wait_query_*`
+  // spuriously reporting `VK_NOT_READY` (and, worse, going on to
+  // destroy the test's own render targets while that worker thread was
+  // still using them, crashing in `ImageView::dimension()` via a
+  // dangling `ImageView*`).
+  if ((flags & VK_QUERY_RESULT_WAIT_BIT) != 0)
+    Pool->waitAvailable(firstQuery, queryCount, getSafetyNetTimeoutNs());
+
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != queryCount; ++I) {
     VkDeviceSize Offset = stride * I;
@@ -83,20 +101,20 @@ vkGetQueryPoolResults(VkDevice, VkQueryPool queryPool, uint32_t firstQuery,
     // are both not set then no result values are written to pData for
     // queries that are in the unavailable state" -- WAIT_BIT does not, by
     // itself, license writing a value; it only means the caller wants this
-    // call to block until every query becomes available, which this ICD's
-    // synchronous execution model (see Sync.h's file comment) never needs
-    // to actually wait for.
+    // call to block until every query becomes available (see
+    // `waitAvailable` above), which this query may still genuinely never
+    // do (e.g. one that was reset but never begun/ended), in which case
+    // it stays unavailable even after the wait above times out.
     bool WriteValues =
         Available || (flags & VK_QUERY_RESULT_PARTIAL_BIT) != 0;
     writeQueryResult(*Pool, firstQuery + I, Is64Bit, WithAvailability, Dst,
                      WriteValues);
     if (!Available && Result == VK_SUCCESS)
-      // Every query this ICD's synchronous execution model could ever
-      // resolve is already resolved by the time this runs (see Sync.h's
-      // file comment for the same reasoning applied to fences/
-      // semaphores/events): an unavailable query stays unavailable
-      // regardless of `VK_QUERY_RESULT_WAIT_BIT`, since no further work is
-      // ever pending to eventually write it.
+      // Still unavailable even after `waitAvailable`'s own safety-net
+      // timeout above (if WAIT_BIT was set) -- either WAIT_BIT was never
+      // requested, or this query is one that's never going to become
+      // available on its own (see this function's own comment just
+      // above).
       Result = VK_NOT_READY;
   }
   return Result;
