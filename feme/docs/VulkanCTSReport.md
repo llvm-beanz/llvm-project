@@ -13439,3 +13439,22 @@ progress as this session ends, then `glsl`, `texture`, `ycbcr`,
 `pipeline`) remain for a future session to pick up (the background
 script, `/tmp/cts_sweep/run_sweep.sh`, is still running and will
 continue through them unattended if left alone).
+
+**Update (next session): `draw` finished fully clean too.**
+
+| Group | Pass | Fail | NotSupported |
+|---|---|---|---|
+| `draw` | 3258 | 0 | 26193 |
+
+13 of ~39 groups now complete, 11 fully clean, 2 triaged to
+already-tracked non-issues. Note: the prior session's background sweep
+process (`run_sweep.sh`) had died partway through `glsl` (no process
+found running, log stale ~24 minutes with no new output) — this is the
+first confirmed case of the sweep *not* surviving to hand off cleanly,
+likely because it was launched via shell-level `cmd &` backgrounding in
+a `bash` tool call rather than the tool's own `mode="async"`, so it did
+not survive past that tool call's owning process lifetime (consistent
+with the background-wait tooling gotcha noted in the prior session).
+Relaunched the remaining groups (`glsl` onward) as `run_sweep2.sh`,
+this time using the bash tool's native async mode, which should survive
+cleanly for the rest of this session.
