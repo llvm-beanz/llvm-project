@@ -63,32 +63,38 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, new, scoped above)** The real fix for the
-   70-case `memory_model.*fence_fence.atomicwrite*` cluster needs an
-   MLIR SPIR-V dialect change: give `OpSpecConstantOp` results a way to
-   be referenced as `OpSpecConstantComposite` constituents (likely a new
-   module-scope symbol form, or extending `SpecConstantCompositeOp`'s
-   constituents to accept operands, not just attributes). This is an
-   upstream-MLIR design question, not a FeMe one -- may be worth
-   proposing on the MLIR list before attempting the implementation
-   solo, given the op-definition-level change involved.
-2. **(a few hours)** The 3 `message_passing.permuted_index.*` cases
-   (`spirv.AtomicStore` legalization failure on `Uniform` storage class
-   atomics) -- not investigated at all yet, different bug class from
-   item 1.
-3. **(a few hours)** Handoff item 1's other untouched sub-clusters:
-   `device_group` (7 cases), `geometry.input.triangle_strip_adjacency`
-   is now DONE (this session), but `user_defined_io` (27 cases) is
-   still untouched.
-4. **(systematic grep, ~1 hour, carried over many sessions)** Handoff
-   item 3's thread-safety audit (`Image`/`Buffer`/`Framebuffer`/
-   `DescriptorSet` for the `Event`/`QueryPool`-class bug) -- still not
-   done, still worth doing.
-5. **(worth investigating once, low cost, carried over)** Wire up
-   ThreadSanitizer for a one-off manual `FeMeVulkanTests` run.
-6. **(dedicated session, carried over many sessions, unchanged)** `L344`
+1. **(dedicated session, unchanged, now the single largest `memory_model.*`
+   blocker)** The `OpSpecConstantOp`-as-`OpSpecConstantComposite`-
+   constituent MLIR dialect gap, 52 cases. Needs an upstream-MLIR-style
+   design change (new module-scope symbol form for
+   `spirv.SpecConstantOperation`, or extending `SpecConstantCompositeOp`'s
+   constituents to accept SSA operands). Consider posting to the MLIR
+   list before attempting solo, per the prior session's note.
+2. **(a few hours)** The 3 `message_passing.permuted_index.*`-adjacent
+   item from an earlier handoff is now done (this session). Next
+   untouched cluster: `geometry_interaction`/`matrix_multiplication`/
+   `shader_input_output`/`misc_draw`/`common_edge` groups from the much
+   older 136-case tessellation residual list -- still not re-checked
+   this session; given today's device_group/user_defined_io surprise,
+   **re-run these first** before assuming they're still broken.
+3. **(worth investigating once, low cost, carried over many sessions)**
+   Wire up ThreadSanitizer for a one-off manual `FeMeVulkanTests` run.
+   Lower urgency now that the thread-safety audit (item above) turned
+   up nothing across every remaining object class, but still worth
+   doing once as a second, stronger confirmation.
+4. **(dedicated session, carried over many sessions, unchanged)** `L344`
    item 2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`).
-7. **(lowest priority, many sessions carried over, unchanged)** `L265`
-   -- ASTC alpha-decode tie-break, 12 cases.
-
+   (`shader_input_output.barrier`). Fully scoped in
+   `FeMeGraphicsDesign.md`; still needs the actual implementation
+   session.
+5. **(lowest priority, many sessions carried over, unchanged)** `L265`
+   -- ASTC alpha-decode tie-break, 12 cases. Next angle, still
+   unattempted: compare decoded 4-texel neighborhoods pixel-by-pixel
+   between `astc_5x5`/`astc_8x8` for a structural property correlating
+   with tie direction.
+6. **(a few hours, still overdue)** The broader-than-tessellation CTS
+   sweep (`api`/`pipeline`/`shader_render`/`synchronization`,
+   `binding_model` explicitly skipped for size) is still not done --
+   carried over many, many sessions now without anyone picking it up.
+   Worth relaunching in the background early next session specifically
+   so it's not deferred again.
