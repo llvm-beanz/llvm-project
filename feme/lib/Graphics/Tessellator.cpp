@@ -36,6 +36,30 @@ bool anyFactorCullsPatch(const float *Factors, size_t Count) {
                      [](float F) { return F <= 0.0f; });
 }
 
+/// (Roadmap L352) The triangle domain's centroid barycentric coordinate,
+/// used both as every concentric ring's own fixed homothety center
+/// (`appendTriangleRingBoundary`) and as the degenerate innermost ring's
+/// single point (`tessellateTriangle`'s `CurrentN == 2` case). This is
+/// deliberately *not* `1.0f / 3.0f`: that nearest-float value, call it
+/// `x`, satisfies `3.0f * x == 1.0f` exactly in IEEE754 (the rounding
+/// that takes true `1/3` up to the nearest representable float happens to
+/// land exactly back on `1.0f` when multiplied by 3 at float precision).
+/// Several CTS tests (e.g. `misc_draw.fill_overlap_*`) compute a
+/// per-vertex "ring index" in their tessellation evaluation shader via a
+/// `d = 3.0 * min(u, v, w)` / `int(d * N)`-style formula, implicitly
+/// relying on the centroid vertex's own `d` landing just *under* `1.0`,
+/// not exactly at it -- `int(d * N)` otherwise overflows by one whole
+/// bucket at that single vertex (e.g. `N == 5`: `int(1.0 * 5) == 5`, a
+/// value the formula's own `% 3` cycling never intends to produce, versus
+/// the correctly-intended `int(0.999999... * 5) == 4`). Real conformant
+/// implementations evidently avoid this by some other centroid
+/// construction that doesn't hit the exact IEEE754 tie; here the fix is
+/// simply the one float ULP below `1.0f / 3.0f`, which keeps
+/// `3.0f * CentroidThird < 1.0f` while moving the centroid's own screen
+/// position by a sub-pixel (~1e-7 relative) amount that is not otherwise
+/// observable.
+constexpr float CentroidThird = 0.333333313f;
+
 /// (Roadmap L341) Computes line index \p I's own `V` (line-density)
 /// coordinate out of \p L total lines, for `tessellateIsoline`, such that
 /// `invariance.outer_edge_symmetry`'s isoline cases' shader-side mirror
@@ -260,13 +284,12 @@ RingEdges appendTriangleBoundaryRing(TessellatedPatch &Patch, uint32_t E01,
 /// convention `appendTriangleBoundaryRing` uses.
 RingEdges appendTriangleRingBoundary(TessellatedPatch &Patch,
                                      uint32_t Resolution, float Scale) {
-  constexpr float Third = 1.0f / 3.0f;
   RingEdges Edges(3);
   auto AddPoint = [&](unsigned Edge, float U, float V, float W) {
     Edges[Edge].push_back(static_cast<uint32_t>(Patch.Points.size()));
-    Patch.Points.push_back({Third + Scale * (U - Third),
-                            Third + Scale * (V - Third),
-                            Third + Scale * (W - Third)});
+    Patch.Points.push_back({CentroidThird + Scale * (U - CentroidThird),
+                            CentroidThird + Scale * (V - CentroidThird),
+                            CentroidThird + Scale * (W - CentroidThird)});
   };
   // (Roadmap L336) Same complementary-fraction exact-equality concern as
   // `appendTriangleBoundaryRing` -- compute the complementary numerator
@@ -562,8 +585,8 @@ TessellatedPatch tessellateTriangle(const TessFactors &Factors,
       // reached after at least one full ring) is fanned directly to this
       // point instead of ever materializing that degenerate ring.
       uint32_t Center = static_cast<uint32_t>(Patch.Points.size());
-      constexpr float Third = 1.0f / 3.0f;
-      Patch.Points.push_back({Third, Third, Third});
+      Patch.Points.push_back(
+          {CentroidThird, CentroidThird, CentroidThird});
       fanRingToPoint(Patch, PrevRing, Center, Cw);
       break;
     }

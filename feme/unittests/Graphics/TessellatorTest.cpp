@@ -258,6 +258,36 @@ TEST(TessellatorTest, TriangleInsideFactorTwoFansOuterBoundaryToOneCenterPoint) 
   EXPECT_EQ(CenterCount, 1);
 }
 
+// (Roadmap L352) The degenerate center point's own barycentric coordinate
+// must not literally be `(1/3, 1/3, 1/3)` using the nearest-float value of
+// `1.0f / 3.0f`: `3.0f * (1.0f / 3.0f)` rounds to exactly `1.0f` in
+// IEEE754, which overflows any CTS tessellation-evaluation-shader
+// per-vertex "ring index" computed as `int(3.0 * min(u, v, w) * N)` by
+// exactly one bucket at that single vertex (observed via
+// `dEQP-VK.tessellation.misc_draw.fill_overlap_triangles_*`'s
+// `fill_overlap_triangles_equal_spacing_draw` case, tess levels
+// `inner={8}, outer={13,15,18}`, whose central fan vertex was miscolored
+// blue instead of the intended green). The fix keeps `3 * min(u,v,w)`
+// strictly below `1.0f` at the centroid while staying close enough to
+// `1/3` that the centroid's own screen position is unaffected.
+TEST(TessellatorTest, TriangleCenterPointThreeTimesMinIsStrictlyBelowOne) {
+  TessFactors Factors;
+  Factors.Inside = {8.0f, 0.0f};
+  Factors.Edges = {13.0f, 15.0f, 18.0f, 0.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Triangle, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  bool FoundCenter = false;
+  for (const DomainPoint &P : Patch.Points) {
+    float Min = std::min({P.U, P.V, P.W});
+    if (std::abs(P.U - P.V) < Epsilon && std::abs(P.V - P.W) < Epsilon) {
+      FoundCenter = true;
+      EXPECT_LT(3.0f * Min, 1.0f);
+    }
+  }
+  ASSERT_TRUE(FoundCenter);
+}
+
 // (Roadmap L220) `N0 == 3` (inside factor 3): the spec's own "edges of the
 // inner triangle are not subdivided" case -- a single small triangle is
 // bridged directly to the real outer boundary, with no further rings and
