@@ -5147,6 +5147,201 @@ TEST_F(DrawTest, RendersWithCombinedDepthStencilAttachment) {
   vkFreeMemory(Device, DepthStencilMemory, nullptr);
 }
 
+/// (Roadmap L357, `VK_KHR_depth_stencil_resolve`) A multisampled combined
+/// `D24_UNORM_S8_UINT` depth/stencil attachment with *both*
+/// `depthResolveMode` and `stencilResolveMode` requested, resolved into an
+/// `S8_UINT` (stencil-only) resolve attachment -- the exact shape
+/// `dEQP-VK.renderpasses.renderpass2.depth_stencil_resolve.*.compatibility_
+/// *_testing_stencil` exercises (its "compatible format" substitution
+/// narrows the resolve attachment to stencil-only, same as here). Per the
+/// extension's own spec text, a requested resolve mode for an aspect the
+/// *resolve attachment's own format* does not have is a silent no-op, not
+/// an error: the depth half must simply not be resolved, while the
+/// stencil half still is. Before this fix, `CommandBuffer.cpp`'s
+/// `buildRenderTargetBinding` populated `Binding.Depth->ResolveView`
+/// purely from `DepthResolveMode != NONE`, with no check that the resolve
+/// attachment's format actually has a depth aspect -- `Executor.cpp`'s
+/// depth resolve then reached a format it has no case for and hard-errored
+/// the whole draw (reported to the client as `VK_ERROR_DEVICE_LOST`).
+TEST_F(DrawTest, DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave) {
+  VkImage DepthStencilImage = VK_NULL_HANDLE;
+  VkImageView DepthStencilView = VK_NULL_HANDLE;
+  VkDeviceMemory DepthStencilMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_D24_UNORM_S8_UINT,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                     DepthStencilImage, DepthStencilView, DepthStencilMemory,
+                     VK_SAMPLE_COUNT_2_BIT);
+
+  VkImage ResolveImage = VK_NULL_HANDLE;
+  VkImageView ResolveView = VK_NULL_HANDLE;
+  VkDeviceMemory ResolveMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_S8_UINT,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_STENCIL_BIT, ResolveImage, ResolveView,
+                     ResolveMemory);
+
+  VkAttachmentDescription2 Attachments[2]{};
+  for (VkAttachmentDescription2 &A : Attachments)
+    A.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+  Attachments[0].format = VK_FORMAT_D24_UNORM_S8_UINT;
+  Attachments[0].samples = VK_SAMPLE_COUNT_2_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_S8_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+  VkAttachmentReference2 DSRef{};
+  DSRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  DSRef.attachment = 0;
+  DSRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+  VkAttachmentReference2 ResolveRef{};
+  ResolveRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  ResolveRef.attachment = 1;
+  ResolveRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+  VkSubpassDescriptionDepthStencilResolve Resolve{};
+  Resolve.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+  Resolve.depthResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+  Resolve.stencilResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+  Resolve.pDepthStencilResolveAttachment = &ResolveRef;
+
+  VkSubpassDescription2 Subpass{};
+  Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+  Subpass.pNext = &Resolve;
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 0;
+  Subpass.pDepthStencilAttachment = &DSRef;
+
+  VkRenderPassCreateInfo2 PassInfo{};
+  PassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass2(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {DepthStencilView, ResolveView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  // No fragment stage needed: the fixed-function depth/stencil tests
+  // below do all the writing (`AcceptsMissingFragmentStage`'s own
+  // pattern), and this test only cares about the resolve step, not any
+  // color output.
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkPipelineShaderStageCreateInfo Stage{};
+  Stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stage.module = Vertex;
+  Stage.pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_2_BIT;
+  VkStencilOpState Face{};
+  Face.failOp = VK_STENCIL_OP_KEEP;
+  Face.passOp = VK_STENCIL_OP_REPLACE;
+  Face.depthFailOp = VK_STENCIL_OP_KEEP;
+  Face.compareOp = VK_COMPARE_OP_ALWAYS;
+  Face.compareMask = 0xFF;
+  Face.writeMask = 0xFF;
+  Face.reference = 7;
+  VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+  DepthStencil.depthTestEnable = VK_TRUE;
+  DepthStencil.depthWriteEnable = VK_TRUE;
+  DepthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  DepthStencil.stencilTestEnable = VK_TRUE;
+  DepthStencil.front = Face;
+  DepthStencil.back = Face;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 1;
+  Info.pStages = &Stage;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pDepthStencilState = &DepthStencil;
+  Info.layout = Layout;
+  Info.renderPass = LocalPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                &Pipe),
+      VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].depthStencil = {1.0f, 0};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  // Before the `L357` fix, this `vkQueueSubmit` hard-errored the whole
+  // draw ("depth attachment format is not yet supported") and reported
+  // `VK_ERROR_DEVICE_LOST` back to the next call -- the completion
+  // criterion here is simply that it still succeeds.
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // The stencil half *does* have a matching aspect in the resolve
+  // attachment's format, so it must still actually resolve: every sample
+  // was replaced with the reference (7), so `SAMPLE_ZERO_BIT` must read
+  // back 7 everywhere.
+  const auto *ResolveObj = fromHandle<Image>(ResolveImage);
+  const auto *ResolveData = static_cast<const uint8_t *>(ResolveObj->data());
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X)
+      EXPECT_EQ(ResolveData[(size_t)Y * Extent + X], 7)
+          << "at (" << X << ", " << Y << ")";
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, ResolveView, nullptr);
+  vkDestroyImage(Device, ResolveImage, nullptr);
+  vkFreeMemory(Device, ResolveMemory, nullptr);
+  vkDestroyImageView(Device, DepthStencilView, nullptr);
+  vkDestroyImage(Device, DepthStencilImage, nullptr);
+  vkFreeMemory(Device, DepthStencilMemory, nullptr);
+}
+
 /// `BlendState::BlendEnable`: a half-alpha fragment source-over-blends with
 /// the attachment's existing (clear) color, rather than replacing it -- the
 /// completion scenario's own "blending" bullet.
