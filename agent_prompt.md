@@ -63,25 +63,39 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(~1-2 hours)** Fix the `compatibility_*` `DeviceLost` found above: at
-   minimum, make the unsupported-alternate-format path fail cleanly
-   instead of poisoning the device; ideally, implement the missing
-   alternate-format support (`VK_KHR_image_format_list`-adjacent, already
-   tracked under **K6a**).
-2. **(unknown)** Continue tessellation/broader triage: `user_defined_io`
-   (27 cases), `device_group` (7), `geometry.input.
-   triangle_strip_adjacency` (6), `memory_model.*` races (~24) -- all
-   still untouched, carried over several sessions now.
-3. **(systematic grep, ~1 hour, carried over)** Audit other Vulkan-layer
-   objects for the "stale synchronous-execution assumption" bug class
-   `QueryPool` had (fixed as `L354`). `Fence`/`Semaphore`/`QueryPool`
-   confirmed fine; nothing else checked yet.
-4. **(dedicated session, carried over many sessions)** `L344` item 2 /
-   `L335` -- N-barrier generalization, 1 case
+1. **(systematic grep, ~1 hour, STILL not finished)** Handoff item 3's
+   audit is still only half-done: only `Event` has been checked beyond
+   the already-known-fine `Fence`/`Semaphore`/`QueryPool`. Still
+   unchecked: anything touching `vkCmdCopyQueryPoolResults`'s buffer-write
+   path for completeness (explicitly called out in the original handoff
+   and still never looked at), plus any other object mutated by a
+   `QueueExecutor` worker and read by the host thread -- `Image`/`Buffer`
+   host-visible-memory bookkeeping fields, `Framebuffer`, anything in
+   `DescriptorSet.{h,cpp}` that caches state. Worth a dedicated pass
+   grepping for every class in `feme/lib/Vulkan/*.h` that's both
+   `Alloc.create`'d (heap, pointer-stable) and referenced from
+   `CommandBuffer.cpp`'s deferred-execution path.
+2. **(worth investigating once, low cost)** Check whether ThreadSanitizer
+   can be wired into a `check-feme`-adjacent build config. If `Event`
+   hid for this long, there may be more of these, and a poll-based unit
+   test alone can't prove a fix's correctness the way TSan actually can.
+   Even a one-off manual TSan build+run of `FeMeVulkanTests` would add
+   real confidence beyond what's been done so far.
+3. **(a few hours)** Continue tessellation/broader triage:
+   `user_defined_io` (27 cases), `device_group` (7),
+   `geometry.input.triangle_strip_adjacency` (6), `memory_model.*` races
+   (~24) -- all still untouched, carried over many sessions now.
+4. **(dedicated session, carried over many sessions, unchanged)** `L344`
+   item 2 / `L335` -- N-barrier generalization, 1 case
    (`shader_input_output.barrier`). Fully scoped in
-   `FeMeGraphicsDesign.md`; still needs the actual implementation session.
-5. **(lowest priority, many sessions carried over)** `L265` -- ASTC
-   alpha-decode tie-break, 12 cases. Next angle, still unattempted:
+   `FeMeGraphicsDesign.md`; still needs the actual implementation
+   session.
+5. **(lowest priority, many sessions carried over, unchanged)** `L265` --
+   ASTC alpha-decode tie-break, 12 cases. Next angle, still unattempted:
    compare decoded 4-texel neighborhoods pixel-by-pixel between
    `astc_5x5`/`astc_8x8` for a structural property correlating with tie
    direction.
+6. **(process note)** `vulkaninfo --summary` without `VK_ICD_FILENAMES`
+   silently reports Mesa `llvmpipe`, not FeMe -- always set the env var
+   explicitly before the mandatory per-session device check, or the
+   check can pass against the wrong driver without any error.
