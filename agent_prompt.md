@@ -63,32 +63,31 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(2 minutes, do this first)** Check `/tmp/cts_sweep/progress.log` and `tail
-   -c 2000` the newest `.stdout.log` -- the sweep was running unattended when
-   this session ended. Parse whatever new groups finished (`draw` was in
-   progress; `glsl`/`texture`/`ycbcr` etc. likely done or close by now) and
-   append to `VulkanCTSReport.md`. Keep going down the `CTS_GROUPS` list in
-   `run_sweep.sh` -- `api`/`pipeline`/`binding_model`/`shader_object`/`image`
-   are the last 5, deliberately saved for last (large/slow).
-2. **(a few hours, carried over, unchanged)** `L344` item 2 / `L335` -- the
-   N-barrier-generalization implementation session. Now confirmed by *two*
-   independent CTS findings (`shader_input_output.barrier` and, this session,
-   `rasterization.line_continuity.*`) to be the same root cause blocking real
-   cases. Scoped already in `FeMeGraphicsDesign.md`. Worth bumping priority
-   given it's now blocking 2+ known clusters, not 1.
-3. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
-   alpha-decode tie-break, 12 cases. Next angle, still unattempted: compare
-   decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5`/`astc_8x8`.
-4. **(worth doing once, low cost)** Re-run
-   `mesh_shader.ext.misc.many_mesh_work_groups_*` one more time with zero other
-   concurrent heavy processes running, purely to rule out a genuine (vs.
-   contention-induced) timing bug with full confidence. Current evidence (clean
-   3/3 isolated repro) already favors "not a real bug," so this is a
-   belt-and-suspenders check, not an urgent one.
-5. **(process note for future sessions)** `build-tsan/` is a legitimate,
-   reusable asset -- don't rebuild it from scratch next time TSan is needed;
-   just `ninja -C build-tsan FeMeVulkanTests` after any
-   `Sync.h`/`QueryPool.h`/similar change to get a fast confirmation. It shares
-   ccache with the main `build/` dir but needs its own object cache entries
-   (sanitizer flags change the cache key), so expect the *first* rebuild after a
-   code change to take a bit, not zero time.
+1. **(dedicated session)** `nested_structs_instance_arrays.31` -- the real fix
+   needs the Row math fixed (confirmed correct now) AND a second storage-sizing
+   bug found (24-byte overrun past an already-widened 112-byte block). Likely
+   geometry-shader multi-vertex-emission related. Next angle: dump the actual
+   GEP/store byte offsets the geometry shader's compiled code emits for this
+   case directly (not just the resolved Row/Component), to find where the extra
+   24 bytes comes from. The underlying architectural gap (distinguishing "array
+   of block instances" from "array of struct member" at
+   `resolveOffsetWithinElement`'s dispatch point via decoration metadata, not
+   just type shape) is still the right long-term fix per the existing code
+   comment.
+2. **(unknown, new)** `basic_arrays.1` -- not investigated at all yet. Same
+   `double free or corruption` signature as `nested_structs_instance_arrays.31`,
+   but confirmed pre-existing and (as far as tested) independent. Worth checking
+   first whether it's the *same* root cause (likely, given the shared
+   `random_geometry.fuzz` generator and identical crash signature) before
+   assuming a third distinct bug.
+3. **(a few hours)** Still-untriaged tessellation/broader CTS groups from
+   several sessions ago: `user_defined_io` (27 cases), `device_group` (7),
+   `memory_model.*` races (~24) -- unchanged, still carried over.
+4. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
+   / `L335` -- N-barrier generalization, 1+ case (`shader_input_output.barrier`,
+   `rasterization.line_continuity.*`).
+5. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
+   alpha-decode tie-break, 12 cases.
+6. **(a few hours, still overdue, many sessions carried over)** The
+   broader-than-tessellation CTS sweep
+   (`api`/`pipeline`/`shader_render`/`synchronization`) is still not done.
