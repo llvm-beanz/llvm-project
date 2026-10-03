@@ -63,38 +63,34 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, start here)** `fill_overlap_triangles_*` (4 cases,
-   `L351`) -- new angle: floating-point boundary tie, not topology.
-   Pick one known-mismatching pixel from `--deqp-log-images=enable`'s
-   `ErrorMask`, and instrument/print the exact interpolated `d` value
-   FeMe computes there (via the barycentric weights at that screen
-   position) alongside `int(d * numConcentricTriangles) % 3`. Check if
-   `d` sits within float epsilon of a `k/5` boundary (this test's tess
-   levels give `numConcentricTriangles=5`). If so, narrow down *which*
-   float operation disagrees with the reference: the ring
-   `CumulativeScale` product, the rasterizer's own barycentric
-   interpolation, or the TES's own cast. This is the same bug *class*
-   as `L265` below, so techniques from any future `L265` session may
-   transfer.
-2. **(dedicated session, unchanged, carried over many sessions)** `L344`
-   item 2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`). Fully scoped already in
-   `FeMeGraphicsDesign.md`'s Status subsection; needs someone to spend
-   the multi-file implementation session.
-3. **(lowest priority, many sessions carried over, unchanged)** `L265` --
-   ASTC alpha-decode tie-break, 12 cases. Untouched again this session.
-   Next angle (from two sessions ago, still unattempted): compare
-   decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5` and
-   `astc_8x8` for a structural property correlating with tie direction.
-4. **(low priority, out of scope, unchanged)** `offload-test-suite`'s
-   own lit-annotation backlog is at zero (confirmed clean 2 sessions
-   ago); not independently re-verified this session since no FeMe
-   runtime-behavior change landed. Cheap confirmation to run first if
-   picking back up `offload-test-suite` work.
-5. **(process note)** When an A/B test of a well-reasoned hypothesis
-   comes back negative, revert and document rather than keep a
-   non-improving change -- this session's own `bridgeEdgeMirrored`
-   detour is a concrete example: technically more "reference-faithful"
-   code is not automatically a fix if the test's real failure mode is
-   numerical, not topological.
-
+1. **(~a dedicated session)** `L344` item 2 / `L335` -- N-barrier
+   generalization, 1 case (`shader_input_output.barrier`). Carried
+   over many sessions, fully scoped in `FeMeGraphicsDesign.md`'s
+   Status subsection. Needs someone to actually spend the multi-file
+   implementation session.
+2. **(~a few hours, lowest priority, many sessions carried over)**
+   `L265` -- ASTC alpha-decode tie-break, 12 cases. Next unattempted
+   angle: compare decoded 4-texel neighborhoods pixel-by-pixel between
+   `astc_5x5` and `astc_8x8` for a structural property correlating
+   with tie direction.
+3. **(~a dedicated session, new idea from this session)** Audit other
+   even-inner-tess-factor CTS tests for the *same* centroid-tie bug
+   class masked by a less color-sensitive shader (this bug existed in
+   every even-`N0` triangle-domain patch, not just this one test family
+   -- only became *visible* here because of this test's exact
+   phase-bucket coloring). A quick way to start: grep the already-known
+   36 `invariance.outer_edge_symmetry` failures and any other
+   `tessellation.*` near-miss for even inner factors, see if any are
+   secretly hitting this same tie at the centroid rather than their
+   currently-assumed root cause.
+4. **(~a few hours, overdue)** The broader-than-tessellation CTS
+   re-run is still overdue -- last broad sample was several sessions
+   back. Worth a dedicated session on `api`/`shader_render` groups now
+   that tessellation's open-failure list is down to 30 (`L337`,
+   `L341`, `L346`, `L344` item 2).
+5. **(process note)** The "wrong tess-level case" mistake cost ~6
+   sessions. When a CTS test logs multiple tess-level cases with
+   images, always confirm which image set belongs to which case by
+   reading the `.qpa`'s own `<Text>` entries directly before drawing
+   any conclusion from pixel diffs -- don't assume image order matches
+   case order.
