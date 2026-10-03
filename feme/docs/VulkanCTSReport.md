@@ -13253,3 +13253,34 @@ constituent cluster -- no new failure modes introduced.
 
 `check-feme`: 3519/3580 Passed, 0 Failed, 61 Unsupported (was
 3518/3579 before this session's new test was added; 0 regressions).
+
+## Re-triage: full `tessellation.*` re-run confirms no new failures (30 of 1114, all already tracked)
+
+A prior session's handoff referenced a stale "136-case tessellation
+residual list" with several untriaged sub-clusters
+(`geometry_interaction`/`matrix_multiplication`/`shader_input_output`/
+`misc_draw`/`common_edge`). Before spending a session re-root-causing
+these, re-ran the full `dEQP-VK.tessellation.*` group (1114 cases) fresh
+to check whether that list is still accurate.
+
+**It is not** -- the residual has shrunk to 30 Fails (646 Pass, 438
+NotSupported), and all 30 are already-documented, already-tracked open
+issues, with zero new failure modes:
+- `common_edge.{quads_equal_spacing,quads_fractional_even_spacing,
+  quads_fractional_odd_spacing}_precise` (3 -- `L337`, open)
+- `invariance.outer_edge_symmetry.*` (24 -- `L341`, confirmed
+  irreconcilable with `inner_triangle_set`'s own requirement, open)
+- `invariance.inner_triangle_set.{quads,triangles}_fractional_odd_spacing`
+  (2 -- `L346`, same irreconcilable tradeoff, open)
+- `shader_input_output.barrier` (1 -- `L344` item 2 / `L335`, N-barrier
+  generalization, open, fully scoped in `FeMeGraphicsDesign.md`)
+
+No action taken this entry beyond the re-run itself -- recorded so a
+future session does not repeat the same "is the old count still
+accurate" question. The `geometry_interaction`/`matrix_multiplication`/
+`misc_draw` sub-clusters named in the stale handoff text no longer
+appear in the Fail list at all (either already fixed by an earlier
+session's collateral work, like `device_group`/`user_defined_io` were
+last session, or never actually part of `tessellation.*` to begin with
+-- not individually re-verified which, since there is nothing left to
+fix there).
