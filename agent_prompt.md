@@ -63,37 +63,36 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session)** Start the `fill_overlap_quads_*` port: implement
-   Mesa's `QuadGeneratePoints`/`QuadGenerateConnectivity` concentric-ring
-   generation in FeMe's `Tessellator.cpp`, including the
-   `StitchRegular`/`StitchTransition` table-driven connectivity. Tackle the
-   quad domain first and verify it in isolation before touching the
-   triangle domain -- they're independent fixes per the scoping above.
-   `/tmp/mesa_tess.cpp` (this session's fetch) is gone (cleaned up at
-   session end); re-fetch from
-   `https://gitlab.freedesktop.org/mesa/mesa/-/raw/main/src/gallium/auxiliary/tessellator/tessellator.cpp`.
-2. **(separate dedicated session)** Port `TriGeneratePoints`'s fixed-point
-   barycentric math for `fill_overlap_triangles_*`, once the quad port is
-   done and stable -- don't conflate the two, they're genuinely separate
-   algorithms in the reference.
-3. **(design session, carried over many sessions, unchanged)** `L344` item
-   2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`). Already fully scoped in
-   `FeMeGraphicsDesign.md`; still needs someone to actually spend the
-   multi-file implementation session.
-4. **(lowest priority, many sessions carried over, unchanged)** `L265` --
-   ASTC alpha-decode tie-break, 12 cases. Blit-geometry hypothesis ruled
-   out this session. Next angle to try: compare the actual decoded
-   4-texel neighborhoods feeding the bilinear blend for `astc_5x5` vs.
-   `astc_8x8` pixel-by-pixel (not just confirm the tie-landing mechanism,
-   which is already proven) -- look for a structural property (texel
-   position within its source block, e.g.) that correlates with which tie
-   direction each group needs.
-5. **(process note)** The `offload-test-suite` lit-annotation backlog
-   (item 4 on handoff lists for ~6+ sessions) is now zero. If new
-   `check-hlsl-feme-vk` failures appear in future sessions, triage them
-   the same way this session did (standalone `offloader -debug-layer` run
-   plus reading the actual VK API bridging code) rather than deferring
-   them as "out of scope" by default -- two of this session's three turned
-   out to be a real, fixable bug and a real, fixable stale annotation, not
-   environment noise.
+1. **(a few hours, start here)** `fill_overlap_triangles_*` (4 cases) --
+   root-cause the centroid-blob defect found in step 4 above. Start by
+   auditing `bridgeRingsByEdge`/`bridgeEdge` (`Tessellator.cpp` ~line 141)
+   for an analogous diagonal/ordering choice near the innermost rings,
+   where the bands are thinnest and any deviation is most visible. The
+   diagnostic images are already known-useful; re-run
+   `--deqp-log-images=enable` on both `_equal_spacing_draw` and
+   `_fractional_even_spacing_draw` if the first angle doesn't pan out.
+2. **(dedicated session, unchanged, carried over many sessions)** `L344`
+   item 2 / `L335` -- N-barrier generalization, 1 case
+   (`shader_input_output.barrier`). Fully scoped already; needs someone to
+   actually spend the multi-file implementation session across the five
+   subsystems listed in step 5 above.
+3. **(lowest priority, many sessions carried over, unchanged)** `L265` --
+   ASTC alpha-decode tie-break, 12 cases. No new angle found or attempted
+   this session. The concrete next angle from two sessions ago (compare
+   decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5` and
+   `astc_8x8` for a structural property correlating with tie direction)
+   is still the best lead, just not attempted again this session.
+4. **(low priority, out of scope, unchanged)** `offload-test-suite`'s own
+   lit-annotation backlog is at zero (confirmed clean last session); no
+   new issues found this session since no new `check-hlsl-feme-vk` run was
+   needed (no FeMe ICD changes this session affect its own runtime
+   behavior in a way distinguishable from the CTS numbers already tracked
+   above -- this wasn't independently re-verified this session and would
+   be a cheap confirmation to run first thing next time if picking back
+   up `offload-test-suite` work).
+5. **(process note)** The `.qpa` base64-image-extraction technique (step 2
+   above) is now the standard first move for any `misc_draw`/tessellation
+   visual-diff investigation -- much faster than ASCII heatmaps or numeric
+   diffs alone, and it's what turned a presumed multi-session port into a
+   6-line fix this session. Keep reaching for it before assuming a
+   topology-level root cause.
