@@ -825,8 +825,40 @@ TessellatedPatch tessellateQuad(const TessFactors &Factors,
       for (uint32_t J = 1; J <= M - 2; ++J) {
         uint32_t A = Grid[I][J], B = Grid[I + 1][J], C = Grid[I + 1][J + 1],
                  D = Grid[I][J + 1];
-        appendTriangle(Patch, A, B, C, Cw);
-        appendTriangle(Patch, A, C, D, Cw);
+        // (Roadmap L350) Mirror each cell's own diagonal to stay parallel
+        // to whichever of the domain's two corner-to-corner diagonals
+        // (`u == v`, or `u == 1 - v`) actually passes through it, instead
+        // of always splitting `A-C` (parallel only to `u == v`). This
+        // patch's own tessellation is topologically valid either way --
+        // no gaps/overlaps, matching CTS reference point counts -- but
+        // `dEQP-VK.tessellation.misc_draw.fill_overlap_quads_*`'s TES
+        // colors each fragment by a `min(phaseX, phaseY)` function of
+        // `gl_TessCoord` that is itself only continuous when interpolated
+        // along lines parallel to one of those two diagonals (the
+        // function's own two "branches" disagree everywhere else): a
+        // uniform `A-C` split interpolates smoothly for cells near
+        // `u == v` (where the chosen diagonal already runs parallel to
+        // it) but cuts across the discontinuity for cells near
+        // `u == 1 - v`, producing a visible golden-image mismatch (a
+        // staircase of small bands straddling that anti-diagonal) despite
+        // correct geometry/coverage -- confirmed via
+        // `--deqp-log-images=enable`'s `ErrorMask`, which showed exactly
+        // that staircase and nothing else. Use each cell's own center
+        // (in normalized domain space, not raw grid index, since `N` and
+        // `M` can differ) to decide which diagonal it's nearer to: same
+        // sign of `(u - 0.5)` and `(v - 0.5)` means the `u == v` diagonal
+        // passes through this cell's quadrant, so keep `A-C`; opposite
+        // signs mean `u == 1 - v` does, so split `B-D` instead to stay
+        // parallel to that one.
+        float CenterU = (static_cast<float>(I) + 0.5f) / N - 0.5f;
+        float CenterV = (static_cast<float>(J) + 0.5f) / M - 0.5f;
+        if (CenterU * CenterV >= 0.0f) {
+          appendTriangle(Patch, A, B, C, Cw);
+          appendTriangle(Patch, A, C, D, Cw);
+        } else {
+          appendTriangle(Patch, A, B, D, Cw);
+          appendTriangle(Patch, B, C, D, Cw);
+        }
       }
     }
     RingEdges InnerRing(4);

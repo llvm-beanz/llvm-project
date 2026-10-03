@@ -988,6 +988,104 @@ TEST(TessellatorTest, QuadAlignedInnerAndOuterFactorsGiveUnitGridTriangles) {
   EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
 }
 
+/// Finds the point index whose domain coordinates match (\p U, \p V)
+/// within a small epsilon, or returns `~0u` if no such point exists.
+/// Used below to locate specific interior grid-cell corners by their
+/// known normalized domain position, since the tessellator's own
+/// `Grid`/`I`/`J` bookkeeping is private to `Tessellator.cpp`.
+uint32_t findPointNear(const TessellatedPatch &Patch, float U, float V) {
+  constexpr float Tol = 1e-4f;
+  for (size_t I = 0; I != Patch.Points.size(); ++I) {
+    const DomainPoint &P = Patch.Points[I];
+    if (std::abs(P.U - U) < Tol && std::abs(P.V - V) < Tol)
+      return static_cast<uint32_t>(I);
+  }
+  return ~0u;
+}
+
+/// Returns whether the two triangles tessellating the quad cell with the
+/// 4 given corner indices (in `A` bottom-left, `B` bottom-right, `C`
+/// top-right, `D` top-left order) are split along the `A-C` diagonal
+/// (parallel to the domain's `u == v` corner-to-corner diagonal) as
+/// opposed to the `B-D` diagonal (parallel to `u == 1 - v`). Finds the
+/// diagonal as whichever of the two candidate edges appears (in either
+/// direction) in the patch's own triangle list.
+bool cellSplitsAlongAC(const TessellatedPatch &Patch, uint32_t A, uint32_t B,
+                      uint32_t C, uint32_t D) {
+  auto hasEdge = [&](uint32_t X, uint32_t Y) {
+    for (size_t I = 0; I + 2 < Patch.Indices.size(); I += 3) {
+      uint32_t V[3] = {Patch.Indices[I], Patch.Indices[I + 1],
+                       Patch.Indices[I + 2]};
+      for (unsigned K = 0; K != 3; ++K) {
+        uint32_t P = V[K], Q = V[(K + 1) % 3];
+        if ((P == X && Q == Y) || (P == Y && Q == X))
+          return true;
+      }
+    }
+    return false;
+  };
+  bool HasAC = hasEdge(A, C);
+  bool HasBD = hasEdge(B, D);
+  EXPECT_TRUE(HasAC != HasBD)
+      << "cell should split along exactly one of its two diagonals";
+  return HasAC;
+}
+
+TEST(TessellatorTest, QuadInteriorCellDiagonalMirrorsAcrossBothDomainDiagonals) {
+  // Roadmap L350 regression test. `dEQP-VK.tessellation.misc_draw.
+  // fill_overlap_quads_*`'s TES colors each fragment by a function of
+  // `gl_TessCoord` that is only continuous when interpolated parallel to
+  // one of the domain's two corner-to-corner diagonals (`u == v` or
+  // `u == 1 - v`) -- so the interior grid's own per-cell diagonal split
+  // must mirror to stay parallel to whichever of those two lines passes
+  // nearest that cell, instead of always splitting the same way. Uses an
+  // asymmetric `N != M` grid (`Inside = {9, 7}`) specifically because a
+  // square `N == M` grid can't distinguish "mirrors by raw grid index"
+  // from "mirrors by normalized domain position" -- only the asymmetric
+  // case proves the fix compares true `u`/`v` coordinates, not `I`/`J`.
+  TessFactors Factors;
+  Factors.Inside = {9.0f, 7.0f};
+  Factors.Edges = {9.0f, 7.0f, 9.0f, 7.0f};
+  TessellatedPatch Patch =
+      tessellate(TessellatorDomain::Quad, TessPartitioning::Integer,
+                 TessOutputPrimitive::TriangleCcw, Factors);
+  const uint32_t N = 9, M = 7;
+
+  // Cell (1, 1): both corners' own domain position is `< 0.5` on both
+  // axes (same sign), so it sits on the `u == v` diagonal's own side and
+  // should split `A-C`.
+  {
+    uint32_t A = findPointNear(Patch, 1.0f / N, 1.0f / M);
+    uint32_t B = findPointNear(Patch, 2.0f / N, 1.0f / M);
+    uint32_t C = findPointNear(Patch, 2.0f / N, 2.0f / M);
+    uint32_t D = findPointNear(Patch, 1.0f / N, 2.0f / M);
+    ASSERT_NE(A, ~0u);
+    ASSERT_NE(B, ~0u);
+    ASSERT_NE(C, ~0u);
+    ASSERT_NE(D, ~0u);
+    EXPECT_TRUE(cellSplitsAlongAC(Patch, A, B, C, D))
+        << "cell near (0, 0) should split along A-C";
+  }
+
+  // Cell (1, M - 2): `u < 0.5` but `v > 0.5` (opposite signs), so it
+  // sits on the `u == 1 - v` diagonal's own side and should split `B-D`
+  // instead.
+  {
+    uint32_t A = findPointNear(Patch, 1.0f / N, (M - 2.0f) / M);
+    uint32_t B = findPointNear(Patch, 2.0f / N, (M - 2.0f) / M);
+    uint32_t C = findPointNear(Patch, 2.0f / N, (M - 1.0f) / M);
+    uint32_t D = findPointNear(Patch, 1.0f / N, (M - 1.0f) / M);
+    ASSERT_NE(A, ~0u);
+    ASSERT_NE(B, ~0u);
+    ASSERT_NE(C, ~0u);
+    ASSERT_NE(D, ~0u);
+    EXPECT_FALSE(cellSplitsAlongAC(Patch, A, B, C, D))
+        << "cell near (0, 1) should split along B-D";
+  }
+
+  EXPECT_EQ(findNonManifoldEdge(Patch, TessellatorDomain::Quad), "");
+}
+
 TEST(TessellatorTest, QuadSingleAxisDegenerateInsideFactorGivesInteriorLine) {
   // Roadmap L221 (axis mapping corrected by L337): when exactly one
   // axis's clamped inner tessellation level is 2 (`N == 2` here, the
