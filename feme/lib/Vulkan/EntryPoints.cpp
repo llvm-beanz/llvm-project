@@ -1544,31 +1544,28 @@ void fillFeatures2Chain(void *pNext) {
       // `DescriptorUpdatedAfterBindingIsVisibleAtSubmission`) for every
       // descriptor type below that is otherwise genuinely usable today.
       //
-      // (Roadmap L228(h)/(i), tracked follow-up) `vkQueueSubmit` now
-      // enqueues a submission onto its `VkQueue`'s own dedicated
-      // `QueueExecutor` worker thread and returns immediately (`Sync.h`'s
-      // file comment) -- the actual update-after-bind pattern this
-      // feature bit exists for (an application calling
-      // `vkUpdateDescriptorSets` *after* `vkQueueSubmit` returns, while
-      // that submission may still be executing on its own worker thread)
-      // is now a genuine, if narrow, data race: `DescriptorSet`
-      // (`Descriptor.h`) has no locking of its own, and its
+      // (Roadmap L228(h)/(i)) `vkQueueSubmit` now enqueues a submission
+      // onto its `VkQueue`'s own dedicated `QueueExecutor` worker thread
+      // and returns immediately (`Sync.h`'s file comment) -- the actual
+      // update-after-bind pattern this feature bit exists for (an
+      // application calling `vkUpdateDescriptorSets` *after*
+      // `vkQueueSubmit` returns, while that submission may still be
+      // executing on its own worker thread) briefly became a genuine data
+      // race once that change landed, since `DescriptorSet`
+      // (`Descriptor.h`) had no locking of its own and its
       // `bindingArray`/`imageBindingArray`/`inlineUniformBlockData`
-      // getters return live `ArrayRef`s into its storage rather than
-      // copies. `DescriptorUpdatedAfterBindingIsVisibleAtSubmission`'s own
-      // update-then-submit ordering is unaffected (still race-free -- the
-      // update fully happens-before the enqueue), so these feature bits
-      // stay `VK_TRUE` rather than regressing a real, tested, and
-      // spec-common usage pattern; only the *concurrent*
-      // update-during-in-flight-submission pattern is newly exposed, and
-      // is not yet covered by a test. Fixing it for real needs
-      // `DescriptorSet`'s storage to be locked (and its getters changed
-      // to return copies rather than live references), a refactor that
-      // touches much of `CommandBuffer.cpp`'s descriptor-consumption code
-      // -- out of scope for the L228(h)/(i) change that introduced this
-      // gap; see the roadmap's own L228(h)/(i) entry for the follow-up
-      // item this is tracked under.
-      // `descriptorBindingStorageImageUpdateAfterBind` stays false because
+      // getters returned live `ArrayRef`s into its storage rather than
+      // copies. (Roadmap L228(j)) **Fixed**: `DescriptorSet` now guards
+      // its binding storage with its own `std::mutex`, and the three
+      // getters above return snapshot-copy `std::vector`s taken under
+      // that lock instead of live references, so a concurrent
+      // `vkUpdateDescriptorSets` can no longer race with an in-flight
+      // submission's read of the same set. Regression-tested by
+      // `DescriptorTest.cpp`'s
+      // `ConcurrentUpdateDescriptorSetsDoesNotRaceWithDispatchRead`
+      // (confirmed to fail reliably without the fix, and clean under
+      // Helgrind with it). `descriptorBindingStorageImageUpdateAfterBind`
+      // stays false because
       // storage images are not usable at all yet -- `Format.cpp` never
       // sets `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` on any format, so no
       // `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE` descriptor can ever be created.
@@ -1579,12 +1576,11 @@ void fillFeatures2Chain(void *pNext) {
       Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_TRUE;
       Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_TRUE;
       // (roadmap L12b) Same reasoning as the update-after-bind cluster
-      // above applies here too, including its now-tracked
-      // concurrent-in-flight-submission race (roadmap L228(h)/(i)
-      // follow-up) -- `DescriptorSet`'s `std::map`-based storage
-      // (`Descriptor.h`) has no locking, so even an "unused" binding's
-      // update can race with a different, in-flight binding's read at the
-      // container level (e.g. tree rebalancing during insertion).
+      // above applies here too; the `L228(j)` locking fix covers this
+      // path as well -- `DescriptorSet`'s storage (`Descriptor.h`) is now
+      // mutex-guarded, so even an "unused" binding's update no longer
+      // races with a different, in-flight binding's read at the
+      // container level.
       // `descriptorBindingUpdateUnusedWhilePending` promises an *unused*
       // binding may be updated while other bindings are in use -- true for
       // every *sequential* update-then-submit ordering, which is all any
