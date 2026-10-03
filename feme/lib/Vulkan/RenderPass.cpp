@@ -532,12 +532,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
           if (Index >= pCreateInfo->attachmentCount ||
               Attachments[Index].samples != 1)
             return VK_ERROR_INITIALIZATION_FAILED;
+          // The resolve attachment's format must be a known depth/stencil
+          // format, but it need not support *both* aspects: per spec, if a
+          // requested mode's aspect isn't present in the format, that
+          // aspect's resolve is simply skipped rather than an error (e.g.
+          // the CTS itself always requests both depth and stencil resolve
+          // modes even against a depth-only `D16_UNORM` target --
+          // `CommandBuffer.cpp`'s `Binding.Depth`/`Binding.Stencil` being
+          // independently null for an unsupported aspect already makes
+          // that skip happen naturally at draw time).
           std::optional<feme::cpu::ResourceFormat> ResolveFormat =
               mapVkFormat(Attachments[Index].format);
           if (!ResolveFormat ||
-              (Resolve->depthResolveMode != VK_RESOLVE_MODE_NONE &&
-               !isSupportedDepthAttachmentFormat(*ResolveFormat)) ||
-              (Resolve->stencilResolveMode != VK_RESOLVE_MODE_NONE &&
+              (!isSupportedDepthAttachmentFormat(*ResolveFormat) &&
                !isSupportedStencilAttachmentFormat(*ResolveFormat)))
             return VK_ERROR_FORMAT_NOT_SUPPORTED;
           DepthStencilResolveAttachments[I] = Index;
