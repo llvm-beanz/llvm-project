@@ -94,6 +94,42 @@ TEST_F(BufferTest, BindBufferMemory2) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap L355: `VK_KHR_maintenance6`'s `VkBindMemoryStatusKHR`, chained
+// onto a `VkBindBufferMemoryInfo`, must have its `pResult` written with the
+// real per-binding result -- see `ImageTest.cpp`'s identical
+// `BindImageMemory2WritesBindMemoryStatusResult` for the full rationale
+// (CTS pre-seeds `pResult` with `VK_ERROR_UNKNOWN` to detect a driver that
+// never touches it).
+TEST_F(BufferTest, BindBufferMemory2WritesBindMemoryStatusResult) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 64;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+
+  VkResult BindResult = VK_ERROR_UNKNOWN;
+  VkBindMemoryStatusKHR Status{};
+  Status.sType = VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS_KHR;
+  Status.pResult = &BindResult;
+  VkBindBufferMemoryInfo BindInfo{};
+  BindInfo.sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO;
+  BindInfo.pNext = &Status;
+  BindInfo.buffer = Buf;
+  BindInfo.memory = Memory;
+  BindInfo.memoryOffset = 0;
+  ASSERT_EQ(vkBindBufferMemory2(Device, 1, &BindInfo), VK_SUCCESS);
+  EXPECT_EQ(BindResult, VK_SUCCESS);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(BufferTest, RejectsZeroSize) {
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = 0;

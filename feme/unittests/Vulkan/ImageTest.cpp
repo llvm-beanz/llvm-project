@@ -1766,6 +1766,68 @@ TEST_F(ImageTest, AcceptsMutableFormatAndExtendedUsageFlags) {
   vkDestroyImage(Device, Img, nullptr);
 }
 
+// Roadmap L355: `VK_IMAGE_CREATE_ALIAS_BIT` used to be rejected outright by
+// `isValidImageShape`'s flags gate, the same way `MUTABLE_FORMAT_BIT`/
+// `EXTENDED_USAGE_BIT` were before L235/L244 -- it is now accepted, since
+// `Image::data()` is pure pointer arithmetic into its bound `DeviceMemory`
+// with no exclusive-ownership bookkeeping aliasing could violate.
+TEST_F(ImageTest, AcceptsAliasBit) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.flags = VK_IMAGE_CREATE_ALIAS_BIT;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  vkDestroyImage(Device, Img, nullptr);
+}
+
+// Roadmap L355: `VK_KHR_maintenance6`'s `VkBindMemoryStatusKHR`, chained
+// onto a `VkBindImageMemoryInfo`, must have its `pResult` written with the
+// real per-binding result -- CTS pre-seeds it with `VK_ERROR_UNKNOWN` to
+// detect a driver that never touches it at all (see
+// `vktMemoryBindingTests.cpp`'s own `makeBinding<VkImage>`).
+TEST_F(ImageTest, BindImageMemory2WritesBindMemoryStatusResult) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+
+  VkResult BindResult = VK_ERROR_UNKNOWN;
+  VkBindMemoryStatusKHR Status{};
+  Status.sType = VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS_KHR;
+  Status.pResult = &BindResult;
+  VkBindImageMemoryInfo BindInfo{};
+  BindInfo.sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO;
+  BindInfo.pNext = &Status;
+  BindInfo.image = Img;
+  BindInfo.memory = Memory;
+  ASSERT_EQ(vkBindImageMemory2(Device, 1, &BindInfo), VK_SUCCESS);
+  EXPECT_EQ(BindResult, VK_SUCCESS);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 // Roadmap L239: a `VK_IMAGE_TYPE_3D` image created with
 // `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` is accepted (the CTS's
 // `render_to_image.core.3d.*` render-target images all set this flag so a

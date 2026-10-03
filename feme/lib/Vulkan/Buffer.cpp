@@ -122,10 +122,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice, VkBuffer buffer,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                     const VkBindBufferMemoryInfo *pBindInfos) {
-  for (uint32_t I = 0; I != bindInfoCount; ++I)
+  for (uint32_t I = 0; I != bindInfoCount; ++I) {
     feme::vulkan::vkBindBufferMemory(device, pBindInfos[I].buffer,
                                      pBindInfos[I].memory,
                                      pBindInfos[I].memoryOffset);
+    // (roadmap L355) `VK_KHR_maintenance6`'s `VkBindMemoryStatusKHR` --
+    // see `vkBindImageMemory2`'s identical comment (`Image.cpp`) for the
+    // full rationale; this ICD's `bindBufferMemory` has no failure path
+    // either, so every chained status is unconditionally `VK_SUCCESS`.
+    for (const auto *Base =
+             static_cast<const VkBaseInStructure *>(pBindInfos[I].pNext);
+         Base; Base = Base->pNext) {
+      if (Base->sType == VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS_KHR) {
+        const auto *Status =
+            reinterpret_cast<const VkBindMemoryStatusKHR *>(Base);
+        if (Status->pResult)
+          *Status->pResult = VK_SUCCESS;
+      }
+    }
+  }
   return VK_SUCCESS;
 }
 

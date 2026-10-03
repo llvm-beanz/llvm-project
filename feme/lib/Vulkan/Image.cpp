@@ -510,11 +510,22 @@ bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
   // `Image::usage()` either (effectively already "extended" regardless of
   // this flag) -- so accepting both flags at creation time is sufficient,
   // with no risk of now-silently-wrong behavior for either.
+  // (Roadmap L355) `VK_IMAGE_CREATE_ALIAS_BIT` promises the application
+  // will bind this image's memory range to the same bytes another
+  // resource is also bound to (and takes responsibility for the data
+  // races/undefined-content consequences of reading one while writing the
+  // other). `Image::data()` is pure pointer arithmetic into its bound
+  // `DeviceMemory`'s own storage, with no per-image exclusive-ownership
+  // bookkeeping that aliasing could violate, so accepting it needs no
+  // further behavioral change here, mirroring `MUTABLE_FORMAT_BIT`/
+  // `EXTENDED_USAGE_BIT`'s own "already effectively supported" precedent
+  // immediately above.
   if (CreateInfo.flags &
       ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT |
                           VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT |
                           VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
-                          VK_IMAGE_CREATE_EXTENDED_USAGE_BIT))
+                          VK_IMAGE_CREATE_EXTENDED_USAGE_BIT |
+                          VK_IMAGE_CREATE_ALIAS_BIT))
     return false;
   if ((CreateInfo.flags & VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT) &&
       CreateInfo.imageType != VK_IMAGE_TYPE_3D)
@@ -787,10 +798,30 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice, VkImage image,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
                    const VkBindImageMemoryInfo *pBindInfos) {
-  for (uint32_t I = 0; I != bindInfoCount; ++I)
+  for (uint32_t I = 0; I != bindInfoCount; ++I) {
     feme::vulkan::vkBindImageMemory(device, pBindInfos[I].image,
                                     pBindInfos[I].memory,
                                     pBindInfos[I].memoryOffset);
+    // (roadmap L355) `VK_KHR_maintenance6`'s `VkBindMemoryStatusKHR`: each
+    // bind info may chain one, letting the caller recover a *per-binding*
+    // result from a batched call rather than only the aggregate
+    // `VkResult` this function itself returns. This ICD's own
+    // `bindImageMemory` has no failure path (see its own comment), so
+    // every chained status is unconditionally `VK_SUCCESS` -- but it must
+    // still be written: left untouched, CTS's own pre-seeded
+    // `VK_ERROR_UNKNOWN` sentinel (used to detect "driver never wrote
+    // this") survives and is reported as a spurious failure.
+    for (const auto *Base =
+             static_cast<const VkBaseInStructure *>(pBindInfos[I].pNext);
+         Base; Base = Base->pNext) {
+      if (Base->sType == VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS_KHR) {
+        const auto *Status =
+            reinterpret_cast<const VkBindMemoryStatusKHR *>(Base);
+        if (Status->pResult)
+          *Status->pResult = VK_SUCCESS;
+      }
+    }
+  }
   return VK_SUCCESS;
 }
 
