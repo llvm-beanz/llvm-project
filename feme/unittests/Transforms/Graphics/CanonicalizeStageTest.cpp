@@ -6139,6 +6139,58 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3}));
 }
 
+/// (Roadmap L365) A lone (non-array-of-instances) single-real-member
+/// struct with a leading `[N x i8]` pad (the same shape
+/// `RewritesLoneLeadingPadBeforeTightArrayOfVectorsMember` above
+/// exercises for `Row`/`Component` resolution) must not have its pad's
+/// byte count folded into `SignatureElement::XfbOffset` *twice*: once via
+/// `ParsedSPIRVDecorations::XfbOffset` (sourced from the member's own
+/// `Offset` decoration, roadmap H101l), and again via
+/// `addStageIOStructMembers`'s own `SL->getElementOffset` computation,
+/// were `isGenuineMultiMemberNestedStruct` to (wrongly) treat the
+/// pad-plus-real-member struct's 2 raw LLVM fields as 2 genuine GLSL
+/// members and decompose it. `dEQP-VK.transform_feedback.fuzz.
+/// random_geometry.basic_arrays.1`'s own 64-byte-padded shape hit exactly
+/// this: a real `xfb_offset = 64` member's `XfbOffset` came out as 128
+/// (64 counted twice), capturing one buffer slot too deep and reading
+/// back as 0 instead of the authored value.
+TEST(CanonicalizeStageTest,
+    DoesNotDoubleCountLeadingPadInXfbOffsetForLoneStruct) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.f32x3 = type { [3 x float] }
+    @var3 = external addrspace(8) global <{ [8 x i8], [2 x <3 x float>] }>, !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [2 x <3 x float>] [<3 x float> <float 1.0, float 2.0, float 3.0>, <3 x float> <float 4.0, float 5.0, float 6.0>], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @var3, i64 8)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 32}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 8}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 2u);
+  EXPECT_EQ(Elt.ComponentCount, 3u);
+  ASSERT_TRUE(Elt.XfbBuffer.has_value());
+  // The real member's own declared `Offset` decoration (8) must be used
+  // exactly once -- never doubled (16) by also adding the pad-stripped
+  // struct's own LLVM layout offset on top of it.
+  EXPECT_EQ(Elt.XfbOffset, 8u);
+}
+
 /// (Roadmap H101l) A single-real-member array-of-block-instances global
 /// (`addElements`' plain, non-`TakeBlockPath` path) whose block declares
 /// a non-zero `xfb_offset` that glslang encodes *only* as the one real

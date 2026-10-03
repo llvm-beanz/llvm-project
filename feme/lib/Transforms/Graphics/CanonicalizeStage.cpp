@@ -5994,6 +5994,50 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                 ValueTy = ArrayType::get(RealMemberTy, ArrTy->getNumElements());
             }
         }
+        // (Roadmap L365) A *lone* (non-array-of-instances) single-real-
+        // member struct's own leading `[N x i8]` pad field (the same
+        // `layOutStructIfOffsetsMatch` artifact the array-of-instances
+        // case just above already strips) is left unstripped here when
+        // `ValueTy` itself -- not wrapped in any outer array -- still
+        // *is* `PeekedST` (2 LLVM fields: pad + real member). Two
+        // separate, compounding bugs follow from that: (1)
+        // `isGenuineMultiMemberNestedStruct(PeeledContent)` below sees
+        // `PeekedST`'s own raw field count (2) rather than its real,
+        // decoration-derived member count (`PeekedMemberDecorations.
+        // size()`, already known to be 1 here), wrongly takes the
+        // per-member-decomposition path (`addStageIOStructMembers`)
+        // instead of the plain single-element path meant for exactly
+        // this shape; (2) that decomposition's own `FieldD.XfbOffset =
+        // BaseD.XfbOffset.value_or(0) + SL->getElementOffset(I)`
+        // re-derives the real member's byte position from `ST`'s own
+        // LLVM layout *on top of* `BaseD.XfbOffset`, which this
+        // function's own H101l fix (just above, `D.XfbOffset =
+        // PeekedMemberDecorations.lookup(0).XfbOffset`) already set to
+        // that exact same declared offset -- double-counting the pad
+        // (e.g. a real `xfb_offset = 64` member landing at a wrongly
+        // computed `XfbOffset = 128`), captured one buffer slot too deep
+        // and silently corrupting whatever a different element or the
+        // next vertex's own record already occupied there. Stripping the
+        // pad here, exactly like the array-of-instances case, sidesteps
+        // both: `isGenuineMultiMemberNestedStruct` sees the real,
+        // pad-free member type (never 2 fields for a scalar/vector/
+        // matrix leaf), and `addElement`'s own plain path uses `D.
+        // XfbOffset` -- the correct, already-adjusted value -- directly,
+        // with no decomposition (and no second offset add) in between.
+        // Unlike the array-of-instances case, this fix is not gated on
+        // `D.XfbBuffer`: the pad is an LLVM-level ABI artifact, not an
+        // XFB-only concept, so an `Input`/non-captured-`Output` lone
+        // padded struct needs the same strip to avoid the same
+        // misclassification (even though it has no `XfbOffset` to
+        // double-count, `isGenuineMultiMemberNestedStruct`'s own
+        // misclassification would still wrongly decompose it).
+        if (PeekedST && PeekedMemberDecorations.size() == 1 && MemberMD &&
+            ValueTy == PeekedST && PeekedST->getNumElements() > 1) {
+          Type *RealMemberTy =
+              PeekedST->getElementType(PeekedST->getNumElements() - 1);
+          if (RealMemberTy != PeekedST)
+            ValueTy = RealMemberTy;
+        }
         //
         // (Roadmap H29g) A hull entry's own plain per-control-point
         // `Output` global (e.g. `layout(location=0) out vec4 vtxColor[];`
