@@ -3929,17 +3929,51 @@ uint64_t getPaddedElementSize(Type *Ty, const DataLayout &DL) {
 /// elsewhere, since that goes through the ordinary, unmodified
 /// `spirv::MatrixType`/`spirv::VectorType` `TypeConverter` registrations.
 /// So a whole-matrix or whole-array-of-vectors store's own \p Actual is
-/// always the *real* `array<N x vector<M x Scalar>>` shape, even when the
-/// member it is stored into declares the *tight*, marker-wrapped
+/// *usually* the real `array<N x vector<M x Scalar>>` shape, even when
+/// the member it is stored into declares the *tight*, marker-wrapped
 /// `array<N x Marker<array<M x Scalar>>>` stand-in -- this recurses
 /// through matching array levels (unwrapping a marker on \p Declared's
 /// own side first), treating a declared `array<M x Scalar>` leaf as
 /// compatible with an actual `vector<M x Scalar>` leaf.
+///
+/// (Roadmap L363) A genuinely-declared, *directly authored* 2-level
+/// array of a narrow (`mat2`) matrix breaks the "Actual is always the
+/// real, unmarked shape" half of that assumption: a `mat2`'s own narrow
+/// (8-byte) column needs the same tight-vector ABI substitution a struct
+/// member's declared type gets, applied by `SPIRVToLLVMPatterns.cpp`'s
+/// own *matrix*-value conversion itself, so a whole-matrix store's own
+/// \p Actual here is `array<N x Marker<array<M x Scalar>>>` too, not
+/// plain `array<N x vector<M x Scalar>>`. Unwrapping a marker on
+/// \p Actual symmetrically (at each matching recursion level, not just
+/// the top) fixes this without disturbing any already-working shape.
+///
+/// (Roadmap L363) That marker only wraps the *narrow* per-column shape
+/// one level further down than any outer array dimension does, so a
+/// `mat2 var[2][2]`'s own raw, *not* marker-substituted \p Declared
+/// (`array<2 x array<2 x vector<2 x float>>>`, a REAL `vector<2 x
+/// float>` column -- this member is never itself tight-vector-
+/// substituted, only its *value*'s per-store conversion is) only ever
+/// reaches a matching level against \p Actual's own marker-unwrapped
+/// `array<2 x Scalar>` one level *before* \p DeclArrTy's own element
+/// peels down to that vector -- i.e. \p Declared itself is already the
+/// vector by the time \p Actual's matching level is the (unwrapped)
+/// array. The existing `DeclArrTy`-must-be-an-array requirement above
+/// only models the opposite pairing (\p Declared array vs. \p Actual
+/// vector); this mirrors it for \p Declared vector vs. \p Actual
+/// (unwrapped-marker) array.
 bool isShapeCompatible(Type *Declared, Type *Actual) {
   if (Type *Inner = getTightVectorMarkerInnerType(Declared))
     Declared = Inner;
+  if (Type *Inner = getTightVectorMarkerInnerType(Actual))
+    Actual = Inner;
   if (Declared == Actual)
     return true;
+  if (auto *DeclVecTy = dyn_cast<FixedVectorType>(Declared)) {
+    if (auto *ActualArrTy = dyn_cast<ArrayType>(Actual))
+      return DeclVecTy->getNumElements() == ActualArrTy->getNumElements() &&
+             DeclVecTy->getElementType() == ActualArrTy->getElementType();
+    return false;
+  }
   auto *DeclArrTy = dyn_cast<ArrayType>(Declared);
   if (!DeclArrTy)
     return false;

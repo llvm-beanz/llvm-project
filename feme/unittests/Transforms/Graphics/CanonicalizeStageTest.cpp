@@ -766,6 +766,83 @@ TEST(CanonicalizeStageTest,
            (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
 }
 
+/// (Roadmap L363) `isShapeCompatible`'s own marker-unwrapping, before
+/// this, only ever ran on \p Declared (a struct member's own declared
+/// type) -- documented as safe because a *value*'s own type (\p Actual)
+/// was assumed to always be the real, unmarked `array<N x vector<M x
+/// Scalar>>` shape, never itself marker-wrapped. A genuinely-declared,
+/// *directly authored* 2-level array of a narrow (`mat2`) matrix (e.g.
+/// `layout(xfb_buffer=0, xfb_offset=0) out Block { mat2 var[2][2]; }
+/// block;`, `dEQP-VK.transform_feedback.fuzz.2_level_array.mat2.
+/// geometry`'s own exact shape) breaks that assumption: a `mat2`'s own
+/// narrow (8-byte) column needs the same tight-vector ABI substitution a
+/// struct member's declared type gets, applied by
+/// `SPIRVToLLVMPatterns.cpp`'s *matrix*-value conversion itself, so a
+/// whole-matrix store's own value type here is `[2 x %feme.tight_vector.
+/// f32x2]` (an array of marker-wrapped columns), not the plain `[2 x <2 x
+/// float>]` every prior matrix-value test above used. Before this fix,
+/// `resolveRowComponent`'s peeling loop never recognized this as a match
+/// at the matrix-column-array level (`isShapeCompatible` only unwrapped
+/// \p Declared's own marker, and \p Declared never had one here), over-
+/// peeling one further level and computing a `Row` double
+/// `buildStageStorage`'s own matching `RowCount` -- an out-of-bounds
+/// `StageStorage` write past this element's own 64-byte allocation
+/// (`double free or corruption`, root-caused via `valgrind`). Unwrapping
+/// a marker on \p Actual symmetrically fixes this.
+TEST(CanonicalizeStageTest,
+    MapsTwoLevelArrayOfTightMatrixValueToRowAndComponentCount) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.f32x2 = type { [2 x float] }
+    @block = external addrspace(8) global [2 x [2 x [2 x <2 x float>]]], !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [2 x %feme.tight_vector.f32x2] [%feme.tight_vector.f32x2 { [2 x float] [float 1.0, float 2.0] }, %feme.tight_vector.f32x2 { [2 x float] [float 3.0, float 4.0] }], ptr addrspace(8) @block
+      store [2 x %feme.tight_vector.f32x2] [%feme.tight_vector.f32x2 { [2 x float] [float 5.0, float 6.0] }, %feme.tight_vector.f32x2 { [2 x float] [float 7.0, float 8.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 16)
+      store [2 x %feme.tight_vector.f32x2] [%feme.tight_vector.f32x2 { [2 x float] [float 9.0, float 10.0] }, %feme.tight_vector.f32x2 { [2 x float] [float 11.0, float 12.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 32)
+      store [2 x %feme.tight_vector.f32x2] [%feme.tight_vector.f32x2 { [2 x float] [float 13.0, float 14.0] }, %feme.tight_vector.f32x2 { [2 x float] [float 15.0, float 16.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 48)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 64}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 0}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  // 2 (outer) * 2 (inner) * 2 (matrix columns) = 8 rows, each a
+  // 2-component (vec2) column -- not 16 (over-peeled one level further)
+  // or any other bogus count.
+  EXPECT_EQ(Elt.RowCount, 8u);
+  EXPECT_EQ(Elt.ComponentCount, 2u);
+
+  // Every one of the 4 whole-matrix stores above decomposes into its own
+  // 2 column rows, covering 0-7 exactly once each -- never doubled (e.g.
+  // 0, 2, 4, 6 only, silently skipping every odd row and writing past
+  // row 7) the way the pre-fix over-peeling produced.
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+}
+
 /// (Roadmap H101j) The tight-array shape as it arises for a *non-matrix*
 /// array-of-vectors member (e.g. `layout(xfb_buffer=0, ...) out Block {
 /// ivec2 var[2]; } block;`, a single block instance -- no array-of-
