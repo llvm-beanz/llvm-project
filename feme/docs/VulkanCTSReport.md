@@ -12734,3 +12734,85 @@ still untriaged -- deferred to a future session; see
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 needed -- an internal query-pool synchronization correctness fix, no
 feature/extension-surface change.
+
+## L355: fixed -- `memory.binding.maintenance6.*` (56 cases) -- `VkBindMemoryStatusKHR` + `VK_IMAGE_CREATE_ALIAS_BIT`
+
+### Background
+
+Continuing the prior session's broader-than-tessellation CTS sweep
+triage (handoff item 1): `dEQP-VK.memory.binding.maintenance6.*` was
+the largest untriaged cluster from the partial 240,182-case sample
+(56 of 343 fails). Ran the full group in isolation (168 cases, 56
+applicable): **0 Pass/56 Fail**, all with the identical failure text
+`*bindMemoryStatus[i].pResult: VK_ERROR_UNKNOWN at
+vktMemoryBindingTests.cpp:817`.
+
+### Root cause (1): `VkBindMemoryStatusKHR` never written
+
+Reading `vktMemoryBindingTests.cpp`'s own `makeBinding<VkImage>`/
+`makeBinding<VkBuffer>`: when `checkIndividualResult` is set, each
+bind info gets a chained `VkBindMemoryStatusKHR` whose `pResult` is
+pre-seeded with `VK_ERROR_UNKNOWN` before the call, specifically so
+the test can detect a driver that never writes it at all (as opposed
+to one that writes a real failure code). `vkBindImageMemory2`/
+`vkBindBufferMemory2` (`Image.cpp`/`Buffer.cpp`) never inspected their
+own `pBindInfos[I].pNext` chain -- the status struct was silently
+ignored, so the sentinel survived and was reported as "the implicit
+per-binding bind failed."
+
+### Fix (1)
+
+Both `*Memory2` entrypoints now walk their own bind info's `pNext`
+chain (the same `VkBaseInStructure` walk pattern used throughout this
+codebase, e.g. `Sampler`'s custom-border-color check) looking for
+`VK_STRUCTURE_TYPE_BIND_MEMORY_STATUS_KHR`, and write `VK_SUCCESS`
+into `*Status->pResult` when found -- this ICD's own `bindImageMemory`/
+`bindBufferMemory` have no failure path, so the per-binding result is
+always `VK_SUCCESS`, it simply needed to actually be written.
+
+### Root cause (2): `VK_IMAGE_CREATE_ALIAS_BIT` rejected
+
+Even with (1) fixed, the `aliasing.*` sub-cases still failed, this
+time earlier: `vkCreateImage` itself returned
+`VK_ERROR_INITIALIZATION_FAILED`. `isValidImageShape`'s flags
+whitelist (`Image.cpp`) only accepted `CUBE_COMPATIBLE_BIT`/
+`2D_ARRAY_COMPATIBLE_BIT`/`MUTABLE_FORMAT_BIT`/`EXTENDED_USAGE_BIT` --
+`VK_IMAGE_CREATE_ALIAS_BIT` (used by every `aliasing.*` test case to
+create two images meant to share the same underlying memory range)
+fell outside it and was rejected outright.
+
+### Fix (2)
+
+Added `VK_IMAGE_CREATE_ALIAS_BIT` to `isValidImageShape`'s whitelist.
+`Image::data()` is pure pointer arithmetic into its bound
+`DeviceMemory`'s own storage (`BoundMemory->data() + BoundOffset`),
+with no per-image exclusive-ownership bookkeeping that two images
+aliasing the same bytes could violate -- accepting the flag needs no
+further behavioral change, exactly mirroring the `MUTABLE_FORMAT_BIT`/
+`EXTENDED_USAGE_BIT` precedent (`L235`/`L244`) in the same function's
+own comment.
+
+### Tests
+
+Added `ImageTest.AcceptsAliasBit` (a plain 2D image created with only
+`VK_IMAGE_CREATE_ALIAS_BIT` set, asserting `vkCreateImage` succeeds),
+`ImageTest.BindImageMemory2WritesBindMemoryStatusResult` and
+`BufferTest.BindBufferMemory2WritesBindMemoryStatusResult` (each
+chains a real `VkBindMemoryStatusKHR` pre-seeded with
+`VK_ERROR_UNKNOWN`, same as CTS's own pattern, and asserts it becomes
+`VK_SUCCESS` after the bind call). `ninja check-feme`: 3,509
+Passed/61 Unsupported/0 Failed (+3 new tests), 0 regressions.
+
+### CTS impact
+
+`dEQP-VK.memory.binding.maintenance6.*` (168 cases, 56 applicable):
+**56/56 Pass** (was 0/56). Re-ran the full `dEQP-VK.memory.binding.*`
+group (336 cases, 112 applicable) as a regression check: **112/112
+Pass**, 0 regressions. Also spot-checked `dEQP-VK.api.image_clearing.*`
+(45,636 cases) for any `isValidImageShape` regression from the new
+accepted flag: 23,028/23,028 applicable Pass, 0 regressions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal bind/image-validation correctness fix; `VK_KHR_
+maintenance6` was already advertised, this closes a real conformance
+gap in its own implementation rather than adding new surface.
