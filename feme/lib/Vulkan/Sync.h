@@ -182,16 +182,29 @@ private:
 /// buffer (`vkCmdSetEvent`/`vkCmdResetEvent`). Unlike a fence or semaphore,
 /// nothing consumes an event's state on a successful wait -- it stays
 /// signaled until something explicitly resets it.
+///
+/// (Roadmap L358) `set`/`reset` can run on the host thread
+/// (`vkSetEvent`/`vkResetEvent`, `Sync.cpp`) *or* on a `VkQueue`'s own
+/// `QueueExecutor` worker thread (a recorded `vkCmdSetEvent`/
+/// `vkCmdResetEvent`, `CommandBuffer.cpp`), while `isSignaled` can be read
+/// from either side too (`vkGetEventStatus` on the host, `vkCmdWaitEvents`'s
+/// `runWaitEvents` on the worker) -- the same cross-thread shape `Fence`/
+/// `Semaphore`/`QueryPool` already guard against. A plain `bool` here was a
+/// genuine data race (no `std::atomic`/mutex ever enforced visibility
+/// between the two threads), a leftover assumption from this ICD's
+/// since-retired fully-synchronous `vkQueueSubmit` (roadmap L228(h)/(i)),
+/// where the host and "worker" were the same thread and no race was
+/// possible.
 class Event {
 public:
   explicit Event(bool Signaled = false) : Signaled(Signaled) {}
 
-  bool isSignaled() const { return Signaled; }
-  void set() { Signaled = true; }
-  void reset() { Signaled = false; }
+  bool isSignaled() const { return Signaled.load(std::memory_order_acquire); }
+  void set() { Signaled.store(true, std::memory_order_release); }
+  void reset() { Signaled.store(false, std::memory_order_release); }
 
 private:
-  bool Signaled;
+  std::atomic<bool> Signaled;
 };
 
 /// A `VkSemaphore`: either binary (unsignaled/signaled, consumed by a
