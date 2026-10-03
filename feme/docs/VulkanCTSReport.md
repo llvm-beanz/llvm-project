@@ -12910,3 +12910,78 @@ above)/30 NotSupported/3 Warnings, 0 regressions elsewhere.
 needed -- `EarlyFragmentTests` is a core SPIR-V execution mode, not an
 extension; this is an internal spec-conformance fix, no new feature/
 extension surface.
+
+## VK_KHR_depth_stencil_resolve (roadmap K6)
+
+Implemented `VK_KHR_depth_stencil_resolve` for `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`
+(the only mode FeMe's single-sample-zero-copy resolve path needs): parsing/
+validation of `VkSubpassDescriptionDepthStencilResolve` in `RenderPass.cpp`,
+execution-side resolve plumbing in `CommandBuffer.cpp`/`Executor.cpp`, and
+capability advertisement in `EntryPoints.cpp`. Targeted at the 6
+`samplemask_{early,no_early}_fragment_tests_depth_samples_{2,4,8}` failures
+left over from the `EarlyFragmentTests` work above (traced to a depth-resolve
+bug, not an early/late-test decision).
+
+Two bugs were found and fixed via CTS verification after the initial
+implementation:
+
+1. **Over-strict resolve-attachment format validation**: the CTS always
+   requests both `depthResolveMode`/`stencilResolveMode` as
+   `SAMPLE_ZERO_BIT`, even against a resolve attachment format that only
+   has one aspect (e.g. a depth-only format while also requesting a
+   stencil resolve). Per the extension's spec text, this is legal -- a
+   requested mode for an aspect the format doesn't have is simply a silent
+   no-op, not `VK_ERROR_FORMAT_NOT_SUPPORTED`. Fixed to only require the
+   resolve attachment's format to support *some* recognized depth/stencil
+   aspect, not both aspects tied to each requested mode.
+2. **`PipelineRenderTargets::DepthStencil` aspect conflation**: a single
+   `std::optional<ResourceFormat>` field computed as "depth's format if
+   declared, else stencil's", used both for dynamic rendering (where
+   `depthAttachmentFormat`/`stencilAttachmentFormat` are independently
+   settable to `UNDEFINED`) and classic render passes (where a subpass's
+   depth/stencil attachment format may only support one aspect, e.g.
+   `S8_UINT`). `dEQP-VK.renderpasses.*.depth_stencil_resolve.*
+   .depth_zero_stencil_zero_testing_stencil` sets `depthTestEnable =
+   VK_TRUE` unconditionally while declaring only a stencil attachment --
+   legal per the "no depth attachment -> depth test is a no-op" rule, but
+   the conflated field wrongly inferred "depth is declared too", causing a
+   draw-time hard error that permanently latches `Device::markLost()`
+   (aborting the rest of the CTS run, not just failing one case). Fixed by
+   splitting into independent `DepthFormat`/`StencilFormat` fields, each
+   gated by `isSupportedDepthAttachmentFormat`/
+   `isSupportedStencilAttachmentFormat` for both paths.
+
+New unit tests: `ExecutorTest.DepthStencilResolveCopiesSampleZeroNotAnAverage`,
+`RenderPassTest.RenderPass2RecordsDepthStencilResolveAttachment`,
+`RenderPassTest.RenderPass2RejectsUnsupportedDepthResolveMode`,
+`GraphicsPipelineTest.StencilOnlyDynamicRenderingDisablesDepthTestForCombinedFormat`,
+`GraphicsPipelineTest.StencilOnlyRenderPassDisablesDepthTest`. `ninja
+check-feme`: 3,516 Passed/61 Unsupported/0 Failed (3,577 total, +5 new
+tests), 0 regressions.
+
+### CTS impact
+
+The original 6 target cases (`dEQP-VK.fragment_operations.early_fragment.
+samplemask_{early,no_early}_fragment_tests_depth_samples_{2,4,8}`) **all now
+Pass**.
+
+Full `dEQP-VK.renderpasses.*.depth_stencil_resolve.*` group (22,611 cases),
+excluding the `compatibility_*` subset (372 cases, see below): **738
+Pass/0 Fail/21,501 NotSupported**, 0 regressions, 0 `DeviceLost`.
+
+The excluded `compatibility_*` cases test a different, pre-existing,
+unrelated gap: resolving against an image created with an alternate
+but bit-compatible format (e.g. `X8_D24_UNORM_PACK32` instead of
+`D24_UNORM_S8_UINT`), which FeMe doesn't yet support
+(`"depth attachment format is not yet supported (mechanical, added on
+demand)"`). This is not part of `VK_KHR_depth_stencil_resolve` itself and
+is out of scope for this change; tracked as a new untriaged finding (see
+`agent_thoughts.md`). One side-effect worth flagging: hitting this
+unsupported-format path during `vkQueueSubmit` currently surfaces as
+`DeviceLost` (aborting the whole caselist run) rather than a clean error
+at `vkCreateImage`/pipeline-creation time -- the same
+"one-bad-draw-poisons-the-device" latching behavior documented above,
+not anything new to this change.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: updated,
+`VK_KHR_depth_stencil_resolve` now "Implemented (SAMPLE_ZERO_BIT only)".
