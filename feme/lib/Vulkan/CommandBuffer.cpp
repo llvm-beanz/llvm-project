@@ -33,6 +33,7 @@
 #include "feme/Target/CPU/ResourceInfo.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/bit.h"
 
 #include <algorithm>
@@ -1392,9 +1393,25 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
     // `D24_UNORM_S8_UINT` attachment leaves the stencil half un-resolved).
     if (Desc.DepthStencilResolveAttachment != VK_ATTACHMENT_UNUSED) {
       ImageView *ResolveTarget = Attachments[Desc.DepthStencilResolveAttachment];
-      if (Binding.Depth && Desc.DepthResolveMode != VK_RESOLVE_MODE_NONE)
+      // Per `VK_KHR_depth_stencil_resolve`'s spec, a requested resolve
+      // mode for an aspect the *resolve attachment's own format* doesn't
+      // have is a silent no-op for that aspect, not an error --
+      // `RenderPass.cpp`'s `vkCreateRenderPass2` validation already
+      // allows this (see its own comment), but this execution-side
+      // `ResolveView` assignment must honor the same rule too, or a
+      // depth resolve requested against a stencil-only resolve format
+      // (e.g. `S8_UINT`, as `dEQP-VK.renderpasses.*.depth_stencil_
+      // resolve.*.compatibility_*_testing_stencil` exercises) reaches
+      // `Executor.cpp`'s depth read/write with a format it has no case
+      // for, hard-erroring the whole draw instead of just skipping.
+      feme::cpu::ResourceFormat ResolveFormat =
+          ResolveTarget && ResolveTarget->image() ? ResolveTarget->image()->format()
+                                                  : feme::cpu::ResourceFormat::Unknown;
+      if (Binding.Depth && Desc.DepthResolveMode != VK_RESOLVE_MODE_NONE &&
+          isSupportedDepthAttachmentFormat(ResolveFormat))
         Binding.Depth->ResolveView = ResolveTarget;
-      if (Binding.Stencil && Desc.StencilResolveMode != VK_RESOLVE_MODE_NONE)
+      if (Binding.Stencil && Desc.StencilResolveMode != VK_RESOLVE_MODE_NONE &&
+          isSupportedStencilAttachmentFormat(ResolveFormat))
         Binding.Stencil->ResolveView = ResolveTarget;
     }
   }
@@ -4220,8 +4237,27 @@ namespace {
 /// the internal binding holds. The format and sample count come from the
 /// view's own image, so a dynamic-rendering attachment needs no separate
 /// format declaration the way a `VkRenderPass` attachment does.
-RenderTargetView
-normalizeRenderingAttachment(const VkRenderingAttachmentInfo &Src) {
+///
+/// \p IsSupportedResolveFormat gates whether `Src.resolveImageView` is
+/// actually recorded as this attachment's `ResolveView`: a color
+/// attachment's resolve image always shares the color aspect (so its
+/// caller passes a predicate that always returns true), but a depth or
+/// stencil attachment's resolve image may legally lack that aspect
+/// entirely (`VK_KHR_depth_stencil_resolve`'s "resolve attachment has no
+/// such aspect -> silent no-op for that aspect" rule, the same one
+/// `RenderPass.cpp`'s classic-render-pass path already honors) -- binding
+/// a `ResolveView` anyway would later reach `Executor.cpp`'s depth/stencil
+/// read/write with a format it has no case for, hard-erroring the draw
+/// instead of just skipping (`dEQP-VK.renderpasses.*.depth_stencil_
+/// resolve.*.compatibility_*_testing_stencil`, whose resolve image is a
+/// stencil-only `S8_UINT` while `depthResolveMode` is still
+/// `SAMPLE_ZERO_BIT`, exercises exactly this).
+RenderTargetView normalizeRenderingAttachment(
+    const VkRenderingAttachmentInfo &Src,
+    llvm::function_ref<bool(feme::cpu::ResourceFormat)>
+        IsSupportedResolveFormat = [](feme::cpu::ResourceFormat) {
+          return true;
+        }) {
   RenderTargetView View;
   View.View = fromHandle<ImageView>(Src.imageView);
   if (View.View) {
@@ -4232,8 +4268,14 @@ normalizeRenderingAttachment(const VkRenderingAttachmentInfo &Src) {
   View.LoadOp = Src.loadOp;
   View.StoreOp = Src.storeOp;
   View.ClearValue = Src.clearValue;
-  if (Src.resolveMode != VK_RESOLVE_MODE_NONE)
-    View.ResolveView = fromHandle<ImageView>(Src.resolveImageView);
+  if (Src.resolveMode != VK_RESOLVE_MODE_NONE) {
+    ImageView *ResolveTarget = fromHandle<ImageView>(Src.resolveImageView);
+    feme::cpu::ResourceFormat ResolveFormat =
+        ResolveTarget && ResolveTarget->image() ? ResolveTarget->image()->format()
+                                                : feme::cpu::ResourceFormat::Unknown;
+    if (IsSupportedResolveFormat(ResolveFormat))
+      View.ResolveView = ResolveTarget;
+  }
   return View;
 }
 
@@ -4253,12 +4295,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
         normalizeRenderingAttachment(pRenderingInfo->pColorAttachments[I]));
   if (pRenderingInfo->pDepthAttachment &&
       pRenderingInfo->pDepthAttachment->imageView)
-    Binding.Depth =
-        normalizeRenderingAttachment(*pRenderingInfo->pDepthAttachment);
+    Binding.Depth = normalizeRenderingAttachment(
+        *pRenderingInfo->pDepthAttachment, isSupportedDepthAttachmentFormat);
   if (pRenderingInfo->pStencilAttachment &&
       pRenderingInfo->pStencilAttachment->imageView)
     Binding.Stencil =
-        normalizeRenderingAttachment(*pRenderingInfo->pStencilAttachment);
+        normalizeRenderingAttachment(*pRenderingInfo->pStencilAttachment,
+                                     isSupportedStencilAttachmentFormat);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->beginRendering(std::move(Binding));
 }
