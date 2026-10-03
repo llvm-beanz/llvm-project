@@ -8882,6 +8882,72 @@ public:
   }
 };
 
+/// An atomic `llvm.load`/`llvm.store` requires an explicit alignment (see
+/// `LLVM_LoadOp`/`LLVM_StoreOp`'s own docs: "An atomic load/store only
+/// supports a limited set of ... types, and requires an explicit
+/// alignment"). `spirv.AtomicLoad`/`spirv.AtomicStore`'s own verifier
+/// already restricts their value type to a scalar integer or float (see
+/// `SPIRV_Numerical`), so this is always exactly that scalar's own
+/// bit-width rounded up to a whole byte -- the natural alignment every
+/// such scalar already has in this converter's one coherent CPU address
+/// space (same assumption `convertAtomicOrdering` above documents for
+/// picking orderings).
+static unsigned getAtomicLoadStoreAlignment(mlir::Type ScalarType) {
+  return (ScalarType.getIntOrFloatBitWidth() + 7) / 8;
+}
+
+/// Converts `spirv.AtomicLoad`/`spirv.AtomicStore` (roadmap memory_model
+/// triage, dEQP-VK.memory_model.message_passing.permuted_index.*) into an
+/// atomic `llvm.load`/`llvm.store`. Unlike every other `spirv.Atomic*` op
+/// above -- which this converter only ever sees against an
+/// `ImageTexelPointerPattern`-produced storage-image texel pointer --
+/// `AtomicLoad`/`AtomicStore` are the only atomic ops the relevant CTS
+/// tests use against an ordinary converted memory pointer (a `Uniform`-
+/// storage-class SSBO member here), reusing whatever `AccessChain`/
+/// `mlir.addressof` pattern already produced `Adaptor.getPointer()` for a
+/// plain (non-atomic) `spirv.Load`/`spirv.Store` to the same location.
+class AtomicLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AtomicLoadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AtomicLoadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AtomicLoadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::LLVM::AtomicOrdering Ordering =
+        convertAtomicOrdering(Op.getSemantics());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(
+        Op, ResultType, Adaptor.getPointer(),
+        getAtomicLoadStoreAlignment(ResultType), /*isVolatile=*/false,
+        /*isNonTemporal=*/false, /*isInvariant=*/false,
+        /*isInvariantGroup=*/false, Ordering);
+    return mlir::success();
+  }
+};
+
+class AtomicStorePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AtomicStoreOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AtomicStoreOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AtomicStoreOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::AtomicOrdering Ordering =
+        convertAtomicOrdering(Op.getSemantics());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(
+        Op, Adaptor.getValue(), Adaptor.getPointer(),
+        getAtomicLoadStoreAlignment(Adaptor.getValue().getType()),
+        /*isVolatile=*/false, /*isNonTemporal=*/false,
+        /*isInvariantGroup=*/false, Ordering);
+    return mlir::success();
+  }
+};
 
 /// Converts `spirv.AtomicCompareExchange` into an `llvm.cmpxchg` plus the
 /// `extractvalue` picking out the *old* value -- SPIR-V's own result is
@@ -16121,7 +16187,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<
       AggregateInitializedVariablePattern,
       ArrayConstantPattern, StructConstantPattern, AssumeTrueConversionPattern,
-      AtomicCompareExchangePattern,
+      AtomicCompareExchangePattern, AtomicLoadPattern, AtomicStorePattern,
       AtomicRMWPattern<mlir::spirv::AtomicIAddOp, mlir::LLVM::AtomicBinOp::add>,
       AtomicRMWPattern<mlir::spirv::AtomicISubOp, mlir::LLVM::AtomicBinOp::sub>,
       AtomicRMWPattern<mlir::spirv::AtomicAndOp, mlir::LLVM::AtomicBinOp::_and>,
