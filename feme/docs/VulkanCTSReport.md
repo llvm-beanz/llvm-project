@@ -13085,3 +13085,126 @@ from before the fix in either group -- expected, since this is a pure
 thread-safety hardening fix with no behavioral change in the
 already-synchronized-by-luck single-threaded case; its value is
 eliminating undefined behavior, not fixing an observed CTS failure.
+
+## L359: fixed -- `TriangleStripWithAdjacency` windowing, `geometry.input.triangle_strip_adjacency.*` (6 of 13 cases)
+
+Triaging the small untouched cluster `geometry.input.triangle_strip_adjacency`
+(13 cases, `vertex_count_0` through `vertex_count_12`): `vertex_count_7`
+through `vertex_count_12` all failed (6 of 13).
+
+Two independent bugs, both in `getStripPrimitiveCount`/
+`splitStripPrimitiveAdjacency` (`Pipeline.cpp`):
+
+1. **Primitive count rejected odd `IndexCount` outright.** The strip's
+   primitive count formula had `if (IndexCount < 6 || (IndexCount - 4) % 2
+   != 0) return 0;` -- treating any odd `IndexCount` as drawing *zero*
+   primitives, when the correct behavior (confirmed via golden-image
+   diffing of `vertex_count_7`, which still draws one triangle on real
+   hardware) is to floor to the largest complete window, exactly like a
+   plain `TriangleStrip` silently drops a dangling trailing vertex. Fixed
+   to `IndexCount < 6 ? 0 : (IndexCount - 4) / 2` (unsigned division
+   already floors correctly for both parities).
+
+2. **The 6-vertex window per primitive was assumed to be a simple sliding
+   window** (`[2*PrimitiveIndex, 2*PrimitiveIndex + 5]`), matching every
+   *other* strip-with-adjacency topology here (lines) and Microsoft's
+   "leading vertices are 0, 2, 4, ..." D3D documentation. This is wrong
+   for triangles: `GL_EXT_geometry_shader` section 10.1.7tsa's own Table
+   10.X1 shows the full 6-vertex set (3 core + 2 adjacent, used
+   unconditionally by a geometry shader's `gl_in[]`) is *not* a sliding
+   window at all -- the first primitive, the last primitive, and every
+   interior primitive's odd-vs-even index each pull their two "sideways"
+   adjacent vertices from a different place, because those vertices come
+   from whichever neighboring triangle hasn't already been covered by the
+   previous primitive's own window (alternating every other triangle).
+   Root-caused via `vertex_count_8` (2 primitives): FeMe's old windowing
+   produced windows `[0..5]` and `[2..7]` (6 even-or-odd-balanced
+   white/red pixels each, 12 total, 50/50 split); the reference image's
+   measured white/red pixel ratio was ~2:1, not 50/50, inconsistent with
+   *any* sliding window but exactly matching the spec table's predicted
+   vertex sets (`{0,1,2,3,4,6}` and `{0,2,4,5,6,7}`, both 4 even/2 odd =
+   8 white/4 red total = 2:1). Implemented the full
+   only/first/middle/last, odd/even case table from the spec (see
+   `splitStripPrimitiveAdjacency`'s own comment in `Pipeline.cpp` for the
+   complete formula). This also fixes the no-geometry-shader
+   rasterization fallback path (`Executor.cpp`), which reuses the same
+   function for its core-triangle vertices.
+
+New/updated unit tests: `PipelineTest.cpp`'s
+`StripPrimitiveCountForTriangles` (added an odd-`IndexCount` case
+expecting a floored, non-zero count) and
+`SplitStripPrimitiveAdjacencyForTriangles` (rewritten to check the real
+only/first/middle/last odd-vs-even case table, covering a 1-, 2-, and
+3-primitive strip). `ninja check-feme`: 3,518 Passed/61 Unsupported/0
+Failed (3,579 total), 0 regressions.
+
+### CTS impact
+
+`dEQP-VK.geometry.input.triangle_strip_adjacency.*` (13 cases): 13/13
+Pass (was 7/13). `dEQP-VK.geometry.*` overall (200 cases): 190/200 Pass,
+1 pre-existing unrelated Fail (`builtin_variable.primitive_id.matching`,
+a tessellation+geometry interaction not touched by this change, not yet
+triaged), 9 NotSupported.
+
+## Investigated (not yet fixed): `memory_model.*` `fence_fence.atomicwrite` cluster (~70 cases) + `message_passing.permuted_index` (3 cases)
+
+Triaged the previously-untouched `dEQP-VK.memory_model.*` races cluster
+(18,530 cases total; `vulkanMemoryModel` isn't advertised as supported,
+so 18,317 are `NotSupported` -- expected). Of the remainder, 140 Pass and
+73 Fail.
+
+**70 of the 73** are `message_passing`/`write_after_read` variants whose
+shaders fail to even create a pipeline:
+`error: OpSpecConstantComposite constituent must be a previously defined
+constant or specialization constant, but found <id> N` --
+`VK_ERROR_INITIALIZATION_FAILED` at shader-module/pipeline creation, not
+a runtime correctness bug. Root-caused one layer down than usual: this
+error comes from **upstream MLIR's own SPIR-V deserializer**
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`), not FeMe
+code. Two distinct missing-constituent-kind bugs found at that same
+error site:
+
+1. **Fixed upstream** (own commit, `mlir/` only, not a FeMe-subdirectory
+   change per this project's "fix issues outside FeMe in isolated
+   commits" convention): the deserializer never checked whether a
+   composite spec constant's constituent was itself *another* composite
+   spec constant (only scalar spec constants and plain constants were
+   recognized). Added the missing `getSpecConstantComposite` lookup, with
+   a new round-trip regression test
+   (`mlir/test/Target/SPIRV/spec-constant.mlir`). Verified via
+   before/after bisection that the new test fails without the fix and
+   passes with it; full `Target/SPIRV`+`Dialect/SPIRV/IR` suites
+   (122/122) and `check-feme` (3518/3579, 0 Fail) both unaffected.
+2. **Found but not fixed -- deeper architectural gap.** Confirmed (via
+   temporary `getSpecConstantOperation` debug instrumentation, same
+   technique as `L359`, removed before committing) that fix #1 does
+   *not* resolve this CTS cluster: the actual missing constituent kind
+   here is an `OpSpecConstantOp` result (an arithmetic expression over
+   spec constants, e.g. a workgroup-size-derived index/offset), which
+   *is* a valid `OpSpecConstantComposite` constituent per the SPIR-V
+   spec ("Constituents must be ... a specialization constant or
+   constant-creation instruction", and `OpSpecConstantOp` is itself a
+   specialization-constant instruction) but has no representation in
+   MLIR's `spirv.SpecConstantComposite` op today: that op's constituents
+   are a plain `ArrayAttr` of symbol-refs/inline-attributes, with no SSA
+   operands, while `spirv.SpecConstantOperation` is only ever
+   materialized inline inside a function body (it has no top-level
+   symbol to reference from module scope). Supporting this would need a
+   redesign of how `spirv.SpecConstantComposite` represents non-trivial
+   constituents (e.g. giving `SpecConstantOperation` an optional
+   module-scope symbol form), which is out of scope for a quick fix --
+   flagged for a dedicated future session, upstream-MLIR-focused like
+   fix #1 above, not FeMe-specific.
+
+**3 of the 73** (`message_passing.permuted_index.{barrier,release_acquire,release_acquire_atomic_payload}`)
+fail with an unrelated MLIR SPIR-V-to-LLVM legalization error:
+`failed to legalize operation 'spirv.AtomicStore' that was explicitly
+marked illegal` for a `Uniform`-storage-class atomic store with
+`Release|UniformMemory` semantics -- not yet investigated beyond
+confirming it's a distinct failure mode from the composite-constituent
+one above; next session should treat it as its own separate item.
+
+No CTS-pass-count change from this investigation alone (the real root
+cause of the 70-case cluster, item 2 above, is still open); recorded
+here per the "every session's findings get written down" convention
+even though no case flipped from Fail to Pass yet.
