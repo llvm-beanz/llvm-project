@@ -12199,3 +12199,116 @@ there is no scale-factor or geometric difference between the passing and
 failing format groups to explain the tie-direction conflict. Did not find
 a new diagnostic lead before time ran out this session; still deferred,
 no regression risk taken (no code change made).
+
+## L350: `fill_overlap_quads_*` fixed (6 cases) -- a methodology correction, not a port
+
+Continuing the handed-off priority list (item 1: "start the
+`fill_overlap_quads_*` port"). Re-fetched Mesa's reference
+`CHWTessellator` (`tessellator.cpp`, `curl` from
+`gitlab.freedesktop.org/mesa/mesa`) and began reading its
+`QuadGeneratePoints`/`QuadGenerateConnectivity`/`StitchRegular`/
+`StitchTransition` functions in full detail, intending to literally port
+the concentric-ring interior generation `L349` scoped. Before writing
+any port code, re-read the actual CTS test harness
+(`vktTessellationMiscDrawTests.cpp`) to double-check the scoping, rather
+than continuing to infer purely from the reference algorithm in
+isolation -- and found `L349`'s own premise was wrong.
+
+### What the test actually checks
+
+`fill_overlap_*`/`fill_cover_*` share one `runTest` function
+(`vktTessellationMiscDrawTests.cpp:141-358`): the TES colors each
+tessellated point red/green/blue by a `phase` value computed from
+`gl_TessCoord` (quad domain: `phaseX`/`phaseY = round((0.5 -
+abs(gl_TessCoord - 0.5)) * innerFactor)`, `phase = min(phaseX, phaseY) %
+3`), producing concentric color bands, then does a plain **golden-image
+comparison** (`tcu::fuzzyCompare`, threshold 0.002) against a
+pre-generated reference PNG -- not a stencil/overlap-counter technique,
+and not a direct comparison against the reference tessellator's own
+point/triangle topology. Any tessellation that is geometrically correct
+(gap-free, non-overlapping, accurate `gl_TessCoord` values) should
+produce a matching image regardless of its internal diagonal/ring-vs-
+grid choice. `L349`'s "no smaller fix exists" conclusion was reached by
+comparing the reference tessellator's algorithm against FeMe's own in
+isolation, without first confirming this -- a methodology gap worth
+flagging explicitly for future sessions: **read what the test actually
+verifies before concluding a port is the only option.**
+
+### Diagnosing the real defect
+
+Rebuilt (`ninja feme_vulkan`, ccache + assertions, confirmed via
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`)
+and ran `fill_overlap_quads_equal_spacing_draw` with
+`--deqp-log-images=enable`, then extracted and diffed the embedded
+Result/Reference/ErrorMask PNGs directly (base64-decoded out of the
+`.qpa` log). The ErrorMask showed a small, symmetric "staircase" of 6
+roughly 12x12-pixel error blobs strung along the domain's own
+anti-diagonal (top-right to bottom-left), with nothing else -- not a
+wholesale topology/coverage mismatch, confirming the methodology
+correction above: this was always a small, localized defect, not a
+"needs the reference's exact topology" problem.
+
+Root cause: `tessellateQuad`'s interior-grid triangulation (the
+non-degenerate `else` branch) always split every grid cell along the
+same `A-C` diagonal (parallel to the domain's `u == v` corner-to-corner
+diagonal). The phase-banding function above is continuous along lines
+parallel to `u == v` *or* `u == 1 - v` (its two branches, `phaseX` and
+`phaseY`, only agree exactly on those two diagonals) -- so a uniform
+`A-C` split interpolates smoothly for cells near `u == v` (parallel to
+the chosen diagonal) but cuts directly across the discontinuity for
+cells near `u == 1 - v` (perpendicular to it), producing the observed
+staircase of banding artifacts.
+
+### Fix
+
+Mirrored each interior cell's own split diagonal to stay parallel to
+whichever of the domain's two diagonals passes nearest it: using each
+cell's center in normalized domain coordinates (not raw grid index, to
+stay correct for asymmetric `N != M` grids), split `A-C` when `(u -
+0.5)` and `(v - 0.5)` share a sign (the cell sits on the `u == v` side)
+and `B-D` otherwise (the `u == 1 - v` side). `Tessellator.cpp`'s own
+inline comment has the full derivation.
+
+New `TessellatorTest.QuadInteriorCellDiagonalMirrorsAcrossBothDomainDiagonals`:
+uses an asymmetric `Inside = {9, 7}` grid specifically so a square grid
+couldn't hide a "mirrors by raw grid index" bug behind a correct
+"mirrors by domain position" fix, and directly asserts the expected
+diagonal (via a `findPointNear`/`cellSplitsAlongAC` helper that locates
+points by normalized domain coordinate and checks which of the two
+candidate diagonal edges the patch's own triangle list actually uses)
+on one cell from each side of the two domain diagonals.
+
+`ninja check-feme`: 3,500 Passed (+1 new test)/61 Unsupported/0 Failed,
+0 regressions.
+
+### CTS impact
+
+Re-ran `dEQP-VK.tessellation.misc_draw.fill_*` (24 cases): all 6
+`fill_overlap_quads_*` cases (`equal_spacing`/`fractional_even_spacing`/
+`fractional_odd_spacing`, each `_draw`/`_draw_indirect`) now **Pass**
+(was Fail) -- the entire quad-domain portion of `L340`/`L349`'s 10-case
+`fill_overlap_*` cluster is closed; `fill_cover_*` (12 cases, same
+`runTest` harness, already passing) unaffected. The 4 remaining
+`fill_overlap_triangles_*` failures (`equal_spacing`/
+`fractional_even_spacing`, each `_draw`/`_draw_indirect` --
+`fractional_odd_spacing` already passed before this session) are a
+distinct algorithm (`appendTriangleRingBoundary`'s own ring-based point
+ordering, unrelated to the quad grid fixed above) and remain open; see
+`FeMeGraphicsDesign.md`'s updated Status subsection for next-step
+guidance (repeat this session's `--deqp-log-images=enable` diagnostic
+there first, before assuming a port is needed).
+
+Re-ran the full `dEQP-VK.tessellation.*` group (1,114 cases) as a
+regression check: 642 Pass/34 Fail/438 NotSupported (was 636/40/438) --
+confirmed by exact set-diff that the 34 remaining failures are precisely
+the same previously-tracked, still-open issues minus the 6 fixed here:
+`common_edge.*_precise` (3, `L337`, open), `invariance.
+outer_edge_symmetry.*` (24, `L341`, confirmed irreconcilable, open),
+`invariance.inner_triangle_set.*` (2, `L346`, confirmed irreconcilable,
+open), `misc_draw.fill_overlap_triangles_*` (4, this session's own
+narrowed scope, open), `shader_input_output.barrier` (1, `L344` item 2,
+open). 0 new regressions anywhere in the group.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal tessellation-triangulation correctness fix, no
+feature/extension-surface change.

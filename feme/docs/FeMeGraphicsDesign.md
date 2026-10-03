@@ -4246,16 +4246,50 @@ L82 entry for the full real-ICD repro/root-cause narrative). See
 `QuadMatchingEdgeAndInsideFactorsGiveDyadicCoreCoords` for the regression
 coverage.
 
-#### Status (roadmap L340 item 2 / L348 / L349): `fill_overlap_*` scoping -- a literal reference-tessellator port is required, no smaller fix exists
+#### Status (roadmap L340 item 2 / L348 / L349 / L350): `fill_overlap_*` scoping -- quad domain fixed; triangle domain still needs its own independent fix
 
-`dEQP-VK.tessellation.misc_draw.fill_overlap_{quads,triangles}_*` (10
-cases) is not a bug reachable by a targeted fix to FeMe's existing
-`tessellateQuad`/`tessellateTriangle` interior-generation approach. This
-was confirmed by directly reading Mesa's vendored reference
-`CHWTessellator` (`src/gallium/auxiliary/tessellator/tessellator.cpp`,
-fetched via `curl` from `gitlab.freedesktop.org/mesa/mesa` -- itself a
-close derivative of Microsoft's D3D reference tessellator, the same
-algorithm the Vulkan CTS's own reference renderer is built against):
+**Correction (L350):** this section's own prior conclusion ("a literal
+port is required, no smaller fix exists") was reached by comparing the
+reference tessellator's own algorithm against FeMe's in isolation,
+*without first re-confirming what the CTS test itself actually checks*
+-- a methodology gap. `fill_overlap_*`/`fill_cover_*` are plain
+golden-image `tcu::fuzzyCompare`s (threshold 0.002) of a
+`gl_TessCoord`-derived phase-banded color shader, not a topology-exact
+comparison against the reference tessellator's own point ordering: any
+correct, gap-free, non-overlapping tessellation with accurate
+`gl_TessCoord` values should pass regardless of its internal
+diagonal/ring-vs-grid choice. Re-running
+`fill_overlap_quads_equal_spacing_draw` with
+`--deqp-log-images=enable` and diffing the Result/Reference/ErrorMask
+PNGs directly (the diagnostic step this section's own prior analysis
+should have done before concluding a port was needed) showed the real
+mismatch was a small, symmetric "staircase" of error pixels along the
+domain's own anti-diagonal (`u == 1 - v`), not a wholesale
+topology/coverage difference -- `tessellateQuad`'s interior grid always
+split every cell along the same `A-C` diagonal, which interpolates
+`fill_overlap_*`'s phase-banding function smoothly along `u == v` but
+cuts across its discontinuity along `u == 1 - v`. Fixed by mirroring
+each cell's own split diagonal to stay parallel to whichever of the
+domain's two corner-to-corner diagonals passes nearest it (see
+`Tessellator.cpp`'s own inline comment and roadmap `L350` for the full
+analysis) -- **no port was needed for the quad domain after all.** All
+6 `fill_overlap_quads_*` cases now pass.
+
+**The triangle domain (`fill_overlap_triangles_*`, 4 of the original 5
+cases -- `fractional_odd_spacing` already passed) remains open.** It is
+a distinct algorithm (FeMe's `appendTriangleRingBoundary` uses its own
+ring-based point ordering, unrelated to the quad grid `tessellateQuad`
+fixed above), so this same diagonal-mirroring technique does not
+directly transfer; it needs its own independent root-cause pass (most
+likely also a localized interpolation-discontinuity artifact rather
+than a full topology mismatch, given the quad domain's own experience,
+but not yet confirmed via its own `--deqp-log-images=enable` diff). The
+rest of this section's analysis of Mesa's reference `CHWTessellator`
+(fetched via `curl` from `gitlab.freedesktop.org/mesa/mesa`, a close
+derivative of Microsoft's D3D reference tessellator) is retained below
+for background on the alternative ring-spiral algorithm, in case the
+triangle-domain root cause turns out to genuinely require matching its
+topology rather than a smaller fix:
 
 - **Quad domain** (`QuadGeneratePoints`/`QuadGenerateConnectivity`): the
   reference generates interior points as **concentric rings spiraling
@@ -4287,18 +4321,22 @@ algorithm the Vulkan CTS's own reference renderer is built against):
   cases need their own careful point-ordering alignment work, independent
   of the quad path's 5.
 
-**Conclusion**: a literal port (both domains' interior-point generation,
-their differing fixed-point arithmetic conventions, and the table-driven
-`StitchTransition` logic) is multi-session-scale work, not "a dedicated
-session" as earlier handoffs hoped, and is definitively not a smaller
-targeted fix -- there is no diagonal-convention tweak, epsilon adjustment,
-or grid-density change within FeMe's current architecture that can close
-this gap. A future dedicated effort should treat the quad and triangle
-domains as two separate porting tasks (quad first, since
-`fill_overlap_quads_*` and `fill_overlap_triangles_*` could then be
-verified independently), and should budget for porting
-`StitchRegular`/`StitchTransition`'s table-driven connectivity logic as
-its own sub-step before attempting to match point generation alone.
+**Conclusion (superseded for the quad domain by `L350`, retained for the
+triangle domain):** a literal port of the reference's ring-spiral
+interior-point generation, its fixed-point arithmetic, and the
+table-driven `StitchTransition` logic would be multi-session-scale work
+-- but `L350` found the quad domain never actually needed one: the
+real defect was a much smaller, localized triangulation-diagonal choice,
+found only by first confirming (via `--deqp-log-images=enable`) that the
+test tolerates any correct topology rather than assuming a literal port
+was the only path forward. **Before starting a literal triangle-domain
+port, repeat `L350`'s own diagnostic step first** -- run
+`fill_overlap_triangles_equal_spacing_draw` (or
+`_fractional_even_spacing_draw`) with `--deqp-log-images=enable` and
+inspect the actual ErrorMask; only fall back to this section's
+ring-spiral/table-driven port plan below if that diff shows a genuine
+large-scale topology mismatch the threshold can't tolerate, rather than
+another small, localized interpolation-discontinuity artifact.
 
 ### G6: Amplification and mesh shading
 
