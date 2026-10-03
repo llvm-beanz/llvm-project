@@ -946,6 +946,19 @@ struct PipelineRenderTargets {
   std::vector<feme::cpu::ResourceFormat> Colors;
   uint32_t SampleCount = 1;
   std::optional<feme::cpu::ResourceFormat> DepthStencil;
+  /// (roadmap L356) Unlike a classic render pass's single depth/stencil
+  /// attachment reference, dynamic rendering's own `VkPipelineRendering
+  /// CreateInfo` can declare `depthAttachmentFormat` and
+  /// `stencilAttachmentFormat` independently -- each `VK_FORMAT_UNDEFINED`
+  /// on its own regardless of the other. `DepthStencil` above conflates
+  /// them (picking depth if present, else stencil), which is enough for
+  /// sample-count derivation but wrong for "does this pipeline's *depth*
+  /// test need a bound depth attachment" style checks: these two track
+  /// each aspect's own declared format independently so those checks
+  /// don't see a stencil-only declaration as implying a depth attachment
+  /// too (or vice versa).
+  std::optional<feme::cpu::ResourceFormat> DepthFormat;
+  std::optional<feme::cpu::ResourceFormat> StencilFormat;
 };
 
 const VkPipelineRenderingCreateInfo *findRenderingCreateInfo(const void *Next) {
@@ -1002,6 +1015,20 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
     if (Subpass.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
       Targets.DepthStencil =
           Pass.attachments()[Subpass.DepthStencilAttachment].Format;
+      // A classic render pass's depth/stencil attachment reference names
+      // one image with one format, but that format may only have one of
+      // the two aspects (e.g. `S8_UINT` has no depth aspect at all) --
+      // `DepthFormat`/`StencilFormat` are only set when the format
+      // actually supports that aspect, matching `isSupportedDepth/
+      // StencilAttachmentFormat`'s own per-aspect semantics (dEQP-VK.
+      // renderpasses.renderpass2.depth_stencil_resolve.*.s8_uint.*
+      // creates a pipeline with `depthTestEnable = VK_TRUE` against
+      // exactly this kind of stencil-only attachment, relying on the
+      // spec's "no depth attachment -> depth test is a no-op" rule).
+      if (isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
+        Targets.DepthFormat = Targets.DepthStencil;
+      if (isSupportedStencilAttachmentFormat(*Targets.DepthStencil))
+        Targets.StencilFormat = Targets.DepthStencil;
       // (roadmap H7n) A subpass with no color attachments at all (a real
       // depth/stencil-only render, e.g. `dEQP-VK.pipeline.monolithic.
       // multisample.alpha_to_coverage_no_color_attachment.*`'s own
@@ -1061,6 +1088,32 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
                                "the depth/stencil attachment names a format "
                                "this driver cannot render into");
     Targets.DepthStencil = *Format;
+  }
+  // (roadmap L356) `depthAttachmentFormat`/`stencilAttachmentFormat` are
+  // independently `VK_FORMAT_UNDEFINED` -- `Targets.DepthStencil` above
+  // conflates them for the sample-count derivation below, but
+  // `DepthFormat`/`StencilFormat` must stay accurate per-aspect so a
+  // pipeline that declares only one of the two (e.g. a stencil-only
+  // declaration against a combined `D24_UNORM_S8_UINT` format, which
+  // *does* support a depth aspect) isn't mistaken for also declaring the
+  // other.
+  if (Rendering->depthAttachmentFormat != VK_FORMAT_UNDEFINED) {
+    std::optional<feme::cpu::ResourceFormat> Format =
+        mapVkFormat(Rendering->depthAttachmentFormat);
+    if (!Format || !isSupportedDepthAttachmentFormat(*Format))
+      return createStringError(inconvertibleErrorCode(),
+                               "the depth attachment names a format this "
+                               "driver cannot render into");
+    Targets.DepthFormat = *Format;
+  }
+  if (Rendering->stencilAttachmentFormat != VK_FORMAT_UNDEFINED) {
+    std::optional<feme::cpu::ResourceFormat> Format =
+        mapVkFormat(Rendering->stencilAttachmentFormat);
+    if (!Format || !isSupportedStencilAttachmentFormat(*Format))
+      return createStringError(inconvertibleErrorCode(),
+                               "the stencil attachment names a format this "
+                               "driver cannot render into");
+    Targets.StencilFormat = *Format;
   }
   // Unlike a `VkRenderPass`'s `VkAttachmentDescription::samples` above,
   // `VkPipelineRenderingCreateInfo` carries no sample-count field of its
@@ -1331,9 +1384,7 @@ Error translateDepthStencilState(
     return Error::success();
   }
 
-  bool HasDepthAttachment =
-      Targets.DepthStencil &&
-      isSupportedDepthAttachmentFormat(*Targets.DepthStencil);
+  bool HasDepthAttachment = Targets.DepthFormat.has_value();
   NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable ||
                Info->depthBoundsTestEnable;
   // (roadmap H29j) As above: a *statically* enabled depth test/write/
@@ -1388,8 +1439,7 @@ Error translateDepthStencilState(
   // against a render target with no (supported) stencil attachment is a
   // no-op, not a pipeline-creation error -- leave `Out.Stencil` disabled
   // (its zero-initialized default) instead of rejecting the pipeline.
-  if (!Targets.DepthStencil ||
-      !isSupportedStencilAttachmentFormat(*Targets.DepthStencil))
+  if (!Targets.StencilFormat)
     return Error::success();
   Out.Stencil.TestEnable = Info->stencilTestEnable != VK_FALSE;
   if (StencilOpDynamic) {

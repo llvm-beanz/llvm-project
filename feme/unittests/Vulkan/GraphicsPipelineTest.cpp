@@ -2204,6 +2204,109 @@ TEST_F(GraphicsPipelineTest, AcceptsDepthTestWithNoDepthAttachment) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap K6) Regression test for a `PipelineRenderTargets::DepthStencil`
+/// conflation bug found via `dEQP-VK.renderpasses.*.depth_stencil_resolve.*
+/// .depth_zero_stencil_zero_testing_stencil` once `VK_KHR_depth_stencil_
+/// resolve` landed: a dynamic-rendering pipeline may declare only a
+/// `stencilAttachmentFormat` (leaving `depthAttachmentFormat` `UNDEFINED`)
+/// even against a combined depth+stencil format that *does* have a depth
+/// aspect -- that must still disable the depth test exactly like
+/// `AcceptsDepthTestWithNoDepthAttachment` above, the same way a genuinely
+/// depth-less render target does, rather than wrongly concluding "depth is
+/// declared too" just because the shared format happens to support it.
+TEST_F(GraphicsPipelineTest,
+       StencilOnlyDynamicRenderingDisablesDepthTestForCombinedFormat) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+  // `D24_UNORM_S8_UINT` has both aspects, but only `stencilAttachmentFormat`
+  // is declared here -- `depthAttachmentFormat` stays `VK_FORMAT_UNDEFINED`,
+  // meaning no depth attachment will actually be bound at draw time.
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.stencilAttachmentFormat = VK_FORMAT_D24_UNORM_S8_UINT;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getDepthState();
+  EXPECT_FALSE(Resolved.TestEnable);
+  EXPECT_FALSE(Resolved.WriteEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap K6) The classic-render-pass equivalent of the test above: a
+/// subpass's depth/stencil attachment reference names exactly one format
+/// for *both* aspects (unlike dynamic rendering's independently-settable
+/// fields), so a pure stencil-only format (`S8_UINT`, no depth aspect at
+/// all) must likewise disable the depth test, matching
+/// `dEQP-VK.renderpasses.renderpass2.depth_stencil_resolve.*.s8_uint.*
+/// depth_zero_stencil_zero_testing_stencil`, which creates exactly this
+/// pipeline shape (`depthTestEnable = VK_TRUE` unconditionally) against a
+/// pure-stencil subpass attachment.
+TEST_F(GraphicsPipelineTest, StencilOnlyRenderPassDisablesDepthTest) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkAttachmentDescription StencilOnlyAttachment{};
+  StencilOnlyAttachment.format = VK_FORMAT_S8_UINT;
+  StencilOnlyAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  StencilOnlyAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  StencilOnlyAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference StencilOnlyRef{
+      0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription StencilOnlySubpass{};
+  StencilOnlySubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  StencilOnlySubpass.colorAttachmentCount = 0;
+  StencilOnlySubpass.pDepthStencilAttachment = &StencilOnlyRef;
+  VkRenderPassCreateInfo StencilOnlyPassInfo{};
+  StencilOnlyPassInfo.attachmentCount = 1;
+  StencilOnlyPassInfo.pAttachments = &StencilOnlyAttachment;
+  StencilOnlyPassInfo.subpassCount = 1;
+  StencilOnlyPassInfo.pSubpasses = &StencilOnlySubpass;
+  VkRenderPass StencilOnlyPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &StencilOnlyPassInfo, nullptr,
+                                &StencilOnlyPass),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = StencilOnlyPass;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthWriteEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(DynamicGraphicsState{}).getDepthState();
+  EXPECT_FALSE(Resolved.TestEnable);
+  EXPECT_FALSE(Resolved.WriteEnable);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyRenderPass(Device, StencilOnlyPass, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// The same three dynamic states, this time over `PassWithDepth`: creation
 /// succeeds despite a static depth-stencil state with the test disabled
 /// (and, deliberately, `depthCompareOp` left at its zero-initialized
