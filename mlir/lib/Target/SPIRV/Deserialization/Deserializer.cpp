@@ -2198,9 +2198,23 @@ spirv::Deserializer::processSpecConstantComposite(ArrayRef<uint32_t> operands) {
     // SPIR-V spec, `OpSpecConstantComposite`'s constituents may be any
     // `Constant` or `Spec Constant` declaration (e.g. a `mat2` spec
     // constant's columns are ordinary `OpConstantComposite` vectors, not
-    // spec constants, since only the whole matrix is specialized).
+    // spec constants, since only the whole matrix is specialized). Per
+    // `spirv::SpecConstantCompositeOp`'s own documented grammar, "another
+    // spec constant" includes both the scalar (`spirv.SpecConstant`) and
+    // composite (`spirv.SpecConstantComposite`) forms -- e.g. a spec
+    // constant array-of-vectors, or a spec constant struct containing a
+    // spec constant array, nests one composite spec constant inside
+    // another. Both symbol-referencing forms are resolved the same way
+    // (a `SymbolRefAttr` to the previously-created op); only the plain
+    // (non-specialization) constant case stores the value inline.
     if (spirv::SpecConstantOp specConstituent = getSpecConstant(operands[i])) {
       elements.push_back(SymbolRefAttr::get(specConstituent));
+      continue;
+    }
+
+    if (spirv::SpecConstantCompositeOp compositeConstituent =
+            getSpecConstantComposite(operands[i])) {
+      elements.push_back(SymbolRefAttr::get(compositeConstituent));
       continue;
     }
 

@@ -107,6 +107,30 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
 
 // -----
 
+// A spec constant composite's constituents may also be other composite spec
+// constants (not just scalar ones) -- e.g. a spec constant array of spec
+// constant vectors, or a spec constant struct with a spec constant array
+// member. Each nested composite constituent must round-trip as a symbol
+// reference to the inner `spirv.SpecConstantComposite`, just like a scalar
+// `spirv.SpecConstant` constituent does.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+  spirv.SpecConstant @sc_f32_1 = 1.5 : f32
+  spirv.SpecConstant @sc_f32_2 = 2.5 : f32
+
+  // CHECK: spirv.SpecConstantComposite @scc_inner (@sc_f32_1, @sc_f32_2) : vector<2xf32>
+  spirv.SpecConstantComposite @scc_inner (@sc_f32_1, @sc_f32_2) : vector<2 x f32>
+
+  // CHECK: spirv.SpecConstantComposite @scc_outer_array (@scc_inner, @scc_inner) : !spirv.array<2 x vector<2xf32>>
+  spirv.SpecConstantComposite @scc_outer_array (@scc_inner, @scc_inner) : !spirv.array<2 x vector<2 x f32>>
+
+  spirv.SpecConstant @sc_i32_1 = 1 : i32
+
+  // CHECK: spirv.SpecConstantComposite @scc_outer_struct (@sc_i32_1, @scc_inner) : !spirv.struct<(i32, vector<2xf32>)>
+  spirv.SpecConstantComposite @scc_outer_struct (@sc_i32_1, @scc_inner) : !spirv.struct<(i32, vector<2 x f32>)>
+}
+
+// -----
+
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, ReplicatedCompositesEXT], [SPV_EXT_replicated_composites]> {
 
   spirv.SpecConstant @sc_i32_1 = 1 : i32
