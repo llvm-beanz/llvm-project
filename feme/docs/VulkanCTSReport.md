@@ -12816,3 +12816,97 @@ accepted flag: 23,028/23,028 applicable Pass, 0 regressions.
 needed -- an internal bind/image-validation correctness fix; `VK_KHR_
 maintenance6` was already advertised, this closes a real conformance
 gap in its own implementation rather than adding new surface.
+
+## L356: fixed (partial) -- `fragment_operations.early_fragment.*` (4 of 10 cases) -- explicit `EarlyFragmentTests` execution mode
+
+### Background
+
+Continuing handoff item 1's smaller-cluster triage, next after `L355`:
+`dEQP-VK.fragment_operations.early_fragment.*` (10 of 54 cases). Ran
+the group in isolation: **14 Pass/10 Fail/27 NotSupported/3 Warnings**.
+Parsing the `.qpa` for the 10 failures found two sub-families:
+`{discard_,}early_fragment_tests_{depth,stencil}` (4 cases) and
+`samplemask_{,no_}early_fragment_tests_depth_samples_{2,4,8}` (6
+cases).
+
+### Root cause
+
+`Executor.cpp`'s `UseEarlyDepthStencil` only ever modeled the Vulkan
+spec's *automatic* early-depth/stencil optimization ("an implementation
+may skip a rejected fragment's shader invocation as an optimization...
+when doing so would not change any observable effect"), which is
+unconditionally declined whenever the fragment stage may discard/
+demote, has memory side effects, or writes `SV_Depth`/`SV_StencilRef`/
+an explicit sample mask. It never tracked the SPIR-V `EarlyFragmentTests`
+execution mode (GLSL's `layout(early_fragment_tests) in;`) at all --
+a distinct, *explicit* application promise that per spec overrides
+every one of those disqualifiers: depth/stencil testing (and writing)
+happens before the fragment stage runs regardless, and any depth/
+stencil-ref/sample-mask value that stage goes on to compute is simply
+*ignored* for the already-complete test/write (confirmed via
+`vktFragmentOperationsEarlyFragmentTests.cpp`'s own shaders, which
+legally combine `early_fragment_tests` with a `gl_FragDepth`/
+`gl_SampleMask` write in the same body, and via `web_search` against the
+GLSL/Vulkan spec text for this exact interaction).
+
+### Fix
+
+Threaded the execution mode end-to-end as a new ABI-versioned artifact
+flag:
+- `ConvertSPIRVToLLVMPass.cpp`: `EntryPointInfo::EarlyFragmentTests`
+  parsed from `spirv::ExecutionMode::EarlyFragmentTests`, attached as a
+  bare `feme.fragment.early_fragment_tests` LLVM function attribute
+  (mirroring the existing `strictfp` passthrough pattern).
+- `ResourceInfo.{h,cpp}`: bumped `ArtifactAbiVersion` 6 -> 7; added
+  `FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS` to `ArtifactFlagBits`,
+  set by `computeSideEffectFlags` when the function carries the
+  attribute.
+- `Executor.cpp`: `UseEarlyDepthStencil` now lets an explicit
+  declaration (`FSExplicitEarlyFragmentTests`) override
+  `FSMayDiscard`/`FSHasMemorySideEffects`/`FSDepthOut`/`FSStencilRefOut`/
+  `FSSampleMaskOut` entirely. This needed no other restructuring: the
+  early path already never reads `FSDepthOut`/`FSStencilRefOut`/
+  `FSSampleMaskOut` (only the rasterizer's interpolated depth, the
+  pipeline's fixed stencil reference, and the rasterizer's own full
+  per-sample coverage), so "ignored" is automatically what happens once
+  the early path is allowed to run. `alphaToCoverageEnable` and a
+  self-referencing depth/stencil input attachment remain unconditional
+  disqualifiers even for an explicit declaration -- neither is a value
+  the application could have promised to ignore.
+
+New tests: `ResourceInfoTest.ArtifactAbiVersionIsSeven` (renamed from
+`ArtifactAbiVersionIsSix`, value `7u`), `ResourceInfoTest.
+ComputeSideEffectFlagsReadsEarlyFragmentTestsAttribute`,
+`ExecutorTest.ExplicitEarlyFragmentTestsStillWritesDepthWhenShaderDiscards`
+(an end-to-end regression: a fragment shader with the new attribute,
+writing color then unconditionally discarding, still writes the
+rasterizer-interpolated depth while still correctly suppressing the
+color write). `ninja check-feme`: 3,511 Passed/61 Unsupported/0 Failed
+(3,572 total, +2 new tests), 0 regressions.
+
+### CTS impact
+
+`dEQP-VK.fragment_operations.early_fragment.*`: **18/54 Pass** (was 10
+Failed of 54, now 6 Failed). `discard_early_fragment_tests_{depth,
+stencil}` and `early_fragment_tests_{depth,stencil}` (4 cases) now
+Pass.
+
+The remaining 6 failures (`samplemask_{early,no_early}_fragment_tests_
+depth_samples_{2,4,8}`) are **not** fixed by this change and are a
+distinct bug: the `no_early` variant (which never declares
+`early_fragment_tests` at all) fails too, with fractional depth-resolve
+values (e.g. `0.0565194`, `0.328374`, `9.15541e-05`) instead of the
+expected clear value `0.5f` -- symptomatic of an MSAA depth-resolve
+issue rather than anything this fix's early/late-test decision governs.
+Not investigated further this session; tracked as a new untriaged
+finding for a future session (see `agent_thoughts.md`'s next-steps for
+this session).
+
+Re-ran the full `dEQP-VK.fragment_operations.*` group (151 cases) as a
+regression check: **112 Pass/6 Fail** (the same 6 `samplemask_*` cases
+above)/30 NotSupported/3 Warnings, 0 regressions elsewhere.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- `EarlyFragmentTests` is a core SPIR-V execution mode, not an
+extension; this is an internal spec-conformance fix, no new feature/
+extension surface.
