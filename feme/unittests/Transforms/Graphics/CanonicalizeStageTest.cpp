@@ -6057,6 +6057,88 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(MaxRowCount, 6u);
 }
 
+/// (Roadmap L364) A *lone* (non-array-of-instances) single-real-member
+/// global whose one real member -- itself a plain, non-matrix 2-level
+/// array of vectors needing its own tight-vector ABI substitution (e.g.
+/// `layout(xfb_buffer=0, xfb_offset=64) out vec3 var3[4][2];`,
+/// `dEQP-VK.transform_feedback.fuzz.random_geometry.basic_arrays.1`'s own
+/// exact shape, reduced here to a 2x2 array) -- gets the identical
+/// LLVM-level leading `[Gap x i8]` pad field
+/// `getEffectiveStageIOValueType`'s own comment already calls out as the
+/// "(or lone-instance)" case, but which `resolveStageIOAccess`'s own
+/// byte-offset remap never actually handled: unlike
+/// `RewritesArrayOfBlockInstancesWithLeadingPadBeforeTightMatrixMember`'s
+/// `@spirv_var_4` above (an *array* of these padded structs, one pad per
+/// instance, `remapByteOffsetPastLeadingPad`'s own concern), \p GV's real
+/// type here is a single padded struct, not an array of them -- so the
+/// prior code's `isa<ArrayType>(GV->getValueType())` guard never fired,
+/// leaving every GEP's own `ByteOffset` still `Gap` bytes too large by
+/// the time `resolveRowComponent` walked the pad-stripped `EffectiveTy`.
+/// `resolveRowComponent`'s self-discovering stride still "succeeded" at
+/// dividing this inflated offset (since `Gap` here is itself a multiple
+/// of the real per-row stride), silently landing two rows deeper than
+/// row 0 for every store -- an out-of-bounds `StageStorage` write past
+/// this element's own allocated bounds once the last (otherwise in-range)
+/// store's own over-peeled row pushed past the end (`double free or
+/// corruption`, root-caused via `valgrind` + env-var-guarded debug
+/// instrumentation). Fixed by subtracting the pad's own constant `Gap`
+/// once -- no per-instance stride division needed, since this is a lone
+/// instance, not an array of them.
+TEST(CanonicalizeStageTest,
+    RewritesLoneLeadingPadBeforeTightArrayOfVectorsMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.f32x3 = type { [3 x float] }
+    @var3 = external addrspace(8) global <{ [8 x i8], [2 x [2 x <3 x float>]] }>, !spirv.Decorations !4, !feme.spirv.MemberDecorations !8
+    define void @main() #0 {
+      store [2 x %feme.tight_vector.f32x3] [%feme.tight_vector.f32x3 { [3 x float] [float 1.0, float 2.0, float 3.0] }, %feme.tight_vector.f32x3 { [3 x float] [float 4.0, float 5.0, float 6.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @var3, i64 8)
+      store [2 x %feme.tight_vector.f32x3] [%feme.tight_vector.f32x3 { [3 x float] [float 7.0, float 8.0, float 9.0] }, %feme.tight_vector.f32x3 { [3 x float] [float 10.0, float 11.0, float 12.0] }], ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @var3, i64 32)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 64}
+    !4 = !{!1, !2, !3}
+    !5 = !{i32 35, i32 8}
+    !6 = !{!5}
+    !7 = !{i32 0, !6}
+    !8 = !{!7}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  // 2 (outer) * 2 (inner) = 4 rows total, matching `buildStageStorage`'s
+  // own sizing -- not inflated by the pad.
+  EXPECT_EQ(Elt.RowCount, 4u);
+  EXPECT_EQ(Elt.ComponentCount, 3u);
+
+  // The first (`i64 8`, pad-adjusted residual 0) and second (`i64 32`,
+  // pad-adjusted residual 24) stores must land on rows {0, 1} and
+  // {2, 3} respectively -- never {2, 3}/{4, 5} (the pre-fix, pad-still-
+  // included rows, each two too high and the second pair entirely out of
+  // `RowCount`'s own 0-3 range).
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3}));
+}
+
 /// (Roadmap H101l) A single-real-member array-of-block-instances global
 /// (`addElements`' plain, non-`TakeBlockPath` path) whose block declares
 /// a non-zero `xfb_offset` that glslang encodes *only* as the one real

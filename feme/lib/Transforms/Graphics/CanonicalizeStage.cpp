@@ -4696,11 +4696,37 @@ std::optional<StageIOAccess> resolveStageIOAccess(
   // `ByteOffset` itself remapped past that same pad -- see
   // `remapByteOffsetPastLeadingPad`'s own comment for why.
   Type *EffectiveTy = getEffectiveStageIOValueType(GV);
-  if (auto *EffectiveArrTy = dyn_cast<ArrayType>(EffectiveTy);
-      EffectiveArrTy && isa<ArrayType>(GV->getValueType()) &&
-      EffectiveTy != GV->getValueType())
-    ByteOffset =
-        remapByteOffsetPastLeadingPad(GV, EffectiveArrTy, ByteOffset, DL);
+  if (EffectiveTy != GV->getValueType()) {
+    if (auto *EffectiveArrTy = dyn_cast<ArrayType>(EffectiveTy);
+        EffectiveArrTy && isa<ArrayType>(GV->getValueType())) {
+      ByteOffset =
+          remapByteOffsetPastLeadingPad(GV, EffectiveArrTy, ByteOffset, DL);
+    } else if (auto *RealST = dyn_cast<StructType>(GV->getValueType())) {
+      // (Roadmap L364) The "lone-instance" leading-pad case
+      // `getEffectiveStageIOValueType`'s own comment calls out but which
+      // this code never actually handled: \p GV's real type here is a
+      // single `<{ [Gap x i8], RealMemberTy }>` struct, *not* an array of
+      // such structs (that's `remapByteOffsetPastLeadingPad`'s own
+      // concern, above) -- so there is no per-instance stride to divide
+      // by, just one constant \p Gap to subtract once, unconditionally,
+      // before `resolveRowComponent` walks `EffectiveTy` (which starts
+      // its own array-peeling loop assuming \p ByteOffset is already
+      // relative to array index 0). Left unhandled, a real GEP offset
+      // into this member (e.g. `64 + i * TightStride` for a plain
+      // `vec3 var[4][2]` output needing this pad, roadmap L364's own
+      // `basic_arrays.1`) stayed `Gap` bytes too large, which
+      // `resolveRowComponent`'s self-discovering stride still happened
+      // to divide "successfully" (since `Gap` here was itself a multiple
+      // of the candidate stride), silently landing two rows deeper than
+      // the real row 0 -- out of range by the same `Gap`-sized margin
+      // once every array index was accounted for, corrupting
+      // `StageStorage` past this element's own allocated bounds.
+      uint64_t Gap = DL.getStructLayout(RealST)->getElementOffset(
+          RealST->getNumElements() - 1);
+      if (ByteOffset >= Gap)
+        ByteOffset -= Gap;
+    }
+  }
   // (Roadmap H117/H118) Mirrors `addElements`' own `TakeBlockPath`
   // construction-side check exactly: only a genuinely `patch`-qualified
   // block's own members fold an outer array-of-instances dimension into
