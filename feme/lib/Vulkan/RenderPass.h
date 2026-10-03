@@ -73,6 +73,26 @@ struct SubpassDescription {
   /// `VK_ATTACHMENT_UNUSED` for a color attachment that is not resolved.
   std::vector<uint32_t> ResolveAttachments;
   uint32_t DepthStencilAttachment = VK_ATTACHMENT_UNUSED;
+  /// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own
+  /// `VkSubpassDescriptionDepthStencilResolve::pDepthStencilResolveAttachment`,
+  /// or `VK_ATTACHMENT_UNUSED` (the common case, and every pre-1.2 render
+  /// pass): the single-sample attachment `DepthStencilAttachment`'s depth
+  /// and/or stencil half resolves into, once every draw in the subpass
+  /// completes. `DepthResolveMode`/`StencilResolveMode` independently gate
+  /// whether each half actually resolves (`VK_RESOLVE_MODE_NONE` leaves
+  /// that half alone even when this attachment is otherwise set, matching
+  /// `VkSubpassDescriptionDepthStencilResolve`'s own per-aspect modes).
+  uint32_t DepthStencilResolveAttachment = VK_ATTACHMENT_UNUSED;
+  /// Only `VK_RESOLVE_MODE_NONE` and `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` are
+  /// implemented -- the latter is the only mode every
+  /// `VK_KHR_depth_stencil_resolve` implementation must support
+  /// (`VkPhysicalDeviceDepthStencilResolveProperties::
+  /// supportedDepthResolveModes`/`supportedStencilResolveModes` advertise
+  /// only this one bit, `EntryPoints.cpp`), so `vkCreateRenderPass2`
+  /// rejects any other requested mode at creation time rather than
+  /// silently misbehaving at draw time.
+  VkResolveModeFlagBits DepthResolveMode = VK_RESOLVE_MODE_NONE;
+  VkResolveModeFlagBits StencilResolveMode = VK_RESOLVE_MODE_NONE;
   /// (Roadmap H2) `VkRenderPassCreateInfo2::pSubpasses[i].viewMask`, or the
   /// classic `vkCreateRenderPass`'s own `VkRenderPassMultiviewCreateInfo::
   /// pViewMasks[i]` when chained -- 0 for a non-multiview subpass. Each set
@@ -105,6 +125,24 @@ public:
     return Attachments;
   }
   llvm::ArrayRef<SubpassDescription> subpasses() const { return Subpasses; }
+
+  /// (Roadmap K6) `vkCreateRenderPass2` patches each subpass's own
+  /// `VK_KHR_depth_stencil_resolve` state in after construction: that
+  /// extension struct is chained only onto `VkSubpassDescription2`, which
+  /// `vkCreateRenderPass2` otherwise converts down into the classic
+  /// `VkSubpassDescription` shape and delegates to `vkCreateRenderPass`
+  /// (reusing its validation/construction rather than duplicating it) --
+  /// so the depth/stencil resolve fields, which the classic structure has
+  /// no room for, are threaded back in here once the `RenderPass` object
+  /// already exists.
+  void setDepthStencilResolve(uint32_t SubpassIndex, uint32_t Attachment,
+                              VkResolveModeFlagBits DepthMode,
+                              VkResolveModeFlagBits StencilMode) {
+    SubpassDescription &Subpass = Subpasses[SubpassIndex];
+    Subpass.DepthStencilResolveAttachment = Attachment;
+    Subpass.DepthResolveMode = DepthMode;
+    Subpass.StencilResolveMode = StencilMode;
+  }
 
 private:
   std::vector<AttachmentDescription> Attachments;

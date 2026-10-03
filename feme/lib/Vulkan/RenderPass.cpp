@@ -476,6 +476,18 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
   // reusing its own multiview handling rather than duplicating it.
   std::vector<uint32_t> ViewMasks(pCreateInfo->subpassCount);
   bool AnyMultiview = false;
+  // (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own per-subpass state,
+  // collected here (its `VkSubpassDescriptionDepthStencilResolve` struct is
+  // chained only onto `VkSubpassDescription2`, with no room in the classic
+  // `VkSubpassDescription` this function converts down to) and patched back
+  // onto the `RenderPass` object `vkCreateRenderPass` below returns --
+  // see `RenderPass::setDepthStencilResolve`'s own comment.
+  std::vector<uint32_t> DepthStencilResolveAttachments(
+      pCreateInfo->subpassCount, VK_ATTACHMENT_UNUSED);
+  std::vector<VkResolveModeFlagBits> DepthResolveModes(
+      pCreateInfo->subpassCount, VK_RESOLVE_MODE_NONE);
+  std::vector<VkResolveModeFlagBits> StencilResolveModes(
+      pCreateInfo->subpassCount, VK_RESOLVE_MODE_NONE);
   for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I) {
     const VkSubpassDescription2 &Src = pCreateInfo->pSubpasses[I];
     ViewMasks[I] = Src.viewMask;
@@ -493,6 +505,47 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
       DepthStencilRefs[I] = toAttachmentReference(*Src.pDepthStencilAttachment);
       DepthStencilPtr = &DepthStencilRefs[I];
     }
+    for (auto *Base = static_cast<const VkBaseInStructure *>(Src.pNext); Base;
+        Base = Base->pNext)
+      if (Base->sType ==
+          VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE) {
+        const auto *Resolve =
+            reinterpret_cast<const VkSubpassDescriptionDepthStencilResolve *>(
+                Base);
+        // Only `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` is implemented: the one
+        // mode `VkPhysicalDeviceDepthStencilResolveProperties` advertises
+        // support for (`EntryPoints.cpp`) and the only mode the spec
+        // mandates every implementation support -- any other requested
+        // mode fails render-pass creation rather than silently
+        // misbehaving at draw time, per this file's own "validated here"
+        // convention (see the file comment).
+        if ((Resolve->depthResolveMode != VK_RESOLVE_MODE_NONE &&
+             Resolve->depthResolveMode != VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) ||
+            (Resolve->stencilResolveMode != VK_RESOLVE_MODE_NONE &&
+             Resolve->stencilResolveMode != VK_RESOLVE_MODE_SAMPLE_ZERO_BIT))
+          return VK_ERROR_FEATURE_NOT_PRESENT;
+        if (Resolve->pDepthStencilResolveAttachment &&
+            Resolve->pDepthStencilResolveAttachment->attachment !=
+                VK_ATTACHMENT_UNUSED) {
+          uint32_t Index =
+              Resolve->pDepthStencilResolveAttachment->attachment;
+          if (Index >= pCreateInfo->attachmentCount ||
+              Attachments[Index].samples != 1)
+            return VK_ERROR_INITIALIZATION_FAILED;
+          std::optional<feme::cpu::ResourceFormat> ResolveFormat =
+              mapVkFormat(Attachments[Index].format);
+          if (!ResolveFormat ||
+              (Resolve->depthResolveMode != VK_RESOLVE_MODE_NONE &&
+               !isSupportedDepthAttachmentFormat(*ResolveFormat)) ||
+              (Resolve->stencilResolveMode != VK_RESOLVE_MODE_NONE &&
+               !isSupportedStencilAttachmentFormat(*ResolveFormat)))
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+          DepthStencilResolveAttachments[I] = Index;
+          DepthResolveModes[I] = Resolve->depthResolveMode;
+          StencilResolveModes[I] = Resolve->stencilResolveMode;
+        }
+        break;
+      }
     Subpasses.push_back(
         {Src.flags, Src.pipelineBindPoint, Src.inputAttachmentCount,
          InputRefs[I].data(), Src.colorAttachmentCount, ColorRefs[I].data(),
@@ -522,8 +575,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
       static_cast<uint32_t>(Dependencies.size()),
       Dependencies.empty() ? nullptr : Dependencies.data(),
   };
-  return feme::vulkan::vkCreateRenderPass(device, &ClassicInfo, pAllocator,
-                                          pRenderPass);
+  VkResult Result = feme::vulkan::vkCreateRenderPass(device, &ClassicInfo,
+                                                     pAllocator, pRenderPass);
+  if (Result != VK_SUCCESS)
+    return Result;
+  // (Roadmap K6) Thread the depth/stencil resolve state collected above
+  // back onto the just-created object -- see `RenderPass::
+  // setDepthStencilResolve`'s own comment for why this cannot be folded
+  // into the classic `vkCreateRenderPass` call itself.
+  RenderPass *Pass = fromHandle<RenderPass>(*pRenderPass);
+  for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I)
+    if (DepthStencilResolveAttachments[I] != VK_ATTACHMENT_UNUSED)
+      Pass->setDepthStencilResolve(I, DepthStencilResolveAttachments[I],
+                                  DepthResolveModes[I], StencilResolveModes[I]);
+  return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL
