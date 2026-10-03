@@ -63,34 +63,30 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(~a dedicated session)** `L344` item 2 / `L335` -- N-barrier
-   generalization, 1 case (`shader_input_output.barrier`). Carried
-   over many sessions, fully scoped in `FeMeGraphicsDesign.md`'s
-   Status subsection. Needs someone to actually spend the multi-file
+1. **(a few hours)** Triage the smaller clusters the broader sweep already found
+   and left untouched: `memory.binding.maintenance6.*` (56 cases),
+   `fragment_operations.early_fragment` (10), `device_group` (7),
+   `geometry.input.triangle_strip_adjacency` (6), `memory_model.*` races (~24).
+   None investigated yet -- just counts from the partial 240K-case sample.
+2. **(systematic grep, ~1 hour)** Audit other Vulkan-layer objects for the same
+   "stale synchronous-execution assumption" bug class `QueryPool` just had. Grep
+   for comments mentioning "synchronous" near any object that's mutated by a
+   `QueueExecutor` worker thread and read by the host (`Event`?
+   `vkGetDeviceGroupPresentCapabilitiesKHR`-style queries? anything touching
+   `vkCmdCopyQueryPoolResults`'s buffer-write path for completeness?).
+   `Fence`/`Semaphore`/now `QueryPool` are confirmed fine; nothing else has been
+   checked.
+3. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
+   / `L335` -- N-barrier generalization, 1 case (`shader_input_output.barrier`).
+   Fully scoped in `FeMeGraphicsDesign.md`; still needs the actual multi-file
    implementation session.
-2. **(~a few hours, lowest priority, many sessions carried over)**
-   `L265` -- ASTC alpha-decode tie-break, 12 cases. Next unattempted
-   angle: compare decoded 4-texel neighborhoods pixel-by-pixel between
-   `astc_5x5` and `astc_8x8` for a structural property correlating
-   with tie direction.
-3. **(~a dedicated session, new idea from this session)** Audit other
-   even-inner-tess-factor CTS tests for the *same* centroid-tie bug
-   class masked by a less color-sensitive shader (this bug existed in
-   every even-`N0` triangle-domain patch, not just this one test family
-   -- only became *visible* here because of this test's exact
-   phase-bucket coloring). A quick way to start: grep the already-known
-   36 `invariance.outer_edge_symmetry` failures and any other
-   `tessellation.*` near-miss for even inner factors, see if any are
-   secretly hitting this same tie at the centroid rather than their
-   currently-assumed root cause.
-4. **(~a few hours, overdue)** The broader-than-tessellation CTS
-   re-run is still overdue -- last broad sample was several sessions
-   back. Worth a dedicated session on `api`/`shader_render` groups now
-   that tessellation's open-failure list is down to 30 (`L337`,
-   `L341`, `L346`, `L344` item 2).
-5. **(process note)** The "wrong tess-level case" mistake cost ~6
-   sessions. When a CTS test logs multiple tess-level cases with
-   images, always confirm which image set belongs to which case by
-   reading the `.qpa`'s own `<Text>` entries directly before drawing
-   any conclusion from pixel diffs -- don't assume image order matches
-   case order.
+4. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
+   alpha-decode tie-break, 12 cases. Next angle (still unattempted): compare
+   decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5`/`astc_8x8`
+   for a structural property correlating with tie direction.
+5. **(a few hours)** Resume/complete the broader-than-tessellation CTS sweep
+   itself -- this session's own run only covered 240,182 of the full suite (died
+   mid-run across a context-compaction boundary); worth relaunching the
+   remaining groups (especially `binding_model`, explicitly skipped this session
+   for being too large) in the background early next session so it's done by the
+   time other work wraps up.
