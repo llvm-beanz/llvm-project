@@ -13685,3 +13685,63 @@ already-tracked `double free or corruption` (`L363`'s own open item).
 Not investigated further this session; carried over alongside
 `nested_structs_instance_arrays.31` for the same dedicated future
 session.
+
+## Fixed: `basic_arrays.1` content mismatch + `all_instance_array.12` (`L365`)
+
+Root-caused and fixed the content-mismatch follow-up `L364` left open
+for `basic_arrays.1`, plus a bonus fix for `all_instance_array.12`
+(previously documented, since `L363`, as a pre-existing *unrelated*
+failure -- it turned out to be the same bug).
+
+- **Root cause:** a second bug in the exact same lone-leading-pad-struct
+  shape `L364` fixed, this time in `EntrySignature` construction, not
+  access resolution. The lone padded struct's `ValueTy` was never
+  pad-stripped before `isGenuineMultiMemberNestedStruct` classified it,
+  so its 2 raw LLVM fields (pad + real member) were misread as a genuine
+  2-member nested struct, routing it through `addStageIOStructMembers`'s
+  decomposition instead of the plain single-element path. That
+  decomposition re-derives each field's `XfbOffset` from the struct's
+  own LLVM layout *on top of* the already-correct `D.XfbOffset` (set by
+  the pre-existing H101l fix from the member's own `Offset` decoration),
+  double-counting the pad: a real `xfb_offset = 64` member came out with
+  `XfbOffset = 128`, captured one buffer slot too deep, reading back as
+  the next vertex's zero-initialized leftover instead of the authored
+  value. Confirmed directly by decoding `EntrySignature`'s versioned
+  binary layout (`feme::serializeSignature`'s own format) from
+  `FEME_DUMP_IR_POSTCANON`'s captured `!feme.signature` metadata.
+- **Fix:** generalized the existing array-of-instances pad-strip (which
+  already rebuilds `ValueTy` pad-free, but only when wrapped in an outer
+  array) to also cover the lone-instance case, independent of
+  `D.XfbBuffer`.
+- **Verified:**
+  - `basic_arrays.1`: now **Pass** (was: content mismatch).
+  - `all_instance_array.12`: now **Pass** (was: pre-existing `Mismatch
+    at offset 68`, documented since `L363` as unrelated -- turned out to
+    be the same bug).
+  - New unit test `DoesNotDoubleCountLeadingPadInXfbOffsetForLoneStruct`
+    asserts `Elt.XfbOffset == 8` (not `16`) for a reduced repro.
+  - `FeMeTransformsGraphicsTests`: 135/135 Passed (+1 new test), 0
+    regressions.
+  - `ninja check-feme`: 3522/3583 Passed, 61 Unsupported, 0 Failed.
+  - Full `basic_arrays.*` group (50 cases): **0 Fail** (7 Passed, 43
+    NotSupported) -- was 1 Fail (`.1`).
+  - Re-ran the same 713-case `random_geometry.*` prefix `L364`'s own
+    follow-up sweep reached: Pass rose 106 -> 132 (+26), Fail fell 28 ->
+    2 (-26) -- this fix's benefit extends well past the two cases spot-
+    checked directly.
+- **Still open, unchanged:** `nested_structs_instance_arrays.2`'s crash
+  no longer aborts the process when run in isolation (now an ordinary
+  `Fail`), but still aborts mid-group in the full sequential sweep --
+  consistent with glibc's delayed heap-corruption detection (the real
+  corruption happens earlier; the abort fires on a later, unrelated
+  `malloc`/`free` call), not a change in `.2`'s own behavior.
+  `nested_structs_instance_arrays.31`'s own crash is also unchanged --
+  both exercise `TakeBlockPath`'s separate multi-member block-array
+  dispatch, a different call site from the one this fix touched. Both
+  remain carried over for the same already-flagged dedicated future
+  session (the `isGenuineMultiMemberNestedStruct`/
+  `PeekedMemberDecorations.size()` architectural gap, for the
+  block-array dispatch site specifically).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- an internal correctness fix, no feature/extension-surface
+  change.
