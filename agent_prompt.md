@@ -63,39 +63,32 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(systematic grep, ~1 hour, STILL not finished)** Handoff item 3's
-   audit is still only half-done: only `Event` has been checked beyond
-   the already-known-fine `Fence`/`Semaphore`/`QueryPool`. Still
-   unchecked: anything touching `vkCmdCopyQueryPoolResults`'s buffer-write
-   path for completeness (explicitly called out in the original handoff
-   and still never looked at), plus any other object mutated by a
-   `QueueExecutor` worker and read by the host thread -- `Image`/`Buffer`
-   host-visible-memory bookkeeping fields, `Framebuffer`, anything in
-   `DescriptorSet.{h,cpp}` that caches state. Worth a dedicated pass
-   grepping for every class in `feme/lib/Vulkan/*.h` that's both
-   `Alloc.create`'d (heap, pointer-stable) and referenced from
-   `CommandBuffer.cpp`'s deferred-execution path.
-2. **(worth investigating once, low cost)** Check whether ThreadSanitizer
-   can be wired into a `check-feme`-adjacent build config. If `Event`
-   hid for this long, there may be more of these, and a poll-based unit
-   test alone can't prove a fix's correctness the way TSan actually can.
-   Even a one-off manual TSan build+run of `FeMeVulkanTests` would add
-   real confidence beyond what's been done so far.
-3. **(a few hours)** Continue tessellation/broader triage:
-   `user_defined_io` (27 cases), `device_group` (7),
-   `geometry.input.triangle_strip_adjacency` (6), `memory_model.*` races
-   (~24) -- all still untouched, carried over many sessions now.
-4. **(dedicated session, carried over many sessions, unchanged)** `L344`
+1. **(dedicated session, new, scoped above)** The real fix for the
+   70-case `memory_model.*fence_fence.atomicwrite*` cluster needs an
+   MLIR SPIR-V dialect change: give `OpSpecConstantOp` results a way to
+   be referenced as `OpSpecConstantComposite` constituents (likely a new
+   module-scope symbol form, or extending `SpecConstantCompositeOp`'s
+   constituents to accept operands, not just attributes). This is an
+   upstream-MLIR design question, not a FeMe one -- may be worth
+   proposing on the MLIR list before attempting the implementation
+   solo, given the op-definition-level change involved.
+2. **(a few hours)** The 3 `message_passing.permuted_index.*` cases
+   (`spirv.AtomicStore` legalization failure on `Uniform` storage class
+   atomics) -- not investigated at all yet, different bug class from
+   item 1.
+3. **(a few hours)** Handoff item 1's other untouched sub-clusters:
+   `device_group` (7 cases), `geometry.input.triangle_strip_adjacency`
+   is now DONE (this session), but `user_defined_io` (27 cases) is
+   still untouched.
+4. **(systematic grep, ~1 hour, carried over many sessions)** Handoff
+   item 3's thread-safety audit (`Image`/`Buffer`/`Framebuffer`/
+   `DescriptorSet` for the `Event`/`QueryPool`-class bug) -- still not
+   done, still worth doing.
+5. **(worth investigating once, low cost, carried over)** Wire up
+   ThreadSanitizer for a one-off manual `FeMeVulkanTests` run.
+6. **(dedicated session, carried over many sessions, unchanged)** `L344`
    item 2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`). Fully scoped in
-   `FeMeGraphicsDesign.md`; still needs the actual implementation
-   session.
-5. **(lowest priority, many sessions carried over, unchanged)** `L265` --
-   ASTC alpha-decode tie-break, 12 cases. Next angle, still unattempted:
-   compare decoded 4-texel neighborhoods pixel-by-pixel between
-   `astc_5x5`/`astc_8x8` for a structural property correlating with tie
-   direction.
-6. **(process note)** `vulkaninfo --summary` without `VK_ICD_FILENAMES`
-   silently reports Mesa `llvmpipe`, not FeMe -- always set the env var
-   explicitly before the mandatory per-session device check, or the
-   check can pass against the wrong driver without any error.
+   (`shader_input_output.barrier`).
+7. **(lowest priority, many sessions carried over, unchanged)** `L265`
+   -- ASTC alpha-decode tie-break, 12 cases.
+
