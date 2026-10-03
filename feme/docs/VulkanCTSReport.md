@@ -13420,12 +13420,19 @@ triaged to ground, neither a new bug:
   session with no other heavy concurrent work as a final sanity check,
   but not pursuing further this session.
 
-**`subgroups` was still in progress (large group, ~48,700 cases) when
-this session's time ran out** -- partial results not yet parsed; its
-own eventual Pass/Fail/NotSupported split and the remaining ~28 groups
-(`wsi`, `draw`, `glsl`, `texture`, `ycbcr`, `robustness`,
-`fragment_shading_rate`, `transform_feedback`, `video`, `memory`,
-`reconvergence`, `protected_memory`, `dgc`, `tensor`,
+**Update: `subgroups` and `wsi` finished before this session ended too**,
+both fully clean:
+
+| Group | Pass | Fail | NotSupported |
+|---|---|---|---|
+| `subgroups` | 888 | 0 | 47817 |
+| `wsi` | 4 | 0 | 36876 |
+
+12 of ~39 groups now complete, 10 fully clean, 2 triaged to
+already-tracked non-issues above. The remaining ~27 groups (`draw` in
+progress as this session ends, then `glsl`, `texture`, `ycbcr`,
+`robustness`, `fragment_shading_rate`, `transform_feedback`, `video`,
+`memory`, `reconvergence`, `protected_memory`, `dgc`, `tensor`,
 `drm_format_modifiers`, `image_processing`, `data_graph`,
 `fragment_shading_barycentric`, `cooperative_vector`, `spirv_assembly`,
 `renderpasses`, `image`, `binding_model`, `shader_object`, `api`,
