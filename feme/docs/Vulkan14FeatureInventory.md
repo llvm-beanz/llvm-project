@@ -182,7 +182,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_2 | `VK_KHR_8bit_storage` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_buffer_device_address` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_create_renderpass2` | yes | core, not advertised by name: vkCreateRenderPass2 and its command family (RenderPass.cpp, CommandBuffer.cpp) |
-| extension | VK_VERSION_1_2 | `VK_KHR_depth_stencil_resolve` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_depth_stencil_resolve` | yes | core, not advertised by name: roadmap K6, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT only (RenderPass.cpp, CommandBuffer.cpp, Executor.cpp, EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_draw_indirect_count` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_driver_properties` | yes | core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_image_format_list` | no |  |

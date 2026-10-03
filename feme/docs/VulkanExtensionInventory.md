@@ -204,7 +204,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_dedicated_allocation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_deferred_host_operations` | Planned (in scope, not implemented) | roadmap J3 |
 | `VK_KHR_depth_clamp_zero_one` | Not implemented |  |
-| `VK_KHR_depth_stencil_resolve` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_depth_stencil_resolve` | Implemented (`VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` only) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K6, closed for the mandatory mode). `AVERAGE`/`MIN`/`MAX` (optional modes) are rejected at `vkCreateRenderPass2` time with `VK_ERROR_FEATURE_NOT_PRESENT`, not silently substituted |
 | `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate) |
 | `VK_KHR_device_address_commands` | Not implemented |  |
 | `VK_KHR_device_fault` | Not implemented |  |
