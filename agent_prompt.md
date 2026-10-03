@@ -63,36 +63,38 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, start here)** `fill_overlap_triangles_*` (4 cases) --
-   root-cause the centroid-blob defect found in step 4 above. Start by
-   auditing `bridgeRingsByEdge`/`bridgeEdge` (`Tessellator.cpp` ~line 141)
-   for an analogous diagonal/ordering choice near the innermost rings,
-   where the bands are thinnest and any deviation is most visible. The
-   diagnostic images are already known-useful; re-run
-   `--deqp-log-images=enable` on both `_equal_spacing_draw` and
-   `_fractional_even_spacing_draw` if the first angle doesn't pan out.
+1. **(a few hours, start here)** `fill_overlap_triangles_*` (4 cases,
+   `L351`) -- new angle: floating-point boundary tie, not topology.
+   Pick one known-mismatching pixel from `--deqp-log-images=enable`'s
+   `ErrorMask`, and instrument/print the exact interpolated `d` value
+   FeMe computes there (via the barycentric weights at that screen
+   position) alongside `int(d * numConcentricTriangles) % 3`. Check if
+   `d` sits within float epsilon of a `k/5` boundary (this test's tess
+   levels give `numConcentricTriangles=5`). If so, narrow down *which*
+   float operation disagrees with the reference: the ring
+   `CumulativeScale` product, the rasterizer's own barycentric
+   interpolation, or the TES's own cast. This is the same bug *class*
+   as `L265` below, so techniques from any future `L265` session may
+   transfer.
 2. **(dedicated session, unchanged, carried over many sessions)** `L344`
    item 2 / `L335` -- N-barrier generalization, 1 case
-   (`shader_input_output.barrier`). Fully scoped already; needs someone to
-   actually spend the multi-file implementation session across the five
-   subsystems listed in step 5 above.
+   (`shader_input_output.barrier`). Fully scoped already in
+   `FeMeGraphicsDesign.md`'s Status subsection; needs someone to spend
+   the multi-file implementation session.
 3. **(lowest priority, many sessions carried over, unchanged)** `L265` --
-   ASTC alpha-decode tie-break, 12 cases. No new angle found or attempted
-   this session. The concrete next angle from two sessions ago (compare
+   ASTC alpha-decode tie-break, 12 cases. Untouched again this session.
+   Next angle (from two sessions ago, still unattempted): compare
    decoded 4-texel neighborhoods pixel-by-pixel between `astc_5x5` and
-   `astc_8x8` for a structural property correlating with tie direction)
-   is still the best lead, just not attempted again this session.
-4. **(low priority, out of scope, unchanged)** `offload-test-suite`'s own
-   lit-annotation backlog is at zero (confirmed clean last session); no
-   new issues found this session since no new `check-hlsl-feme-vk` run was
-   needed (no FeMe ICD changes this session affect its own runtime
-   behavior in a way distinguishable from the CTS numbers already tracked
-   above -- this wasn't independently re-verified this session and would
-   be a cheap confirmation to run first thing next time if picking back
-   up `offload-test-suite` work).
-5. **(process note)** The `.qpa` base64-image-extraction technique (step 2
-   above) is now the standard first move for any `misc_draw`/tessellation
-   visual-diff investigation -- much faster than ASCII heatmaps or numeric
-   diffs alone, and it's what turned a presumed multi-session port into a
-   6-line fix this session. Keep reaching for it before assuming a
-   topology-level root cause.
+   `astc_8x8` for a structural property correlating with tie direction.
+4. **(low priority, out of scope, unchanged)** `offload-test-suite`'s
+   own lit-annotation backlog is at zero (confirmed clean 2 sessions
+   ago); not independently re-verified this session since no FeMe
+   runtime-behavior change landed. Cheap confirmation to run first if
+   picking back up `offload-test-suite` work.
+5. **(process note)** When an A/B test of a well-reasoned hypothesis
+   comes back negative, revert and document rather than keep a
+   non-improving change -- this session's own `bridgeEdgeMirrored`
+   detour is a concrete example: technically more "reference-faithful"
+   code is not automatically a fix if the test's real failure mode is
+   numerical, not topological.
+
