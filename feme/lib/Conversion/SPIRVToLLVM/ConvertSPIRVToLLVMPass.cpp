@@ -118,6 +118,14 @@ struct EntryPointInfo {
   /// `TessVertexOrder` above.
   bool TessPointMode = false;
   std::optional<uint32_t> TessOutputControlPointCount;
+  /// SPIR-V's `EarlyFragmentTests` execution mode (roadmap L356): a
+  /// fragment entry point's own explicit `layout(early_fragment_tests)
+  /// in;` request, re-attached as the `feme.fragment.early_fragment_tests`
+  /// bare passthrough attribute below and read back into
+  /// `FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS`
+  /// (`feme::cpu::computeSideEffectFlags`) by the time `Executor.cpp`'s
+  /// `UseEarlyDepthStencil` needs it.
+  bool EarlyFragmentTests = false;
   /// (Roadmap H5a) A geometry entry point's declared shape: its input/
   /// output primitive classes (SPIR-V's `InputPoints`/.../
   /// `InputTrianglesAdjacency` and `OutputPoints`/`OutputLineStrip`/
@@ -485,6 +493,9 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
       It->second.GeometryInvocations = static_cast<uint32_t>(
           mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
       break;
+    case mlir::spirv::ExecutionMode::EarlyFragmentTests:
+      It->second.EarlyFragmentTests = true;
+      break;
     default:
       break;
     }
@@ -678,6 +689,12 @@ void applyEntryPointAttributes(
     if (!It->second.RoundingModeRTZWidths.empty() ||
         It->second.NeedsStrictFPForPerInstructionRounding)
       addBarePassthroughAttribute(Func, "strictfp");
+    // (roadmap L356) See `EntryPointInfo::EarlyFragmentTests`'s own
+    // comment: a verbatim carry of the SPIR-V module's own explicit
+    // `EarlyFragmentTests` execution mode declaration, read back by
+    // `feme::cpu::computeSideEffectFlags`.
+    if (It->second.EarlyFragmentTests)
+      addBarePassthroughAttribute(Func, "feme.fragment.early_fragment_tests");
   });
 }
 

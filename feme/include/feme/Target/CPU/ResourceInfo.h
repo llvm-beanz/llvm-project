@@ -96,6 +96,13 @@ std::array<uint32_t, 3> getDeclaredGroupSize(const llvm::Function &F);
 /// still present can only be a write through a real resource pointer (an
 /// SSBO/UAV buffer or image descriptor) or a local-variable spill -- this
 /// scan's only job is telling those two apart.
+///
+/// Also reports `FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS` (roadmap
+/// L356): a verbatim read of \p F's own `feme.fragment.early_fragment_
+/// tests` bare function attribute (`ConvertSPIRVToLLVMPass.cpp` attaches
+/// it whenever the entry point's SPIR-V module declared the
+/// `EarlyFragmentTests` execution mode), not anything derived from a scan
+/// of the body like the other bits above.
 uint32_t computeSideEffectFlags(const llvm::Function &F);
 
 /// Which of the three physical heaps a `BoundResourceRange`'s slots belong
@@ -233,7 +240,17 @@ struct ResourceInfo {
 /// shader never actually reads whenever a SPIR-V push-constant block
 /// declares a nonzero leading `layout(offset=N)` (see `ResourceInfo::
 /// RootConstantMinOffset`'s own comment).
-constexpr uint32_t ArtifactAbiVersion = 6;
+///
+/// Version 7 (roadmap L356) added `FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_
+/// TESTS` to `ArtifactFlagBits`: whether the entry point's SPIR-V module
+/// declared the `EarlyFragmentTests` execution mode (GLSL's `layout(early_
+/// fragment_tests) in;`) for it, letting `Executor.cpp`'s `UseEarlyDepth
+/// Stencil` tell an *explicit* request (which the spec mandates honoring
+/// even when the fragment stage discards or has other observable side
+/// effects) apart from its own automatic optimization-only inference
+/// (which must still decline whenever either is present, see
+/// `UseEarlyDepthStencil`'s own comment).
+constexpr uint32_t ArtifactAbiVersion = 7;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.
@@ -257,6 +274,19 @@ enum ArtifactFlagBits : uint32_t {
   /// local-variable spill/scratch write the early depth/stencil-test
   /// optimization can still safely skip).
   FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS = 1u << 4,
+  /// Set if the entry point's SPIR-V module declared the
+  /// `EarlyFragmentTests` execution mode for it (GLSL's `layout(early_
+  /// fragment_tests) in;`), read back off the `feme.fragment.early_
+  /// fragment_tests` bare passthrough function attribute
+  /// `ConvertSPIRVToLLVMPass.cpp` attaches (roadmap L356). Unlike the
+  /// three `feme.stage.*`-derived bits above, this one is not computed
+  /// from the function body at all -- it is a verbatim carry of the
+  /// SPIR-V module's own explicit declaration, which `Executor.cpp`'s
+  /// `UseEarlyDepthStencil` honors unconditionally (per spec, the
+  /// application's own explicit request overrides every one of the
+  /// automatic-eligibility checks the other `FEME_CPU_ARTIFACT_USES_*`
+  /// bits exist to drive, discard/memory-side-effects included).
+  FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS = 1u << 5,
 };
 
 /// The versioned, object-file-friendly artifact `emitArtifactGlobal` writes

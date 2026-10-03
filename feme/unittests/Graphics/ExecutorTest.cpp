@@ -111,6 +111,32 @@ constexpr char ConstantOutOfRangeFragDepthFragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// (roadmap L356) A fragment shader that explicitly declares `layout(early_
+// fragment_tests) in;` (the `feme.fragment.early_fragment_tests` bare
+// function attribute `ConvertSPIRVToLLVMPass.cpp` would attach for the
+// real SPIR-V execution mode), writes a solid color, then unconditionally
+// discards -- exactly `dEQP-VK.fragment_operations.early_fragment.discard_
+// early_fragment_tests_depth`'s own shader shape. Per spec, the explicit
+// declaration means depth testing (and writing) happens before this body
+// ever runs, so the discard below must not undo an already-complete depth
+// write -- unlike a fragment shader that never declared the mode at all,
+// where `UseEarlyDepthStencil` (Executor.cpp) correctly declines the early
+// path for exactly this combination (discard after a would-be depth
+// write), deferring everything until after the shader returns.
+constexpr char EarlyFragmentTestsDiscardFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 1.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    call void @feme.stage.discard(i1 true)
+    ret void
+  }
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.discard(i1)
+  attributes #0 = { "feme.shader.stage"="fragment" "feme.fragment.early_fragment_tests" }
+)";
+
 // (roadmap H7t) Like FragmentShaderIR above, but only stores its 3 color
 // components (r, g, b) to SV_Target0 -- no alpha write at all, matching a
 // `vec3` fragment output's own signature (`ComponentCount == 3`), legal
@@ -3332,6 +3358,85 @@ TEST(ExecutorTest, ClampsAShaderWrittenFragDepthWhenDepthClampIsEnabled) {
   // shader's own unclamped `-0.5`.
   for (uint32_t I = 0; I != 16; ++I)
     EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
+}
+
+// (roadmap L356) `dEQP-VK.fragment_operations.early_fragment.discard_
+// early_fragment_tests_depth`: an explicit `layout(early_fragment_tests)
+// in;` must still perform the depth test/write before the fragment stage
+// runs -- and therefore before an unconditional `discard` inside that
+// stage -- unlike the automatic, declaration-free "may skip as an
+// optimization" inference, which correctly declines early testing
+// whenever a discard is present (see `UseEarlyDepthStencil`'s own
+// comment). Before this fix, FeMe never read SPIR-V's `EarlyFragmentTests`
+// execution mode at all, so every explicitly-early fragment stage that
+// also discarded (or had any other memory side effect) was wrongly
+// deferred to the late path, where the discard then suppressed the depth
+// write the application's own explicit declaration had promised would
+// already be done.
+TEST(ExecutorTest, ExplicitEarlyFragmentTestsStillWritesDepthWhenShaderDiscards) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, EarlyFragmentTestsDiscardFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Always;
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  Expected<GraphicsPipeline> Pipeline = GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList, Raster,
+      Depth, BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A full-viewport CCW triangle, NDC Z = 0.25 at every vertex. Pre-clear
+  // depth storage defaults to 1.0f (`TriangleScene`'s own constructor), and
+  // the color attachment defaults to all-zero.
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.25f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.25f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.25f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  // Depth got written to the rasterizer-interpolated 0.25 despite the
+  // shader's own unconditional discard, because the explicit early-test
+  // declaration means the test/write already happened before that discard
+  // ever ran.
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.25f) << "texel " << I;
+  // The color attachment stays untouched (still all-zero): the discard
+  // itself still correctly suppresses the color write, exactly as it
+  // would with no `early_fragment_tests` declaration at all -- only the
+  // depth write's own timing relative to the discard changes.
+  for (uint8_t Byte : Scene.AttachmentStorage)
+    EXPECT_EQ(Byte, 0u);
 }
 
 TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {

@@ -273,8 +273,8 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsSix) {
-  EXPECT_EQ(ArtifactAbiVersion, 6u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsSeven) {
+  EXPECT_EQ(ArtifactAbiVersion, 7u);
 }
 
 TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {
@@ -449,6 +449,24 @@ TEST(ResourceInfoTest, ComputeSideEffectFlagsFindsDiscardDemoteHelper) {
             static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_DEMOTE));
   EXPECT_EQ(computeSideEffectFlags(*M->getFunction("checksHelper")),
             static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_HELPER));
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("plain")), 0u);
+}
+
+TEST(ResourceInfoTest, ComputeSideEffectFlagsReadsEarlyFragmentTestsAttribute) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @declaresEarly() #0 {
+      ret void
+    }
+    define void @plain() {
+      ret void
+    }
+    attributes #0 = { "feme.fragment.early_fragment_tests" }
+  )");
+  ASSERT_TRUE(M);
+
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("declaresEarly")),
+            static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS));
   EXPECT_EQ(computeSideEffectFlags(*M->getFunction("plain")), 0u);
 }
 

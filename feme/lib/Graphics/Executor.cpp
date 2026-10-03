@@ -2667,6 +2667,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // defers the test until after the fragment stage returns, matching
   // output merge's own "depth, stencil, blend, and attachment writes in
   // specification order".
+  //
+  // (roadmap L356) That whole "may only skip as an optimization" rule is
+  // the *implicit* default, used when the fragment stage declares nothing
+  // about its own ordering. When it instead explicitly declares
+  // `layout(early_fragment_tests) in;` (`FSExplicitEarlyFragmentTests`
+  // below), the application has made a binding promise of its own that
+  // overrides the usual discard/demote/memory-side-effect disqualifiers:
+  // the spec requires testing (and, for any storage write, gating that
+  // write on the test's own outcome) to happen before the fragment stage
+  // runs, even though that stage goes on to discard or write storage
+  // afterward.
   const SignatureElement *FSDepthOut = findElement(
       FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
   const SignatureElement *FSStencilRefOut = findElement(
@@ -2691,6 +2702,32 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // does.
   bool FSHasMemorySideEffects =
       (FSFlags & cpu::FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS) != 0;
+  // (roadmap L356) The fragment stage's own explicit `layout(early_
+  // fragment_tests) in;` (SPIR-V's `EarlyFragmentTests` execution mode):
+  // per spec, this is not merely a hint the "may skip a rejected
+  // invocation as an optimization" wording above covers -- it is the
+  // application's own binding promise that depth/stencil testing (and, for
+  // a shader storage/image write, *gating* that write on the test's own
+  // outcome) happens before the fragment stage runs, full stop, so
+  // `UseEarlyDepthStencil` below must honor it unconditionally, overriding
+  // `FSMayDiscard`/`FSHasMemorySideEffects` exactly like the automatic,
+  // declaration-free inference never could: discarding or storing *after*
+  // an already-complete early test/write no longer gets to undo it (see
+  // `dEQP-VK.fragment_operations.early_fragment.discard_early_fragment_
+  // tests_depth`/`.early_fragment_tests_depth`/the `samplemask_*_depth_
+  // samples_*` family, all of which write/atomic or discard *after*
+  // relying on exactly this). The four checks this still shares with the
+  // automatic path below (`FSDepthOut`/`FSStencilRefOut`/`alphaToCoverage
+  // Enable`/`FSSampleMaskOut`) are not optional even for an explicit
+  // declaration: a fragment stage that writes `SV_Depth`/`SV_StencilRef`
+  // can't coherently combine with `early_fragment_tests` at all (the GLSL
+  // spec disallows exactly this pairing, SPIR-V's own validator rejects
+  // it), and alpha-to-coverage/an explicit `SampleMask` output both narrow
+  // coverage using a value the fragment stage itself computes, which is
+  // definitionally not yet known before that stage runs regardless of
+  // what the application declared.
+  bool FSExplicitEarlyFragmentTests =
+      (FSFlags & cpu::FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
   // (roadmap H7d) `BoundsTestEnable` also needs the depth-read path active
   // even when neither the regular depth test nor a depth write is
@@ -2739,8 +2776,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     }
   }
   bool UseEarlyDepthStencil = NeedsDepthStencil && !FSDepthOut &&
-                              !FSStencilRefOut && !FSMayDiscard &&
-                              !FSHasMemorySideEffects &&
+                              !FSStencilRefOut &&
+                              (FSExplicitEarlyFragmentTests ||
+                               (!FSMayDiscard && !FSHasMemorySideEffects)) &&
                               !Pipeline.getAlphaToCoverageEnable() &&
                               !FSSampleMaskOut &&
                               !HasSelfReferencingDepthStencilInput;

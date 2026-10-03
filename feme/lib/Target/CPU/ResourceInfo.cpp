@@ -159,6 +159,12 @@ uint32_t feme::cpu::computeSideEffectFlags(const Function &F) {
         Flags |= FEME_CPU_ARTIFACT_USES_MEMORY_SIDE_EFFECTS;
     }
   }
+  // (roadmap L356) Not a body scan like the bits above -- a verbatim carry
+  // of the SPIR-V module's own explicit `EarlyFragmentTests` execution
+  // mode declaration, see `ConvertSPIRVToLLVMPass.cpp`'s
+  // `applyEntryPointAttributes`.
+  if (F.hasFnAttribute("feme.fragment.early_fragment_tests"))
+    Flags |= FEME_CPU_ARTIFACT_USES_EARLY_FRAGMENT_TESTS;
   return Flags;
 }
 
