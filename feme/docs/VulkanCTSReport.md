@@ -13666,3 +13666,22 @@ there is only one instance.
 distinct -- an array-of-block-instances shape, not a lone-instance one)
 remains open and untouched this session; see `L363`'s roadmap row for
 its own still-unresolved second under-sizing bug.
+
+**Full `basic_arrays.*` group confirmation**: ran the complete
+`dEQP-VK.transform_feedback.fuzz.random_geometry.basic_arrays.*` group
+(50 cases) post-fix -- it now runs to completion with no crash at all
+(previously aborted the whole process at `.1`): 6 Passed, 43
+NotSupported, 1 Failed (`.1` itself, the still-open content-mismatch
+noted above).
+
+A full `dEQP-VK.transform_feedback.fuzz.random_geometry.*` sweep was
+also attempted post-fix: it progressed 713 cases past where it would
+previously have aborted (106 Passed, 28 Failed, 578 NotSupported so
+far), then hit a *different*, still-open crash --
+`nested_structs_instance_arrays.2`'s own `malloc(): unaligned tcache
+chunk detected` -- a distinct symptom from (but likely the same
+architectural root cause as) `nested_structs_instance_arrays.31`'s
+already-tracked `double free or corruption` (`L363`'s own open item).
+Not investigated further this session; carried over alongside
+`nested_structs_instance_arrays.31` for the same dedicated future
+session.
