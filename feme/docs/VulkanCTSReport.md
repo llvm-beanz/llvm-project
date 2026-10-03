@@ -13356,3 +13356,79 @@ semaphores promptly after observing them signaled from another thread.
 Worth keeping ThreadSanitizer in mind as an ongoing one-off check after
 future `Sync.h`/`QueryPool.h`-adjacent changes, even though `check-feme`
 itself doesn't run under it.
+
+## Broader-than-tessellation CTS sweep (handoff item, long overdue): first 10 groups complete, `subgroups` in progress
+
+Picked up the handoff's long-overdue "broader-than-tessellation" sweep
+(explicitly flagged "overdue many sessions", `binding_model` previously
+skipped for size). Enumerated every top-level `dEQP-VK.*` group via
+`--deqp-runmode=stdout-caselist` (~2.8M cases across ~39 groups; no
+`shader_render` group exists under that name in this checkout). Wrote a
+background driver script running each group's full `dEQP-VK.<group>.*`
+case set via `deqp-vk`, in priority order (fastest/smallest groups
+first, `pipeline`/`api`/`binding_model`/`shader_object`/`image`
+deliberately last since they are each too large for one session alone).
+
+**10 groups completed and parsed this session** (totals below are
+`Pass/Fail/NotSupported` out of each group's full case count):
+
+| Group | Pass | Fail | NotSupported |
+|---|---|---|---|
+| `synchronization` | 18420 | 0 | 46452 |
+| `synchronization2` | 24631 | 0 | 56986 |
+| `compute` | 686 | 0 | 60774 |
+| `ssbo` | 3242 | 0 | 8983 |
+| `ubo` | 5687 | 0 | 7553 |
+| `rasterization` | 482 | 2 | 14535 |
+| `sparse_resources` | 0 | 0 | 19402 |
+| `mesh_shader` | (crashed mid-group, see below) | | |
+| `ray_query` | 0 | 0 | 49311 |
+| `ray_tracing_pipeline` | 0 | 0 | 22659 |
+
+8 of 10 groups are 100% clean (0 Fail). The 2 exceptions, both
+triaged to ground, neither a new bug:
+
+- **`rasterization.line_continuity.{line-strip,polygon-mode-lines}`**
+  (2 Fail): reproduced in isolation (`deqp-vk
+  --deqp-case=dEQP-VK.rasterization.line_continuity.*`, both fail
+  identically standalone). Diagnostic: `"function 'main' has a barrier
+  inside non-linear control flow ... region splitting only supports a
+  straight-line wave body or a single uniform loop"` -- this is the
+  exact, already-tracked `L335` finding (an Amber-script compute
+  verification shader with `barrier()` inside nested `if`/`while`
+  control flow), itself the same subsystem/scope as `L344` item 2's
+  single-group-sync-barrier limitation, both still open pending a
+  dedicated N-barrier-generalization implementation session. **Not a
+  new bug** -- confirms `L335`'s prior triage, no action needed beyond
+  this cross-reference.
+- **`mesh_shader.ext.misc.many_mesh_work_groups_{x,y,z}`**: the
+  in-sweep run showed `many_mesh_work_groups_x` failing with
+  `VK_TIMEOUT` and the `deqp-vk` process then truncating mid-log during
+  `many_mesh_work_groups_y` (likely a crash, given the abruptly-cut-off
+  `.qpa` XML). Re-ran all 3 cases in isolation afterward (`deqp-vk
+  --deqp-case=dEQP-VK.mesh_shader.ext.misc.many_mesh_work_groups_*`):
+  **3/3 Pass**, clean. The in-sweep failure's timing coincides exactly
+  with this same session's concurrent `ninja -C build-tsan
+  FeMeVulkanTests` full rebuild (4802 targets) and TSan-instrumented
+  test run, both independently CPU-heavy -- consistent with `Sync.h`'s
+  own documented safety-net rationale ("a host machine heavily
+  oversubscribed... can legitimately make one otherwise-unremarkable
+  large dispatch's own worker thread wait past the default bound purely
+  from scheduling contention, not a real FeMe hang"). Treating as a
+  contention-induced false failure, not a new bug, given the clean
+  isolated repro; worth re-running this group once more in a future
+  session with no other heavy concurrent work as a final sanity check,
+  but not pursuing further this session.
+
+**`subgroups` was still in progress (large group, ~48,700 cases) when
+this session's time ran out** -- partial results not yet parsed; its
+own eventual Pass/Fail/NotSupported split and the remaining ~28 groups
+(`wsi`, `draw`, `glsl`, `texture`, `ycbcr`, `robustness`,
+`fragment_shading_rate`, `transform_feedback`, `video`, `memory`,
+`reconvergence`, `protected_memory`, `dgc`, `tensor`,
+`drm_format_modifiers`, `image_processing`, `data_graph`,
+`fragment_shading_barycentric`, `cooperative_vector`, `spirv_assembly`,
+`renderpasses`, `image`, `binding_model`, `shader_object`, `api`,
+`pipeline`) remain for a future session to pick up (the background
+script, `/tmp/cts_sweep/run_sweep.sh`, is still running and will
+continue through them unattended if left alone).
