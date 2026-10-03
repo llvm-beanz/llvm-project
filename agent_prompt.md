@@ -63,25 +63,24 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session)** `nested_structs_instance_arrays.31` -- the real fix
-   needs the Row math fixed (confirmed correct now) AND a second storage-sizing
-   bug found (24-byte overrun past an already-widened 112-byte block). Likely
-   geometry-shader multi-vertex-emission related. Next angle: dump the actual
-   GEP/store byte offsets the geometry shader's compiled code emits for this
-   case directly (not just the resolved Row/Component), to find where the extra
-   24 bytes comes from. The underlying architectural gap (distinguishing "array
-   of block instances" from "array of struct member" at
-   `resolveOffsetWithinElement`'s dispatch point via decoration metadata, not
-   just type shape) is still the right long-term fix per the existing code
-   comment.
-2. **(unknown, new)** `basic_arrays.1` -- not investigated at all yet. Same
-   `double free or corruption` signature as `nested_structs_instance_arrays.31`,
-   but confirmed pre-existing and (as far as tested) independent. Worth checking
-   first whether it's the *same* root cause (likely, given the shared
-   `random_geometry.fuzz` generator and identical crash signature) before
-   assuming a third distinct bug.
-3. **(a few hours)** Still-untriaged tessellation/broader CTS groups from
-   several sessions ago: `user_defined_io` (27 cases), `device_group` (7),
+1. **(unknown, new)** `basic_arrays.1`'s own now-isolated content mismatch
+   (`Mismatch at offset 64 expected 72 received 0`) -- not yet root-caused. The
+   `received 0` pattern suggests an unwritten/zero-initialized row; worth
+   checking whether this is a geometry-shader multi-vertex-emission
+   capture-ordering bug (a different invocation's row landing in the wrong
+   per-vertex `StageStorage` slot), using the same `FEME_DUMP_IR_PRECANON` +
+   env-var-debug-print technique that worked this session.
+2. **(dedicated session, carried over many sessions)**
+   `nested_structs_instance_arrays.31`/`.2` -- now confirmed to have **two
+   distinct crash symptoms** in the same architecturally-related
+   (array-of-block-instances) shape. `L363`'s own handoff already scoped the
+   right long-term fix direction (threading `PeekedMemberDecorations.size() > 1`
+   metadata through to `resolveOffsetWithinElement`'s dispatch, rather than
+   relying on `isGenuineMultiMemberNestedStruct`'s type-shape-only heuristic).
+   Start with `FEME_DUMP_IR_PRECANON` on both `.2` and `.31` to compare their
+   real compiled shapes side by side before diving into Row math.
+3. **(a few hours)** Still-untriaged tessellation/broader CTS groups from many
+   sessions ago: `user_defined_io` (27 cases), `device_group` (7),
    `memory_model.*` races (~24) -- unchanged, still carried over.
 4. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
    / `L335` -- N-barrier generalization, 1+ case (`shader_input_output.barrier`,
