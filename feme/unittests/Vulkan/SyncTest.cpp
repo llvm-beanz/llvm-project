@@ -11,6 +11,7 @@
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "Sync.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -794,6 +795,41 @@ TEST_F(SyncTest, HostEventSetResetStatus) {
   EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_RESET);
 
   vkDestroyEvent(Device, Ev, nullptr);
+}
+
+// (Roadmap L358) The cross-thread shape this fix addresses, mirroring
+// `QueryPoolTest.WaitAvailableBlocksUntilAnotherThreadMarksItAvailable`'s
+// (`L354`) own precedent: a `vkCmdSetEvent` recorded onto one thread
+// (standing in for a `QueueExecutor` worker thread) and an `isSignaled`
+// poll from another (standing in for a host thread's `vkGetEventStatus`)
+// must observe the same state once the setter has actually run. Before
+// this fix, `Event::Signaled` was a plain, unsynchronized `bool`, so there
+// was no guarantee the setting thread's write was ever visible to the
+// polling thread at all (undefined behavior, not merely a timing race).
+TEST(EventTest, SetFromAnotherThreadIsObservedByIsSignaled) {
+  Event Ev(/*Signaled=*/false);
+  EXPECT_FALSE(Ev.isSignaled());
+
+  constexpr auto SetDelay = std::chrono::milliseconds(200);
+  std::thread Setter([&] {
+    std::this_thread::sleep_for(SetDelay);
+    Ev.set();
+  });
+
+  // Poll (rather than block, since `Event` has no condition variable --
+  // `vkCmdWaitEvents` itself never spins, see `runWaitEvents`) until
+  // either the setter thread's write becomes visible or a generous
+  // timeout elapses; a pre-fix build could in principle still observe the
+  // write promptly on most real hardware (a data race is undefined
+  // behavior, not a guaranteed hang), so this test's real value is
+  // documenting/pinning the now-correct synchronized access, with
+  // ThreadSanitizer as the actual race detector.
+  auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!Ev.isSignaled() && std::chrono::steady_clock::now() < Deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  EXPECT_TRUE(Ev.isSignaled());
+
+  Setter.join();
 }
 
 TEST_F(SyncTest, CommandBufferSetEventThenWaitSucceeds) {
