@@ -13208,3 +13208,48 @@ No CTS-pass-count change from this investigation alone (the real root
 cause of the 70-case cluster, item 2 above, is still open); recorded
 here per the "every session's findings get written down" convention
 even though no case flipped from Fail to Pass yet.
+
+## L360: fixed -- missing `spirv.AtomicLoad`/`spirv.AtomicStore` conversion patterns, `memory_model.message_passing.permuted_index.*` (3 targeted, 21 total)
+
+Root-caused the `permuted_index.{barrier,release_acquire,release_acquire_atomic_payload}`
+failure flagged at the end of the prior `memory_model.*` triage entry
+above: `failed to legalize operation 'spirv.AtomicStore' that was
+explicitly marked illegal`. Unlike the prior entry's two findings, this
+one is **FeMe-internal, not upstream MLIR** -- `feme/lib/Conversion/
+SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`'s atomics section (Roadmap R39/H8u)
+implements every RMW-shaped `spirv.Atomic*` op, increment/decrement, and
+compare-exchange, but plain `spirv.AtomicLoad`/`spirv.AtomicStore` --
+distinct ops with no "old value" semantics -- were simply never added to
+the pattern set. The whole `spirv` dialect is marked illegal in
+`ConvertSPIRVToLLVMPass.cpp`, so any un-pattern-matched op fails
+legalization with exactly this error.
+
+Added `AtomicLoadPattern`/`AtomicStorePattern`, converting to ordinary
+`llvm.load`/`llvm.store` with an `ordering` attribute (reusing the
+existing `convertAtomicOrdering` helper) and an explicit alignment
+(required by LLVM for any atomic load/store), computed from the loaded/
+stored scalar's own natural byte-rounded bit-width via a new
+`getAtomicLoadStoreAlignment` helper. These two ops reuse the exact same
+already-converted-pointer infrastructure ordinary `spirv.Load`/
+`spirv.Store` already use, so no new pointer-conversion logic was
+needed -- only the atomic-specific ordering/alignment wrapping.
+
+Added a lit test (`spirv-to-llvm-atomic-load-store.mlir`) covering both
+ops against a `Uniform`-storage-class field pointer (same shape as
+`spirv-to-llvm-uniform-buffer.mlir`'s existing non-atomic case).
+Verified via before/after bisection that the new test fails without the
+fix and passes with it.
+
+**CTS impact, bigger than the originally-targeted 3 cases**: re-running
+the full `dEQP-VK.memory_model.*` group (18,530 cases) went from
+140 Pass/73 Fail to **161 Pass/52 Fail** -- a net +21 Pass/-21 Fail.
+The extra 18 cases beyond the 3 targeted `permuted_index.*` ones are
+other `message_passing`/`write_after_read` sub-variants that were also
+blocked purely on this same missing-pattern bug, now unblocked as a side
+effect. All 52 remaining Fails were confirmed (via the same
+`getSpecConstantOperation` triage from the prior entry) to be the
+already-documented, still-unfixed `OpSpecConstantOp`-as-composite-
+constituent cluster -- no new failure modes introduced.
+
+`check-feme`: 3519/3580 Passed, 0 Failed, 61 Unsupported (was
+3518/3579 before this session's new test was added; 0 regressions).
