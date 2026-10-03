@@ -147,10 +147,22 @@ public:
     return Signaled;
   }
   void signal() {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      Signaled = true;
-    }
+    // `notify_all` is deliberately called *while still holding* `Mutex`,
+    // not after releasing it (the usual "notify outside the lock"
+    // performance idiom): a waiter blocked in `wait` below can observe
+    // `Signaled` become true and return as soon as it can re-acquire
+    // `Mutex`, and the host thread that owns it is then free to
+    // immediately destroy this `Fence` (`vkDestroyFence`). If `notify_all`
+    // ran after releasing the lock, that destruction -- which tears down
+    // `CV` itself -- could race with this thread's own still-in-flight
+    // `notify_all` call on the same `CV` (caught by ThreadSanitizer: a
+    // `pthread_cond_destroy`/`pthread_cond_broadcast` data race). Calling
+    // it inside the critical section instead means the waiter cannot
+    // re-acquire `Mutex` and return until this call has already
+    // completed, so no destruction can observe `CV` while this thread is
+    // still using it.
+    std::lock_guard<std::mutex> Lock(Mutex);
+    Signaled = true;
     CV.notify_all();
   }
   void reset() {
@@ -230,10 +242,13 @@ public:
   /// operation, or `vkAcquireNextImageKHR`'s, `Swapchain.cpp`) and wakes
   /// every thread currently blocked in `waitAndConsumeBinary` below.
   void signalBinary() {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      Value = 1;
-    }
+    // See `Fence::signal`'s comment: `notify_all` must run inside the
+    // critical section, not after releasing `Mutex`, so a waiter that
+    // wakes and returns from `waitAndConsumeBinary` below can never let
+    // the host thread destroy this `Semaphore` while this call is still
+    // using `CV`.
+    std::lock_guard<std::mutex> Lock(Mutex);
+    Value = 1;
     CV.notify_all();
   }
   /// Binary semaphores only: blocks the calling thread until this
@@ -270,10 +285,13 @@ public:
   /// responsible for the specification's monotonically-increasing
   /// requirement; this class enforces no ordering of its own.
   void signalTimeline(uint64_t NewValue) {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      Value = NewValue;
-    }
+    // See `Fence::signal`'s comment: `notify_all` must run inside the
+    // critical section, not after releasing `Mutex`, so a waiter that
+    // wakes and returns from `waitTimeline` below can never let the host
+    // thread destroy this `Semaphore` while this call is still using
+    // `CV`.
+    std::lock_guard<std::mutex> Lock(Mutex);
+    Value = NewValue;
     CV.notify_all();
   }
   /// Timeline semaphores only: blocks the calling thread until this

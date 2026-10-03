@@ -13284,3 +13284,75 @@ session's collateral work, like `device_group`/`user_defined_io` were
 last session, or never actually part of `tessellation.*` to begin with
 -- not individually re-verified which, since there is nothing left to
 fix there).
+
+## L361: fixed -- `Fence`/`Semaphore`/`QueryPool` `notify_all` called outside the lock, ThreadSanitizer-confirmed destroy race (0 CTS cases, correctness/robustness fix)
+
+Carried-over handoff item: wire up ThreadSanitizer for a one-off manual
+`FeMeVulkanTests` run. Built a second, separate CMake/Ninja configuration
+(`build-tsan/`, same flags as the main `build/` -- assertions on, ccache,
+PCH disabled -- plus `-DLLVM_USE_SANITIZER=Thread`; required installing
+the previously-missing `libclang-rt-21-dev` package for this system's
+Ubuntu clang 21.1.8 to provide the TSan runtime archive). Running the
+instrumented `FeMeVulkanTests` found a real, reproducible (confirmed on
+two separate runs) data race:
+
+```
+WARNING: ThreadSanitizer: data race
+  Write of size 8 by main thread:
+    #0 pthread_cond_destroy
+    #1 ~Fence Sync.h:141
+    ...vkDestroyFence...
+  Previous read of size 8 by a QueueExecutor worker thread:
+    #0 pthread_cond_broadcast
+    #1 signal Sync.h:154
+    ...makeFenceSignalTask...
+```
+
+Root cause: `Fence::signal()` set `Signaled = true` under `Mutex`, then
+called `CV.notify_all()` *after* releasing it. A host thread blocked in
+`Fence::wait` (e.g. inside `vkWaitForFences`) can re-acquire `Mutex` and
+observe `Signaled == true` as soon as the worker thread's `lock_guard`
+destructs -- strictly before that same worker thread goes on to call
+`CV.notify_all()`. If the host thread is then free to immediately
+`vkDestroyFence` (a legal, ordinary Vulkan idiom once a fence is known
+signaled), the `Fence`'s implicit destructor tears down `CV` itself while
+the worker thread's `notify_all()` call is still in flight on that same,
+now-destroyed object -- exactly the write/read pair ThreadSanitizer
+reported.
+
+This is not a `Fence`-only hazard: `Semaphore::signalBinary`,
+`Semaphore::signalTimeline` (both `Sync.h`), and `QueryPool::markAvailable`
+(`QueryPool.h`) all had the identical "notify after releasing the lock"
+shape paired with a caller-triggerable destructor
+(`vkDestroySemaphore`/`vkDestroyQueryPool`) once their own condition is
+observed satisfied -- a systemic instance of the same "stale
+synchronous-execution assumption" bug class as `Event`/`QueryPool`'s
+earlier, already-fixed issues, just one `notify_all` call later than
+those fixes looked. Fixed all four by moving `CV.notify_all()` inside the
+same `lock_guard` scope that sets the signaled state, so a waiter cannot
+reacquire the mutex and return from its own wait until the signaling
+thread's `notify_all()` call has already fully completed -- no
+destruction can then race with it. `QueueExecutor`'s own `notify_all`
+call sites were checked and are *not* affected: its destructor
+`Worker.join()`s the one thread that could still be touching `CV`,
+which can only return after `run()` itself returns, so no race is
+possible there regardless of lock scope.
+
+Verified fix: rebuilt both the main `build/` and `build-tsan/`
+configurations; `FeMeVulkanTests` passes 792/792 in both, and two
+consecutive TSan reruns after the fix report zero data races (versus two
+reproductions of the same two-call-site race before it). Also ran
+`check-feme` (1183 lit tests via 3580 discovered individual checks, all
+target dependencies rebuilt first): 3519 passed, 61 unsupported, 0
+failed -- no regression.
+
+No CTS case count changes (this bug was never observed to flip a CTS
+case's Pass/Fail outcome -- deqp-vk's own process-per-case or
+batch-but-short-lived usage pattern apparently never hit the narrow
+window), but a real, confirmed-via-instrumentation correctness bug in
+any long-lived process (like a CTS batch run reusing one process across
+many cases, or a real application) that creates/destroys fences or
+semaphores promptly after observing them signaled from another thread.
+Worth keeping ThreadSanitizer in mind as an ongoing one-off check after
+future `Sync.h`/`QueryPool.h`-adjacent changes, even though `check-feme`
+itself doesn't run under it.

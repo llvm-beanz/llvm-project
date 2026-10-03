@@ -190,14 +190,25 @@ public:
   /// `vkCmdEndQuery`/`vkCmdWriteTimestamp`: marks \p Query (and, under
   /// multiview, its following \p ViewCount-1 implicit indices -- see
   /// `begin`'s own comment) available.
+  ///
+  /// `notify_all` is deliberately called *while still holding* `Mutex`,
+  /// not after releasing it: a waiter blocked in the `wait_for` below can
+  /// observe availability become true and return as soon as it can
+  /// re-acquire `Mutex`, and the host thread that owns this `QueryPool`
+  /// is then free to immediately destroy it (`vkDestroyQueryPool`). If
+  /// `notify_all` ran after releasing the lock, that destruction --
+  /// which tears down `CV` itself -- could race with this thread's own
+  /// still-in-flight `notify_all` call on the same `CV` (the same data
+  /// race ThreadSanitizer caught for `Fence::signal`/`Semaphore`'s
+  /// `signalBinary`/`signalTimeline` in `Sync.h`). Calling it inside the
+  /// critical section instead means the waiter cannot re-acquire `Mutex`
+  /// and return until this call has already completed, so no destruction
+  /// can observe `CV` while this thread is still using it.
   void markAvailable(uint32_t Query, uint32_t ViewCount = 1) {
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      for (uint32_t I = 0; I != ViewCount && Query + I < Available.size();
-           ++I) {
-        Active[Query + I] = false;
-        Available[Query + I] = true;
-      }
+    std::lock_guard<std::mutex> Lock(Mutex);
+    for (uint32_t I = 0; I != ViewCount && Query + I < Available.size(); ++I) {
+      Active[Query + I] = false;
+      Available[Query + I] = true;
     }
     CV.notify_all();
   }
