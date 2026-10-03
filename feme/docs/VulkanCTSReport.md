@@ -13507,3 +13507,103 @@ re-run planned.
 plus `draw` -- and `glsl` itself triaged to 2 known-bug clusters, no
 new unexplained issues). Sweep continues unattended on `texture` as of
 this writing.
+
+## L363: fixed -- `transform_feedback.fuzz.2_level_array.mat2.geometry` heap corruption
+
+**Symptom**: `dEQP-VK.transform_feedback.fuzz.2_level_array.mat2.geometry`
+crashed the ICD with `double free or corruption (out)` during pipeline
+creation/draw -- a `StageStorage`-allocated heap block overrun, the same
+bug *class* `L359`-adjacent prior sessions have found in this stage-IO
+area before.
+
+**Root cause**: `isShapeCompatible` (`CanonicalizeStage.cpp`) compares a
+struct member's *declared* type against a store's *actual* value type to
+find the right row/component for a tight-vector-marker-substituted
+member. It only ever unwrapped a tight-vector marker on the *Declared*
+side, on the theory that a whole-matrix/array-of-vectors store's own
+*Actual* value type is always the real, unmarked
+`array<N x vector<M x Scalar>>` shape. A directly-authored 2-level array
+of a narrow (`mat2`) matrix (`mat2 var[2][2]`) breaks that assumption:
+the member's own *declared* type is never itself tight-vector-marker-
+substituted (it stays a real `vector<2 x float>` column), but each
+per-instance store's own *value* type IS marker-wrapped --
+`SPIRVToLLVMPatterns.cpp`'s matrix-value conversion always tight-packs a
+narrow matrix's columns, regardless of the member's own declared
+(un-substituted) type. `isShapeCompatible` therefore never found a match
+at the correct recursion level, over-peeled one level further, and
+`resolveRowComponent` computed a `Row` double `buildStageStorage`'s own
+matching `RowCount` for that element -- an out-of-bounds `StageStorage`
+write, exposed as heap corruption (`valgrind`-confirmed: "Invalid write
+of size 4" / "Invalid read of size 4" immediately past this element's
+own allocation, consistent with the previously-fixed `L359`-adjacent
+bugs in this area).
+
+**Fix**: unwrap a tight-vector marker on *both* `Declared` and `Actual`
+symmetrically at each array-level recursion step, and add the missing
+`Declared`-is-vector/`Actual`-is-(unwrapped-marker)-array symmetric case
+(previously only the opposite pairing, `Declared`-is-array/`Actual`-is-
+vector, was modeled).
+
+**Verification**:
+- `valgrind`: crash and invalid-read/write reports both gone for the
+  target case.
+- New unit test
+  (`CanonicalizeStageTest.MapsTwoLevelArrayOfTightMatrixValueToRowAndComponentCount`)
+  exercises the exact row/component decomposition this bug broke --
+  confirms all 8 rows (`0`-`7`) are covered exactly once, never doubled.
+- `dEQP-VK.transform_feedback.fuzz.2_level_array.mat2.geometry`: now
+  **Pass** (was: crash).
+- `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.12`:
+  confirmed via a temporary baseline rebuild (reverting just this fix)
+  that its pre-existing `Mismatch at offset 68` failure is **unchanged**
+  by this fix -- not a new regression, not newly fixed either.
+- `ninja check-feme`: 3520/3581 discovered tests Passed (61 Unsupported,
+  0 Failed) -- full regression-free baseline.
+
+## Investigated (not yet fixed): second `transform_feedback` heap corruption, `nested_structs_instance_arrays.31` + `basic_arrays.1`
+
+While investigating `L363` above, root-caused (but did **not** fix) two
+further pre-existing heap-corruption crashes in the same
+`transform_feedback.fuzz.random_geometry` subgroup, confirmed via a
+temporary baseline rebuild (reverting `L363`'s fix) to exist
+**independently of `L363`**, i.e. neither is a new regression from this
+session's work:
+
+- `dEQP-VK.transform_feedback.fuzz.random_geometry.nested_structs_instance_arrays.31`:
+  a non-`Patch`-qualified XFB block wrapped in an outer array of block
+  instances (glslang's "array of block instances" syntax applied to a
+  plain, non-`patch` XFB block). `addElements`' `FoldOrdinaryArray`
+  deliberately skips `BlockArrayCount` folding for this exact shape
+  (`!ProbeD.XfbBuffer` exclusion, left in place by an earlier session
+  specifically to avoid regressing `all_instance_array.12` below).
+  Attempted removing that exclusion: confirmed via debug trace that
+  `buildStageStorage`'s per-element `RowCount` now widens correctly
+  (e.g. `6` instead of `3`), and every store's resolved `Row` lands
+  in-bounds against that widened storage (traced all 6 stores'
+  `Instance`/`CombinedRow` values directly) -- yet the crash still
+  occurs, now as a **24-byte overrun past the widened 112-byte block**
+  (previously an exact-boundary overrun against the unwidened 56-byte
+  block), indicating a *second*, compounding under-sizing bug (not yet
+  identified, suspected geometry-shader multi-vertex-emission-related)
+  independent of the one this attempted fix addressed.
+- `dEQP-VK.transform_feedback.fuzz.random_geometry.basic_arrays.1`: a
+  different, not-yet-investigated `double free or corruption` crash,
+  discovered incidentally while re-running the `transform_feedback`
+  group after landing `L363` -- confirmed via the same baseline-rebuild
+  technique to be pre-existing, unrelated to `L363`'s fix. Not yet
+  root-caused at all.
+
+The attempted `FoldOrdinaryArray` fix for `nested_structs_instance_arrays.31`
+was **reverted entirely** (`git checkout --
+feme/lib/Transforms/Graphics/CanonicalizeStage.cpp
+feme/lib/Graphics/StageStorage.cpp`) rather than ship it: it also
+regresses `dEQP-VK.transform_feedback.fuzz.random_geometry.all_instance_array.12`
+from its pre-existing `Mismatch` failure into a different failure mode,
+exactly reproducing a previously-documented regression from an even
+earlier session's identical attempt -- net negative (new crash not
+fixed, previously-known failure made worse), so left untouched. Both
+crashes remain open, carried over for a dedicated future session (see
+`L363`'s roadmap row and `agent_thoughts.md` for the full trace and next
+steps). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+change needed for any of the above (all internal correctness bugs, no
+feature/extension surface affected).
