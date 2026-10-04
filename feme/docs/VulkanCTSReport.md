@@ -13859,3 +13859,79 @@ predicted):
     indexing a struct is out of bounds`, a compile-time MLIR verification
     error, not a runtime content/crash issue. Not investigated this
     session.
+
+## Fixed: `all_missing.8` "`received 0`" content mismatch, shared root cause (`L369`)
+
+Root-caused and fixed the shared "`received 0`" content-mismatch bug
+carried over from the previous session's handoff
+(`dEQP-VK.transform_feedback.fuzz.random_geometry.all_missing.8`).
+
+- **Technique:** added a new, reusable ground-truth debug tool
+  (`FEME_DEBUG_DUMP_SPIRV_MLIR`, env-var-gated `spirv.module::print()`
+  right after deserialization in `SPIRVImporter.cpp`) to confirm the
+  SPIR-V access chain's own declared member indices are correct before
+  looking anywhere else -- ruled out any SPIR-V-level ambiguity, isolating
+  the bug entirely to FeMe's own `SPIRVToLLVMPatterns.cpp` struct-member
+  remap logic.
+- **Root cause (two layers):**
+  1. `remapNestedStructMemberIndices` only threaded a caller's
+     already-known-correct "real" converted type (`RealStructTy`) through
+     its loop's *subsequent* iterations, never its first -- so a
+     non-offset-decorated nested struct member (legitimately lacking its
+     own `Offset` decoration, since it's nested inside an enclosing
+     `Block`-decorated struct) had its physical member index re-derived
+     from scratch via an isolated, context-free redo.
+  2. That isolated redo (`getStructMemberPhysicalIndexInRealType`'s
+     `!Struct.hasOffset()` branch) ignored its own `RealStructTy`
+     parameter even once correctly threaded in, always falling back to
+     `getStructMemberPhysicalIndex`'s from-scratch
+     `convertOffsetStructTypeIgnoringDecorations` call -- which
+     independently inserts a natural-ABI-alignment padding member
+     (`layOutStructIfOffsetsMatch`'s own non-offset branch) that the real,
+     already-correctly-built embedding (zero interior padding, since the
+     enclosing struct's own offsets already account for every byte) never
+     had, silently shifting every later member's physical index forward
+     by one.
+- **Fix:**
+  1. Threaded a new `RealCurrentType` parameter through
+     `remapNestedStructMemberIndices` (and all 3 call sites) so its first
+     loop iteration gets the same real-type context subsequent iterations
+     already had.
+  2. Rewrote `getStructMemberPhysicalIndexInRealType`'s non-offset branch
+     to walk `RealStructTy`'s own body directly, skipping every synthetic
+     padding member (always a literal `!llvm.array<N x i8>`, the same
+     shape this file's own padding-insertion code always builds) and
+     returning the physical slot where the `DeclaredIndex`-th real member
+     is actually found -- recovering the true mapping from the
+     already-correct real type instead of re-deriving (and risking
+     disagreeing with) it from scratch.
+- **Verified:**
+  - `all_missing.8`: **Passes** (was: `Mismatch at offset 68 expected 83
+    received 0`).
+  - `nested_structs_instance_arrays.{2,31}`: still fail, but confirmed
+    unrelated -- same already-documented `L368` architectural gap (array
+    of block instances), different mismatch offset (56, not 68), not a
+    regression.
+  - `all_unordered_and_instance_array.2`: incidental bonus -- no longer
+    crashes at pipeline-creation time (the previously-documented
+    `'llvm.getelementptr' op index 3 indexing a struct is out of bounds`
+    MLIR verification error is gone). Now reaches runtime and fails with
+    an ordinary, different content mismatch (`Mismatch at offset 100
+    expected 48 received 0`) -- a separate, still-open, not-yet-root-caused
+    bug, not investigated further this session.
+  - `ninja check-feme`: 3523/3584 Passed, 61 Unsupported, 0 Failed --
+    identical totals to the pre-fix baseline, confirming no regressions.
+  - Full `random_geometry.*` fuzz sweep (850 cases, 244 runnable): 241
+    Passed, 3 Failed, 0 crashes -- down from 4 known failures pre-fix
+    (`all_missing.8` now fixed; the other 3 are the unrelated,
+    already-tracked issues above, each now a non-crashing content
+    mismatch).
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal SPIR-V-to-LLVM lowering correctness fix,
+  no feature/extension-surface change.
+- **Files:** `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`,
+  `feme/lib/Import/SPIRV/SPIRVImporter.cpp`.
+- **Open follow-ups:** `nested_structs_instance_arrays.{2,31}`'s
+  remaining mismatch (`L368`'s own handoff item, unchanged) and
+  `all_unordered_and_instance_array.2`'s newly-surfaced runtime content
+  mismatch (new, not yet root-caused).
