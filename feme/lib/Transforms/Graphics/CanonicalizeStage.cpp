@@ -1822,6 +1822,61 @@ bool isPerVertexArrayMeshOutputGlobal(const GlobalVariable *GV,
   return isa<ArrayType>(GV->getValueType());
 }
 
+/// (Roadmap L366) Whether \p GV is the genuine, non-`Patch`, *multi*-
+/// member XFB "array of block instances" shape (glslang's
+/// `layout(xfb_buffer=0, ...) out Block {...} block[N];` for a multi-
+/// member `Block`) -- as opposed to a `patch`-qualified block array
+/// (which packs every instance's rows back-to-back into one buffer, a
+/// different `BlockArrayCount` sub-case), a per-vertex/per-primitive
+/// dynamically-indexed array (`gl_in[]`-shaped `Input`, a Mesh entry's
+/// own per-vertex/per-primitive `Output`, or a Hull per-invocation
+/// `Output`), or the single-member sub-case (`XfbBufferArrayStride`'s own
+/// older, narrower mechanism, which must not also fold this same
+/// `BlockArrayCount` widening -- see `addElements`' own comment on why
+/// folding both at once regressed `all_instance_array.12`). Shared by
+/// both `addElements` (deciding whether to widen each member's own
+/// storage and set `XfbBufferArrayStride`) and `resolveStageIOAccess`
+/// (deciding whether `resolveOffsetWithinElement`'s own
+/// `AllowBlockArrayInstanceFold` byte-offset math may run) so the two
+/// agree on exactly the same shape -- disagreeing here is exactly the
+/// `BlockArrayCount`/access-resolution mismatch class of bug roadmap
+/// H117/H118's own comment already documents for the `Patch` case,
+/// applied to this one instead.
+bool isMultiMemberXfbBlockArrayGlobal(GlobalVariable *GV, ShaderStage Stage) {
+  unsigned AddrSpace = 0;
+  if (!isSPIRVStageIOGlobal(GV, AddrSpace))
+    return false;
+  const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations");
+  if (!MemberMD)
+    return false;
+  auto *ArrTy = dyn_cast<ArrayType>(GV->getValueType());
+  if (!ArrTy || !isa<StructType>(ArrTy->getElementType()))
+    return false;
+  DenseMap<unsigned, ParsedSPIRVDecorations> MemberDecorations =
+      parseSPIRVMemberDecorations(MemberMD);
+  if (MemberDecorations.size() <= 1)
+    return false;
+  if (!MemberDecorations.empty() && MemberDecorations.begin()->second.Patch)
+    return false;
+  ParsedSPIRVDecorations WholeVarD =
+      parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
+  if (!WholeVarD.XfbBuffer)
+    return false;
+  unsigned ProbeAddrSpace = AddrSpace;
+  if (isPerVertexArrayInputGlobal(GV, ProbeAddrSpace, Stage) ||
+      isPerVertexArrayMeshOutputGlobal(GV, ProbeAddrSpace, Stage) ||
+      (Stage == ShaderStage::Hull && AddrSpace == 8 && !WholeVarD.Patch))
+    return false;
+  for (const User *U : GV->users()) {
+    const auto *GEP = dyn_cast<GetElementPtrInst>(U);
+    if (!GEP || GEP->getNumIndices() < 2)
+      continue;
+    if (!isa<ConstantInt>(GEP->getOperand(2)))
+      return false;
+  }
+  return true;
+}
+
 /// (Roadmap H6b) Whether \p GV is a stage-IO global's per-vertex- or
 /// per-primitive-arrayed `Input` (address space 7, geometry's `gl_in[]`)
 /// *or* `Output` (address space 8, a mesh entry's own
@@ -4727,18 +4782,28 @@ std::optional<StageIOAccess> resolveStageIOAccess(
         ByteOffset -= Gap;
     }
   }
-  // (Roadmap H117/H118) Mirrors `addElements`' own `TakeBlockPath`
-  // construction-side check exactly: only a genuinely `patch`-qualified
-  // block's own members fold an outer array-of-instances dimension into
-  // `RowCount` -- see `resolveOffsetWithinElement`'s own
+  // (Roadmap H117/H118, extended by L366) Mirrors `addElements`' own
+  // `TakeBlockPath` construction-side check exactly: a block array's
+  // outer dimension only folds into each member's own `RowCount` (and so
+  // only `resolveOffsetWithinElement`'s own `BlockInstance` byte-offset
+  // math may run here) for a genuinely `patch`-qualified block array, or
+  // (roadmap L366) the genuine non-`Patch` multi-member XFB "array of
+  // block instances" case `isMultiMemberXfbBlockArrayGlobal` recognizes --
+  // never the single-member sub-case (`XfbBufferArrayStride` below
+  // already models that one separately) nor any other shape, which still
+  // leaves `AllowBlockArrayInstanceFold` false, exactly as before this
+  // milestone. See `resolveOffsetWithinElement`'s own
   // `AllowBlockArrayInstanceFold` parameter comment for why passing this
-  // unconditionally corrupted `StageStorage` for a non-`Patch` multi-
-  // member XFB "array of block instances".
-  bool AllowBlockArrayInstanceFold = false;
-  if (const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations")) {
-    for (const auto &KV : parseSPIRVMemberDecorations(MemberMD)) {
-      AllowBlockArrayInstanceFold = KV.second.Patch;
-      break;
+  // unconditionally corrupted `StageStorage`.
+  bool AllowBlockArrayInstanceFold =
+      isMultiMemberXfbBlockArrayGlobal(GV, Stage);
+  if (!AllowBlockArrayInstanceFold) {
+    if (const MDNode *MemberMD =
+            GV->getMetadata("feme.spirv.MemberDecorations")) {
+      for (const auto &KV : parseSPIRVMemberDecorations(MemberMD)) {
+        AllowBlockArrayInstanceFold = KV.second.Patch;
+        break;
+      }
     }
   }
   return resolveOffsetWithinElement(EffectiveTy, It->second, ByteOffset,
@@ -5409,12 +5474,23 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         // assertion crash `dEQP-VK.tessellation.user_defined_io.
         // per_vertex_block` hit.
         uint32_t BlockArrayCount = 0;
+        // (Roadmap L366) Set when this block array turns out to be the
+        // genuine, non-`Patch`, *multi*-member XFB "array of block
+        // instances" case (see the long comment below) -- as opposed to
+        // the `Patch`/ordinary-struct-array cases, which pack every
+        // instance's rows back-to-back into one buffer, this shape
+        // instead needs each instance routed to its own `XfbBuffer + k`,
+        // exactly like the single-member `XfbBufferArrayStride`
+        // mechanism below already does. `AddBlockElement`'s own closure
+        // reads this to decide whether to pass a nonzero
+        // `XfbBufferArrayStride` down to `addElement` for each member.
+        bool XfbBlockArrayOfInstances = false;
         if (PeekedBlockTy) {
           if (auto *ArrTy = dyn_cast<ArrayType>(PeekedBlockTy)) {
             bool ArrayMembersArePatch = false;
+            DenseMap<unsigned, ParsedSPIRVDecorations> ProbeMemberDecorations;
             if (MemberMD) {
-              DenseMap<unsigned, ParsedSPIRVDecorations>
-                  ProbeMemberDecorations = parseSPIRVMemberDecorations(MemberMD);
+              ProbeMemberDecorations = parseSPIRVMemberDecorations(MemberMD);
               ArrayMembersArePatch = !ProbeMemberDecorations.empty() &&
                                      ProbeMemberDecorations.begin()->second.Patch;
             }
@@ -5455,6 +5531,34 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // same (pre-existing, imperfect) handling it had before this
             // milestone -- fixing it a proper `XfbBufferArrayStride`-like
             // mechanism for the multi-member case is out of scope here.
+            //
+            // (Roadmap L366) ...was out of scope for H117/H118; picked up
+            // here. The regression the comment above describes came from
+            // conflating the *single*-member sub-case's own
+            // `XfbBufferArrayStride` mechanism (below, keyed off
+            // `PeekedMemberDecorations.size() == 1`) with this
+            // `BlockArrayCount` fold -- applying both at once to the same
+            // single-member shape double-widened it. The fix is not to
+            // leave the genuine multi-member case unfolded forever, but
+            // to tell the two shapes apart *before* folding, using the
+            // same `ProbeMemberDecorations.size()` proxy `TakeBlockPath`'s
+            // own dispatch (below) already relies on for exactly this
+            // real-member-count distinction: a multi-member block
+            // (`size() > 1`) can safely fold here (`XfbBlockArrayOfInstances`),
+            // since the single-member mechanism's own `size() == 1` guard
+            // means it can never fire for this shape anyway. Folding here
+            // widens each member's own storage via `AddBlockElement`
+            // exactly like the `Patch`/ordinary-array cases already do;
+            // `XfbBlockArrayOfInstances` additionally tells
+            // `AddBlockElement` to pass a nonzero `XfbBufferArrayStride`
+            // (that member's own per-instance row count) down to
+            // `addElement`, so `Executor.cpp`'s existing, already-general
+            // `XfbBufferArrayStride != 0` capture logic (written for the
+            // single-member case, but shaped generically per `Signature.h`'s
+            // own comment) routes each instance to its own `XfbBuffer + k`
+            // for a multi-member block the same way it already does for a
+            // single-member one. Fixes `dEQP-VK.transform_feedback.fuzz.
+            // random_geometry.nested_structs_instance_arrays.{2,31}`.
             //
             // (Roadmap L94(j)) A fourth shape needs the same fold, not
             // covered by any of the three above: an *ordinary*, entirely
@@ -5515,8 +5619,20 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             bool FoldOrdinaryArray = !ArrayMembersArePatch &&
                                      !IsPerVertexDynamicShape &&
                                      !HasDynamicOuterIndex && !ProbeD.XfbBuffer;
+            // (Roadmap L366) The genuine multi-member XFB array-of-
+            // instances case: `isMultiMemberXfbBlockArrayGlobal` is the
+            // single shared recognizer also used by `resolveStageIOAccess`
+            // below (via `AllowBlockArrayInstanceFold`) -- the two *must*
+            // agree on exactly this shape, or `resolveOffsetWithinElement`'s
+            // own byte-offset math silently disagrees with whatever
+            // storage `addElement` actually allocated, corrupting
+            // `StageStorage` the same way roadmap H117/H118's own comment
+            // already documents for the `Patch` case.
+            XfbBlockArrayOfInstances =
+                isMultiMemberXfbBlockArrayGlobal(GV, Stage);
             PeekedBlockTy = ArrTy->getElementType();
-            if (ArrayMembersArePatch || FoldOrdinaryArray)
+            if (ArrayMembersArePatch || FoldOrdinaryArray ||
+                XfbBlockArrayOfInstances)
               BlockArrayCount = static_cast<uint32_t>(ArrTy->getNumElements());
           }
         }
@@ -5755,6 +5871,27 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // mirroring `addStageIOStructMembers`'s own `ArrayType`
             // branch one level further in (for a *member's* own array-
             // of-struct field, e.g. `S blockSa[2]`).
+            // (Roadmap L366) Unlike the single-member sub-case below,
+            // this genuine multi-member XFB "array of block instances"
+            // case must *not* also set `XfbBufferArrayStride`:
+            // `Executor.cpp`'s `XfbBufferArrayStride != 0` capture logic
+            // routes each instance to its own, separately-bound buffer
+            // `XfbBuffer + k` (`Signature.h`'s own comment) -- the
+            // single-member sub-case's mechanism, where each instance
+            // really is a *separate* captured variable with its own
+            // buffer binding. Here, by contrast, every instance shares
+            // the *same* `XfbBuffer` (confirmed via manual signature
+            // decoding: every member's `XfbBuffer` is identical across
+            // instances) and `BlockArrayCount`'s own `RowCount` widening
+            // above already packs every instance's rows back-to-back
+            // within that one buffer -- precisely the plain, no-stride
+            // row-packing path `Executor.cpp`'s capture loop already
+            // takes by default. Passing a nonzero stride here (an
+            // earlier version of this fix's own mistake) instead made
+            // the capture loop route rows to nonexistent buffer indices
+            // `BaseBufIdx + Row / Stride`, corrupting
+            // `Draw.XfbBuffers`'s own out-of-bounds access -- this
+            // session's `double free or corruption` regression.
             auto AddBlockElement = [&](GlobalVariable *EltGV,
                                        unsigned EltAddrSpace,
                                        const ParsedSPIRVDecorations &EltD,
@@ -5763,7 +5900,8 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
                   BlockArrayCount > 1
                       ? ArrayType::get(EltTy, BlockArrayCount)
                       : EltTy;
-              addElement(EltGV, EltAddrSpace, EltD, WrappedTy);
+              addElement(EltGV, EltAddrSpace, EltD, WrappedTy,
+                        /*RowCountIsVertexArray=*/false);
             };
             if (isGenuineMultiMemberNestedStruct(PM.Ty)) {
               uint32_t NestedLocation = PM.D.Location.value_or(0);
