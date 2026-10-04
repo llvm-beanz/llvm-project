@@ -6909,6 +6909,105 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenLoads, 4u);
 }
 
+/// (Roadmap L368) The real shape `dEQP-VK.transform_feedback.fuzz.
+/// random_geometry.nested_structs_instance_arrays.{2,31}` exercises: a
+/// genuine, non-`Patch`, *multi*-member XFB "array of block instances"
+/// (`BlockArrayCount` = 2 here) whose second member (`y`, a `vec2 y[2]`
+/// -- modeled with the "tight vector marker" wrapper struct
+/// `%feme.tight_vector.f32x2` a real SPIR-V-to-LLVM import of this exact
+/// shape produces) is stored as *one whole-aggregate* `store` for the
+/// second block instance, rather than one store per row. Before this
+/// fix, `resolveNestedStageIOField`'s array-of-struct-instance branch
+/// pre-folded this instance index multiplicatively
+/// (`Instance * Inner.RowCount + Inner.Row`) into a single final `Row`,
+/// assuming no further row-decomposition would happen -- but
+/// `storeStageIOValue`'s own generic `ArrayType` decomposition branch
+/// (needed here regardless, to split this whole-aggregate store into
+/// one `feme.stage.output.store.f32` call per row) performs *its own*,
+/// separate `Row * RE + R` multiplication on top, squaring the instance
+/// index's own contribution (`Instance * RowCount^2` instead of
+/// `Instance * RowCount`) -- silently computing out-of-range `Row`
+/// values consumed by unchecked, direct `inbounds` GEP arithmetic
+/// downstream (`GeometryWrapper.cpp`'s `lowerGeometryOutputStore`),
+/// corrupting the heap (`double free or corruption`) rather than
+/// tripping any assertion. Fixed by `NestedStageIOField::DeferRowScale`:
+/// a leaf whose value spans its whole declared type (same
+/// `DL.getTypeAllocSize`, a size-based comparison rather than `Ty ==
+/// ValueTy` pointer equality, since the tight-vector-marker wrapper is a
+/// different, same-size `Type*`) defers its own instance-index scaling
+/// to the one multiplication `storeStageIOValue` will still perform,
+/// combining the outer instance index with this leaf's own (still-zero)
+/// `Row` *additively* instead.
+TEST(CanonicalizeStageTest,
+     DefersRowScalingForWholeAggregateMemberOfXfbBlockArrayInstance) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %feme.tight_vector.f32x2 = type { [2 x float] }
+
+    @testBlockArray = external addrspace(8) global [2 x <{ i32, [2 x <2 x float>] }>], !spirv.Decorations !0, !feme.spirv.MemberDecorations !5
+
+    define void @main() #0 {
+      %px0 = getelementptr inbounds [2 x <{ i32, [2 x <2 x float>] }>], ptr addrspace(8) @testBlockArray, i32 0, i32 0, i32 0
+      store i32 10, ptr addrspace(8) %px0
+      %py1 = getelementptr inbounds [2 x <{ i32, [2 x <2 x float>] }>], ptr addrspace(8) @testBlockArray, i32 0, i32 1, i32 1
+      store [2 x %feme.tight_vector.f32x2] [%feme.tight_vector.f32x2 { [2 x float] [float 1.000000e+00, float 2.000000e+00] }, %feme.tight_vector.f32x2 { [2 x float] [float 3.000000e+00, float 4.000000e+00] }], ptr addrspace(8) %py1
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="geometry" }
+
+    !0 = !{!1, !2, !3}
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 56}
+    !4 = !{i32 35, i32 0}
+    !5 = !{!6, !7}
+    !6 = !{i32 0, !8}
+    !8 = !{!4}
+    !7 = !{i32 1, !9}
+    !9 = !{!10}
+    !10 = !{i32 35, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+
+  // No raw, un-canonicalized store survives -- `storeStageIOValue` fully
+  // decomposes the whole-aggregate store into one call per row/
+  // component instead of leaving it as a direct store to the still-
+  // `external` SPIR-V global.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I));
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  // `y`'s own `RowCount` is widened by `BlockArrayCount` (2) on top of
+  // its own natural per-instance row count (2): 2 * 2 = 4 total rows,
+  // not the squared bug's own even-larger (but coincidentally also
+  // plausible-looking) value.
+  EXPECT_EQ(Sig->Elements[1].RowCount, 4u);
+
+  std::set<uint64_t> SeenRows;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    if (cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue() != 1)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, /*Row=*/1);
+    ASSERT_TRUE(Row.has_value());
+    SeenRows.insert(*Row);
+  }
+  // The second block instance's own two rows land at `Row` 2 and 3
+  // (`Instance(1) * RowCount(2) + {0,1}`) -- not the pre-fix double-
+  // scaling bug's squared `Row` 4 and 5 (`Instance(1) * RowCount(2)^2 +
+  // {0,1}`), which would silently address past this element's own
+  // sized storage.
+  EXPECT_EQ(SeenRows, (std::set<uint64_t>{2u, 3u}));
+}
+
 /// Whether \p V transitively (through any chain of `zext`/`mul`/`add`)
 /// uses \p Arg as one of its leaf operands -- used below to confirm
 /// `combineDynamicRowTerms`'s own materialized `Row` value genuinely
