@@ -3481,7 +3481,8 @@ bool remapNestedStructMemberIndices(
     mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
-    llvm::SmallVectorImpl<mlir::Value> &Indices);
+    llvm::SmallVectorImpl<mlir::Value> &Indices,
+    mlir::Type RealCurrentType = nullptr);
 
 class StageIOArrayAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
@@ -3530,7 +3531,7 @@ public:
     llvm::SmallVector<mlir::Value, 4> RemappedIndices(Adaptor.getIndices());
     if (!remapNestedStructMemberIndices(BaseType.getPointeeType(), Op,
                                         /*StartIndex=*/0, *getTypeConverter(),
-                                        Rewriter, RemappedIndices))
+                                        Rewriter, RemappedIndices, ElementType))
       return Rewriter.notifyMatchFailure(
           Op, "struct member selector is not a constant");
     llvm::append_range(Indices, RemappedIndices);
@@ -4228,7 +4229,8 @@ bool remapNestedStructMemberIndices(
     mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
-    llvm::SmallVectorImpl<mlir::Value> &Indices);
+    llvm::SmallVectorImpl<mlir::Value> &Indices,
+    mlir::Type RealCurrentType);
 
 /// Forward declaration: defined below (alongside
 /// getPhysicalMatrixMemberType, whose own \p IsRowMajor/\p Stride fields
@@ -4811,7 +4813,8 @@ mlir::LogicalResult rewriteBlockAccess(
   llvm::SmallVector<mlir::Value, 4> RemappedIndices(AllIndices.begin(),
                                                     AllIndices.end());
   if (!remapNestedStructMemberIndices(SelectedType, Op, NextIndexPos,
-                                      TypeConverter, Rewriter, RemappedIndices))
+                                      TypeConverter, Rewriter, RemappedIndices,
+                                      ElementType))
     return Rewriter.notifyMatchFailure(
         Op, "nested struct member selector is not a constant");
 
@@ -6831,8 +6834,55 @@ unsigned getStructMemberPhysicalIndexInRealType(
     mlir::spirv::StructType Struct, unsigned DeclaredIndex,
     mlir::LLVM::LLVMStructType RealStructTy,
     const mlir::TypeConverter &Converter) {
-  if (!Struct.hasOffset())
+  if (!Struct.hasOffset()) {
+    // (Roadmap L369) Unlike the offset-decorated case below, a non-offset
+    // struct has no declared per-member `Offset` to walk \p RealStructTy's
+    // own body against -- but every synthetic padding member this file's
+    // several struct-layout retries ever insert
+    // (layOutStructIfOffsetsMatch's own non-offset branch,
+    // padUndersizedMembersIfNeeded, ...) is always built the same way, a
+    // plain `!llvm.array<N x i8>` (see layOutStructIfOffsetsMatch's own
+    // `Laid.push_back(... IntegerType::get(..., 8) ...)` calls) -- never a
+    // real SPIR-V struct member's own converted type, substituted or not.
+    // Walking \p RealStructTy's own body in order, skipping every such
+    // pad, and returning the physical slot where the \p DeclaredIndex-th
+    // *real* (non-pad) member is found therefore recovers \p
+    // RealStructTy's own true declared-to-physical mapping directly from
+    // reality, exactly the way the offset-decorated walk below does from
+    // declared offsets -- without ever re-deriving \p Struct's own
+    // conversion from scratch via getStructMemberPhysicalIndex, whose own
+    // isolated natural-alignment-gap computation can disagree with how \p
+    // Struct was really embedded (this roadmap item's own investigation:
+    // a `!spirv.struct<(mat3x3, mat3x4, mat3x3)>` member with no `Offset`
+    // of its own, really embedded by its enclosing offset-decorated
+    // struct in a fully tight, interior-pad-free 3-member form, whose
+    // isolated redo instead inserted a spurious natural-alignment gap no
+    // real embedding has, shifting every member from the second one on
+    // one physical slot forward --
+    // `dEQP-VK.transform_feedback.fuzz.random_geometry.all_missing.8`'s
+    // own `received 0` content mismatch).
+    unsigned Declared = 0;
+    llvm::ArrayRef<mlir::Type> Body = RealStructTy.getBody();
+    for (unsigned Physical = 0, E = Body.size(); Physical != E; ++Physical) {
+      auto PadArrayTy =
+          mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Body[Physical]);
+      auto PadElementTy =
+          PadArrayTy
+              ? mlir::dyn_cast<mlir::IntegerType>(PadArrayTy.getElementType())
+              : nullptr;
+      bool IsSyntheticPad = PadElementTy && PadElementTy.getWidth() == 8;
+      if (IsSyntheticPad)
+        continue;
+      if (Declared == DeclaredIndex)
+        return Physical;
+      ++Declared;
+    }
+    // Should not happen for a real, successfully-converted \p
+    // RealStructTy (every declared member must appear somewhere in its
+    // own body) -- degrades to the isolated redo rather than returning an
+    // out-of-bounds index.
     return getStructMemberPhysicalIndex(Struct, DeclaredIndex, Converter);
+  }
   mlir::DataLayout DL;
   llvm::ArrayRef<mlir::Type> Body = RealStructTy.getBody();
   llvm::SmallVector<unsigned, 8> Order = getOffsetSortedMemberIndices(Struct);
@@ -6900,16 +6950,36 @@ bool remapNestedStructMemberIndices(
     mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
-    llvm::SmallVectorImpl<mlir::Value> &Indices) {
+    llvm::SmallVectorImpl<mlir::Value> &Indices,
+    mlir::Type RealCurrentType) {
   unsigned Pos = StartIndex;
-  // (Roadmap L124u) The *real*, already-known-correct LLVM struct type
-  // substituted for CurrentType, whenever CurrentType was itself reached
-  // by selecting a struct member one level up (null only for the very
-  // first/outermost struct level, which has no such ambiguity: see
-  // getStructMemberPhysicalIndexInRealType's own comment for why a
-  // *nested* struct's own physical layout cannot safely be re-derived
-  // from scratch the way the outermost struct's can).
-  mlir::LLVM::LLVMStructType RealStructTy = nullptr;
+  // (Roadmap L369) \p RealCurrentType -- \p CurrentType's own real,
+  // already-known-correct converted LLVM type, when the caller already
+  // has it in hand (e.g. OffsetStructMemberReorderAccessChainPattern's
+  // own `getStructMemberPhysicalFieldType` result for the member
+  // \p CurrentType is) -- seeds \p RealStructTy/\p RealArrayElementTy
+  // below for *this* (the first) loop iteration, exactly the same way
+  // the loop body itself seeds them for every iteration after the
+  // first. Before this roadmap item, the first iteration always started
+  // with both null, silently re-deriving \p CurrentType's own conversion
+  // from scratch via getStructMemberPhysicalIndex whenever it is itself a
+  // struct -- safe only when \p CurrentType really is the *outermost*
+  // struct level (which has no enclosing context to disagree with), but
+  // every real caller except StageIOArrayAccessChainPattern instead
+  // starts this function at an already-*nested* member (one or more
+  // struct levels below the true outermost one), for which an isolated
+  // redo can silently disagree with how that member was really embedded
+  // -- see getStructMemberPhysicalIndexInRealType's own comment for the
+  // general hazard, and this roadmap item's own investigation (a
+  // `!spirv.struct<(mat3x3, mat3x4, mat3x3)>` member with no `Offset`
+  // decorations of its own, embedded by its enclosing offset-decorated
+  // struct in a fully tight, interior-pad-free form, whose isolated
+  // redo instead inserted a natural-alignment gap no real embedding
+  // has, shifting every member from its second one on by one physical
+  // slot -- `dEQP-VK.transform_feedback.fuzz.random_geometry.
+  // all_missing.8`'s own `received 0` content mismatch).
+  mlir::LLVM::LLVMStructType RealStructTy =
+      mlir::dyn_cast_or_null<mlir::LLVM::LLVMStructType>(RealCurrentType);
   // (Roadmap L289) The *real*, already-known-correct LLVM element type of
   // whatever array CurrentType turns out to be *this* iteration, when that
   // array was itself just reached by selecting a struct member one level
@@ -6928,7 +6998,11 @@ bool remapNestedStructMemberIndices(
   // very first/outermost level), in which case no insertion happens --
   // not yet observed in practice, but safe: only a strictly-too-few-
   // index error would result, not a silently wrong address.
-  mlir::Type RealArrayElementTy = nullptr;
+  mlir::Type RealArrayElementTy =
+      mlir::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(RealCurrentType)
+          ? mlir::cast<mlir::LLVM::LLVMArrayType>(RealCurrentType)
+                .getElementType()
+          : nullptr;
   while (Pos < Op.getIndices().size()) {
     mlir::Type ElementType;
     if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(CurrentType)) {
@@ -7456,7 +7530,16 @@ public:
     // (Roadmap H133) Any further index may itself select into a member of
     // a further reordered/padded struct, nested more than one level below
     // \p StructTy -- remap every one of those exactly as \p MemberIndex's
-    // own selector was above.
+    // own selector was above. \p RealSelectedMemberTy -- \p
+    // SelectedMemberType's own real, already-known-correct converted
+    // field type within \p StructTy's own just-computed physical layout
+    // -- lets remapNestedStructMemberIndices seed its own first
+    // iteration from reality rather than silently re-deriving \p
+    // SelectedMemberType's conversion from scratch, which can disagree
+    // with how it was really embedded whenever \p SelectedMemberType is
+    // itself a nested struct (roadmap L369).
+    mlir::Type RealSelectedMemberTy = getStructMemberPhysicalFieldType(
+        StructTy, static_cast<unsigned>(*MemberIndex), *getTypeConverter());
     llvm::SmallVector<mlir::Value, 4> RemappedTail(Adaptor.getIndices().begin(),
                                                    Adaptor.getIndices().end());
     if (auto MatrixTy =
@@ -7470,7 +7553,8 @@ public:
     }
     if (!remapNestedStructMemberIndices(SelectedMemberType, Op,
                                         MemberIndexPos + 1, *getTypeConverter(),
-                                        Rewriter, RemappedTail))
+                                        Rewriter, RemappedTail,
+                                        RealSelectedMemberTy))
       return Rewriter.notifyMatchFailure(
           Op, "nested struct member selector is not a constant");
     llvm::append_range(
