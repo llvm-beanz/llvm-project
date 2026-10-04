@@ -63,22 +63,23 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, new best pick)** Root-cause the shared "`received 0`" content
-   mismatch across `.2`/`.31`/possibly `all_missing.8`. Start by checking
-   whether `all_missing.8` shares the root cause (10 min check) before diving
-   into `Executor.cpp`'s XFB capture loop -- canonicalization is already
-   confirmed correct for this field.
-2. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
+1. **(a few hours, new)** `all_unordered_and_instance_array.2`'s newly-surfaced
+   runtime content mismatch (`Mismatch at offset 100 expected 48 received 0`) --
+   was hidden behind a pipeline-creation crash until this session's fix; worth
+   checking first whether it's yet another instance of the same "`received 0`"
+   family (quick signature check) before assuming it's unrelated.
+2. **(dedicated session, carried over)**
+   `nested_structs_instance_arrays.{2,31}`'s own remaining mismatch (`L368`'s
+   handoff item, confirmed unrelated to this fix) -- still needs its own
+   root-cause session; canonicalization is confirmed correct for this field, so
+   likely `Executor.cpp`'s XFB-capture loop.
+3. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
    for many sessions: `user_defined_io` (27 cases), `device_group` (7),
    `memory_model.*` races (~24).
-3. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
+4. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
    generalization (`shader_input_output.barrier`,
    `rasterization.line_continuity.*`).
-4. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
+5. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
    tie-break, 12 cases.
-5. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
+6. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
    (`api`/`pipeline`/`shader_render`/`synchronization`).
-6. **(unrelated, pre-existing)** `all_unordered_and_instance_array.2` fails at
-   pipeline-creation time with `'llvm.getelementptr' op index 3 indexing a
-   struct is out of bounds` -- a compile-time MLIR verification error, not a
-   runtime one. Not triaged yet.
