@@ -63,23 +63,16 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, new, high-value)** `xfb_pointsize` family: ~1,920 fails in
-   `simple`/`simple_fast_gpl`/`simple_optimized_gpl.xfb_pointsize_*`, all
-   `Failed at item N received:<huge/tiny float> expected:0` -- strongly suggests
-   an uninitialized/garbage `gl_PointSize` XFB capture. By far the largest
-   single unaddressed cluster found in any sweep so far this project. Start with
-   one minimal failing case (e.g.
-   `xfb_pointsize_endqueryindexed_streamid_0_1_512`) and a
-   `FEME_DUMP_IR_PRECANON` dump to see whether `gl_PointSize`'s XFB capture is
-   even wired up at all, or just wrong.
-2. **(a few hours, new)** `fuzz.random_vertex.*` + non-square-matrix
-   `single_basic_{type,array}.{mat2x3,mat3,mat4x3}.vertex` (44 fails): a
-   different fuzz variant (vertex-only, not geometry) from the one `L371` fixed.
-   Includes a `random_vertex.nested_structs_instance_arrays.22` (different case
-   index, vertex not geometry -- worth checking if it's the *same* root cause as
-   `.2`/`.31` in a different shader stage, or new) and
-   `random_vertex.basic_arrays.1` (matches a still-open geometry-variant handoff
-   item from several sessions ago -- check if they share a cause).
+1. **(a few hours, still overdue, now the best pick)** Broader-than-tessellation
+   CTS sweep (`api`/`pipeline`/`shader_render`/`synchronization`) --
+   `transform_feedback` itself is now clean of its two largest known clusters;
+   time to look elsewhere for the next big lead.
+2. **(a few hours)** `fuzz.random_vertex.*` + non-square-matrix
+   `single_basic_{type,array}.{mat2x3,mat3,mat4x3}.vertex` (44 fails) -- carried
+   over from two sessions ago, still untouched. Check
+   `random_vertex.nested_structs_instance_arrays.22` and
+   `random_vertex.basic_arrays.1` for shared root causes with prior
+   geometry-variant fixes.
 3. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
    for many sessions: `user_defined_io` (27 cases), `device_group` (7),
    `memory_model.*` races (~24).
@@ -88,8 +81,3 @@ next steps are:
    `rasterization.line_continuity.*`).
 5. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
    tie-break, 12 cases.
-6. **(a few hours, still overdue, but note item 1 above is now the better
-   broader-sweep pick)** Broader-than-tessellation CTS sweep
-   (`api`/`pipeline`/`shader_render`/`synchronization`) -- still not done, but
-   the `xfb_pointsize` finding (item 1) is a bigger, more concrete lead found
-   *within* `transform_feedback` itself; worth doing that first.
