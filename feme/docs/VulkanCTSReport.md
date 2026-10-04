@@ -14216,3 +14216,65 @@ Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
   N-barrier generalization, `L265` ASTC alpha-decode tie-break (12
   cases), and the still-overdue broader-than-tessellation CTS sweep
   (`api`/`pipeline`/`shader_render`/`synchronization`).
+
+## Fixed: xfb_clipdistance/xfb_culldistance/xfb_clip_and_cull out-of-order BuiltIn PhysicalIndex gap (L373)
+
+- **Symptom:** `dEQP-VK.transform_feedback.*.xfb_clipdistance_*`/
+  `xfb_culldistance_*`/`xfb_clip_and_cull_*` (162 of 218 cases) failed
+  with a real but *wrong* captured value (e.g. `received:1
+  expected:0`, or `received:-5.7e+20 expected:6.1e-05`) -- left open
+  by `L372` as a confirmed-separate, pre-existing bug.
+- **Root cause:** a second, independent gap in `addElements`'s
+  per-member decomposition loop: the `Offset`-based `PhysicalIndex`
+  remap (`PhysicalIndex =
+  DL.getStructLayout(ST)->getElementContainingOffset(*MemberD.XfbOffset)`)
+  was *also* gated on `!MemberD.BuiltIn`. `xfb_clipdistance_*`'s own
+  vertex shader declares `layout(xfb_buffer=0) out gl_PerVertex {
+  float gl_PointSize; float gl_ClipDistance[7]; };` -- glslang emits
+  `gl_PointSize` as declared SPIR-V member index 0 (`Offset=28`) and
+  `gl_ClipDistance` as declared member index 1 (`Offset=0`), out of
+  ascending-physical-offset order, so the real LLVM struct is `<{ [7 x
+  float], float }>` (`ClipDistance` physical field 0, `PointSize`
+  physical field 1) -- the reverse of their declared order. With the
+  remap excluded for `BuiltIn` members, both members kept their wrong
+  declared-order `PhysicalIndex` default, so each `SignatureElement`
+  silently resolved to the *other* member's physical storage --
+  `PointSize`'s element read back `ClipDistance`'s captured value and
+  vice versa. Confirmed via `FEME_DEBUG_DUMP_SPIRV_MLIR` ground truth
+  and the corresponding pre-canon LLVM IR/metadata.
+- **Fix:** removed the `!MemberD.BuiltIn` exclusion from this remap
+  entirely -- safe unconditionally, since the remap only ever fires
+  when `MemberD.XfbOffset` already has a value (i.e. the member
+  genuinely carries a real `Offset`/`XfbOffset` decoration),
+  regardless of `BuiltIn`-ness.
+- **Unit test:** added
+  `RemapsPhysicalIndexForOutOfOrderBuiltInBlockMembers`
+  (`CanonicalizeStageTest.cpp`), modeling the exact
+  `xfb_clipdistance_1_256` shape (packed `<{ [7 x float], float }>`,
+  member decorations swapped relative to declared order); confirmed
+  via `git stash` A/B to fail (`ClipDistance.RowCount` comes out `1`,
+  not `7` -- it resolves to the scalar `PointSize` field instead)
+  pre-fix, pass post-fix.
+- **Verified:**
+  - Combined `xfb_clip*`/`xfb_cull*`/`xfb_pointsize*` sweep (436
+    cases): 324/324 runnable **Pass**, 0 Fail, 112 NotSupported
+    (pre-existing `maxTransformFeedbackBuffers=4` device-limit gap,
+    unrelated) -- up from `L372`'s own 162 Pass/162 Fail baseline for
+    this same combined sweep.
+  - `FeMeTransformsGraphicsTests`: 139/139 Passed (+1 new test).
+  - `ninja check-feme`: 3528/3589 Passed, 61 Unsupported, 0 Failed, 0
+    regressions.
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal correctness fix, no feature/extension-
+  surface change.
+- **Files:** `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`,
+  `feme/unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`.
+- **Open follow-ups:** none specific to this fix -- the entire
+  `xfb_pointsize`/`xfb_clipdistance`/`xfb_culldistance`/
+  `xfb_clip_and_cull` family is now fully passing (runnable cases).
+  Remaining carried-over items unchanged: `fuzz.random_vertex.*`/
+  non-square-matrix `single_basic_*` (44 cases), `user_defined_io` (27
+  cases), `device_group` (7), `memory_model.*` races (~24),
+  `L344`/`L335` N-barrier generalization, `L265` ASTC alpha-decode
+  tie-break (12 cases), and the still-overdue broader-than-tessellation
+  CTS sweep (`api`/`pipeline`/`shader_render`/`synchronization`).
