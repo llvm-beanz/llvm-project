@@ -14008,3 +14008,90 @@ carried over from the previous session's handoff
   `feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`.
 - **Open follow-ups:** `nested_structs_instance_arrays.{2,31}`'s
   remaining mismatch (`L368`'s own handoff item, unchanged).
+
+## Fixed: `nested_structs_instance_arrays.{2,31}` multi-member XFB block-array stride (`L371`)
+
+- **Symptom:** both cases failed with `Mismatch at offset 56 expected 75
+  received 0` (`.2`) / the analogous offset for `.31` -- a geometry
+  shader writing a 2-element array of a 3-member `Block`-decorated
+  struct (`uint a; mat2 b; mat3 c;`) only ever had instance 0's own data
+  captured; every byte belonging to instance 1 read back as `0`. Left
+  open by `L368` as a plain, non-crashing content mismatch after that
+  session's own `Row`-double-scaling fix.
+- **Root cause:** `L366`'s own `addElements`/`TakeBlockPath` fix (for
+  this same multi-member "array of block instances" shape's crash)
+  deliberately left `SignatureElement::XfbBufferArrayStride` at `0` for
+  every decomposed per-member leaf, reasoning that -- unlike the
+  already-working single-member sub-case -- every instance of a
+  multi-member block array shares one `XfbBuffer` and packs back-to-back
+  into that one buffer, so no instance-to-buffer routing was needed.
+  That reasoning was wrong: decoding the real signature blob (via a
+  corrected, reusable `/tmp/parse_sig.py`, rewritten this session after
+  finding two bugs in an earlier ad hoc recreation -- every one of the
+  24 fixed fields in `feme::serializeSignature`'s binary layout is a
+  4-byte `uint32_t`, not a mix of `u8`/`u32`, and a multi-stage IR dump
+  can contain more than one signature blob, so a decoder must pick the
+  *largest* one) showed all three elements with `XfbBufferArrayStride=0`
+  despite a combined `RowCount` that already (correctly) folds both
+  instances together. Cross-referencing a `FEME_DEBUG_DUMP_SPIRV_MLIR`
+  ground-truth dump and the raw pre-canonicalization LLVM IR (a direct
+  `getelementptr`/`store` at byte offset 56 -- exactly instance 1's own
+  local offset-0 member, one full `XfbStride` further into the global's
+  own flat storage) against the shader source (`max_vertices = 1`, a
+  single `EmitVertex()` call writing both `blockB[0]`/`blockB[1]` before
+  it) confirmed this is GLSL's "array of block instances" captured as N
+  *separate* transform-feedback buffer bindings -- direct comparison
+  against the passing single-member `dEQP-VK.transform_feedback.fuzz.
+  instance_array_basic_type.mat4.vertex` case (also written in one go,
+  with no loop/dynamic index, structurally identical to this shape one
+  level up) confirmed dEQP binds both shapes identically.
+- **Fix:** `addElements`'s `TakeBlockPath` per-member decomposition loop
+  (`AddBlockElement`, `CanonicalizeStage.cpp`) now computes each
+  decomposed leaf's own per-instance row count
+  (`getStageIORowShape(EltTy).RowCount` on the un-widened per-member
+  type) and threads it through as `XfbBufferArrayStride`, exactly
+  mirroring the single-member mechanism's own `RealMemberTy`
+  computation, instead of the previously-hardcoded `0`. `L366`'s own
+  prior "double free or corruption" regression came from a *different*
+  mistake than "setting a nonzero stride at all": that earlier attempt
+  passed the instance *count* (e.g. 2) as the stride rather than each
+  leaf's own *per-instance row count* (1/2/3 for the `uint`/`mat2`/
+  `mat3` members respectively) -- `Executor.cpp`'s `(Instance, InnerRow)
+  = (Row / Stride, Row % Stride)` split only recovers correctly with the
+  latter formula.
+- **Unit test:** added
+  `MapsArrayOfBlockInstancesWithMultipleMembersToXfbBufferArrayStride`
+  (`CanonicalizeStageTest.cpp`), a simplified 2-member version of this
+  exact shape (`uint a; vec2 b;`, 2 instances), confirming both members'
+  `SignatureElement`s get `XfbBufferArrayStride=1` (their own
+  per-instance row count) and that each instance's stores resolve to
+  distinct `Row` values (0 and 1).
+- **Verified:**
+  - `nested_structs_instance_arrays.2`: now **Pass** (was: `Mismatch at
+    offset 56 expected 75 received 0`).
+  - `nested_structs_instance_arrays.31`: now **Pass** (same family).
+  - `instance_array_basic_type.mat4.vertex` and the `all_instance_array.*`
+    group (100 cases, 12 runnable, `all_instance_array.12`/`.28`
+    specifically -- `L366`'s own documented regression risks): all still
+    Pass, confirming this fix doesn't regress either the single-member
+    mechanism or the `Patch`/ordinary-array `BlockArrayCount` folds.
+  - `ninja check-feme`: 3526/3587 Passed (+1 new unit test), 61
+    Unsupported, 0 Failed, 0 regressions.
+  - Full `random_geometry.*` fuzz sweep (850 cases, 244 runnable): **244
+    Passed, 0 Failed, 0 crashes** -- a full pass of every runnable case
+    in this sweep, up from `L370`'s own 242/2/0 baseline. This closes
+    out the sweep's own standing carried-over item: every previously-
+    known failure in this group is now fixed.
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal correctness fix, no feature/extension-
+  surface change.
+- **Files:** `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`,
+  `feme/unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`.
+- **Open follow-ups:** none for this bug family -- `L366`/`L368`/`L371`
+  together close out `nested_structs_instance_arrays.{2,31}` entirely.
+  Still-untriaged, carried-over-from-many-sessions items remain:
+  `user_defined_io` (27 cases), `device_group` (7), `memory_model.*`
+  races (~24), `L344`/`L335` N-barrier generalization, `L265` ASTC
+  alpha-decode tie-break (12 cases), and the still-overdue broader-than-
+  tessellation CTS sweep (`api`/`pipeline`/`shader_render`/
+  `synchronization`).
