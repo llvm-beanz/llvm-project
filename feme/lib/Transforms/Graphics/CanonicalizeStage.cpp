@@ -5802,14 +5802,19 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
           // SPIR-V does decorate per member with `Location`) is
           // unaffected. A genuinely `BuiltIn`-decorated member (e.g.
           // `gl_PerVertex`'s own `gl_Position`/`gl_PointSize`/...) is
-          // matched downstream by `SystemValue`, never `Location`, and
-          // never carries a real `Offset`/`XfbBuffer`/... of its own in
-          // practice -- skip all of this synthesis for it, so this
-          // milestone leaves every existing builtin-block element exactly
-          // as before (an unset `Location`/`XfbBuffer`/`XfbOffset`/
-          // `XfbStride`), rather than fabricating a `Location` that could
-          // collide with a real, separately-declared user-defined
-          // variable's own `Location` 0.
+          // matched downstream by `SystemValue`, never `Location`, so a
+          // fabricated `Location` for it could collide with a real,
+          // separately-declared user-defined variable's own `Location`
+          // 0 -- that half of the synthesis below stays gated on
+          // `!MemberD.BuiltIn`. (Roadmap L372) It *can*, however, still
+          // carry a real `XfbBuffer`/`XfbOffset`/`XfbStride` of its own
+          // in practice (`gl_PointSize` XFB-captured via a whole-variable
+          // `xfb_buffer`/`xfb_stride` plus its own member `Offset`, e.g.
+          // `dEQP-VK.transform_feedback.*.xfb_pointsize_*`) -- that half
+          // of the synthesis is *not* gated on `BuiltIn`-ness below, fixing
+          // an earlier version of this milestone that incorrectly skipped
+          // it for every `BuiltIn` member unconditionally, leaving a real
+          // captured builtin silently uncaptured.
           ParsedSPIRVDecorations WholeVarD =
               parseSPIRVDecorations(GV->getMetadata("spirv.Decorations"));
           uint32_t NextMemberLocation = WholeVarD.Location.value_or(0);
@@ -5902,13 +5907,36 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             if (!MemberD.BuiltIn) {
               if (!MemberD.Location)
                 MemberD.Location = NextMemberLocation;
-              if (!MemberD.XfbBuffer)
-                MemberD.XfbBuffer = WholeVarD.XfbBuffer;
-              MemberD.XfbOffset = WholeVarD.XfbOffset.value_or(0) +
-                                  MemberD.XfbOffset.value_or(0);
-              if (!MemberD.XfbStride)
-                MemberD.XfbStride = WholeVarD.XfbStride;
             }
+            // (Roadmap L372) Unlike `Location` just above -- which must
+            // stay unsynthesized for a `BuiltIn` member to avoid
+            // colliding with a real user-defined variable's own
+            // `Location` 0 -- a `BuiltIn` member can genuinely be
+            // transform-feedback-captured too: `gl_PerVertex { float
+            // gl_PointSize; }` decorated `layout(xfb_buffer=N,
+            // xfb_offset=0)` (`dEQP-VK.transform_feedback.*.
+            // xfb_pointsize_*`, `simple`/`simple_fast_gpl`/
+            // `simple_optimized_gpl` groups) is exactly this shape, and
+            // the Vulkan spec places no restriction against XFB-capturing
+            // a `BuiltIn` output. Thread `XfbBuffer`/`XfbOffset`/
+            // `XfbStride` down to *every* member regardless of
+            // `BuiltIn`-ness -- harmless when the whole variable never
+            // declared any (`WholeVarD.XfbBuffer` stays unset, so
+            // `Elt.XfbBuffer` stays unset too, matching `verifySignature`'s
+            // own "absent `XfbBuffer` means nothing is captured"
+            // convention), but required for this real captured-builtin
+            // case, where previously every one of `Elt.XfbBuffer`/
+            // `XfbOffset`/`XfbStride` was silently left unset despite the
+            // SPIR-V genuinely declaring all three, so the executor's XFB
+            // capture loop (keyed on `XfbBuffer.has_value()`) skipped this
+            // element outright and the capture buffer kept its original,
+            // uninitialized contents.
+            if (!MemberD.XfbBuffer)
+              MemberD.XfbBuffer = WholeVarD.XfbBuffer;
+            MemberD.XfbOffset = WholeVarD.XfbOffset.value_or(0) +
+                                MemberD.XfbOffset.value_or(0);
+            if (!MemberD.XfbStride)
+              MemberD.XfbStride = WholeVarD.XfbStride;
             Pending.push_back({MemberD, MemberTy, PhysicalIndex});
             NextMemberLocation += RowCount;
           }
