@@ -1552,6 +1552,80 @@ TEST(CanonicalizeStageTest, ThreadsXfbCaptureDecorationsThroughBuiltInBlockMembe
   EXPECT_EQ(PointSize.XfbStride, 4u);
 }
 
+/// (Roadmap L373) `addElements`'s per-member decomposition loop also
+/// remaps a member's `PhysicalIndex` to whichever LLVM struct field its
+/// own `Offset`/`XfbOffset` decoration says it actually occupies --
+/// needed whenever a block's members are declared out of ascending-
+/// physical-offset order, which glslang does for `dEQP-VK.
+/// transform_feedback.*.xfb_clipdistance_*`'s own
+/// `layout(xfb_buffer=0) out gl_PerVertex { float gl_PointSize;
+/// float gl_ClipDistance[7]; };`: `gl_PointSize` is declared *first*
+/// (SPIR-V member index 0, `Offset=28`) but is laid out *after* the
+/// 7-row `gl_ClipDistance` array declared second (member index 1,
+/// `Offset=0`), so the physical LLVM struct is `<{ [7 x float], float
+/// }>` -- `ClipDistance` is physical field 0, `PointSize` is physical
+/// field 1, the reverse of their declared order. Before this fix, this
+/// remap was gated on `!MemberD.BuiltIn`, so neither member (both
+/// `BuiltIn`-decorated) had its `PhysicalIndex` remapped at all and each
+/// silently fell back to its (wrong) declared-order default --
+/// resolving `PointSize`'s `SignatureElement` to the physical
+/// `ClipDistance` field's value and vice versa, exactly the "received a
+/// real but wrong captured value" symptom the CTS run actually showed
+/// (unlike `L372`'s "received 0/garbage" symptom).
+TEST(CanonicalizeStageTest,
+     RemapsPhysicalIndexForOutOfOrderBuiltInBlockMembers) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global <{ [7 x float], float }>, !spirv.Decorations !0, !feme.spirv.MemberDecorations !20
+    define void @main() #0 {
+      %p0 = getelementptr inbounds <{ [7 x float], float }>, ptr addrspace(8) @gl_PerVertex, i32 0, i32 1
+      store float 1.0, ptr addrspace(8) %p0
+      %p1 = getelementptr inbounds <{ [7 x float], float }>, ptr addrspace(8) @gl_PerVertex, i32 0, i32 0, i32 0
+      store float 2.0, ptr addrspace(8) %p1
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1, !2}
+    !1 = !{i32 36, i32 0}
+    !2 = !{i32 37, i32 32}
+    !20 = !{!21, !23}
+    !21 = !{i32 0, !22}
+    !22 = !{!24, !25}
+    !24 = !{i32 11, i32 1}
+    !25 = !{i32 35, i32 28}
+    !23 = !{i32 1, !26}
+    !26 = !{!27, !28}
+    !27 = !{i32 11, i32 3}
+    !28 = !{i32 35, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement *PointSize = nullptr;
+  const SignatureElement *ClipDistance = nullptr;
+  for (const SignatureElement &E : Sig->Elements) {
+    if (E.SystemValue == SignatureSystemValue::PointSize)
+      PointSize = &E;
+    else if (E.SystemValue == SignatureSystemValue::ClipDistance)
+      ClipDistance = &E;
+  }
+  ASSERT_NE(PointSize, nullptr);
+  ASSERT_NE(ClipDistance, nullptr);
+
+  ASSERT_TRUE(PointSize->XfbBuffer.has_value());
+  EXPECT_EQ(*PointSize->XfbBuffer, 0u);
+  EXPECT_EQ(PointSize->XfbOffset, 28u);
+
+  ASSERT_TRUE(ClipDistance->XfbBuffer.has_value());
+  EXPECT_EQ(*ClipDistance->XfbBuffer, 0u);
+  EXPECT_EQ(ClipDistance->XfbOffset, 0u);
+  EXPECT_EQ(ClipDistance->RowCount, 7u);
+}
+
 /// (Roadmap H7h) `BuiltIn ClipDistance`/`CullDistance` (SPIR-V codes 3/4,
 /// `gl_ClipDistance`/`gl_CullDistance`) map to
 /// `SignatureSystemValue::ClipDistance`/`CullDistance` -- each a real,
