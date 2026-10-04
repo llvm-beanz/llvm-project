@@ -13832,3 +13832,30 @@ predicted):
 - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
   needed -- an internal correctness fix, no feature/extension-surface
   change.
+
+## Regression sweep: full `random_geometry.*` fuzz group post-L366/L368 (850 cases)
+
+- Ran the complete `dEQP-VK.transform_feedback.fuzz.random_geometry.*`
+  group (850 cases, device-limited to 244 runnable) to check for any
+  wider impact from `L366`'s `BlockArrayCount` fold now firing for a
+  shape it previously skipped.
+- **Result:** 240 Passed, 4 Failed, 606 Not Supported -- 0 crashes.
+  Before this session's fix, the same style of sweep (a 713-case prefix)
+  showed 28 Failed; the two `nested_structs_instance_arrays.{2,31}`
+  crashes are now ordinary content-mismatch fails, and no new failures
+  were introduced.
+- The 4 remaining failures:
+  - `nested_structs_instance_arrays.2` / `.31`: the already-tracked
+    shared content mismatch (`Mismatch at offset 56 expected 75 received
+    0`), not yet root-caused (see above).
+  - `all_missing.8`: pre-existing, unrelated to this session's fix --
+    `Mismatch at offset 68 expected 83 received 0`. Notably the same
+    "`received 0`" signature as `.2`/`.31`'s remaining mismatch; worth
+    checking in a future session whether it shares the same
+    not-yet-root-caused cause (possible, given the shared signature) or
+    is a distinct issue.
+  - `all_unordered_and_instance_array.2`: pre-existing, unrelated --
+    fails at pipeline-creation time with `'llvm.getelementptr' op index 3
+    indexing a struct is out of bounds`, a compile-time MLIR verification
+    error, not a runtime content/crash issue. Not investigated this
+    session.
