@@ -14138,3 +14138,81 @@ Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
   `xfb_pointsize` cluster is likely the single highest-value pick next,
   given its size (~1,920 cases, by far the largest unaddressed cluster
   found in any sweep so far this project).
+
+## Fixed: `xfb_pointsize_*` BuiltIn-member XFB capture gap (`L372`)
+
+- **Symptom:** all 81 runnable cases in `dEQP-VK.transform_feedback.
+  {simple,simple_fast_gpl,simple_optimized_gpl}.xfb_pointsize_*` failed
+  with `Failed at item N received:<huge/tiny garbage float>
+  expected:0` -- the largest unaddressed failure cluster any CTS sweep
+  had found in this project to date, surfaced by `L371`'s own
+  session-end broad `transform_feedback.*` sweep.
+- **Root cause:** `addElements`'s per-member decomposition loop for an
+  interface block (`gl_PerVertex` and similar) only ever inherited the
+  whole variable's own `XfbBuffer`/`XfbOffset`/`XfbStride` decorations
+  down to a *non*-`BuiltIn` member, under an explicit prior design
+  comment's assumption that a genuinely `BuiltIn`-decorated member
+  (`gl_Position`/`gl_PointSize`/...) "never carries a real
+  `Offset`/`XfbBuffer`/... of its own in practice." `layout(xfb_buffer=N,
+  xfb_offset=0) out gl_PerVertex { float gl_PointSize; };` -- exactly
+  the shape `xfb_pointsize_*`'s own vertex shader declares -- is
+  exactly this real case. Confirmed via `FEME_DEBUG_DUMP_SPIRV_MLIR`
+  ground truth (`spirv.GlobalVariable @spirv_var_9 {xfb_buffer = 0,
+  xfb_stride = 4} : !spirv.ptr<!spirv.struct<(f32 [0, BuiltIn=1]),
+  Block>, Output>`) and the pre-canon LLVM IR/metadata (member
+  decorations `BuiltIn=1` plus `Offset=0`, alongside the whole
+  variable's own `XfbBuffer=0`/`XfbStride=4`). The Vulkan spec places
+  no restriction against XFB-capturing a `BuiltIn` output, and
+  `addElement` itself already fully supports a `SignatureElement`
+  carrying both a `SystemValue` and real `XfbBuffer`/`XfbOffset`/
+  `XfbStride` simultaneously -- the gap was purely in the per-member
+  decomposition loop never populating the latter three for a `BuiltIn`
+  member, so `Executor.cpp`'s capture loop (keyed on
+  `XfbBuffer.has_value()`) silently skipped the element outright,
+  leaving the capture buffer at its original, uninitialized contents.
+- **Fix:** split the per-member synthesis in `CanonicalizeStage.cpp`
+  into two independently-gated halves. `Location` synthesis stays
+  gated on `!MemberD.BuiltIn` (a fabricated `Location` for a `BuiltIn`
+  member could still collide with a real user-defined variable's own
+  `Location` 0 -- this half of the original reasoning was correct and
+  is preserved verbatim). `XfbBuffer`/`XfbOffset`/`XfbStride` threading
+  is no longer gated on `BuiltIn`-ness at all -- harmless when the
+  whole variable never declared any, required for this real
+  captured-builtin case.
+- **Unit test:** added
+  `ThreadsXfbCaptureDecorationsThroughBuiltInBlockMember`
+  (`CanonicalizeStageTest.cpp`), modeling the exact real shape;
+  confirmed via `git stash` A/B to fail (`XfbBuffer` unset) pre-fix,
+  pass post-fix.
+- **Verified:**
+  - `xfb_pointsize_*` (109 total cases, 81 runnable): all 81 now
+    **Pass** (was: all Fail; 28 `NotSupported` for an unrelated
+    `maxTransformFeedbackBuffers=4` device-limit gap, unchanged).
+  - `xfb_clipdistance`/`xfb_culldistance`/`xfb_clip_and_cull` (218
+    cases, 162 runnable fail, 56 NotSupported): confirmed via `git
+    stash` A/B that this is a **separate, pre-existing, not-yet-
+    root-caused bug**, unaffected by this fix -- identical failure
+    before and after, with a different symptom (a real but *wrong*
+    captured value, e.g. `received:1 expected:0` or `received:-5.7e+20
+    expected:6.1e-05`, not an uninitialized/garbage one). Left open for
+    a future session.
+  - `ninja check-feme`: 3527/3588 Passed (+1 new unit test), 61
+    Unsupported, 0 Failed, 0 regressions.
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal correctness fix, no feature/extension-
+  surface change.
+- **Files:** `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`,
+  `feme/unittests/Transforms/Graphics/CanonicalizeStageTest.cpp`.
+- **Open follow-ups:** `xfb_clipdistance`/`xfb_culldistance`/
+  `xfb_clip_and_cull`'s own remaining content mismatch (162 cases,
+  confirmed unrelated to this fix -- a real but wrong captured value,
+  not an uninitialized one; worth checking whether this is a
+  `ClipDistance`/`CullDistance` array-row capture-ordering bug, given
+  both are themselves multi-row `[8 x float]`-shaped system values,
+  unlike the single-scalar `PointSize` this fix covers). Remaining
+  carried-over items unchanged: `fuzz.random_vertex.*`/non-square-matrix
+  `single_basic_*` (44 cases), `user_defined_io` (27 cases),
+  `device_group` (7), `memory_model.*` races (~24), `L344`/`L335`
+  N-barrier generalization, `L265` ASTC alpha-decode tie-break (12
+  cases), and the still-overdue broader-than-tessellation CTS sweep
+  (`api`/`pipeline`/`shader_render`/`synchronization`).
