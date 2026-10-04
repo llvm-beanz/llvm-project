@@ -1500,6 +1500,58 @@ TEST(CanonicalizeStageTest, MapsSPIRVPointSizeBuiltInToSystemValue) {
   EXPECT_FALSE(PointSize.Location.has_value());
 }
 
+/// (Roadmap L372) A `BuiltIn`-decorated interface-block member can still
+/// be genuinely transform-feedback-captured: `layout(xfb_buffer=0,
+/// xfb_offset=0) out gl_PerVertex { float gl_PointSize; };` (`dEQP-VK.
+/// transform_feedback.*.xfb_pointsize_*`) decorates the whole block
+/// variable with `XfbBuffer`/`XfbStride` and its sole member with
+/// `BuiltIn PointSize` plus its own (zero) `Offset` -- the exact shape
+/// `FEME_DEBUG_DUMP_SPIRV_MLIR` shows glslang emits for this test family.
+/// `addElements`'s per-member decomposition loop must still thread
+/// `XfbBuffer`/`XfbOffset`/`XfbStride` down to this member even though it
+/// is `BuiltIn`-decorated (unlike `Location`, which must stay unsynthesized
+/// for a `BuiltIn` member to avoid colliding with a real user-defined
+/// variable's own `Location` 0) -- before this fix, every one of
+/// `SignatureElement::XfbBuffer`/`XfbOffset`/`XfbStride` was silently left
+/// unset for a captured `BuiltIn` member, so `Executor.cpp`'s capture loop
+/// (keyed on `XfbBuffer.has_value()`) skipped it outright and the capture
+/// buffer kept its original, uninitialized contents.
+TEST(CanonicalizeStageTest, ThreadsXfbCaptureDecorationsThroughBuiltInBlockMember) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { float }, !spirv.Decorations !0, !feme.spirv.MemberDecorations !10
+    define void @main() #0 {
+      store float 4.0, ptr addrspace(8) @gl_PerVertex
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1, !2}
+    !1 = !{i32 36, i32 0}
+    !2 = !{i32 37, i32 4}
+    !10 = !{!11}
+    !11 = !{i32 0, !12}
+    !12 = !{!13, !14}
+    !13 = !{i32 11, i32 1}
+    !14 = !{i32 35, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &PointSize = Sig->Elements[0];
+  EXPECT_EQ(PointSize.Direction, SignatureDirection::Output);
+  EXPECT_EQ(PointSize.SystemValue, SignatureSystemValue::PointSize);
+  // No real `Location` should be fabricated for a `BuiltIn` member.
+  EXPECT_FALSE(PointSize.Location.has_value());
+  ASSERT_TRUE(PointSize.XfbBuffer.has_value());
+  EXPECT_EQ(*PointSize.XfbBuffer, 0u);
+  EXPECT_EQ(PointSize.XfbOffset, 0u);
+  EXPECT_EQ(PointSize.XfbStride, 4u);
+}
+
 /// (Roadmap H7h) `BuiltIn ClipDistance`/`CullDistance` (SPIR-V codes 3/4,
 /// `gl_ClipDistance`/`gl_CullDistance`) map to
 /// `SignatureSystemValue::ClipDistance`/`CullDistance` -- each a real,
