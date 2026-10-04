@@ -63,30 +63,18 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(unknown, new)** `basic_arrays.1`'s own now-isolated content mismatch
-   (`Mismatch at offset 64 expected 72 received 0`) -- not yet root-caused. The
-   `received 0` pattern suggests an unwritten/zero-initialized row; worth
-   checking whether this is a geometry-shader multi-vertex-emission
-   capture-ordering bug (a different invocation's row landing in the wrong
-   per-vertex `StageStorage` slot), using the same `FEME_DUMP_IR_PRECANON` +
-   env-var-debug-print technique that worked this session.
-2. **(dedicated session, carried over many sessions)**
-   `nested_structs_instance_arrays.31`/`.2` -- now confirmed to have **two
-   distinct crash symptoms** in the same architecturally-related
-   (array-of-block-instances) shape. `L363`'s own handoff already scoped the
-   right long-term fix direction (threading `PeekedMemberDecorations.size() > 1`
-   metadata through to `resolveOffsetWithinElement`'s dispatch, rather than
-   relying on `isGenuineMultiMemberNestedStruct`'s type-shape-only heuristic).
-   Start with `FEME_DUMP_IR_PRECANON` on both `.2` and `.31` to compare their
-   real compiled shapes side by side before diving into Row math.
-3. **(a few hours)** Still-untriaged tessellation/broader CTS groups from many
-   sessions ago: `user_defined_io` (27 cases), `device_group` (7),
-   `memory_model.*` races (~24) -- unchanged, still carried over.
-4. **(dedicated session, carried over many sessions, unchanged)** `L344` item 2
-   / `L335` -- N-barrier generalization, 1+ case (`shader_input_output.barrier`,
+1. **(dedicated session)** `nested_structs_instance_arrays.31`/`.2` -- the
+   `TakeBlockPath` architectural fix above. This is now the single
+   most-carried-over item across many sessions; consider doing this one next
+   regardless of order, since every lone-instance-shape variant of this bug
+   class is now fixed.
+2. **(a few hours)** Untriaged tessellation/CTS groups, still carried over
+   unchanged for many sessions: `user_defined_io` (27 cases), `device_group`
+   (7), `memory_model.*` races (~24).
+3. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
+   generalization (`shader_input_output.barrier`,
    `rasterization.line_continuity.*`).
-5. **(lowest priority, many sessions carried over, unchanged)** `L265` -- ASTC
-   alpha-decode tie-break, 12 cases.
-6. **(a few hours, still overdue, many sessions carried over)** The
-   broader-than-tessellation CTS sweep
-   (`api`/`pipeline`/`shader_render`/`synchronization`) is still not done.
+4. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
+   tie-break, 12 cases.
+5. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
+   (`api`/`pipeline`/`shader_render`/`synchronization`).
