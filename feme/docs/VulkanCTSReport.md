@@ -13745,3 +13745,90 @@ failure -- it turned out to be the same bug).
 - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
   needed -- an internal correctness fix, no feature/extension-surface
   change.
+
+## Fixed: `nested_structs_instance_arrays.{2,31}` heap corruption (`L366`/`L368`)
+
+Root-caused and fixed the `double free or corruption` crash in both
+`nested_structs_instance_arrays.2` and `.31` -- the two cases flagged as
+"carried over for a dedicated future session" at the end of `L365`'s own
+entry above. Two independent, stacked bugs, both in the genuine,
+non-`Patch`, *multi*-member XFB "array of block instances" shape
+(`TakeBlockPath`'s own separate dispatch for this shape, as that entry
+predicted):
+
+- **Bug 1 (`L366`, construction/access-side disagreement):**
+  `addElements`' `BlockArrayCount` fold (which widens each member's own
+  storage to hold every block-array instance's rows back-to-back) never
+  fired for this shape -- only the `Patch` sub-case did -- under-sizing
+  every member's storage to one instance's worth of rows.
+  `resolveStageIOAccess`'s own `AllowBlockArrayInstanceFold` similarly
+  never fired for it. **Fix:** added `isMultiMemberXfbBlockArrayGlobal`,
+  a single shared recognizer used by both the construction and access
+  sides, so they agree on exactly this shape (mirroring the existing
+  `Patch`-case precedent, roadmap H117/H118).
+- **Bug 2 (`L368`, Row double-scaling):** even with Bug 1 fixed,
+  `resolveNestedStageIOField`'s array-of-struct-instance branch
+  pre-folds the block-array instance index *multiplicatively*
+  (`Instance * Inner.RowCount + Inner.Row`) into what it assumes is a
+  final `Row`. When the leaf member is itself a whole, multi-row
+  aggregate (e.g. `vec2 y[2]`) stored/loaded as one LLVM value,
+  `storeStageIOValue`/`loadStageIOValue`'s own generic `ArrayType`
+  decomposition branch performs *its own*, separate `Row * RE + R`
+  multiplication to split it into one call per row -- squaring the
+  instance index's contribution (`Instance * RowCount^2` instead of
+  `Instance * RowCount`). The resulting out-of-range `Row` values feed
+  unchecked, direct `inbounds` GEP arithmetic in `GeometryWrapper.cpp`
+  with no bounds assertion, corrupting the heap silently instead of
+  tripping any assertion. **Fix:** added
+  `NestedStageIOField::DeferRowScale`, threaded through every recursive
+  return path, so an enclosing instance-folding site defers its own
+  instance-index scaling (combining additively instead of
+  multiplicatively) when the leaf is still a whole, undecomposed value.
+  Detecting this condition needed a size-based comparison
+  (`DL.getTypeAllocSize(ValueTy) == DL.getTypeAllocSize(Ty)`) rather
+  than `Ty == ValueTy` pointer equality, since `.31`'s own shape has
+  `SPIRVToLLVMPatterns.cpp`'s "tight vector marker" substitution leave
+  the stored value and the global's own declared field type as
+  structurally-equivalent-but-pointer-distinct `Type*`s (`.2`'s shape
+  happened to keep them pointer-identical, masking this gap until `.31`
+  was investigated).
+- Also added a defensive `ElementID` bounds assert to
+  `StageStorage::writeRaw`, matching the existing one in `readRaw`.
+- **Verified:**
+  - `nested_structs_instance_arrays.2`: no longer crashes (was: `double
+    free or corruption`). Now fails with a plain, non-crashing content
+    mismatch (`Mismatch at offset 56 expected 75 received 0`) -- a
+    separate, not-yet-investigated bug (the "`received 0`" pattern
+    suggests an XFB-capture-side issue, not a `CanonicalizeStage.cpp`
+    one; see Next Steps).
+  - `nested_structs_instance_arrays.31`: same -- no longer crashes, same
+    remaining content mismatch as `.2` (strongly suggesting both now
+    share one single remaining root cause, separate from the two fixed
+    here).
+  - New unit test
+    `DefersRowScalingForWholeAggregateMemberOfXfbBlockArrayInstance`
+    reproduces `.31`'s exact type-identity-mismatch shape; confirmed it
+    fails (reproducing the squared `Row` values 4/5 instead of 2/3) when
+    reverted to the old `Ty == ValueTy` check.
+  - `FeMeTransformsGraphicsTests`: 136/136 Passed (+1 new test), 0
+    regressions.
+  - `FeMeVulkanTests`: 792/792 Passed, 0 regressions.
+  - `ninja check-feme`: 3523/3584 Passed, 61 Unsupported, 0 Failed.
+  - Full `nested_structs_instance_arrays.*` group (50 cases, deqp
+    device-limited to 13 runnable): 11 Passed, 2 Failed (the two content
+    mismatches above, not crashes), 37 Not Supported (device
+    `maxGeometryOutputComponents` limit) -- 0 crashes anywhere in the
+    group.
+  - Full `all_instance_array.*` group (100 cases, 12 runnable): 12
+    Passed, 0 Failed -- confirms no regression from `BlockArrayCount`
+    now folding for a shape it previously skipped.
+- **Next steps:** `.2`/`.31`'s shared remaining content mismatch
+  (`received 0` at the second block instance's first scalar member) is
+  not yet root-caused -- likely an `Executor.cpp` XFB-capture-side issue
+  (not a `CanonicalizeStage.cpp` one, since canonicalization now computes
+  the correct `Row=1` for this field per `FEME_DUMP_IR_POSTCANON`), given
+  it's now the *only* remaining symptom after both canonicalization-side
+  bugs are fixed.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- an internal correctness fix, no feature/extension-surface
+  change.
