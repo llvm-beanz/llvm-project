@@ -766,6 +766,99 @@ TEST(CanonicalizeStageTest,
            (std::set<uint64_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
 }
 
+/// (Roadmap L371) The genuine *multi*-member sub-case of "array of block
+/// instances" (`layout(xfb_buffer=0, ...) out Block { uint a; vec2 b; }
+/// block[2];`) -- unlike the single-member cases above, this decomposes
+/// into one `SignatureElement` per real member (`TakeBlockPath`'s own
+/// per-member loop), each of which must *independently* carry its own
+/// `XfbBufferArrayStride` (that member's own per-instance row count: 1
+/// for both `uint` and `vec2` here, since a plain vector is one row
+/// regardless of its own component count) so `Executor.cpp` can route
+/// each instance to its own `XfbBuffer + k`, exactly as the single-member
+/// mechanism already does -- this is the exact shape `dEQP-VK.
+/// transform_feedback.fuzz.random_geometry.
+/// nested_structs_instance_arrays.{2,31}` hit (a 3-member version of this
+/// same shape): before this fix, every leaf of this decomposition was
+/// hardcoded to `XfbBufferArrayStride=0`, so `Executor.cpp`'s capture loop
+/// packed every instance's own row into the *same* buffer at the wrong
+/// offset, silently dropping every instance but the first (the "received
+/// 0" symptom for every byte past the first instance's own span).
+TEST(CanonicalizeStageTest,
+    MapsArrayOfBlockInstancesWithMultipleMembersToXfbBufferArrayStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @block = external addrspace(8) global [2 x { i32, <2 x float> }], !spirv.Decorations !4, !feme.spirv.MemberDecorations !20
+    define void @main() #0 {
+      ; Instance 0 (bytes [0, 16)).
+      store i32 89, ptr addrspace(8) @block
+      store <2 x float> <float 1.000000e+00, float 2.000000e+00>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 8)
+      ; Instance 1 (bytes [16, 32)).
+      store i32 75, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 16)
+      store <2 x float> <float 3.000000e+00, float 4.000000e+00>, ptr addrspace(8) getelementptr inbounds nuw (i8, ptr addrspace(8) @block, i64 24)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !1 = !{i32 30, i32 0}
+    !2 = !{i32 36, i32 0}
+    !3 = !{i32 37, i32 16}
+    !4 = !{!1, !2, !3}
+    !10 = !{i32 0, !11}
+    !11 = !{!12}
+    !12 = !{i32 35, i32 0}
+    !13 = !{i32 1, !14}
+    !14 = !{!15}
+    !15 = !{i32 35, i32 8}
+    !20 = !{!10, !13}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+
+  const SignatureElement &EltA = Sig->Elements[0];
+  EXPECT_EQ(EltA.RowCount, 2u);
+  EXPECT_EQ(EltA.XfbBufferArrayStride, 1u);
+  ASSERT_TRUE(EltA.XfbBuffer.has_value());
+  EXPECT_EQ(*EltA.XfbBuffer, 0u);
+  EXPECT_EQ(EltA.XfbOffset, 0u);
+
+  const SignatureElement &EltB = Sig->Elements[1];
+  EXPECT_EQ(EltB.RowCount, 2u);
+  EXPECT_EQ(EltB.XfbBufferArrayStride, 1u);
+  ASSERT_TRUE(EltB.XfbBuffer.has_value());
+  EXPECT_EQ(*EltB.XfbBuffer, 0u);
+  EXPECT_EQ(EltB.XfbOffset, 8u);
+
+  // Each member's own instance 0/1 stores resolve to `Row` 0/1
+  // respectively (`XfbBufferArrayStride == 1` means `Row` already *is*
+  // the instance index, exactly like the single-member simple-member
+  // case above).
+  struct Store {
+    uint64_t ElementID, Row;
+  };
+  SmallVector<Store> Stores;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    Stores.push_back(
+        {cast<ConstantInt>(CI->getArgOperand(0))->getZExtValue(),
+         cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue()});
+  }
+  // A vector-valued member (`<2 x float>`) decomposes into one store per
+  // component, so collect the distinct `(ElementID, Row)` pairs actually
+  // seen rather than asserting an exact store count.
+  std::set<std::pair<uint64_t, uint64_t>> SeenElementRows;
+  for (const Store &S : Stores)
+    SeenElementRows.insert({S.ElementID, S.Row});
+  EXPECT_EQ(SeenElementRows,
+           (std::set<std::pair<uint64_t, uint64_t>>{
+               {0, 0}, {0, 1}, {1, 0}, {1, 1}}));
+}
+
 /// (Roadmap L363) `isShapeCompatible`'s own marker-unwrapping, before
 /// this, only ever ran on \p Declared (a struct member's own declared
 /// type) -- documented as safe because a *value*'s own type (\p Actual)
