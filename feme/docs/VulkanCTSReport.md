@@ -13935,3 +13935,76 @@ carried over from the previous session's handoff
   remaining mismatch (`L368`'s own handoff item, unchanged) and
   `all_unordered_and_instance_array.2`'s newly-surfaced runtime content
   mismatch (new, not yet root-caused).
+
+## Fixed: `all_unordered_and_instance_array.2` trailing non-offset nested struct tightening (`L370`)
+
+- Root-caused and fixed `dEQP-VK.transform_feedback.fuzz.random_geometry.
+  all_unordered_and_instance_array.2`'s own `Mismatch at offset 100
+  expected 48 received 0` content mismatch, left open by `L369` (which
+  only fixed `all_missing.8`'s *index-remap* bug, a different layer of
+  this same subsystem).
+- **Methodology:** decoded the raw `!feme.signature` metadata blob via a
+  new reusable Python decoder (`feme::serializeSignature`'s exact binary
+  layout), cross-referenced against a `FEME_DUMP_IR_POSTCANON` LLVM IR
+  dump and a `FEME_DEBUG_DUMP_SPIRV_MLIR` ground-truth SPIR-V dump.
+  Confirmed the expected value at offset 100 is the first stored value of
+  the struct's *last* declared member (a non-`Offset` `{i32, mat2x2}`
+  nested struct), proving that member's real offset should be 100, not
+  the 104 FeMe actually computed -- a genuine extra 4 bytes of padding
+  baked directly into the nested struct's own *converted LLVM type*, not
+  merely a member-index remap error like `L369`'s bug.
+- **Root cause:** `convertOffsetStructTypeIgnoringDecorations`'s first,
+  naive per-member conversion attempt recursed into a nested struct
+  member via a plain recursive call (not `getTightNestedStructType`),
+  letting `layOutStructIfOffsetsMatch`'s own non-offset branch silently
+  insert a natural-alignment interior gap inside that member's own body
+  (the `i32` padded up to the following `mat2x2`'s 8-byte real-vector
+  alignment) -- invisible to the *enclosing* struct's own offset
+  validation, which only ever checks where each member *starts*, never
+  how large a member's own converted body grows to. Because this nested
+  member happens to be the enclosing struct's *last* member, nothing
+  after it could ever collide with its oversized body, so the naive
+  first attempt "succeeded" and this file's existing "tight" retry tiers
+  (which already handle exactly this shape correctly, per
+  `getTightNestedStructType`'s own pre-existing doc comment) never ran
+  at all.
+- **Fix:** in that same per-member loop, convert a nested struct member
+  via `getTightNestedStructType` instead of the naive recursive call
+  specifically when the enclosing struct declares explicit per-member
+  `Offset`s but the nested member itself does not -- the only
+  combination where an oversized nested body can go undetected. Two
+  other combinations were verified to need the prior, naive conversion
+  kept unchanged:
+  1. A plain, fully offset-less `Input`/`Output` interface struct (no
+     `Block`/XFB byte-position semantics at all) must keep the naive
+     conversion's real natural-ABI layout (including any genuinely-needed
+     interior pad) -- an initial, too-broad version of this fix (keying
+     only on the enclosing struct's own `hasOffset()`) regressed the
+     existing `NestedNonOffsetStructInteriorPadRemapsInnerMember` unit
+     test, which caught this.
+  2. A nested struct with its own explicit offsets (an independently
+     offset-laid-out UBO/SSBO member) must also keep the naive
+     conversion, which already validates/retries correctly on its own --
+     the existing `spirv-to-llvm-struct-trailing-gap-packed.mlir` lit
+     test caught this.
+  Final condition: tighten only when `Type.hasOffset() &&
+  !NestedStructTy.hasOffset()`.
+- **Verified:**
+  - `all_unordered_and_instance_array.2`: **Passes** (was: `Mismatch at
+    offset 100 expected 48 received 0`).
+  - `nested_structs_instance_arrays.{2,31}`: still fail with their own
+    unrelated, already-documented (`L368`) mismatch -- confirmed by a
+    different offset (56, not 100) and a different stored value, not a
+    regression.
+  - `ninja check-feme`: 3525/3586 Passed, 61 Unsupported, 0 Failed (one
+    new unit test added: `TrailingNestedNonOffsetStructWithMatrixMember
+    TightlyPacks`).
+  - Full `random_geometry.*` fuzz sweep (850 cases, 244 runnable): 242
+    Passed, 2 Failed, 0 crashes -- up from `L369`'s own 241/3/0 baseline.
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal SPIR-V-to-LLVM lowering correctness fix,
+  no feature/extension-surface change.
+- **Files:** `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`,
+  `feme/unittests/Conversion/SPIRVToLLVM/SPIRVToLLVMTest.cpp`.
+- **Open follow-ups:** `nested_structs_instance_arrays.{2,31}`'s
+  remaining mismatch (`L368`'s own handoff item, unchanged).
