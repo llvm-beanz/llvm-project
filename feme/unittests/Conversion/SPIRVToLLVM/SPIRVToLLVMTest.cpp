@@ -1771,4 +1771,62 @@ TEST(SPIRVToLLVMTest,
   EXPECT_EQ(Result.find(", 0, 2] :"), std::string::npos) << Result;
 }
 
+// (Roadmap L370) A non-`Offset`-decorated nested struct member embedded
+// as the *last* member of an enclosing `Offset`-decorated struct used to
+// silently convert too large, rather than failing or being retried
+// tightly: unlike `NestedNonOffsetStructTightEmbeddingRemapsMemberIndex
+// Correctly` (above)'s own shape (where the nested member is *not* last, so
+// an oversized natural conversion collides with -- and is caught by
+// validation against -- a following sibling's own declared offset), a
+// nested member with no sibling after it has nothing for an oversized
+// natural layout to collide with: the enclosing struct's own offset
+// validation only ever checks where each member *starts*, never how
+// large a trailing member's own converted body grows to, so the
+// convert-naturally-first attempt silently "succeeded" with 4 bytes of
+// unneeded interior padding inside the nested struct's own body (an
+// `i32` member naturally padded up to a following `mat2x2` member's
+// 8-byte real-vector alignment) baked in, and this bug was never routed
+// through this file's "tight" retry tiers at all. Reduced from the real
+// CTS shape this was found from (`dEQP-VK.transform_feedback.fuzz.
+// random_geometry.all_unordered_and_instance_array.2`'s own captured-
+// output struct, whose last member is a non-`Offset` `{i32, mat2x2}`
+// substruct that must end exactly 20 bytes after its own start to match
+// the enclosing struct's own `XfbStride`).
+TEST(SPIRVToLLVMTest,
+     TrailingNestedNonOffsetStructWithMatrixMemberTightlyPacks) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @shared : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], "
+      "!spirv.struct<(i32, !spirv.matrix<2 x vector<2xf32>>)> [4])>, "
+      "Workgroup> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @shared : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], "
+      "!spirv.struct<(i32, !spirv.matrix<2 x vector<2xf32>>)> [4])>, "
+      "Workgroup> "
+      "%outer = spirv.Constant 1 : i32 "
+      "%inner = spirv.Constant 1 : i32 "
+      "%1 = spirv.AccessChain %0[%outer, %inner] : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], "
+      "!spirv.struct<(i32, !spirv.matrix<2 x vector<2xf32>>)> [4])>, "
+      "Workgroup>, i32, i32 -> "
+      "!spirv.ptr<!spirv.matrix<2 x vector<2xf32>>, Workgroup> "
+      "%2 = spirv.Load \"Workgroup\" %1 : !spirv.matrix<2 x vector<2xf32>> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The nested struct's own real embedding must be tight (no synthetic
+  // pad inserted between its `i32` member and its `mat2x2` member) --
+  // confirming the enclosing struct's own declared offsets (0, 4) really
+  // did force a gap-free, 2-member physical layout for the nested
+  // substruct, not the 3-member (with a synthetic 4-byte pad) layout a
+  // naive, natural-alignment-respecting conversion would otherwise
+  // silently accept uncaught, since this nested member is the last one.
+  EXPECT_EQ(Result.find("array<4 x i8>"), std::string::npos) << Result;
+  // The declared member index 1 (the `mat2x2`) must remain physical
+  // index 1 in this tight embedding (identity mapping).
+  EXPECT_NE(Result.find(", 1, 1] :"), std::string::npos) << Result;
+}
+
 } // namespace
