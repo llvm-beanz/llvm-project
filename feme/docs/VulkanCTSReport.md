@@ -14095,3 +14095,46 @@ carried over from the previous session's handoff
   alpha-decode tie-break (12 cases), and the still-overdue broader-than-
   tessellation CTS sweep (`api`/`pipeline`/`shader_render`/
   `synchronization`).
+
+## New finding: broader `transform_feedback.*` sweep (not yet triaged)
+
+Ran the full `dEQP-VK.transform_feedback.*` group (133,719 cases) against
+the real FeMe device for the first time this session (previous sessions
+only ever sampled the `fuzz.random_geometry.*` sub-group directly) to
+confirm `L371`'s fix doesn't regress anything wider. Results:
+Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
+126,987/133,719 (95.0%, mostly `maxTransformFeedbackBuffers`/
+`shaderFloat64`/component-count device-limit gaps, not bugs).
+
+- **No regression confirmed:** zero failures in
+  `fuzz.random_geometry.*` (the sub-group `L371` and its predecessors
+  `L366`/`L368`/`L369`/`L370` all live in) -- the full 244/244 runnable
+  cases in that sub-group all Pass, matching this session's own
+  targeted sweep result.
+- **Two new, not-yet-triaged failure clusters surfaced**, both
+  pre-existing (not caused by this session's change, confirmed by their
+  presence being orthogonal to anything `L371` touches):
+  - `simple`/`simple_fast_gpl`/`simple_optimized_gpl.xfb_pointsize_*`
+    (~1,920 of the 1,957 total fails): `Failed at item N received:<huge
+    or tiny float> expected:0`-style mismatches, consistent with an
+    uninitialized/garbage `gl_PointSize` XFB capture, not yet
+    investigated.
+  - `fuzz.random_vertex.*` and `fuzz.single_basic_{type,array}.
+    {mat2x3,mat3,mat4x3}.vertex` (44 of the 1,957, within the `fuzz`
+    sub-group's own 722 Pass/44 Fail/1,402 NotSupported breakdown): a
+    *different* fuzz variant than `random_geometry.*` (vertex-shader-only,
+    not geometry-shader), including non-square-matrix-specific cases
+    (`mat2x3`/`mat3`/`mat4x3`, never `mat2`/`mat3`/`mat4`/`mat4x2`/etc.)
+    and `random_vertex`'s own `nested_structs_instance_arrays.22` (a
+    different case index than `.2`/`.31`, in the vertex-shader fuzz
+    variant, not geometry) and `random_vertex.basic_arrays.1` (matching
+    the still-open `basic_arrays.1` content-mismatch item carried in
+    prior sessions' handoffs for the geometry variant -- worth checking
+    whether these are the same root cause across both shader stages).
+- **Recommendation for a future session:** these are both substantial
+  enough to warrant their own dedicated root-cause session(s); not
+  attempted this session due to time budget (this session's primary
+  deliverable, `L371`, was already complete and verified). The
+  `xfb_pointsize` cluster is likely the single highest-value pick next,
+  given its size (~1,920 cases, by far the largest unaddressed cluster
+  found in any sweep so far this project).
