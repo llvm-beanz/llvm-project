@@ -63,23 +63,28 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(a few hours, new)** `all_unordered_and_instance_array.2`'s newly-surfaced
-   runtime content mismatch (`Mismatch at offset 100 expected 48 received 0`) --
-   was hidden behind a pipeline-creation crash until this session's fix; worth
-   checking first whether it's yet another instance of the same "`received 0`"
-   family (quick signature check) before assuming it's unrelated.
-2. **(dedicated session, carried over)**
+1. **(dedicated session, carried over many sessions, unchanged)**
    `nested_structs_instance_arrays.{2,31}`'s own remaining mismatch (`L368`'s
-   handoff item, confirmed unrelated to this fix) -- still needs its own
-   root-cause session; canonicalization is confirmed correct for this field, so
-   likely `Executor.cpp`'s XFB-capture loop.
-3. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
+   handoff item) -- this is now the single most-carried-over item across
+   sessions. Canonicalization confirmed correct for this field in earlier
+   sessions, so likely `Executor.cpp`'s XFB-capture loop, not
+   `SPIRVToLLVMPatterns.cpp` (the last two sessions' fixes were both in the
+   latter and both left this one untouched). Start with the same
+   signature-decoder + `FEME_DUMP_IR_POSTCANON`/`FEME_DEBUG_DUMP_SPIRV_MLIR`
+   combo that worked for both `L369` and `L370`.
+2. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
    for many sessions: `user_defined_io` (27 cases), `device_group` (7),
    `memory_model.*` races (~24).
-4. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
+3. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
    generalization (`shader_input_output.barrier`,
    `rasterization.line_continuity.*`).
-5. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
+4. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
    tie-break, 12 cases.
-6. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
+5. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
    (`api`/`pipeline`/`shader_render`/`synchronization`).
+6. **(minor, low priority)** `/tmp/parse_sig.py`'s signature-blob decoder has
+   now paid off across two sessions (`L369`, `L370`) -- worth formalizing into a
+   real in-tree debug tool (e.g. a `feme-decode-signature` utility or a
+   `FEME_DUMP_SIGNATURE_DECODED=1` env var printing the same decoded fields
+   FeMe's own IR dump already embeds) instead of recreating it ad hoc each time
+   it's needed.
