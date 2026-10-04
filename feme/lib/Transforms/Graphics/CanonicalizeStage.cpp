@@ -5937,37 +5937,61 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // mirroring `addStageIOStructMembers`'s own `ArrayType`
             // branch one level further in (for a *member's* own array-
             // of-struct field, e.g. `S blockSa[2]`).
-            // (Roadmap L366) Unlike the single-member sub-case below,
-            // this genuine multi-member XFB "array of block instances"
-            // case must *not* also set `XfbBufferArrayStride`:
-            // `Executor.cpp`'s `XfbBufferArrayStride != 0` capture logic
-            // routes each instance to its own, separately-bound buffer
-            // `XfbBuffer + k` (`Signature.h`'s own comment) -- the
-            // single-member sub-case's mechanism, where each instance
-            // really is a *separate* captured variable with its own
-            // buffer binding. Here, by contrast, every instance shares
-            // the *same* `XfbBuffer` (confirmed via manual signature
-            // decoding: every member's `XfbBuffer` is identical across
-            // instances) and `BlockArrayCount`'s own `RowCount` widening
-            // above already packs every instance's rows back-to-back
-            // within that one buffer -- precisely the plain, no-stride
-            // row-packing path `Executor.cpp`'s capture loop already
-            // takes by default. Passing a nonzero stride here (an
-            // earlier version of this fix's own mistake) instead made
-            // the capture loop route rows to nonexistent buffer indices
-            // `BaseBufIdx + Row / Stride`, corrupting
-            // `Draw.XfbBuffers`'s own out-of-bounds access -- this
-            // session's `double free or corruption` regression.
+            // (Roadmap L371) L366's own claim just above (superseded by
+            // this fix) that this genuine multi-member XFB "array of
+            // block instances" case must *not* also set
+            // `XfbBufferArrayStride` was wrong: dEQP binds this shape's
+            // `N` array instances the exact same way it binds the
+            // single-member sub-case's own `N` instances -- as `N`
+            // *separate* transform-feedback buffer bindings, each one
+            // `XfbStride`-many bytes further into the same underlying
+            // buffer object (confirmed by direct comparison against
+            // `dEQP-VK.transform_feedback.fuzz.instance_array_basic_
+            // type.mat4.vertex`'s own passing single-member `block[3]`
+            // shape, which binds identically and is captured correctly
+            // today) -- never "every instance packed back-to-back within
+            // one shared record" as this comment previously assumed.
+            // Leaving `XfbBufferArrayStride` at 0 here left every
+            // instance past the first silently uncaptured (`Executor.cpp`'s
+            // no-stride path only ever advances within `BaseBufIdx`'s own
+            // single buffer, never reaching `BaseBufIdx + Instance`) --
+            // the `nested_structs_instance_arrays.{2,31}` "received 0"
+            // failure this fixes.
+            //
+            // L366's own regression came from a *different* mistake than
+            // "setting a nonzero stride at all": an earlier attempt
+            // passed `BlockArrayCount` itself (the instance *count*, e.g.
+            // 2) as the stride, rather than this leaf's own *per-instance
+            // row count* (e.g. 1 for a scalar/vector leaf, 2 for a
+            // `mat2x2`, 3 for a `mat3x3`) -- exactly the distinction the
+            // single-member mechanism's own `XfbBufferArrayStride`
+            // computation (`getStageIORowShape(RealMemberTy).RowCount`,
+            // above) already gets right. `Executor.cpp`'s capture loop
+            // recovers `(Instance, InnerRow) = (Row / Stride, Row %
+            // Stride)`; using the instance count as `Stride` instead of
+            // the per-instance row count scrambles that split for any
+            // leaf whose own row count differs from the instance count
+            // (every leaf here but a lucky coincidence), routing rows to
+            // out-of-range buffer indices -- the prior session's "double
+            // free or corruption" crash. `getStageIORowShape(EltTy)
+            // .RowCount` below (computed on the *un*-widened per-instance
+            // leaf type, mirroring the single-member case's own
+            // `RealMemberTy`) avoids repeating that mistake.
             auto AddBlockElement = [&](GlobalVariable *EltGV,
                                        unsigned EltAddrSpace,
                                        const ParsedSPIRVDecorations &EltD,
                                        Type *EltTy) {
-              Type *WrappedTy =
-                  BlockArrayCount > 1
-                      ? ArrayType::get(EltTy, BlockArrayCount)
-                      : EltTy;
+              uint32_t EltXfbBufferArrayStride = 0;
+              Type *WrappedTy = EltTy;
+              if (BlockArrayCount > 1) {
+                if (XfbBlockArrayOfInstances)
+                  EltXfbBufferArrayStride =
+                      getStageIORowShape(EltTy).RowCount;
+                WrappedTy = ArrayType::get(EltTy, BlockArrayCount);
+              }
               addElement(EltGV, EltAddrSpace, EltD, WrappedTy,
-                        /*RowCountIsVertexArray=*/false);
+                        /*RowCountIsVertexArray=*/false,
+                        /*XfbBufferArrayStride=*/EltXfbBufferArrayStride);
             };
             if (isGenuineMultiMemberNestedStruct(PM.Ty)) {
               uint32_t NestedLocation = PM.D.Location.value_or(0);
