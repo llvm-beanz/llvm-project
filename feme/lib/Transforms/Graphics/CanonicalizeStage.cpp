@@ -4183,6 +4183,27 @@ struct NestedStageIOField {
   /// `x`/`y` members have `RowCount=1` each per instance, but its `z`
   /// member -- itself a two-element array -- has `RowCount=2`).
   uint32_t RowCount;
+  /// (Roadmap L368) Whether this leaf is itself a *whole*, not-yet-
+  /// decomposed multi-row value (`ValueTy == Ty` at the leaf, and
+  /// `RowCount > 1`) that `storeStageIOValue`/`loadStageIOValue`'s own
+  /// generic `ArrayType` branch will *still* need to decompose one row
+  /// at a time via its own `Row * RE + R` combination (see that
+  /// function's own H101c comment). When true, `Row` above is `0` (no
+  /// sub-offset has been resolved yet -- the whole value starts at this
+  /// leaf's own row 0) and an *enclosing* array-of-block-instances level
+  /// must fold its own instance index into `Row` *additively*
+  /// (`Instance + Row`), leaving the multiplicative `* RowCount` scaling
+  /// to that same downstream `storeStageIOValue`/`loadStageIOValue` call
+  /// -- folding it in *again* here first (`Instance * RowCount + Row`)
+  /// would double-scale the instance index by this leaf's own `RowCount`
+  /// a second time (e.g. instance 1 of a `vec2 y[2]` member landing on
+  /// `Row=4` instead of `Row=2`, a `double free or corruption` heap
+  /// overrun `dEQP-VK.transform_feedback.fuzz.random_geometry.
+  /// nested_structs_instance_arrays.{2,31}` exposed -- the member's own
+  /// declared array dimension and the block's own array-of-instances
+  /// dimension are two independent axes that happen to share the same
+  /// `RowCount` here only by coincidence of this fuzz case's shape).
+  bool DeferRowScale;
 };
 
 /// (Roadmap H115) Generalizes the old (roadmap H101t) "genuine
@@ -4221,9 +4242,18 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
       uint64_t InnerResidual = Residual - Instance * InstanceSize;
       NestedStageIOField Inner = resolveNestedStageIOField(
           ElemTy, InnerResidual, ValueTy, DL, UseTightArrayStride);
-      return {Inner.IDStart, Instance * Inner.RowCount + Inner.Row,
-              Inner.Component,
-              static_cast<uint32_t>(ArrTy->getNumElements()) * Inner.RowCount};
+      // (Roadmap L368) See `NestedStageIOField::DeferRowScale`'s own
+      // comment: when `Inner` is itself a whole, not-yet-decomposed
+      // multi-row leaf, fold this array-of-instances level's own
+      // `Instance` index *additively*, not multiplicatively -- the
+      // multiplicative scaling by `Inner.RowCount` happens exactly once,
+      // downstream, in `storeStageIOValue`/`loadStageIOValue`'s own
+      // `ArrayType` decomposition of this same leaf's `RowCount` rows.
+      uint64_t Row = Inner.DeferRowScale ? Instance + Inner.Row
+                                        : Instance * Inner.RowCount + Inner.Row;
+      return {Inner.IDStart, Row, Inner.Component,
+              static_cast<uint32_t>(ArrTy->getNumElements()) * Inner.RowCount,
+              Inner.DeferRowScale};
     }
     // An ordinary (non-genuine-multi-member) array member -- not this
     // shape; fall through to the plain-leaf path below, which already
@@ -4256,7 +4286,33 @@ NestedStageIOField resolveNestedStageIOField(Type *Ty, uint64_t Residual,
   }
   auto [Row, Component] =
       resolveRowComponent(Ty, Residual, ValueTy, DL, UseTightArrayStride);
-  return {0, Row, Component, getStageIORowShape(Ty).RowCount};
+  uint32_t RowCount = getStageIORowShape(Ty).RowCount;
+  // (Roadmap L368) `ValueTy` names this leaf's own *whole* value (every
+  // one of its `RowCount` rows at once, e.g. a `vec2 y[2]` member's
+  // whole array) when it spans \p Ty's own full `DL.getTypeAllocSize` --
+  // a genuinely *narrower* access (one specific row/component) can only
+  // ever be smaller, never equal, since it addresses a strict subset of
+  // \p Ty's own bytes. Pointer-equality (`ValueTy == Ty`) is *not*
+  // reliable here: `SPIRVToLLVMPatterns.cpp`'s "tight vector" retry (see
+  // `getTightVectorMarkerInnerType`'s own comment) may substitute an
+  // ABI-aligned `<N x float>` member's own array-of-rows with an
+  // equal-size-but-differently-typed `[rows x Marker<[N x float]>]` for
+  // the *value* being stored/loaded, even though \p Ty (the global's own
+  // declared field type) keeps the natural `[rows x <N x float>]` shape
+  // -- same total shape and byte size, different `Type*` identity,
+  // which pointer-equality alone misses (`dEQP-VK.transform_feedback.
+  // fuzz.random_geometry.nested_structs_instance_arrays.31`'s own
+  // shape). When this leaf's full value is being stored/loaded in one
+  // call, `storeStageIOValue`/`loadStageIOValue` themselves will still
+  // decompose \p Ty's own row dimension(s) one at a time via their own
+  // `Row * RE + R` combination (see `NestedStageIOField::DeferRowScale`'s
+  // own comment), so this leaf's own `Row` must stay `0` (not yet
+  // folded) and the caller must know to defer its own instance-index
+  // scaling to that same downstream combination.
+  bool DeferRowScale = RowCount > 1 &&
+                       DL.getTypeAllocSize(ValueTy) ==
+                           DL.getTypeAllocSize(Ty);
+  return {0, Row, Component, RowCount, DeferRowScale};
 }
 
 /// Resolves \p Ptr -- a load/store's pointer operand -- against \p
@@ -4463,7 +4519,17 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   // into the eventual leaf's own `Row`, scaled by that leaf's own
   // per-instance `RowCount` -- `BlockInstance` is 0 for the (far more
   // common) non-arrayed-block case, leaving `Nested.Row` unchanged.
-  uint64_t Row = BlockInstance * Nested.RowCount + Nested.Row;
+  // (Roadmap L368) Unless `Nested.DeferRowScale` -- the leaf's own
+  // `RowCount` rows are still a whole, not-yet-decomposed value that
+  // `storeStageIOValue`/`loadStageIOValue` will themselves decompose via
+  // their own multiplicative `Row * RE + R`; pre-multiplying
+  // `BlockInstance` by `Nested.RowCount` here too would double-scale it
+  // (see `NestedStageIOField::DeferRowScale`'s own comment) -- fold
+  // `BlockInstance` in additively instead, leaving the one necessary
+  // multiplication to that same downstream call.
+  uint64_t Row = Nested.DeferRowScale
+                     ? BlockInstance + Nested.Row
+                     : BlockInstance * Nested.RowCount + Nested.Row;
   return StageIOAccess{IDs.slice(IDStart, 1), AsConstant(Row),
                        AsConstant(Nested.Component), Vertex, IsOutput};
 }

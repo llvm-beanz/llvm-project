@@ -87,6 +87,8 @@ struct StageStorage {
 
   void writeRaw(uint32_t ElementID, uint32_t Component, uint32_t Invocation,
                 uint32_t Value, uint32_t Row = 0) {
+    assert(ElementID < Elements.size() &&
+           "StageStorage::writeRaw: ElementID out of range");
     const cpu::FemeStageElement &E = Elements[ElementID];
     uint64_t Off =
         E.DataOffset + (uint64_t)Row * E.RowStride +
