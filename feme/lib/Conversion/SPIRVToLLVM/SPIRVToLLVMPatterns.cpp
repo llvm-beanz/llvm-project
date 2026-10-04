@@ -6374,26 +6374,70 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
   mlir::DataLayout DL;
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
     mlir::Type ElementTy = Type.getElementType(I);
-    // (Roadmap H133) A nested-struct member must be converted via this
-    // same function directly, not through Converter.convertType --
-    // MLIR's TypeConverter caches "context-free" conversions per raw
-    // SPIR-V type (see TypeConverter::convertTypeImpl), so once *any*
-    // caller (anywhere, including one only checking whether some
-    // *different* struct converts, transitively) has caused this exact
-    // nested struct type to be converted once, every *other* caller
-    // (including this struct's own member-list construction here) reuses
-    // that one cached answer -- even though convertOffsetStructTypeIgnoring
-    // Decorations's own several retry tiers are deterministic given only
-    // \p Type and \p Converter, so recomputing here is always safe and
-    // guarantees this struct's own Members list agrees with whatever
-    // getStructMemberPhysicalIndex (which always calls this function
-    // directly, bypassing the cache) computes for this same nested
-    // struct, however it's reached.
+    // (Roadmap H133, L370) A nested-struct member must be converted via
+    // this same function directly (or, when \p Type itself is
+    // byte-offset-decorated, via getTightNestedStructType instead), not
+    // through Converter.convertType -- MLIR's TypeConverter caches
+    // "context-free" conversions per raw SPIR-V type (see
+    // TypeConverter::convertTypeImpl), so once *any* caller (anywhere,
+    // including one only checking whether some *different* struct
+    // converts, transitively) has caused this exact nested struct type
+    // to be converted once, every *other* caller (including this
+    // struct's own member-list construction here) reuses that one
+    // cached answer.
+    //
+    // Whether to use the naive recursive conversion or
+    // getTightNestedStructType depends on *both* \p Type's and \p
+    // ElementTy's own `hasOffset()`: the bug this guards against only
+    // arises when \p Type itself declares explicit per-member
+    // `Offset`s (so \p Type's own members occupy fixed, byte-precise
+    // positions with no slack for a nested member's own body to grow
+    // past its natural minimal size) *and* \p ElementTy itself declares
+    // none of its own (as commonly happens for a struct nested *inside*
+    // a `Block`-decorated struct, which SPIR-V does not require to
+    // carry its own redundant Offsets) -- in that combination, a naive
+    // recursive conversion lets layOutStructIfOffsetsMatch's own
+    // non-offset branch silently insert a natural-alignment interior
+    // gap inside \p ElementTy's own body (e.g. padding an `i32` member
+    // up to a following matrix member's 8-byte vector alignment) that
+    // \p Type's own offset validation below can never catch -- that
+    // validation only pins down where each of \p Type's own members
+    // starts, never how large a nested member's own converted body may
+    // silently balloon to. This let `dEQP-VK.transform_feedback.fuzz.
+    // all_unordered_and_instance_array.2`'s own non-offset nested
+    // struct (an `{i32}` wrapper immediately followed by a `mat2x2`
+    // member, with no member of its own needing padding) silently gain
+    // 4 bytes of unneeded interior padding, which \p Type's own
+    // declared offsets (member0 at 96, member1 at 88) could not detect
+    // since they only constrain where member0 itself starts, not how
+    // large its own converted body is -- producing a corrupted layout
+    // that still passed every outer-offset check, and was never run
+    // through this file's later "tight" retry tiers because the naive
+    // first attempt already "succeeded".
+    //
+    // Neither of the other two combinations needs this: when \p Type
+    // itself declares no offsets at all (e.g. a plain `Input`/`Output`
+    // interface-variable struct with no `Block`/XFB byte-position
+    // semantics at all, as `NestedNonOffsetStructInteriorPadRemapsInner
+    // Member` below exercises), there is no byte-precision requirement
+    // to protect, and the naive recursive conversion's own natural,
+    // host-ABI-matching layout (including any genuinely-needed interior
+    // pad) remains exactly the semantics this conversion needs. And
+    // when \p ElementTy itself *does* declare its own explicit offsets
+    // (a nested, independently offset-laid-out UBO/SSBO member, as the
+    // "H135" packed-interior-gap tests exercise), the naive recursive
+    // call already validates and retries against those offsets
+    // correctly on its own, via this same function's own
+    // layOutStructIfOffsetsMatch-based tiers one level down -- forcing
+    // getTightNestedStructType here instead would needlessly strip a
+    // real, ABI-driven gap that member's own offsets actually rely on.
     mlir::Type MemberTy;
     if (auto NestedStructTy =
             mlir::dyn_cast<mlir::spirv::StructType>(ElementTy))
-      MemberTy = convertOffsetStructTypeIgnoringDecorations(NestedStructTy,
-                                                            Converter, nullptr);
+      MemberTy = (Type.hasOffset() && !NestedStructTy.hasOffset())
+                     ? getTightNestedStructType(NestedStructTy, Converter)
+                     : convertOffsetStructTypeIgnoringDecorations(
+                           NestedStructTy, Converter, nullptr);
     else
       MemberTy = Converter.convertType(ElementTy);
     if (!MemberTy)
