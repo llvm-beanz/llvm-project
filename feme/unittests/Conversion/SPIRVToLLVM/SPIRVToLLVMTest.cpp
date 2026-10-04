@@ -1716,4 +1716,59 @@ TEST(SPIRVToLLVMTest, WholeWrapperFieldLoadFromStorageBufferConverts) {
   EXPECT_NE(Result.find("llvm.store"), std::string::npos) << Result;
 }
 
+// (Roadmap L369) A non-`Offset`-decorated nested struct member (legitimate
+// per the SPIR-V spec: only the outermost `Block`-decorated struct needs
+// its own member `Offset`s) embedded inside an enclosing `Offset`-
+// decorated struct whose own declared offsets require the nested member
+// to be laid out *tightly* (no interior padding) disagreed with
+// `getStructMemberPhysicalIndexInRealType`'s own isolated re-derivation of
+// that same nested struct's "natural" (alignment-gap-inserting) layout --
+// the real embedding has 2 physical members (no pad), the isolated redo
+// computed 3 (with a synthetic 12-byte pad inserted before the
+// `vector<4xf32>` member, to satisfy its own natural 16-byte alignment),
+// silently remapping the declared index 1 member to the wrong physical
+// slot 2. Modeled on the real CTS shape this was found from
+// (`dEQP-VK.transform_feedback.fuzz.random_geometry.all_missing.8`'s own
+// `!spirv.struct<(mat3x3, mat3x4, mat3x3)>` substruct), reduced to the
+// smallest shape that reproduces it: an outer offset-decorated struct
+// whose first member is a no-`Offset` `{f32, vector<4xf32>}` substruct
+// that must be tightly packed (ending at byte 20, not the 32 its own
+// isolated natural layout would compute) to satisfy the outer struct's
+// own declared second-member `Offset 20`.
+TEST(SPIRVToLLVMTest,
+     NestedNonOffsetStructTightEmbeddingRemapsMemberIndexCorrectly) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @shared : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32, vector<4xf32>)> [0], "
+      "f32 [20])>, Workgroup> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @shared : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32, vector<4xf32>)> [0], "
+      "f32 [20])>, Workgroup> "
+      "%outer = spirv.Constant 0 : i32 "
+      "%inner = spirv.Constant 1 : i32 "
+      "%1 = spirv.AccessChain %0[%outer, %inner] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.struct<(f32, vector<4xf32>)> [0], "
+      "f32 [20])>, Workgroup>, i32, i32 -> "
+      "!spirv.ptr<vector<4xf32>, Workgroup> "
+      "%2 = spirv.Load \"Workgroup\" %1 : vector<4xf32> "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The nested struct's own real embedding must be tight (no synthetic
+  // pad inserted) -- confirming the outer struct's own declared offsets
+  // (0, 20) really did force a gap-free, 2-member physical layout for the
+  // nested substruct, not the 3-member (with pad) layout its own isolated
+  // natural-alignment conversion would otherwise compute.
+  EXPECT_EQ(Result.find("array<12 x i8>"), std::string::npos) << Result;
+  // The declared member index 1 (`vector<4xf32>`) must remain physical
+  // index 1 in this tight embedding (identity mapping) -- not remapped to
+  // 2, the wrong index the bug's isolated-redo fallback used to compute
+  // from its own (irrelevant, since never actually used for the real
+  // embedding) padded natural layout.
+  EXPECT_NE(Result.find(", 0, 1] :"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find(", 0, 2] :"), std::string::npos) << Result;
+}
+
 } // namespace
