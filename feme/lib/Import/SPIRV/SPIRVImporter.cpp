@@ -8,6 +8,8 @@
 
 #include "feme/Import/SPIRV/SPIRVImporter.h"
 
+#include <cstdlib>
+
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
@@ -1070,6 +1072,14 @@ llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
   if (!SpirvModule)
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "failed to deserialize SPIR-V module");
+
+  // Ground-truth debug aid: dump the just-deserialized `spirv.module` op
+  // (SPIR-V dialect MLIR, pre-any-FeMe-specific lowering) so bugs in
+  // FeMe's own SPIR-V->LLVM conversion can be diffed against what the
+  // SPIR-V itself actually says, rather than re-derived from LLVM-level
+  // output alone.
+  if (::getenv("FEME_DEBUG_DUMP_SPIRV_MLIR"))
+    SpirvModule->print(llvm::errs());
 
   return Module::fromMLIR(std::move(SpirvModule));
 }
