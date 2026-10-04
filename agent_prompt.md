@@ -63,28 +63,33 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **(dedicated session, carried over many sessions, unchanged)**
-   `nested_structs_instance_arrays.{2,31}`'s own remaining mismatch (`L368`'s
-   handoff item) -- this is now the single most-carried-over item across
-   sessions. Canonicalization confirmed correct for this field in earlier
-   sessions, so likely `Executor.cpp`'s XFB-capture loop, not
-   `SPIRVToLLVMPatterns.cpp` (the last two sessions' fixes were both in the
-   latter and both left this one untouched). Start with the same
-   signature-decoder + `FEME_DUMP_IR_POSTCANON`/`FEME_DEBUG_DUMP_SPIRV_MLIR`
-   combo that worked for both `L369` and `L370`.
-2. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
+1. **(a few hours, new, high-value)** `xfb_pointsize` family: ~1,920 fails in
+   `simple`/`simple_fast_gpl`/`simple_optimized_gpl.xfb_pointsize_*`, all
+   `Failed at item N received:<huge/tiny float> expected:0` -- strongly suggests
+   an uninitialized/garbage `gl_PointSize` XFB capture. By far the largest
+   single unaddressed cluster found in any sweep so far this project. Start with
+   one minimal failing case (e.g.
+   `xfb_pointsize_endqueryindexed_streamid_0_1_512`) and a
+   `FEME_DUMP_IR_PRECANON` dump to see whether `gl_PointSize`'s XFB capture is
+   even wired up at all, or just wrong.
+2. **(a few hours, new)** `fuzz.random_vertex.*` + non-square-matrix
+   `single_basic_{type,array}.{mat2x3,mat3,mat4x3}.vertex` (44 fails): a
+   different fuzz variant (vertex-only, not geometry) from the one `L371` fixed.
+   Includes a `random_vertex.nested_structs_instance_arrays.22` (different case
+   index, vertex not geometry -- worth checking if it's the *same* root cause as
+   `.2`/`.31` in a different shader stage, or new) and
+   `random_vertex.basic_arrays.1` (matches a still-open geometry-variant handoff
+   item from several sessions ago -- check if they share a cause).
+3. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
    for many sessions: `user_defined_io` (27 cases), `device_group` (7),
    `memory_model.*` races (~24).
-3. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
+4. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
    generalization (`shader_input_output.barrier`,
    `rasterization.line_continuity.*`).
-4. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
+5. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
    tie-break, 12 cases.
-5. **(a few hours, still overdue)** Broader-than-tessellation CTS sweep
-   (`api`/`pipeline`/`shader_render`/`synchronization`).
-6. **(minor, low priority)** `/tmp/parse_sig.py`'s signature-blob decoder has
-   now paid off across two sessions (`L369`, `L370`) -- worth formalizing into a
-   real in-tree debug tool (e.g. a `feme-decode-signature` utility or a
-   `FEME_DUMP_SIGNATURE_DECODED=1` env var printing the same decoded fields
-   FeMe's own IR dump already embeds) instead of recreating it ad hoc each time
-   it's needed.
+6. **(a few hours, still overdue, but note item 1 above is now the better
+   broader-sweep pick)** Broader-than-tessellation CTS sweep
+   (`api`/`pipeline`/`shader_render`/`synchronization`) -- still not done, but
+   the `xfb_pointsize` finding (item 1) is a bigger, more concrete lead found
+   *within* `transform_feedback` itself; worth doing that first.
