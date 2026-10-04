@@ -5890,7 +5890,19 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             unsigned PhysicalIndex = I < NonPadPhysicalIndices.size()
                                         ? NonPadPhysicalIndices[I]
                                         : I;
-            if (MemberD.XfbOffset && !MemberD.BuiltIn)
+            // (Roadmap L372) A `BuiltIn` member can carry a real `Offset`
+            // decoration too, same as any other member, whenever its
+            // enclosing block is genuinely XFB-captured and its members
+            // are declared out of ascending-physical-offset order (e.g.
+            // `xfb_clipdistance_*`'s own shape: `gl_PointSize` declared
+            // first at `Offset=28` but physically laid out *after* the
+            // 7-row `gl_ClipDistance` array declared second at
+            // `Offset=0`) -- no longer excluded from this remap, which
+            // used to leave such a member's `PhysicalIndex` at its
+            // (wrong) declared-order default, silently swapping which
+            // physical field each of a `BuiltIn`/non-`BuiltIn` pair's own
+            // `SignatureElement` resolved to.
+            if (MemberD.XfbOffset)
               PhysicalIndex =
                   DL.getStructLayout(ST)->getElementContainingOffset(
                       *MemberD.XfbOffset);
