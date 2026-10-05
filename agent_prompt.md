@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: gpt-5.6-sol
 ---
 # Initial Guidelines
 
