@@ -60,23 +60,17 @@ file.
 
 # Request
 
-I'm seeing one of feme's tests failing locally. Can you fix it?
+Still seeing a test failure. Can you fix it?
 
 ```
-[57/58] Running the feme regression tests
-FAIL: FEME :: Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll (1217 of 1237)
-******************** TEST 'FEME :: Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll' FAILED ********************
-Exit Code: 1
-
-Command Output (stdout):
 --
 # RUN: at line 1
 /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
 # executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
 # executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
 # .---command stderr------------
-# | /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll:35:10: error: CHECK: expected string not found in input
-# | ; CHECK: %chain.merge = select i1 %.linearized9, i1 true, i1 %.linearized8
+# | /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll:44:10: error: CHECK: expected string not found in input
+# | ; CHECK: %chain.merge = select i1 {{%[A-Za-z0-9_.]+}}, i1 true, i1 {{%[A-Za-z0-9_.]+}}
 # |          ^
 # | <stdin>:1:1: note: scanning from here
 # | ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
@@ -93,8 +87,8 @@ Command Output (stdout):
 # | Input was:
 # | <<<<<<
 # |             1: ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
-# | check:35'0    {                                                                                                                                   search range start (exclusive)
-# | check:35'1                                                                                                                                        error: no match found in search range
+# | check:44'0    {                                                                                                                                   search range start (exclusive)
+# | check:44'1                                                                                                                                        error: no match found in search range
 # |             2: source_filename = "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll"
 # |             3:
 # |             4: define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #0 {
@@ -109,7 +103,7 @@ Command Output (stdout):
 # |            36:
 # |            37: Flow: ; preds = %loop.exit.guard.Flow_crit_edge
 # |            38:  %live.merge = select i1 %Guard..inv, i1 %live.t, i1 %live.f
-# | check:35'2      ?                                                             possible intended match
+# | check:44'2      ?                                                             possible intended match
 # |            39:  %sideeffect.merge = select i1 %Guard..inv, i1 %sideeffect.t, i1 %sideeffect.f
 # |            40:  %.linearized = select i1 %Guard..inv, i1 false, i1 true
 # |            41:  %not..linearized = xor i1 %.linearized, true
@@ -124,14 +118,8 @@ Command Output (stdout):
 # |           279: attributes #2 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
 # |           280: attributes #3 = { nounwind willreturn memory(argmem: read) }
 # |           281: attributes #4 = { nounwind willreturn memory(argmem: write) }
-# | check:35'3                                                                   } search range end (exclusive)
+# | check:44'3                                                                   } search range end (exclusive)
 # | >>>>>>
 # `-----------------------------
 # error: command failed with exit status: 1
-
---
-
-********************
-********************
-Failed Tests (1):
 ```
