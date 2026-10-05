@@ -109,18 +109,39 @@ The largest ordinary-failure changes by group are:
 
 ## Current triage
 
-1. **Linearizer dominance regression — at least 31,024 failures.**
+1. **Linearizer dominance regression — 31,024 failures, now safety-fixed
+   (`L377`), shape-support still open (`L377(a)`).**
    `pipeline.monolithic.image` contributes 23,056 failures and
-   `pipeline.monolithic.image_view` contributes 7,968. Representative cases
-   from both families fail pipeline creation because `feme-cpu-linearize`
-   emits IR in which loop activity and exit-mask values do not dominate their
-   uses. This is one shared compiler-root-cause family and the highest-value
-   next fix.
-2. **Sampler coverage — 7,454 failures.** These span every image view type and
-   include address modes, filtering, border colors, reduction behavior, and
-   one `maxSamplerLodBias` case. At least some execute and produce incorrect
-   colors rather than failing compilation, so this remains a family to split
-   by diagnostic after the linearizer regression is removed.
+   `pipeline.monolithic.image_view` contributes 7,968. Root-caused this
+   session: a loop-body-internal divergent exit check (`CheckBlock`) was not
+   always the sole entry into its own "stay in loop" continuation -- an
+   earlier, legitimate constant-predecessor-peeling fold could redirect a
+   different block directly into that continuation, bypassing `CheckBlock`'s
+   own check, so the mask values it computes could not dominate every later
+   use. `feme-cpu-linearize` now detects this shape explicitly
+   (`DT.dominates(CheckBlock, CheckExit->StayInLoop)`) and diagnoses it
+   cleanly instead of risking invalid IR. **Re-verified via a complete rerun
+   of both families** (150,668 cases): 31,024 Pass / 31,024 Fail / 88,620
+   NotSupported / **0 crashes / 0 DeviceLost** -- an identical Pass/Fail
+   split to before (this fix does not make any of these cases pass), but a
+   full-log grep confirms **100% of the 31,024 failures** now hit the new
+   clean diagnostic and fail gracefully with
+   `VK_ERROR_INITIALIZATION_FAILED`. Making this shape actually linearize
+   (so these cases pass) remains open, see `Roadmap.md`'s `L377(a)`.
+2. **Sampler coverage — 7,454 failures, triaged this session (`L378`),
+   bulk folded into `L377(a)`.** Ran `sampler.view_type.*` (74,616 cases:
+   7,625 Pass / 7,453 Fail / 59,538 NotSupported) and
+   `sampler.exact_sampling.*`/`sampler.separate_stencil_usage.*` to
+   completion (both fully clean, 0 Fail). `sampler.border_swizzle.*`
+   (140,696 cases) is entirely `NotSupported` (an unrelated, pre-existing
+   `VK_EXT_border_color_swizzle` extension gap). A full-log grep confirms
+   **all 7,453 `view_type.*` failures carry `L377`'s own exact new
+   diagnostic string** -- the identical `CheckBlock`-not-sole-entry
+   dominance shape, not an independent sampler bug. The only failure in
+   this family genuinely unrelated to `L377` is
+   `sampler.max_sampler_lod_bias.shader_bias` (1 of 10 cases in that small
+   family), which executes and produces an incorrect color -- a real,
+   still-unexplained wrong-pixel bug, tracked as `Roadmap.md`'s `L378(a)`.
 3. **Render-pass correctness and device loss.** `renderpasses` has 4,845
    ordinary failures and 328 `DeviceLost` results. The largest ordinary
    families are dynamic rendering (2,990) and suballocation tests (1,842).
