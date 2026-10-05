@@ -115195,3 +115195,52 @@ Found leftover `FEME_DEBUG_L369`-gated `fprintf` debug instrumentation in `Canon
 5. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged for many sessions: `user_defined_io` (27 cases), `device_group` (7), `memory_model.*` races (~24).
 6. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier generalization (`shader_input_output.barrier`, `rasterization.line_continuity.*`).
 7. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode tie-break, 12 cases.
+
+# Session: complete Vulkan CTS baseline and roadmap re-triage (2026-10-05)
+
+**Confirmed device:** `FeMe CPU Vulkan Device` with the build-tree ICD selected
+explicitly through `VK_DRIVER_FILES` and `VK_ICD_FILENAMES`.
+
+## What's done
+
+1. Rebuilt the assertion-enabled, ccache-backed, no-PCH build and ran
+   `check-feme`: 3,587 Passed / 3 Unsupported / 0 Failed.
+2. Ran all 3,244,369 `dEQP-VK` cases with the committed crash-tolerant harness.
+   The initial sweep had one batch hang for about three hours; terminating only
+   that `deqp-vk` process let the existing recovery rounds classify the missing
+   cases without discarding completed QPA records.
+3. Re-verified all 47,192 initially reported failures alone. Eighteen
+   mesh-shader failures changed to Pass and are contention-only flakes. A final
+   isolated exit-status pass classified the remaining 53 incomplete records as
+   3 ordinary Fail and 50 process crashes (47 SIGSEGV, 3 SIGABRT), leaving zero
+   unrun cases or timeouts.
+4. Final result: 650,027 Pass / 47,174 Fail / 2,546,724 NotSupported / 46
+   QualityWarning / 348 DeviceLost / 50 crashes. Ordinary failures improve by
+   1,133 from the 2026-09-26 baseline, but 39,644 now sit in `pipeline`.
+5. Replaced `VulkanCTSReport.md`'s 14,000-line milestone diary with a concise
+   current baseline and re-triaged `Roadmap.md`. `L376` is closed; `L377`
+   owns the 31,024-case shared linearizer dominance regression and `L378`
+   owns the 7,454-case sampler long tail.
+
+## Important reasoning
+
+- A complete QPA record with `DeviceLost` is not a process crash, but it is
+  still a conformance and stability failure. The report keeps the 348
+  `DeviceLost` results separate from the 50 signal-terminated processes.
+- The largest new failure surface is not 38,478 independent bugs.
+  `pipeline.monolithic.image` and `.image_view` representatives reproduce the
+  same `feme-cpu-linearize` SSA dominance verifier failure, so they belong to
+  one P0 compiler row. Sampler cases are separate because at least one executes
+  and returns incorrect colors.
+- Old inline roadmap counts remain useful discovery history. The centralized
+  2026-10-05 re-triage table is now the authoritative current disposition.
+
+## Next steps
+
+1. **P0:** Reduce one L377 compute case to pre-linearize IR and fix the shared
+   loop-mask/exit-value dominance construction; then rerun both complete image
+   families.
+2. **P0:** Bucket L378's sampler failures by pipeline-creation diagnostic
+   versus executed-result mismatch before splitting implementation rows.
+3. **Stability:** Triage the 46 isolated pipeline SIGSEGV cases and the 328
+   render-pass `DeviceLost` results by common family/signature.
