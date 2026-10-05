@@ -115244,3 +115244,95 @@ explicitly through `VK_DRIVER_FILES` and `VK_ICD_FILENAMES`.
    versus executed-result mismatch before splitting implementation rows.
 3. **Stability:** Triage the 46 isolated pipeline SIGSEGV cases and the 328
    render-pass `DeviceLost` results by common family/signature.
+
+# Session: fixed L377 loop-mask dominance bug, triaged L378 into it (2026-10-06)
+
+**Confirmed device:** `FeMe CPU Vulkan Device` via explicit `VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES` (checked at session start and again before the final CTS
+reruns below).
+
+**Next action for the next session: open `feme/lib/Transforms/CPU/Linearize.cpp`,
+read the new `L377(a)` comment block in the roadmap, and start designing the
+per-predecessor `ExitBlockRelayValues` generalization described there.** About
+a day of focused work, not an afternoon -- this is a real SSA-merge redesign,
+not a mechanical fix.
+
+## What's done (all committed, 5 commits)
+
+1. Root-caused `L377`'s dominance-verifier bug to the exact mechanism: a
+   loop-body-internal divergent exit check (`CheckBlock`) is not always the
+   sole entry into its own "stay in loop" continuation, because an earlier,
+   legitimate constant-predecessor-peeling fold can redirect a different
+   block straight into that continuation, bypassing `CheckBlock`'s own check.
+2. Fixed it the safe way: `linearizeCycle` now checks
+   `DT.dominates(CheckBlock, CheckExit->StayInLoop)` and diagnoses the shape
+   instead of emitting invalid IR. Added a lit test + a unit test, both from
+   the real reduced IR. `ninja check-feme`: 3,589/3,592 Passed, 0 Failed.
+3. Reran both affected CTS families to completion (150,668 cases,
+   ~35 minutes): **31,024 Pass / 31,024 Fail / 88,620 NotSupported / 0
+   crashes** -- same split as before, but a full-log grep (not a sample)
+   confirms every single one of the 31,024 failures now hits the clean new
+   diagnostic. Before this fix, these cases risked an actual dominance-
+   verifier crash/invalid-IR path depending on exact shape details; now they
+   fail gracefully and are correctly diagnosed every time.
+4. Triaged `L378` (the 7,454-case sampler long tail) instead of just
+   splitting it blind: ran `sampler.view_type.*` (74,616 cases, ~8 minutes)
+   and the two smaller real sub-trees to completion. **Found all 7,453
+   `view_type.*` failures carry `L377`'s own exact diagnostic string** --
+   same bug, not an independent sampler issue. Only one case in the whole
+   7,454-case family (`max_sampler_lod_bias.shader_bias`) is a real,
+   separate, not-yet-root-caused wrong-pixel bug.
+5. Updated `Roadmap.md` (`L377` not struck through, new `L377(a)`/`L378(a)`
+   sub-entries, `L378` struck through as triaged), `FeMeCPUDesign.md` (new
+   milestone-6 deviation bullet), and `VulkanCTSReport.md`'s triage section.
+6. Final `check-feme` rerun this session: 3,589/3,592 Passed, 3 Unsupported,
+   0 Failed -- clean.
+
+## Why this matters more than "one bug fixed"
+
+`L378` looked like a second, independent 7,454-case bug family. It wasn't --
+it was the same `L377` bug showing up under a different pipeline-creation
+path. Running the actual CTS sub-trees instead of guessing from case names
+saved a whole redundant investigation. **Net effect: the 38,478 cases
+`L377`+`L378` originally covered are now one compiler bug (`L377(a)`), not
+two**, plus one unrelated 1-case wrong-pixel bug (`L378(a)`).
+
+## What's still open (ranked)
+
+1. **`L377(a)`** (the real fix, ~1 day): make the `CheckBlock`-not-sole-entry
+   shape actually linearize instead of just diagnosing it. This is what
+   would flip most of the 38,478 cases above from Fail to Pass. Design
+   sketch: generalize `ExitBlockRelayValues`/`RelaySource` to treat the
+   bypass edge as a second relay source, computing `CheckBlock`'s own
+   derived values per-predecessor and merging them at the consumption point
+   instead of assuming one source. **Worth checking first: does this share
+   a root cause with `L295`'s still-open "two divergent decisions sharing
+   one dispatch block" design problem?** Both are about a value computed in
+   one block needing to dominate a use reachable via a second, bypassing
+   path. If so, one fix might close both.
+2. **`L378(a)`** (~1-2 hours once picked up): `max_sampler_lod_bias.shader_bias`
+   wrong-pixel bug. `shader_bias_compute` (same LOD-bias logic, compute
+   pipeline) passes, so this is likely graphics-fragment-path-specific.
+   Next step: `--deqp-log-images=enable` and diff against the golden image.
+3. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost) --
+   not started this session.** No case names are recorded anywhere from the
+   original full-suite run that produced these counts, only aggregate
+   numbers. Finding them requires either (a) a full `pipeline.*`/
+   `renderpasses.*` rerun (the `pipeline` group alone is ~1.1M cases; at
+   this session's ~150K-cases-per-35-minutes rate, that's several hours,
+   too long for one session) or (b) narrowing by sub-family first the way
+   this session did for `L378` (check `renderpasses` sub-group names for
+   a `DeviceLost` cluster, probably "dynamic rendering" or "suballocation"
+   per the existing `VulkanCTSReport.md` ordinary-failure breakdown, then
+   scope a targeted rerun to just that). Recommend (b) next session --
+   start with `renderpasses.dynamic_rendering.*` and
+   `renderpasses.suballocation.*` specifically, since those are already the
+   two largest ordinary-failure families in that group.
+4. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
+   completely unaddressed, carried over from multiple prior sessions.
+5. **`check-hlsl-feme-vk` rerun** -- not reverified this session (no
+   `Linearize.cpp` behavior change should affect it beyond possibly fixing
+   or not-affecting the 3 `WaveActiveBit{And,Or,Xor}.convergence` cases
+   `L296` flagged as plausibly related to this same reconvergence territory
+   -- worth specifically re-checking those 3 cases next session given this
+   session's fix, even though the shape doesn't look identical).
