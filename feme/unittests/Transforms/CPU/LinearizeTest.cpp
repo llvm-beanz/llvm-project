@@ -1950,25 +1950,30 @@ TEST(LinearizeTest,
   EXPECT_TRUE(SawNonBackedgeIncoming);
 }
 
-// Roadmap L377: a real, captured pre-`feme-cpu-linearize` IR reduction of
-// `dEQP-VK.pipeline.monolithic.image.sampler.view_type.1d.format.*.
+// Roadmap L377(a): a real, captured pre-`feme-cpu-linearize` IR reduction
+// of `dEQP-VK.pipeline.monolithic.image.sampler.view_type.1d.format.*.
 // image_size.127x1_compute`'s own barycentric-sampling loop (see the
 // checked-in `Transforms/CPU/Linearize/
-// unsupported-checkblock-not-sole-entry-to-stay-in-loop.ll` lit test for
-// the full FileCheck-driven version of this same case). The loop's body
-// has a second, genuinely divergent exit check (`Flow72.
-// Flow74_crit_edge`) whose own "stay in loop" continuation (ultimately
-// block `26`) is *also* reachable directly from `Flow72`'s own sibling
-// successor `86` (via block `29`/`Flow75`/`Flow71`), entirely bypassing
-// `Flow72.Flow74_crit_edge`'s own check -- i.e. that check does not
-// dominate its own continuation after all. Before this milestone's fix,
-// this silently produced IR failing `verifyModule` ("Instruction does
-// not dominate all uses!" on `active.check.live`/`exited.via.check.next`
-// and their phi/select consumers); the fix instead diagnoses this shape
-// as unsupported, same as every other not-yet-lowered shape in this
-// file.
+// checkblock-chained-divergent-check-bypass.ll` lit test for the full
+// FileCheck-driven version of this same case). The loop's body has a
+// second, genuinely divergent branch (`Flow72`) immediately upstream of
+// the loop's real exit check (`Flow72.Flow74_crit_edge`) whose own "stay
+// in loop" continuation (ultimately block `26`) is *also* reachable
+// directly from `Flow72`'s own sibling successor `86` (via block
+// `29`/`Flow75`/`Flow71`), entirely bypassing `Flow72.Flow74_crit_edge`'s
+// own check -- i.e. that check did not dominate its own continuation.
+// `Flow72` is not itself a second exit check (neither of its arms reaches
+// `ExitBlock` on its own) -- it is an ordinary "if (c1) continue; else if
+// (c2) continue; else exit;" shape. Before roadmap `L377`'s guard, this
+// silently produced IR failing `verifyModule` ("Instruction does not
+// dominate all uses!" on `active.check.live`/`exited.via.check.next` and
+// their phi/select consumers); `L377(a)` recognizes this specific,
+// common shape and physically merges `Flow72`'s bypass edge into the
+// exit check's own single-entry machinery (see `linearizeCycle`'s own
+// comment), so it now linearizes successfully instead of being
+// diagnosed.
 TEST(LinearizeTest,
-     DiagnosesCheckBlockNotSoleEntryToStayInLoopInsteadOfInvalidIR) {
+     LinearizesCheckBlockChainedDivergentCheckBypassToStayInLoop) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     declare i32 @llvm.spv.thread.id.i32(i32)
@@ -2216,9 +2221,7 @@ TEST(LinearizeTest,
     }
     attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="compute" "hlsl.numthreads"="1,1,1" "hlsl.shader"="compute" }
   )");
-  ASSERT_TRUE(M) << "the IR text itself must still parse even though this "
-                    "is the (currently unsupported, see roadmap L377) "
-                    "shape this test exists to diagnose cleanly";
+  ASSERT_TRUE(M) << "the IR text itself must still parse";
 
   bool SawError = false;
   M->getContext().setDiagnosticHandlerCallBack(
@@ -2228,13 +2231,13 @@ TEST(LinearizeTest,
       },
       &SawError);
 
-  // Must not crash the process and must not leave invalid IR behind (the
-  // pre-fix behavior: a real, reproduced `verifyModule` dominance
-  // failure on `active.check.live`/`exited.via.check.next` and their
-  // phi/select consumers).
+  // Roadmap L377(a): this shape is now linearized successfully instead of
+  // being diagnosed -- confirm no error is raised and the resulting IR
+  // still verifies cleanly (not just "doesn't crash", the bar the
+  // pre-`L377(a)` diagnostic-only guard only ever had to clear).
   run(*M);
-  EXPECT_TRUE(SawError) << "this shape should be diagnosed as unsupported "
-                           "(roadmap L377), not silently miscompiled";
+  EXPECT_FALSE(SawError) << "roadmap L377(a) should linearize this shape "
+                            "instead of diagnosing it as unsupported";
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
