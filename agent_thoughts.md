@@ -115427,3 +115427,72 @@ just until the verifier and tests are quiet.**
    assertion, found by `L374`): still open, not touched this session --
    a different function in the same file, needs its own dedicated design
    session per the existing roadmap entry.
+
+# Session: fixed brittle SSA-suffix lit test causing a spurious local failure (2026-10-05)
+
+**Confirmed device:** `FeMe CPU Vulkan Device` via explicit `VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES`.
+
+**Next action: none required -- this was a self-contained, already-fixed,
+already-committed bug report.** If anything else comes up, `L378(a)` is
+still the next open item (see prior session's entry).
+
+## What happened
+
+User reported `checkblock-chained-divergent-check-bypass.ll` (added last
+session, for `L377(a)`) failing on their local macOS build (`build-rel`)
+with a `FileCheck` mismatch: the expected `%chain.merge = select i1
+%.linearized9, i1 true, i1 %.linearized8` was not found; a structurally
+unrelated `select` (`%live.merge = ...`) was flagged as the "possible
+intended match" instead.
+
+## Root cause
+
+Not a real bug in the fix itself. Running this exact lit test here
+(same commit) **passes**, and produces IR with the same total line count
+(282 vs. the user's reported 281, off by a harmless EOF/attribute-line
+difference) and identical overall structure. The only difference is the
+exact numeric suffix on two `.linearized<N>`-named operands feeding
+`%chain.merge`. Those names come from `DiamondFlattener::flatten`'s
+`PN.getName() + ".linearized"` naming scheme (`Linearize.cpp:1773`):
+LLVM auto-uniquifies same-named values within a function by appending a
+whole-function-wide counter, so the exact number assigned to any one
+`.linearized`-named value depends on how many *other* such values this
+same function's *other*, unrelated diamonds happen to produce first.
+That ordering is not guaranteed stable across different LLVM/platform/
+compiler builds (confirmed no in-process non-determinism here: 5 repeated
+invocations in this environment gave identical output every time, so
+whatever shifts the count only varies *across* builds, not across runs of
+the same binary) -- the test should never have hardcoded those exact
+suffixes, since they were never semantically meaningful to the thing the
+test actually verifies (that `ChainGate`'s branch is gone and `CheckBlock`
+is entered via a merged boolean, not literally which temporary numbers
+LLVM's printer happens to assign the two operands).
+
+## Fix
+
+Replaced the two hardcoded operand names (`%.linearized9`, `%.linearized8`)
+with FileCheck `{{%[A-Za-z0-9_.]+}}` regex patterns, matching the
+structural shape (some SSA value selected against a literal `i1 true`)
+without depending on its auto-generated name. Added a comment explaining
+why, so a future session doesn't hardcode the same kind of fragile pattern
+again. Did **not** touch `Linearize.cpp` itself -- the compiler behavior is
+correct; only the test was fragile. Checked the companion unit test
+(`LinearizeTest.cpp`) for the same anti-pattern: clean, no hardcoded
+`.linearized<N>` names there.
+
+**Verified:** updated test passes here; `ninja check-feme`: 3,589/3,589
+Passed, 0 Failed, 3 Unsupported -- clean, 0 regressions. Single, separate
+commit (`3ae810fc1fa0`).
+
+## Takeaway for future lit tests in this file
+
+Any `CHECK` line matching a `DiamondFlattener::flatten`-produced
+`.linearized<N>`-style auto-named value (or any other value whose base
+name is reused many times in one function, triggering LLVM's own
+uniquing suffix) should use a FileCheck capture/regex instead of the
+literal printed name, unless the test is specifically about name
+stability itself (it normally isn't). This fix only touched one test;
+worth a quick grep (`grep -rn '\.linearized[0-9]' feme/test/`) next time
+a `Linearize.cpp` session starts, in case any other lit test added since
+has the same latent fragility.
