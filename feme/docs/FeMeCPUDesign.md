@@ -588,10 +588,36 @@ where it's discussed, and summarized here:
   explicitly checks `DT.dominates(CheckBlock, CheckExit->StayInLoop)`
   immediately after `CheckBlock`/`CheckExit` are established, diagnosing
   this shape as unsupported (consistent with every other not-yet-lowered
-  shape in this pass) instead of producing invalid IR. This converts a
-  compiler-correctness bug into a clean diagnostic; it does not yet make
-  this CFG shape linearize successfully -- see `feme/docs/Roadmap.md`'s
-  `L377`/`L377(a)` entries for the still-open work to support it.
+  shape in this pass) instead of producing invalid IR.
+- (Roadmap L377(a)) The common real-world shape behind the `L377` gap above
+  (confirmed via a live IR dump, not just source reasoning) is a second,
+  genuinely divergent branch (`ChainGate`) immediately upstream of
+  `CheckBlock` -- its sole predecessor -- with one arm going straight to
+  `CheckBlock` and the other, via a uniform pass-through chain, bypassing it
+  entirely to reach `CheckExit->StayInLoop` directly. This is not a second
+  real exit check (`ChainGate` never reaches `ExitBlock` on either arm); it
+  is an ordinary "if (c1) continue; else if (c2) continue; else exit;"
+  shape that `DiamondFlattener::flattenLoopBodyDiamond` correctly refuses to
+  flatten as an ordinary body diamond, because one of `ChainGate`'s arms
+  (via `CheckBlock`'s own further branch) still crosses a loop control edge.
+  `linearizeCycle` now recognizes this specific shape and repairs it
+  instead of diagnosing it: it requires the bypass chain to be pure,
+  single-predecessor control-flow glue (no real instructions of its own --
+  confirmed true of the actual captured shape), folds `ChainGate`'s own
+  condition into a plain `select` merged with `CheckBlock`'s own check
+  condition, replaces `ChainGate`'s `CondBr` with a single unconditional
+  branch straight into `CheckBlock`, and deletes the now wholly dead bypass
+  chain. Physically eliminating `ChainGate`'s divergent branch (not just
+  routing both its arms to the same place) is required because
+  `feme-cpu-simdize` rejects any surviving divergent terminator regardless
+  of where its arms lead. Falls back to the original `L377` diagnostic for
+  any bypass chain containing real instructions (a shape not yet confirmed
+  to arise in practice, and not safe to silently drop). Verified end-to-end
+  against the real `dEQP-VK.pipeline.monolithic.image...127x1_compute`
+  case: the pipeline now builds, runs, and produces correct pixels. See
+  `feme/docs/Roadmap.md`'s `L377(a)` entry for remaining narrower gaps this
+  detection does not yet cover (e.g. a bypass chain with real
+  instructions, or more than one bypass predecessor).
 - Nested loops (a cycle containing another cycle) are not linearized: only
   a leaf cycle (one with no child cycle) is considered a candidate.
 - The "skip a block when all lanes are off" guard described as "not emitted
