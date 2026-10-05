@@ -23,15 +23,18 @@
 ; `Flow72` is not itself a second exit check (neither of its arms reaches
 ; `ExitBlock` on its own) -- it is an ordinary "if (c1) continue; else if
 ; (c2) continue; else exit;" shape. Roadmap `L377(a)` recognizes this
-; specific, common shape and physically redirects the bypass edge into
-; `Flow72.Flow74_crit_edge` itself, merging the two incoming "would this
-; lane exit" decisions via a fresh phi, so `Flow72.Flow74_crit_edge`
-; becomes the sole real gateway into its own "stay in loop" continuation
-; again -- letting this loop linearize successfully instead of being
-; diagnosed.
+; specific, common shape and folds it entirely into a data-flow decision:
+; `76` (the bypass block) is pure glue with no instructions of its own,
+; so it is deleted outright, and `Flow72`'s own divergent `CondBr` is
+; replaced with a plain `select` (forcing "stay" for lanes that used to
+; take the bypass) feeding `Flow72.Flow74_crit_edge`'s own check, plus a
+; single, uniform, unconditional branch straight into it -- so the loop
+; both linearizes *and* has no divergent branch left over for
+; `feme-cpu-simdize` to reject afterward.
 
-; CHECK: Flow72.Flow74_crit_edge:
-; CHECK-NEXT: %[[MERGE:.*]] = phi i1 [ %.linearized8, %Flow72 ], [ true, %76 ]
+; CHECK: %chain.merge = select i1 %.linearized9, i1 true, i1 %.linearized8
+; CHECK-NEXT: br label %Flow72.Flow74_crit_edge
+; CHECK-NOT: label %76
 
 define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #4 {
   %1 = call i32 @llvm.spv.thread.id.i32(i32 0)

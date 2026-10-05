@@ -1968,10 +1968,12 @@ TEST(LinearizeTest,
 // silently produced IR failing `verifyModule` ("Instruction does not
 // dominate all uses!" on `active.check.live`/`exited.via.check.next` and
 // their phi/select consumers); `L377(a)` recognizes this specific,
-// common shape and physically merges `Flow72`'s bypass edge into the
-// exit check's own single-entry machinery (see `linearizeCycle`'s own
-// comment), so it now linearizes successfully instead of being
-// diagnosed.
+// common shape and folds `Flow72`'s own divergent branch into a plain
+// `select` feeding the exit check's own single-entry machinery (see
+// `linearizeCycle`'s own comment) -- deleting the now wholly dead bypass
+// chain outright so no divergent branch (which `feme-cpu-simdize` would
+// otherwise reject) is left behind -- so it now linearizes successfully
+// instead of being diagnosed.
 TEST(LinearizeTest,
      LinearizesCheckBlockChainedDivergentCheckBypassToStayInLoop) {
   LLVMContext Ctx;

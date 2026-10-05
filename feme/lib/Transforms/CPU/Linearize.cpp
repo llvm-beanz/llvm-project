@@ -3893,10 +3893,15 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       // can still reach `ExitBlock`, i.e. crosses a loop control edge --
       // see that function's own comment), yet is not itself the loop's
       // real exit decision either -- `CheckBlock` is. Recognize this
-      // specific shape and physically merge it into `CheckBlock`'s own
-      // single-entry check below (rather than just diagnosing it), so
-      // the rest of this function's existing single-source machinery
-      // keeps working entirely unmodified.
+      // specific shape and physically eliminate `ChainGate`'s own
+      // divergent branch below (rather than just diagnosing it), folding
+      // its condition into `CheckBlock`'s own check as a plain boolean
+      // value instead -- `feme-cpu-simdize` requires every divergent
+      // branch gone by the time this pass finishes, not merely routed
+      // around, so this cannot stop at making `CheckBlock` dominate its
+      // continuation again; `ChainGate`'s own `CondBr` must disappear
+      // too. The rest of this function's existing single-source
+      // machinery keeps working entirely unmodified once that's done.
       BasicBlock *ChainGate = CheckBlock->getUniquePredecessor();
       CondBrInst *ChainGateBr =
           ChainGate ? dyn_cast<CondBrInst>(ChainGate->getTerminator())
@@ -3917,6 +3922,26 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         ChainBypassRegion = collectUniformPassThroughRegion(
             ChainBypassEntry, CheckExit->StayInLoop, ExitBlock, C,
             PeeledFrom);
+      // Roadmap L377(a): `collectUniformPassThroughRegion` only validates
+      // the bypass's *control-flow* shape (a plain unconditional chain) --
+      // it says nothing about what the blocks along it actually compute.
+      // Physically deleting that chain below (required to make
+      // `ChainGate`'s own branch disappear entirely, see the comment on
+      // that below) is only safe if every block in it is pure glue: no
+      // real instructions of its own (just its terminator) and no
+      // predecessor besides the previous link in the chain -- otherwise a
+      // lane that used to take this path could be computing (or someone
+      // else could be relying on) a real value this milestone has no way
+      // to preserve once the blocks producing it are gone. Both real,
+      // captured shapes this fix was built from (the lit test's `76` and
+      // the unit test's `86`) are exactly this: a bare `br` and nothing
+      // else. Anything richer falls back to the original diagnostic
+      // rather than risk silently dropping a live computation.
+      if (ChainBypassRegion &&
+          !llvm::all_of(*ChainBypassRegion, [](BasicBlock *BB) {
+            return BB->size() == 1 && llvm::hasSingleElement(predecessors(BB));
+          }))
+        ChainBypassRegion = std::nullopt;
       if (ChainBypassRegion) {
         for (BasicBlock *P : predecessors(CheckExit->StayInLoop))
           if (P == ChainBypassEntry || ChainBypassRegion->contains(P)) {
@@ -3940,43 +3965,44 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                         "unsupported (roadmap milestone 6 deviation)");
         return false;
       }
-      // `ChainBypassTail`'s own unconditional edge into `StayInLoop`
-      // becomes an edge into `CheckBlock` instead -- every lane that used
-      // to bypass `CheckBlock` entirely now flows through it physically
-      // too, with a fresh phi (below) forcing its own effective check
-      // condition to "stay" for exactly those lanes, regardless of
-      // whatever `CheckBlock`'s original condition (computed only for
-      // lanes genuinely reaching it via `ChainGate`'s *other* arm) says.
+      // Fold `ChainGate`'s own decision into a plain boolean *value*
+      // (`MergedCond`, computed from `ChainGateBr`'s own condition while
+      // it still dominates `CheckBlock`) rather than leaving it as real
+      // control flow: `feme-cpu-simdize` requires every divergent branch
+      // to have been removed by this point (see its own "has a divergent
+      // branch" diagnostic), and `ChainGate`'s branch is exactly that --
+      // a second, genuinely divergent `CondBr` -- so merely routing both
+      // of its arms to the same block (this fix's first attempt) is not
+      // enough; the branch itself must go away. Since the bypass chain is
+      // now confirmed to be pure glue with no live effects of its own
+      // (see above), nothing is lost by never actually taking it: build
+      // the merged condition from `ChainGateBr`'s own condition value
+      // directly, then replace `ChainGate`'s terminator with a plain,
+      // uniform, unconditional branch straight into `CheckBlock`, and
+      // delete the now wholly unreachable, side-effect-free bypass chain
+      // outright.
+      bool BypassOnTrue = ChainGateBr->getSuccessor(0) == ChainBypassEntry;
+      Value *StayConst = CheckExit->ExitOnTrue ? ConstantInt::getFalse(Ctx)
+                                               : ConstantInt::getTrue(Ctx);
+      IRBuilder<> ChainB(ChainGateBr);
+      Value *MergedCond =
+          BypassOnTrue
+              ? ChainB.CreateSelect(ChainGateBr->getCondition(), StayConst,
+                                    CheckExit->Cond, "chain.merge")
+              : ChainB.CreateSelect(ChainGateBr->getCondition(),
+                                    CheckExit->Cond, StayConst, "chain.merge");
       CheckExit->StayInLoop->removePredecessor(ChainBypassTail,
                                                /*KeepOneInputPHIs=*/true);
-      auto *TailBr = cast<UncondBrInst>(ChainBypassTail->getTerminator());
-      assert(TailBr->getSuccessor(0) == CheckExit->StayInLoop &&
-             "collectUniformPassThroughRegion only tolerates a plain "
-             "unconditional chain reaching its target");
-      TailBr->setSuccessor(0, CheckBlock);
-      PHINode *MergedCond = PHINode::Create(
-          CheckExit->Cond->getType(), /*NumReservedValues=*/2,
-          CheckExit->Cond->getName() + ".chain.merge");
-      MergedCond->insertBefore(CheckBlock->getFirstNonPHIIt());
-      MergedCond->addIncoming(CheckExit->Cond, ChainGate);
-      MergedCond->addIncoming(CheckExit->ExitOnTrue
-                                  ? ConstantInt::getFalse(Ctx)
-                                  : ConstantInt::getTrue(Ctx),
-                              ChainBypassTail);
+      UncondBrInst::Create(CheckBlock, ChainGateBr->getIterator());
+      ChainGateBr->eraseFromParent();
+      for (BasicBlock *BB : *ChainBypassRegion)
+        BB->eraseFromParent();
       CheckExit->Br->setCondition(MergedCond);
       CheckExit->Cond = MergedCond;
-      // `ChainGate` no longer has a path of its own to `ExitBlock` on
-      // either arm (both now funnel into `CheckBlock`), so it is exactly
-      // as safe to walk through as any other `PeeledFrom` entry -- the
-      // `PreRegion` walk below now tolerates it, and the uniform
-      // `ChainBypassRegion` chain it feeds, folding both into the same,
-      // single, unchanged `Masks` value `CheckBlock` itself already
-      // receives (neither arm narrows anything on its own).
-      PeeledFrom.insert(ChainGate);
       DT.recalculate(F);
       assert(DT.dominates(CheckBlock, CheckExit->StayInLoop) &&
-             "the chain merge above should have made CheckBlock the sole "
-             "gateway into StayInLoop");
+             "ChainGate should now be CheckBlock's sole, unconditional "
+             "predecessor");
     }
 
     // Roadmap L292: `Header`'s own exit check (recovered via
