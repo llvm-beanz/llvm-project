@@ -109,39 +109,43 @@ The largest ordinary-failure changes by group are:
 
 ## Current triage
 
-1. **Linearizer dominance regression — 31,024 failures, now safety-fixed
-   (`L377`), shape-support still open (`L377(a)`).**
-   `pipeline.monolithic.image` contributes 23,056 failures and
-   `pipeline.monolithic.image_view` contributes 7,968. Root-caused this
-   session: a loop-body-internal divergent exit check (`CheckBlock`) was not
-   always the sole entry into its own "stay in loop" continuation -- an
-   earlier, legitimate constant-predecessor-peeling fold could redirect a
-   different block directly into that continuation, bypassing `CheckBlock`'s
-   own check, so the mask values it computes could not dominate every later
-   use. `feme-cpu-linearize` now detects this shape explicitly
-   (`DT.dominates(CheckBlock, CheckExit->StayInLoop)`) and diagnoses it
-   cleanly instead of risking invalid IR. **Re-verified via a complete rerun
-   of both families** (150,668 cases): 31,024 Pass / 31,024 Fail / 88,620
-   NotSupported / **0 crashes / 0 DeviceLost** -- an identical Pass/Fail
-   split to before (this fix does not make any of these cases pass), but a
-   full-log grep confirms **100% of the 31,024 failures** now hit the new
-   clean diagnostic and fail gracefully with
-   `VK_ERROR_INITIALIZATION_FAILED`. Making this shape actually linearize
-   (so these cases pass) remains open, see `Roadmap.md`'s `L377(a)`.
-2. **Sampler coverage — 7,454 failures, triaged this session (`L378`),
-   bulk folded into `L377(a)`.** Ran `sampler.view_type.*` (74,616 cases:
-   7,625 Pass / 7,453 Fail / 59,538 NotSupported) and
-   `sampler.exact_sampling.*`/`sampler.separate_stencil_usage.*` to
-   completion (both fully clean, 0 Fail). `sampler.border_swizzle.*`
-   (140,696 cases) is entirely `NotSupported` (an unrelated, pre-existing
-   `VK_EXT_border_color_swizzle` extension gap). A full-log grep confirms
-   **all 7,453 `view_type.*` failures carry `L377`'s own exact new
-   diagnostic string** -- the identical `CheckBlock`-not-sole-entry
-   dominance shape, not an independent sampler bug. The only failure in
-   this family genuinely unrelated to `L377` is
-   `sampler.max_sampler_lod_bias.shader_bias` (1 of 10 cases in that small
-   family), which executes and produces an incorrect color -- a real,
-   still-unexplained wrong-pixel bug, tracked as `Roadmap.md`'s `L378(a)`.
+1. **Linearizer dominance regression — `L377`/`L377(a)` fully resolved this
+   session.** `feme-cpu-linearize`'s `LoopLinearizer::linearizeCycle` now
+   actually linearizes the `CheckBlock`-not-sole-entry shape instead of
+   merely diagnosing it: the offending second divergent branch (`ChainGate`)
+   is detected, its bypass arm is proven to be pure, side-effect-free
+   control-flow glue, and the two arms are merged via a `select`-based
+   condition with `ChainGate`'s own branch replaced by a single
+   unconditional branch into `CheckBlock` (eliminating the divergent branch
+   entirely, not just repairing dominance -- `feme-cpu-simdize` requires
+   zero divergent branches to remain, which the first dominance-only attempt
+   did not satisfy). **Re-verified via a complete rerun of all three
+   affected families** (`pipeline.monolithic.image.*`: 122,912 cases, 46,112
+   Pass / **0 Fail** / 76,800 NotSupported; `pipeline.monolithic.image_view.*`:
+   27,708 cases, 15,936 Pass / **0 Fail** / 11,772 NotSupported;
+   `pipeline.monolithic.sampler.view_type.*`: 74,616 cases, 15,078 Pass /
+   **0 Fail** / 59,538 NotSupported -- all 0 crashes, 0 DeviceLost). All
+   31,024 previously-failing `image*`/`image_view*` cases and all 7,453
+   previously-failing `sampler.view_type.*` cases (same root cause, see
+   below) now pass, confirmed not from the Pass/Fail totals alone but also
+   against the real end-to-end reproducer
+   (`pipeline.monolithic.image.dedicated_allocation.sampling_type.combined.view_type.1d.format.r16_sfloat.count_1.size.127x1_compute`),
+   which produces correct pixels. `ninja check-feme`: 3,589/3,589 Passed, 0
+   Failed, 3 Unsupported, 0 regressions. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` change needed -- internal
+   compiler-correctness fix only.
+2. **Sampler coverage — `L378` bulk folded into `L377(a)`, now resolved;
+   one independent case remains open (`L378(a)`).** Confirmed this session:
+   of the 7,454 `sampler` failures, 7,453 (`sampler.view_type.*`) shared
+   `L377`'s exact root cause and are now fixed by the `L377(a)` linearizer
+   change (see above). The one remaining failure,
+   `sampler.max_sampler_lod_bias.shader_bias`, is independently confirmed
+   (via a direct rerun of `sampler.max_sampler_lod_bias.*`, 10 cases: 7
+   Pass / 1 Fail / 2 NotSupported) to still fail with "Unexpected color
+   found in color buffer" -- a genuine, still-unexplained wrong-pixel bug
+   unrelated to the linearizer fix (its `_compute` sibling, running the
+   same LOD-bias shader logic, passes), tracked as `Roadmap.md`'s
+   `L378(a)` and not yet root-caused.
 3. **Render-pass correctness and device loss.** `renderpasses` has 4,845
    ordinary failures and 328 `DeviceLost` results. The largest ordinary
    families are dynamic rendering (2,990) and suballocation tests (1,842).
