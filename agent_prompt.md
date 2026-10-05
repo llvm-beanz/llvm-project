@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: 1ebfe39e-5f48-4c14-810b-08a0301888a7
+model: claude-opus-5.5
 ---
 # Initial Guidelines
 
@@ -60,24 +59,7 @@ file.
 
 # Request
 
-Please continue working on the FeMe Vulkan ICD. The previous session's suggested
-next steps are:
-
-1. **(a few hours, still overdue, now the best pick)** Broader-than-tessellation
-   CTS sweep (`api`/`pipeline`/`shader_render`/`synchronization`) --
-   `transform_feedback` itself is now clean of its two largest known clusters;
-   time to look elsewhere for the next big lead.
-2. **(a few hours)** `fuzz.random_vertex.*` + non-square-matrix
-   `single_basic_{type,array}.{mat2x3,mat3,mat4x3}.vertex` (44 fails) -- carried
-   over from two sessions ago, still untouched. Check
-   `random_vertex.nested_structs_instance_arrays.22` and
-   `random_vertex.basic_arrays.1` for shared root causes with prior
-   geometry-variant fixes.
-3. **(a few hours)** Untriaged tessellation/CTS groups, carried over unchanged
-   for many sessions: `user_defined_io` (27 cases), `device_group` (7),
-   `memory_model.*` races (~24).
-4. **(dedicated session, carried over many sessions)** `L344`/`L335` N-barrier
-   generalization (`shader_input_output.barrier`,
-   `rasterization.line_continuity.*`).
-5. **(lowest priority, many sessions carried over)** `L265` ASTC alpha-decode
-   tie-break, 12 cases.
+Can you please perform a full run of the Vulkan CTS against the feme ICD
+implementaiton? On completion please update the VulkanCTSReport (clearing any
+intermediate milestone notes), and re-triage the Roadmap.md against the existing
+state.
