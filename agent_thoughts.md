@@ -115591,3 +115591,76 @@ fixing it.
 
 No `Linearize.cpp`/test changes this session -- investigation only, Vulkan
 CTS not rerun (no code changed).
+
+# Session: root-caused the "still failing" report with the real output.ll -- confirmed stale build, not a bug (2026-10-05)
+
+## Proof, concretely
+
+Diffed the reporter's own full `output.ll` against this build's output for
+the identical `feme-opt --llvm -passes=feme-cpu-linearize -S` invocation on
+the identical test file. Their output is missing **every** naming
+convention introduced by the last 6 commits to `Linearize.cpp`:
+
+- No `active.check.live`/`active.check.sideeffect`/`exited.via.check`/
+  `exited.via.check.next` anywhere (introduced by `be3f15c1340f`,
+  "[feme][L297] ... merge Header/CheckBlock ExitBlockRelayValues").
+- No `.exit.merge*` relay selects (same commit's machinery).
+- `loop.exit.guard` still merges via **two-predecessor `phi`s**
+  (`%122`/`%123`/`%124`/`%125`, from `Flow71._crit_edge` *and*
+  `Flow74.Flow75_crit_edge`) -- the exact "shared dispatch block, two
+  divergent decisions" shape `L297` fixed away.
+- `Flow72`/`Flow72.Flow74_crit_edge` both still end in real, divergent
+  `CondBr`s (`br i1 %.linearized9, label %76, ...` /
+  `br i1 %.linearized8, label %26, ...`) -- block `76` (the bypass) is
+  still **present**, not deleted -- exactly the pre-`L377`/`L377(a)`
+  shape, before either the diagnostic guard or the real fix existed.
+
+Their binary is therefore at least 6 `Linearize.cpp` commits behind this
+tree's `HEAD` (`670f7c94abea`): missing `be3f15c1340f`, `2476da753302`,
+`31b91013559d`, `afc55d424dde`, `41820edc94a6`, and `670f7c94abea` itself.
+This is not a platform-dependent compiler bug -- it is conclusive proof of
+a stale `build-rel/bin/feme-opt` binary. (This supersedes my own prior
+"stale build, unconfirmed" hedge from the previous entry -- it is now
+directly proven from their own pasted IR, not inferred.)
+
+## Action for the reporter
+
+```
+cd /path/to/llvm-project
+git log -1 --format='%H %s' -- feme/lib/Transforms/CPU/Linearize.cpp
+# must print 670f7c94abea or a descendant of it
+rm -rf build-rel/tools/feme    # or, safest: rm -rf build-rel && reconfigure
+ninja -C build-rel feme-opt
+build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S \
+  feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll \
+  | grep -c 'active.check.live'   # must print >=1 once rebuilt
+```
+
+Likely cause of the staleness itself: an incremental `ninja` build in
+`build-rel` not detecting the `Linearize.cpp` changes (stale object file,
+possibly an interrupted build, a ccache key collision, or `build-rel`
+being on a different branch/worktree than the one being edited). I did
+not change any FeMe source this session -- there is nothing to fix in the
+compiler; the compiled artifact the reporter is running does not match
+the source tree they are editing.
+
+## Next steps
+
+1. If the reporter's rebuild still doesn't pick up the change (`grep -c`
+   stays `0` after a real `ninja feme-opt`), that is new, actionable
+   information -- get `ninja -C build-rel -t commands feme-opt-related
+   object` and `ninja -C build-rel -d explain feme-opt` output to see
+   why ninja thinks the object is up to date; possible real bug in FeMe's
+   `CMakeLists.txt` dependency graph at that point, worth a `copilot`
+   session focused specifically on the build graph rather than
+   `Linearize.cpp` itself.
+2. Carried over, unstarted, from prior sessions (unchanged by this one):
+   `L378(a)` sampler LOD-bias graphics-fragment bug, 46-case pipeline
+   SIGSEGV + 328-case renderpasses `DeviceLost` stability triage,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap,
+   `check-hlsl-feme-vk` rerun to re-check the 3 `WaveActiveBit{And,Or,Xor}`
+   cases.
+
+No `Linearize.cpp`/test changes this session -- investigation only
+(confirmed root cause via diff of reporter's actual output), Vulkan CTS
+not rerun (no code changed).
