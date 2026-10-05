@@ -14278,3 +14278,101 @@ Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
   `L344`/`L335` N-barrier generalization, `L265` ASTC alpha-decode
   tie-break (12 cases), and the still-overdue broader-than-tessellation
   CTS sweep (`api`/`pipeline`/`shader_render`/`synchronization`).
+
+## Fixed: LinearizePass relay-block PHI/predecessor crash on `spirv_assembly.instruction.graphics.loop.break_frag` (L374)
+
+- **Symptom:** `dEQP-VK.spirv_assembly.instruction.graphics.loop.break_frag`
+  crashed the ICD at pipeline-creation time with a
+  `PHINode::removeIncomingValue` assertion
+  (`Idx < getNumIncomingValues() && "Invalid value!"`) inside
+  `feme::cpu::LinearizePass`, picked up mid-fix from a prior (compacted)
+  session.
+- **Root cause:** in `LoopLinearizer::linearizeCycle`'s `HeaderDivergent`/
+  `LatchDivergent` common linearization path, when `HeaderExit`/`LatchExit`
+  was matched via a genuine relay chain (`recoverRelayExitCheck`, not
+  `matchExitCheck`), `RelayBlock` names a block distinct from `Header`/
+  `Latch` (the relay chain's own final hop, e.g. a critical-edge stub a
+  prior `peelConstantFlowPredecessors` pass retargeted directly at
+  `ExitBlock`). The buggy code called
+  `ExitBlock->removePredecessor(RelayBlock, true)` eagerly but never
+  erased/disconnected `RelayBlock`'s own terminator -- leaving it alive
+  with a real edge to `ExitBlock` but no phi entry, until
+  `EliminateUnreachableBlocks` tried to detach it a second time and hit
+  `PHINode::removeIncomingValue`'s assertion.
+- **Fix:** mirrored the sibling, already-correct `CheckBlock` code path:
+  capture the leftover `ExitBlock` phi value always keyed on
+  `HeaderExit->RelayBlock`/`LatchExit->RelayBlock` (the only place the
+  value currently exists), but only manually call `removePredecessor`
+  keyed on `Header`/`Latch` themselves (the block whose own terminator is
+  actually being erased right now), guarded by
+  `is_contained(predecessors(ExitBlock), Header/Latch)`. The direct-match
+  case (`RelayBlock == Header/Latch`) behaves identically to before; the
+  relay case becomes a clean no-op for the removal, leaving `RelayBlock`'s
+  stale entry for `EliminateUnreachableBlocks` to clean up correctly
+  later.
+- **Unit test:** added
+  `LinearizesLoopWhoseHeaderRelayIsPeeledDirectlyToExit`
+  (`LinearizeTest.cpp`), modeled closely on the real captured
+  pre-linearize IR shape (a header exit check relayed through a one-hop
+  critical-edge stub a prior `peelConstantFlowPredecessors` retargets
+  directly at the exit block). Honestly documented in its own comment
+  that this synthetic reduction verifies the module stays verifier-clean
+  and phi/predecessor bookkeeping stays consistent after a
+  constant-flow-predecessor peel in a divergent loop, but does **not**
+  reproduce the original assertion failure pre-fix (confirmed via a
+  `git stash` A/B: the synthetic CFG's `header` branch gets fully
+  mask-converted rather than taking the specific `HeaderDivergent`-with-
+  relay path the real crash hit) -- the real regression evidence remains
+  the CTS case itself (confirmed via `gdb` pre-fix, confirmed passing
+  post-fix).
+- **Verified:**
+  - `dEQP-VK.spirv_assembly.instruction.graphics.loop.break_frag`: now
+    **Pass** (previously crashed the whole process).
+  - `FeMeTransformsCPUTests`: 607/607 Passed (+1 new test).
+  - `ninja check-feme`: 3,529/3,590 Passed, 61 Unsupported, 0 Failed, 0
+    regressions.
+  - Broader `dEQP-VK.spirv_assembly.*` regression sweep (full group,
+    graphics + compute instruction tests): run to completion excluding
+    one known, **pre-existing, unrelated** crash found along the way (see
+    below); 0 new Fails attributable to this fix, confirming the targeted
+    fix introduces no regressions elsewhere in `spirv_assembly.*`.
+- **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
+  change needed -- an internal compiler correctness fix (CFG
+  linearization bookkeeping), no feature/extension-surface change.
+- **New, separate finding during the broader sweep (not caused by this
+  fix, confirmed pre-existing via a `HEAD~1` A/B rebuild):**
+  `dEQP-VK.spirv_assembly.instruction.graphics.loop.switch_continue_geom`
+  crashes with a *different* assertion,
+  `PredIterator::operator*()`'s `!It.atEnd() && "pred_iterator out of
+  range!"`, inside `(anonymous namespace)::DiamondFlattener::flatten`
+  (same `Linearize.cpp` file, different function than `L374`'s own fix).
+  Root-cause investigation this session (via a temporary
+  `FEME_DEBUG_FLATTEN_TRACE` instrumentation, removed before committing)
+  traced it to a switch-lowering CFG shape
+  (`NodeBlock`/`LeafBlock`/`Flow`-style dispatch blocks, the same pattern
+  `glslang`'s `switch` lowering and `StructurizeCFG` produce for a
+  `switch` inside a loop body with a `continue` in one case) where a
+  shared merge block (`Flow26` in the captured case, reached through a
+  loop-control/`Flow`-boundary block that `flatten`'s own
+  `CycleBoundaryMasks` memoization correctly handles) is reached and
+  *mutated* by one `flatten` walk, then visited again by a second,
+  independent `flatten`/`flattenLoopBodyRegion` walk (the loop body's own
+  post-continue-check continuation) using a now-stale
+  `PostDominatorTree` answer -- the second visit's `R =
+  immediatePostDom(Cur)` names the same block by name, but its real
+  predecessor edges have already been redirected away by the first
+  visit, leaving zero real predecessors and tripping the
+  `pred_begin(R)`/`PredIt++`/`*PredIt` "exactly two predecessors"
+  assumption both the uniform and divergent branches of `flatten` share.
+  Confirmed via a `HEAD~1` (pre-`L374`) rebuild that this crash
+  reproduces identically without this session's own fix applied --
+  **unrelated to `L374`**, filed as a new backlog item (see
+  `agent_thoughts.md` and `Roadmap.md`'s new entry) for a dedicated
+  future session, since a safe fix likely requires extending
+  `flatten`'s existing `CycleBoundaryMasks`-style memoization to
+  ordinary (non-cycle-boundary) merge blocks reachable from more than
+  one structural walk, or restructuring `flattenLoopBodyRegion`'s own
+  region splitting to avoid the overlap -- not a small, safe, late-
+  session change.
+- **Files:** `feme/lib/Transforms/CPU/Linearize.cpp`,
+  `feme/unittests/Transforms/CPU/LinearizeTest.cpp`.
