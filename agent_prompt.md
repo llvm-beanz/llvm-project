@@ -60,43 +60,78 @@ file.
 
 # Request
 
-Please continue working on the FeMe Vulkan ICD. The previous session's suggested
-next steps are:
+I'm seeing one of feme's tests failing locally. Can you fix it?
 
-1. **`L377(a)`** (the real fix, ~1 day): make the `CheckBlock`-not-sole-entry
-   shape actually linearize instead of just diagnosing it. This is what
-   would flip most of the 38,478 cases above from Fail to Pass. Design
-   sketch: generalize `ExitBlockRelayValues`/`RelaySource` to treat the
-   bypass edge as a second relay source, computing `CheckBlock`'s own
-   derived values per-predecessor and merging them at the consumption point
-   instead of assuming one source. **Worth checking first: does this share
-   a root cause with `L295`'s still-open "two divergent decisions sharing
-   one dispatch block" design problem?** Both are about a value computed in
-   one block needing to dominate a use reachable via a second, bypassing
-   path. If so, one fix might close both.
-2. **`L378(a)`** (~1-2 hours once picked up): `max_sampler_lod_bias.shader_bias`
-   wrong-pixel bug. `shader_bias_compute` (same LOD-bias logic, compute
-   pipeline) passes, so this is likely graphics-fragment-path-specific.
-   Next step: `--deqp-log-images=enable` and diff against the golden image.
-3. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost) --
-   not started this session.** No case names are recorded anywhere from the
-   original full-suite run that produced these counts, only aggregate
-   numbers. Finding them requires either (a) a full `pipeline.*`/
-   `renderpasses.*` rerun (the `pipeline` group alone is ~1.1M cases; at
-   this session's ~150K-cases-per-35-minutes rate, that's several hours,
-   too long for one session) or (b) narrowing by sub-family first the way
-   this session did for `L378` (check `renderpasses` sub-group names for
-   a `DeviceLost` cluster, probably "dynamic rendering" or "suballocation"
-   per the existing `VulkanCTSReport.md` ordinary-failure breakdown, then
-   scope a targeted rerun to just that). Recommend (b) next session --
-   start with `renderpasses.dynamic_rendering.*` and
-   `renderpasses.suballocation.*` specifically, since those are already the
-   two largest ordinary-failure families in that group.
-4. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
-   completely unaddressed, carried over from multiple prior sessions.
-5. **`check-hlsl-feme-vk` rerun** -- not reverified this session (no
-   `Linearize.cpp` behavior change should affect it beyond possibly fixing
-   or not-affecting the 3 `WaveActiveBit{And,Or,Xor}.convergence` cases
-   `L296` flagged as plausibly related to this same reconvergence territory
-   -- worth specifically re-checking those 3 cases next session given this
-   session's fix, even though the shape doesn't look identical).
+```
+[57/58] Running the feme regression tests
+FAIL: FEME :: Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll (1217 of 1237)
+******************** TEST 'FEME :: Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll' FAILED ********************
+Exit Code: 1
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
+# .---command stderr------------
+# | /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll:35:10: error: CHECK: expected string not found in input
+# | ; CHECK: %chain.merge = select i1 %.linearized9, i1 true, i1 %.linearized8
+# |          ^
+# | <stdin>:1:1: note: scanning from here
+# | ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
+# | ^
+# | <stdin>:38:2: note: possible intended match here
+# |  %live.merge = select i1 %Guard..inv, i1 %live.t, i1 %live.f
+# |  ^
+# |
+# | Input file: <stdin>
+# | Check file: /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
+# |
+# | -dump-input=help explains the following input dump.
+# |
+# | Input was:
+# | <<<<<<
+# |             1: ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
+# | check:35'0    {                                                                                                                                   search range start (exclusive)
+# | check:35'1                                                                                                                                        error: no match found in search range
+# |             2: source_filename = "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll"
+# |             3:
+# |             4: define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #0 {
+# |             5:  %1 = call i32 @llvm.spv.thread.id.i32(i32 0)
+# |             6:  %2 = insertelement <3 x i32> poison, i32 %1, i32 0
+# |             .
+# |             .
+# |             .
+# |            33:  %active.header.live = and i1 %active.live, %23
+# |            34:  %active.header.sideeffect = and i1 %active.sideeffect, %23
+# |            35:  br label %28
+# |            36:
+# |            37: Flow: ; preds = %loop.exit.guard.Flow_crit_edge
+# |            38:  %live.merge = select i1 %Guard..inv, i1 %live.t, i1 %live.f
+# | check:35'2      ?                                                             possible intended match
+# |            39:  %sideeffect.merge = select i1 %Guard..inv, i1 %sideeffect.t, i1 %sideeffect.f
+# |            40:  %.linearized = select i1 %Guard..inv, i1 false, i1 true
+# |            41:  %not..linearized = xor i1 %.linearized, true
+# |            42:  %live.t2 = and i1 %live.merge, %.linearized
+# |            43:  %sideeffect.t3 = and i1 %sideeffect.merge, %.linearized
+# |             .
+# |             .
+# |             .
+# |           276:
+# |           277: attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="compute" "hlsl.numthreads"="1,1,1" "hlsl.shader"="compute" }
+# |           278: attributes #1 = { nounwind willreturn memory(none) }
+# |           279: attributes #2 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
+# |           280: attributes #3 = { nounwind willreturn memory(argmem: read) }
+# |           281: attributes #4 = { nounwind willreturn memory(argmem: write) }
+# | check:35'3                                                                   } search range end (exclusive)
+# | >>>>>>
+# `-----------------------------
+# error: command failed with exit status: 1
+
+--
+
+********************
+********************
+Failed Tests (1):
+```
