@@ -4238,30 +4238,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // making this a no-op change for that, previously-only-supported,
   // case).
   SmallVector<std::pair<PHINode *, Value *>, 4> HeaderExitRelayValues;
-  if (HeaderDivergent) {
-    IRBuilder<> B(HeaderExit->Br);
-    Value *Cond = HeaderExit->Cond;
-    Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
-    MasksAtLatch = stayInLoop(B, Masks, Staying, "active.header");
-    // Never really exit here: always continue toward the latch, letting an
-    // inactive lane's iterations become no-ops instead (see the file
-    // comment above).
-    // Roadmap L40/L292: see the identical `CheckBlock` case's own comment
-    // above -- `HeaderExit->RelayBlock`'s own edge straight to
-    // `ExitBlock` has just vanished from the CFG the same way; repair
-    // any of `ExitBlock`'s own phis that still list it as an incoming
-    // block accordingly, after first capturing their values so they can
-    // be restored on `Latch`'s own new edge to `ExitBlock` below.
-    for (PHINode &PN : ExitBlock->phis())
-      if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock); Idx != -1)
-        HeaderExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
-    if (llvm::is_contained(predecessors(ExitBlock), HeaderExit->RelayBlock))
-      ExitBlock->removePredecessor(HeaderExit->RelayBlock,
-                                   /*KeepOneInputPHIs=*/true);
-    UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
-    HeaderExit->Br->eraseFromParent();
-  }
-
   // Roadmap L298: this shape's own region between `Header`'s own exit
   // check and `Latch` is required to be a uniform pass-through in the
   // *control-flow* sense `collectUniformPassThroughRegion` already
@@ -4290,6 +4266,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // validation step here too: if the region is not actually a uniform
   // pass-through, it returns `std::nullopt` and this cycle is correctly
   // diagnosed and left alone instead of silently mis-masked.
+  //
+  // This is computed *before* `Header`'s own exit branch is mutated below
+  // (unlike the `DivergentCandidates` branch above, which only ever needs
+  // it afterwards) specifically so the "shared relay block" check right
+  // after it can still see `HeaderExit->RelayBlock`'s real, pre-mutation
+  // predecessor set -- see that check's own comment for why.
   BasicBlock *BodyRegionStart =
       HeaderDivergent ? HeaderExit->StayInLoop : Header;
   std::optional<SmallPtrSet<BasicBlock *, 8>> BodyRegion =
@@ -4304,6 +4286,58 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                     "deviation)");
     return false;
   }
+  if (HeaderDivergent) {
+    IRBuilder<> B(HeaderExit->Br);
+    Value *Cond = HeaderExit->Cond;
+    Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
+    MasksAtLatch = stayInLoop(B, Masks, Staying, "active.header");
+    // Never really exit here: always continue toward the latch, letting an
+    // inactive lane's iterations become no-ops instead (see the file
+    // comment above).
+    // Roadmap L374: capture the leftover value from `HeaderExit->RelayBlock`
+    // (the only place it currently exists -- for a direct match
+    // (`matchExitCheck`), `RelayBlock == Header`; for a genuine relay
+    // (`recoverRelayExitCheck`), it is instead the relay chain's own last
+    // hop, which alone is ExitBlock's real, listed predecessor), but only
+    // manually strip *`Header`'s own* entry below, not `RelayBlock`'s --
+    // matching `CheckBlock`'s own, already-correct capture-via-relay/
+    // remove-via-self split above (see its identical comment). `Header`
+    // itself is the block whose own terminator (`HeaderExit->Br`) is
+    // actually being erased here, so it is the only one guaranteed to
+    // need its `ExitBlock` entry fixed up *right now*: in the direct-match
+    // case that is `RelayBlock` itself (no behavior change from before);
+    // in the relay case, `Header` was never literally one of `ExitBlock`'s
+    // own predecessors to begin with (`is_contained` below is false, a
+    // clean no-op), and `RelayBlock`'s own edge to `ExitBlock` is left
+    // completely untouched for now -- it becomes genuinely unreachable as
+    // a side effect of erasing `HeaderExit->Br` below (the relay chain's
+    // only path in vanishes with it), and our caller's own
+    // `EliminateUnreachableBlocks(F)` cleans it up correctly afterwards,
+    // including fixing up this same `ExitBlock` phi for it then. Removing
+    // `RelayBlock`'s entry *here* too (the previous, buggy behavior)
+    // stripped a *still-live* predecessor's phi entry out from under it
+    // whenever that same relay block was *also* reachable independently
+    // from elsewhere in the loop body (confirmed via a real, reproduced
+    // `PHINode::removeIncomingValue` assertion inside
+    // `EliminateUnreachableBlocks`, from `dEQP-VK.spirv_assembly.
+    // instruction.graphics.loop.break_frag`): `StructurizeCFG` can route
+    // the loop body's own separate uniform "hard iteration bound" check
+    // through the very same relay block `Header`'s own divergent check
+    // also relays through, leaving that block (and its real edge to
+    // `ExitBlock`) alive in the CFG long after this premature strip
+    // already told `ExitBlock`'s phis it was gone -- a desync
+    // `EliminateUnreachableBlocks`'s own later, correct removal attempt
+    // for the same (by-then genuinely dead) block then crashes on,
+    // finding no entry left to remove.
+    for (PHINode &PN : ExitBlock->phis())
+      if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock); Idx != -1)
+        HeaderExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+    if (llvm::is_contained(predecessors(ExitBlock), Header))
+      ExitBlock->removePredecessor(Header, /*KeepOneInputPHIs=*/true);
+    UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
+    HeaderExit->Br->eraseFromParent();
+  }
+
   // A *child* cycle's own header can still legitimately sit anywhere in
   // this pass-through region (e.g. the `dowhile_trap` shape's own inner
   // `do`-`while`, entirely between this outer loop's own header check
@@ -4334,18 +4368,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     Value *Staying = LatchExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
     MasksAfterLatchCheck = stayInLoop(B, MasksAtLatch, Staying, "active.latch");
     Continue = createUniformMaskAny(B, MasksAfterLatchCheck.Live, "loop.continue");
-    // Roadmap L292: same relay-aware capture/removal as `HeaderExit`
-    // above, for whatever predecessor of `ExitBlock` this latch exit
-    // check's own match actually reached it through -- `Latch` itself,
-    // for a direct match.
     SmallVector<std::pair<PHINode *, Value *>, 4> LatchExitRelayValues;
+    // Roadmap L374: capture from `LatchExit->RelayBlock` (the only place
+    // the value currently lives, whether direct match or relay -- see
+    // the identical `HeaderExit` fix above for the full reasoning), but
+    // only manually strip `Latch`'s *own* entry below. `Latch` always
+    // gains a brand-new edge to `ExitBlock` just below (`CondBrInst::
+    // Create`, unconditionally, regardless of this branch) and so always
+    // needs *some* phi value for it: in the direct-match case
+    // (`RelayBlock == Latch`) that is its own existing entry, captured
+    // and then immediately restored below (net no-op); in the relay case
+    // `Latch` was never literally a predecessor of `ExitBlock` before
+    // (`is_contained` below is false, a clean no-op here), so the value
+    // captured from `RelayBlock` is instead what gets attached to
+    // `Latch`'s new edge, by the restore loop below -- `RelayBlock`'s own
+    // (eventually dead) entry is left for `EliminateUnreachableBlocks` to
+    // clean up on its own, exactly as `HeaderExit`'s fix does.
     for (PHINode &PN : ExitBlock->phis())
       if (int Idx = PN.getBasicBlockIndex(LatchExit->RelayBlock); Idx != -1)
         LatchExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
-    if (LatchExit->RelayBlock != Latch &&
-        llvm::is_contained(predecessors(ExitBlock), LatchExit->RelayBlock))
-      ExitBlock->removePredecessor(LatchExit->RelayBlock,
-                                   /*KeepOneInputPHIs=*/true);
+    if (llvm::is_contained(predecessors(ExitBlock), Latch))
+      ExitBlock->removePredecessor(Latch, /*KeepOneInputPHIs=*/true);
     CondBrInst::Create(Continue, Header, ExitBlock,
                        LatchExit->Br->getIterator());
     LatchExit->Br->eraseFromParent();
