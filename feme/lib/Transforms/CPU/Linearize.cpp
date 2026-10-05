@@ -3866,19 +3866,117 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // `exited.via.check.next` at all, so neither can possibly dominate
     // the phi/select later built from it. Recompute `DT` immediately
     // before checking (the `flatten()` fixed-point loop above can have
-    // changed dominance since the last recompute) and bail out,
-    // diagnosed, rather than silently producing invalid IR for this not-
-    // yet-supported shape.
+    // changed dominance since the last recompute); roadmap `L377(a)`
+    // below recognizes and physically repairs the one shape this is
+    // confirmed to actually arise from (a second, genuinely divergent
+    // branch immediately upstream of `CheckBlock`, see its own comment),
+    // still bailing out, diagnosed, for anything else rather than
+    // silently producing invalid IR for a not-yet-understood shape.
     DT.recalculate(F);
     if (!DT.dominates(CheckBlock, CheckExit->StayInLoop)) {
-      diagnose(F, "loop at '" + Header->getName() +
-                      "' has an internal branch in '" +
-                      CheckBlock->getName() +
-                      "' whose own check is not the sole entry into its "
-                      "'stay in loop' continuation (e.g. a peeled "
-                      "predecessor bypassing the check directly); "
-                      "unsupported (roadmap milestone 6 deviation)");
-      return false;
+      // Roadmap L377(a): the common, safe shape this is (confirmed via a
+      // real IR dump of `dEQP-VK.pipeline.monolithic.image...
+      // 127x1_compute`'s own doubly-nested barycentric/degenerate-
+      // triangle check, post-`DiamondFlattener`): a second, genuinely
+      // divergent branch (`ChainGate`) sits immediately upstream of
+      // `CheckBlock` -- `CheckBlock`'s own *sole* predecessor -- with one
+      // successor going straight to `CheckBlock` and the other (via a
+      // uniform pass-through chain, `ChainBypassRegion`) bypassing it
+      // entirely, straight to `CheckExit->StayInLoop`. This is not a real
+      // second exit check (`ChainGate` itself never reaches `ExitBlock`
+      // on either arm -- see `RealExitCandidates`'s own computation
+      // above, which already ruled that out) -- it is an ordinary
+      // sequential "if (c1) continue; else if (c2) continue; else exit;"
+      // shape that `DiamondFlattener` could not flatten as an ordinary
+      // body diamond (`flattenLoopBodyDiamond` correctly refuses: one of
+      // `ChainGate`'s own arms, via `CheckBlock`'s *own* further branch,
+      // can still reach `ExitBlock`, i.e. crosses a loop control edge --
+      // see that function's own comment), yet is not itself the loop's
+      // real exit decision either -- `CheckBlock` is. Recognize this
+      // specific shape and physically merge it into `CheckBlock`'s own
+      // single-entry check below (rather than just diagnosing it), so
+      // the rest of this function's existing single-source machinery
+      // keeps working entirely unmodified.
+      BasicBlock *ChainGate = CheckBlock->getUniquePredecessor();
+      CondBrInst *ChainGateBr =
+          ChainGate ? dyn_cast<CondBrInst>(ChainGate->getTerminator())
+                    : nullptr;
+      BasicBlock *ChainBypassEntry = nullptr;
+      std::optional<SmallPtrSet<BasicBlock *, 8>> ChainBypassRegion;
+      BasicBlock *ChainBypassTail = nullptr;
+      if (ChainGateBr && CI.contains(C, ChainGate) && ChainGate != Header &&
+          ChainGate != Latch && isDivergentBranch(ChainGateBr) &&
+          !matchExitCheckWithRelay(*ChainGate, ExitBlock)) {
+        BasicBlock *S0 = ChainGateBr->getSuccessor(0);
+        BasicBlock *S1 = ChainGateBr->getSuccessor(1);
+        ChainBypassEntry = S0 == CheckBlock ? S1
+                           : S1 == CheckBlock ? S0
+                                              : nullptr;
+      }
+      if (ChainBypassEntry)
+        ChainBypassRegion = collectUniformPassThroughRegion(
+            ChainBypassEntry, CheckExit->StayInLoop, ExitBlock, C,
+            PeeledFrom);
+      if (ChainBypassRegion) {
+        for (BasicBlock *P : predecessors(CheckExit->StayInLoop))
+          if (P == ChainBypassEntry || ChainBypassRegion->contains(P)) {
+            ChainBypassTail = P;
+            break;
+          }
+        if (ChainBypassTail &&
+            !llvm::all_of(predecessors(CheckExit->StayInLoop),
+                          [&](BasicBlock *P) {
+                            return P == CheckBlock || P == ChainBypassTail;
+                          }))
+          ChainBypassTail = nullptr; // Some third, unrecognized source too.
+      }
+      if (!ChainBypassTail) {
+        diagnose(F, "loop at '" + Header->getName() +
+                        "' has an internal branch in '" +
+                        CheckBlock->getName() +
+                        "' whose own check is not the sole entry into its "
+                        "'stay in loop' continuation (e.g. a peeled "
+                        "predecessor bypassing the check directly); "
+                        "unsupported (roadmap milestone 6 deviation)");
+        return false;
+      }
+      // `ChainBypassTail`'s own unconditional edge into `StayInLoop`
+      // becomes an edge into `CheckBlock` instead -- every lane that used
+      // to bypass `CheckBlock` entirely now flows through it physically
+      // too, with a fresh phi (below) forcing its own effective check
+      // condition to "stay" for exactly those lanes, regardless of
+      // whatever `CheckBlock`'s original condition (computed only for
+      // lanes genuinely reaching it via `ChainGate`'s *other* arm) says.
+      CheckExit->StayInLoop->removePredecessor(ChainBypassTail,
+                                               /*KeepOneInputPHIs=*/true);
+      auto *TailBr = cast<UncondBrInst>(ChainBypassTail->getTerminator());
+      assert(TailBr->getSuccessor(0) == CheckExit->StayInLoop &&
+             "collectUniformPassThroughRegion only tolerates a plain "
+             "unconditional chain reaching its target");
+      TailBr->setSuccessor(0, CheckBlock);
+      PHINode *MergedCond = PHINode::Create(
+          CheckExit->Cond->getType(), /*NumReservedValues=*/2,
+          CheckExit->Cond->getName() + ".chain.merge");
+      MergedCond->insertBefore(CheckBlock->getFirstNonPHIIt());
+      MergedCond->addIncoming(CheckExit->Cond, ChainGate);
+      MergedCond->addIncoming(CheckExit->ExitOnTrue
+                                  ? ConstantInt::getFalse(Ctx)
+                                  : ConstantInt::getTrue(Ctx),
+                              ChainBypassTail);
+      CheckExit->Br->setCondition(MergedCond);
+      CheckExit->Cond = MergedCond;
+      // `ChainGate` no longer has a path of its own to `ExitBlock` on
+      // either arm (both now funnel into `CheckBlock`), so it is exactly
+      // as safe to walk through as any other `PeeledFrom` entry -- the
+      // `PreRegion` walk below now tolerates it, and the uniform
+      // `ChainBypassRegion` chain it feeds, folding both into the same,
+      // single, unchanged `Masks` value `CheckBlock` itself already
+      // receives (neither arm narrows anything on its own).
+      PeeledFrom.insert(ChainGate);
+      DT.recalculate(F);
+      assert(DT.dominates(CheckBlock, CheckExit->StayInLoop) &&
+             "the chain merge above should have made CheckBlock the sole "
+             "gateway into StayInLoop");
     }
 
     // Roadmap L292: `Header`'s own exit check (recovered via
