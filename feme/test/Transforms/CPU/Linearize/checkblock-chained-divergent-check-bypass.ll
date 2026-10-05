@@ -1,32 +1,37 @@
-; RUN: not feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s | FileCheck %s
 
-; Roadmap L377: a real, captured pre-`feme-cpu-linearize` IR reduction of
+; Roadmap L377(a): a real, captured pre-`feme-cpu-linearize` IR reduction of
 ; `dEQP-VK.pipeline.monolithic.image.sampler.view_type.1d.format.*.
 ; image_size.127x1_compute`'s own barycentric-sampling loop. This loop's
-; body contains a second, genuinely divergent exit check (`Flow72.
-; Flow74_crit_edge`, the collapsed remnant of a constant-folded `Flow74`
-; diamond -- see `Flow72`'s own two phi-to-select-converted operands) in
-; addition to `Header`'s (block `21`'s) own uniform trip-count check.
+; body contains a second, genuinely divergent branch (`Flow72`, the
+; collapsed remnant of a constant-folded `Flow74` diamond -- see `Flow72`'s
+; own two phi-to-select-converted operands) immediately upstream of the
+; loop's real exit check (`Flow72.Flow74_crit_edge`), in addition to
+; `Header`'s (block `21`'s) own uniform trip-count check.
 ;
 ; `Flow72`'s *other* successor (`86`) was earlier found, by
 ; `peelConstantFlowPredecessorsInCycle`, to carry a provably-constant
 ; value into what was `Flow74`'s phi -- so `86` was redirected to jump
-; directly to block `29` (and from there, `Flow75`/`Flow71`), completely
-; bypassing `Flow72.Flow74_crit_edge`'s own check. This leaves `Flow72.
-; Flow74_crit_edge`'s own "stay in loop" successor (ultimately block `26`)
-; reachable *both* via `Flow72.Flow74_crit_edge`'s own check *and* via
-; this unrelated bypass edge from `86` -- `Flow72.Flow74_crit_edge` does
-; not dominate its own "stay in loop" continuation after all, so the
-; per-lane mask/relay values this pass builds from values computed
-; strictly inside it (`active.check.live`, `exited.via.check.next`, ...)
-; cannot be made to dominate every one of their uses once threaded through
-; that continuation to `Latch`/`ExitBlock` -- a real, reproduced
-; `verifyModule` dominance failure before the fix this test guards (see
-; `agent_thoughts.md`'s own "L377" entry). Diagnosing this shape as
-; unsupported, rather than silently producing invalid IR, is this
-; milestone's fix.
+; directly to block `29` (and from there, `Flow75`/`Flow71`), entirely
+; bypassing `Flow72.Flow74_crit_edge`'s own check. This used to leave
+; `Flow72.Flow74_crit_edge`'s own "stay in loop" successor (ultimately
+; block `26`) reachable *both* via `Flow72.Flow74_crit_edge`'s own check
+; *and* via this unrelated bypass edge from `86` -- a real, reproduced
+; `verifyModule` dominance failure (see `agent_thoughts.md`'s own "L377"
+; entry) before roadmap `L377`'s guard started diagnosing it instead.
+;
+; `Flow72` is not itself a second exit check (neither of its arms reaches
+; `ExitBlock` on its own) -- it is an ordinary "if (c1) continue; else if
+; (c2) continue; else exit;" shape. Roadmap `L377(a)` recognizes this
+; specific, common shape and physically redirects the bypass edge into
+; `Flow72.Flow74_crit_edge` itself, merging the two incoming "would this
+; lane exit" decisions via a fresh phi, so `Flow72.Flow74_crit_edge`
+; becomes the sole real gateway into its own "stay in loop" continuation
+; again -- letting this loop linearize successfully instead of being
+; diagnosed.
 
-; CHECK: feme-cpu-linearize: function 'main': loop at '' has an internal branch in 'Flow72.Flow74_crit_edge' whose own check is not the sole entry into its 'stay in loop' continuation
+; CHECK: Flow72.Flow74_crit_edge:
+; CHECK-NEXT: %[[MERGE:.*]] = phi i1 [ %.linearized8, %Flow72 ], [ true, %76 ]
 
 define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #4 {
   %1 = call i32 @llvm.spv.thread.id.i32(i32 0)
