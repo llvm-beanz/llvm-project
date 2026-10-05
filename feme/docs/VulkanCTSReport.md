@@ -14332,17 +14332,26 @@ Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
   - `ninja check-feme`: 3,529/3,590 Passed, 61 Unsupported, 0 Failed, 0
     regressions.
   - Broader `dEQP-VK.spirv_assembly.*` regression sweep (full group,
-    graphics + compute instruction tests): run to completion excluding
-    one known, **pre-existing, unrelated** crash found along the way (see
-    below); 0 new Fails attributable to this fix, confirming the targeted
-    fix introduces no regressions elsewhere in `spirv_assembly.*`.
+    graphics + compute instruction tests, 68,729 cases): run to
+    completion excluding the `switch_continue_{geom,tessc,tesse}` family
+    (see `L375` below) -- 10,079 Pass / 457 Fail / 58,193 NotSupported.
+    The 457 Fails span many pre-existing, unrelated feature-gap groups
+    (`opquantize` (70), `opmemoryaccess` (35), `decoration_group` (30),
+    `variable_init.private` (15), `opline` (15), and many smaller groups
+    -- none in the `loop`/`switch_continue` families this fix or `L375`
+    touch), none newly introduced by this fix; this is recorded as the
+    first full baseline for `spirv_assembly.*`, left untriaged pending a
+    dedicated future session (see `agent_thoughts.md`'s next steps).
 - **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:** no
   change needed -- an internal compiler correctness fix (CFG
   linearization bookkeeping), no feature/extension-surface change.
 - **New, separate finding during the broader sweep (not caused by this
-  fix, confirmed pre-existing via a `HEAD~1` A/B rebuild):**
-  `dEQP-VK.spirv_assembly.instruction.graphics.loop.switch_continue_geom`
-  crashes with a *different* assertion,
+  fix, confirmed pre-existing via a `HEAD~1` A/B rebuild):** 3 of the 5
+  stage variants of
+  `dEQP-VK.spirv_assembly.instruction.graphics.loop.switch_continue_*`
+  (`switch_continue_geom`, `switch_continue_tessc`,
+  `switch_continue_tesse`; `switch_continue_frag`/`switch_continue_vert`
+  both Pass) crash with a *different* assertion,
   `PredIterator::operator*()`'s `!It.atEnd() && "pred_iterator out of
   range!"`, inside `(anonymous namespace)::DiamondFlattener::flatten`
   (same `Linearize.cpp` file, different function than `L374`'s own fix).
