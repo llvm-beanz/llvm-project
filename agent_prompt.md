@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 9d06b2b9-f3c8-4fbb-9416-30f8a58d062b
 ---
 # Initial Guidelines
 
@@ -62,10 +63,40 @@ file.
 Please continue working on the FeMe Vulkan ICD. The previous session's suggested
 next steps are:
 
-1. **P0:** Reduce one L377 compute case to pre-linearize IR and fix the shared
-   loop-mask/exit-value dominance construction; then rerun both complete image
-   families.
-2. **P0:** Bucket L378's sampler failures by pipeline-creation diagnostic
-   versus executed-result mismatch before splitting implementation rows.
-3. **Stability:** Triage the 46 isolated pipeline SIGSEGV cases and the 328
-   render-pass `DeviceLost` results by common family/signature.
+1. **`L377(a)`** (the real fix, ~1 day): make the `CheckBlock`-not-sole-entry
+   shape actually linearize instead of just diagnosing it. This is what
+   would flip most of the 38,478 cases above from Fail to Pass. Design
+   sketch: generalize `ExitBlockRelayValues`/`RelaySource` to treat the
+   bypass edge as a second relay source, computing `CheckBlock`'s own
+   derived values per-predecessor and merging them at the consumption point
+   instead of assuming one source. **Worth checking first: does this share
+   a root cause with `L295`'s still-open "two divergent decisions sharing
+   one dispatch block" design problem?** Both are about a value computed in
+   one block needing to dominate a use reachable via a second, bypassing
+   path. If so, one fix might close both.
+2. **`L378(a)`** (~1-2 hours once picked up): `max_sampler_lod_bias.shader_bias`
+   wrong-pixel bug. `shader_bias_compute` (same LOD-bias logic, compute
+   pipeline) passes, so this is likely graphics-fragment-path-specific.
+   Next step: `--deqp-log-images=enable` and diff against the golden image.
+3. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost) --
+   not started this session.** No case names are recorded anywhere from the
+   original full-suite run that produced these counts, only aggregate
+   numbers. Finding them requires either (a) a full `pipeline.*`/
+   `renderpasses.*` rerun (the `pipeline` group alone is ~1.1M cases; at
+   this session's ~150K-cases-per-35-minutes rate, that's several hours,
+   too long for one session) or (b) narrowing by sub-family first the way
+   this session did for `L378` (check `renderpasses` sub-group names for
+   a `DeviceLost` cluster, probably "dynamic rendering" or "suballocation"
+   per the existing `VulkanCTSReport.md` ordinary-failure breakdown, then
+   scope a targeted rerun to just that). Recommend (b) next session --
+   start with `renderpasses.dynamic_rendering.*` and
+   `renderpasses.suballocation.*` specifically, since those are already the
+   two largest ordinary-failure families in that group.
+4. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
+   completely unaddressed, carried over from multiple prior sessions.
+5. **`check-hlsl-feme-vk` rerun** -- not reverified this session (no
+   `Linearize.cpp` behavior change should affect it beyond possibly fixing
+   or not-affecting the 3 `WaveActiveBit{And,Or,Xor}.convergence` cases
+   `L296` flagged as plausibly related to this same reconvergence territory
+   -- worth specifically re-checking those 3 cases next session given this
+   session's fix, even though the shape doesn't look identical).
