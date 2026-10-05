@@ -115336,3 +115336,94 @@ two**, plus one unrelated 1-case wrong-pixel bug (`L378(a)`).
    `L296` flagged as plausibly related to this same reconvergence territory
    -- worth specifically re-checking those 3 cases next session given this
    session's fix, even though the shape doesn't look identical).
+
+# Session: shipped L377(a) for real -- divergent branch eliminated, not just dominance-repaired (2026-10-06)
+
+**Confirmed device:** `FeMe CPU Vulkan Device` via explicit `VK_ICD_FILENAMES`/
+`VK_DRIVER_FILES` (checked at session start).
+
+**Next action for the next session: pick up `L378(a)`** (`max_sampler_lod_bias.shader_bias`
+wrong-pixel bug) -- run the case with `--deqp-log-images=enable` and diff against
+the golden reference image. About 1-2 hours; see "What's still open" below.
+
+## What's done (all committed, 6 commits: 5 code/test + 1 docs)
+
+1. Picked up last session's `L377(a)` handoff and implemented the real fix:
+   `LoopLinearizer::linearizeCycle` now actually linearizes the
+   `CheckBlock`-not-sole-entry shape instead of diagnosing it.
+2. **Caught a critical gap the first attempt missed.** The initial fix
+   (redirect the bypass edge into `CheckBlock` via a phi) made `opt
+   -passes=verify` and all unit/lit tests pass -- but running the real CTS
+   reproducer end-to-end still failed, now with a *different* error:
+   `feme-cpu-simdize` rejected a still-physically-intact divergent branch
+   (`ChainGate`'s own `CondBr`) that the first fix never actually removed,
+   only bypassed. This is exactly the `L295` silent-miscompile lesson in
+   action: a fix that verifies clean can still be functionally incomplete.
+   Only the real end-to-end CTS run caught it.
+3. Fixed it for real: detect `ChainGate`, require its bypass region to be
+   pure/side-effect-free glue (every block `size()==1`, single predecessor),
+   build a `select`-based merged condition, replace `ChainGate`'s `CondBr`
+   with one `UncondBrInst` into `CheckBlock`, delete the dead bypass blocks,
+   rewire `CheckExit` to the new merged condition. Falls back to the old
+   diagnostic for any shape that doesn't match.
+4. Verified against the real captured reproducer
+   (`...image.dedicated_allocation...r16_sfloat.count_1.size.127x1_compute`):
+   **Pass (Result image matches reference)** -- correct pixels, not just a
+   clean pipeline build.
+5. Updated both the lit test (renamed, `RUN: not` removed, new `CHECK` lines
+   for the `select`-based merge) and the unit test (renamed, flipped
+   `EXPECT_TRUE(SawError)` to `EXPECT_FALSE`) to match. `ninja check-feme`:
+   3,589/3,589 Passed, 0 Failed, 3 Unsupported -- clean.
+6. **Reran all three affected CTS families to completion** (~45 minutes
+   total): `pipeline.monolithic.image.*` (122,912 cases: 46,112 Pass / **0
+   Fail** / 76,800 NotSupported), `pipeline.monolithic.image_view.*` (27,708
+   cases: 15,936 Pass / **0 Fail** / 11,772 NotSupported),
+   `pipeline.monolithic.sampler.view_type.*` (74,616 cases: 15,078 Pass /
+   **0 Fail** / 59,538 NotSupported). All three: 0 crashes, 0 DeviceLost.
+   This flips all 31,024 `L377` cases and all 7,453 `L378`-folded-into-`L377`
+   cases from Fail to Pass.
+7. Independently reran `sampler.max_sampler_lod_bias.*` (10 cases: 7 Pass /
+   **1 Fail** / 2 NotSupported) -- confirmed `L378(a)`'s wrong-pixel bug is
+   still open and genuinely unrelated to this fix.
+8. Re-verified `check-hlsl-feme-vk`: 445 Pass / 31 XFAIL / 200 Unsupported /
+   3 Fail / 1 XPass -- matches the known pre-existing baseline exactly
+   (`Mandelbrot` golden-image flakiness, `spec_const_32_bits`/`WaveActiveMax`
+   lit-annotation issues, `array_of_matrices` unexpected-pass). Specifically
+   re-checked the 3 `WaveActiveBit{And,Or,Xor}.convergence` cases flagged
+   last session as plausibly related: **all 3 individually Pass**, confirmed
+   not a regression either way.
+9. Updated `Roadmap.md` (struck through `L377(a)` completely; updated `L378`
+   to reflect its bulk is now fixed, not just folded) and
+   `VulkanCTSReport.md`'s triage section to match. `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md`: no change needed (internal
+   compiler-correctness fix, no feature/extension-surface change).
+
+## Why the two-attempt process matters
+
+The first `L377(a)` attempt looked done: valid IR, all tests green. It
+wasn't. `feme-cpu-simdize`'s "zero divergent branches" requirement is
+stricter than "dominance is correct," and only the actual CTS pipeline
+exercises that second pass. **Lesson reinforced again: never trust a fix
+is complete until the real end-to-end case passes with correct pixels, not
+just until the verifier and tests are quiet.**
+
+## What's still open (ranked)
+
+1. **`L378(a)`** (~1-2 hours): `max_sampler_lod_bias.shader_bias` wrong-pixel
+   bug, confirmed still open and unrelated to this fix. `shader_bias_compute`
+   (same LOD-bias logic, compute pipeline) passes, so likely
+   graphics-fragment-path-specific. Next step: `--deqp-log-images=enable`
+   and diff against the golden image.
+2. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost)
+   -- still not started.** No case names recorded anywhere, only aggregate
+   counts. Recommend narrowing by sub-family first: start with
+   `renderpasses.dynamic_rendering.*` and `renderpasses.suballocation.*`
+   (the two largest ordinary-failure families in that group per
+   `VulkanCTSReport.md`), the same approach that worked for `L378` this
+   session and last.
+3. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
+   completely unaddressed, carried over from multiple prior sessions.
+4. **`L375`** (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener`
+   assertion, found by `L374`): still open, not touched this session --
+   a different function in the same file, needs its own dedicated design
+   session per the existing roadmap entry.
