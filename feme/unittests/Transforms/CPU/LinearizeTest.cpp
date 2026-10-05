@@ -1127,7 +1127,7 @@ TEST(LinearizeTest, LinearizesLoopWithTwoRelayHopsToDivergentExit) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     @spirv_var_41 = external addrspace(3) global [1 x i32]
-    @out_buf = external addrspace(1) global i32
+    @out_buf_two_hop = external addrspace(1) global i32
 
     define void @main() #0 {
     entry:
@@ -1181,7 +1181,7 @@ TEST(LinearizeTest, LinearizesLoopWithTwoRelayHopsToDivergentExit) {
     loopexit_merged:
       %found.mismatch = phi i1 [ true, %doexit ], [ false, %loop.exit.guard._crit_edge ]
       %flag = select i1 %found.mismatch, i32 1, i32 0
-      store i32 %flag, ptr addrspace(1) @out_buf, align 4
+      store i32 %flag, ptr addrspace(1) @out_buf_two_hop, align 4
       br label %merge
     merge:
       ret void
@@ -1202,6 +1202,94 @@ TEST(LinearizeTest, LinearizesLoopWithTwoRelayHopsToDivergentExit) {
           CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
         FoundMaskAny = true;
   EXPECT_TRUE(FoundMaskAny);
+}
+
+// Roadmap L374: distilled from a real captured pre-linearize IR dump of
+// `dEQP-VK.spirv_assembly.instruction.graphics.loop.break_frag` (see
+// agent_thoughts.md's "L374 session" entry for the full trace this was
+// root-caused from). `.flow_crit_edge` below plays the real crash's own
+// `.Flow_crit_edge` block's role: a one-hop pure relay stub that is
+// `header`'s own *sole* false-arm target, feeding `flow`'s condition phi
+// a compile-time-constant `true` value. Because that value is constant,
+// `peelConstantFlowPredecessors` (which runs early, before `header`'s own
+// exit is even classified) retargets `.flow_crit_edge`'s own branch to go
+// directly to `exit` instead of through `flow` -- exercising the same
+// peel-then-reclassify shape the real crash's `HeaderExit->RelayBlock`
+// fix (see `Linearize.cpp`'s own comment at the `HeaderDivergent`
+// handling code) depends on. Note: this particular reduction's own
+// control-flow shape (confirmed via `FEME_DEBUG_LINEARIZE_TRACE`) ends up
+// fully mask-converting `header`'s own branch rather than reaching the
+// specific relayed-`HeaderExit` code path the real crash hit -- it does
+// not, on its own, reproduce the original assertion failure pre-fix.
+// It is kept anyway as a general regression check that peeling a
+// constant-flow predecessor inside a cycle headed toward a genuine exit
+// block continues to produce a verifier-clean module with fully
+// consistent phi/predecessor bookkeeping (the same class of invariant
+// the real bug violated), while the real crash's own, much more reliable
+// regression coverage remains the literal CTS case named above (reproduced
+// via `gdb` pre-fix, confirmed passing post-fix).
+TEST(LinearizeTest, LinearizesLoopWhoseHeaderRelayIsPeeledDirectlyToExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @out_buf = external addrspace(1) global float
+
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %bound = add i32 %tid, 2
+      br label %header
+
+    header:
+      %i = phi i32 [ 4, %entry ], [ %dec, %latch ]
+      %acc = phi float [ 0.000000e+00, %entry ], [ %frozen, %latch ]
+      %cont = icmp sgt i32 %i, %bound
+      br i1 %cont, label %body, label %.flow_crit_edge
+
+    .flow_crit_edge:
+      br label %flow
+
+    body:
+      %fi = uitofp nneg i32 %i to float
+      %acc2 = fadd float %acc, %fi
+      %dec = add nsw i32 %i, -1
+      %break = icmp sle i32 %i, 1
+      br label %flow
+
+    flow:
+      %acc3 = phi float [ %acc2, %body ], [ %acc, %.flow_crit_edge ]
+      %exit3 = phi i1 [ %break, %body ], [ true, %.flow_crit_edge ]
+      br i1 %exit3, label %exit, label %latch
+
+    latch:
+      %frozen = freeze float %acc3
+      br label %header
+
+    exit:
+      %final = phi float [ %acc3, %flow ], [ %acc, %latch ]
+      store float %final, ptr addrspace(1) @out_buf, align 4
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="8,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // The real crash was a mismatch between a phi's listed incoming blocks
+  // and its own parent block's real, structural predecessor list -- so
+  // directly re-check that invariant holds for every surviving phi,
+  // rather than only trusting `verifyModule` (which does check this, but
+  // a regression here is worth asserting on explicitly and clearly).
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  for (BasicBlock &BB : *F) {
+    SmallPtrSet<BasicBlock *, 4> Preds(llvm::from_range, predecessors(&BB));
+    for (PHINode &PN : BB.phis()) {
+      SmallPtrSet<BasicBlock *, 4> Incoming(llvm::from_range, PN.blocks());
+      EXPECT_EQ(Preds, Incoming) << "phi " << PN << " in " << BB.getName();
+    }
+  }
 }
 
 // Roadmap H120: distilled from a real captured pre-`feme-cpu-linearize` IR
