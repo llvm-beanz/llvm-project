@@ -573,6 +573,25 @@ where it's discussed, and summarized here:
   anticipated). `feme.cpu.mask.any` (needed by the loop linearizer itself,
   unlike the memory intrinsics) is implemented in
   `feme/include/feme/Transforms/CPU/MaskIntrinsics.h`.
+- (Roadmap L377) The loop linearizer's body-internal divergent exit check
+  (`CheckBlock`) was silently assumed to be the sole entry into its own
+  "stay in loop" continuation, so the "active"/"exited via check" mask
+  values it computes could be threaded to every later use unconditionally.
+  An earlier fold/peel/merge fixed-point step
+  (`peelConstantFlowPredecessorsInCycle`/
+  `collapseTriviallyRedundantPhisInCycle`/`mergeTrivialRelayBlocksInCycle`)
+  can, for a provably-constant edge, redirect some other block directly
+  into that same continuation, bypassing `CheckBlock` entirely -- a real
+  dominance violation `verifyModule` catches, reproduced from
+  `dEQP-VK.pipeline.monolithic.image...127x1_compute`'s own barycentric-
+  sampling loop. `LoopLinearizer::linearizeCycle` now recomputes `DT` and
+  explicitly checks `DT.dominates(CheckBlock, CheckExit->StayInLoop)`
+  immediately after `CheckBlock`/`CheckExit` are established, diagnosing
+  this shape as unsupported (consistent with every other not-yet-lowered
+  shape in this pass) instead of producing invalid IR. This converts a
+  compiler-correctness bug into a clean diagnostic; it does not yet make
+  this CFG shape linearize successfully -- see `feme/docs/Roadmap.md`'s
+  `L377`/`L377(a)` entries for the still-open work to support it.
 - Nested loops (a cycle containing another cycle) are not linearized: only
   a leaf cycle (one with no child cycle) is considered a candidate.
 - The "skip a block when all lanes are off" guard described as "not emitted
