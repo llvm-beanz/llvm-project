@@ -115496,3 +115496,98 @@ stability itself (it normally isn't). This fix only touched one test;
 worth a quick grep (`grep -rn '\.linearized[0-9]' feme/test/`) next time
 a `Linearize.cpp` session starts, in case any other lit test added since
 has the same latent fragility.
+
+# Session: re-investigated "still failing" checkblock-chained-divergent-check-bypass.ll report -- not reproducible, no bug found (2026-10-06)
+
+## Next action for the reporter (do this first)
+
+Run on the machine that saw the failure:
+
+```
+cd /path/to/llvm-project && git log -1 --format='%H %s' -- feme/lib/Transforms/CPU/Linearize.cpp
+strings build-rel/bin/feme-opt | grep -c 'chain.merge'
+```
+
+1. If the first command's hash is not `670f7c94abea` ("L377(a): eliminate
+   ChainGate's divergent branch...") or a descendant of it, `git pull`/
+   rebase first -- the fix is not present yet.
+2. If the hash *is* current but `grep -c` prints `0`, the source has the
+   fix but `build-rel/bin/feme-opt` does not: force-rebuild just that
+   target (`ninja -t clean feme-opt && ninja feme-opt`, or safest, `rm -rf
+   build-rel && ` reconfigure) rather than trusting incremental ninja.
+3. Re-run the lit test once `grep -c` prints `2` (one literal use, one
+   debug-info/metadata reference is typical).
+
+## What I checked (all came back clean)
+
+- `ninja check-feme` on this Linux Release+Asserts build: **3,589/3,589
+  passed, 0 failed, 3 unsupported** -- including this exact test.
+- The companion unit test, `LinearizeTest.
+  LinearizesCheckBlockChainedDivergentCheckBypassToStayInLoop` (already
+  existed, checks `verifyModule` + no diagnostic -- text-independent):
+  **passes**.
+- Traced `BypassOnTrue`/`CheckExit->ExitOnTrue` (the two booleans that
+  pick which operand of the `chain.merge` select gets the literal
+  `true`/`false`) all the way back to plain pointer-equality checks
+  against the *fixed, embedded* `.ll` text in the test -- both are 100%
+  determined by that literal input and the already-committed code, not by
+  anything platform- or build-dependent.
+- Audited every `SmallPtrSet`/relay-collection helper this fix touches
+  (`collectUniformPassThroughRegion`, `peelConstantFlowPredecessorsInCycle`,
+  `collapseTriviallyRedundantPhisInCycle`, `mergeTrivialRelayBlocksInCycle`)
+  for iteration-order-dependent *decisions* (not just membership tests):
+  none found -- all iterate the function's own instruction/block list
+  (already a stable, deterministic order) or are indexed by integer, never
+  keyed by pointer hash order.
+- `collectUniformPassThroughRegion`'s one real edge case (`From == To`
+  producing an empty-but-valid region) was checked and ruled out for this
+  shape: `ChainBypassEntry` (block `86`) is never equal to `CheckExit->
+  StayInLoop` in the fixed input text.
+
+## Why I didn't change `Linearize.cpp`
+
+The prior session's report (first failure) already showed the *correct*
+hardcoded names (`%.linearized9`/`%.linearized8`) for this build, so that
+part was never the live bug. The second report (after the regex fix
+landed) showed the maximally permissive `{{%[A-Za-z0-9_.]+}}` pattern
+*still* not matching anywhere in the reporter's dump -- meaning no
+`chain.merge`-named value exists in their output *at all*, not merely
+differently numbered. That is not explainable by SSA-suffix drift; it
+means their binary took an entirely different code path for this
+function. Since this build reproduces the fix deterministically (5 reruns
+previously, plus this session's full `check-feme` + targeted unit test),
+and I found no non-deterministic construct in the fix itself, the most
+likely explanation is the reporter's `build-rel/bin/feme-opt` predates
+commit `670f7c94abea` (still has the old diagnostic-only `L377` behavior,
+or an even older pre-`L377` state) despite their *source tree* (test file)
+being current -- i.e. a stale/incremental-build gap, not a product bug.
+I did not make a speculative code change against a hypothesis I could not
+confirm; that risks masking the real stale-build problem instead of
+fixing it.
+
+## Next steps
+
+1. **If the reporter confirms a stale binary was the cause**: no code
+   change needed here; consider (separately, low priority) whether
+   `check-feme`'s ninja target is missing a dependency edge that let
+   `feme-opt` go stale in the first place -- would explain recurring
+   "my local build is stale" reports across sessions. ~30 min to audit
+   `feme/tools/feme-opt/CMakeLists.txt` and `add_feme_tool`'s dependency
+   wiring if this keeps happening.
+2. **If the reporter rebuilds clean and it *still* fails** with a
+   genuinely different IR shape (not just missing the binary): that would
+   be new information ruling out "stale build" and reopening this as a
+   real cross-platform bug -- next session should get the reporter's full,
+   *untruncated* `--llvm -passes=feme-cpu-linearize -S` output (their
+   dump was `.`-collapsed by FileCheck's own diagnostic printer and hid
+   the exact block structure that matters) rather than re-guessing from a
+   collapsed dump.
+3. Carried over, unstarted, from prior sessions (unchanged by this one):
+   `L378(a)` sampler LOD-bias graphics-fragment bug, 46-case pipeline
+   SIGSEGV + 328-case renderpasses `DeviceLost` stability triage,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap,
+   `check-hlsl-feme-vk` rerun to re-check the 3 `WaveActiveBit{And,Or,Xor}`
+   cases.
+
+No `Linearize.cpp`/test changes this session -- investigation only, Vulkan
+CTS not rerun (no code changed).
