@@ -3848,6 +3848,39 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     std::optional<ExitCheck> CheckExit =
         matchExitCheckWithRelay(*CheckBlock, ExitBlock);
 
+    // Roadmap L377: `CheckBlock` must be the sole gateway into its own
+    // "stay in loop" continuation (`CheckExit->StayInLoop`) for the mask
+    // narrowed just below (`MasksAfterCheck`, built from values computed
+    // *inside* `CheckBlock`) to be valid at every point that
+    // continuation reaches. An earlier fold in this same fixed-point
+    // pipeline (`peelConstantFlowPredecessorsInCycle`/
+    // `collapseTriviallyRedundantPhisInCycle`/
+    // `mergeTrivialRelayBlocksInCycle`) can, for a provably-constant
+    // edge, redirect some *other* block directly into
+    // `CheckExit->StayInLoop` (or anything it reaches before `Latch`),
+    // bypassing `CheckBlock`'s own check entirely -- confirmed via a
+    // real, reproduced `verifyModule` dominance failure on `dEQP-VK.
+    // pipeline.monolithic.image...127x1_compute`'s own doubly-nested
+    // barycentric/degenerate-triangle check: a lane that takes that
+    // bypass edge never computes `active.check.live`/
+    // `exited.via.check.next` at all, so neither can possibly dominate
+    // the phi/select later built from it. Recompute `DT` immediately
+    // before checking (the `flatten()` fixed-point loop above can have
+    // changed dominance since the last recompute) and bail out,
+    // diagnosed, rather than silently producing invalid IR for this not-
+    // yet-supported shape.
+    DT.recalculate(F);
+    if (!DT.dominates(CheckBlock, CheckExit->StayInLoop)) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" +
+                      CheckBlock->getName() +
+                      "' whose own check is not the sole entry into its "
+                      "'stay in loop' continuation (e.g. a peeled "
+                      "predecessor bypassing the check directly); "
+                      "unsupported (roadmap milestone 6 deviation)");
+      return false;
+    }
+
     // Roadmap L292: `Header`'s own exit check (recovered via
     // `recoverRelayExitCheck`, since a plain `matchExitCheck` already
     // would have made this cycle take the ordinary `HeaderDivergent`
