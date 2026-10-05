@@ -14385,3 +14385,35 @@ Passed 4,775/133,719 (3.6%), Failed 1,957/133,719 (1.5%), NotSupported
   session change.
 - **Files:** `feme/lib/Transforms/CPU/Linearize.cpp`,
   `feme/unittests/Transforms/CPU/LinearizeTest.cpp`.
+
+## Broader-than-tessellation CTS sweep sample (overdue handoff item, this session)
+
+Continuing the standing overdue "broader-than-tessellation CTS sweep"
+backlog item alongside `L374`/`L375`:
+
+- **`dEQP-VK.synchronization.*` + `dEQP-VK.synchronization2.*`** (full
+  group, 146,489 cases): **43,051 Pass / 0 Fail / 103,438 NotSupported.**
+  Clean -- no issues found.
+- **`dEQP-VK.api.*`**: this group is far larger than anticipated
+  (267,504 cases) -- a full run is infeasible in a single session (the
+  `command_buffers` subgroup alone took several minutes and the full
+  group would take many hours at the same rate). Started a sample run;
+  it got partway through `api.command_buffers.*` before stopping without
+  a clean `DONE!` summary, right after:
+  - `dEQP-VK.api.command_buffers.record_many_draws_secondary_1`: **Fail**
+    (`vk.waitForFences(device, 1u, &fence, VK_TRUE, timeoutNanos):
+    VK_TIMEOUT at vkCmdUtil.cpp:296)`.
+  - `dEQP-VK.api.command_buffers.record_many_draws_secondary_2` then
+    started but never printed a result before the process stopped
+    producing output -- consistent with a hang (possibly a real
+    secondary-command-buffer-with-many-draws execution stall, not
+    confirmed), not a clean crash or assertion.
+  - **Not yet root-caused or confirmed reproducible in isolation** --
+    flagged as a new, unconfirmed lead for a dedicated future session
+    rather than chased further this session given time constraints.
+- **`dEQP-VK.pipeline.*`** (1,172,229 cases) and the GLSL shader-executor
+  group (`dEQP-VK.glsl.*`, the de facto "shader_render" group -- there is
+  no literal top-level `shader_render` group name) were not sampled at
+  all this session; `pipeline.*` in particular is too large for a full
+  run (over 1 million cases) and will need deliberate subgroup sampling
+  in a future session, not a blind full run.
