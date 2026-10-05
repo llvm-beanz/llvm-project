@@ -1,5 +1,5 @@
 ---
-model: gpt-5.6-sol
+model: claude-sonnet-5.5
 ---
 # Initial Guidelines
 
@@ -59,7 +59,13 @@ file.
 
 # Request
 
-Can you please perform a full run of the Vulkan CTS against the feme ICD
-implementaiton? On completion please update the VulkanCTSReport (clearing any
-intermediate milestone notes), and re-triage the Roadmap.md against the existing
-state.
+Please continue working on the FeMe Vulkan ICD. The previous session's suggested
+next steps are:
+
+1. **P0:** Reduce one L377 compute case to pre-linearize IR and fix the shared
+   loop-mask/exit-value dominance construction; then rerun both complete image
+   families.
+2. **P0:** Bucket L378's sampler failures by pipeline-creation diagnostic
+   versus executed-result mismatch before splitting implementation rows.
+3. **Stability:** Triage the 46 isolated pipeline SIGSEGV cases and the 328
+   render-pass `DeviceLost` results by common family/signature.
