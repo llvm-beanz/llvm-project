@@ -5545,6 +5545,88 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L388 regression) A null `pColorAttachmentLocations` with a
+/// nonzero `colorAttachmentCount` is the spec-legal way of spelling the
+/// identity mapping (no remap) -- see `VkRenderingAttachmentLocationInfo`'s
+/// own documentation. This is distinct from the struct being entirely
+/// absent (also the identity mapping, handled by the `if` not matching at
+/// all). Found via `dEQP-VK.renderpasses.dynamic_rendering.
+/// graphics_pipeline_library.local_read.
+/// null_color_attachment_location_with_locationinfo`: this session's first
+/// `ColorAttachmentLocations` capture-side fix unconditionally read
+/// `LocationInfo->pColorAttachmentLocations` without checking it for null,
+/// so `std::vector::assign(nullptr, nullptr + N)` was undefined behavior
+/// and crashed with `SIGSEGV` on this exact CTS case, a regression
+/// introduced (and caught, within the same session) by the `L388` fix
+/// itself.
+TEST_F(GraphicsPipelineTest,
+       LinksALibraryWithANullColorAttachmentLocationsArray) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = VK_NULL_HANDLE;
+
+  VkFormat ColorFormats[1] = {VK_FORMAT_R8G8B8A8_UNORM};
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  // `pColorAttachmentLocations == nullptr` with a nonzero
+  // `colorAttachmentCount` means "identity mapping" per the spec -- must
+  // not be dereferenced.
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 1;
+  LocationInfo.pColorAttachmentLocations = nullptr;
+  LocationInfo.pNext = &Rendering;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+      &LocationInfo);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = VK_NULL_HANDLE;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            1u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H29m) Only the fragment-output-interface part owns the render
 /// target's attachment formats, so a `VkPipelineRenderingCreateInfo`
 /// chained onto any *other* part must be ignored entirely rather than

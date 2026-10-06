@@ -2952,10 +2952,14 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
           PrecomputedColorAttachmentLocations->end());
     else if (const VkRenderingAttachmentLocationInfo *LocationInfo =
                  findRenderingAttachmentLocationInfo(CreateInfo.pNext))
-      ColorAttachmentLocations.assign(
-          LocationInfo->pColorAttachmentLocations,
-          LocationInfo->pColorAttachmentLocations +
-              LocationInfo->colorAttachmentCount);
+      // A null `pColorAttachmentLocations` means the identity mapping (no
+      // remap) per the spec -- leave `ColorAttachmentLocations` empty in
+      // that case (see the `L388`-era capture-side fix for the same bug).
+      if (LocationInfo->pColorAttachmentLocations)
+        ColorAttachmentLocations.assign(
+            LocationInfo->pColorAttachmentLocations,
+            LocationInfo->pColorAttachmentLocations +
+                LocationInfo->colorAttachmentCount);
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
         compileAndValidateStages(
             VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
@@ -3211,13 +3215,17 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     }
     // (roadmap L388) See `ColorAttachmentLocations`'s own comment: only
     // this part owns the attachment-location remap, so only this part's
-    // own chained `VkRenderingAttachmentLocationInfo` is captured.
+    // own chained `VkRenderingAttachmentLocationInfo` is captured. Per the
+    // spec, a null `pColorAttachmentLocations` means the identity mapping
+    // (no remap) -- leave `ColorAttachmentLocations` empty in that case,
+    // the same way its absence is already treated downstream.
     if (const VkRenderingAttachmentLocationInfo *LocationInfo =
             findRenderingAttachmentLocationInfo(CreateInfo.pNext))
-      Out.ColorAttachmentLocations.assign(
-          LocationInfo->pColorAttachmentLocations,
-          LocationInfo->pColorAttachmentLocations +
-              LocationInfo->colorAttachmentCount);
+      if (LocationInfo->pColorAttachmentLocations)
+        Out.ColorAttachmentLocations.assign(
+            LocationInfo->pColorAttachmentLocations,
+            LocationInfo->pColorAttachmentLocations +
+                LocationInfo->colorAttachmentCount);
     // (roadmap H29m) Only this part owns the render target's attachment
     // formats, so only this part's own chained
     // `VkPipelineRenderingCreateInfo` is captured -- see
