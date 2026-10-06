@@ -60,7 +60,15 @@ file.
 # Request
 
 I've done a fully clean build deleting all objects and clearing all caches. I'm
-still seeing this failure. The full output of feme-opt is in output.ll.
+still seeing this failure.
+
+I have done multiple fully clean builds (optimized and unoptimized). I've
+cleared caches. Your theory about dynamic loading libraries is nonsense, the
+passes are statically linked into feme-opt (there is no dylib).
+
+There is something platform-specific going on.
+
+The full output of feme-opt is in output.ll.
 
 Please diagnose what is happening.
 
