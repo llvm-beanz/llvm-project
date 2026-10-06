@@ -388,6 +388,26 @@ The largest ordinary-failure changes by group are:
     `VulkanExtensionInventory.md` change needed -- internal correctness
     fix only, no feature/extension-surface change.
 
+12. **`primary_cmd_buff.suballocation.*` low-priority triage (roadmap
+    `L387`): single root cause confirmed, not fixed.** Per the handoff's
+    own suggestion, ran the full sub-family (5,935 cases -- the handoff's
+    "993 cases" estimate was stale) through one sweep rather than
+    assuming a large triage effort was needed: 3,894 Pass / 152 Fail /
+    1,889 NotSupported. All 152 failures share one error signature,
+    confirmed on four independently-sampled cases:
+    `vkCreateGraphicsPipelines: fragment stage has no integer output of
+    1-4 components at location N (SV_TargetN)`. Every failing case uses a
+    multi-subpass render pass (subpass 0 writes an integer-format color
+    attachment, subpass 1 reads it back as an input attachment and writes
+    a second `R8G8B8A8_UNORM` attachment) wrapped as dynamic rendering --
+    a different shape from the single-attachment case `H29l` already
+    fixed this same check for. Hypothesis (not yet confirmed): the
+    per-subpass `ColorAttachments` list `validateStageInterfaces`
+    consults may be resolving the wrong attachment's format for a
+    multi-subpass-derived dynamic-rendering sequence. Not fixed this
+    session -- out of scope for the ~30-minute budget this triage item
+    was given.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
