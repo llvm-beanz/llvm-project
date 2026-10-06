@@ -1127,6 +1127,19 @@ private:
   /// consulted by `getOrCreatePushDescriptorSet` to decide what the next
   /// push to that slot should copy forward. Cleared by `begin`/`reset`.
   std::map<uint32_t, DescriptorSet *> CurrentPushDescriptorSets;
+  /// (roadmap L381 follow-on) Slot number -> the original
+  /// `VkDescriptorSetLayout`'s own `DescriptorSetLayout *` identity that
+  /// slot's current snapshot was created against, kept *separately* from
+  /// the snapshot itself: `DescriptorSet::getLayout()` returns a
+  /// by-value copy embedded in the snapshot (see that class's own
+  /// `Layout` comment), so its address can never equal the original
+  /// layout's address even when every push to a slot names the very same
+  /// `VkDescriptorSetLayout` throughout -- comparing `getLayout()`'s
+  /// address here would wrongly treat every push as a layout change and
+  /// start a fresh, empty snapshot each time instead of accumulating
+  /// into the previous one. Cleared by `begin`/`reset`, alongside
+  /// `CurrentPushDescriptorSets`.
+  std::map<uint32_t, const DescriptorSetLayout *> CurrentPushDescriptorSetLayouts;
   bool Recording = false;
   const PhysicalDeviceInfo *Info = nullptr;
   VkCommandBufferLevel Level;

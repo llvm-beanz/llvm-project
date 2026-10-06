@@ -3698,20 +3698,24 @@ DescriptorSet *
 CommandBuffer::getOrCreatePushDescriptorSet(uint32_t Set,
                                             const DescriptorSetLayout &Layout) {
   auto It = CurrentPushDescriptorSets.find(Set);
+  auto LayoutIt = CurrentPushDescriptorSetLayouts.find(Set);
   std::unique_ptr<DescriptorSet> NewSet =
       (It != CurrentPushDescriptorSets.end() &&
-       &It->second->getLayout() == &Layout)
+       LayoutIt != CurrentPushDescriptorSetLayouts.end() &&
+       LayoutIt->second == &Layout)
           ? std::make_unique<DescriptorSet>(*It->second)
           : std::make_unique<DescriptorSet>(Layout);
   DescriptorSet *Result = NewSet.get();
   PushDescriptorSetStorage.push_back(std::move(NewSet));
   CurrentPushDescriptorSets[Set] = Result;
+  CurrentPushDescriptorSetLayouts[Set] = &Layout;
   return Result;
 }
 
 void CommandBuffer::clearPushDescriptorSets() {
   PushDescriptorSetStorage.clear();
   CurrentPushDescriptorSets.clear();
+  CurrentPushDescriptorSetLayouts.clear();
 }
 
 void CommandBuffer::pushDescriptorSet(
