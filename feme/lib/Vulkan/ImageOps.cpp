@@ -698,8 +698,31 @@ Error resolveSubpassColorAttachments(const RenderTargetBinding &Binding) {
       };
       feme::graphics::AttachmentView SrcLayer = SliceLayer(*Src, Layer);
       feme::graphics::AttachmentView DstLayer = SliceLayer(*Dst, Layer);
+      // (roadmap L379(a)) This is a *second*, independent resolve pass
+      // from the per-draw one `resolveDrawAttachments`/`Executor.cpp`
+      // already perform (roadmap R33): it runs once more at
+      // `vkCmdEndRenderPass`/`vkCmdNextSubpass` so that a subpass with no
+      // draws at all, or one whose only draws didn't cover every pixel,
+      // still gets every covered sample resolved exactly once at
+      // subpass-end (see `resolveSubpassColorAttachments`'s own doc
+      // comment at its call sites). Before this fix it unconditionally
+      // box-filter-averaged every attachment here, silently re-clobbering
+      // the per-draw pass's correct `SAMPLE_ZERO_BIT` result for an
+      // integer color format with an averaged one -- exactly the
+      // `View.ColorResolveMode` this function must honor too.
+      bool UseSampleZero =
+          Target.ColorResolveMode == VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
       for (uint32_t Y = 0; Y != Src->Height; ++Y) {
         for (uint32_t X = 0; X != Src->Width; ++X) {
+          size_t DstOff = ((size_t)Y * Dst->Width + X) * *ElemSize;
+          if (UseSampleZero) {
+            size_t SrcOff =
+                (((size_t)Y * Src->Width + X) * Target.SampleCount + 0) *
+                *ElemSize;
+            std::memcpy(DstLayer.Data.data() + DstOff,
+                       SrcLayer.Data.data() + SrcOff, *ElemSize);
+            continue;
+          }
           std::array<double, 4> Sum{};
           for (uint32_t S = 0; S != Target.SampleCount; ++S) {
             size_t Off =
@@ -716,7 +739,6 @@ Error resolveSubpassColorAttachments(const RenderTargetBinding &Binding) {
           std::array<double, 4> Avg{};
           for (unsigned C = 0; C != 4; ++C)
             Avg[C] = Sum[C] / Target.SampleCount;
-          size_t DstOff = ((size_t)Y * Dst->Width + X) * *ElemSize;
           if (Error E = feme::graphics::packClearColor(
                   DstLayer.Format, Avg,
                   MutableArrayRef(DstLayer.Data.data() + DstOff, *ElemSize)))

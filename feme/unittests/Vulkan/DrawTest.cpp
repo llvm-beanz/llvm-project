@@ -6626,6 +6626,230 @@ TEST_F(DrawTest, ResolvesMultisampleColorDuringRenderPass) {
   vkFreeMemory(Device, MSMemory, nullptr);
 }
 
+/// (roadmap L379(a)) A classic `VkRenderPass`'s color attachment resolve has
+/// no per-attachment `resolveMode` field at all (unlike
+/// `VkRenderingAttachmentInfo`'s dynamic-rendering equivalent) -- but the
+/// Vulkan spec still mandates sample-0-only resolve, never box-filter
+/// averaging, whenever the attachment's format is a signed/unsigned integer
+/// one (averaging raw integer bit patterns is undefined). Two pipelines
+/// draw the same fullscreen triangle into the same 4x `R32G32B32A32_UINT`
+/// multisample attachment with disjoint static `pSampleMask`s -- sample 0
+/// gets `{10, 20, 30, 40}`, samples 1-3 get `{999, 999, 999, 999}` -- so a
+/// box-filter average (`(10 + 999*3) / 4 == 751`, truncated) is trivially
+/// distinguishable from the spec-mandated sample-0-only result.
+TEST_F(DrawTest, ClassicRenderPassResolvesIntegerColorToSampleZeroNotAverage) {
+  VkImage MSImage = VK_NULL_HANDLE;
+  VkImageView MSView = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R32G32B32A32_UINT,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage, MSView, MSMemory,
+                     VK_SAMPLE_COUNT_4_BIT);
+  VkImage ResolveImage = VK_NULL_HANDLE;
+  VkImageView ResolveView = VK_NULL_HANDLE;
+  VkDeviceMemory ResolveMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R32G32B32A32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, ResolveImage, ResolveView, ResolveMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R32G32B32A32_UINT;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_R32G32B32A32_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference ResolveRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pResolveAttachments = &ResolveRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {MSView, ResolveView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  constexpr llvm::StringLiteral Sample0FragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xi32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[10, 20, 30, 40]> : vector<4xi32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xi32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xi32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+  constexpr llvm::StringLiteral OtherSamplesFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xi32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[999, 999, 999, 999]> : vector<4xi32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xi32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xi32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Sample0Fragment = createModule(Sample0FragmentSource);
+  VkShaderModule OtherSamplesFragment = createModule(OtherSamplesFragmentSource);
+
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  // Sample 0 only: binary `0b0001`.
+  VkSampleMask Sample0Mask = 0x1;
+  VkPipelineMultisampleStateCreateInfo Sample0Multisample{};
+  Sample0Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  Sample0Multisample.pSampleMask = &Sample0Mask;
+  // Samples 1-3: binary `0b1110`.
+  VkSampleMask OtherSamplesMask = 0xE;
+  VkPipelineMultisampleStateCreateInfo OtherSamplesMultisample{};
+  OtherSamplesMultisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  OtherSamplesMultisample.pSampleMask = &OtherSamplesMask;
+
+  VkPipelineShaderStageCreateInfo Sample0Stages[2]{};
+  Sample0Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Sample0Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Sample0Stages[0].module = Vertex;
+  Sample0Stages[0].pName = "main";
+  Sample0Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Sample0Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Sample0Stages[1].module = Sample0Fragment;
+  Sample0Stages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo Sample0Info{};
+  Sample0Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Sample0Info.stageCount = 2;
+  Sample0Info.pStages = Sample0Stages;
+  Sample0Info.pVertexInputState = &VertexInput;
+  Sample0Info.pInputAssemblyState = &InputAssembly;
+  Sample0Info.pViewportState = &ViewportState;
+  Sample0Info.pRasterizationState = &Raster;
+  Sample0Info.pMultisampleState = &Sample0Multisample;
+  Sample0Info.pColorBlendState = &Blend;
+  Sample0Info.layout = Layout;
+  Sample0Info.renderPass = LocalPass;
+  VkPipeline Sample0Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Sample0Info,
+                                      nullptr, &Sample0Pipe),
+            VK_SUCCESS);
+
+  VkPipelineShaderStageCreateInfo OtherSamplesStages[2]{};
+  OtherSamplesStages[0].sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  OtherSamplesStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  OtherSamplesStages[0].module = Vertex;
+  OtherSamplesStages[0].pName = "main";
+  OtherSamplesStages[1].sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  OtherSamplesStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  OtherSamplesStages[1].module = OtherSamplesFragment;
+  OtherSamplesStages[1].pName = "main";
+  VkGraphicsPipelineCreateInfo OtherSamplesInfo{};
+  OtherSamplesInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  OtherSamplesInfo.stageCount = 2;
+  OtherSamplesInfo.pStages = OtherSamplesStages;
+  OtherSamplesInfo.pVertexInputState = &VertexInput;
+  OtherSamplesInfo.pInputAssemblyState = &InputAssembly;
+  OtherSamplesInfo.pViewportState = &ViewportState;
+  OtherSamplesInfo.pRasterizationState = &Raster;
+  OtherSamplesInfo.pMultisampleState = &OtherSamplesMultisample;
+  OtherSamplesInfo.pColorBlendState = &Blend;
+  OtherSamplesInfo.layout = Layout;
+  OtherSamplesInfo.renderPass = LocalPass;
+  VkPipeline OtherSamplesPipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1,
+                                      &OtherSamplesInfo, nullptr,
+                                      &OtherSamplesPipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Sample0Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, OtherSamplesPipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  const auto *Data =
+      static_cast<const uint32_t *>(fromHandle<Image>(ResolveImage)->data());
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      const uint32_t *Texel = Data + ((size_t)Y * Extent + X) * 4;
+      EXPECT_EQ(Texel[0], 10u) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 20u) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 30u) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 40u) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Sample0Pipe, nullptr);
+  vkDestroyPipeline(Device, OtherSamplesPipe, nullptr);
+  vkDestroyShaderModule(Device, OtherSamplesFragment, nullptr);
+  vkDestroyShaderModule(Device, Sample0Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, ResolveView, nullptr);
+  vkDestroyImage(Device, ResolveImage, nullptr);
+  vkFreeMemory(Device, ResolveMemory, nullptr);
+  vkDestroyImageView(Device, MSView, nullptr);
+  vkDestroyImage(Device, MSImage, nullptr);
+  vkFreeMemory(Device, MSMemory, nullptr);
+}
+
 /// (roadmap L379) Two multisample color attachments where only *one*
 /// declares a resolve attachment (`pResolveAttachments[0] ==
 /// VK_ATTACHMENT_UNUSED`, mirroring a `VkRenderingAttachmentInfo` whose own
