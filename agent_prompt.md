@@ -64,19 +64,23 @@ Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
 1. **~1 day, needs a dedicated design session, the only remaining design-session
-   item**: `L375` (`DiamondFlattener` stale-postdom-tree assertion,
-   `switch_continue_{geom,tessc,tesse}` +
-   `graphicsfuzz.nested-for-loops-switch-fallthrough`). Fully scoped in the
-   Roadmap across many sessions now; this is the next real bottleneck once
-   picked up.
-2. **~30 min, low priority, easy win, carried over across several sessions and
+   item, carried over across many sessions now**: `L375` (`DiamondFlattener`
+   stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` +
+   `graphicsfuzz.nested-for-loops-switch-fallthrough`). This is now
+   unambiguously the single biggest backlog item — every other queued triage
+   item from the last several sessions has been resolved or newly scoped,
+   leaving this as the clear next real bottleneck.
+2. **~30-60 min**: `L390` (the 4 remaining
+   `graphics_pipeline_library.local_read.*` ordinary Fails). Use
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one reproducer first (the `L379(c)`
+   playbook), falling back to `gdb bt` if the surfaced error isn't
+   self-explanatory.
+3. **~30 min, low priority, easy win, carried over across many sessions and
    still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining
-   ~1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt`
-   each, the same approach that worked for `L379`/`L381`/`L382`/`L387`/`L386`.
-3. **~15 min**: confirm whether `Feature/PushConstant/array_of_matrices.test`'s
-   newly-unexpected pass is in fact caused by this session's `L386` fix (bisect
-   by reverting just this session's commit and re-running that one test), then,
-   if confirmed, remove its stale `XFAIL: Clang` / update expectations in the
-   `offload-test-suite` `feme` branch (a separate repo/PR, not this one).
+   ~828-case ordinary-Fail bucket's largest sub-families through one `gdb bt`
+   each, the same approach that worked for
+   `L379`/`L381`/`L382`/`L386`/`L387`/`L388`.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
+5. `array_of_matrices.test`'s XPASS: definitively closed this session (see
+   above) — no further action needed, don't re-open.
