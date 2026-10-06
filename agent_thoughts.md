@@ -116270,3 +116270,76 @@ No work done outside `feme/` this session — nothing found to isolate/fix in an
 2. **~30 min, low priority, easy win, carried over across several sessions and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining ~1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt` each, the same approach that worked for `L379`/`L381`/`L382`/`L387`/`L386`.
 3. **~15 min**: confirm whether `Feature/PushConstant/array_of_matrices.test`'s newly-unexpected pass is in fact caused by this session's `L386` fix (bisect by reverting just this session's commit and re-running that one test), then, if confirmed, remove its stale `XFAIL: Clang` / update expectations in the `offload-test-suite` `feme` branch (a separate repo/PR, not this one).
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+# Session: L388 fixed (library-linked attachment-location remap), L389 self-regression caught and fixed same session (2026-10-06)
+
+Device check: `VK_ICD_FILENAMES=$(find build -iname feme_icd.json) vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start, mid-session, and end).
+
+## What's fixed
+
+**`L388`** (`graphics_pipeline_library.{suballocation,dedicated_allocation}.attachment_allocation.roll.*`, 278 cases): **fully fixed, all 278 now Pass.**
+
+Same error class as `L387` (`fragment stage has no floating-point/integer output ... at location N`), but for `VK_EXT_graphics_pipeline_library`-*linked* pipelines. CTS's `GraphicsPipelineWrapper` chains `VkRenderingAttachmentLocationInfo` onto the fragment-output-interface *library part's own* create info (`setupFragmentOutputState`), never onto the top-level link call's — so `L387`'s own fix, which only ever reads `findRenderingAttachmentLocationInfo(CreateInfo.pNext)` off the create info it's handed, always came up empty for a linked pipeline. Exactly `L381`'s own `PrecomputedRenderTargets` bug shape (render-pass-related state owned by one library part must be captured at `captureGraphicsPipelineLibraryState` time and threaded forward as an explicit out-parameter, not re-derived from the synthesized link-call create info).
+
+Fix: new `GraphicsPipelineLibraryState::ColorAttachmentLocations` field, captured/folded/threaded through `synthesizeLinkedGraphicsPipelineCreateInfo` as a new `PrecomputedColorAttachmentLocations` out-parameter, consumed by `compileGraphicsPipeline` in place of re-searching when supplied — mechanically identical to `RenderTargets`'s own plumbing.
+
+**`L389`** (self-regression, found and fixed within this same session): 2 `SIGSEGV` crashes in `graphics_pipeline_library.local_read.{null_color_attachment_location_with_locationinfo,_before_identity}`, discovered purely as a side effect of re-sweeping the `graphics_pipeline_library.*` family to verify `L388`. **This is worth reading carefully — it's a mistake I made and caught in the same session, not a pre-existing bug.**
+
+`gdb bt` pointed straight at `L388`'s own brand-new `captureGraphicsPipelineLibraryState` code (`std::vector::assign` on a null pointer). I didn't just assume it was new, though — I checked out the pre-`L388` version of the two source files, rebuilt, and reran the exact same CTS case: it passed. That's the confirmation this was a genuine same-session regression, not something that happened to exist already and only became reachable (the "look suspicious, go verify" habit from `L386`'s own post-mortem last session paid off immediately here).
+
+Root cause: `VkRenderingAttachmentLocationInfo::pColorAttachmentLocations == nullptr` with a nonzero `colorAttachmentCount` is the spec-legal spelling of "identity mapping, no remap." Both of `L388`'s new call sites unconditionally did `vector.assign(ptr, ptr + count)` without checking `ptr` for null — and in fixing it I noticed `L387`'s own original `compileGraphicsPipeline` code had the exact same latent bug for monolithic (non-linked) pipelines, just never exercised by a null-pointer CTS case before now. Fixed both, with a null check mirroring the existing `ColorBlendAttachments::pAttachments` pattern already sitting right above in the same function.
+
+## Verification
+
+1. New unit test `GraphicsPipelineTest.LinksRemappedColorAttachmentLocationsFromLibraryPart` (`L388`): confirmed to fail with `VK_ERROR_INITIALIZATION_FAILED` before the fix (via `git checkout <pre-L388-sha> -- <files>`, rebuild, run), passes after.
+2. New unit test `GraphicsPipelineTest.LinksALibraryWithANullColorAttachmentLocationsArray` (`L389`): exercises the null-pointer path directly.
+3. `FeMeVulkanTests`: 802/802 Passed (801 baseline at session start, +1 for `L388`'s test, +1 for `L389`'s test).
+4. `ninja check-feme`: 3,603/3,606 Passed, 3 Unsupported, 0 Failed, 0 regressions (started session at 3,601/3,604; +2 matching the two new unit tests).
+5. CTS, `graphics_pipeline_library.*` family (6,155 cases), swept twice (once after `L388`, once after `L389`):
+   - After `L388` alone: 4,128 Pass, 4 Fail, 2,021 NotSupported, 2 Unrun (the 2 `L389` crashes, not yet found/fixed at that point in the session).
+   - After `L389`: 4,130 Pass (+2), 4 Fail (unchanged — the remaining, unrelated `local_read` sub-family, see `L390` below), 2,021 NotSupported (unchanged), **0 Unrun**.
+6. CTS, full `renderpasses.dynamic_rendering.*` (28,898 cases), swept twice:
+   - After `L388` alone: 11,593 Pass, 828 Fail (down from 1,106 pre-session, exactly -278), 16,475 NotSupported.
+   - After `L389`: 11,595 Pass (+2), 828 Fail (unchanged), 16,475 NotSupported (unchanged), 0 Unrun.
+7. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: double-checked by grep this session (not just assumed) — `VK_EXT_graphics_pipeline_library` is already listed "Advertised" with no related entries needing a status change. No edit needed for either fix; both are internal correctness fixes with no feature/extension-surface change.
+
+## Closed out a carried-over item: `array_of_matrices.test`'s XPASS is NOT caused by `L386`
+
+A prior session flagged `Feature/PushConstant/array_of_matrices.test` (in `offload-test-suite`) as unexpectedly passing after `L386`'s push-constant-phi fix, and queued a 15-minute bisect to confirm. Did the bisect this session — and the actual story is different from the hypothesis:
+
+- The test has **two separate XFAILs**: `XFAIL: Clang` ("matrices support missing") and `XFAIL: DXC` ("DXC observed output: [1, 3, 2, 4, 5, 7, 6, 8]", linking `microsoft/DirectXShaderCompiler#8080`).
+- Ran it under both the `clang-feme-vk` lit config (uses FeMe's own Clang-based HLSL→SPIR-V path, the one `L386` actually touches) and the plain `feme-vk` config (uses the external `dxc` binary, entirely bypassing FeMe's compiler).
+- `clang-feme-vk`: still correctly `XFAIL` (Clang's matrix support gap is real and unrelated to `L386`, which only fixes push-constant-pointer `phi` lowering, not matrix codegen).
+- `feme-vk` (dxc): **this** is the one unexpectedly passing, against the *`DXC`* XFAIL, not the Clang one. Since this path never touches any FeMe compiler pass (dxc emits SPIR-V directly; FeMe only runs the SPIR-V through its Vulkan runtime), `L386` cannot be the cause — not mechanically possible on this path at all.
+- Most likely explanation: the `dxc` binary installed in this environment has since fixed the referenced upstream ordering bug. This is a DXC-version artifact, not a FeMe change, and not something to "fix" here — if anyone wants to update the stale `XFAIL: DXC` in `offload-test-suite`, it's a separate, unrelated PR with its own verification (confirm the DXC fix is intentional/stable upstream, not just incidental to this environment's particular pinned binary), out of scope for this session.
+- **Conclusion: no action taken, on either repo.** This closes the item definitively instead of carrying it over again.
+
+## New roadmap items opened (not yet started)
+
+**`L390`**: the remaining 4 `graphics_pipeline_library.local_read.*` ordinary-Fail cases (`depth_stencil_mapping_to_no_index[_depth_clear|_stencil_clear]`, `input_attachments_without_mapping`), confirmed unaffected by the `L389` null-pointer fix (same `VK_ERROR_INITIALIZATION_FAILED` before and after). Not triaged this session — next step is `FEME_VULKAN_LOG_CREATION_ERRORS=1` or a `gdb bt`, same playbook as `L379(c)`.
+
+## Not touched
+
+**`L375`** — still untouched, still needs a dedicated design session (`DiamondFlattener` stale-postdom-tree assertion). Deferred again, consistent with every prior session's own scoping.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in another LLVM subproject. (The `L389` self-regression was entirely within `feme/`, caught and fixed in the same session it was introduced, so it never needed the "isolated reproducer in its own commit" treatment that an *external* bug would require — it's purely an `feme/lib/Vulkan/GraphicsPipeline.cpp` fix.)
+
+## Commits this session
+
+1. `[feme][Vulkan] L388: thread attachment-location remap through linked graphics-pipeline-library parts` — the fix + regression test.
+2. `[feme][docs] L388: update Roadmap/VulkanCTSReport, scope new L389` — docs for `L388`, plus the initial (later-refined) `L389` scoping entry.
+3. `[feme][Vulkan] L389: fix SIGSEGV on null pColorAttachmentLocations (L388 self-regression)` — the self-regression fix + its own regression test.
+4. `[feme][docs] L389: update Roadmap/VulkanCTSReport, scope new L390` — docs for `L389`, scoping the remaining `L390` sub-family.
+5. This `agent_thoughts.md` commit.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, the only remaining design-session item, carried over across many sessions now**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). This is now unambiguously the single biggest backlog item — every other queued triage item from the last several sessions has been resolved or newly scoped, leaving this as the clear next real bottleneck.
+2. **~30-60 min**: `L390` (the 4 remaining `graphics_pipeline_library.local_read.*` ordinary Fails). Use `FEME_VULKAN_LOG_CREATION_ERRORS=1` on one reproducer first (the `L379(c)` playbook), falling back to `gdb bt` if the surfaced error isn't self-explanatory.
+3. **~30 min, low priority, easy win, carried over across many sessions and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining ~828-case ordinary-Fail bucket's largest sub-families through one `gdb bt` each, the same approach that worked for `L379`/`L381`/`L382`/`L386`/`L387`/`L388`.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+5. `array_of_matrices.test`'s XPASS: definitively closed this session (see above) — no further action needed, don't re-open.
+
+## A process note for future sessions
+
+This session is the second in a row (after `L386`'s own stale-predecessor bug last session) where the fix itself introduced a bug that was caught by re-verifying against the *full* CTS sweep rather than just the one scoped reproducer. Both times, the fix passed its own narrow unit test and `check-feme` cleanly — neither exercised the specific edge case (a stale cached predecessor pointer; a null optional-array pointer) that the fix's own new code path needed to handle. The common thread: **re-sweeping the *entire* targeted CTS family after a fix, not just the original scoped reproducer, is what caught both bugs.** Keep doing the full-family sweep, not just the single-case check, even when the single case already passes — it would have missed both of these.
