@@ -62,7 +62,10 @@ bool hasRootConstantParams(const Function &F) {
 /// Walks every user of \p Base -- `Access.Global` itself, at the top-level
 /// call from `matchSPIRVPushConstantAccess`, or a GEP already resolved
 /// relative to it on a deeper recursive call -- recognizing a load (pushed
-/// onto \p Loads) or a further GEP (recursed into) and rejecting (returning
+/// onto \p Loads), a further GEP (recursed into), or a `phi` merge
+/// (recorded into \p PhiEdges for `matchSPIRVPushConstantAccess`'s own
+/// finalization pass to resolve once every edge of each such `phi` has
+/// been seen -- see that function's own comment), and rejecting (returning
 /// false) anything else, exactly per the file comment's scope note. \p
 /// BaseOffset/\p DynamicIndex/\p DynamicStride describe \p Base's own
 /// address relative to `Access.Global`: a compile-time-constant offset,
@@ -79,10 +82,11 @@ bool hasRootConstantParams(const Function &F) {
 /// exactly why a per-load function filter is still needed one level below
 /// a `ConstantExpr`, even though a top-level `Instruction` walk needs it
 /// only once, at its own root).
-bool visitPushConstantUsers(Value *Base, uint64_t BaseOffset,
-                            Value *DynamicIndex, uint64_t DynamicStride,
-                            Function &F, const DataLayout &DL,
-                            SmallVectorImpl<SPIRVPushConstantLoad> &Loads) {
+bool visitPushConstantUsers(
+    Value *Base, uint64_t BaseOffset, Value *DynamicIndex,
+    uint64_t DynamicStride, Function &F, const DataLayout &DL,
+    SmallVectorImpl<SPIRVPushConstantLoad> &Loads,
+    MapVector<PHINode *, SmallVector<SPIRVPushConstantPhiEdge, 2>> &PhiEdges) {
   for (User *U : Base->users()) {
     if (auto *UI = dyn_cast<Instruction>(U); UI && UI->getFunction() != &F)
       continue; // Not this function's own use; visited when that one is.
@@ -92,15 +96,36 @@ bool visitPushConstantUsers(Value *Base, uint64_t BaseOffset,
       continue;
     }
 
+    // A `phi` merging `Base` with one or more other push-constant
+    // pointers (roadmap L386) -- record this one incoming edge's own
+    // resolved address against `Phi`, keyed by *which* incoming index
+    // this edge is (a `phi` can in principle list the same incoming
+    // value from more than one predecessor, so this loop may record more
+    // than one edge for a single `U`); deliberately not the predecessor
+    // `BasicBlock *` itself -- see `SPIRVPushConstantPhiEdge`'s own
+    // comment for why that would go stale. Do not recurse into `Phi`'s
+    // own users yet -- unlike a GEP, `Phi`'s resolved address is not
+    // known until every one of its incoming edges has been seen, which
+    // may happen across several different calls to this function (one
+    // per distinct incoming GEP/global); `matchSPIRVPushConstantAccess`'s
+    // own finalization pass handles `Phi`'s users once the top-level walk
+    // below has completed.
+    if (auto *Phi = dyn_cast<PHINode>(U)) {
+      for (unsigned I = 0, E = Phi->getNumIncomingValues(); I != E; ++I)
+        if (Phi->getIncomingValue(I) == Base)
+          PhiEdges[Phi].push_back({I, BaseOffset, DynamicIndex, DynamicStride});
+      continue;
+    }
+
     // Anything else must be a further GEP (a store, or a GEP result used
-    // as anything but a load or a further GEP, is unsupported) -- see the
-    // file comment. This also covers a constant-index GEP folded straight
-    // to a `ConstantExpr` rather than left as a real `GetElementPtrInst`
-    // (the shape the global's own address and every index being already
-    // compile-time constant collapses to by default, under every ordinary
-    // constant-folding IR builder, including the one `feme-translate`'s
-    // `--llvmdialect-to-llvmir` step uses): both are a `GEPOperator`,
-    // handled identically here.
+    // as anything but a load, a further GEP, or a `phi`, is unsupported)
+    // -- see the file comment. This also covers a constant-index GEP
+    // folded straight to a `ConstantExpr` rather than left as a real
+    // `GetElementPtrInst` (the shape the global's own address and every
+    // index being already compile-time constant collapses to by default,
+    // under every ordinary constant-folding IR builder, including the one
+    // `feme-translate`'s `--llvmdialect-to-llvmir` step uses): both are a
+    // `GEPOperator`, handled identically here.
     auto *GEP = dyn_cast<GEPOperator>(U);
     if (!GEP)
       return false;
@@ -129,7 +154,7 @@ bool visitPushConstantUsers(Value *Base, uint64_t BaseOffset,
       NewDynamicStride = Stride.getZExtValue();
     }
     if (!visitPushConstantUsers(GEP, NewBaseOffset, NewDynamicIndex,
-                                NewDynamicStride, F, DL, Loads))
+                                NewDynamicStride, F, DL, Loads, PhiEdges))
       return false;
   }
   return true;
@@ -181,6 +206,73 @@ void eraseDeadPushConstantGEPs(Value *V) {
   }
 }
 
+/// Emits a bounds-checked load of type \p LoadedTy (alignment \p
+/// LoadAlign) from \p RootConstants at the byte address \p BaseOffset
+/// (plus, if \p DynamicIndex is set, \p DynamicIndex * \p DynamicStride
+/// further bytes), split in right before \p InsertBefore, and returns the
+/// resulting value (the real loaded value if in-bounds of \p
+/// RootConstantSize, a zero fallback otherwise). `SplitBlockAndInsertIfThenElse`
+/// relocates \p InsertBefore (and the rest of its original block) into a
+/// new successor block as part of this call -- `InsertBefore->getParent()`,
+/// read *after* this call returns, is that new block, reached by both the
+/// real-load and zero-fallback paths.
+///
+/// Shared by `lowerSPIRVPushConstantAccess`'s plain-load rewrite and its
+/// per-`phi`-edge rewrite (roadmap L386): both need the exact same
+/// bounds-check-and-load codegen, just anchored at a different instruction
+/// and, in the `phi` case, feeding a new edge-local merge rather than
+/// directly replacing a `Load`.
+Value *emitBoundsCheckedLoad(Instruction *InsertBefore, Type *LoadedTy,
+                             Align LoadAlign, uint64_t LoadSize,
+                             uint64_t BaseOffset, Value *DynamicIndex,
+                             uint64_t DynamicStride, Value *RootConstants,
+                             Value *RootConstantSize, Type *I32Ty,
+                             Type *I64Ty) {
+  IRBuilder<> Builder(InsertBefore);
+
+  // The byte offset this particular access reads, as a 64-bit value ready
+  // for the `getelementptr` below -- the constant `BaseOffset` alone,
+  // widened, if this access's index chain never carried a dynamic term, or
+  // that same `BaseOffset` plus `DynamicIndex * DynamicStride`
+  // (replicating the very GEP arithmetic `matchSPIRVPushConstantAccess`
+  // decomposed) otherwise. `CreateSExtOrTrunc`, not a zero-extend, matches
+  // `getelementptr`'s own indexing semantics -- every index
+  // `GEPOperator::collectOffset` itself scales is treated as signed (see
+  // its own `sextOrTrunc` in `llvm/lib/IR/Operator.cpp`).
+  Value *ByteOffset64 = ConstantInt::get(I64Ty, BaseOffset);
+  Value *InBoundsEndByte32 = ConstantInt::get(I32Ty, BaseOffset + LoadSize);
+  if (DynamicIndex) {
+    Value *Index64 = Builder.CreateSExtOrTrunc(DynamicIndex, I64Ty);
+    Value *DynamicByteOffset64 = Builder.CreateMul(
+        Index64, ConstantInt::get(I64Ty, DynamicStride),
+        "push_const.dyn_offset");
+    ByteOffset64 = Builder.CreateAdd(DynamicByteOffset64, ByteOffset64,
+                                     "push_const.byte_offset");
+    Value *ByteOffset32 = Builder.CreateTrunc(ByteOffset64, I32Ty);
+    InBoundsEndByte32 = Builder.CreateAdd(
+        ByteOffset32, ConstantInt::get(I32Ty, LoadSize),
+        "push_const.end_offset");
+  }
+  Value *InBounds = Builder.CreateICmpULE(InBoundsEndByte32, RootConstantSize,
+                                          "push_const.inbounds");
+
+  Instruction *ThenTerm = nullptr;
+  Instruction *ElseTerm = nullptr;
+  SplitBlockAndInsertIfThenElse(InBounds, InsertBefore, &ThenTerm, &ElseTerm);
+
+  IRBuilder<> ThenBuilder(ThenTerm);
+  Value *ElemPtr = ThenBuilder.CreateInBoundsGEP(
+      ThenBuilder.getInt8Ty(), RootConstants, ByteOffset64, "push_const.ptr");
+  Value *Loaded = ThenBuilder.CreateAlignedLoad(LoadedTy, ElemPtr, LoadAlign,
+                                                "push_const.load");
+
+  IRBuilder<> MergeBuilder(InsertBefore); // The split's own merge block.
+  PHINode *Merged = MergeBuilder.CreatePHI(LoadedTy, 2, "push_const.value");
+  Merged->addIncoming(Loaded, ThenTerm->getParent());
+  Merged->addIncoming(Constant::getNullValue(LoadedTy), ElseTerm->getParent());
+  return Merged;
+}
+
 } // namespace
 
 namespace feme::cpu {
@@ -197,11 +289,40 @@ matchSPIRVPushConstantAccess(Function &F) {
   SPIRVPushConstantAccess Access;
   Access.Global = PC;
   const DataLayout &DL = PC->getDataLayout();
+  MapVector<PHINode *, SmallVector<SPIRVPushConstantPhiEdge, 2>> PhiEdges;
   if (!visitPushConstantUsers(PC, /*BaseOffset=*/0, /*DynamicIndex=*/nullptr,
-                             /*DynamicStride=*/0, F, DL, Access.Loads))
+                             /*DynamicStride=*/0, F, DL, Access.Loads,
+                             PhiEdges))
     return std::nullopt;
 
-  if (Access.Loads.empty())
+  // Finalize every `phi` merge `visitPushConstantUsers` recorded edges
+  // for (roadmap L386, see that function's own comment): a `phi` is only
+  // actually supported if *every* one of its incoming edges resolved to
+  // the push-constant global (an incomplete edge set means some incoming
+  // value is unrelated to the push-constant block entirely, which this
+  // pass cannot soundly attribute to it), and its own result is read by
+  // nothing but plain loads (a further GEP or a nested `phi` off of it is
+  // left for a future extension -- see the file comment's own scope
+  // note). Either gap fails the whole function's match, exactly as an
+  // unsupported plain GEP user would above.
+  for (auto &[Phi, Edges] : PhiEdges) {
+    if (Edges.size() != Phi->getNumIncomingValues())
+      return std::nullopt;
+
+    SPIRVPushConstantPhiAccess PhiAccess;
+    PhiAccess.Phi = Phi;
+    PhiAccess.Edges = std::move(Edges);
+    for (User *U : Phi->users()) {
+      auto *LI = dyn_cast<LoadInst>(U);
+      if (!LI)
+        return std::nullopt;
+      PhiAccess.Loads.push_back(LI);
+    }
+    if (!PhiAccess.Loads.empty())
+      Access.PhiAccesses.push_back(std::move(PhiAccess));
+  }
+
+  if (Access.Loads.empty() && Access.PhiAccesses.empty())
     return std::nullopt; // The global exists, but not referenced by `F`.
   return Access;
 }
@@ -239,9 +360,10 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   // whenever this block's own reflected struct declares a nonzero leading
   // `layout(offset=N)` gap (e.g. one shader stage's own share of a larger
   // block several stages share, each reading only its own portion).
-  // `Access.Loads` is guaranteed nonempty (see `matchSPIRVPushConstantAccess`),
-  // so the loop below always runs at least once and this initial sentinel
-  // is always overwritten.
+  // `Access.Loads` and `Access.PhiAccesses` are never both empty (see
+  // `matchSPIRVPushConstantAccess`), so at least one of the two loops
+  // below always runs at least once and this initial sentinel is always
+  // overwritten.
   uint32_t MaxAccessedByte = 0;
   uint32_t MinAccessedByte = std::numeric_limits<uint32_t>::max();
 
@@ -258,54 +380,71 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
             ? dynamicAccessMemberEndByte(Access.Global, LoadInfo.BaseOffset, DL)
             : LoadInfo.BaseOffset + LoadSize);
 
-    IRBuilder<> Builder(Load);
-
-    // The byte offset this particular load reads, as a 64-bit value ready
-    // for the `getelementptr` below -- the constant `BaseOffset` alone,
-    // widened, if this load's index chain never carried a dynamic term, or
-    // that same `BaseOffset` plus `DynamicIndex * DynamicStride`
-    // (replicating the very GEP arithmetic `matchSPIRVPushConstantAccess`
-    // decomposed) otherwise. `CreateSExtOrTrunc`, not a zero-extend,
-    // matches `getelementptr`'s own indexing semantics -- every index
-    // `GEPOperator::collectOffset` itself scales is treated as signed (see
-    // its own `sextOrTrunc` in `llvm/lib/IR/Operator.cpp`).
-    Value *ByteOffset64 = ConstantInt::get(I64Ty, LoadInfo.BaseOffset);
-    Value *InBoundsEndByte32 =
-        ConstantInt::get(I32Ty, LoadInfo.BaseOffset + LoadSize);
-    if (LoadInfo.DynamicIndex) {
-      Value *Index64 =
-          Builder.CreateSExtOrTrunc(LoadInfo.DynamicIndex, I64Ty);
-      Value *DynamicByteOffset64 = Builder.CreateMul(
-          Index64, ConstantInt::get(I64Ty, LoadInfo.DynamicStride),
-          "push_const.dyn_offset");
-      ByteOffset64 = Builder.CreateAdd(DynamicByteOffset64, ByteOffset64,
-                                       "push_const.byte_offset");
-      Value *ByteOffset32 = Builder.CreateTrunc(ByteOffset64, I32Ty);
-      InBoundsEndByte32 = Builder.CreateAdd(
-          ByteOffset32, ConstantInt::get(I32Ty, LoadSize),
-          "push_const.end_offset");
-    }
-    Value *InBounds = Builder.CreateICmpULE(InBoundsEndByte32, RootConstantSize,
-                                            "push_const.inbounds");
-
-    Instruction *ThenTerm = nullptr;
-    Instruction *ElseTerm = nullptr;
-    SplitBlockAndInsertIfThenElse(InBounds, Load, &ThenTerm, &ElseTerm);
-
-    IRBuilder<> ThenBuilder(ThenTerm);
-    Value *ElemPtr = ThenBuilder.CreateInBoundsGEP(
-        ThenBuilder.getInt8Ty(), RootConstants, ByteOffset64,
-        "push_const.ptr");
-    Value *Loaded = ThenBuilder.CreateAlignedLoad(
-        LoadedTy, ElemPtr, Load->getAlign(), "push_const.load");
-
-    IRBuilder<> MergeBuilder(Load); // The original block is now the merge.
-    PHINode *Merged = MergeBuilder.CreatePHI(LoadedTy, 2, "push_const.value");
-    Merged->addIncoming(Loaded, ThenTerm->getParent());
-    Merged->addIncoming(Constant::getNullValue(LoadedTy), ElseTerm->getParent());
+    Value *Merged = emitBoundsCheckedLoad(
+        Load, LoadedTy, Load->getAlign(), LoadSize, LoadInfo.BaseOffset,
+        LoadInfo.DynamicIndex, LoadInfo.DynamicStride, RootConstants,
+        RootConstantSize, I32Ty, I64Ty);
 
     Load->replaceAllUsesWith(Merged);
     Load->eraseFromParent();
+  }
+
+  // (roadmap L386) Every recognized `phi` merge of differently-addressed
+  // push-constant pointers (see `SPIRVPushConstantPhiAccess`'s own
+  // comment): sink a bounds-checked load to each incoming edge's own
+  // predecessor block -- there is no single `BaseOffset` to assign the
+  // shared `Load`(s) downstream of `Phi` itself, since which offset is
+  // correct depends on which edge control flow actually took -- then
+  // build a new value-level `phi` (`ValuePhi`, matching `Phi`'s own
+  // incoming-block structure) merging each edge's own loaded value, and
+  // replace every one of `Phi`'s (plain-load, per the match contract)
+  // users with it directly, since the loading has already happened before
+  // the merge. `Phi` itself (now always unused, per that same contract)
+  // and the GEPs that fed each of its edges are left for
+  // `eraseDeadPushConstantGEPs` below, exactly like every other now-dead
+  // GEP this function rewrote through.
+  for (const SPIRVPushConstantPhiAccess &PhiAccess : Access.PhiAccesses) {
+    PHINode *Phi = PhiAccess.Phi;
+    LoadInst *FirstLoad = PhiAccess.Loads.front();
+    Type *LoadedTy = FirstLoad->getType();
+    uint64_t LoadSize = DL.getTypeStoreSize(LoadedTy).getFixedValue();
+    Align LoadAlign = FirstLoad->getAlign();
+    for (LoadInst *LI : PhiAccess.Loads)
+      LoadAlign = std::min(LoadAlign, LI->getAlign());
+
+    IRBuilder<> PhiBuilder(Phi);
+    PHINode *ValuePhi = PhiBuilder.CreatePHI(
+        LoadedTy, PhiAccess.Edges.size(), "push_const.phi_value");
+
+    for (const SPIRVPushConstantPhiEdge &Edge : PhiAccess.Edges) {
+      MinAccessedByte = std::min<uint64_t>(MinAccessedByte, Edge.BaseOffset);
+      MaxAccessedByte = std::max<uint64_t>(
+          MaxAccessedByte,
+          Edge.DynamicIndex
+              ? dynamicAccessMemberEndByte(Access.Global, Edge.BaseOffset, DL)
+              : Edge.BaseOffset + LoadSize);
+
+      // Re-read `Phi`'s own incoming block for this edge right here,
+      // rather than one captured once at match time -- see
+      // `SPIRVPushConstantPhiEdge::Index`'s own comment for why an
+      // earlier-rewritten plain load sharing this edge's original
+      // predecessor block can otherwise leave a stale `BasicBlock *`
+      // whose current terminator no longer reaches `Phi` at all.
+      BasicBlock *Pred = Phi->getIncomingBlock(Edge.Index);
+      Instruction *Terminator = Pred->getTerminator();
+      Value *EdgeValue = emitBoundsCheckedLoad(
+          Terminator, LoadedTy, LoadAlign, LoadSize, Edge.BaseOffset,
+          Edge.DynamicIndex, Edge.DynamicStride, RootConstants,
+          RootConstantSize, I32Ty, I64Ty);
+      ValuePhi->addIncoming(EdgeValue, Terminator->getParent());
+    }
+
+    for (LoadInst *LI : PhiAccess.Loads) {
+      LI->replaceAllUsesWith(ValuePhi);
+      LI->eraseFromParent();
+    }
+    if (Phi->use_empty())
+      Phi->eraseFromParent();
   }
 
   // Drop every now-unused `getelementptr` this access rewrote through; the
@@ -367,12 +506,17 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
       // `Argument` belongs to its `Function`, not to any basic block, so
       // it is not moved by `splice` at all -- it is only replaced,
       // instruction-use by instruction-use, by the loop below. Without
-      // this remap, `Access.Loads`' own `DynamicIndex` would still point
-      // at `OldArg` once `F.eraseFromParent()` below frees it, a
-      // dangling-pointer read in `lowerSPIRVPushConstantAccess`.
+      // this remap, `Access.Loads`' (and `Access.PhiAccesses`' own edges')
+      // `DynamicIndex` would still point at `OldArg` once
+      // `F.eraseFromParent()` below frees it, a dangling-pointer read in
+      // `lowerSPIRVPushConstantAccess`.
       for (SPIRVPushConstantLoad &LoadInfo : Access->Loads)
         if (LoadInfo.DynamicIndex == &OldArg)
           LoadInfo.DynamicIndex = &NewArg;
+      for (SPIRVPushConstantPhiAccess &PhiAccess : Access->PhiAccesses)
+        for (SPIRVPushConstantPhiEdge &Edge : PhiAccess.Edges)
+          if (Edge.DynamicIndex == &OldArg)
+            Edge.DynamicIndex = &NewArg;
       OldArg.replaceAllUsesWith(&NewArg);
     }
     auto ArgIt = NewF->arg_begin() + F.arg_size();

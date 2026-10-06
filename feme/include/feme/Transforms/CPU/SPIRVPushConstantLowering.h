@@ -44,6 +44,21 @@
 // hasOnlySupportedUses`'s own "leave it alone rather than partially lower
 // it" contract.
 //
+// roadmap L386: one further shape is recognized -- a `phi` merging two or
+// more push-constant pointers that each resolve (by the same rules as
+// above) to their own `{BaseOffset, DynamicIndex, DynamicStride}`, e.g. a
+// branchy multisample-resolve shader that computes one of two different
+// compile-time-constant byte offsets along two different control-flow
+// paths and only then merges the resulting pointers before a single
+// shared load. Support is intentionally narrower here than the plain-GEP
+// case above: every incoming value of a recognized `phi` must itself
+// resolve to the push-constant global (a `phi` with even one incoming
+// edge that does not is left alone entirely -- see
+// `SPIRVPushConstantPhiAccess`'s own comment), and the `phi`'s own result
+// may only be used by plain loads -- not a further GEP, and not a further
+// (nested) `phi` -- again, anything else leaves the whole function
+// untouched rather than partially rewritten.
+//
 // As with DXIL root constants, a function that also performs bound
 // (`spirv.VulkanBuffer` handle) resource access is supported, but lowered
 // differently: `feme::cpu::SPIRVResourceLoweringPass` itself finishes the
@@ -67,6 +82,7 @@ namespace llvm {
 class Function;
 class GlobalVariable;
 class LoadInst;
+class PHINode;
 class Value;
 } // namespace llvm
 
@@ -84,12 +100,55 @@ struct SPIRVPushConstantLoad {
   uint64_t DynamicStride = 0;
 };
 
+/// One incoming edge of a `phi` recognized by `SPIRVPushConstantPhiAccess`
+/// -- which of `Phi->getNumIncomingValues()` this edge is, and that edge's
+/// own resolved address relative to the push-constant global, exactly as
+/// `SPIRVPushConstantLoad`'s own fields describe a plain load's address
+/// (see the file comment's "roadmap L386" scope note).
+///
+/// This records the incoming *index*, not the predecessor `BasicBlock *`
+/// itself: `lowerSPIRVPushConstantAccess` rewrites every plain
+/// `SPIRVPushConstantLoad` in `Access.Loads` before it ever reaches
+/// `Access.PhiAccesses`, and that earlier rewrite's own
+/// `SplitBlockAndInsertIfThenElse` call may split a block this edge's
+/// predecessor was recorded against right out from under it, if some
+/// unrelated plain load this edge's own predecessor block also happens to
+/// contain gets rewritten first -- the original `BasicBlock *` captured at
+/// match time would then no longer be `Phi`'s real predecessor by the
+/// time this edge's own rewrite runs. `Phi->getIncomingBlock(Index)`
+/// always remains accurate (LLVM's own `BasicBlock::splitBasicBlock`
+/// keeps every PHI node in a split block's successors, `Phi` included,
+/// pointed at its real current predecessor -- see that function's own
+/// comment), so re-reading it from `Phi` itself, immediately before this
+/// edge's own rewrite, is what this index exists to do.
+struct SPIRVPushConstantPhiEdge {
+  unsigned Index = 0;
+  uint64_t BaseOffset = 0;
+  llvm::Value *DynamicIndex = nullptr;
+  uint64_t DynamicStride = 0;
+};
+
+/// One recognized `phi` merge of two or more differently-addressed
+/// push-constant pointers, and every plain load reading through it (see
+/// the file comment's "roadmap L386" scope note). `Edges` always has
+/// exactly one entry per `Phi->getNumIncomingValues()` -- a `phi` with any
+/// incoming edge that does not itself resolve to the push-constant global
+/// is not recognized at all, and never appears here (nor is the whole
+/// function's access, per the file comment's "leave it alone" contract).
+struct SPIRVPushConstantPhiAccess {
+  llvm::PHINode *Phi;
+  llvm::SmallVector<SPIRVPushConstantPhiEdge, 2> Edges;
+  llvm::SmallVector<llvm::LoadInst *, 2> Loads;
+};
+
 /// One function's complete, supported push-constant access: the module's
-/// push-constant global, and every load recognized as reading through it
+/// push-constant global, every plain load recognized as reading through
+/// it, and every `phi`-of-pointers merge recognized as reading through it
 /// (see the file comment for exactly what is recognized).
 struct SPIRVPushConstantAccess {
   llvm::GlobalVariable *Global;
   llvm::SmallVector<SPIRVPushConstantLoad, 8> Loads;
+  llvm::SmallVector<SPIRVPushConstantPhiAccess, 2> PhiAccesses;
 };
 
 /// Returns \p F's push-constant access if the module has a push-constant
