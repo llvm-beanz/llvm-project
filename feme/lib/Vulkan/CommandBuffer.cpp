@@ -31,6 +31,7 @@
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "feme/Target/CPU/RuntimeABI.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
@@ -1371,8 +1372,28 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
     }
     RenderTargetView View = makeView(Index, /*UseStencilOps=*/false);
     if (I < Desc.ResolveAttachments.size() &&
-        Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED)
+        Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED) {
       View.ResolveView = Attachments[Desc.ResolveAttachments[I]];
+      // (roadmap L379(a)) A classic `VkRenderPass`'s color attachment
+      // resolve has no `resolveMode` field at all -- unlike dynamic
+      // rendering's `VkRenderingAttachmentInfo`, there is nothing for
+      // `normalizeRenderingAttachment` (below) to read here. The spec's
+      // fixed-function resolve behavior is not actually a free choice,
+      // though: an integer (U/SINT) color format's multisample resolve
+      // is *always* sample 0 (box-filter averaging is undefined for
+      // integers), exactly like `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` would
+      // request explicitly, while every other format implicitly
+      // box-filter-averages. This mirrors real drivers/validation layers
+      // (e.g. VUID-VkSubpassDescription2-pResolveAttachments-03067's
+      // integer-format carve-out) and is what the CTS's own
+      // `RenderPassWrapper::beginRendering` helper derives too, even for
+      // test cases parameterized as "classic render pass" (it always
+      // dynamic-rendering-translates them under the hood for most
+      // pipeline construction types).
+      if (feme::cpu::isIntegerColorAttachmentFormat(
+              Pass.attachments()[Index].Format))
+        View.ColorResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+    }
     Binding.Colors.push_back(View);
   }
   if (Desc.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
