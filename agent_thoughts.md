@@ -115664,3 +115664,102 @@ the source tree they are editing.
 No `Linearize.cpp`/test changes this session -- investigation only
 (confirmed root cause via diff of reporter's actual output), Vulkan CTS
 not rerun (no code changed).
+
+# Session: diagnosed the clean-build `chain.merge` contradiction as a binary provenance problem (2026-10-06)
+
+## Outcome
+
+The supplied `output.ll` is not the output of the current
+`Linearize.cpp` implementation for the supplied test, even after accounting
+for unstable SSA suffixes or platform differences. The current implementation
+emits:
+
+```
+%chain.merge = select i1 %.linearized9, i1 true, i1 %.linearized8
+br label %Flow72.Flow74_crit_edge
+```
+
+It also deletes bypass block `76`, threads `active.check.live` and
+`exited.via.check`, and makes `loop.exit.guard` single-predecessor. The
+reported output has none of those changes: it retains both divergent branches,
+bypass block `76`, and the old two-predecessor `loop.exit.guard` phis.
+
+The test was renamed to its current path by `41820edc94a6`, the same commit
+that added the initial L377(a) chain repair. The current select-based repair
+landed in `670f7c94abea`, and the permissive FileCheck expression landed in
+`3ae810fc1fa0`. Therefore the current test file and the implementation behavior
+shown in `output.ll` cannot come from one coherently built source revision.
+A clean object/cache rebuild rules out an ordinary stale `.o`, but it does not
+prove that the executable loaded the library just built or that CMake was
+configured against the source checkout containing the test.
+
+## Build-graph audit
+
+The checked-in and generated dependency graphs are correct:
+
+1. `feme/test/CMakeLists.txt` lists `feme-opt` in `FEME_TEST_DEPENDS`.
+2. `feme-opt` links `FeMeTransformsCPU`.
+3. `libFeMeTransformsCPU.a` directly depends on
+   `Linearize.cpp.o`.
+4. `Linearize.cpp.o` directly depends on this checkout's
+   `feme/lib/Transforms/CPU/Linearize.cpp`.
+
+The local build uses `ccache`, has `LLVM_ENABLE_ASSERTIONS=ON` and
+`CMAKE_DISABLE_PRECOMPILE_HEADERS=ON`, and is statically linked. Rebuilding
+through `ninja -C build check-feme` rebuilt/relinked `feme-opt`; all 3,589
+supported tests passed (3 unsupported), including the exact lit test. The
+direct `feme-opt | FileCheck` command also passed and emitted `chain.merge`.
+This rules out a missing `check-feme` target dependency in the repository.
+
+## Leading clean-build explanation on macOS
+
+If the reporter's build has `BUILD_SHARED_LIBS=ON`, the most likely remaining
+cause is runtime resolution of an older `libFeMeTransformsCPU.dylib`.
+Deleting objects and CMake/compiler caches does not change
+`DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`, or an `@rpath` that selects
+a library from another build/install tree. In that configuration,
+`build-rel/bin/feme-opt` may itself be freshly linked while the pass code being
+executed still comes from an older dylib.
+
+Run these on the failing Mac:
+
+```
+grep -E '^(CMAKE_HOME_DIRECTORY|BUILD_SHARED_LIBS|LLVM_ENABLE_ASSERTIONS|CMAKE_DISABLE_PRECOMPILE_HEADERS):' \
+  build-rel/CMakeCache.txt
+otool -L build-rel/bin/feme-opt | grep -E 'FeMeTransformsCPU|LLVM'
+DYLD_PRINT_LIBRARIES=1 build-rel/bin/feme-opt --llvm \
+  -passes=feme-cpu-linearize -disable-output \
+  feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll \
+  2>&1 | grep -E 'FeMeTransformsCPU|feme-opt'
+```
+
+If `otool` shows no FeMe dylib, this is a static build and the executable
+itself is mismatched; compare `CMAKE_HOME_DIRECTORY` with the test checkout and
+run:
+
+```
+strings build-rel/bin/feme-opt | grep -c chain.merge
+ninja -C build-rel -t query bin/feme-opt
+ninja -C build-rel -t query lib/libFeMeTransformsCPU.a
+```
+
+The first command must be nonzero for a current static binary. For a shared
+build, run the same `strings` check on the exact dylib path printed by
+`DYLD_PRINT_LIBRARIES`, not on `feme-opt`.
+
+## Environment and documentation
+
+The session's default Vulkan ICD initially selected llvmpipe. Explicitly
+setting `VK_ICD_FILENAMES` to
+`build/tools/feme/tools/feme-vulkan/feme_icd.json` confirmed
+`FeMe CPU Vulkan Device`. No compiler or driver source changed, so there was
+no behavior change to rerun Vulkan CTS against and no
+`VulkanCTSReport.md`, `Vulkan14FeatureInventory`, or
+`VulkanExtensionInventory` update was needed.
+
+## Next step
+
+Capture the `DYLD_PRINT_LIBRARIES` result from the failing invocation. It will
+identify the exact dylib containing the old pass; if no dylib is involved,
+`CMAKE_HOME_DIRECTORY` plus the two Ninja queries will identify the other
+source/build tree that produced the executable.
