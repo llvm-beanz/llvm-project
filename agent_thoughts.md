@@ -115876,3 +115876,92 @@ re-investigated as new.
    choice, not a bug. Documented so it stays resolved.
 4. `L375` -- **confirmed still accurate and still open**, no new work; it
    genuinely needs a dedicated design session as previously scoped.
+
+# Session: fixed 3 of 46 pipeline/api SIGSEGVs (L381/L382), found+fixed a 4th independent crash family (L384) and its own regression (L383) (2026-10-06)
+
+## Confirmed device first
+`vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed
+twice this session (start and end).
+
+## What shipped, in commit order
+
+1. **`L384`** -- `DescriptorSet::Layout` raw-pointer dangled after the app
+   destroyed its `VkDescriptorSetLayout` (spec-legal). Root cause of
+   `ds_resolve_sample_zero.*`'s own SIGSEGV, a **46-case** crash family
+   found by exploring past the two already-tracked crashes below.
+   Fix: by-value copy (mirrors `L305`). New test:
+   `DescriptorTest.UsableAfterDescriptorSetLayoutDestroyed`.
+2. **`L383`** -- fixing `L384` broke push-descriptor-set accumulation:
+   `getOrCreatePushDescriptorSet` compared `getLayout()`'s *address* for
+   identity, which only worked while `Layout` was a pointer. Found via a
+   full unit-test-suite rerun, not targeted testing -- confirmed genuine
+   regression via `git stash` A/B. Fix: track the original layout pointer
+   separately in a new `CurrentPushDescriptorSetLayouts` map. Existing test
+   already covers it, no new test needed.
+3. **`L381`** -- `compatible_render_pass` SIGSEGV: a pipeline-library link
+   can legally outlive the `VkRenderPass` every part was built against.
+   Fix: cache each library's own `RenderTargets` eagerly, before the
+   handle can go stale. Writing the regression test
+   (`LinksAfterOriginalRenderPassIsDestroyed`) found **two more** latent
+   bugs in the same path (unconditional `RenderPass` capture letting a
+   non-owning library win a search; a dynamic-rendering pNext-scoping
+   ambiguity) -- both fixed in the same commit, both found only by running
+   the **full** suite after the initial fix, not by code review.
+4. **`L382`** -- `pipeline_invalid_pointers_unused_structs` SIGSEGV: driver
+   dereferenced `pViewportState`/`pMultisampleState`/`pDepthStencilState`/
+   `pColorBlendState` even when rasterization is statically disabled and
+   the spec says their contents don't matter. Fix:
+   `isRasterizationStaticallyDiscarded` gate before every dereference.
+5. Doc commits: `Roadmap.md` (new `L381`-`L384`, `L383(a)` rows, updated
+   stability summary), `VulkanCTSReport.md` (new triage items 6-8).
+
+## Verified
+
+- `FeMeVulkanTests`: 797/797 Pass (0 regressions, up from 796/797 mid-session).
+- `ninja check-feme`: 3,595/3,598 Pass, 3 Unsupported, **0 Failed**.
+- Targeted CTS: `compatible_render_pass` x2, `pipeline_invalid_pointers_
+  unused_structs` x2, `bad_rendering_create_info`,
+  `null_rendering_create_info_ptr` -- 6/6 Pass.
+- `pipeline_library.graphics_library.misc.*`: 70/88 Pass, 0 Fail, 0 crashes.
+- `ds_resolve_sample_zero.*` full rerun: 768 cases, **0 crashes** (120
+  ordinary Fail, pre-existing and unrelated; 648 NotSupported).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked by
+  `grep`, not just asserted -- all touched features/extensions already
+  marked `yes`/`Advertised`/`Implemented`. No change needed; these were
+  internal correctness fixes only.
+
+## Open questions, flagged explicitly rather than guessed at
+
+- **Does `L384`'s 46-case `ds_resolve_sample_zero` family overlap with the
+  pre-existing "46 `pipeline` `SIGSEGV`" bucket `L381`/`L382` are chipping
+  away at?** The matching count (46 == 46) is very likely coincidence --
+  different group (`pipeline.*.multisample.misc` vs `fast_linked_library`/
+  `pipeline_library.misc`/`api.pipeline`), different root cause entirely.
+  No case-name-level diff was run to be sure. Flagged in both docs rather
+  than silently assumed either way.
+- **`L383(a)`**: reproduced `graphicsfuzz.nested-for-loops-switch-fallthrough`
+  (same `pred_iterator out of range!` assertion symptom as `L375`), but did
+  **not** run a `gdb bt` to confirm it's the same root function. Per
+  explicit instruction, `L375` needs its own dedicated session -- did not
+  start one.
+
+## Next steps (ranked, with time estimates)
+
+1. **~30 min**: `gdb bt` on `graphicsfuzz.nested-for-loops-switch-fallthrough`
+   vs `L375`'s own repro, to settle whether `L383(a)` folds into `L375` or
+   is a separate bug needing its own entry.
+2. **~1 hour**: case-name-level diff between `L384`'s `ds_resolve_sample_zero`
+   family and the original "46 pipeline SIGSEGV" bucket -- settles the
+   open question above and gives an accurate current pipeline-crash count.
+3. **~2-4 hours, the real next priority**: the 44 still-open `pipeline`
+   `SIGSEGV`s have never been narrowed to case names. Next session should
+   do a full, isolated `pipeline.*` crash sweep (similar to how `L379`
+   found `renderpasses`' `DeviceLost` cases) to get a case list before
+   attempting any more fixes -- debugging blind, one aggregate-count crash
+   at a time, doesn't scale.
+4. Still fully scoped, still untouched, still needs its own session:
+   `L375` (`DiamondFlattener` assertion, `switch_continue_{geom,tessc,
+   tesse}`).
+5. Investigate two old, never-explained commits (`bb7885607e34`,
+   `2e1279d6e99a`, "Prompt agent for Vulkan ICD") via `git show` -- low
+   priority, carried over from multiple prior sessions, never blocking.
