@@ -116221,3 +116221,52 @@ No work done outside `feme/` this session — nothing found to isolate/fix in an
 2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in the Roadmap, still not attempted — two design-session items now queued (`L375`, `L386`); consider whether one session can reasonably tackle both or whether they need separate sittings.
 3. **~30 min, low priority, easy win, carried over from the last two sessions and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining 1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt` each to check for single root causes before assuming large triage efforts, the same approach that worked for `L379`/`L381`/`L382`/`L387`.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+# Session: L386 fixed (phi-of-GEPs push-constant access), including a self-caught bug in the fix itself (2026-10-06)
+
+Device check: `VK_ICD_FILENAMES=build/tools/feme/tools/feme-vulkan/feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start and end of session).
+
+## What's fixed
+
+**`L386`** (push-constant `phi`-of-GEPs, the remaining 24 `ds_resolve_sample_zero*` `input_attachments.render_to` cases): **fully fixed, all 24 cases now Pass.**
+
+Extended `visitPushConstantUsers` to recognize a `phi` merging push-constant pointers with different compile-time byte offsets (reached via different control-flow edges), and `lowerSPIRVPushConstantAccess` to sink a bounds-checked load to each of the `phi`'s own incoming edges, merging the resulting *values* with a new `phi` that replaces the original pointer `phi`. The original shared `load` becomes dead and is removed.
+
+## The self-caught bug (worth reading even if you skip everything else)
+
+The first version of this fix passed its own unit test and `check-feme` cleanly, but crashed the real CTS reproducer with an LLVM assertion inside `DiamondFlattener::flatten` — the exact function `L375`'s own documented bug lives in. Natural read: "this is `L375`." That read was wrong.
+
+What actually happened: `SPIRVPushConstantPhiEdge` cached a `BasicBlock *Pred` per edge at match time. `lowerSPIRVPushConstantAccess` processes plain loads (`Access.Loads`) *before* `phi` edges (`Access.PhiAccesses`). When an unrelated plain load's own GEP happened to live in the same original block as a `phi` edge's GEP, processing that plain load first split the shared block — replacing its terminator (which used to branch straight to the `phi`'s merge block) with a new conditional branch, and moving the real edge-to-merge branch into a new block. The `phi` edge's own rewrite then called `Edge.Pred->getTerminator()` on the stale pointer, grabbed the *wrong* instruction, and produced a `phi` listing a predecessor that was no longer real — invalid IR, caught by `LinearizePass` downstream as an unrelated-looking assertion.
+
+Caught by running the LLVM verifier (`opt -passes=verify`) directly on IR dumped right before `LinearizePass`, instead of trusting the `L375` pattern-match. It found the real problem immediately: `PHI node entries do not match predecessors!`
+
+Fix: store the incoming-value **index**, not the block pointer. Re-read `Phi->getIncomingBlock(Edge.Index)` fresh, immediately before each edge's own rewrite. This works because `BasicBlock::splitBasicBlock` always keeps every `phi`'s incoming-block entries pointed at the real current predecessor, no matter which pass caused the split — the index is the only thing that has to stay stable, and it does.
+
+**Lesson for future sessions, stated plainly so it's not missed again**: when a new crash looks like a documented, deferred bug (same function, similar shape), verify independently before writing it down as the same bug. A verifier run or a diffed `gdb bt` takes minutes. Believing a pattern match costs a session.
+
+## Verification
+
+1. Lit test (`spirv-push-constant-lowering-phi.ll`, 4 functions): `FileCheck` passes AND output is LLVM-verifier-valid (added a 4th function this session specifically to regression-test the stale-predecessor bug — a `phi` edge sharing its predecessor block with an unrelated plain load).
+2. Real CTS reproducer (`...ds_resolve_sample_zero.sub_framebuffer`): now passes end-to-end, no crash.
+3. Full `ds_resolve_sample_zero*` sweep (2,304 cases): 120 Pass, **0 Fail**, 2,184 NotSupported (unrelated `VK_EXT_shader_object` gap).
+4. `ninja -C build check-feme`: 3,601/3,604 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+5. `check-hlsl-feme-vk` (offload-test-suite, `feme` branch): 445 Passed, 3 Failed, 31 Expected-Fail, 1 Unexpectedly-Passed, 200 Unsupported. The 3 failures (`Mandelbrot`, `spec_const_32_bits`, `WaveActiveMax`) have no FeMe-specific `XFAIL` — pre-existing, unrelated gaps, not a regression from this fix. The 1 unexpected pass, `Feature/PushConstant/array_of_matrices.test` (an array of `float2x2` matrices inside a push-constant struct), is very plausibly a side-benefit of this exact fix — matrix-array element access through push constants is a plausible source of GEP/`phi` shapes this change now handles. Did not edit the `offload-test-suite` XFAIL list (external repo, no established precedent this session for committing there).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed — internal compiler-pass correctness fix only.
+
+Commits (already landed):
+1. `feme: L386 - support phi-of-push-constant-GEPs in SPIRVPushConstantLowering` — the fix (header + source + lit test, including the stale-predecessor correctness fix folded in since the buggy intermediate state was never itself committed).
+2. `feme: update Roadmap/VulkanCTSReport for the L386 fix` — `Roadmap.md` (struck through) + `VulkanCTSReport.md` (item 15).
+
+## Not touched
+
+**`L375`** — still untouched, still needs a dedicated design session (`DiamondFlattener` stale-postdom-tree assertion). This session's own crash turned out to be a different bug entirely (see above), so `L375` itself is exactly as open as before — not closer, not further.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in another subproject.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, the only remaining design-session item**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). Fully scoped in the Roadmap across many sessions now; this is the next real bottleneck once picked up.
+2. **~30 min, low priority, easy win, carried over across several sessions and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining ~1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt` each, the same approach that worked for `L379`/`L381`/`L382`/`L387`/`L386`.
+3. **~15 min**: confirm whether `Feature/PushConstant/array_of_matrices.test`'s newly-unexpected pass is in fact caused by this session's `L386` fix (bisect by reverting just this session's commit and re-running that one test), then, if confirmed, remove its stale `XFAIL: Clang` / update expectations in the `offload-test-suite` `feme` branch (a separate repo/PR, not this one).
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
