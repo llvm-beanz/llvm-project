@@ -63,25 +63,20 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, needs a dedicated design session, now the single highest-value
-   target**: `L386` (push-constant `phi`-of-GEPs). Design
-   `visitPushConstantUsers`'s `phi`-support extension (recognize a GEP user that
-   is a `phi`, recursing per incoming edge) and `lowerSPIRVPushConstantAccess`'s
-   corresponding per-edge rewrite (sink the load+bounds-check to each edge's own
-   predecessor block, build a parallel value-`phi`, replace the original shared
-   `Load` with that `phi`'s result). Verify against the single reproducer first,
-   then the full `ds_resolve_sample_zero*` sweep (2,304 cases, 24 currently
-   failing) to confirm it closes all 24 `input_attachments.render_to` cases.
-2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
-   stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` +
-   `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in
-   the Roadmap, still not attempted — two design-session items now queued
-   (`L375`, `L386`); consider whether one session can reasonably tackle both or
-   whether they need separate sittings.
-3. **~30 min, low priority, easy win, carried over from the last two sessions
-   and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining
-   1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt`
-   each to check for single root causes before assuming large triage efforts,
-   the same approach that worked for `L379`/`L381`/`L382`/`L387`.
+1. **~1 day, needs a dedicated design session, the only remaining design-session
+   item**: `L375` (`DiamondFlattener` stale-postdom-tree assertion,
+   `switch_continue_{geom,tessc,tesse}` +
+   `graphicsfuzz.nested-for-loops-switch-fallthrough`). Fully scoped in the
+   Roadmap across many sessions now; this is the next real bottleneck once
+   picked up.
+2. **~30 min, low priority, easy win, carried over across several sessions and
+   still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining
+   ~1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt`
+   each, the same approach that worked for `L379`/`L381`/`L382`/`L387`/`L386`.
+3. **~15 min**: confirm whether `Feature/PushConstant/array_of_matrices.test`'s
+   newly-unexpected pass is in fact caused by this session's `L386` fix (bisect
+   by reverting just this session's commit and re-running that one test), then,
+   if confirmed, remove its stale `XFAIL: Clang` / update expectations in the
+   `offload-test-suite` `feme` branch (a separate repo/PR, not this one).
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
