@@ -1851,6 +1851,10 @@ struct ActiveOcclusionQuery {
 struct ResolvedDrawAttachments {
   std::vector<feme::graphics::AttachmentView> Attachments;
   std::vector<feme::graphics::AttachmentView> ResolveAttachments;
+  /// (Roadmap L379(a)) Parallel index-for-index with `ResolveAttachments`
+  /// -- see `feme::graphics::PreparedDraw::ColorResolveModes`'s own
+  /// comment for why this is a flat, never-per-layer-sliced array.
+  std::vector<feme::graphics::ColorResolveMode> ColorResolveModes;
   feme::graphics::DepthStencilAttachment DepthStencil;
   /// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own resolve targets,
   /// mirroring `ResolveAttachments`' role for color but for depth/stencil:
@@ -1940,6 +1944,8 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
         // attachment with no `ResolveView` of its own simply opted out of
         // resolving.
         Resolved.ResolveAttachments.push_back(feme::graphics::AttachmentView{});
+        Resolved.ColorResolveModes.push_back(
+            feme::graphics::ColorResolveMode::Average);
         continue;
       }
       Expected<feme::graphics::AttachmentView> Attachment =
@@ -1947,6 +1953,15 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
       if (!Attachment)
         return Attachment.takeError();
       Resolved.ResolveAttachments.push_back(*Attachment);
+      // (roadmap L379(a)) `View.ColorResolveMode` carries
+      // `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`/`VK_RESOLVE_MODE_AVERAGE_BIT`
+      // verbatim from `normalizeRenderingAttachment`/the classic-render-
+      // pass color loop above -- map onto the API-agnostic
+      // `feme::graphics::ColorResolveMode` enum `Executor.cpp` consumes.
+      Resolved.ColorResolveModes.push_back(
+          View.ColorResolveMode == VK_RESOLVE_MODE_SAMPLE_ZERO_BIT
+              ? feme::graphics::ColorResolveMode::SampleZero
+              : feme::graphics::ColorResolveMode::Average);
     }
 
   if (Gfx.Binding.Depth) {
@@ -2029,6 +2044,8 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
       Resolved.Attachments;
   const std::vector<feme::graphics::AttachmentView> &ResolveAttachments =
       Resolved.ResolveAttachments;
+  const std::vector<feme::graphics::ColorResolveMode> &ColorResolveModes =
+      Resolved.ColorResolveModes;
   const feme::graphics::DepthStencilAttachment &DepthStencil =
       Resolved.DepthStencil;
   const feme::graphics::DepthStencilAttachment &DepthStencilResolve =
@@ -2175,6 +2192,11 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
         ActivePipelineStatsQueries.empty() ? nullptr : &LocalStats;
     Prepared.Attachments = ViewAttachments;
     Prepared.ResolveAttachments = ViewResolveAttachments;
+    // (roadmap L379(a)) Never per-multiview-layer sliced -- see
+    // `PreparedDraw::ColorResolveModes`'s own comment -- so it is simply
+    // pointed straight at `Resolved`'s own (whole-draw-lifetime) storage,
+    // unlike every per-view `View*` copy above.
+    Prepared.ColorResolveModes = ColorResolveModes;
     Prepared.DepthStencil = ViewDepthStencil;
     Prepared.DepthStencilResolve = ViewDepthStencilResolve;
     Prepared.SubpassInputHeap = SubpassInputHeap;
@@ -4306,8 +4328,19 @@ RenderTargetView normalizeRenderingAttachment(
     feme::cpu::ResourceFormat ResolveFormat =
         ResolveTarget && ResolveTarget->image() ? ResolveTarget->image()->format()
                                                 : feme::cpu::ResourceFormat::Unknown;
-    if (IsSupportedResolveFormat(ResolveFormat))
+    if (IsSupportedResolveFormat(ResolveFormat)) {
       View.ResolveView = ResolveTarget;
+      // (roadmap L379(a)) `VkRenderingAttachmentInfo::resolveMode` is a
+      // color attachment's own real, per-attachment mode (depth/stencil
+      // resolve modes are already carried separately, via
+      // `Desc.DepthResolveMode`/`StencilResolveMode` and this same
+      // `vkCmdBeginRenderingKHR` path's own depth/stencil calls below) --
+      // threaded through verbatim so `Executor.cpp`'s color resolve can
+      // honor `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` (mandatory for integer
+      // color formats, where box-filter averaging is undefined) instead
+      // of always box-filter-averaging regardless of what was requested.
+      View.ColorResolveMode = Src.resolveMode;
+    }
   }
   return View;
 }

@@ -197,6 +197,19 @@ struct RenderTargetView {
   /// The single-sample attachment this one resolves into once the render
   /// pass/rendering ends, or null (the common single-sample case).
   ImageView *ResolveView = nullptr;
+  /// (Roadmap L379(a)) Only meaningful for a *color* entry with a non-null
+  /// `ResolveView` (ignored everywhere else, including every `Depth`/
+  /// `Stencil` entry -- `Executor.cpp`'s depth/stencil resolve already
+  /// always copies sample 0, the only mode `VK_KHR_depth_stencil_resolve`
+  /// requires every implementation to support, independent of this
+  /// field). A classic `VkRenderPass`'s `pResolveAttachments` has no
+  /// configurable mode of its own -- its spec-defined behavior is always
+  /// equivalent to `VK_RESOLVE_MODE_AVERAGE_BIT` -- so `RenderPass.cpp`'s
+  /// classic-render-pass path always sets this to `AVERAGE_BIT`;
+  /// `vkCmdBeginRenderingKHR`'s dynamic-rendering path instead carries
+  /// `VkRenderingAttachmentInfo::resolveMode` through verbatim, since that
+  /// one *is* independently configurable per color attachment.
+  VkResolveModeFlagBits ColorResolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
 };
 
 /// The single internal render-target binding both `VkRenderPass` and
