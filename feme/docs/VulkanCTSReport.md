@@ -524,6 +524,48 @@ The largest ordinary-failure changes by group are:
     needed -- internal compiler-pass correctness fix only, no
     feature/extension-surface change.
 
+16. **`L388` fixed: library-linked `attachment_allocation.roll.*` -- 278
+    failures, now 0.** The `renderpasses.dynamic_rendering.*` triage
+    sweep's second-largest remaining family, same error class as `L387`
+    (`vkCreateGraphicsPipelines: fragment stage has no floating-point/
+    integer output of 1-4 components at location N (SV_TargetN)`), but
+    for `graphics_pipeline_library`-linked pipelines rather than
+    monolithic/`primary_cmd_buff` ones. Root cause: `L387`'s own fix reads
+    `findRenderingAttachmentLocationInfo(CreateInfo.pNext)` directly off
+    its `CreateInfo` argument, but CTS's own `GraphicsPipelineWrapper`
+    chains `VkRenderingAttachmentLocationInfo` onto the fragment-output-
+    interface *library part's* own create info (via
+    `setupFragmentOutputState`), never onto the top-level link call's --
+    exactly `L381`'s own `PrecomputedRenderTargets` bug shape, but for the
+    attachment-location remap instead of the render-pass handle. Fixed by
+    extending `GraphicsPipelineLibraryState` with a new
+    `ColorAttachmentLocations` field (captured in
+    `captureGraphicsPipelineLibraryState`, folded in
+    `foldLinkedLibraryState`, both gated on
+    `FRAGMENT_OUTPUT_INTERFACE_BIT` mirroring `RenderTargets`'s own
+    gating), threaded through `synthesizeLinkedGraphicsPipelineCreateInfo`
+    as a new `PrecomputedColorAttachmentLocations` out-parameter, and
+    consumed by `compileGraphicsPipeline` in place of (when supplied)
+    re-searching the synthesized create info's own `pNext`. Added
+    `GraphicsPipelineTest.
+    LinksRemappedColorAttachmentLocationsFromLibraryPart`, confirmed to
+    fail with `VK_ERROR_INITIALIZATION_FAILED` before this fix. **Verified:**
+    the full `renderpasses.dynamic_rendering.graphics_pipeline_library.*`
+    family (6,155 cases) shows all 200 `attachment_allocation.roll.*`
+    cases in this sweep now Pass (0 Fail); the only 4 remaining failures
+    are a pre-existing, unrelated `local_read` sub-family issue (2 of
+    which are in fact a genuine `SIGSEGV`, not an ordinary Fail -- scoped
+    as new roadmap item `L389`, not yet triaged or fixed, out of this
+    fix's scope). A
+    full re-run of the wider `renderpasses.dynamic_rendering.*` group
+    (28,898 cases) confirms no regressions: 11,593 Pass / 828 Fail /
+    16,475 NotSupported (was 11,317/1,106/16,475 -- Fail down by exactly
+    278, NotSupported unchanged). `FeMeVulkanTests`: 801/801 Passed (+1
+    new unit test). `ninja check-feme`: 3,602/3,605 Passed, 3 Unsupported,
+    0 Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only, no feature/extension-surface change.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
