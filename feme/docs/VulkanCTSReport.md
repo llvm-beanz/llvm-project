@@ -160,6 +160,26 @@ The largest ordinary-failure changes by group are:
 3. **Render-pass correctness and device loss.** `renderpasses` has 4,845
    ordinary failures and 328 `DeviceLost` results. The largest ordinary
    families are dynamic rendering (2,990) and suballocation tests (1,842).
+   **Update (roadmap `L379`/`L379(b)`, this session):** the full 328-case
+   `renderpasses` `DeviceLost` share is now fixed. Two independent bugs
+   were found and fixed: (1) `CommandBuffer.cpp`'s `resolveDrawAttachments`
+   wrongly required every bound color attachment to either all resolve or
+   none, when the Vulkan spec allows resolving independently per
+   attachment; (2) `vkCmdSetRenderingAttachmentLocations` bounded location
+   values against the bound attachment count instead of the device's
+   `maxColorAttachments` limit, and `Executor.cpp`'s `locationForAttachment`
+   searched its lookup array backwards (only coincidentally correct for
+   self-inverse remaps). A complete, from-scratch re-run of
+   `dEQP-VK.renderpasses.dynamic_rendering.*` (28,898 cases) now shows
+   **zero** `DeviceLost`: 9,917 Pass / 2,506 ordinary Fail / 16,475
+   NotSupported. The 2,506 ordinary Fails are a separate, not-yet-triaged
+   gap (largest families: `primary_cmd_buff.suballocation` 993,
+   `primary_cmd_buff.random` 756, `graphics_pipeline_library.suballocation`
+   144, `complete_secondary_cmd_buff.suballocation` 144, all returning
+   `VK_ERROR_INITIALIZATION_FAILED` at pipeline construction) -- left open
+   for a future session, see `Roadmap.md`. The 46 `pipeline` `SIGSEGV`s
+   below remain completely untouched and are the next stability-triage
+   priority.
 4. **Transform feedback and SPIR-V long tails.** `transform_feedback` has
    1,918 failures, led by primitives-generated query get/copy cases (1,308).
    `spirv_assembly` has 458 failures and two isolated `SIGABRT` crashes.
@@ -168,7 +188,13 @@ The largest ordinary-failure changes by group are:
    `graphicsfuzz` `SIGABRT`, and two `spirv_assembly` `SIGABRT`s. There are
    no remaining timeouts. Separately, completed QPA records contain 348
    `DeviceLost` results: 328 `renderpasses`, 12 `pipeline`, and 8
-   `robustness`.
+   `robustness`. **Update (this session):** `L379`/`L379(b)` fixed the full
+   328-case `renderpasses` share (see item 3 above) -- 20 `DeviceLost`
+   results remain (12 `pipeline`, 8 `robustness`), neither re-triaged this
+   session. The 46 `pipeline` `SIGSEGV`s are also still unstarted: no case
+   names are recorded anywhere, so the next stability session should
+   narrow by `pipeline` sub-family first, the same approach that worked
+   for `renderpasses` this session and last.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
