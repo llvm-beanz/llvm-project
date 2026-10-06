@@ -474,6 +474,55 @@ The largest ordinary-failure changes by group are:
     design session, the same category of work as `L375` -- not attempted
     this session. No FeMe source code change this item -- investigation/
     triage only.
+15. **`L386` fixed: push-constant `phi`-of-GEPs now supported.** Extended
+    `visitPushConstantUsers` to recognize a `phi` merging push-constant
+    pointers with different compile-time byte offsets, and
+    `lowerSPIRVPushConstantAccess` to sink a bounds-checked load to each
+    of the `phi`'s own incoming edges, merging the resulting *values*
+    with a new `phi` that replaces the original pointer `phi` (the
+    original shared `load` becomes dead and is removed). **Mid-session
+    self-correction, worth recording as a methodology note:** the first
+    version of this fix cached a `BasicBlock *` per edge at match time;
+    this went stale whenever an unrelated, earlier-processed plain
+    push-constant load happened to share (and split) the same original
+    predecessor block as a later `phi` edge, producing genuinely invalid
+    IR (a `phi` listing a `BasicBlock *` no longer among its real
+    predecessors). This was not caught by the new unit test (too simple a
+    CFG to trigger the overlap) -- it surfaced only as an assertion crash
+    inside `(anonymous namespace)::DiamondFlattener::flatten` against the
+    real CTS reproducer, initially (and wrongly) suspected to be `L375`
+    purely because it crashed in the same function with superficially
+    similar symptoms, even though the assertion text was already
+    different. Running the LLVM verifier (`opt -passes=verify`) directly
+    on the IR dumped immediately before `LinearizePass`
+    (`FEME_DUMP_IR_PRELINEARIZE`) immediately found the real,
+    independent bug: `PHI node entries do not match predecessors!` on
+    this fix's own new `phi`. **Lesson for future sessions:** when a new
+    crash resembles a documented/deferred bug, verify independently via
+    direct tooling (the verifier, a matching `gdb bt`) before concluding
+    it is the same bug -- pattern-matching against written descriptions
+    alone is not sufficient. Fixed by storing the incoming-value index
+    instead of a `BasicBlock *`, and re-reading
+    `Phi->getIncomingBlock(Edge.Index)` fresh immediately before each
+    edge's own rewrite, relying on the (confirmed) LLVM invariant that
+    `BasicBlock::splitBasicBlock` always keeps every `phi`'s
+    incoming-block entries pointed at their real current predecessors.
+    New lit test (`spirv-push-constant-lowering-phi.ll`) covers an
+    incomplete edge, a `phi` feeding a further GEP, the basic
+    differently-offset-GEPs case, and a dedicated regression test for the
+    stale-predecessor bug (a `phi` edge sharing its original predecessor
+    block with an unrelated plain load). **Verified:** the real
+    reproducer
+    (`dEQP-VK.pipeline.fast_linked_library.multisample.misc.input_attachments.render_to.r8g8b8a8_unorm_r16g16b16a16_sfloat_r16g16b16a16_sint_d16_unorm.2x.ds_resolve_sample_zero.sub_framebuffer`)
+    now passes end-to-end (was a crash); a full rerun of the
+    `ds_resolve_sample_zero*` family (2,304 cases) shows 120 Pass, **0
+    Fail**, 2,184 NotSupported (unrelated `VK_EXT_shader_object` gap) --
+    every one of the 24 cases this item originally scoped is fixed.
+    `ninja check-feme`: 3,601/3,604 Passed (+1 new lit test), 3
+    Unsupported, 0 Failed, 0 regressions. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- internal compiler-pass correctness fix only, no
+    feature/extension-surface change.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
