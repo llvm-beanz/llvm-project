@@ -2829,6 +2829,63 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap L387) A multi-subpass classic `VkRenderPass` translated to
+/// dynamic rendering (CTS's own `renderpasses.dynamic_rendering.*` shape)
+/// gives every subpass's pipeline the same combined, cross-subpass color-
+/// attachment list -- here, attachment index 0 (an integer format) and
+/// index 1 (`R8G8B8A8_UNORM`) -- even though this particular subpass's
+/// fragment shader only ever writes one location. To disambiguate, CTS
+/// chains a `VkRenderingAttachmentLocationInfo` onto the pipeline's own
+/// create info remapping each attachment index to the fragment-shader
+/// output location that actually feeds it (`VK_ATTACHMENT_UNUSED` meaning
+/// "this subpass writes nothing for this attachment at all"): here,
+/// attachment index 0 is unused by this subpass, and index 1 is fed by the
+/// shader's own location-0 output. Before this fix,
+/// `validateStageInterfaces` ignored this struct entirely and assumed
+/// attachment index == fragment-output location, so it looked up location
+/// 0 for the *integer* attachment (index 0) -- finding the shader's real
+/// (float) location-0 output, meant for the *other* attachment -- and
+/// rejected the pipeline with "fragment stage has no integer output of 1-4
+/// components at location 0 (SV_Target0)", exactly the error
+/// `dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.suballocation.
+/// formats.r16_uint.input.clear.store.draw` hit.
+TEST_F(GraphicsPipelineTest,
+       AcceptsRemappedColorAttachmentLocationsFromPipelineCreateInfo) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkFormat ColorFormats[2] = {VK_FORMAT_R16_UINT, VK_FORMAT_R8G8B8A8_UNORM};
+  std::array<VkPipelineColorBlendAttachmentState, 2> BlendAttachments{};
+  for (auto &A : BlendAttachments)
+    A.colorWriteMask = 0xF;
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments.data();
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+  uint32_t Locations[2] = {VK_ATTACHMENT_UNUSED, 0};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  LocationInfo.pNext = &Rendering;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &LocationInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->colorAttachmentCount(),
+            2u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
 
 /// fragment stage with no color output -- is legal Vulkan
 /// (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape) and must

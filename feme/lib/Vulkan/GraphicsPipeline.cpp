@@ -710,7 +710,8 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                               const feme::cpu::CompiledStage *DomainStage,
                               const feme::cpu::CompiledStage *GeometryStage,
                               llvm::ArrayRef<AttachmentFormat> ColorAttachments,
-                              llvm::ArrayRef<VertexInputAttribute> Attributes) {
+                              llvm::ArrayRef<VertexInputAttribute> Attributes,
+                              llvm::ArrayRef<uint32_t> ColorAttachmentLocations) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
@@ -838,8 +839,28 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
       // required to declare an output there at all.
       if (ColorAttachments[I].Format == feme::cpu::ResourceFormat::Unknown)
         continue;
+      // (roadmap L387) A multi-subpass classic `VkRenderPass` translated
+      // to dynamic rendering (CTS's own `renderpasses.dynamic_rendering.*`
+      // shape) chains a `VkRenderingAttachmentLocationInfo` onto this
+      // pipeline's own `VkGraphicsPipelineCreateInfo::pNext`, remapping
+      // attachment index `I` (an index into the *combined*, cross-subpass
+      // attachment list every subpass's pipeline is created against) to
+      // the fragment-shader output *location* this particular subpass's
+      // pipeline actually uses for it -- which is not necessarily `I`
+      // itself. `VK_ATTACHMENT_UNUSED` there means this subpass's pipeline
+      // writes no output for attachment index `I` at all (handled exactly
+      // like the existing `!Color` fallback below). Without a chained
+      // struct (the overwhelmingly common, single-subpass case), the
+      // mapping defaults to identity, preserving every previously-passing
+      // pipeline's behavior.
+      uint32_t Location = I;
+      if (I < ColorAttachmentLocations.size()) {
+        if (ColorAttachmentLocations[I] == VK_ATTACHMENT_UNUSED)
+          continue;
+        Location = ColorAttachmentLocations[I];
+      }
       const feme::SignatureElement *Color =
-          findLocation(*FSSig, feme::SignatureDirection::Output, I);
+          findLocation(*FSSig, feme::SignatureDirection::Output, Location);
       // (roadmap H11) A fragment stage is not required to declare an
       // output at every location a real (non-`Unknown`) color attachment
       // occupies -- unlike a *used* attachment's own component-count/type
@@ -894,7 +915,7 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                  Want == feme::SignatureComponentType::Float
                                      ? "floating-point"
                                      : "integer",
-                                 I, I);
+                                 Location, Location);
     }
   }
   // (roadmap H9a) A fragment-less pipeline may legally declare a nonempty
@@ -953,6 +974,26 @@ const VkPipelineRenderingCreateInfo *findRenderingCreateInfo(const void *Next) {
        Header; Header = Header->pNext)
     if (Header->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
       return reinterpret_cast<const VkPipelineRenderingCreateInfo *>(Header);
+  return nullptr;
+}
+
+/// (roadmap L387) A `VkRenderingAttachmentLocationInfo` chained onto
+/// `VkGraphicsPipelineCreateInfo::pNext` gives this pipeline's own static
+/// `pColorAttachmentLocations` remap -- see `validateStageInterfaces`'s own
+/// comment on why this is needed for a multi-subpass classic `VkRenderPass`
+/// translated to dynamic rendering. Distinct from (and, per the spec, must
+/// agree with) the dynamic `vkCmdSetRenderingAttachmentLocations` form
+/// already handled by `CommandBuffer.cpp` (roadmap F8) -- that command sets
+/// the *current* mapping for subsequent draws, while this is only consulted
+/// here, at pipeline-creation-time validation, before any such command can
+/// possibly have run.
+const VkRenderingAttachmentLocationInfo *
+findRenderingAttachmentLocationInfo(const void *Next) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
+       Header; Header = Header->pNext)
+    if (Header->sType == VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO)
+      return reinterpret_cast<const VkRenderingAttachmentLocationInfo *>(
+          Header);
   return nullptr;
 }
 
@@ -2316,7 +2357,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     llvm::ArrayRef<VertexInputAttribute> VertexAttributes,
     feme::graphics::TessellationState &Tessellation,
     feme::graphics::GeometryState &Geometry, feme::graphics::MeshState &Mesh,
-    bool RasterizerDiscardEnable) {
+    bool RasterizerDiscardEnable,
+    llvm::ArrayRef<uint32_t> ColorAttachmentLocations) {
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
@@ -2640,7 +2682,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
             GeometryStageCompiled.get(), ColorAttachments,
-            VertexAttributes))
+            VertexAttributes, ColorAttachmentLocations))
       return std::move(E);
   }
 
@@ -2879,6 +2921,19 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
     if (getEffectivePipelineCreateFlags(CreateInfo) &
         VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
       return std::nullopt;
+    // (roadmap L387) See `validateStageInterfaces`'s own comment: this
+    // pipeline's static attachment-index-to-fragment-output-location
+    // remap, if any, chained onto its own create info rather than derived
+    // from `Result.Attachments` (which stays attachment-index-ordered for
+    // every other consumer, e.g. `ColorBlends`/`Executor.cpp`'s own
+    // attachment binding).
+    llvm::SmallVector<uint32_t, 4> ColorAttachmentLocations;
+    if (const VkRenderingAttachmentLocationInfo *LocationInfo =
+            findRenderingAttachmentLocationInfo(CreateInfo.pNext))
+      ColorAttachmentLocations.assign(
+          LocationInfo->pColorAttachmentLocations,
+          LocationInfo->pColorAttachmentLocations +
+              LocationInfo->colorAttachmentCount);
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
         compileAndValidateStages(
             VertexInfo, FragmentInfo, TessControlInfo, TessEvalInfo,
@@ -2886,7 +2941,8 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
             DeviceInfo.Properties.limits,
             llvm::ArrayRef(Result.Attachments),
             Result.VertexAttributes, Result.Tessellation, Result.Geometry,
-            Result.Mesh, Result.Raster.DiscardEnable);
+            Result.Mesh, Result.Raster.DiscardEnable,
+            ColorAttachmentLocations);
     if (!Compiled)
       return Compiled.takeError();
     Artifact = std::move(*Compiled);
