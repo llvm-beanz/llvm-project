@@ -448,6 +448,32 @@ The largest ordinary-failure changes by group are:
     regressions. No `Vulkan14FeatureInventory.md`/
     `VulkanExtensionInventory.md` change needed -- internal correctness
     fix only, no feature/extension-surface change.
+14. **`L386` root-caused (previous guess was wrong), not fixed -- needs a
+    dedicated design session.** `FEME_DUMP_IR_PRECANON`/
+    `FEME_DUMP_IR_POSTCANON` on the single reproducer showed the
+    unresolved `spirv_var_25` is a **push-constant block** (address space
+    13), not a stage-IO variable as a prior session guessed -- still
+    present, unrewritten, in the postcanon dump, meaning
+    `SPIRVPushConstantLoweringPass` never touched this function at all.
+    Root cause: the `ds_resolve_sample_zero` fragment shader's branchy
+    resolve logic computes two different compile-time byte offsets (112
+    and 116) into the push-constant block along two branches, each via
+    its own `getelementptr`, then merges the two pointers with a `phi`
+    before a single shared `load`. `SPIRVPushConstantLowering.cpp`'s
+    `visitPushConstantUsers` walk only recognizes a GEP's user as a `load`
+    or a further `getelementptr` -- a `phi` user is unsupported by its own
+    documented scope, so the pass rejects the *whole* function's
+    push-constant access, leaving the global forever unresolved at
+    JIT-link time. This is a materially deeper gap than a quick fix: the
+    rewrite is keyed per-terminal-`Load` with exactly one compile-time
+    `BaseOffset`, which cannot express "whichever offset the live `phi`
+    incoming edge used" -- a correct general fix needs to sink the
+    existing per-load bounds-check/load logic to each `phi` edge's own
+    GEP and build a parallel value-level `phi`, generalizing cleanly to
+    nested `phi`s too. Scoped in `Roadmap.md` as needing its own dedicated
+    design session, the same category of work as `L375` -- not attempted
+    this session. No FeMe source code change this item -- investigation/
+    triage only.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
