@@ -565,6 +565,43 @@ The largest ordinary-failure changes by group are:
     0 Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/
     `VulkanExtensionInventory.md` change needed -- internal correctness
     fix only, no feature/extension-surface change.
+17. **`L389` fixed: self-regression from `L388`'s own fix, same session --
+    2 `SIGSEGV` crashes, now 0.** While verifying `L388`'s own CTS sweep
+    (item 16 above), `dEQP-VK.renderpasses.dynamic_rendering.
+    graphics_pipeline_library.local_read.
+    {null_color_attachment_location_with_locationinfo,
+    null_color_attachment_location_with_locationinfo_before_identity}`
+    were found to be genuine `SIGSEGV` crashes (confirmed via a direct,
+    isolated `deqp-vk -n <case>` run, exit code 139). `gdb bt` pointed
+    directly at `L388`'s own new `captureGraphicsPipelineLibraryState`
+    code; checking out the pre-`L388` sources and re-running the same
+    case confirmed it passed before this session's own `L388` commit --
+    a self-inflicted regression, not a pre-existing bug. Root cause:
+    `VkRenderingAttachmentLocationInfo::pColorAttachmentLocations ==
+    nullptr` with a nonzero `colorAttachmentCount` is the spec-legal
+    identity-mapping spelling, but both of `L388`'s new call sites (plus
+    `L387`'s own pre-existing, never-before-exercised
+    `compileGraphicsPipeline` code, which had the identical latent bug
+    for monolithic/non-linked pipelines) unconditionally called
+    `std::vector::assign(ptr, ptr + count)` without checking the pointer
+    for null. **Fixed this session**: both call sites now guard with a
+    null check, mirroring the existing `ColorBlendAttachments::
+    pAttachments` null-check pattern already used immediately above in
+    the same function. Added `GraphicsPipelineTest.
+    LinksALibraryWithANullColorAttachmentLocationsArray`. **Verified:**
+    both crash cases now Pass; a full re-run of the
+    `graphics_pipeline_library.*` family (6,155 cases) shows 0 Unrun (was
+    2), Pass 4,130 (was 4,128), Fail unchanged at 4 (the remaining,
+    unrelated `local_read` ordinary-Fail sub-family, scoped as new
+    roadmap item `L390`, not yet triaged). A full re-run of the wider
+    `renderpasses.dynamic_rendering.*` group (28,898 cases) confirms no
+    regressions: 11,595 Pass / 828 Fail / 16,475 NotSupported / 0 Unrun
+    (Fail unchanged, Pass +2 for the two fixed crashes). `FeMeVulkanTests`:
+    802/802 Passed (+1 new unit test). `ninja check-feme`: 3,603/3,606
+    Passed, 3 Unsupported, 0 Failed, 0 regressions. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- internal correctness fix only, no feature/extension-surface
+    change.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
