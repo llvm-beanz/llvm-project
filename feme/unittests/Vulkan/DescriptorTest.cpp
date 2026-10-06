@@ -464,6 +464,78 @@ TEST_F(DescriptorTest, UniformBufferLayoutAcceptedAndDynamicOffsetCounted) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+// Regression test for roadmap L384: per spec, an application may destroy
+// a `VkDescriptorSetLayout` immediately after allocating descriptor sets
+// from it -- the sets themselves remain valid and usable. `DescriptorSet`
+// used to retain a raw `const DescriptorSetLayout *` pointing directly at
+// the (now-destroyed) layout object, which dangled once the application
+// destroyed the layout below, and crashed `getLayout().
+// dynamicOffsetCount()` the first time a command buffer bound the
+// (still-live) descriptor set -- `dEQP-VK.pipeline.*.multisample.misc.
+// {basic,clear_attachments}.*.ds_resolve_sample_zero.*`'s own genuine
+// `SIGSEGV` (a distinct, 46-case crash family this session discovered
+// and fixed independently of -- and, per a direct case-name check, not
+// overlapping with -- the separately-tracked "46 `pipeline` `SIGSEGV`"
+// stability-triage bucket `L381`/`L382` also chipped away at the same
+// session) exercises exactly this sequence via a command-buffer-execution
+// path; this test exercises the same dangling-pointer bug directly via
+// the object model, covering both `getLayout()` and `write()`'s own
+// `Layout.find(Binding)` lookup (also previously a dereference of the
+// dangling pointer).
+TEST_F(DescriptorTest, UsableAfterDescriptorSetLayoutDestroyed) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  // Destroy the descriptor set layout *before* using the descriptor set --
+  // this must not leave `Set` holding a dangling pointer to it.
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  EXPECT_EQ(S->getLayout().dynamicOffsetCount(), 1u);
+
+  VkBuffer Buf = createStorageBuffer(64);
+  VkDescriptorBufferInfo BufInfo{Buf, 0, 32};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  std::vector<DescriptorBufferBinding> Array = S->bindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
+  EXPECT_EQ(Array[0].Range, 32u);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+}
+
 TEST_F(DescriptorTest, InputAttachmentWriteAndReadBack) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;

@@ -314,7 +314,7 @@ public:
   /// `std::mutex` not being copyable would delete anyway.
   DescriptorSet(const DescriptorSet &Other);
 
-  const DescriptorSetLayout &getLayout() const { return *Layout; }
+  const DescriptorSetLayout &getLayout() const { return Layout; }
 
   /// Writes array element \p ArrayElement of binding \p Binding, per
   /// `vkUpdateDescriptorSets`. A binding or array element this set's layout
@@ -364,7 +364,17 @@ public:
   std::vector<uint8_t> inlineUniformBlockData(uint32_t Binding) const;
 
 private:
-  const DescriptorSetLayout *Layout;
+  // Owns a deep copy of the layout's bindings (roadmap L305 applied the
+  // same fix to `PipelineLayout`) rather than retaining the original
+  // `VkDescriptorSetLayout`'s own `DescriptorSetLayout *`: per spec, an
+  // application may call `vkDestroyDescriptorSetLayout` as soon as it has
+  // finished allocating sets from that layout, so a raw pointer here would
+  // dangle the moment a later `vkCmdBindDescriptorSets` call walked back
+  // through `getLayout()` -- e.g. to compute `dynamicOffsetCount()` --
+  // after the layout object was gone. Several `dEQP-VK.pipeline.*`
+  // multisample depth/stencil-resolve cases exercise exactly this
+  // allocate-then-destroy-layout sequence and crashed before this fix.
+  DescriptorSetLayout Layout;
   std::map<uint32_t, std::vector<DescriptorBufferBinding>> Bindings;
   std::map<uint32_t, std::vector<DescriptorImageBinding>> ImageBindings;
   std::map<uint32_t, std::vector<uint8_t>> InlineUniformBlockBindings;

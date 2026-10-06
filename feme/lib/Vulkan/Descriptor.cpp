@@ -96,9 +96,8 @@ uint32_t DescriptorSetLayout::dynamicOffsetCount() const {
   return Count;
 }
 
-DescriptorSet::DescriptorSet(const DescriptorSet &Other) {
+DescriptorSet::DescriptorSet(const DescriptorSet &Other) : Layout(Other.Layout) {
   std::lock_guard<std::mutex> Lock(Other.Mutex);
-  Layout = Other.Layout;
   Bindings = Other.Bindings;
   ImageBindings = Other.ImageBindings;
   InlineUniformBlockBindings = Other.InlineUniformBlockBindings;
@@ -108,7 +107,7 @@ DescriptorSet::DescriptorSet(const DescriptorSet &Other) {
 
 DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout,
                              std::optional<uint32_t> VariableDescriptorCount)
-    : Layout(&Layout) {
+    : Layout(Layout) {
   for (const DescriptorSetLayoutBinding &B : Layout.bindings()) {
     // (roadmap L12c) Only the layout's own `VariableCount`-flagged binding
     // (at most one, and always the highest-numbered one -- enforced by
@@ -169,7 +168,7 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
   // binding, but its own `VkDescriptorImageInfo::sampler` field is
   // ignored, not applied -- so the incoming `Samp` here must not clobber
   // the one this set's constructor already seeded from the layout.
-  const DescriptorSetLayoutBinding *LayoutBinding = this->Layout->find(Binding);
+  const DescriptorSetLayoutBinding *LayoutBinding = this->Layout.find(Binding);
   bool HasImmutableSampler =
       LayoutBinding && !LayoutBinding->ImmutableSamplers.empty();
   Sampler *ResolvedSamp =
