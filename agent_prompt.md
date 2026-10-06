@@ -1,5 +1,5 @@
 ---
-model: gpt-5.6-sol
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -59,75 +59,24 @@ file.
 
 # Request
 
-I've done a fully clean build deleting all objects and clearing all caches. I'm
-still seeing this failure.
+Can you please continue the work on the Vulkan FeMe ICD? A previous session
+suggested the next steps:
 
-I have done multiple fully clean builds (optimized and unoptimized). I've
-cleared caches. Your theory about dynamic loading libraries is nonsense, the
-passes are statically linked into feme-opt (there is no dylib).
-
-There is something platform-specific going on.
-
-The full output of feme-opt is in output.ll.
-
-Please diagnose what is happening.
-
-```
-/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
-# .---command stderr------------
-# | /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll:44:10: error: CHECK: expected string not found in input
-# | ; CHECK: %chain.merge = select i1 {{%[A-Za-z0-9_.]+}}, i1 true, i1 {{%[A-Za-z0-9_.]+}}
-# |          ^
-# | <stdin>:1:1: note: scanning from here
-# | ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
-# | ^
-# | <stdin>:38:2: note: possible intended match here
-# |  %live.merge = select i1 %Guard..inv, i1 %live.t, i1 %live.f
-# |  ^
-# |
-# | Input file: <stdin>
-# | Check file: /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll
-# |
-# | -dump-input=help explains the following input dump.
-# |
-# | Input was:
-# | <<<<<<
-# |             1: ; ModuleID = '/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll'
-# | check:44'0    {                                                                                                                                   search range start (exclusive)
-# | check:44'1                                                                                                                                        error: no match found in search range
-# |             2: source_filename = "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/Linearize/checkblock-chained-divergent-check-bypass.ll"
-# |             3:
-# |             4: define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #0 {
-# |             5:  %1 = call i32 @llvm.spv.thread.id.i32(i32 0)
-# |             6:  %2 = insertelement <3 x i32> poison, i32 %1, i32 0
-# |             .
-# |             .
-# |             .
-# |            33:  %active.header.live = and i1 %active.live, %23
-# |            34:  %active.header.sideeffect = and i1 %active.sideeffect, %23
-# |            35:  br label %28
-# |            36:
-# |            37: Flow: ; preds = %loop.exit.guard.Flow_crit_edge
-# |            38:  %live.merge = select i1 %Guard..inv, i1 %live.t, i1 %live.f
-# | check:44'2      ?                                                             possible intended match
-# |            39:  %sideeffect.merge = select i1 %Guard..inv, i1 %sideeffect.t, i1 %sideeffect.f
-# |            40:  %.linearized = select i1 %Guard..inv, i1 false, i1 true
-# |            41:  %not..linearized = xor i1 %.linearized, true
-# |            42:  %live.t2 = and i1 %live.merge, %.linearized
-# |            43:  %sideeffect.t3 = and i1 %sideeffect.merge, %.linearized
-# |             .
-# |             .
-# |             .
-# |           276:
-# |           277: attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="compute" "hlsl.numthreads"="1,1,1" "hlsl.shader"="compute" }
-# |           278: attributes #1 = { nounwind willreturn memory(none) }
-# |           279: attributes #2 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
-# |           280: attributes #3 = { nounwind willreturn memory(argmem: read) }
-# |           281: attributes #4 = { nounwind willreturn memory(argmem: write) }
-# | check:44'3                                                                   } search range end (exclusive)
-# | >>>>>>
-# `-----------------------------
-# error: command failed with exit status: 1
-```
+1. **`L378(a)`** (~1-2 hours): `max_sampler_lod_bias.shader_bias` wrong-pixel
+   bug, confirmed still open and unrelated to this fix. `shader_bias_compute`
+   (same LOD-bias logic, compute pipeline) passes, so likely
+   graphics-fragment-path-specific. Next step: `--deqp-log-images=enable`
+   and diff against the golden image.
+2. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost)
+   -- still not started.** No case names recorded anywhere, only aggregate
+   counts. Recommend narrowing by sub-family first: start with
+   `renderpasses.dynamic_rendering.*` and `renderpasses.suballocation.*`
+   (the two largest ordinary-failure families in that group per
+   `VulkanCTSReport.md`), the same approach that worked for `L378` this
+   session and last.
+3. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
+   completely unaddressed, carried over from multiple prior sessions.
+4. **`L375`** (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener`
+   assertion, found by `L374`): still open, not touched this session --
+   a different function in the same file, needs its own dedicated design
+   session per the existing roadmap entry.
