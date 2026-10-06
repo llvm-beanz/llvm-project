@@ -115763,3 +115763,116 @@ Capture the `DYLD_PRINT_LIBRARIES` result from the failing invocation. It will
 identify the exact dylib containing the old pass; if no dylib is involved,
 `CMAKE_HOME_DIRECTORY` plus the two Ninja queries will identify the other
 source/build tree that produced the executable.
+
+# Session: closed out renderpasses DeviceLost triage, resolved OffloadTest cache "gap" as a build-dir choice (2026-10-06)
+
+## Do this first, every session
+
+Run `vulkaninfo --summary | grep deviceName`. If it says `llvmpipe` instead of
+`FeMe CPU Vulkan Device`, you forgot `VK_ICD_FILENAMES`:
+
+```
+VK_ICD_FILENAMES=build/tools/feme/tools/feme-vulkan/feme_icd.json \
+  vulkaninfo --summary | grep deviceName
+```
+
+Confirmed this session. System default is lavapipe, not FeMe.
+
+## What shipped (4 commits)
+
+1. **`ef8fd6e934ff`** -- `resolveDrawAttachments` no longer requires every
+   bound color attachment to resolve or none (spec allows per-attachment
+   independence). New test `ResolvesOnlyTheColorAttachmentsThatDeclareAResolveTarget`.
+2. **`518360e57c44`** -- `vkCmdSetRenderingAttachmentLocations` two bugs:
+   bounds-checked against attachment count instead of `maxColorAttachments`,
+   and `locationForAttachment` searched its lookup table backwards (only
+   worked by luck for self-inverse swaps). New test
+   `RenderingAttachmentLocationsRemapsSingleAttachmentAsymmetrically`.
+3. **`5678f0f621c9`** -- docs: full 28,898-case `renderpasses.dynamic_rendering.*`
+   re-run confirms **zero DeviceLost** (was 328). Updated `Roadmap.md`/
+   `VulkanCTSReport.md`.
+4. **`e7d0cb586e01`** -- docs: resolved the `LLVM_EXTERNAL_PROJECTS=OffloadTest`
+   "cache-persistence gap" (see below). No code change.
+
+Each code commit was verified with a `git stash` A/B: test fails pre-fix
+(`submit()` returns `VK_ERROR_DEVICE_LOST`), passes post-fix. `ninja check-feme`
+clean after both (3592/3595, 0 Failed) -- not just "the new test passes."
+
+## The big number
+
+**328 `renderpasses` DeviceLost results -> 0.** Confirmed by a full, not
+sampled, re-run of all 28,898 `dEQP-VK.renderpasses.dynamic_rendering.*`
+cases: 9,917 Pass / 2,506 ordinary Fail / 16,475 NotSupported, zero crashes.
+This closes the `renderpasses` half of the carried-over "46 pipeline SIGSEGV
++ 328 renderpasses DeviceLost" stability triage item.
+
+## The OffloadTest "cache-persistence gap" was never a cache bug
+
+Four prior sessions carried this forward as an unstarted item with no detail
+beyond its name. Here's what it actually is:
+
+- This repo's own `build/` directory is **already** configured with
+  `-DLLVM_EXTERNAL_PROJECTS=OffloadTest` and everything else needed.
+  `ninja -C build check-hlsl-feme-vk` builds/runs the whole 680-case suite
+  in **~25 seconds**, because LLVM/clang/mlir/feme are already built there
+  with a warm `ccache`.
+- A prior session (roadmap `L192`) instead stood up a brand-new, separate
+  build directory at `/home/dev/dev/offload-test-suite/build`. That
+  directory's own CMake-generated include paths differ from `build/`'s, so
+  almost none of `build/`'s cache applies -- a full ~5,400-target,
+  ~15-minute rebuild every time, and the directory doesn't even persist
+  across sessions (it didn't exist at this session's start).
+- Fix: use `build/`, not a separate directory. Updated
+  `feme/.instructions.md` so this doesn't get rediscovered again.
+
+While chasing this I found `Basic/Mandelbrot.test` flaky under the suite's
+default 12-parallel-worker run (`Failed to wait on Semaphore, VkResult = 2`).
+Traced it to `Sync.cpp`'s own pre-existing `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`
+safety net (roadmap `L228(h)`/`(i)`, already documented, already has an
+env-var override) being legitimately exercised by 12-way host CPU
+contention. Not a new bug -- confirmed the design doc already explains this
+exact scenario. No action taken; noted in roadmap `L380` so it isn't
+re-investigated as new.
+
+## What's still open (ranked)
+
+1. **46 `pipeline` SIGSEGVs -- still not started.** No case names recorded
+   anywhere. Same playbook that worked for `renderpasses`: narrow by
+   `pipeline` sub-family first rather than attempting the full ~1.1M-case
+   group. Start here next session -- it's the single largest remaining gap
+   in the stability triage item.
+2. **2,506 ordinary `renderpasses` Fails, newly visible now that DeviceLost
+   no longer masks them.** Largest families: `primary_cmd_buff.suballocation`
+   (993), `primary_cmd_buff.random` (756), `graphics_pipeline_library.suballocation`
+   (144), `complete_secondary_cmd_buff.suballocation` (144). Sampled failures
+   return `VK_ERROR_INITIALIZATION_FAILED` at pipeline construction -- not
+   yet root-caused. New, not previously tracked.
+3. **`L379(a)`** -- color-attachment resolve mode (box-filter vs
+   sample-zero-copy for integer formats) isn't plumbed per-attachment.
+   Scoped, not fixed. Needs a dedicated session (add `ColorResolveModes`
+   alongside the existing depth/stencil fields).
+4. **`local_read.*`'s remaining 4 fails** (`depth_stencil_mapping_to_no_index*`,
+   `input_attachments_without_mapping`) -- `VK_ERROR_INITIALIZATION_FAILED`,
+   not yet root-caused, small and likely quick once picked up.
+5. **`L375`** (`DiamondFlattener` assertion in `switch_continue_{geom,tesse}`)
+   -- re-confirmed this session, reproduces identically, unaffected by
+   today's changes. Still needs its own dedicated design session (root
+   cause: two independent structural walks mutate/re-visit the same merge
+   block using a stale postdominator answer). Not touched beyond
+   confirmation.
+6. **`pipeline.monolithic.sampler.*` full sweep** (background, PID 79358,
+   `/tmp/l378a/sampler-full.log`) -- optional, low-priority non-regression
+   confirmation for `L378(a)`, started ~15:32, still running (`border_swizzle`
+   family is NotSupported-heavy and slow). Check on it next session if still
+   running; not blocking anything.
+
+## Honest status against this session's 4 handed-off priorities
+
+1. `L378(a)` sampler LOD bias -- **already done before this session** (per
+   prior summary).
+2. Stability triage -- **renderpasses half done** (328 -> 0 DeviceLost,
+   two real bugs fixed, CTS-verified). Pipeline SIGSEGV half **not started**.
+3. OffloadTest cache gap -- **resolved**, turned out to be a build-directory
+   choice, not a bug. Documented so it stays resolved.
+4. `L375` -- **confirmed still accurate and still open**, no new work; it
+   genuinely needs a dedicated design session as previously scoped.
