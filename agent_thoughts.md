@@ -116180,3 +116180,44 @@ No work done outside `feme/` this session — nothing to isolate/fix in another 
 2. **~2-4 hours**: `L386` — isolate `dEQP-VK.pipeline.fast_linked_library.multisample.misc.input_attachments.render_to.r8g8b8a8_unorm_r16g16b16a16_sfloat_r16g16b16a16_sint_d16_unorm.2x.ds_resolve_sample_zero.sub_framebuffer`, dump canonicalized IR before/after `CanonicalizeStage.cpp` to find what `spirv_var_25` is and why it's unresolved. Fixes the remaining 24 of `L379(c)`'s original 72 cases.
 3. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in the Roadmap, still not attempted.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+# Session: L387 root-caused and fixed (152/152 cases), L386 root-caused and scoped (2026-10-06)
+
+Device check: `VK_ICD_FILENAMES=build/tools/feme/tools/feme-vulkan/feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start and end of session — the unset default resolves to lavapipe/llvmpipe, not FeMe).
+
+## What's fixed
+
+**`L387`** (`dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.suballocation.*` pipeline-creation failures): **all 152 of 152 cases now Pass.**
+
+Root cause (confirmed via CTS source reading, `vktRenderPassTests.cpp`'s `findColorAttachments`/`fillRenderingAttachmentLocationsInfo`): a multi-subpass classic `VkRenderPass` translated to dynamic rendering gives every subpass's own pipeline the *same combined*, cross-subpass `pColorAttachmentFormats` list (e.g. `[intFmt, UNORM]` for a 2-subpass test), not a per-subpass subset. To disambiguate which attachment index a given subpass's fragment shader actually writes (and at which location), CTS chains a `VkRenderingAttachmentLocationInfo` onto that pipeline's own create info. FeMe had code for the already-known *dynamic* form of this state (`vkCmdSetRenderingAttachmentLocations`, fixed in a prior session's `L379(b)`) but nothing anywhere that looked for the *static*, pipeline-creation-time chained struct — so `validateStageInterfaces` assumed attachment index `I` always equals fragment-output location `I`, misattributing one subpass's real output to the wrong attachment and rejecting pipeline creation.
+
+Fixed by adding `findRenderingAttachmentLocationInfo` (mirrors the existing `findRenderingCreateInfo` pNext-search pattern) and threading the resolved remap through `compileAndValidateStages`/`validateStageInterfaces`'s per-attachment check, falling back to identity when no such struct is chained (every other pipeline's behavior is unchanged).
+
+Commits (already landed):
+1. `[feme] Fix L387: honor VkRenderingAttachmentLocationInfo at pipeline creation` — the fix + `GraphicsPipelineTest.AcceptsRemappedColorAttachmentLocationsFromPipelineCreateInfo` (manually confirmed to fail with the exact real error *before* this fix, by stashing the source change and re-running just the new test).
+2. `[feme] Update Roadmap/VulkanCTSReport for the L387 fix` — Roadmap.md (struck through) + VulkanCTSReport.md (item 13).
+
+Verified: `primary_cmd_buff.suballocation.*` (5,935 cases) goes from 3,894 Pass / 152 Fail / 1,889 NotSupported to **4,046 Pass / 0 Fail / 1,889 NotSupported**. Wider `renderpasses.dynamic_rendering.*` sweep (28,898 cases) shows no regressions (11,317 Pass / 1,106 Fail / 16,475 NotSupported — the remaining 1,106 are unrelated, already-scoped families, e.g. `L386`). `FeMeVulkanTests`: 800/800 Passed (+1 new test). `ninja check-feme`: 3,600/3,603 Passed, 3 Unsupported, 0 Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed (internal correctness fix only).
+
+## What's root-caused but not fixed
+
+**`L386`** — the handoff's priority #2. Previous session's guess (an unresolved stage-IO global, a `CanonicalizeStage.cpp`-class bug) was **wrong**. Using the existing `FEME_DUMP_IR_PRECANON`/`FEME_DUMP_IR_POSTCANON` env vars against the single reproducer showed `spirv_var_25` is actually a **push-constant block** (address space 13), still unrewritten after `SPIRVPushConstantLoweringPass` runs.
+
+Real root cause: the `ds_resolve_sample_zero` fragment shader's branchy resolve logic computes two different compile-time byte offsets (112 and 116) into the push-constant block along two branches, each via its own `getelementptr`, then **merges the two pointers with a `phi`** before one shared `load`. `SPIRVPushConstantLowering.cpp`'s `visitPushConstantUsers` only recognizes a GEP's user as a `load` or a further `getelementptr` — a `phi` user is unsupported by the file's own documented scope, so the pass rejects the *whole* function's push-constant access, leaving the global forever unresolved at JIT-link time.
+
+This is genuinely a design-session item, not a quick fix: the rewrite (`lowerSPIRVPushConstantAccess`) is keyed per-terminal-`Load` with exactly one compile-time `BaseOffset` — incompatible with a load reached through a `phi` of pointers that have *different* offsets per incoming edge. A correct fix needs to sink the per-load bounds-check/load-and-replace logic to each `phi` edge's own GEP (replacing it with a scalar load in that edge's predecessor block) and build a parallel value-level `phi`, generalizing to nested `phi`s too. Scoped in `Roadmap.md` accordingly (same category as `L375`) — not attempted this session.
+
+Commit: `[feme] Root-cause L386: push-constant phi-of-GEPs unresolved JIT symbol` — Roadmap.md + VulkanCTSReport.md (item 14), documentation/triage only, no source change.
+
+## Not touched
+
+**`L375`** — still untouched, still needs a dedicated design session (`DiamondFlattener` stale-postdom-tree assertion). Deliberately deferred again, per every prior session's own scoping.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in another subproject.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, now the single highest-value target**: `L386` (push-constant `phi`-of-GEPs). Design `visitPushConstantUsers`'s `phi`-support extension (recognize a GEP user that is a `phi`, recursing per incoming edge) and `lowerSPIRVPushConstantAccess`'s corresponding per-edge rewrite (sink the load+bounds-check to each edge's own predecessor block, build a parallel value-`phi`, replace the original shared `Load` with that `phi`'s result). Verify against the single reproducer first, then the full `ds_resolve_sample_zero*` sweep (2,304 cases, 24 currently failing) to confirm it closes all 24 `input_attachments.render_to` cases.
+2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in the Roadmap, still not attempted — two design-session items now queued (`L375`, `L386`); consider whether one session can reasonably tackle both or whether they need separate sittings.
+3. **~30 min, low priority, easy win, carried over from the last two sessions and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining 1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt` each to check for single root causes before assuming large triage efforts, the same approach that worked for `L379`/`L381`/`L382`/`L387`.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
