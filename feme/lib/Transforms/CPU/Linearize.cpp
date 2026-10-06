@@ -2060,6 +2060,14 @@ private:
   /// `OtherCondBrBlocks` scan reaches it.
   bool isDivergentBranch(const CondBrInst *Br) const;
 
+  /// Returns whether a value has the `.linearized` suffix, indicating it was
+  /// created by DiamondFlattener when collapsing a divergent branch. Such
+  /// values represent the result of linearizing formerly-divergent decisions
+  /// and should be treated specially regardless of UniformityInfo classification.
+  static bool isLinearizedValueName(const Value *V) {
+    return V->getName().contains(".linearized");
+  }
+
   /// Records \p V (freshly created by this pass) into `KnownUniformValues`
   /// iff every one of \p Ops is *itself* already provably uniform (via
   /// `isDivergentValue`, so an operand may be either a pre-existing value
@@ -3276,7 +3284,15 @@ bool LoopLinearizer::isDivergentValue(const Value *V) const {
 }
 
 bool LoopLinearizer::isDivergentBranch(const CondBrInst *Br) const {
-  return isDivergentValue(Br->getCondition());
+  const Value *Cond = Br->getCondition();
+  // Linearized values represent the results of flattening previously-divergent
+  // diamonds (created by DiamondFlattener). While UniformityInfo may classify
+  // them as uniform after flattening, they should always be recognized as
+  // candidates for the chained-branch fix (L377a) because they semantically
+  // represent formerly-divergent decisions that the fix is designed to handle.
+  if (isLinearizedValueName(Cond))
+    return true;
+  return isDivergentValue(Cond);
 }
 
 Value *LoopLinearizer::markUniformIfOperandsAreUniform(Value *V,
