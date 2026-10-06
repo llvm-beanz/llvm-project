@@ -62,21 +62,11 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **`L378(a)`** (~1-2 hours): `max_sampler_lod_bias.shader_bias` wrong-pixel
-   bug, confirmed still open and unrelated to this fix. `shader_bias_compute`
-   (same LOD-bias logic, compute pipeline) passes, so likely
-   graphics-fragment-path-specific. Next step: `--deqp-log-images=enable`
-   and diff against the golden image.
-2. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost)
-   -- still not started.** No case names recorded anywhere, only aggregate
-   counts. Recommend narrowing by sub-family first: start with
-   `renderpasses.dynamic_rendering.*` and `renderpasses.suballocation.*`
-   (the two largest ordinary-failure families in that group per
-   `VulkanCTSReport.md`), the same approach that worked for `L378` this
-   session and last.
-3. **`LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence gap** -- still
-   completely unaddressed, carried over from multiple prior sessions.
-4. **`L375`** (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener`
-   assertion, found by `L374`): still open, not touched this session --
-   a different function in the same file, needs its own dedicated design
-   session per the existing roadmap entry.
+1. `L378(a)` sampler LOD bias -- **already done before this session** (per
+   prior summary).
+2. Stability triage -- **renderpasses half done** (328 -> 0 DeviceLost,
+   two real bugs fixed, CTS-verified). Pipeline SIGSEGV half **not started**.
+3. OffloadTest cache gap -- **resolved**, turned out to be a build-directory
+   choice, not a bug. Documented so it stays resolved.
+4. `L375` -- **confirmed still accurate and still open**, no new work; it
+   genuinely needs a dedicated design session as previously scoped.
