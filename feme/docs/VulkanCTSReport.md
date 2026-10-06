@@ -263,6 +263,37 @@ The largest ordinary-failure changes by group are:
    797/797 Passed. No `Vulkan14FeatureInventory.md`/
    `VulkanExtensionInventory.md` change needed -- internal correctness fix
    only.
+9. **Pipeline SIGSEGV triage fully closed — `L385`.** The original 53-case
+   crash/`Unrun` case list from the baseline full-CTS run was never
+   actually missing: it sits intact in
+   `feme-20261005-full-1170553-complete/report.txt`'s own `Unrun case
+   names:` section and its paired `abnormal/*.log`/`.qpa` artifacts, just
+   never previously extracted despite repeated notes that "no case names
+   are recorded anywhere." Re-ran all 53 case names verbatim against the
+   current build via `deqp-vk -n <comma-joined-list>` (`-n`/`--deqp-case`
+   accepts comma-separated exact names). **Result:** 3 Pass (the `api` +
+   2 `compatible_render_pass` cases, confirming `L381`/`L382`), 47 ordinary
+   `Fail (Incorrect multisampled rendering for color attachment N)` with
+   **zero crashes** (confirming `L384`'s fix) -- and these 47 are not a
+   newly-introduced or unexplained gap: the failing attachment index is
+   consistently an integer-format attachment, confirming they are
+   `L379(a)`'s own already-scoped, not-yet-fixed per-attachment color
+   `resolveMode` plumbing gap, simply unmasked now that the crash hiding
+   it is gone. The remaining 3 cases
+   (`graphicsfuzz.nested-for-loops-switch-fallthrough` +
+   `spirv_assembly.switch_continue_{geom,tesse}`) still crash, all
+   confirmed the same `L375` bug via a matching `gdb bt` (`L383(a)`).
+   **Zero `pipeline`-group `SIGSEGV`s remain unexplained** -- item 6's
+   "44 `pipeline` `SIGSEGV`s remain open" and item 8's "coincidentally
+   matches... no case-name-level comparison done" are both superseded:
+   the `ds_resolve_sample_zero` family is confirmed the exact same bucket
+   item 5/6 tracked (47 cases, not 46 -- 44 were the true SIGSEGVs, the
+   other 3 were already-classified ordinary Fails in the original run),
+   and it is now fully fixed from a crash perspective. The only process
+   crashes left anywhere in the original 53-case baseline are the 3 that
+   fold into `L375`. No FeMe source code change -- a documentation/triage-
+   closure finding only, since every underlying crash was already fixed
+   by `L381`/`L382`/`L384`.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
