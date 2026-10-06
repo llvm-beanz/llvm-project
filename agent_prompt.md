@@ -63,11 +63,21 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. `L378(a)` sampler LOD bias -- **already done before this session** (per
-   prior summary).
-2. Stability triage -- **renderpasses half done** (328 -> 0 DeviceLost,
-   two real bugs fixed, CTS-verified). Pipeline SIGSEGV half **not started**.
-3. OffloadTest cache gap -- **resolved**, turned out to be a build-directory
-   choice, not a bug. Documented so it stays resolved.
-4. `L375` -- **confirmed still accurate and still open**, no new work; it
-   genuinely needs a dedicated design session as previously scoped.
+1. **~30 min**: `gdb bt` on `graphicsfuzz.nested-for-loops-switch-fallthrough`
+   vs `L375`'s own repro, to settle whether `L383(a)` folds into `L375` or
+   is a separate bug needing its own entry.
+2. **~1 hour**: case-name-level diff between `L384`'s `ds_resolve_sample_zero`
+   family and the original "46 pipeline SIGSEGV" bucket -- settles the
+   open question above and gives an accurate current pipeline-crash count.
+3. **~2-4 hours, the real next priority**: the 44 still-open `pipeline`
+   `SIGSEGV`s have never been narrowed to case names. Next session should
+   do a full, isolated `pipeline.*` crash sweep (similar to how `L379`
+   found `renderpasses`' `DeviceLost` cases) to get a case list before
+   attempting any more fixes -- debugging blind, one aggregate-count crash
+   at a time, doesn't scale.
+4. Still fully scoped, still untouched, still needs its own session:
+   `L375` (`DiamondFlattener` assertion, `switch_continue_{geom,tessc,
+   tesse}`).
+5. Investigate two old, never-explained commits (`bb7885607e34`,
+   `2e1279d6e99a`, "Prompt agent for Vulkan ICD") via `git show` -- low
+   priority, carried over from multiple prior sessions, never blocking.
