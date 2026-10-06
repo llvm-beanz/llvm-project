@@ -3261,20 +3261,38 @@ Error executeCommandsInto(
                                  "colorAttachmentCount (%zu) disagrees with "
                                  "the current rendering instance's (%zu)",
                                  Locations.size(), Gfx.Binding.Colors.size());
-      std::vector<bool> Seen(Gfx.Binding.Colors.size(), false);
+      // (roadmap L379(b)) Each element of `pColorAttachmentLocations` is a
+      // fragment shader *output location* value (`VUID-VkRenderingAttachment
+      // LocationInfo-pColorAttachmentLocations-09515`: "must be less than
+      // maxColorAttachments"), not itself bounded by the *current* number
+      // of bound color attachments -- a 1-attachment rendering instance
+      // remapping its sole attachment onto shader output location 1 (as
+      // opposed to the default location 0) is entirely legal whenever the
+      // device's `maxColorAttachments` exceeds 1 (every real device's
+      // does). Bounding this by `Gfx.Binding.Colors.size()` instead
+      // spuriously rejected that legal remap, surfacing as `vkQueueSubmit`
+      // returning an `Error` and latching the whole `VkDevice` lost (see
+      // `L379`'s own commit message) on
+      // `dEQP-VK.renderpasses.dynamic_rendering.graphics_pipeline_library.
+      // local_read.mapping_1_attachments_to_locs_from_1`.
+      const uint32_t MaxColorAttachments =
+          DeviceInfo ? DeviceInfo->Properties.limits.maxColorAttachments
+                     : static_cast<uint32_t>(Gfx.Binding.Colors.size());
+      std::vector<bool> Seen(MaxColorAttachments, false);
       for (uint32_t Index : Locations) {
         if (Index == VK_ATTACHMENT_UNUSED)
           continue;
-        if (Index >= Gfx.Binding.Colors.size())
+        if (Index >= MaxColorAttachments)
           return createStringError(inconvertibleErrorCode(),
                                    "vkCmdSetRenderingAttachmentLocations "
-                                   "named out-of-range color attachment %u",
+                                   "named a location (%u) that is not less "
+                                   "than maxColorAttachments",
                                    Index);
         if (Seen[Index])
           return createStringError(inconvertibleErrorCode(),
                                    "vkCmdSetRenderingAttachmentLocations "
-                                   "mapped more than one location onto "
-                                   "color attachment %u",
+                                   "mapped more than one color attachment "
+                                   "onto the same location %u",
                                    Index);
         Seen[Index] = true;
       }

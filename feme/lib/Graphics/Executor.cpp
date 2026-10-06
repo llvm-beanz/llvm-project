@@ -2380,20 +2380,32 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // "multiple render targets"), linked by `Location` the same way varyings
   // are: `FSColors[i]` writes into `Draw.Attachments[i]`.
   //
-  // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` can remap which
-  // output location feeds which attachment index; `Draw.
-  // ColorAttachmentLocations[Location]` names the attachment index (or
-  // `0xFFFFFFFF`/`VK_ATTACHMENT_UNUSED` for "writes nowhere"), the identity
-  // mapping when empty. `locationForAttachment` inverts it once per draw --
-  // attachment index `I`'s own source location -- rather than repeating an
-  // O(N) search per attachment for every draw's every triangle.
+  // (roadmap L379(b)) `vkCmdSetRenderingAttachmentLocations` can remap
+  // which output location feeds which attachment index; per
+  // `VkRenderingAttachmentLocationInfo`'s own spec text ("map the
+  // specified location value to the color attachment specified ... at the
+  // corresponding index"), `Draw.ColorAttachmentLocations[AttachmentIndex]`
+  // names that attachment's own *source location* directly (or
+  // `0xFFFFFFFF`/`VK_ATTACHMENT_UNUSED` for "writes nowhere"), the
+  // identity mapping when empty -- this function previously (incorrectly)
+  // treated the array as indexed the other way around (by location,
+  // naming an attachment index), an O(N) search that only ever produced
+  // the right answer for a self-inverse (e.g. two-attachment swap)
+  // permutation, confirmed wrong-pixel on
+  // `dEQP-VK.renderpasses.dynamic_rendering.graphics_pipeline_library.
+  // local_read.mapping_1_attachments_to_locs_from_1`.
   auto locationForAttachment = [&](uint32_t I) -> std::optional<uint32_t> {
     if (Draw.ColorAttachmentLocations.empty())
       return I;
-    for (uint32_t Loc = 0; Loc != Draw.ColorAttachmentLocations.size(); ++Loc)
-      if (Draw.ColorAttachmentLocations[Loc] == I)
-        return Loc;
-    return std::nullopt;
+    if (I >= Draw.ColorAttachmentLocations.size())
+      return std::nullopt;
+    uint32_t Location = Draw.ColorAttachmentLocations[I];
+    // `VK_ATTACHMENT_UNUSED` (`0xFFFFFFFF`) -- this file has no Vulkan
+    // header dependency, so the sentinel is spelled out literally, as the
+    // surrounding file already does elsewhere for the same constant.
+    if (Location == 0xFFFFFFFFu)
+      return std::nullopt;
+    return Location;
   };
   SmallVector<SmallVector<const SignatureElement *, 2>, 4> FSColors;
   // (Roadmap L134(b)) The `Row` within each of `FSColors[I]`'s own
