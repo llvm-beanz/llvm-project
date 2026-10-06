@@ -2786,7 +2786,50 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap H2b: a depth-only pipeline -- zero color attachments and a
+/// (Roadmap L379(c)) `VK_FORMAT_UNDEFINED` is a legal, spec-defined way to
+/// leave a `pColorAttachmentFormats` slot unused -- CTS's own multisample
+/// resolve-mode tests (`dEQP-VK.pipeline.*.ds_resolve_sample_zero*`) fix
+/// every `VkPipelineRenderingCreateInfo` to a wider array than the real
+/// color attachment count and leave the unused trailing slots
+/// `VK_FORMAT_UNDEFINED`, exactly like an unused classic-render-pass
+/// subpass color slot (`VK_ATTACHMENT_UNUSED`). Before this fix, the
+/// dynamic-rendering color-attachment loop treated any
+/// `VK_FORMAT_UNDEFINED` slot as an unrecognized/unsupported format and
+/// rejected the whole pipeline with "color attachment N names a format
+/// this driver cannot render into", even though the real color
+/// attachments (indices before it) are all perfectly valid.
+TEST_F(GraphicsPipelineTest,
+       AcceptsAnUndefinedTrailingDynamicRenderingColorFormat) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkFormat ColorFormats[4] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_UNDEFINED,
+                              VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+  std::array<VkPipelineColorBlendAttachmentState, 4> BlendAttachments{};
+  for (auto &A : BlendAttachments)
+    A.colorWriteMask = 0xF;
+  Blend.attachmentCount = 4;
+  Blend.pAttachments = BlendAttachments.data();
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 4;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->colorAttachmentCount(),
+            4u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+
 /// fragment stage with no color output -- is legal Vulkan
 /// (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape) and must
 /// build rather than being rejected for lacking a color attachment.

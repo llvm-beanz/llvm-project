@@ -1085,6 +1085,19 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
                              "a graphics pipeline needs either a VkRenderPass "
                              "or a chained VkPipelineRenderingCreateInfo");
   for (uint32_t I = 0; I != Rendering->colorAttachmentCount; ++I) {
+    // (roadmap L379(c)) `VK_FORMAT_UNDEFINED` is a legal, spec-defined way
+    // to leave a `pColorAttachmentFormats` slot unused (e.g. CTS's own
+    // multisample resolve-mode tests fix every `VkPipelineRenderingCreateInfo`
+    // to a 4-wide array and only fill in as many real formats as there are
+    // color attachments, leaving the rest `VK_FORMAT_UNDEFINED`) -- mirrors
+    // the classic-render-pass loop's own `VK_ATTACHMENT_UNUSED` handling
+    // above. Treat it the same way: push a placeholder `Unknown` format
+    // (never consulted for an unused slot downstream) instead of rejecting
+    // the whole pipeline as naming an unsupported format.
+    if (Rendering->pColorAttachmentFormats[I] == VK_FORMAT_UNDEFINED) {
+      Targets.Colors.push_back(feme::cpu::ResourceFormat::Unknown);
+      continue;
+    }
     std::optional<feme::cpu::ResourceFormat> Format =
         mapVkFormat(Rendering->pColorAttachmentFormats[I]);
     if (!Format || !isSupportedColorAttachmentFormat(*Format))
