@@ -63,21 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1-2 hours**: `L387` — confirm/refute the per-subpass `ColorAttachments`
-   format-resolution hypothesis via a debug print in `validateStageInterfaces`,
-   using
-   `dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.suballocation.formats.r16_uint.input.clear.store.draw`
-   as the reproducer. If confirmed, likely fixes all 152 cases in this
-   sub-family at once (same shape as `L379`/`L381`/`L382`'s own
-   single-root-cause wins).
-2. **~2-4 hours**: `L386` — isolate
-   `dEQP-VK.pipeline.fast_linked_library.multisample.misc.input_attachments.render_to.r8g8b8a8_unorm_r16g16b16a16_sfloat_r16g16b16a16_sint_d16_unorm.2x.ds_resolve_sample_zero.sub_framebuffer`,
-   dump canonicalized IR before/after `CanonicalizeStage.cpp` to find what
-   `spirv_var_25` is and why it's unresolved. Fixes the remaining 24 of
-   `L379(c)`'s original 72 cases.
-3. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
+1. **~1 day, needs a dedicated design session, now the single highest-value
+   target**: `L386` (push-constant `phi`-of-GEPs). Design
+   `visitPushConstantUsers`'s `phi`-support extension (recognize a GEP user that
+   is a `phi`, recursing per incoming edge) and `lowerSPIRVPushConstantAccess`'s
+   corresponding per-edge rewrite (sink the load+bounds-check to each edge's own
+   predecessor block, build a parallel value-`phi`, replace the original shared
+   `Load` with that `phi`'s result). Verify against the single reproducer first,
+   then the full `ds_resolve_sample_zero*` sweep (2,304 cases, 24 currently
+   failing) to confirm it closes all 24 `input_attachments.render_to` cases.
+2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
    stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` +
    `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in
-   the Roadmap, still not attempted.
+   the Roadmap, still not attempted — two design-session items now queued
+   (`L375`, `L386`); consider whether one session can reasonably tackle both or
+   whether they need separate sittings.
+3. **~30 min, low priority, easy win, carried over from the last two sessions
+   and still not done**: re-run the `renderpasses.dynamic_rendering.*` remaining
+   1,106-case ordinary-Fail bucket's largest sub-families through one `gdb bt`
+   each to check for single root causes before assuming large triage efforts,
+   the same approach that worked for `L379`/`L381`/`L382`/`L387`.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
