@@ -115965,3 +115965,90 @@ twice this session (start and end).
 5. Investigate two old, never-explained commits (`bb7885607e34`,
    `2e1279d6e99a`, "Prompt agent for Vulkan ICD") via `git show` -- low
    priority, carried over from multiple prior sessions, never blocking.
+
+# Session: closed the pipeline SIGSEGV crash triage end-to-end — all 53 original crash cases now accounted for (2026-10-06)
+
+Device confirmed at session start: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`.
+
+## What's done, in order
+
+1. **`L383(a)` vs `L375` — confirmed duplicate.** `gdb -batch -ex run -ex bt`
+   on both `spirv_assembly.switch_continue_geom` (`L375`'s repro) and
+   `graphicsfuzz.nested-for-loops-switch-fallthrough` (`L383(a)`): identical
+   function, identical assertion, identical call chain
+   (`DiamondFlattener::flatten` -> ... -> `LoopLinearizer::linearizeCycle`
+   -> `linearizeCyclePostOrder` -> `LinearizePass::run`), differing only in
+   recursion depth (nested loops vs. one loop). `L383(a)` closed as a
+   duplicate; `L375` is still open, still needs its own dedicated session.
+2. **Old-commit mystery resolved.** `bb7885607e34`/`2e1279d6e99a` ("Prompt
+   agent for Vulkan ICD") are trivial `agent_prompt.md` edits by the human
+   maintainer (Chris Bieneman), not agent work. Nothing to investigate
+   further.
+3. **The big one: found the "missing" case-name list.** Prior sessions
+   repeatedly wrote "no case names recorded anywhere" for the 46/50-crash
+   bucket. That was wrong — the exact 53-case list was sitting the whole
+   time in `VK-GL-CTS/run/feme-20261005-full-1170553-complete/report.txt`'s
+   own `Unrun case names:` section, with paired `abnormal/*.log`/`.qpa`
+   files per case. Nobody had grepped for it.
+4. **Re-ran all 53 original case names against the current build**
+   (`deqp-vk -n <comma-joined-exact-names>` — confirmed `-n`/`--deqp-case`
+   takes comma-separated exact names, no trie-format caselist file needed).
+   Result:
+   - 3 Pass (1 `api` + 2 `compatible_render_pass` — confirms `L381`/`L382`)
+   - 47 ordinary `Fail (Incorrect multisampled rendering for color
+     attachment N)`, **zero crashes** — confirms `L384`'s fix, and the
+     failing attachment is always an integer format, which is exactly
+     `L379(a)`'s already-scoped, not-yet-fixed per-attachment color
+     resolveMode gap. Not a new bug.
+   - 3 still crash — `graphicsfuzz.nested-for-loops-switch-fallthrough` +
+     `spirv_assembly.switch_continue_{geom,tesse}`, all confirmed `L375`
+     via the `gdb bt` from step 1.
+   **Net result: zero pipeline-group SIGSEGVs remain unexplained.** The
+   "44 pipeline SIGSEGVs, never narrowed to case names" line that's been
+   carried in the Roadmap/CTS report for two sessions is now resolved —
+   it was always the same 47-case `ds_resolve_sample_zero` bucket `L384`
+   fixed (47, not 46 as previously documented — 44 were true SIGSEGVs, 3
+   were already-classified ordinary Fails in the original run).
+5. Updated `Roadmap.md` (new row `L385`, corrections to the stability
+   summary row, `L381`, `L384`, `L379(a)`) and `VulkanCTSReport.md` (new
+   item 9) to reflect this. Both committed, docs-only, no FeMe code
+   touched this session.
+6. `ninja check-feme`: 3,595/3,598 Passed, 3 Unsupported, 0 Failed — no
+   regressions (expected, since no source changed).
+
+## What's still open (nothing new found, just re-confirmed)
+
+- **`L375`** — `DiamondFlattener` assertion on `switch_continue_{geom,
+  tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`
+  (`L383(a)`, folds in). Root cause already understood (stale
+  `PostDominatorTree` answer after a shared merge block is mutated by one
+  `DiamondFlattener::flatten` walk then revisited by a second). Still
+  needs its own dedicated design session — not attempted again this
+  session, per standing instruction.
+- **`L379(a)`** — per-attachment color `resolveMode` plumbing gap
+  (box-filter vs. sample-zero-copy for integer formats). Now confirmed to
+  be the root cause behind all 47 `ds_resolve_sample_zero` ordinary Fails,
+  not just the one `renderpasses` case that originally surfaced it. Still
+  not fixed — still scoped as its own dedicated session.
+
+## Next steps (ranked, with time estimates)
+
+1. **~4-6 hours, now the single highest-value target**: fix `L379(a)`
+   (per-attachment color `resolveMode` plumbing). This is scoped already
+   (add a `ColorResolveModes` vector alongside the existing depth/stencil
+   fields, thread it from `VkRenderingAttachmentInfo::resolveMode` through
+   to `Executor.cpp`'s resolve loop, branch sample-zero-copy vs.
+   box-filter per attachment). Fixing it will very likely also fix all 47
+   `ds_resolve_sample_zero` cases found this session, in addition to the
+   original `renderpasses` case that scoped it.
+2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
+   stale-postdom-tree assertion). Scoping already exists in the Roadmap;
+   this needs actual design/implementation time, not more triage.
+3. **~30 min, low priority, easy win**: re-run the full
+   `renderpasses.dynamic_rendering.*` 2,506 ordinary-Fail bucket's largest
+   sub-family (`primary_cmd_buff.suballocation`, 993 cases) through one
+   `gdb bt` to see if it's a single root cause like `L379`/`L381`/`L382`
+   turned out to be, before assuming it needs a large triage effort.
+4. No code changes pending review — this session was documentation/triage
+   closure only, all prior fixes (`L381`/`L382`/`L384`) already landed and
+   re-verified.
