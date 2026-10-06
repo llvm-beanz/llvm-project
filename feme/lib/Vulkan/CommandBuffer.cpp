@@ -1919,18 +1919,29 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     AnyResolve |= View.ResolveView != nullptr;
   }
   if (AnyResolve)
+    // (roadmap L379) `VkRenderingAttachmentInfo::resolveMode` is set
+    // *per color attachment*, independently of every other one -- nothing
+    // in the spec requires every bound color attachment of one render
+    // target to resolve together. A real, common shape this executor must
+    // accept (found via a genuine `DeviceLost`,
+    // `dEQP-VK.renderpasses.dynamic_rendering.*.suballocation.multisample.*`)
+    // binds one color attachment purely as a same-subpass input (its own
+    // `resolveMode` left `VK_RESOLVE_MODE_NONE`) alongside others that do
+    // resolve into a real multisample-to-singlesample destination -- a
+    // bound-but-non-resolving attachment is exactly as legitimate as an
+    // entirely-unused one, so this loop must not hard-error on it either;
+    // it is simply left out of `Resolved.ResolveAttachments` for this
+    // attachment's own index, exactly like the explicitly-unused case.
     for (const RenderTargetView &View : Gfx.Binding.Colors) {
-      if (!View.View) {
+      if (!View.View || !View.ResolveView) {
         // An unused attachment slot never resolves either way (its
         // `resolveMode` is ignored, per `VkRenderingAttachmentInfo`'s
-        // spec), regardless of whether the others do.
+        // spec), regardless of whether the others do. Likewise, a used
+        // attachment with no `ResolveView` of its own simply opted out of
+        // resolving.
         Resolved.ResolveAttachments.push_back(feme::graphics::AttachmentView{});
         continue;
       }
-      if (!View.ResolveView)
-        return createStringError(inconvertibleErrorCode(),
-                                 "either every color attachment resolves or "
-                                 "none does");
       Expected<feme::graphics::AttachmentView> Attachment =
           resolveAttachmentView(View.ResolveView);
       if (!Attachment)

@@ -6511,6 +6511,180 @@ TEST_F(DrawTest, ResolvesMultisampleColorDuringRenderPass) {
   vkFreeMemory(Device, MSMemory, nullptr);
 }
 
+/// (roadmap L379) Two multisample color attachments where only *one*
+/// declares a resolve attachment (`pResolveAttachments[0] ==
+/// VK_ATTACHMENT_UNUSED`, mirroring a `VkRenderingAttachmentInfo` whose own
+/// `resolveMode` is left `VK_RESOLVE_MODE_NONE`) -- a real, legitimate
+/// shape (found via a genuine `DeviceLost`,
+/// `dEQP-VK.renderpasses.dynamic_rendering.*.suballocation.multisample.*`)
+/// that nothing in the Vulkan spec requires every color attachment of one
+/// render target to resolve together. Before this fix,
+/// `resolveDrawAttachments` (`CommandBuffer.cpp`) hard-errored with
+/// "either every color attachment resolves or none does" the instant any
+/// *other* attachment resolved, latching the whole `VkDevice` lost via
+/// `Device::markLost` (`Sync.cpp`'s `makeSubmissionTask`) rather than
+/// completing the submission -- exactly the symptom the real CTS case hit.
+TEST_F(DrawTest, ResolvesOnlyTheColorAttachmentsThatDeclareAResolveTarget) {
+  VkImage MSImage0 = VK_NULL_HANDLE, MSImage1 = VK_NULL_HANDLE;
+  VkImageView MSView0 = VK_NULL_HANDLE, MSView1 = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory0 = VK_NULL_HANDLE, MSMemory1 = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage0, MSView0, MSMemory0,
+                     VK_SAMPLE_COUNT_4_BIT);
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage1, MSView1, MSMemory1,
+                     VK_SAMPLE_COUNT_4_BIT);
+  VkImage ResolveImage1 = VK_NULL_HANDLE;
+  VkImageView ResolveView1 = VK_NULL_HANDLE;
+  VkDeviceMemory ResolveMemory1 = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, ResolveImage1, ResolveView1, ResolveMemory1);
+
+  VkAttachmentDescription Attachments[3]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRefs[2] = {
+      {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+      {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+  // Attachment 0 declares no resolve target at all; attachment 1 does.
+  VkAttachmentReference ResolveRefs[2] = {
+      {VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED},
+      {2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 2;
+  Subpass.pColorAttachments = ColorRefs;
+  Subpass.pResolveAttachments = ResolveRefs;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 3;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[3] = {MSView0, MSView1, ResolveView1};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 3;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(DualOutputFragmentSource);
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = LocalPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[3]{};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 3;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  // Before this fix, this very `submit()` is exactly where `Device::
+  // markLost` latched -- every subsequent Vulkan call on this device
+  // (including this one's own `VK_SUCCESS` check) would instead have
+  // observed `VK_ERROR_DEVICE_LOST`.
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Attachment 1's own resolve target holds its real, fully-resolved
+  // solid-green color -- the only genuinely observable proof the "opted
+  // out" attachment 0 did not somehow poison it.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texelOf(ResolveImage1, X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, ResolveView1, nullptr);
+  vkDestroyImage(Device, ResolveImage1, nullptr);
+  vkFreeMemory(Device, ResolveMemory1, nullptr);
+  vkDestroyImageView(Device, MSView1, nullptr);
+  vkDestroyImage(Device, MSImage1, nullptr);
+  vkFreeMemory(Device, MSMemory1, nullptr);
+  vkDestroyImageView(Device, MSView0, nullptr);
+  vkDestroyImage(Device, MSImage0, nullptr);
+  vkFreeMemory(Device, MSMemory0, nullptr);
+}
+
 /// (Roadmap L228(k)) A render pass instance whose only subpass command is
 /// `vkCmdClearAttachments` (no draw at all) must still resolve its
 /// multisample color attachment into the resolve target at subpass/render-

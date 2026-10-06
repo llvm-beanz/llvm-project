@@ -6180,6 +6180,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size(); ++AttIdx) {
       const AttachmentView &Src = Draw.Attachments[AttIdx];
       AttachmentView &Dst = Draw.ResolveAttachments[AttIdx];
+      // (roadmap L379) Not every bound color attachment resolves --
+      // `resolveDrawAttachments` (`CommandBuffer.cpp`) leaves `Dst` at its
+      // default-constructed, empty-`Data` state for one that is unused or
+      // opted out of resolving on its own, exactly like `Src` itself for
+      // an unused attachment slot. Either side being unbound means there
+      // is nothing to resolve for this index.
+      if (Src.Data.empty() || Dst.Data.empty())
+        continue;
       for (uint32_t Layer = 0; Layer != Src.ArrayLayers; ++Layer) {
         AttachmentView SrcLayer = sliceAttachmentLayer(Src, Layer);
         AttachmentView DstLayer = sliceAttachmentLayer(Dst, Layer);
