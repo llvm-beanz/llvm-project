@@ -196,6 +196,74 @@ The largest ordinary-failure changes by group are:
    narrow by `pipeline` sub-family first, the same approach that worked
    for `renderpasses` this session and last.
 
+6. **Pipeline/api `SIGSEGV` triage begun — `L381`/`L382` fixed 3 of the 46
+   `pipeline`-group/one `api`-group crashes this session.** Two independent
+   `pipeline` `SIGSEGV`s (`fast_linked_library`/`pipeline_library.misc.
+   compatible_render_pass`, `L381`) and the one `api` `SIGSEGV`
+   (`api.pipeline.pipeline_invalid_pointers_unused_structs.graphics`,
+   `L382`) were reproduced and fixed; see `Roadmap.md` for full root-cause
+   detail. The `compatible_render_pass` fix required gating two further,
+   independently-discovered latent bugs in the same eager-caching code path
+   (an unconditional-capture bug and a dynamic-rendering pNext-scoping
+   bug), both found via a new regression unit test
+   (`GraphicsPipelineTest.LinksAfterOriginalRenderPassIsDestroyed`) and the
+   full suite rerun it triggered, not by code review alone. Fixing
+   `pipeline_invalid_pointers_unused_structs` required gating four
+   pointer-dereferences on a new `isRasterizationStaticallyDiscarded`
+   helper (`GraphicsPipelineTest.
+   IgnoresUnusedStructsWhenRasterizationStaticallyDisabled`). **Verified:**
+   both `compatible_render_pass` cases, both `bad_rendering_create_info`/
+   `null_rendering_create_info_ptr`, and `pipeline_invalid_pointers_
+   unused_structs.{graphics,compute}` all Pass via direct reruns; a
+   70/88-case `pipeline_library.graphics_library.misc.*` sweep and a
+   2,984-case `pipeline.*.misc.*` sweep both complete with zero
+   crashes/regressions; `ninja check-feme`: 3,595/3,598 Passed (+3 new unit
+   tests), 3 Unsupported, 0 Failed. **44 `pipeline` `SIGSEGV`s remain
+   open** (still not narrowed to case names -- a fresh, full `pipeline.*`
+   crash sweep naming every surviving case is the natural next step for a
+   future session). No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` change needed for either fix -- internal
+   correctness fixes only.
+7. **`graphicsfuzz` crash reproduced, deliberately not fixed —
+   `L383(a)`.** The one `graphicsfuzz`-group crash (item 5's accounting)
+   was reproduced this session: `dEQP-VK.graphicsfuzz.
+   nested-for-loops-switch-fallthrough` is an `assert()` failure
+   (`llvm/include/llvm/IR/CFG.h:63`, "pred_iterator out of range!") during
+   SPIR-V-to-LLVM translation, not a `SIGSEGV`. Judged likely the same
+   class of bug as `L375`'s own already-scoped `switch_continue_
+   {geom,tessc,tesse}` `DiamondFlattener` assertion (identical symptom),
+   but not confirmed via a matching `gdb bt` this session. Per explicit
+   user instruction that `L375` needs its own dedicated design session,
+   deliberately left open and untouched.
+8. **A fourth, independent crash family found and fixed while testing the
+   above — `L384`.** While adding regression coverage for `L381`,
+   `DescriptorSet::Layout`'s own dangling-pointer bug was found and fixed:
+   `DescriptorSet` retained a raw `const DescriptorSetLayout *` aliasing
+   the original, externally-owned `VkDescriptorSetLayout`, which the
+   Vulkan spec permits an application to destroy immediately after
+   allocating descriptor sets from it -- doing so left `getLayout()` and
+   `write()`'s own `Layout.find(Binding)` lookup dereferencing a dangling
+   pointer. This is the genuine root cause of `dEQP-VK.pipeline.*.
+   multisample.misc.{basic,clear_attachments}.*.ds_resolve_sample_zero.*`'s
+   own `SIGSEGV` -- a 46-case crash family this session discovered by
+   exploring beyond the two cases already tracked under item 6 above.
+   **Its case count (46) coincidentally matches item 5's own "46 `pipeline`
+   `SIGSEGV`" figure, but no case-name-level comparison was done this
+   session to confirm or refute any overlap between the two** -- a future
+   session should run a fresh, full `pipeline.*` crash sweep naming every
+   surviving case to settle this. Fixing this by-value conversion then
+   caused a further, separate regression in `CommandBuffer::
+   getOrCreatePushDescriptorSet`'s own pointer-identity comparison
+   (`L383`, also fixed this session, caught via the full unit test suite
+   before committing). **Verified:** new regression test `DescriptorTest.
+   UsableAfterDescriptorSetLayoutDestroyed` passes; a full, fresh
+   `ds_resolve_sample_zero.*` rerun (768 cases) completes with zero
+   crashes (120 ordinary Fail -- a separate, pre-existing correctness gap,
+   out of scope here -- 648 NotSupported); full `FeMeVulkanTests` suite:
+   797/797 Passed. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` change needed -- internal correctness fix
+   only.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
