@@ -116140,3 +116140,43 @@ outside the subdirectory.
    triage effort is needed.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented in a prior session, no action needed.
+
+# Session: L379(c) fixed (48/72 cases), L386/L387 scoped (2026-10-06)
+
+Device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES=build/tools/feme/tools/feme-vulkan/feme_icd.json` — the unset default resolves to llvmpipe, not FeMe).
+
+## What's fixed
+
+`L379(c)` (`dEQP-VK.pipeline.*.ds_resolve_sample_zero*` pipeline-creation failures): **48 of 72 cases now Pass.**
+
+Root cause: `GraphicsPipeline.cpp`'s dynamic-rendering color-attachment loop treated `VK_FORMAT_UNDEFINED` in `pColorAttachmentFormats` as an unsupported format and rejected the pipeline. It's actually a legal "unused slot" marker (CTS always declares a fixed 4-element array) — exactly like `VK_ATTACHMENT_UNUSED` for a classic render pass, which the adjacent loop already handles. Fixed by mirroring that handling: push `ResourceFormat::Unknown`, continue.
+
+Commits (already landed on this branch):
+1. `[feme] Fix L379(c): accept VK_FORMAT_UNDEFINED in dynamic-rendering color formats` — the fix + `GraphicsPipelineTest.AcceptsAnUndefinedTrailingDynamicRenderingColorFormat`.
+2. `[feme] Update docs for L379(c) fix and scope new L386` — Roadmap.md + VulkanCTSReport.md.
+3. `[feme] Scope L387: primary_cmd_buff.suballocation triage root cause` — Roadmap.md + VulkanCTSReport.md.
+
+Verified: `FeMeVulkanTests` 799/799 Passed. `ninja check-feme` 3,599/3,599 Passed, 3 Unsupported, 0 Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed (internal correctness fix).
+
+## Build gotcha hit this session (write this down, it'll happen again)
+
+FeMe's Vulkan-layer code links into **two** targets: `FeMeVulkanTests` (unit tests) and `libfeme_vulkan.so` (the actual ICD `deqp-vk` loads). Rebuilding only `FeMeVulkanTests` after a source change does **not** relink the `.so` — caused a confusing false-negative CTS re-run (fix looked like it didn't take effect, even a debug marker in the error string never showed up). Always: `ninja -C build libfeme_vulkan.so FeMeVulkanTests` together when validating a Vulkan-layer fix against real CTS.
+
+Also hit, and fixed in the test itself (not a product bug): the new unit test declared 4 color attachments but only 1 blend-attachment state in `VkPipelineColorBlendStateCreateInfo` — `Blend.attachmentCount` must match `colorAttachmentCount`, not just the number of *real* formats.
+
+## What's scoped but not fixed
+
+**`L386`** — of `L379(c)`'s remaining 24 cases (`input_attachments.render_to` subgroup), a different, unrelated bug: `JIT session error: Symbols not found: [ spirv_var_N ]` → an unresolved stage-IO global surviving to JIT-link time. `CanonicalizeStage.cpp` already has several fixes for this failure class but none cover this shape. Not root-caused.
+
+**`L387`** — low-priority triage item from the handoff (`primary_cmd_buff.suballocation`, re-estimated at 5,935 cases not 993). Single root cause confirmed across all 152 failures: `vkCreateGraphicsPipelines: fragment stage has no integer output of 1-4 components at location N`, specifically on multi-subpass render passes wrapped as dynamic rendering (subpass 0 writes an int attachment, subpass 1 reads it as input attachment + writes a second UNORM attachment). Hypothesis: `validateStageInterfaces`'s per-subpass `ColorAttachments` may resolve the wrong attachment's format. Not confirmed or fixed — next session should add a debug print of `ColorAttachments[I].Format` in `validateStageInterfaces` for one of the four sampled reproducers.
+
+**`L375`** — still untouched, still needs a dedicated design session (`DiamondFlattener` stale-postdom-tree assertion). Not attempted again this session; genuinely out of scope for incremental triage.
+
+No work done outside `feme/` this session — nothing to isolate/fix in another subproject.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1-2 hours**: `L387` — confirm/refute the per-subpass `ColorAttachments` format-resolution hypothesis via a debug print in `validateStageInterfaces`, using `dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.suballocation.formats.r16_uint.input.clear.store.draw` as the reproducer. If confirmed, likely fixes all 152 cases in this sub-family at once (same shape as `L379`/`L381`/`L382`'s own single-root-cause wins).
+2. **~2-4 hours**: `L386` — isolate `dEQP-VK.pipeline.fast_linked_library.multisample.misc.input_attachments.render_to.r8g8b8a8_unorm_r16g16b16a16_sfloat_r16g16b16a16_sint_d16_unorm.2x.ds_resolve_sample_zero.sub_framebuffer`, dump canonicalized IR before/after `CanonicalizeStage.cpp` to find what `spirv_var_25` is and why it's unresolved. Fixes the remaining 24 of `L379(c)`'s original 72 cases.
+3. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener` stale-postdom-tree assertion, `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`). Still fully scoped in the Roadmap, still not attempted.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
