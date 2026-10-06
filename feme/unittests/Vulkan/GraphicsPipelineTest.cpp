@@ -5455,6 +5455,96 @@ TEST_F(GraphicsPipelineTest, LinksADynamicRenderingFragmentOutputLibrary) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap L388) The library-linked counterpart of `L387`'s own
+/// `AcceptsRemappedColorAttachmentLocationsFromPipelineCreateInfo`: CTS's
+/// `GraphicsPipelineWrapper` chains a `VkRenderingAttachmentLocationInfo`
+/// onto the fragment-output-interface library part's own create info (via
+/// `setupFragmentOutputState`), never onto the final link call's -- so a
+/// linked (as opposed to monolithic) pipeline must capture that remap at
+/// library-creation time and thread it through the synthesized create
+/// info, the same way `L381`'s `RenderTargets` is already threaded through
+/// for the render-pass handle itself. Before this fix, `compileGraphics
+/// Pipeline`'s own `findRenderingAttachmentLocationInfo(CreateInfo.pNext)`
+/// search always came up empty for a linked pipeline (the synthesized
+/// `CreateInfo` never carries the chain forward), so this exact shape was
+/// rejected with "fragment stage has no integer output of 1-4 components
+/// at location 0 (SV_Target0)" -- `dEQP-VK.renderpasses.dynamic_rendering.
+/// graphics_pipeline_library.{suballocation,dedicated_allocation}.
+/// attachment_allocation.roll.*`'s own 278 failures.
+TEST_F(GraphicsPipelineTest,
+       LinksRemappedColorAttachmentLocationsFromLibraryPart) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = VK_NULL_HANDLE;
+
+  VkFormat ColorFormats[2] = {VK_FORMAT_R16_UINT, VK_FORMAT_R8G8B8A8_UNORM};
+  std::array<VkPipelineColorBlendAttachmentState, 2> BlendAttachments{};
+  for (auto &A : BlendAttachments)
+    A.colorWriteMask = 0xF;
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments.data();
+
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  // Attachment index 0 (the integer format) is unused by this subpass;
+  // index 1 (`R8G8B8A8_UNORM`) is fed by the shader's own location-0
+  // output -- without consulting this remap, `validateStageInterfaces`
+  // assumes attachment index == location and looks up location 0 for the
+  // *integer* attachment instead, exactly `L387`'s own error.
+  uint32_t Locations[2] = {VK_ATTACHMENT_UNUSED, 0};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  LocationInfo.pNext = &Rendering;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  // The remap is chained onto the fragment-output-interface part alone,
+  // mirroring CTS's own `setupFragmentOutputState` call site.
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+      &LocationInfo);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = VK_NULL_HANDLE;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            2u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H29m) Only the fragment-output-interface part owns the render
 /// target's attachment formats, so a `VkPipelineRenderingCreateInfo`
 /// chained onto any *other* part must be ignored entirely rather than

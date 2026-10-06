@@ -711,6 +711,24 @@ struct GraphicsPipelineLibraryState {
   std::vector<VkPipelineColorBlendAttachmentState> ColorBlendAttachments;
   std::optional<VkPipelineColorBlendStateCreateInfo> ColorBlendState;
 
+  /// (roadmap L388) A chained `VkRenderingAttachmentLocationInfo`'s own
+  /// `pColorAttachmentLocations` remap, deep-copied. Populated only for
+  /// `FRAGMENT_OUTPUT_INTERFACE_BIT` -- the same part that owns the test
+  /// utility's own `setupFragmentOutputState` call this struct's wider
+  /// comment already attributes `ColorBlendState`/`RenderingCreateInfo` to
+  /// -- since CTS chains this struct onto that same library part's own
+  /// `VkGraphicsPipelineCreateInfo`, never onto a pure-link call's.
+  /// Without capturing and re-threading it here, a linked (as opposed to
+  /// monolithic) `VK_EXT_graphics_pipeline_library` pipeline's synthesized
+  /// create info never carries this remap forward, and
+  /// `compileGraphicsPipeline`'s own `findRenderingAttachmentLocationInfo`
+  /// search comes up empty even though the application supplied one --
+  /// exactly roadmap `L387`'s own bug, but for library-linked pipelines
+  /// rather than monolithic/`primary_cmd_buff` ones
+  /// (`dEQP-VK.renderpasses.dynamic_rendering.graphics_pipeline_library.
+  /// {suballocation,dedicated_allocation}.attachment_allocation.roll.*`).
+  std::vector<uint32_t> ColorAttachmentLocations;
+
   /// (roadmap H29m) A chained `VkPipelineRenderingCreateInfo`: dynamic
   /// rendering's own replacement for a `VkRenderPass`, naming the formats
   /// this pipeline renders into. Captured only for

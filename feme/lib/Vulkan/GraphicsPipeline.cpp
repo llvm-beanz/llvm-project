@@ -2726,6 +2726,16 @@ getEffectivePipelineCreateFlags(const VkGraphicsPipelineCreateInfo &CreateInfo) 
 /// that library's own `VkRenderPass` handle may already have been
 /// destroyed by the time this call runs (see
 /// `GraphicsPipelineLibraryState::RenderTargets`'s own comment).
+///
+/// \p PrecomputedColorAttachmentLocations (roadmap L388), when non-null,
+/// is used in place of searching \p CreateInfo.pNext for a chained
+/// `VkRenderingAttachmentLocationInfo` -- the caller supplies this
+/// whenever that remap was captured from a linked fragment-output-
+/// interface library part rather than chained directly onto this call's
+/// own \p CreateInfo, since a pure-link call's synthesized create info
+/// never carries that chain forward itself; see
+/// `GraphicsPipelineLibraryState::ColorAttachmentLocations`'s own
+/// comment.
 Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
@@ -2733,7 +2743,9 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         bool &CacheHit,
                         bool PreRasterViewIndexIsDeviceIndex,
                         bool FragmentViewIndexIsDeviceIndex,
-                        const PipelineRenderTargets *PrecomputedRenderTargets) {
+                        const PipelineRenderTargets *PrecomputedRenderTargets,
+                        const std::vector<uint32_t>
+                            *PrecomputedColorAttachmentLocations = nullptr) {
   CacheHit = false;
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
@@ -2927,9 +2939,19 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
     // from `Result.Attachments` (which stays attachment-index-ordered for
     // every other consumer, e.g. `ColorBlends`/`Executor.cpp`'s own
     // attachment binding).
+    //
+    // (roadmap L388) A library-linked pipeline's synthesized `CreateInfo`
+    // never itself carries this chain forward (see
+    // `PrecomputedColorAttachmentLocations`'s own comment above), so it
+    // takes precedence over searching this call's own `CreateInfo.pNext`
+    // when the caller supplied one.
     llvm::SmallVector<uint32_t, 4> ColorAttachmentLocations;
-    if (const VkRenderingAttachmentLocationInfo *LocationInfo =
-            findRenderingAttachmentLocationInfo(CreateInfo.pNext))
+    if (PrecomputedColorAttachmentLocations)
+      ColorAttachmentLocations.assign(
+          PrecomputedColorAttachmentLocations->begin(),
+          PrecomputedColorAttachmentLocations->end());
+    else if (const VkRenderingAttachmentLocationInfo *LocationInfo =
+                 findRenderingAttachmentLocationInfo(CreateInfo.pNext))
       ColorAttachmentLocations.assign(
           LocationInfo->pColorAttachmentLocations,
           LocationInfo->pColorAttachmentLocations +
@@ -3075,6 +3097,7 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
     Out.ColorBlendState = Child.ColorBlendState;
     Out.ColorAttachmentFormats = Child.ColorAttachmentFormats;
     Out.RenderingCreateInfo = Child.RenderingCreateInfo;
+    Out.ColorAttachmentLocations = Child.ColorAttachmentLocations;
   }
   // Multisample state is shared by the fragment-shader/fragment-output
   // parts alike, so it is not owned by a single bit and cannot be folded
@@ -3186,6 +3209,15 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
       Copy.pAttachments = nullptr;
       Out.ColorBlendState = Copy;
     }
+    // (roadmap L388) See `ColorAttachmentLocations`'s own comment: only
+    // this part owns the attachment-location remap, so only this part's
+    // own chained `VkRenderingAttachmentLocationInfo` is captured.
+    if (const VkRenderingAttachmentLocationInfo *LocationInfo =
+            findRenderingAttachmentLocationInfo(CreateInfo.pNext))
+      Out.ColorAttachmentLocations.assign(
+          LocationInfo->pColorAttachmentLocations,
+          LocationInfo->pColorAttachmentLocations +
+              LocationInfo->colorAttachmentCount);
     // (roadmap H29m) Only this part owns the render target's attachment
     // formats, so only this part's own chained
     // `VkPipelineRenderingCreateInfo` is captured -- see
@@ -3428,13 +3460,25 @@ findLinkedLibraryForBit(ArrayRef<GraphicsPipelineLibrary *> Libraries,
 /// target shape from the (possibly already-destroyed) `VkRenderPass`
 /// handle this function put into the synthesized `renderPass` field; see
 /// `GraphicsPipelineLibraryState::RenderTargets`'s own comment.
+///
+/// \p PrecomputedColorAttachmentLocations (roadmap L388) is set whenever
+/// the linked fragment-output-interface library part captured its own
+/// `VkRenderingAttachmentLocationInfo` -- the synthesized `CreateInfo`
+/// this function returns never itself carries that chain forward (CTS
+/// chains it onto the owning library part's own create info, never onto
+/// a pure-link call's), so the caller must pass this through to
+/// `compileGraphicsPipeline` in place of its own
+/// `findRenderingAttachmentLocationInfo(CreateInfo.pNext)` search, which
+/// would otherwise always come up empty for a linked pipeline; see
+/// `GraphicsPipelineLibraryState::ColorAttachmentLocations`'s own comment.
 static Expected<VkGraphicsPipelineCreateInfo>
 synthesizeLinkedGraphicsPipelineCreateInfo(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
     ArrayRef<VkPipeline> LibraryHandles, LinkedPipelineStorage &Storage,
     bool &PreRasterViewIndexIsDeviceIndex,
     bool &FragmentViewIndexIsDeviceIndex,
-    std::optional<PipelineRenderTargets> &PrecomputedRenderTargets) {
+    std::optional<PipelineRenderTargets> &PrecomputedRenderTargets,
+    std::optional<std::vector<uint32_t>> &PrecomputedColorAttachmentLocations) {
   SmallVector<GraphicsPipelineLibrary *, 4> Libraries;
   for (VkPipeline Handle : LibraryHandles) {
     auto *P = fromHandle<Pipeline>(Handle);
@@ -3693,6 +3737,11 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
                                            : S.ColorAttachmentFormats.data();
       Result.pNext = &Storage.RenderingState;
     }
+    // (roadmap L388) This library is the authoritative source for the
+    // attachment-location remap too -- see
+    // `PrecomputedColorAttachmentLocations`'s own comment above.
+    if (!S.ColorAttachmentLocations.empty())
+      PrecomputedColorAttachmentLocations = S.ColorAttachmentLocations;
   } else {
     Result.pColorBlendState = CreateInfo.pColorBlendState;
   }
@@ -3952,13 +4001,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
          VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
     bool FragmentViewIndexIsDeviceIndex = PreRasterViewIndexIsDeviceIndex;
     std::optional<PipelineRenderTargets> PrecomputedRenderTargets;
+    std::optional<std::vector<uint32_t>> PrecomputedColorAttachmentLocations;
     if (LinkInfo && LinkInfo->libraryCount != 0) {
       Expected<VkGraphicsPipelineCreateInfo> Synthesized =
           synthesizeLinkedGraphicsPipelineCreateInfo(
               pCreateInfos[I],
               ArrayRef(LinkInfo->pLibraries, LinkInfo->libraryCount),
               LinkedStorage, PreRasterViewIndexIsDeviceIndex,
-              FragmentViewIndexIsDeviceIndex, PrecomputedRenderTargets);
+              FragmentViewIndexIsDeviceIndex, PrecomputedRenderTargets,
+              PrecomputedColorAttachmentLocations);
       if (!Synthesized) {
         logCreationFailure(Synthesized.takeError(),
                            "vkCreateGraphicsPipelines");
@@ -3976,7 +4027,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                                 PreRasterViewIndexIsDeviceIndex,
                                 FragmentViewIndexIsDeviceIndex,
                                 PrecomputedRenderTargets ? &*PrecomputedRenderTargets
-                                                         : nullptr);
+                                                         : nullptr,
+                                PrecomputedColorAttachmentLocations
+                                    ? &*PrecomputedColorAttachmentLocations
+                                    : nullptr);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))
