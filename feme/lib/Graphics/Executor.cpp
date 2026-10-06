@@ -3975,8 +3975,38 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               // per-vertex value -- see `projectVertex`'s comment.
               if (Pipeline.getRasterState().DepthClampEnable)
                 Depth = std::clamp(Depth, Tri.DepthClampLo, Tri.DepthClampHi);
-              Inv.Position[Lane][0] = Quad.PixelX[Lane] + 0.5f;
-              Inv.Position[Lane][1] = Quad.PixelY[Lane] + 0.5f;
+              // (roadmap L378(a)) `gl_FragCoord`'s quad-filling helper
+              // lanes (every lane in this 2x2 quad that isn't actually
+              // covered -- including one entirely outside the
+              // attachment's own extent, as is unavoidable for a quad
+              // straddling the last row/column of an odd-sized, or the
+              // whole of a 1x1, render target) must report a position a
+              // real conformant implementation would agree on well
+              // enough for `dFdx`/`dFdy` built from it to come out
+              // sane. `Quad.PixelX`/`PixelY` alone can run one step
+              // past `ExtentWidth`/`ExtentHeight`, extrapolating a
+              // `gl_FragCoord` for a pixel that is not part of the
+              // image at all (no fragment could ever genuinely be
+              // shaded there) -- confirmed via a `lavapipe` A/B
+              // (`dEQP-VK.pipeline.monolithic.sampler.
+              // max_sampler_lod_bias.shader_bias`'s 1x1-framebuffer
+              // `texture(sampler, gl_FragCoord.xy / fbExtent, bias)`)
+              // that a real driver instead clamps such a lane's
+              // position to the nearest in-image pixel, zeroing the
+              // derivative the extrapolated value would otherwise
+              // manufacture. Every genuinely covered lane's own
+              // `PixelX`/`PixelY` is already inside the image (coverage
+              // requires it), so this clamp is a no-op there.
+              float PosX =
+                  std::clamp(Quad.PixelX[Lane], 0,
+                             static_cast<int32_t>(ExtentWidth) - 1) +
+                  0.5f;
+              float PosY =
+                  std::clamp(Quad.PixelY[Lane], 0,
+                             static_cast<int32_t>(ExtentHeight) - 1) +
+                  0.5f;
+              Inv.Position[Lane][0] = PosX;
+              Inv.Position[Lane][1] = PosY;
               Inv.Position[Lane][2] = Depth;
               Inv.Position[Lane][3] = InvW;
               Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
@@ -4170,8 +4200,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               PassInv.Coverage[Lane] &= SampleBit;
               if (Quad.SampleMask[Lane] & SampleBit)
                 PassSideEffectMask |= (1u << Lane);
-              PassInv.Position[Lane][0] = Quad.PixelX[Lane] + Offset[0];
-              PassInv.Position[Lane][1] = Quad.PixelY[Lane] + Offset[1];
+              // (roadmap L378(a)) Same out-of-image helper-lane clamp as
+              // the pixel-center `Inv.Position` above -- a no-op for any
+              // genuinely covered lane.
+              PassInv.Position[Lane][0] =
+                  std::clamp(Quad.PixelX[Lane], 0,
+                             static_cast<int32_t>(ExtentWidth) - 1) +
+                  Offset[0];
+              PassInv.Position[Lane][1] =
+                  std::clamp(Quad.PixelY[Lane], 0,
+                             static_cast<int32_t>(ExtentHeight) - 1) +
+                  Offset[1];
               // (roadmap L114) `gl_SamplePosition` reads back this same
               // `Offset`, unmixed with `Quad.PixelX`/`PixelY` (unlike
               // `Position.xy` above): it is the sample's own offset

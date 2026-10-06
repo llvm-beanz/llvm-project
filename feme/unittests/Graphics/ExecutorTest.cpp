@@ -6064,6 +6064,123 @@ TEST(ExecutorTest, SampleShadingEnableVariesFragCoordPerSamplePosition) {
     }
 }
 
+// Roadmap L378(a): a fragment shader that reads `gl_FragCoord.xy` and
+// writes `dFdx(gl_FragCoord.x)`/`dFdy(gl_FragCoord.y)` straight into its
+// red/green channels. On a render target smaller than a full 2x2
+// fragment-shading quad (the degenerate case this test exercises, a 1x1
+// framebuffer), *every* pixel's quad has at least one "helper" lane whose
+// raw screen position falls entirely outside the attachment's own
+// extent -- not merely outside the scissor rect, which is the only case
+// `gl_FragCoord` extrapolation is legitimate for. Before this fix, that
+// out-of-image lane's `gl_FragCoord` was still extrapolated literally
+// (`PixelX + 0.5`), manufacturing a spurious nonzero derivative across
+// the quad purely from the degenerate framebuffer size -- exactly the
+// bug `dEQP-VK.pipeline.monolithic.sampler.max_sampler_lod_bias.
+// shader_bias`'s implicit-LOD `texture(sampler, gl_FragCoord.xy /
+// fbExtent, bias)` surfaced (a wildly wrong, maximum-mip-level sample
+// instead of the one two levels above the base). A real covered lane
+// always has its own `PixelX`/`PixelY` inside the image already, so the
+// fix (clamping only the out-of-image helper lanes' position) is a
+// no-op for every genuinely shaded pixel on a normally-sized target.
+constexpr char FragCoordDerivativeFragmentShaderIR[] = R"(
+  define void @fs_fragcoord_deriv() #0 {
+    %fx = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %fy = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %dx = call float @feme.stage.derivative.x.fine.f32(float %fx)
+    %dy = call float @feme.stage.derivative.y.fine.f32(float %fy)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %dx, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %dy, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare float @feme.stage.derivative.x.fine.f32(float)
+  declare float @feme.stage.derivative.y.fine.f32(float)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+TEST(ExecutorTest, FragCoordDerivativeIsZeroOnAFramebufferSmallerThanAQuad) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  SignatureElement FragCoordIn;
+  FragCoordIn.ElementID = 0;
+  FragCoordIn.Direction = SignatureDirection::Input;
+  FragCoordIn.ComponentType = SignatureComponentType::Float;
+  FragCoordIn.SystemValue = SignatureSystemValue::Position;
+  FragCoordIn.FirstComponent = 0;
+  FragCoordIn.ComponentCount = 4;
+  EntrySignature FSSig;
+  FSSig.Elements = {FragCoordIn, makeElement(1, SignatureDirection::Output, 4,
+                                             /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, FragCoordDerivativeFragmentShaderIR,
+                   "fs_fragcoord_deriv", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 1, 1}},
+      StencilState{}, std::vector<BlendState>{BlendState{}},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, /*SampleShadingEnable=*/false);
+
+  // A genuinely 1x1 framebuffer: the pixel (0, 0)'s own shading quad has
+  // three helper lanes at (1, 0), (0, 1), (1, 1) -- none of which is a
+  // real pixel in this image at all.
+  std::vector<uint8_t> Storage(1u * 1u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 1, 1};
+  std::array<AttachmentView, 1> Attachs{Color};
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  // Both derivatives must quantize to UNORM8 0 -- a 255 (the UNORM8
+  // encoding, clamped, of the spuriously large +1.0-magnitude derivative
+  // the unclamped helper lane's extrapolated `gl_FragCoord` used to
+  // produce) is exactly the pre-fix, bugged value this guards against.
+  EXPECT_EQ(Storage[0], 0u) << "dFdx(gl_FragCoord.x)";
+  EXPECT_EQ(Storage[1], 0u) << "dFdy(gl_FragCoord.y)";
+}
+
 // Roadmap L114: a fragment shader that reads `gl_SamplePosition`
 // (`SignatureSystemValue::SamplePosition`, components 0/1) and writes it
 // straight into its red/green channels, with *no*
