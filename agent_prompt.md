@@ -63,21 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~30 min**: `gdb bt` on `graphicsfuzz.nested-for-loops-switch-fallthrough`
-   vs `L375`'s own repro, to settle whether `L383(a)` folds into `L375` or
-   is a separate bug needing its own entry.
-2. **~1 hour**: case-name-level diff between `L384`'s `ds_resolve_sample_zero`
-   family and the original "46 pipeline SIGSEGV" bucket -- settles the
-   open question above and gives an accurate current pipeline-crash count.
-3. **~2-4 hours, the real next priority**: the 44 still-open `pipeline`
-   `SIGSEGV`s have never been narrowed to case names. Next session should
-   do a full, isolated `pipeline.*` crash sweep (similar to how `L379`
-   found `renderpasses`' `DeviceLost` cases) to get a case list before
-   attempting any more fixes -- debugging blind, one aggregate-count crash
-   at a time, doesn't scale.
-4. Still fully scoped, still untouched, still needs its own session:
-   `L375` (`DiamondFlattener` assertion, `switch_continue_{geom,tessc,
-   tesse}`).
-5. Investigate two old, never-explained commits (`bb7885607e34`,
-   `2e1279d6e99a`, "Prompt agent for Vulkan ICD") via `git show` -- low
-   priority, carried over from multiple prior sessions, never blocking.
+1. **~4-6 hours, now the single highest-value target**: fix `L379(a)`
+   (per-attachment color `resolveMode` plumbing). This is scoped already
+   (add a `ColorResolveModes` vector alongside the existing depth/stencil
+   fields, thread it from `VkRenderingAttachmentInfo::resolveMode` through
+   to `Executor.cpp`'s resolve loop, branch sample-zero-copy vs.
+   box-filter per attachment). Fixing it will very likely also fix all 47
+   `ds_resolve_sample_zero` cases found this session, in addition to the
+   original `renderpasses` case that scoped it.
+2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
+   stale-postdom-tree assertion). Scoping already exists in the Roadmap;
+   this needs actual design/implementation time, not more triage.
+3. **~30 min, low priority, easy win**: re-run the full
+   `renderpasses.dynamic_rendering.*` 2,506 ordinary-Fail bucket's largest
+   sub-family (`primary_cmd_buff.suballocation`, 993 cases) through one
+   `gdb bt` to see if it's a single root cause like `L379`/`L381`/`L382`
+   turned out to be, before assuming it needs a large triage effort.
+4. No code changes pending review — this session was documentation/triage
+   closure only, all prior fixes (`L381`/`L382`/`L384`) already landed and
+   re-verified.
