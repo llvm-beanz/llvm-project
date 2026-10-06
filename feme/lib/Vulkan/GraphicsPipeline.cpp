@@ -942,24 +942,11 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
 /// `VkPipelineRenderingCreateInfo` chained onto its create info. Both
 /// normalize into the same shape, exactly as the render-target binding
 /// itself does at draw time.
-struct PipelineRenderTargets {
-  std::vector<feme::cpu::ResourceFormat> Colors;
-  uint32_t SampleCount = 1;
-  std::optional<feme::cpu::ResourceFormat> DepthStencil;
-  /// (roadmap L356) Unlike a classic render pass's single depth/stencil
-  /// attachment reference, dynamic rendering's own `VkPipelineRendering
-  /// CreateInfo` can declare `depthAttachmentFormat` and
-  /// `stencilAttachmentFormat` independently -- each `VK_FORMAT_UNDEFINED`
-  /// on its own regardless of the other. `DepthStencil` above conflates
-  /// them (picking depth if present, else stencil), which is enough for
-  /// sample-count derivation but wrong for "does this pipeline's *depth*
-  /// test need a bound depth attachment" style checks: these two track
-  /// each aspect's own declared format independently so those checks
-  /// don't see a stencil-only declaration as implying a depth attachment
-  /// too (or vice versa).
-  std::optional<feme::cpu::ResourceFormat> DepthFormat;
-  std::optional<feme::cpu::ResourceFormat> StencilFormat;
-};
+///
+/// Declared in `GraphicsPipeline.h` (as `feme::vulkan::PipelineRenderTargets`,
+/// used here via this namespace's own using-directive) rather than here,
+/// so `GraphicsPipelineLibraryState` can cache one eagerly -- see that
+/// field's own comment.
 
 const VkPipelineRenderingCreateInfo *findRenderingCreateInfo(const void *Next) {
   for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
@@ -967,6 +954,37 @@ const VkPipelineRenderingCreateInfo *findRenderingCreateInfo(const void *Next) {
     if (Header->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
       return reinterpret_cast<const VkPipelineRenderingCreateInfo *>(Header);
   return nullptr;
+}
+
+/// Whether \p CreateInfo statically disables rasterization -- i.e.
+/// `VkPipelineRasterizationStateCreateInfo::rasterizerDiscardEnable` is
+/// `VK_TRUE` and not overridden by `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_
+/// ENABLE` -- in which case every one of `pViewportState`/
+/// `pMultisampleState`/`pDepthStencilState`/`pColorBlendState` is entirely
+/// unused per the spec and may be any value at all, including a garbage,
+/// unreadable pointer (`dEQP-VK.api.pipeline.
+/// pipeline_invalid_pointers_unused_structs.graphics`'s own genuine
+/// `SIGSEGV`, roadmap L382: it deliberately sets each of those four to
+/// `~0` cast to a pointer, to verify a conformant driver never reads any
+/// of them). A dynamically-controlled `rasterizerDiscardEnable` can't be
+/// resolved this early (its real runtime value isn't known until a
+/// command buffer actually records it), so this conservatively reports
+/// "not statically discarded" in that case -- matching this file's other
+/// static/dynamic precedent (see `translateViewportState`'s own comment
+/// on the null-`pViewportState` case this subsumes).
+bool isRasterizationStaticallyDiscarded(
+    const VkGraphicsPipelineCreateInfo &CreateInfo) {
+  const VkPipelineRasterizationStateCreateInfo *Raster =
+      CreateInfo.pRasterizationState;
+  if (!Raster || !Raster->rasterizerDiscardEnable)
+    return false;
+  if (const VkPipelineDynamicStateCreateInfo *Dynamic =
+          CreateInfo.pDynamicState)
+    for (uint32_t I = 0; I != Dynamic->dynamicStateCount; ++I)
+      if (Dynamic->pDynamicStates[I] ==
+          VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE)
+        return false;
+  return true;
 }
 
 Expected<PipelineRenderTargets>
@@ -1053,7 +1071,8 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
     // count is therefore the only applicable count, as it is for dynamic
     // rendering below.
     if (!AnyColorSampleCount && !Targets.DepthStencil &&
-        CreateInfo.pMultisampleState)
+        CreateInfo.pMultisampleState &&
+        !isRasterizationStaticallyDiscarded(CreateInfo))
       Targets.SampleCount = static_cast<uint32_t>(
           CreateInfo.pMultisampleState->rasterizationSamples);
     return Targets;
@@ -1127,7 +1146,8 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
   // -- otherwise the check just below would reject every genuinely
   // multisampled dynamic-rendering pipeline as "disagreeing" with a
   // sample count dynamic rendering never actually specified.
-  if (CreateInfo.pMultisampleState)
+  if (CreateInfo.pMultisampleState &&
+      !isRasterizationStaticallyDiscarded(CreateInfo))
     Targets.SampleCount = static_cast<uint32_t>(
         CreateInfo.pMultisampleState->rasterizationSamples);
   return Targets;
@@ -1372,6 +1392,16 @@ Error translateDepthStencilState(
 
   bool NeedsDepth = TestDynamic || WriteDynamic || BoundsDynamic;
   bool NeedsStencil = StencilTestDynamic;
+  // (roadmap L382) `pDepthStencilState` is entirely unused -- and may be
+  // any value, including a garbage/unreadable pointer -- whenever
+  // rasterization is statically disabled: see
+  // `isRasterizationStaticallyDiscarded`'s own comment. This must be
+  // checked (and `Info` left untouched) before the `!Info` branch just
+  // below, which only handles a genuinely null `Info`, not a non-null one
+  // this ICD must still not dereference.
+  if ((Out.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
+      Out.Raster.DiscardEnable)
+    return Error::success();
   if (!Info) {
     // (roadmap H29j) Per the Vulkan spec ("If there is no depth attachment
     // then the depth test is skipped."/analogous stencil text), enabling
@@ -1508,6 +1538,14 @@ Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
                                bool HasFragmentStage,
                                GraphicsPipelineState &Out) {
   Out.ColorBlends.assign(Targets.Colors.size(), BlendState{});
+  // (roadmap L382) As above (`translateDepthStencilState`'s own comment):
+  // `pColorBlendState` is unused, and may be a garbage pointer, whenever
+  // rasterization is statically disabled -- checked before touching
+  // `Info` at all, alongside (not in place of) the pre-existing
+  // `!HasFragmentStage` reason for ignoring it.
+  if ((Out.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
+      Out.Raster.DiscardEnable)
+    return Error::success();
   if (!Info || !HasFragmentStage || Targets.Colors.empty())
     return Error::success();
   if (Info->attachmentCount != Targets.Colors.size())
@@ -1562,30 +1600,36 @@ Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
 Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
                              const VkPhysicalDeviceLimits &Limits,
                              GraphicsPipelineState &Out) {
+  // (roadmap L382) Statically-disabled rasterization makes
+  // `pViewportState` entirely unused -- and, per
+  // `VUID-VkGraphicsPipelineCreateInfo-rasterizerDiscardEnable-00750`,
+  // legally a garbage/unreadable pointer, not just legally null -- so
+  // this must be checked (and `Info` left completely untouched) before
+  // even the `!Info` branch below, which only ever handled the
+  // already-null case.
+  if ((Out.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
+      Out.Raster.DiscardEnable)
+    return Error::success();
   if (!Info) {
     // (roadmap L218) Per `VUID-VkGraphicsPipelineCreateInfo-
     // rasterizerDiscardEnable-00750`, `pViewportState` may be null
     // entirely -- not just "ignored but still required to point at a
     // structure" -- whenever rasterization is *statically* disabled
-    // (`translateRasterState`, called just before this by every caller,
-    // already resolved `Out.Raster.DiscardEnable` for the static case;
-    // if `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` is in play instead,
-    // the static value is unknowable here, so this ICD still requires a
-    // real viewport state, matching this function's pre-existing
-    // behavior for that case). There is no viewport/scissor state left to
-    // translate in the disabled case: `Executor.cpp`'s `RasterState::
-    // DiscardEnable` (set from the very `rasterizerDiscardEnable` bit
-    // this depends on) already short-circuits every consumer of
-    // `Out.Viewports`/`Out.Scissors` before they would ever be read, so
-    // leaving both empty here is safe. Found via a real
-    // `dEQP-VK.tessellation.tesscoord.*` reproduction (18/18 cases): its
-    // shared `GraphicsPipelineBuilder` util builds a tessellation-only,
-    // rasterization-disabled pipeline (no fragment stage) with a null
-    // `pViewportState` exactly as the spec allows, which this function
-    // previously rejected unconditionally.
-    if ((Out.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
-        Out.Raster.DiscardEnable)
-      return Error::success();
+    // (handled just above now; this ICD still requires a real viewport
+    // state when `VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE` is in play
+    // instead, since the static value is unknowable here, matching this
+    // function's pre-existing behavior for that case). There is no
+    // viewport/scissor state left to translate in the disabled case:
+    // `Executor.cpp`'s `RasterState::DiscardEnable` (set from the very
+    // `rasterizerDiscardEnable` bit this depends on) already
+    // short-circuits every consumer of `Out.Viewports`/`Out.Scissors`
+    // before they would ever be read, so leaving both empty here is
+    // safe. Found via a real `dEQP-VK.tessellation.tesscoord.*`
+    // reproduction (18/18 cases): its shared `GraphicsPipelineBuilder`
+    // util builds a tessellation-only, rasterization-disabled pipeline
+    // (no fragment stage) with a null `pViewportState` exactly as the
+    // spec allows, which this function previously rejected
+    // unconditionally.
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs viewport state");
   }
@@ -1787,6 +1831,11 @@ serializeFixedFunctionState(const GraphicsPipelineState &State) {
 /// `Result.Artifact`), and resolves which stage is which: none of it reads
 /// the compiled stages, so it runs -- and a pipeline-cache key can be
 /// computed from its result -- before paying for stage compilation.
+///
+/// \p PrecomputedRenderTargets (roadmap L381), when non-null, is used in
+/// place of resolving \p CreateInfo.renderPass via `getRenderTargets`
+/// below -- see `compileGraphicsPipeline`'s own parameter of the same name
+/// for why.
 Error translateFixedFunctionState(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
     const PhysicalDeviceInfo &DeviceInfo, GraphicsPipelineState &Result,
@@ -1796,7 +1845,8 @@ Error translateFixedFunctionState(
     const VkPipelineShaderStageCreateInfo *&TessEvalInfo,
     const VkPipelineShaderStageCreateInfo *&GeometryInfo,
     const VkPipelineShaderStageCreateInfo *&MeshInfo,
-    const VkPipelineShaderStageCreateInfo *&TaskInfo) {
+    const VkPipelineShaderStageCreateInfo *&TaskInfo,
+    const PipelineRenderTargets *PrecomputedRenderTargets) {
   VertexInfo = nullptr;
   FragmentInfo = nullptr;
   TessControlInfo = nullptr;
@@ -1908,7 +1958,9 @@ Error translateFixedFunctionState(
     Result.FragmentRobustness = *FragmentRobustness;
   }
 
-  Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo);
+  Expected<PipelineRenderTargets> Targets =
+      PrecomputedRenderTargets ? Expected<PipelineRenderTargets>(*PrecomputedRenderTargets)
+                               : getRenderTargets(CreateInfo);
   if (!Targets)
     return Targets.takeError();
   // A depth-only render target -- no color attachments at all -- is legal
@@ -2068,8 +2120,16 @@ Error translateFixedFunctionState(
                                          FragmentInfo != nullptr, Result))
     return E;
 
+  // (roadmap L382) `pMultisampleState` joins `pViewportState`/
+  // `pDepthStencilState`/`pColorBlendState` as entirely unused -- and
+  // potentially a garbage pointer -- whenever rasterization is statically
+  // disabled; see `translateViewportState`'s own comment.
+  bool RasterizationStaticallyDiscarded =
+      (Result.DynamicStates & DynamicStateRasterizerDiscardEnable) == 0 &&
+      Result.Raster.DiscardEnable;
   if (const VkPipelineMultisampleStateCreateInfo *Multisample =
-          CreateInfo.pMultisampleState) {
+          RasterizationStaticallyDiscarded ? nullptr
+                                           : CreateInfo.pMultisampleState) {
     uint32_t Samples = static_cast<uint32_t>(Multisample->rasterizationSamples);
     if (!isSupportedAttachmentSampleCount(Samples))
       return createStringError(inconvertibleErrorCode(),
@@ -2602,13 +2662,23 @@ getEffectivePipelineCreateFlags(const VkGraphicsPipelineCreateInfo &CreateInfo) 
   return resolvePipelineCreateFlags2(CreateInfo.flags, CreateInfo.pNext);
 }
 
+/// \p PrecomputedRenderTargets (roadmap L381), when non-null, is used in
+/// place of resolving \p CreateInfo.renderPass via `getRenderTargets`
+/// below -- the caller (`vkCreateGraphicsPipelines`'s own link-call path)
+/// supplies this whenever \p CreateInfo's `renderPass`/`subpass` were
+/// synthesized from an already-linked `VK_EXT_graphics_pipeline_library`
+/// library rather than freshly supplied by the application itself, since
+/// that library's own `VkRenderPass` handle may already have been
+/// destroyed by the time this call runs (see
+/// `GraphicsPipelineLibraryState::RenderTargets`'s own comment).
 Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
                         PipelineCache *Cache, PipelineCache &ImplicitCache,
                         bool &CacheHit,
                         bool PreRasterViewIndexIsDeviceIndex,
-                        bool FragmentViewIndexIsDeviceIndex) {
+                        bool FragmentViewIndexIsDeviceIndex,
+                        const PipelineRenderTargets *PrecomputedRenderTargets) {
   CacheHit = false;
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
@@ -2626,7 +2696,8 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   const VkPipelineShaderStageCreateInfo *TaskInfo = nullptr;
   if (Error E = translateFixedFunctionState(
           CreateInfo, DeviceInfo, Result, VertexInfo, FragmentInfo,
-          TessControlInfo, TessEvalInfo, GeometryInfo, MeshInfo, TaskInfo))
+          TessControlInfo, TessEvalInfo, GeometryInfo, MeshInfo, TaskInfo,
+          PrecomputedRenderTargets))
     return std::move(E);
 
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
@@ -2905,6 +2976,7 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
   if (!Out.RenderPass) {
     Out.RenderPass = Child.RenderPass;
     Out.Subpass = Child.Subpass;
+    Out.RenderTargets = Child.RenderTargets;
   }
   for (VkDynamicState State : Child.DynamicStates)
     if (llvm::find(Out.DynamicStates, State) == Out.DynamicStates.end())
@@ -2952,8 +3024,28 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
   GraphicsPipelineLibraryState Out;
   Out.Flags = Flags;
   Out.Layout = CreateInfo.layout;
-  Out.RenderPass = CreateInfo.renderPass;
-  Out.Subpass = CreateInfo.subpass;
+  // (roadmap L381) Only captured when this library actually owns one of
+  // the three render-pass-consuming parts -- mirroring `RenderTargets`'s
+  // own gating below, and for the same reason: a part that owns none of
+  // them (e.g. a vertex-input-interface-only library) may still have its
+  // own `VkGraphicsPipelineCreateInfo::renderPass` populated by a caller
+  // that (legally) reuses one shared, fully-populated create-info struct
+  // across every library part, but that value is not this library's to
+  // give -- capturing it unconditionally let a non-owning library "win"
+  // `synthesizeLinkedGraphicsPipelineCreateInfo`'s own "first library
+  // with a `RenderPass`" search ahead of the actual owning library, whose
+  // `RenderTargets` was the only one actually computed, leaving the
+  // linked pipeline's `PrecomputedRenderTargets` empty and
+  // `translateFixedFunctionState` falling back to dereferencing a
+  // `renderPass` handle that may by then be dangling -- exactly this
+  // test file's own `LinksAfterOriginalRenderPassIsDestroyed`.
+  if (Flags &
+      (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+       VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
+       VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
+    Out.RenderPass = CreateInfo.renderPass;
+    Out.Subpass = CreateInfo.subpass;
+  }
   if (const auto *DS = CreateInfo.pDynamicState)
     Out.DynamicStates.assign(DS->pDynamicStates,
                              DS->pDynamicStates + DS->dynamicStateCount);
@@ -3061,6 +3153,43 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     Copy.pNext = nullptr;
     Copy.pSampleMask = nullptr;
     Out.MultisampleState = Copy;
+  }
+
+  // (roadmap L381) Eagerly resolve this library's own render target shape
+  // right now, while `CreateInfo.renderPass` (if any) is still guaranteed
+  // valid -- see `RenderTargets`'s own comment for why a linked pipeline
+  // must not defer this to link time instead. Gated on owning one of the
+  // three render-pass-consuming parts (not merely on `CreateInfo.
+  // renderPass` being non-null): a part that owns none of them may legally
+  // chain an arbitrary/garbage render-pass-shaped `pNext` the spec
+  // requires a driver to ignore outright (see `RenderingCreateInfo`'s own
+  // comment on `bad_rendering_create_info`), so resolving one here for
+  // such a part could itself manufacture a spurious error.
+  //
+  // A *second*, narrower condition further guards the dynamic-rendering
+  // case specifically (`CreateInfo.renderPass == VK_NULL_HANDLE`):
+  // `getRenderTargets` resolves that case by searching `CreateInfo.pNext`
+  // for *any* `VkPipelineRenderingCreateInfo`, with no way to tell a
+  // legitimate one (chained on the fragment-output-interface part, the
+  // only part the spec actually gives ownership of it) apart from a
+  // garbage one some *other* part illegally chains -- exactly
+  // `IgnoresARenderingCreateInfoOnANonOutputLibrary`'s own
+  // `bad_rendering_create_info` shape, which this capture call must not
+  // read at all. A real `VkRenderPass` handle has no such ambiguity (only
+  // one may ever be chained, and it is this library's own), so it alone
+  // is resolved unconditionally; the dynamic-rendering case is narrowed
+  // to only the one part actually entitled to supply it.
+  if ((Flags &
+       (VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+        VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
+        VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) &&
+      (CreateInfo.renderPass ||
+       (Flags &
+        VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT))) {
+    if (Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo))
+      Out.RenderTargets = *Targets;
+    else
+      consumeError(Targets.takeError());
   }
 
   // (roadmap H29n) This library may itself be built by linking other
@@ -3222,12 +3351,21 @@ findLinkedLibraryForBit(ArrayRef<GraphicsPipelineLibrary *> Libraries,
 /// whichever library provided each of the pre-rasterization/fragment-
 /// shader parts, falling back to \p CreateInfo's own flags for a part
 /// not supplied by any linked library).
+///
+/// \p PrecomputedRenderTargets (roadmap L381) is set whenever `RenderPass`/
+/// `Subpass` above were inherited from a linked library rather than
+/// \p CreateInfo's own fields -- the caller must then pass it through to
+/// `compileGraphicsPipeline` instead of letting it recompute the render
+/// target shape from the (possibly already-destroyed) `VkRenderPass`
+/// handle this function put into the synthesized `renderPass` field; see
+/// `GraphicsPipelineLibraryState::RenderTargets`'s own comment.
 static Expected<VkGraphicsPipelineCreateInfo>
 synthesizeLinkedGraphicsPipelineCreateInfo(
     const VkGraphicsPipelineCreateInfo &CreateInfo,
     ArrayRef<VkPipeline> LibraryHandles, LinkedPipelineStorage &Storage,
     bool &PreRasterViewIndexIsDeviceIndex,
-    bool &FragmentViewIndexIsDeviceIndex) {
+    bool &FragmentViewIndexIsDeviceIndex,
+    std::optional<PipelineRenderTargets> &PrecomputedRenderTargets) {
   SmallVector<GraphicsPipelineLibrary *, 4> Libraries;
   for (VkPipeline Handle : LibraryHandles) {
     auto *P = fromHandle<Pipeline>(Handle);
@@ -3258,9 +3396,42 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
   // which parts came from libraries -- falling back to a linked library's
   // own captured value only covers a pure-link call that supplies none of
   // its own state directly.
+  //
+  // RenderPass/Subpass get the opposite precedence: whichever linked
+  // library supplies one of the three RenderPass-consuming parts (pre-
+  // rasterization shaders, fragment shader, fragment output interface) is
+  // always authoritative for it, never this call's own `CreateInfo.
+  // renderPass` -- unlike `layout`, whose handle stays live for as long as
+  // the pipeline that names it exists, a `VkRenderPass` is explicitly
+  // permitted to be destroyed as soon as every library/pipeline that needs
+  // it has been built (see "Render Pass Compatibility"), which a pure-link
+  // call like this one always runs after. `CreateInfo.renderPass` here is
+  // not a *fresh* value in that case -- it is merely whatever stale handle
+  // a test harness's own internal state tracking happened to still be
+  // carrying from an earlier per-library setup call -- so trusting it
+  // unconditionally re-dereferences an already-destroyed `VkRenderPass`
+  // via `getRenderTargets` below (`dEQP-VK.pipeline.fast_linked_library.
+  // misc.compatible_render_pass`/`pipeline_library.misc.
+  // compatible_render_pass`'s own genuine `SIGSEGV`, which destroys the
+  // original render pass once every library needing it has been built,
+  // and links against a *different*, merely format-compatible one for the
+  // final executable pipeline). `CreateInfo.renderPass` is only trusted
+  // when no linked library supplies any of those three parts -- i.e. this
+  // call is itself directly supplying all of them, the one case the
+  // comment above already covers for `layout`.
+  constexpr VkGraphicsPipelineLibraryFlagsEXT RenderPassOwningParts =
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT |
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT;
+  VkGraphicsPipelineLibraryFlagsEXT LibraryProvidedParts = 0;
+  for (const GraphicsPipelineLibrary *Lib : Libraries)
+    LibraryProvidedParts |= Lib->state().Flags;
+
   Result.layout = CreateInfo.layout;
-  Result.renderPass = CreateInfo.renderPass;
-  Result.subpass = CreateInfo.subpass;
+  if (!(LibraryProvidedParts & RenderPassOwningParts)) {
+    Result.renderPass = CreateInfo.renderPass;
+    Result.subpass = CreateInfo.subpass;
+  }
   auto addDynamicStates = [&](const VkPipelineDynamicStateCreateInfo *Info) {
     if (!Info)
       return;
@@ -3289,6 +3460,10 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
     if (!Result.renderPass) {
       Result.renderPass = Lib->state().RenderPass;
       Result.subpass = Lib->state().Subpass;
+      // (roadmap L381) This library is the authoritative source for the
+      // render target shape too, not just the raw handle -- see
+      // `PrecomputedRenderTargets`'s own comment above.
+      PrecomputedRenderTargets = Lib->state().RenderTargets;
     }
     for (VkDynamicState State : Lib->state().DynamicStates)
       if (llvm::find(Storage.DynamicStates, State) ==
@@ -3707,13 +3882,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         (EffectiveFlags &
          VK_PIPELINE_CREATE_VIEW_INDEX_FROM_DEVICE_INDEX_BIT) != 0;
     bool FragmentViewIndexIsDeviceIndex = PreRasterViewIndexIsDeviceIndex;
+    std::optional<PipelineRenderTargets> PrecomputedRenderTargets;
     if (LinkInfo && LinkInfo->libraryCount != 0) {
       Expected<VkGraphicsPipelineCreateInfo> Synthesized =
           synthesizeLinkedGraphicsPipelineCreateInfo(
               pCreateInfos[I],
               ArrayRef(LinkInfo->pLibraries, LinkInfo->libraryCount),
               LinkedStorage, PreRasterViewIndexIsDeviceIndex,
-              FragmentViewIndexIsDeviceIndex);
+              FragmentViewIndexIsDeviceIndex, PrecomputedRenderTargets);
       if (!Synthesized) {
         logCreationFailure(Synthesized.takeError(),
                            "vkCreateGraphicsPipelines");
@@ -3729,7 +3905,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         compileGraphicsPipeline(*EffectiveInfo, DeviceInfo, Cache,
                                 ImplicitCache, CacheHit,
                                 PreRasterViewIndexIsDeviceIndex,
-                                FragmentViewIndexIsDeviceIndex);
+                                FragmentViewIndexIsDeviceIndex,
+                                PrecomputedRenderTargets ? &*PrecomputedRenderTargets
+                                                         : nullptr);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       if (FailBatch(VK_ERROR_INITIALIZATION_FAILED))

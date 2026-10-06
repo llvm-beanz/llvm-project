@@ -1271,6 +1271,54 @@ TEST_F(GraphicsPipelineTest, DynamicRasterizerDiscardOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Regression test for roadmap L382: per
+/// `VUID-VkGraphicsPipelineCreateInfo-rasterizerDiscardEnable-00750` and
+/// its siblings, `pViewportState`/`pMultisampleState`/
+/// `pDepthStencilState`/`pColorBlendState` are entirely unused -- and may
+/// legally hold *any* value, including an unreadable garbage pointer, not
+/// merely `nullptr` -- whenever rasterization is statically disabled.
+/// `getRenderTargets`/`translateViewportState`/`translateDepthStencilState`/
+/// `translateColorBlendState` used to only special-case a genuinely null
+/// pointer for each of these, and otherwise dereferenced whatever was
+/// there unconditionally -- `dEQP-VK.api.pipeline.
+/// pipeline_invalid_pointers_unused_structs.graphics`'s own genuine
+/// `SIGSEGV`, which deliberately sets each of those four fields to `~0`
+/// cast to a pointer specifically to verify a conformant driver never
+/// reads any of them once rasterization is disabled.
+TEST_F(GraphicsPipelineTest, IgnoresUnusedStructsWhenRasterizationStaticallyDisabled) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  const void *InvalidPointer = reinterpret_cast<void *>(~uintptr_t(0));
+  Info.pViewportState =
+      static_cast<const VkPipelineViewportStateCreateInfo *>(InvalidPointer);
+  Info.pMultisampleState =
+      static_cast<const VkPipelineMultisampleStateCreateInfo *>(
+          InvalidPointer);
+  Info.pDepthStencilState =
+      static_cast<const VkPipelineDepthStencilStateCreateInfo *>(
+          InvalidPointer);
+  Info.pColorBlendState =
+      static_cast<const VkPipelineColorBlendStateCreateInfo *>(InvalidPointer);
+
+  // No fragment stage either -- matching the real CTS case's own shape
+  // (a vertex-only pipeline), and independently exercising
+  // `translateColorBlendState`'s pre-existing `!HasFragmentStage` path
+  // alongside the new static-discard one.
+  Info.stageCount = 1;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+
 TEST_F(GraphicsPipelineTest, DynamicPrimitiveRestartOverridesStaticState) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
@@ -5142,6 +5190,97 @@ TEST_F(GraphicsPipelineTest, LinksDynamicDepthBiasEnableState) {
   EXPECT_FALSE(Graphics->buildExecutorPipeline(DynamicState)
                    .getRasterState()
                    .DepthBiasEnable);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Regression test for roadmap L381: per the Vulkan spec's "Multiple
+/// Pipeline Creation" rules, an application may destroy a `VkRenderPass`
+/// as soon as every graphics-pipeline-library part needing it has been
+/// built -- the final, pure-link call is not required to keep it alive,
+/// and in practice a test framework's own internal state-tracking struct
+/// may still carry the (now stale) handle in its `renderPass` field at
+/// that point, exactly as `CreateInfo.renderPass` does below.
+/// `getRenderTargets` used to always prefer this field, re-dereferencing
+/// the dangling `VkRenderPass` handle at link time --
+/// `dEQP-VK.pipeline.{fast_linked_library,pipeline_library}.misc.
+/// compatible_render_pass`'s own genuine `SIGSEGV`. The fix caches each
+/// library's own render target shape (format/sample-count, not the raw
+/// handle) at library-build time, while the handle is still guaranteed
+/// valid, and threads that cached value through linking instead.
+TEST_F(GraphicsPipelineTest, LinksAfterOriginalRenderPassIsDestroyed) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  // A render pass private to this test (format-compatible with, but a
+  // distinct object from, the fixture's own `Pass`), so it can be
+  // destroyed mid-test without double-destroying the fixture's copy.
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 1;
+  PassInfo.pAttachments = &Attachment;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass TempPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &TempPass),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = TempPass;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  // Destroy the original render pass *before* linking -- the link call
+  // below still carries its (now stale) handle in `LinkedCreateInfo.
+  // renderPass`, matching the exact shape the failing CTS case's own
+  // `GraphicsPipelineWrapper` leaves behind.
+  vkDestroyRenderPass(Device, TempPass, nullptr);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = TempPass; // Stale; must not be dereferenced.
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(fromHandle<Pipeline>(Handle)->kind(), Pipeline::Kind::Graphics);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->colorAttachmentCount(),
+            1u);
 
   vkDestroyPipeline(Device, Handle, nullptr);
   vkDestroyPipeline(Device, FragmentOutputLib, nullptr);

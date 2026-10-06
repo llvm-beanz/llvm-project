@@ -57,6 +57,35 @@ class Context;
 
 namespace feme::vulkan {
 
+/// A graphics pipeline's render target shape -- the color/depth/stencil
+/// attachment formats and sample count its fragment output interface
+/// targets, resolved from either a classic `VkRenderPass`/subpass or a
+/// dynamic-rendering `VkPipelineRenderingCreateInfo`. Declared here
+/// (rather than local to `GraphicsPipeline.cpp`, where `getRenderTargets`
+/// still computes it) so `GraphicsPipelineLibraryState` below can cache
+/// one eagerly, at `VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_
+/// INTERFACE_BIT_EXT`-library-capture time -- see that field's own
+/// comment for why a linked pipeline must not recompute this later from
+/// `VkGraphicsPipelineCreateInfo::renderPass` directly.
+struct PipelineRenderTargets {
+  std::vector<feme::cpu::ResourceFormat> Colors;
+  uint32_t SampleCount = 1;
+  std::optional<feme::cpu::ResourceFormat> DepthStencil;
+  /// (roadmap L356) Unlike a classic render pass's single depth/stencil
+  /// attachment reference, dynamic rendering's own `VkPipelineRendering
+  /// CreateInfo` can declare `depthAttachmentFormat` and
+  /// `stencilAttachmentFormat` independently -- each `VK_FORMAT_UNDEFINED`
+  /// on its own regardless of the other. `DepthStencil` above conflates
+  /// them (picking depth if present, else stencil), which is enough for
+  /// sample-count derivation but wrong for "does this pipeline's *depth*
+  /// test need a bound depth attachment" style checks: these two track
+  /// each aspect's own declared format independently so those checks
+  /// don't see a stencil-only declaration as implying a depth attachment
+  /// too (or vice versa).
+  std::optional<feme::cpu::ResourceFormat> DepthFormat;
+  std::optional<feme::cpu::ResourceFormat> StencilFormat;
+};
+
 /// One `VkVertexInputBindingDescription`, normalized.
 struct VertexInputBinding {
   uint32_t Binding = 0;
@@ -620,6 +649,24 @@ struct GraphicsPipelineLibraryState {
   VkPipelineLayout Layout = VK_NULL_HANDLE;
   VkRenderPass RenderPass = VK_NULL_HANDLE;
   uint32_t Subpass = 0;
+  /// (roadmap L381) `RenderPass`/`Subpass`'s already-resolved attachment
+  /// shape, computed eagerly at capture time (while `RenderPass` is still
+  /// guaranteed valid) whenever this library owns one of the three parts
+  /// the spec's "Multiple Pipeline Creation" table assigns a render pass
+  /// to (`PRE_RASTERIZATION_SHADERS_BIT`/`FRAGMENT_SHADER_BIT`/
+  /// `FRAGMENT_OUTPUT_INTERFACE_BIT`) and supplied a `VkRenderPass` or
+  /// dynamic-rendering `VkPipelineRenderingCreateInfo` of its own. A
+  /// linked pipeline that inherits `RenderPass`/`Subpass` from this
+  /// library (rather than supplying its own, fresher ones directly) must
+  /// also use this cached value rather than re-resolving `RenderPass` via
+  /// `fromHandle` at link time -- per spec, an application may destroy a
+  /// `VkRenderPass` as soon as every library/pipeline that needs it has
+  /// been built, which a pure-link call always runs after, so re-
+  /// dereferencing the handle then is a use-after-free
+  /// (`dEQP-VK.pipeline.fast_linked_library.misc.compatible_render_pass`/
+  /// `pipeline_library.misc.compatible_render_pass`'s own genuine
+  /// `SIGSEGV`).
+  std::optional<PipelineRenderTargets> RenderTargets;
   /// The dynamic states named by `pDynamicState`. A linked pipeline unions
   /// the lists from every library because these states are shared pipeline
   /// state, not owned by one graphics-pipeline-library part.
