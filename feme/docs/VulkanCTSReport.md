@@ -134,18 +134,29 @@ The largest ordinary-failure changes by group are:
    Failed, 3 Unsupported, 0 regressions. No `Vulkan14FeatureInventory.md`/
    `VulkanExtensionInventory.md` change needed -- internal
    compiler-correctness fix only.
-2. **Sampler coverage — `L378` bulk folded into `L377(a)`, now resolved;
-   one independent case remains open (`L378(a)`).** Confirmed this session:
-   of the 7,454 `sampler` failures, 7,453 (`sampler.view_type.*`) shared
-   `L377`'s exact root cause and are now fixed by the `L377(a)` linearizer
-   change (see above). The one remaining failure,
-   `sampler.max_sampler_lod_bias.shader_bias`, is independently confirmed
-   (via a direct rerun of `sampler.max_sampler_lod_bias.*`, 10 cases: 7
-   Pass / 1 Fail / 2 NotSupported) to still fail with "Unexpected color
-   found in color buffer" -- a genuine, still-unexplained wrong-pixel bug
-   unrelated to the linearizer fix (its `_compute` sibling, running the
-   same LOD-bias shader logic, passes), tracked as `Roadmap.md`'s
-   `L378(a)` and not yet root-caused.
+2. **Sampler coverage — `L378` bulk folded into `L377(a)`, now fully
+   resolved including `L378(a)`.** Of the 7,454 `sampler` failures, 7,453
+   (`sampler.view_type.*`) shared `L377`'s exact root cause and were fixed
+   by the `L377(a)` linearizer change (see above). The one remaining case,
+   `sampler.max_sampler_lod_bias.shader_bias`, is now also fixed
+   (`L378(a)`): a `--deqp-log-images=enable` QPA diff against the test's 13
+   known mip clear colors showed FeMe sampling mip level 12 (max) instead
+   of the expected level 2, root-caused to `Executor.cpp`'s per-tile
+   fragment-quad construction extrapolating a literal, unclamped
+   `gl_FragCoord` for synthetic "helper" lanes that fall entirely outside
+   the attachment's own extent (unavoidable on this test's 1x1
+   framebuffer), manufacturing a large spurious screen-space derivative
+   that drove the implicit-LOD base far above 0 before the 2.0 bias was
+   even added. Fixed by clamping each lane's position to
+   `[0, ExtentWidth-1]x[0, ExtentHeight-1]` at the two `gl_FragCoord`
+   call sites (ordinary and per-sample-shading paths) -- a no-op for any
+   genuinely covered lane. A direct rerun of `sampler.max_sampler_lod_bias.*`
+   (10 cases) now shows 8 Pass / **0 Fail** / 2 NotSupported (the
+   NotSupported pair is the pre-existing, unrelated `VK_EXT_image_view_min_lod`
+   gap). `ninja check-feme`: 3,590/3,593 Passed (+1 new regression test),
+   3 Unsupported, 0 Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md` change needed -- internal rasterizer
+   correctness fix only.
 3. **Render-pass correctness and device loss.** `renderpasses` has 4,845
    ordinary failures and 328 `DeviceLost` results. The largest ordinary
    families are dynamic rendering (2,990) and suballocation tests (1,842).
