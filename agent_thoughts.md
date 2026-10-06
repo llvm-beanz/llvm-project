@@ -116052,3 +116052,91 @@ Device confirmed at session start: `vulkaninfo --summary | grep deviceName` → 
 4. No code changes pending review — this session was documentation/triage
    closure only, all prior fixes (`L381`/`L382`/`L384`) already landed and
    re-verified.
+
+# Session: L379(a) root-caused and fixed (48/120 cases), L379(c) scoped
+
+## Confirmed device first
+
+`vulkaninfo --summary | grep deviceName` with the default `VK_ICD_FILENAMES`
+reported `llvmpipe`, not FeMe — the shell's env var pointed at
+`/usr/share/vulkan/icd.d/lvp_icd.json`. Re-ran with
+`VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json`
+and got `FeMe CPU Vulkan Device`, confirmed. Every CTS/test run this session
+used that same explicit `VK_ICD_FILENAMES`.
+
+## What's fixed, right now
+
+`ds_resolve_sample_zero*` CTS family: **0/120 Pass -> 48/120 Pass**.
+Try it: `./build/tools/feme/unittests/Vulkan/FeMeVulkanTests
+--gtest_filter="*ClassicRenderPassResolvesIntegerColorToSampleZeroNotAverage*"`
+passes.
+
+Two bugs found and fixed, both needed together — fixing only one does
+nothing observable:
+
+1. **`CommandBuffer.cpp`** (`buildRenderTargetBinding`): a classic
+   `VkRenderPass` has no `resolveMode` field at all for color attachments
+   (unlike dynamic rendering's `VkRenderingAttachmentInfo`). The spec still
+   requires integer color formats to always resolve via sample 0. Fixed by
+   forcing `View.ColorResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` when
+   `feme::cpu::isIntegerColorAttachmentFormat` is true.
+2. **`ImageOps.cpp`** (`resolveSubpassColorAttachments`): a *second*,
+   independent resolve pass that runs at `vkCmdEndRenderPass`/
+   `vkCmdNextSubpass` (to catch any samples a subpass's own draws didn't
+   cover) unconditionally box-filter-averaged every attachment, completely
+   ignoring `ColorResolveMode` — silently overwriting fix #1's correct
+   per-draw result, since this pass always runs last. Fixed by branching
+   it on `ColorResolveMode` the same way the per-draw resolve already does.
+
+Found bug #2 by debug-tracing three points end-to-end
+(`buildRenderTargetBinding` -> `resolveDrawAttachments` ->
+`Executor.cpp`'s per-draw resolve loop) and confirming each one computed
+and threaded `SampleZero` correctly, yet the final pixel value was still
+the average — meaning something *downstream* of the already-correct
+per-draw resolve was overwriting it. That pointed straight at the
+subpass-end resolve pass, which turned out to have its own entirely
+separate, unconditional-average bug.
+
+## What's still broken (new, scoped, not touched)
+
+**`L379(c)`** (new roadmap entry): 72 of the 120 `ds_resolve_sample_zero*`
+cases (`dynamic_rendering`/`input_attachments` subgroups, each paired with
+`D16_UNORM` depth) fail with `VK_ERROR_INITIALIZATION_FAILED` at
+pipeline-creation time — not a resolve-pixel mismatch, a totally different
+failure mode. Not investigated. Reproducer:
+`dEQP-VK.pipeline.fast_linked_library.multisample.misc.dynamic_rendering.basic.r8g8b8a8_unorm_r16g16b16a16_sfloat_r16g16b16a16_sint_d16_unorm.2x.ds_resolve_sample_zero.sub_framebuffer.default`.
+
+## Verification this session
+
+- `FeMeVulkanTests`: 798/798 Passed (new test added).
+- `ninja check-feme`: 3,598 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+- CTS `ds_resolve_sample_zero*` (2,304 cases incl. NotSupported): 48 Pass
+  / 72 Fail / 2,184 NotSupported (was 0/120/2,184 before this session).
+
+## Commits this session
+
+1. `[feme] L379(a): force SAMPLE_ZERO resolve for integer color in classic render pass`
+2. `[feme] L379(a): honor ColorResolveMode in subpass-end resolve pass` (+ unit test)
+3. `feme: update Roadmap/VulkanCTSReport for L379(a)/L379(c)`
+
+No non-FeMe files touched this session — no isolated reproducer/fix needed
+outside the subdirectory.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1-2 hours**: `L379(c)` — isolate the `VK_ERROR_INITIALIZATION_FAILED`
+   pipeline-creation failure for the `D16_UNORM`-paired cases. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the single reproducer case above
+   to surface the swallowed real error, then `gdb bt` if that's not enough.
+2. **~1 day, needs a dedicated design session**: `L375`
+   (`DiamondFlattener` stale-postdom-tree assertion,
+   `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`).
+   Still fully scoped in the Roadmap, still not attempted — genuinely
+   needs implementation time, not more triage.
+3. **~30 min, low priority, easy win**: re-run the
+   `renderpasses.dynamic_rendering.*` 2,506 ordinary-Fail bucket's largest
+   sub-family (`primary_cmd_buff.suballocation`, 993 cases) through one
+   `gdb bt` to check for a single root cause before assuming a large
+   triage effort is needed.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented in a prior session, no action needed.
