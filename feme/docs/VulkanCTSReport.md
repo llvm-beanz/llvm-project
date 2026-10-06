@@ -340,6 +340,54 @@ The largest ordinary-failure changes by group are:
     `VulkanExtensionInventory.md` change needed -- internal correctness
     fix only.
 
+11. **`L379(c)` fixed: the `dynamic_rendering` half of the remaining 72
+    `ds_resolve_sample_zero*` failures, 48 more cases now Pass.**
+    `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the single representative
+    `dynamic_rendering.basic` case surfaced the real swallowed error:
+    `color attachment 3 names a format this driver cannot render into`.
+    Root cause: `GraphicsPipeline.cpp`'s dynamic-rendering color-attachment
+    loop (building `PipelineRenderTargets` from a chained
+    `VkPipelineRenderingCreateInfo`) treated any `VK_FORMAT_UNDEFINED`
+    slot in `pColorAttachmentFormats` as an unrecognized/unsupported
+    format and rejected the whole pipeline -- but CTS always declares a
+    fixed 4-element `pColorAttachmentFormats` array, padding unused
+    trailing slots with `VK_FORMAT_UNDEFINED` as a legal "unused slot"
+    marker (confirmed via CTS source,
+    `vktPipelineMultisampledRenderToSingleSampledTests.cpp`), exactly
+    mirroring `VK_ATTACHMENT_UNUSED` for a classic `VkRenderPass` (which
+    the classic-render-pass loop a few dozen lines earlier in the same
+    function already handles correctly). Fixed by special-casing
+    `VK_FORMAT_UNDEFINED` the same way: push
+    `feme::cpu::ResourceFormat::Unknown` and `continue`, instead of
+    erroring. Added `GraphicsPipelineTest.
+    AcceptsAnUndefinedTrailingDynamicRenderingColorFormat`, modeled on the
+    existing `AcceptsDynamicRenderingFormats` test, with a matching
+    4-attachment blend state (the real CTS cases declare one color blend
+    attachment state per declared format slot, including unused ones).
+    **Build gotcha hit and resolved:** FeMe's Vulkan-layer code links into
+    two separate targets, `FeMeVulkanTests` (unit tests) and
+    `libfeme_vulkan.so` (the actual ICD `deqp-vk` loads); rebuilding only
+    `FeMeVulkanTests` after a source change does not relink the `.so`,
+    causing a confusing false-negative CTS re-run earlier in this
+    investigation -- resolved by explicitly rebuilding both together.
+    **Verified:** of the 72 cases `L379(c)` originally scoped, **48 now
+    Pass** (every `dynamic_rendering.basic`/`dynamic_rendering.
+    clear_attachments` case) -- re-running the full `ds_resolve_sample_
+    zero*` sweep (2,304 cases total, counting all pipeline-construction-
+    type variants) now shows 96 Pass (was 48), 24 Fail (was 72), 2,184 Not
+    Supported (`VK_EXT_shader_object` unavailable, unrelated/expected).
+    The remaining 24 are *not* this bug: they are all `input_attachments.
+    render_to` cases, which fail with a different, unrelated error (`JIT
+    session error: Symbols not found: [ spirv_var_N ]`, an unresolved
+    stage-IO global reference specific to `subpassLoad`-based input
+    attachments) -- scoped separately as roadmap `L386`, not investigated
+    beyond the single reproducer's own JIT error this session.
+    `FeMeVulkanTests`: 799/799 Passed (+1 new unit test, fixture-corrected
+    after an initial self-inflicted blend-attachment-count mismatch in the
+    test itself, not a product bug). No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only, no feature/extension-surface change.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
