@@ -407,6 +407,47 @@ The largest ordinary-failure changes by group are:
     multi-subpass-derived dynamic-rendering sequence. Not fixed this
     session -- out of scope for the ~30-minute budget this triage item
     was given.
+13. **`L387` root-caused and fixed: `primary_cmd_buff.suballocation.*`'s
+    remaining 152 failures, now 0.** CTS source reading
+    (`vktRenderPassTests.cpp`'s `findColorAttachments`/
+    `fillRenderingAttachmentLocationsInfo`) found the real root cause: a
+    multi-subpass classic `VkRenderPass` translated to dynamic rendering
+    gives every subpass's own pipeline the *same combined*, cross-subpass
+    `pColorAttachmentFormats` list (not a per-subpass subset), then
+    chains a `VkRenderingAttachmentLocationInfo` onto that pipeline's own
+    create info remapping each attachment index to the fragment-shader
+    output location that subpass's own shader actually writes for it
+    (`VK_ATTACHMENT_UNUSED` meaning "no output expected here at all").
+    `GraphicsPipeline.cpp` had no code anywhere that looked for this
+    struct at pipeline-creation time -- only the already-handled dynamic
+    `vkCmdSetRenderingAttachmentLocations` command form (`L379(b)`,
+    `CommandBuffer.cpp`) -- so `validateStageInterfaces` silently assumed
+    attachment index `I` always equals fragment-output location `I`,
+    misattributing one subpass's real (float) output to the *other*
+    subpass's integer attachment and rejecting pipeline creation with
+    "fragment stage has no integer output ... at location N". Fixed by
+    adding `findRenderingAttachmentLocationInfo` (mirroring the existing
+    `findRenderingCreateInfo` pNext-search pattern) and threading its
+    resolved remap through `compileAndValidateStages`/
+    `validateStageInterfaces`'s per-attachment fragment-output check,
+    falling back to identity when no such struct is chained (preserving
+    every other, non-remapped pipeline's existing behavior). Added
+    `GraphicsPipelineTest.
+    AcceptsRemappedColorAttachmentLocationsFromPipelineCreateInfo`,
+    confirmed to fail with the exact real error before this fix.
+    **Verified:** the full `primary_cmd_buff.suballocation.*` sub-family
+    (5,935 cases) now shows **4,046 Pass / 0 Fail / 1,889 NotSupported**
+    (was 3,894/152/1,889) -- every one of the 152 originally-scoped
+    failures fixed. A full, from-scratch re-run of the wider
+    `renderpasses.dynamic_rendering.*` group (28,898 cases) shows 11,317
+    Pass / 1,106 Fail / 16,475 NotSupported, with no regressions
+    (unrelated families, e.g. `L386`'s own `input_attachments.render_to`
+    `spirv_var_N` JIT-symbol failures, still open and untouched by this
+    fix). `FeMeVulkanTests`: 800/800 Passed (+1 new unit test). `ninja
+    check-feme`: 3,600/3,603 Passed, 3 Unsupported, 0 Failed, 0
+    regressions. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only, no feature/extension-surface change.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
