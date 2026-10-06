@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: db99d377-bdef-4dd8-a2b5-787bcf66bc23
 ---
 # Initial Guidelines
 
