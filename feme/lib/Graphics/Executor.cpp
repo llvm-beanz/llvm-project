@@ -6183,11 +6183,21 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       return E;
   }
 
-  // --- Multisample resolve (roadmap R33): box-filter average every
-  // sample of each color attachment into its resolve attachment, once
-  // every draw above has run. A single-sample pipeline has nothing to
-  // resolve (`ResolveAttachments` is required to be empty in that case by
-  // convention -- see PreparedDraw.h). ---
+  // --- Multisample resolve (roadmap R33, mode plumbing roadmap L379(a)):
+  // resolve every sample of each color attachment into its resolve
+  // attachment, once every draw above has run. A single-sample pipeline
+  // has nothing to resolve (`ResolveAttachments` is required to be empty
+  // in that case by convention -- see PreparedDraw.h). Per
+  // `VkRenderingAttachmentInfo`'s own spec, `resolveMode` is set
+  // independently for each color attachment: `ColorResolveMode::Average`
+  // (the box-filter mean this executor has always computed) is correct
+  // only for non-integer formats; `ColorResolveMode::SampleZero` instead
+  // copies sample 0's raw bytes verbatim, required for an integer color
+  // format (where "averaging" raw integer bit patterns is not meaningful,
+  // and the Vulkan spec requires SAMPLE_ZERO_BIT there), and legal for any
+  // format. `Draw.ColorResolveModes` defaults every index to `Average`
+  // when absent (an empty `ArrayRef`, matching an older/narrower caller
+  // that never set it), preserving this resolve's pre-L379(a) behavior.
   if (!Draw.ResolveAttachments.empty()) {
     for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size(); ++AttIdx) {
       const AttachmentView &Src = Draw.Attachments[AttIdx];
@@ -6200,11 +6210,25 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // is nothing to resolve for this index.
       if (Src.Data.empty() || Dst.Data.empty())
         continue;
+      bool UseSampleZero = AttIdx < Draw.ColorResolveModes.size() &&
+                           Draw.ColorResolveModes[AttIdx] ==
+                               ColorResolveMode::SampleZero;
       for (uint32_t Layer = 0; Layer != Src.ArrayLayers; ++Layer) {
         AttachmentView SrcLayer = sliceAttachmentLayer(Src, Layer);
         AttachmentView DstLayer = sliceAttachmentLayer(Dst, Layer);
         for (uint32_t PY = 0; PY != Src.Height; ++PY) {
           for (uint32_t PX = 0; PX != Src.Width; ++PX) {
+            size_t DstOff =
+                ((size_t)PY * Dst.Width + PX) * ColorElemSizes[AttIdx];
+            if (UseSampleZero) {
+              size_t SrcOff =
+                  (((size_t)PY * Src.Width + PX) * SampleCount + 0) *
+                  ColorElemSizes[AttIdx];
+              std::memcpy(DstLayer.Data.data() + DstOff,
+                         SrcLayer.Data.data() + SrcOff,
+                         ColorElemSizes[AttIdx]);
+              continue;
+            }
             std::array<double, 4> Sum{};
             for (uint32_t S = 0; S != SampleCount; ++S) {
               size_t Off = (((size_t)PY * Src.Width + PX) * SampleCount + S) *
@@ -6221,8 +6245,6 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             std::array<double, 4> Avg{};
             for (unsigned C = 0; C != 4; ++C)
               Avg[C] = Sum[C] / SampleCount;
-            size_t DstOff =
-                ((size_t)PY * Dst.Width + PX) * ColorElemSizes[AttIdx];
             if (Error E = packClearColor(
                     DstLayer.Format, Avg,
                     MutableArrayRef(DstLayer.Data.data() + DstOff,

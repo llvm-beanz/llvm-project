@@ -123,6 +123,22 @@ struct AttachmentView {
   uint32_t ArrayLayers = 1;
 };
 
+/// (Roadmap L379(a)) How a multisample color attachment's resolve step
+/// combines its samples into the single-sample resolve attachment, mirroring
+/// `VkResolveModeFlagBits`'s two color-legal values (`VK_RESOLVE_MODE_
+/// AVERAGE_BIT`/`VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`) without leaking the
+/// Vulkan API type into this API-agnostic layer (see `VertexAttribute`'s own
+/// comment on why Pipeline.h/PreparedDraw.h avoid Vulkan-specific enums).
+/// `Average` is the box-filter mean this executor has always computed, only
+/// ever correct for non-integer formats; `SampleZero` instead copies sample
+/// 0 verbatim, the only mode defined (and that the Vulkan spec requires) for
+/// an integer color format, where "averaging" raw integer bit patterns is
+/// not meaningful.
+enum class ColorResolveMode : uint8_t {
+  Average,
+  SampleZero,
+};
+
 /// The optional depth/stencil attachments a draw tests/writes against
 /// (roadmap R33, "Depth, stencil, blending, and multisampling"; combined-
 /// format support added by roadmap C1, "Mandatory formats"). For a pure
@@ -229,6 +245,15 @@ struct PreparedDraw {
   /// rule. Empty for a single-sample pipeline, which has nothing to
   /// resolve.
   llvm::MutableArrayRef<AttachmentView> ResolveAttachments;
+  /// (Roadmap L379(a)) `ColorResolveModes[I]` is the resolve mode for
+  /// `ResolveAttachments[I]`, parallel index-for-index with it (so, like
+  /// `ResolveAttachments`, only meaningful -- and only ever read -- for an
+  /// index whose `ResolveAttachments[I].Data` is non-empty). Empty when
+  /// `ResolveAttachments` itself is empty (a single-sample pipeline).
+  /// Unlike `ResolveAttachments`, this is never per-multiview-layer sliced:
+  /// a resolve mode is a scalar per-attachment property, not per-layer
+  /// data.
+  llvm::ArrayRef<ColorResolveMode> ColorResolveModes;
   /// (Roadmap K6) `VK_KHR_depth_stencil_resolve`'s own resolve targets,
   /// mirroring `ResolveAttachments`' role for color but for depth/stencil:
   /// a non-empty `Depth`/`Stencil::Data` names the single-sample

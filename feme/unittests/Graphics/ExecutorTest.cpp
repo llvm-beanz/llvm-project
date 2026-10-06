@@ -12867,4 +12867,185 @@ TEST(ExecutorTest, MeshLocalArrayDynamicIndexProducesFullScreenGradient) {
   EXPECT_NE(BottomLeft[2], 0.0f);
 }
 
+/// Builds a trivial `SampleCount`-multisample, single-pixel,
+/// `R32G32B32A32_UINT` pipeline: a position-only vertex stage and a
+/// constant-uint4 fragment stage that is never actually invoked (every
+/// test using this builds its `PreparedDraw` with `VertexCount = 0`,
+/// since only the multisample *resolve* step -- which runs unconditionally
+/// once every draw above it has, roadmap L379(a) -- is under test, not
+/// rasterization itself). A real integer-format fragment output is still
+/// required here, mirroring `RejectsAFloatFragmentOutputForAnInteger
+/// ColorAttachment` above: `GraphicsPipeline`'s own construction-time
+/// format-compatibility check runs regardless of whether any draw
+/// command actually executes.
+static Expected<GraphicsPipeline>
+buildUint4MultisamplePipeline(Context &Ctx, uint32_t SampleCount) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  constexpr char PositionOnlyVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, PositionOnlyVertexShaderIR, "vs_main", VSSig,
+                  ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  constexpr char UInt4ConstantFragmentShaderIR[] = R"(
+    define void @fs_main() #0 {
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 1, i32 0, i32 0)
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 2, i32 0, i32 0)
+      call void @feme.stage.output.store.i32(i32 0, i32 0, i32 3, i32 0, i32 0)
+      ret void
+    }
+    declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+  SignatureElement UOut =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0);
+  UOut.ComponentType = SignatureComponentType::UInt;
+  EntrySignature FSSig;
+  FSSig.Elements = {UOut};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, UInt4ConstantFragmentShaderIR, "fs_main", FSSig,
+      ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32G32B32A32_UINT, 1, 1}};
+  return GraphicsPipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, SampleCount, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{BlendState{}}, /*LogicOpEnable=*/false,
+      LogicOp::Copy, std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+}
+
+/// (Roadmap L379(a)) `ColorResolveMode::SampleZero` resolves to sample 0's
+/// raw bytes verbatim rather than this executor's pre-existing box-filter
+/// average -- the only spec-legal mode for an integer color format, where
+/// "averaging" four different raw `R32G32B32A32_UINT` bit patterns would
+/// otherwise silently compute a meaningless blended value no sample ever
+/// held. Every sample here holds a distinct value specifically so an
+/// (incorrect) average would differ from every individual sample,
+/// including sample 0 -- this is the regression this fix closes: before
+/// it, this single-pixel resolve would have landed the mathematical
+/// average instead of sample 0's own `{10, 20, 30, 40}`.
+TEST(ExecutorTest, ColorResolveSampleZeroCopiesSampleZeroVerbatim) {
+  Context Ctx;
+  constexpr uint32_t SampleCount = 4;
+  Expected<GraphicsPipeline> Pipeline =
+      buildUint4MultisamplePipeline(Ctx, SampleCount);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // One pixel, four samples, 4 components * 4 bytes = 16 bytes each.
+  std::array<uint32_t, 4 * 4> MSStorage = {
+      /*sample 0=*/10, 20, 30, 40,
+      /*sample 1=*/100, 110, 120, 130,
+      /*sample 2=*/1000, 1010, 1020, 1030,
+      /*sample 3=*/5, 6, 7, 8,
+  };
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(MSStorage.data()),
+                      MSStorage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32G32B32A32_UINT, 1, 1};
+  std::array<uint32_t, 4> ResolveStorage{};
+  AttachmentView Resolve{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(ResolveStorage.data()),
+                      ResolveStorage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32G32B32A32_UINT, 1, 1};
+  std::array<AttachmentView, 1> Attach = {Color};
+  std::array<AttachmentView, 1> ResolveAttach = {Resolve};
+  std::array<ColorResolveMode, 1> Modes = {ColorResolveMode::SampleZero};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.ResolveAttachments = ResolveAttach;
+  Draw.ColorResolveModes = Modes;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  DrawCommand Cmd;
+  Cmd.VertexCount = 0;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  EXPECT_EQ(ResolveStorage[0], 10u);
+  EXPECT_EQ(ResolveStorage[1], 20u);
+  EXPECT_EQ(ResolveStorage[2], 30u);
+  EXPECT_EQ(ResolveStorage[3], 40u);
+}
+
+/// Regression companion to the `SampleZero` test above: an *absent*
+/// `ColorResolveModes` entry (an empty `ArrayRef`, `PreparedDraw`'s own
+/// documented "older/narrower caller" default) must still box-filter-
+/// average exactly as every resolve did before roadmap L379(a) introduced
+/// per-attachment modes -- using the same four distinct per-sample values
+/// as the `SampleZero` test above (whose mean is exactly representable,
+/// so this is an exact-equality check, not merely "close enough").
+TEST(ExecutorTest, ColorResolveDefaultsToAverageWhenModesIsEmpty) {
+  Context Ctx;
+  constexpr uint32_t SampleCount = 4;
+  Expected<GraphicsPipeline> Pipeline =
+      buildUint4MultisamplePipeline(Ctx, SampleCount);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  std::array<uint32_t, 4 * 4> MSStorage = {
+      /*sample 0=*/10, 20, 30, 40,
+      /*sample 1=*/100, 110, 120, 130,
+      /*sample 2=*/1000, 1010, 1020, 1030,
+      /*sample 3=*/5, 6, 7, 8,
+  };
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(MSStorage.data()),
+                      MSStorage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32G32B32A32_UINT, 1, 1};
+  std::array<uint32_t, 4> ResolveStorage{};
+  AttachmentView Resolve{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(ResolveStorage.data()),
+                      ResolveStorage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32G32B32A32_UINT, 1, 1};
+  std::array<AttachmentView, 1> Attach = {Color};
+  std::array<AttachmentView, 1> ResolveAttach = {Resolve};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attach;
+  Draw.ResolveAttachments = ResolveAttach;
+  // `Draw.ColorResolveModes` is left default-constructed (empty).
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 1, 1};
+  DrawCommand Cmd;
+  Cmd.VertexCount = 0;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  EXPECT_EQ(ResolveStorage[0], (10u + 100u + 1000u + 5u) / 4);
+  EXPECT_EQ(ResolveStorage[1], (20u + 110u + 1010u + 6u) / 4);
+  EXPECT_EQ(ResolveStorage[2], (30u + 120u + 1020u + 7u) / 4);
+  EXPECT_EQ(ResolveStorage[3], (40u + 130u + 1030u + 8u) / 4);
+}
+
 } // namespace
