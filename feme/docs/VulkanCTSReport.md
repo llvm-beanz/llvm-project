@@ -294,6 +294,51 @@ The largest ordinary-failure changes by group are:
    fold into `L375`. No FeMe source code change -- a documentation/triage-
    closure finding only, since every underlying crash was already fixed
    by `L381`/`L382`/`L384`.
+10. **`L379(a)`'s per-attachment color `resolveMode` gap: fixed in two
+    parts, 48 of 120 `ds_resolve_sample_zero*` cases now Pass.** Traced why
+    the previously-committed dynamic-rendering `ColorResolveModes`
+    plumbing fix (a prior session) did not flip any of these 120 cases:
+    the specific failing cases (`fast_linked_library`/`monolithic`
+    construction types) use a *classic* `VkRenderPass`, not dynamic
+    rendering -- `RenderPassWrapper::m_isDynamicRendering` is keyed on
+    `isConstructionTypeShaderObject`, not the CTS test's own misleadingly-
+    named `dynamicRendering` parameter. A classic render pass has no
+    `resolveMode` field anywhere to plumb, yet the spec still mandates
+    integer color formats always resolve via sample 0 (fixed-function,
+    not a free choice); fixed by forcing
+    `View.ColorResolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` in
+    `buildRenderTargetBinding`'s color-attachment loop (`CommandBuffer.cpp`)
+    whenever `feme::cpu::isIntegerColorAttachmentFormat` is true. This
+    alone did not change the CTS result: debug tracing confirmed it
+    computed and threaded the correct mode all the way to `Executor.cpp`'s
+    per-draw resolve, yet the final image still showed the box-filter
+    average. **Second, independent bug:** `resolveSubpassColorAttachments`
+    (`ImageOps.cpp`), a *second* resolve pass that runs once more at
+    `vkCmdEndRenderPass`/`vkCmdNextSubpass` (to resolve any samples a
+    subpass's own draws didn't already cover), unconditionally
+    box-filter-averaged every color attachment, ignoring
+    `RenderTargetView::ColorResolveMode` entirely -- silently re-clobbering
+    the correct per-draw `SAMPLE_ZERO_BIT` result with an averaged one,
+    since this pass always runs last. Fixed by branching this pass on
+    `ColorResolveMode` exactly like the per-draw resolve already does.
+    Added `DrawTest.cpp`'s
+    `ClassicRenderPassResolvesIntegerColorToSampleZeroNotAverage` (a real
+    Vulkan-API-level regression test, since `buildRenderTargetBinding` has
+    internal linkage; two pipelines with disjoint static `pSampleMask`s
+    create genuine per-sample divergence without `gl_SampleID`-branching
+    shaders). **Verified:** of the 120 originally-targeted
+    `ds_resolve_sample_zero*` cases, **48 now Pass** (was 0) -- every
+    `fast_linked_library`/`monolithic` case under the `misc.basic`/
+    `misc.clear_attachments` subgroups. The remaining 72
+    (`dynamic_rendering`/`input_attachments` subgroups, each paired with a
+    `D16_UNORM` depth format) fail with `VK_ERROR_INITIALIZATION_FAILED`
+    at pipeline-creation time, not a resolve-pixel mismatch at all -- a
+    distinct, unrelated bug, scoped separately as roadmap `L379(c)`, not
+    investigated this session. `FeMeVulkanTests`: 798/798 Passed (+1 new
+    unit test). `ninja check-feme`: 3,598/3,601 Passed, 3 Unsupported, 0
+    Failed, 0 regressions. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
