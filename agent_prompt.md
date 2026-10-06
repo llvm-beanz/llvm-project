@@ -63,22 +63,19 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~4-6 hours, now the single highest-value target**: fix `L379(a)`
-   (per-attachment color `resolveMode` plumbing). This is scoped already
-   (add a `ColorResolveModes` vector alongside the existing depth/stencil
-   fields, thread it from `VkRenderingAttachmentInfo::resolveMode` through
-   to `Executor.cpp`'s resolve loop, branch sample-zero-copy vs.
-   box-filter per attachment). Fixing it will very likely also fix all 47
-   `ds_resolve_sample_zero` cases found this session, in addition to the
-   original `renderpasses` case that scoped it.
-2. **~1 day, needs a dedicated design session**: `L375` (`DiamondFlattener`
-   stale-postdom-tree assertion). Scoping already exists in the Roadmap;
-   this needs actual design/implementation time, not more triage.
-3. **~30 min, low priority, easy win**: re-run the full
+1. **~1-2 hours**: `L379(c)` — isolate the `VK_ERROR_INITIALIZATION_FAILED`
+   pipeline-creation failure for the `D16_UNORM`-paired cases. Start with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` on the single reproducer case above
+   to surface the swallowed real error, then `gdb bt` if that's not enough.
+2. **~1 day, needs a dedicated design session**: `L375`
+   (`DiamondFlattener` stale-postdom-tree assertion,
+   `switch_continue_{geom,tessc,tesse}` + `graphicsfuzz.nested-for-loops-switch-fallthrough`).
+   Still fully scoped in the Roadmap, still not attempted — genuinely
+   needs implementation time, not more triage.
+3. **~30 min, low priority, easy win**: re-run the
    `renderpasses.dynamic_rendering.*` 2,506 ordinary-Fail bucket's largest
    sub-family (`primary_cmd_buff.suballocation`, 993 cases) through one
-   `gdb bt` to see if it's a single root cause like `L379`/`L381`/`L382`
-   turned out to be, before assuming it needs a large triage effort.
-4. No code changes pending review — this session was documentation/triage
-   closure only, all prior fixes (`L381`/`L382`/`L384`) already landed and
-   re-verified.
+   `gdb bt` to check for a single root cause before assuming a large
+   triage effort is needed.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented in a prior session, no action needed.
