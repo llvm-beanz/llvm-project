@@ -525,12 +525,34 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
 
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   IRBuilder<> Builder(&CI);
+  // Roadmap L390: `SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) bakes one
+  // of `kSubpassLoadDirectDepthAttachmentIndex`/
+  // `kSubpassLoadDirectStencilAttachmentIndex` as `CI`'s own
+  // `attachment_index` operand for a direct (undecorated)
+  // `subpassInput`/`usubpassInput` read -- neither is a real heap index,
+  // so resolve either one here, once, against the two slots
+  // `feme::vulkan::buildSubpassInputHeap` (CommandBuffer.cpp) always
+  // appends at the tail of `SubpassInputHeap`, computed from its own
+  // (runtime) `SubpassInputHeapCount` rather than looked up by any
+  // compile-time-known index.
+  Value *DirectAttachmentIndex = nullptr;
+  if (auto *IndexConst = dyn_cast<ConstantInt>(CI.getArgOperand(0))) {
+    uint64_t IndexValue = IndexConst->getZExtValue();
+    if (IndexValue == feme::kSubpassLoadDirectDepthAttachmentIndex)
+      DirectAttachmentIndex =
+          Builder.CreateSub(SubpassInputHeapCount, Builder.getInt32(2));
+    else if (IndexValue == feme::kSubpassLoadDirectStencilAttachmentIndex)
+      DirectAttachmentIndex =
+          Builder.CreateSub(SubpassInputHeapCount, Builder.getInt32(1));
+  }
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Active =
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *AttachmentIndex =
-        extractLaneOrScalar(Builder, CI.getArgOperand(0), Lane);
+        DirectAttachmentIndex
+            ? DirectAttachmentIndex
+            : extractLaneOrScalar(Builder, CI.getArgOperand(0), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Sample = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
     Value *InvocationIndex =
