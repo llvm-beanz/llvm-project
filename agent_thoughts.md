@@ -116422,3 +116422,60 @@ No work done outside `feme/` this session — nothing found to isolate/fix in an
 ## A process note for future sessions
 
 My first version of `L391`'s regression test passed even *without* the fix — both the suspended and resuming instance drew the same color over an overlapping area, so the assertion couldn't distinguish "resume honored CLEAR" from "resume's own draw just overwrote the pixel anyway." Caught this only by actually doing the `git checkout --`/rebuild A/B check that past sessions' own process notes recommend, rather than trusting a test that merely compiled and passed once. Keep doing the A/B check even when a test looks obviously correct on inspection — "looks right" and "proven right" are not the same thing, and this is now the third session in a row where that gap mattered (after `L386`'s and `L388`'s own self-caught bugs).
+
+# Session: L390 fix completed and fully CTS-verified (0 Fail/28,898) (2026-10-06)
+
+Device check: `VK_ICD_FILENAMES=$(find build -iname feme_icd.json) VK_DRIVER_FILES=$(find build -iname feme_icd.json) vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start and end; plain `vulkaninfo --summary` without the env vars still reports the ambient `llvmpipe` default — expected, documented in `feme/.instructions.md`, not a bug).
+
+## tl;dr
+
+Picked up `L390` exactly where the prior session's root-cause left off (a `subpassInput`/`usubpassInput` with no `input_attachment_index` decoration — a deliberate, spec-legal "read the current subpass's own depth/stencil attachment directly" shape). Implemented the fix, found and fixed **two** regressions along the way, added a regression unit test for each, and finished with a full 28,898-case CTS re-sweep of the whole `dynamic_rendering.*` family showing **0 Fail** (down from the 12 Fails this family has carried since `L391`'s own sweep last session). This closes out the `renderpasses.dynamic_rendering.*` family entirely for now — every previously-tracked Fail in it is gone.
+
+## What actually shipped
+
+- `StageOpKind::SubpassLoad` reused unchanged — no new op kind needed.
+- `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) now bakes one of two new reserved sentinel constants (`kSubpassLoadDirectDepthAttachmentIndex`/`kSubpassLoadDirectStencilAttachmentIndex`, added to `StageOps.h`) as the `attachment_index` operand instead of declining the match when `input_attachment_index` is absent.
+- `lowerFragmentSubpassLoad` (`FragmentWrapper.cpp`) detects the sentinel at runtime and resolves it against `SubpassInputHeapCount - 2`/`- 1` — the last two slots of the per-draw subpass-input heap.
+- `buildSubpassInputHeap` (`CommandBuffer.cpp`) always appends two trailing heap slots populated directly from `Draw.DepthStencil.Depth`/`.Stencil`, independent of whether any *indexed* subpass input is also in play.
+- **Zero new ABI struct fields, zero new function parameters.** Smallest possible surface for the fix.
+
+## Two regressions, two independent root causes (don't conflate them like I almost did)
+
+1. **`Executor.cpp`'s `HasSelfReferencingDepthStencilInput` (`L330`) false-positived on every depth/stencil draw.** It scans every `SubpassInputHeap` entry's `Data` pointer against `DepthStencil.Depth`/`.Stencil`'s own pointer to detect a genuine feedback loop (shader reads what it's about to write). The two new trailing slots *always* equal that same pointer by construction — not because of a real self-reference — so the scan needs to simply skip them: `Draw.SubpassInputHeap.drop_back(std::min<size_t>(2, ...))`. A true feedback-loop self-reference can only ever happen through a *real*, indexed `subpassLoad`, never through this direct no-index mechanism, so excluding the last two slots from the scan is always correct, not just a workaround.
+2. **My own interim attempt at fixing (1) broke a different CTS case family.** I first tried gating the two trailing slots' *construction* on `Any` (whether the draw already used the indexed subpass-input mechanism for *something*). This seemed reasonable until I read the actual CTS source (`vktDynamicRenderingLocalReadTests.cpp`) for `depth_stencil_mapping_to_no_index_depth_clear`/`_stencil_clear` and found their shaders read **only** the no-index depth/stencil input — zero indexed subpass input anywhere else in the subpass. `Any` is `false` for exactly the draws that need the direct slots, so gating construction on it was backwards. Reverted that gate entirely; fix (1) alone (excluding the slots from the *scan*, not gating their *construction*) is sufficient and correct on its own.
+
+The lesson here (echoing last session's own "A process note," now a fourth session in a row where this mattered): when a fix for a regression itself causes a *second* regression, don't assume the two problems are coupled and need one combined gate. They were actually two independent, narrow problems, each with its own narrow fix. Trying to solve both with one conditional was the wrong shape from the start.
+
+## Verification
+
+1. New unit test `DrawTest.SubpassLoadReadsBackTheDepthAttachmentItWroteWithNoIndex` — reproduces regression (2)'s exact shape (never calls `vkCmdSetRenderingInputAttachmentIndices`, so `Any` stays `false` throughout). Passes alongside all 6 pre-existing `*SubpassLoad*` tests.
+2. `FeMeVulkanTests`: 804/804 Passed (+1 new test, 0 regressions, including the regression-1 case `DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave` now passing again).
+3. `ninja check-feme`: 3,605/3,608 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+4. CTS `local_read` sub-family (182 cases, the originally-targeted family): 105 Passed, 0 Failed, 77 NotSupported (`shader_object`, expected — no `VK_EXT_shader_object`). All 12 originally-Fail cases now Pass.
+5. **Full `dEQP-VK.renderpasses.dynamic_rendering.*` re-sweep (28,898 cases, ran most of this session in the background due to heavy MSAA sub-families being slow):** 12,423 Passed, **0 Failed**, 16,475 Not supported, 0 Warnings, 0 Waived. This is the whole family, not just the targeted sub-family — confirms the fix is completely clean with no collateral damage anywhere else in `dynamic_rendering.*`.
+6. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no change needed — this is an internal correctness fix to already-advertised `VK_KHR_dynamic_rendering_local_read` functionality, not a new feature/extension-surface addition.
+
+## A performance note for future sessions (not a bug, just a heads-up)
+
+The full 28,898-case sweep took noticeably longer this session than `L391`'s own equivalent full sweep last session — the `multisample_resolve.layers_3.*samples_8*` sub-family in particular is very heavy (likely large multi-layer MSAA framebuffers being resolved on a CPU rasterizer) and can take minutes to clear a handful of cases, making the sweep *look* stalled when checked at short intervals even though it's genuinely progressing (confirmed via repeated `ps aux` CPU-time increments and advancing case names in the tail log). At one point the process briefly showed as `sleeping` on a `futex_wait_queue` with zero case-count progress for ~500 seconds, and `ps -eLf` showed **1,125 threads** for the single `deqp-vk` process — this is unusually high and is worth a future session's attention as a possible thread-pool-reuse gap in the CPU renderer under heavy multi-layer-MSAA load, though it eventually resumed on its own and the sweep did complete cleanly. Not investigated further this session (no reproducer isolated, didn't want to scope-creep away from `L390`), but flagging it explicitly here in case a future session sees an actual hang in a similar case shape.
+
+## Commits this session
+
+1. `feme: add L390 direct depth/stencil subpass-load sentinel constants` — `StageOps.h`.
+2. `feme: bake a sentinel constant for no-index subpass depth/stencil reads` — `SPIRVToLLVMPatterns.cpp`.
+3. `feme: resolve no-index subpass sentinel at runtime in FragmentWrapper` — `FragmentWrapper.cpp`.
+4. `feme: build and safely detect the direct depth/stencil subpass-load heap slots` — `CommandBuffer.cpp` + `Executor.cpp` + the new `DrawTest.cpp` unit test (both regression fixes and the test, together since they're tightly coupled).
+5. `feme: update Roadmap/VulkanCTSReport for the completed L390 fix` — docs, with the `local_read`-sub-family-scoped verification numbers.
+6. `feme: record full-family re-sweep confirmation for the L390 fix (0 Fail/28,898)` — docs, with the full-family sweep's final 0-Fail tally once it finished.
+7. This `agent_thoughts.md` commit.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in another LLVM subproject.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, the only remaining design-session item, carried over across many sessions now (genuinely not touched this session — deliberately deferred, consistent with explicit guidance carried over from the prior two sessions that two independent fix attempts already failed and a real design sitting is needed)**: `L375` (`DiamondFlattener` double-visitation of ordinary merge blocks by independent top-level `flatten()` calls). Do **not** re-attempt a PDT/DT recompute — confirmed via tracing (not guessing) that the predecessor count genuinely is 1 by the second visit, so recomputing cannot help. The next real step is a `FlattenedBlockMasks`-style memoization recording a block's final `Masks` once a walk fully reconverges past it, generalizing the existing `CycleBoundaryMasks`/H120 mechanism beyond cycle-boundary blocks to ordinary merge blocks.
+2. **~30 min, low priority, carried over from last session, still not done**: the `primary_cmd_buff.random` bucket (756 Fails from the *old*, pre-`L390`/`L391` baseline — note this bucket's current Fail count needs re-confirming now that both `L390` and `L391` are fixed, since the full sweep above showed 0 Fail family-wide, meaning this bucket may already be fully resolved as a side effect and this item may simply be closed; check the full sweep's log for `random` case names before spending any time here, since the numbers may no longer apply).
+3. **~1 hour, new this session**: investigate the 1,125-thread / brief-futex-stall anomaly observed during the `multisample_resolve.layers_3.*samples_8*` sweep (see the performance note above) — not a confirmed bug yet, just an anomaly worth a dedicated look with a narrower, isolated reproducer (a single `samples_8_baseLayer*` case run standalone, checked for thread count via `ps -eLf` before assuming it's actually a problem rather than expected CPU-renderer-under-heavy-MSAA-load behavior).
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+**Big picture**: with the full `dynamic_rendering.*` family now at 0 Fail family-wide, `L375` is unambiguously the single remaining substantial open item in the FeMe backlog — every other queued triage/fix item from the last several sessions has been resolved. Next session should very likely just go straight at `L375`'s design problem rather than look for more small wins first.
