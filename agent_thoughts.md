@@ -116810,3 +116810,116 @@ No issues found outside `feme/` (the one fuzzer-tool change is inside
    regression.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
+
+# Session: L375 4th investigation — exact root-cause mechanism confirmed via tracing, no code change (2026-10-07)
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed at session start, via the ICD at
+`build/tools/feme/tools/feme-vulkan/feme_icd.json` (per standing instructions, every session).
+
+## Done this session
+
+1. Handoff offered one item: `L375`, explicitly flagged "do not retry ad
+   hoc" after three failed fix attempts across prior sessions, with
+   instructions to pick one of two abstract directions and *design* it
+   before touching code. Decided the prior sessions' own written
+   hypotheses weren't independently re-verifiable (based on since-reverted
+   traces), so re-reproduced from scratch with new, more precise
+   instrumentation before designing anything.
+2. Reproduced `dEQP-VK.spirv_assembly.instruction.graphics.loop.switch_continue_geom`
+   live via `gdb -batch -ex run -ex bt` — confirmed current backtrace
+   (single `DiamondFlattener` instance, crash in `flatten` called
+   recursively from `flatten`, called from `flattenLoopBodyRegion`).
+3. Added temporary, env-var-gated tracing (`FEME_DEBUG_FLATTEN_TRACE_L375`)
+   to `DiamondFlattener::flatten()`: per-call IDs, entry/return-point/
+   branch-point prints showing `Cur`/`End`/`RedirectTo`/`T`/`F`/`R`/
+   `R.NumPreds`/`divergent`. Built, ran against the reproducer, captured
+   the full trace to `/tmp/l375_trace2.log`.
+4. **Reconstructed the exact call tree and root cause** (see
+   `Roadmap.md`'s `L375` entry for the full mechanistic writeup):
+   `DiamondFlattener::run()`'s own `Roots` loop makes two *independent,
+   sequential* top-level `flatten()` calls that both reach the same
+   physical merge block (`Flow26.Flow27_crit_edge`). The first processes
+   it as a uniform diamond and builds real `phi` nodes consuming both its
+   predecessor edges. The second, unrelated root call later flattens an
+   upstream divergent branch (`Flow26`) whose own merge point is the
+   *same physical block* — its `RedirectTo`-based terminator rewrite
+   silently steals one of that block's predecessor edges out from under
+   the first call's already-finalized `phi` nodes, then re-enters the
+   block a second time with only one predecessor left, tripping the
+   2-predecessor assumption.
+5. This **sharpens and corrects** the 2nd attempt's "two independent
+   top-level calls share a block" finding (now mechanistically exact,
+   not just observed) and explains *why* the 3rd attempt's naive
+   memoization alone wasn't sufficient: the defect isn't "revisiting a
+   block" in the abstract, it's "a later root's redirect mutation
+   invalidates an earlier root's already-finalized IR" — detection/
+   memoization without also preventing the mutation would still leave
+   broken `phi` nodes.
+6. Documented two concrete next-session design directions in
+   `Roadmap.md`: (a) refuse a redirect that would steal a predecessor
+   edge from an already-finalized merge block (extends the existing
+   `CycleBoundaryMasks` bookkeeping pattern), or (b) change `run()`'s
+   root-selection/ordering so a block is never added as an independent
+   root while an earlier, undiscovered divergent branch still targets it
+   as its own merge point — recommended as the structurally cleaner
+   option to attempt first.
+7. **Fully reverted all tracing instrumentation** (`git checkout --`) —
+   confirmed `Linearize.cpp` is byte-for-byte unchanged from session
+   start. No functional code change this session.
+8. While documenting, noticed `VulkanCTSReport.md` item 9 (pipeline
+   SIGSEGV triage, "fully closed") found only 3 remaining pipeline
+   crashes, but the Complete group accounting table still shows `pipeline`
+   Crash=46 / DeviceLost=12 — flagged this discrepancy for the next
+   stability session rather than chasing it down this session (budget
+   went to `L375`).
+
+## Why this was the right priority
+
+The handoff was explicit: don't retry ad hoc, and the prior sessions'
+own hypotheses were built on evidence that no longer exists to check.
+Re-deriving the mechanism from a fresh, more precise trace was the only
+way to actually satisfy "design it, don't guess" — and it paid off: this
+is the first session where the *exact* mutation-order mechanism (not
+just "two calls touch the same block") is confirmed, with two concrete,
+implementable design directions instead of two abstract ones. Given this
+took the full session to nail down precisely and implementing a CFG
+structural fix safely (with full regression testing against all three
+reproducers) is itself a multi-hour task, stopping at a thorough, correct
+design hand-off was the right call rather than risking a rushed fourth
+failed attempt.
+
+## Commits this session
+
+1. `feme: L375 - precisely nail root-cause mechanism via live tracing
+   (docs only)` — `feme/docs/Roadmap.md`.
+2. `feme: flag pipeline SIGSEGV/DeviceLost count discrepancy for next
+   session` — `feme/docs/VulkanCTSReport.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change —
+no conformance-surface change this session (docs/investigation only).
+No offload-test-suite changes. No issues found outside `feme/`. No CTS
+re-run performed (no functional code changed, so no regression risk to
+verify, per standing guidance's intent).
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, dedicated design+implementation session, now with a fully
+   confirmed mechanism and two concrete design options**: implement
+   `L375` direction (b) first — change `DiamondFlattener::run()`'s root
+   selection/ordering so a block already known (via `PDT`, computed once
+   up front) to be the immediate post-dominator of an earlier-discovered,
+   not-yet-flattened divergent branch is never independently added as its
+   own `Roots` entry. If that proves structurally awkward, fall back to
+   direction (a): refuse a `RedirectTo` rewrite that would steal a
+   predecessor edge from an already-`phi`-finalized merge block (a
+   `CycleBoundaryMasks`-style extension). Re-verify against all four
+   known reproducers: `switch_continue_{geom,tessc,tesse}` and
+   `graphicsfuzz.nested-for-loops-switch-fallthrough` (`L383(a)`).
+2. **~30 min**: reconcile `VulkanCTSReport.md`'s `pipeline` Crash=46/
+   DeviceLost=12 table figures against item 9's "only 3 crashes remain"
+   finding — re-run a fresh full `dEQP-VK.pipeline.*` sweep (or at least
+   recapture `Crash`/`DeviceLost` case names) to confirm whether the table
+   is stale or whether new crashes exist. Also still completely untriaged:
+   `robustness`'s 8 `DeviceLost` cases (never had case names recorded).
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented, no action needed.
