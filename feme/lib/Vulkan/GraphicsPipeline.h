@@ -540,11 +540,6 @@ public:
                             : State.Depth.WriteEnable;
     return TestEnable || WriteEnable;
   }
-  bool needsStencilAttachment(const DynamicGraphicsState &Dynamic) const {
-    return isDynamic(DynamicStateStencilTestEnable)
-               ? Dynamic.StencilTestEnable
-               : State.Stencil.TestEnable;
-  }
   const feme::cpu::CompiledStage &vertexStage() const {
     return *State.Artifact->VertexStage;
   }

@@ -1933,11 +1933,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     return createStringError(inconvertibleErrorCode(),
                              "depth testing/writes are enabled but the draw "
                              "has no bound depth attachment");
-  const StencilState &PipelineStencil = Pipeline.getStencilState();
-  if (PipelineStencil.TestEnable && Draw.DepthStencil.Stencil.Data.empty())
-    return createStringError(inconvertibleErrorCode(),
-                             "stencil testing is enabled but the draw has "
-                             "no bound stencil attachment");
+  // (Roadmap L394) Per the Vulkan spec, enabling the stencil test (static
+  // or dynamic, `dEQP-VK.pipeline.*.stencil.no_stencil_att.*`'s own shape)
+  // against a render target with no stencil attachment is legal: the
+  // stencil test is simply never performed (nothing to compare against or
+  // write to), exactly as if `stencilTestEnable` were false, and the draw
+  // must otherwise proceed normally (its color/depth results are
+  // unaffected). This used to hard-error here, latching the device lost
+  // -- a copy of `getStencilState()` with `TestEnable` forced off in this
+  // no-attachment case is handed to every stencil-consulting check below
+  // instead (`testDepthStencil`'s own precondition that `StencilAttachment`
+  // is only dereferenced when `Stencil.TestEnable` is true still holds,
+  // since this copy's `TestEnable` is false exactly when the attachment is
+  // unbound).
+  StencilState PipelineStencil = Pipeline.getStencilState();
+  if (Draw.DepthStencil.Stencil.Data.empty())
+    PipelineStencil.TestEnable = false;
   // A depth-only pipeline (no fragment shader color output) legally has
   // zero color attachments (`dEQP-VK.multiview.depth_without_fragment_
   // shader`'s own shape, roadmap H2b); the count-match check below is

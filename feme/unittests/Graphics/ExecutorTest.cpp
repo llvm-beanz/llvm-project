@@ -4226,10 +4226,21 @@ TEST(ExecutorTest, StencilTestPassesAndReplacesReference) {
   }
 }
 
-TEST(ExecutorTest, RejectsStencilStateWithoutBoundAttachment) {
+// (Roadmap L394) Enabling the stencil test against a draw with no bound
+// stencil attachment is legal per the Vulkan spec -- the stencil test is
+// simply never performed, exactly as if `stencilTestEnable` were false --
+// not an error (`dEQP-VK.pipeline.*.stencil.no_stencil_att.*`'s own shape,
+// a real `DeviceLost` this used to hard-error into). `Stencil.Back` is
+// configured to always fail and zero the (non-existent) stencil value, so
+// if the no-attachment case were ever treated as "test enabled" rather
+// than skipped, this would either crash dereferencing the empty stencil
+// data or spuriously suppress the color write below.
+TEST(ExecutorTest, StencilTestEnabledToleratesNoBoundStencilAttachment) {
   Context Ctx;
   StencilState Stencil;
   Stencil.TestEnable = true;
+  Stencil.Back.Compare = CompareOp::Never;
+  Stencil.Back.FailOp = StencilOp::Zero;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
       PrimitiveTopology::TriangleList, DepthState{}, Stencil);
@@ -4240,7 +4251,9 @@ TEST(ExecutorTest, RejectsStencilStateWithoutBoundAttachment) {
                       3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
                       -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
   PreparedDraw Draw = Scene.prepare(); // BindStencil left false.
-  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
 }
 
 // Roadmap R33: blending, write masks, and logic ops.

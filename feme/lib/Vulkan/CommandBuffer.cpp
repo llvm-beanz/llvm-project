@@ -1976,10 +1976,12 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     return createStringError(inconvertibleErrorCode(),
                              "the bound pipeline tests/writes depth but the "
                              "render target has no depth attachment");
-  if (Pipeline.needsStencilAttachment(Gfx.Dynamic) && !Gfx.Binding.Stencil)
-    return createStringError(inconvertibleErrorCode(),
-                             "the bound pipeline tests stencil but the "
-                             "render target has no stencil attachment");
+  // (Roadmap L394) Unlike depth above, stencil testing with no bound
+  // stencil attachment is legal (`dEQP-VK.pipeline.*.stencil.
+  // no_stencil_att.*`'s own shape): the spec treats it as a no-op, not an
+  // error, so `Executor.cpp`'s `executeDraws` is the one place that
+  // forces the effective `TestEnable` off in that case -- nothing to
+  // reject here.
 
   ResolvedDrawAttachments Resolved;
   bool AnyResolve = false;
