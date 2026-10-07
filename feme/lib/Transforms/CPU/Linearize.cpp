@@ -1344,14 +1344,26 @@ private:
   /// tripping `flatten`'s own "exactly two predecessors" assertion later.
   /// `R->hasNPredecessors(2)` above already guards a diamond's own
   /// *reconvergence* point against an unexpected third predecessor; this
-  /// is the missing, symmetric guard on the diamond's own *start* against
-  /// being an unexpected second entry into a block some other root
-  /// already claimed. Tracked in `MergeVisited` -- a per-instance member,
-  /// deliberately *not* reset between roots the way `CycleBoundaryBlocks`
-  /// is (see `run`'s own loop) -- rather than a parameter threaded only
-  /// through one top-level call's own recursion, since (as the live trace
-  /// above shows) the collision is not confined to a single top-level
-  /// call's own arms.
+  /// is the missing, symmetric guard against a block (any block this
+  /// walk visits -- not only a divergent diamond's own start, see
+  /// `L383(a)`'s 7th investigation) being an unexpected second entry into
+  /// territory some other walk already claimed. A plain pass-through
+  /// block (an ordinary `UncondBr` link in one arm's chain) can be
+  /// exactly such territory too: found live-traced as a block reached
+  /// both partway down an outer diamond's own arm chain *and* directly as
+  /// a nested diamond's own branch successor (found later, within the
+  /// *other* arm), where both diamonds' own `R` happened to coincide --
+  /// each arm's own `hasNPredecessors(2)` check at its own `R` passes
+  /// individually (each only ever sees the 2 physical edges actually
+  /// feeding that shared `R`), so only tracking every visited block here,
+  /// not just `CondBr`-terminated diamond starts, catches the overlap
+  /// before `flatten` later steals one of those edges out from under the
+  /// other arm's own, not-yet-processed merge. Tracked in `MergeVisited`
+  /// -- a per-instance member, deliberately *not* reset between roots the
+  /// way `CycleBoundaryBlocks` is (see `run`'s own loop) -- rather than a
+  /// parameter threaded only through one top-level call's own recursion,
+  /// since (as the live trace above shows) the collision is not confined
+  /// to a single top-level call's own arms.
   bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false,
                unsigned Depth = 0);
 
@@ -1377,16 +1389,20 @@ private:
   /// after it is squarely this pass's.
   SmallPtrSet<BasicBlock *, 8> CycleBoundaryBlocks;
 
-  /// Roadmap L375 (6th investigation): every ordinary (non-cycle-boundary)
-  /// diamond-start block `validate` has approved so far -- a *reference*
-  /// to state owned by `LinearizePass::run`'s own per-`Function` driver
-  /// (see its own comment), shared across every `DiamondFlattener`
-  /// instance constructed for that one `Function` (this whole-function
-  /// pass's own instance, and every one `LoopLinearizer` separately
-  /// constructs internally for a single cycle or candidate block) --
-  /// *not* a member owned by any single instance, since the live-traced
-  /// collision this exists to reject (see `validate`'s own comment) can
-  /// span two entirely different, sequentially-constructed-and-destroyed
+  /// Roadmap L375 (6th investigation), broadened by L383(a) (7th
+  /// investigation): every ordinary (non-cycle-boundary) block `validate`
+  /// has visited so far -- originally only diamond-start (`CondBr`)
+  /// blocks, now every block the walk passes through (see `validate`'s
+  /// own comment for why a plain pass-through `UncondBr` link needs the
+  /// same guard) -- a *reference* to state owned by
+  /// `LinearizePass::run`'s own per-`Function` driver (see its own
+  /// comment), shared across every `DiamondFlattener` instance
+  /// constructed for that one `Function` (this whole-function pass's own
+  /// instance, and every one `LoopLinearizer` separately constructs
+  /// internally for a single cycle or candidate block) -- *not* a member
+  /// owned by any single instance, since the live-traced collision this
+  /// exists to reject (see `validate`'s own comment) can span two
+  /// entirely different, sequentially-constructed-and-destroyed
   /// `DiamondFlattener` objects, not just two roots within one object's
   /// own `run()`. Unlike `CycleBoundaryBlocks` below, deliberately never
   /// cleared for the lifetime of that per-`Function` driver.
@@ -1475,12 +1491,76 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
       return true;
     }
 
+    auto *Br = dyn_cast<CondBrInst>(Term);
+
+    // Roadmap L151: a cycle-boundary exemption must be checked before
+    // `MergeVisited` below, since a cycle's own exit edge may legitimately
+    // be revisited by more than one walk (see `CycleBoundaryBlocks`'s own
+    // comment for why).
+    if (Br && isInCycle(Cur) &&
+        (isLoopControlOrHeaderRelayEdge(Cur, Br->getSuccessor(0)) ||
+         isLoopControlOrHeaderRelayEdge(Cur, Br->getSuccessor(1)))) {
+      CycleBoundaryBlocks.insert(Cur);
+      // Remember the reconvergence point (if any) this walk was headed for
+      // when it stopped here, so `run` can seed this cycle's own
+      // exit-block root with the *same* one (see `RootEnd`) instead of
+      // always assuming the cycle's exit reaches a `ret` directly. A cycle
+      // nested inside an enclosing diamond's arm (e.g. a second, sibling
+      // loop inside an `if`'s true arm) has its exit block's own
+      // downstream code -- up to and including that diamond's merge --
+      // *shared* with the enclosing diamond's other arm; without this,
+      // the exit-block root's own `flatten` walk would independently
+      // re-walk (and re-mask, with a stale, narrower mask) that same
+      // shared tail after the enclosing root's walk already merged and
+      // masked it correctly.
+      CycleBoundaryEnd.try_emplace(Cur, End);
+      return true; // Stop here; LoopLinearizer's problem, not an error.
+    }
+
+    // Roadmap L375/L383(a): see `MergeVisited`'s own comment for the exact
+    // shape this rejects -- any block (not only a divergent diamond-start
+    // block, see L383(a)'s 7th investigation) that some *other*,
+    // already-processed walk already claimed as its own. Checked here
+    // (after the cycle-boundary early return above has already had its
+    // chance to accept a legitimate multi-visit) and keyed on `Cur`
+    // itself, not `R`: `R->hasNPredecessors(2)` below only catches a
+    // reconvergence point with an unexpected third predecessor at the
+    // moment its owning diamond is validated, not a plain pass-through
+    // block reachable from two different arms that happens to merge back
+    // into the same reconvergence point from both -- e.g. an outer
+    // diamond's own arm chain passing through a block that a nested
+    // diamond (found later, within the *other* arm) also branches to
+    // directly as one of its own two successors. Both arms' own
+    // `hasNPredecessors(2)` checks pass individually (each only ever sees
+    // the 2 physical edges actually feeding their own shared `R`), so the
+    // overlap is invisible unless the shared interior block itself is
+    // tracked, which is what moving this check here (covering every
+    // visited block, not only `CondBr`-terminated diamond starts)
+    // accomplishes.
+    if (!MergeVisited.insert(Cur).second) {
+      if (!Quiet)
+        diagnose(F, "block '" + Cur->getName() +
+                        "' is reached by more than one divergent root "
+                        "(a shared merge point outside a cycle boundary); "
+                        "unsupported (roadmap milestone 6 deviation, L375)");
+      return false;
+    }
+
+    if (isa<ReturnInst>(Term)) {
+      if (End != nullptr) {
+        if (!Quiet)
+          diagnose(F, "early return under a divergent branch is not yet "
+                      "supported (roadmap milestone 6 deviation)");
+        return false;
+      }
+      return true;
+    }
+
     if (auto *UBr = dyn_cast<UncondBrInst>(Term)) {
       Cur = UBr->getSuccessor(0);
       continue;
     }
 
-    auto *Br = dyn_cast<CondBrInst>(Term);
     if (!Br) {
       if (!Quiet)
         diagnose(F, "unsupported terminator '" +
@@ -1491,45 +1571,6 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
 
     BasicBlock *T = Br->getSuccessor(0);
     BasicBlock *Fsucc = Br->getSuccessor(1);
-
-    if (isInCycle(Cur) &&
-        (isLoopControlOrHeaderRelayEdge(Cur, T) ||
-         isLoopControlOrHeaderRelayEdge(Cur, Fsucc))) {
-      CycleBoundaryBlocks.insert(Cur);
-      // Roadmap L151: remember the reconvergence point (if any) this walk
-      // was headed for when it stopped here, so `run` can seed this
-      // cycle's own exit-block root with the *same* one (see `RootEnd`)
-      // instead of always assuming the cycle's exit reaches a `ret`
-      // directly. A cycle nested inside an enclosing diamond's arm (e.g.
-      // a second, sibling loop inside an `if`'s true arm) has its exit
-      // block's own downstream code -- up to and including that diamond's
-      // merge -- *shared* with the enclosing diamond's other arm; without
-      // this, the exit-block root's own `flatten` walk would independently
-      // re-walk (and re-mask, with a stale, narrower mask) that same
-      // shared tail after the enclosing root's walk already merged and
-      // masked it correctly.
-      CycleBoundaryEnd.try_emplace(Cur, End);
-      return true; // Stop here; LoopLinearizer's problem, not an error.
-    }
-
-    // Roadmap L375 (6th investigation): see `MergeVisited`'s own comment
-    // for the exact shape this rejects -- an ordinary (non-cycle-boundary)
-    // diamond-start block some *other*, already-processed root already
-    // claimed as its own. Checked here (after the cycle-boundary early
-    // return above has already had its chance to accept a legitimate
-    // multi-visit) and keyed on `Cur` itself, not `R`:
-    // `R->hasNPredecessors(2)` below only catches a reconvergence point
-    // with an unexpected third predecessor, not a diamond-start block
-    // that is itself an unexpected second entry into territory another
-    // root already validated.
-    if (!MergeVisited.insert(Cur).second) {
-      if (!Quiet)
-        diagnose(F, "block '" + Cur->getName() +
-                        "' is reached by more than one divergent root "
-                        "(a shared merge point outside a cycle boundary); "
-                        "unsupported (roadmap milestone 6 deviation, L375)");
-      return false;
-    }
 
     BasicBlock *R = immediatePostDom(Cur);
     if (!R) {
@@ -1765,8 +1806,9 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
     if (auto *UBr = dyn_cast<UncondBrInst>(Term)) {
       BasicBlock *Succ = UBr->getSuccessor(0);
       if (Succ == End) {
-        if (RedirectTo != End)
+        if (RedirectTo != End) {
           UBr->setSuccessor(0, RedirectTo);
+        }
         return Masks;
       }
       Cur = Succ;
