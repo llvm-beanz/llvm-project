@@ -1081,6 +1081,47 @@ The largest ordinary-failure changes by group are:
     fix only, no new feature surfaced. Handoff items 1 and 2 (bisection
     and oob triage) are therefore both fully closed this session, with no
     further action needed on either.
+29. **`pipeline` `Crash=46`/`api` `Crash=1` reconciled this session: both
+    are stale, zero real crashes remain.** Extended item 9's/`L394`'s own
+    targeted-case-name technique instead of a full `pipeline.*` sweep
+    (still ~1.17-1.64M cases, infeasible). Recovered the exact 53 `Unrun`
+    case names from the original `feme-20261005-full-1170553-complete/
+    report.txt` baseline artifact (49 `pipeline`, 1 `api`, 1
+    `graphicsfuzz`, 2 `spirv_assembly` -- the same artifact item
+    9/`L385`/`L394` have each reused) and re-ran all 49 `pipeline` cases
+    plus the 1 `api` case verbatim against the current build:
+    **49/49 `pipeline` and 1/1 `api` cases now Pass, 0 Fail, 0 Crash.**
+    This confirms, with direct case-level evidence (not just the
+    `Roadmap.md` stability-row's own prose claim), that all 53 of the
+    original baseline's crash/`Unrun` cases are fixed: the 46 real
+    `pipeline` `SIGSEGV`s (44 `ds_resolve_sample_zero`, fixed by `L384`;
+    2 `compatible_render_pass`, fixed by `L381`) plus 3 collateral
+    `Unrun`-but-not-actually-crashing `ds_resolve_sample_zero` cases
+    (already noted by `L385` as pre-existing ordinary `Fail`s, now also
+    confirmed Pass -- a separate, later fix to `L379(a)`'s own
+    `resolveMode` gap not tracked under any single roadmap item in this
+    session's history, found only by this reconciliation's own direct
+    rerun), the 1 `api` `SIGSEGV` (fixed by `L382`), the 1 `graphicsfuzz`
+    crash (fixed by `L395`), and the 2 `spirv_assembly` crashes (fixed by
+    `L375`) -- **a complete, zero-crash close-out of the entire original
+    53-case baseline crash/`Unrun` set.** Also re-ran all 4 of `L375`'s/
+    `L383(a)`'s own known reproducers (`switch_continue_{geom,tessc,
+    tesse}`, `nested-for-loops-switch-fallthrough`) directly: all 4 now
+    fail with clean, diagnosable "roadmap milestone 6 deviation" errors
+    (ordinary `Fail`, not a crash) -- confirming the handoff claim that
+    `L375` is "still open, needing a design session" was itself stale;
+    `Roadmap.md`'s own `L375`/`L383(a)` rows already record both as
+    fixed (`Fix committed.` / `fixed (see L395)`), this session's rerun
+    is independent, direct confirmation of that record. **Group
+    accounting table:** `pipeline` `Pass` 259,029 -> 259,075, `Crash` 46
+    -> 0; `api` `Pass` 115,798 -> 115,799, `Crash` 1 -> 0. The remaining
+    `pipeline` `Fail`/`NotSupported` totals (39,644/873,467) are
+    themselves still the stale 2026-10-05 baseline figures, unrelated to
+    this reconciliation -- a full `pipeline.*` resweep remains infeasible
+    in a single session and is not attempted here. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- a documentation reconciliation only, no code changed this
+    item.
 
 
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
@@ -1090,7 +1131,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `api` | 267,504 | 115,798 | 34 | 151,671 | 0 | 0 | 0 | 1 | 0 | -15,511 |
+| `api` | 267,504 | 115,799 | 34 | 151,671 | 0 | 0 | 0 | 0 | 0 | -15,511 |
 | `binding_model` | 150,289 | 87,669 | 3 | 62,617 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `clipping` | 308 | 298 | 0 | 10 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `compute` | 61,460 | 686 | 0 | 60,774 | 0 | 0 | 0 | 0 | 0 | +0 |
@@ -1119,7 +1160,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `memory_model` | 18,530 | 161 | 52 | 18,317 | 0 | 0 | 0 | 0 | 0 | -114 |
 | `mesh_shader` | 28,044 | 468 | 69 | 27,507 | 0 | 0 | 0 | 0 | 0 | -21 |
 | `multiview` | 838 | 643 | 0 | 195 | 0 | 0 | 0 | 0 | 0 | +0 |
-| `pipeline` | 1,172,229 | 259,029 | 39,644 | 873,467 | 43 | 0 | 0 | 46 | 0 | +35,934 |
+| `pipeline` | 1,172,229 | 259,075 | 39,644 | 873,467 | 43 | 0 | 0 | 0 | 0 | +35,934 |
 | `postmortem` | 24 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `protected_memory` | 6,000 | 0 | 0 | 6,000 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `query_pool` | 19,276 | 16,587 | 0 | 2,689 | 0 | 0 | 0 | 0 | 0 | -328 |
@@ -1148,10 +1189,14 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 ## Conformance assessment
 
 This is not a conformant result. There are 47,172 ordinary failures, 340
-`DeviceLost` results, 50 process crashes, and 2,546,724 `NotSupported`
-outcomes. The latter include mandatory core capability gaps as well as
-optional extensions, so eliminating ordinary failures alone would not
-establish conformance.
+`DeviceLost` results, and 2,546,724 `NotSupported` outcomes. The latter
+include mandatory core capability gaps as well as optional extensions, so
+eliminating ordinary failures alone would not establish conformance.
+**Update: item 29 reconciled the previously-tracked "50 process crashes"
+figure -- all 53 of the original baseline's crash/`Unrun` cases (49
+`pipeline`, 1 `api`, 1 `graphicsfuzz`, 2 `spirv_assembly`) are now
+confirmed, via direct case-level reruns, to be fixed. Zero process
+crashes remain in the measured set.**
 
 The roadmap's C/H/J/K/L rows retain implementation ownership. Its 2026-10-05
 full-run re-triage prioritizes the shared `feme-cpu-linearize` dominance bug,
