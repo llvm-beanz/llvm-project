@@ -117139,3 +117139,42 @@ Last session's own edit to the "Stability work remains open" aggregate row claim
 4. **Process note for future sessions**: treat handoff lists as a *hypothesis*, not fact — this is now the 2nd-3rd session in a row that found a stale/incorrect claim in its own handoff (or in the immediately preceding session's own edit). Always re-verify via `git log --oneline --all | grep <L-number>` and a direct CTS rerun before starting "design session" work.
 
 No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
+
+# Session: full CTS sweep launched (2026-10-07, picking up where L397 left off)
+
+**Not done yet — a ~10-11 hour background job is now running. This entry exists so the next session picks it up correctly.**
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start of session, via `VK_ICD_FILENAMES=$(find / -iname "*feme*icd*.json") vulkaninfo --summary`).
+
+## Why: last session's handoff said "no known open bug," only task left was a fresh full sweep
+
+Verified the premise first (per the handoff's own item 4 process note): `git log`, clean tree, `L397` was indeed the last commit, build was fresh (no `feme/lib` files newer than `libfeme_vulkan.so`). No stale claims found this time — confirmed the handoff was accurate before proceeding.
+
+## What I did
+
+1. Generated a fresh full case list from the mustpass index (`external/vulkancts/mustpass/main/vk-default.txt` → concatenated all 32 listed sub-files) into `/tmp/vk_default_full_caselist.txt`: **3,237,548 cases**. (Tried `deqp-vk --deqp-runmode=txt-caselist` first — wrong approach, it emits `GROUP:` header lines mixed with cases and crashed partway on a missing data file because the cwd wasn't deqp's own module dir; the existing mustpass file list is the correct, already-used source the `feme-20261005-full-1170553-complete` baseline almost certainly used, so switched to that instead.)
+2. Launched `feme/utils/run_vulkan_cts.py` (the crash-tolerant batch/worker/solo-reverify harness already built for exactly this, documented in its own module docstring) as a **detached background process** (`nohup ... & disown`), since the historical precedent (`feme-20261005-full-1170553-complete`) took ~11 hours (07:02 to 18:22) for a near-identical case count — far longer than any single interactive turn.
+   - `--deqp-vk /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk`
+   - `--case-list /tmp/vk_default_full_caselist.txt`
+   - `--cwd /home/dev/dev/VK-GL-CTS/external/vulkancts/modules/vulkan` (required for deqp's relative data-file resolution)
+   - `--output-dir /home/dev/dev/VK-GL-CTS/run/feme-20261007-full`
+   - `--baseline-qpa /home/dev/dev/VK-GL-CTS/run/feme-20261005-full-1170553-complete/report.txt` (lets the final report diff against the Oct-5 baseline directly)
+   - `VK_ICD_FILENAMES` pointed at the feme ICD manifest; defaults for everything else (6 workers, 1800-case batches, matching the historical run).
+3. Confirmed it started cleanly: 6 `deqp-vk` worker processes running concurrently, 88 of ~1800 batches already completed within the first ~15 seconds, no errors in `driver.log`.
+
+## State for the next session (read this first)
+
+- **PID of the driver**: `69934` (background, detached via `disown` — survives this CLI session ending). Check with `ps aux | grep run_vulkan_cts` — if it's gone, check `/home/dev/dev/VK-GL-CTS/run/feme-20261007-full/report.txt` for completion (the script's own final step) or `driver.log`'s tail for a crash.
+- **Output dir**: `/home/dev/dev/VK-GL-CTS/run/feme-20261007-full/` — `lists/`, `qpa/`, `logs/` subdirs fill in as rounds progress; final report lands at `report.txt` in that same dir once all 3 rounds (initial batches → recovery → solo-Fail-reverification) finish.
+- **Do not re-launch a second sweep** on top of this one — check `ps aux` first. If it's still running, let it finish; if the host needs the CPU for something else, the process is just a script wrapping a worker pool and can be killed safely (it reconciles already-completed QPA records; no partial corruption risk) and the whole thing can be relaunched later from this same command.
+- Once `report.txt` exists, diff its `Result counts:` block against the Oct-5 baseline's (650,027 Pass / 47,171 Fail / 348 DeviceLost / 46 QualityWarning / 53 Unrun out of 3,244,369 total) to see the net movement across every fix since then (`L375` through `L397`, i.e. roughly 15+ roadmap items). Expect a large Fail-count drop given how many fixes have landed since Oct 5.
+- **Next actual bug-fixing work** only starts after this report exists: re-cluster the fresh Fail list by sub-family (the same technique used throughout this project, e.g. `L390`/`L391`/`L394`), pick the largest untriaged cluster, and begin a dedicated root-cause session on it.
+
+## Next steps, ranked
+
+1. **(ongoing, ~10-11 hrs, unattended)**: let the sweep above finish. Nothing else to do until `report.txt` lands.
+2. **(~1-2 hrs, once report lands)**: diff the fresh totals against the Oct-5 baseline, re-cluster the Fail list by sub-family, identify the single largest new untriaged cluster, and file it as a fresh roadmap `L`-item (next available number — `L397` was last used, so start at `L398`).
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed.
+4. No code changes this session — nothing to build/test beyond the existing `check-feme` baseline (unchanged, not re-run since no source touched).
+
+No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
