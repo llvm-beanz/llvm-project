@@ -116995,3 +116995,53 @@ Three fix attempts across three sessions (this one's first two, plus the prior s
 3. **~30 min, carried over, untouched this session**: triage the 2 `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails — never investigated, no hypothesis yet.
 4. **Still infeasible, don't attempt a full sweep, carried over**: `pipeline`'s own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Item 9's own 53-case targeted re-run (3 crashes, all `L375`, now fixed) remains the best evidence it's stale. If a future session wants to move this forward, extend item 9's targeted-case-name technique rather than a full sweep.
 5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+# Session: L383(a) fixed — DiamondFlattener pass-through-block collision (L395) (2026-10-07)
+
+**Win: the last process crash in the entire measured abnormal set is gone.** `graphicsfuzz.nested-for-loops-switch-fallthrough` no longer asserts — confirmed via a minimal, self-contained unit test that crashes pre-fix and passes a clean diagnostic post-fix.
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start and end of session).
+
+## What was wrong (previous session's close was incorrect)
+
+`Roadmap.md` had `L383(a)` marked "closed as a duplicate of `L375`" based on a shallow `gdb bt` match (same assertion, same call-chain shape). That was wrong. The prior session itself had already re-confirmed the crash survived `L375`'s fix but left the real mechanism unresolved — the handoff said to design-session it from scratch.
+
+## Root cause, in one paragraph
+
+`L375`'s `MergeVisited` check only ran for `CondBr`-terminated (diamond-start) blocks — it sat after `validate()`'s `UncondBrInst` early-`continue`, so plain pass-through blocks were never tracked. This reproducer has an outer divergent diamond whose true-arm is a straight-line chain that happens to pass through the *same physical block* (confirmed by pointer identity, not name) that a nested uniform diamond — found later, validating the outer diamond's false-arm — also branches to directly. Both diamonds' own `hasNPredecessors(2)` check at their shared reconvergence point passes individually (each only sees its own 2 edges), so the overlap is invisible until `flatten()`'s fallthrough rewrite steals one of the shared block's edges out from under the nested diamond's not-yet-processed merge.
+
+## How I found it (4 steps, ~2 hours)
+
+1. Disproved a stale-`PDT` hypothesis (built, tested, reverted — no effect).
+2. Added temporary `FLATTENTRACE-REDIRECT`/`FLATTENTRACE-PREDCOUNT` prints — found `Flow87`'s predecessor count dropping from 2 to 1 between two points that each expected 2.
+3. Added temporary `VALIDATETRACE`/`VALIDATECHAIN` prints with pointer identity — found the smoking gun: an unnamed block at the same address reached both from the outer arm's chain and as a nested diamond's direct successor.
+4. Fixed by moving `MergeVisited.insert(Cur)` to run for every visited block, not just `CondBr` starts. Removed all temporary trace instrumentation once confirmed.
+
+## Fix verified (all green, 0 regressions)
+
+1. New minimal IR test `shared-pass-through-block-between-arms.ll` — crashes identically pre-fix (`git stash` A/B), clean diagnostic post-fix.
+2. All 4 known reproducers (`switch_continue_{geom,tessc,tesse}`, `nested-for-loops-switch-fallthrough`) — no crashes, diagnostics unchanged/expected.
+3. `spirv_assembly.instruction.graphics.loop.*`: 32/35 Pass, 3 Fail, 0 Crash (unchanged).
+4. `graphicsfuzz.*` full 757 cases: 666 Pass / 83 Fail (+1, the former crash) / 8 Not Supported / **0 Crash**.
+5. `ninja check-feme`: 3,607/3,610 Passed (+1 new test), 3 Unsupported, 0 Failed.
+
+## Docs updated
+
+- `Roadmap.md`: rewrote the stale `L383(a)` row, added `L395` (the fix), updated the "Stability work remains open" aggregate row — all 53 original baseline crash cases are now fixed.
+- `VulkanCTSReport.md`: added item 27, updated `graphicsfuzz` group-accounting row (`Crash` 1→0, `Fail` 82→83).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change — internal correctness fix, no conformance-surface change.
+
+## Commits (3, small, separate)
+
+1. `c6dce510b507` — code fix + new unit test
+2. `520e707f2871` — Roadmap.md + VulkanCTSReport.md updates
+3. this commit — `agent_thoughts.md`
+
+## Next steps, ranked
+
+1. **~1 day, needs a reproducer preserving full-sweep ordering** (carried over, untouched): 8 `robustness.index_access.draw_indexed*pipeline_robustness_1*` `DeviceLost` cases. Case names recorded in `VulkanCTSReport.md` item 25. Isolated re-runs don't reproduce — bisect the full `index_access.*` sub-family first (the approach that worked for `L392`).
+2. **~30 min, carried over, untouched**: triage `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` — 2 Fails, no hypothesis yet.
+3. **Infeasible as a full sweep, carried over**: `pipeline`'s own `Crash=46` figure is unconfirmed (~1.17-1.64M cases). Best evidence it's stale: item 9's own 53-case targeted re-run found only 3 crashes, all now fixed (`L375`/`L395`). Extend that targeted-case-name technique rather than a full sweep if revisited.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed.
+
+No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
