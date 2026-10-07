@@ -177,9 +177,11 @@ The largest ordinary-failure changes by group are:
    `primary_cmd_buff.random` 756, `graphics_pipeline_library.suballocation`
    144, `complete_secondary_cmd_buff.suballocation` 144, all returning
    `VK_ERROR_INITIALIZATION_FAILED` at pipeline construction) -- left open
-   for a future session, see `Roadmap.md`. The 46 `pipeline` `SIGSEGV`s
-   below remain completely untouched and are the next stability-triage
-   priority.
+   for a future session, see `Roadmap.md`. **Update: fully resolved by
+   `L387` through `L391` (items 12-20 below), with items 20/23 confirming
+   a from-scratch full-family re-sweep at 0 Fail.** The 46 `pipeline`
+   `SIGSEGV`s below remain completely untouched and are the next
+   stability-triage priority.
 4. **Transform feedback and SPIR-V long tails.** `transform_feedback` has
    1,918 failures, led by primitives-generated query get/copy cases (1,308).
    `spirv_assembly` has 458 failures and two isolated `SIGABRT` crashes.
@@ -817,6 +819,26 @@ The largest ordinary-failure changes by group are:
     `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
     needed -- internal compile-path efficiency/stability fix only, no
     conformance-surface change.
+23. **`L393` -- `L392` follow-up sweep closed one remaining fuzzer-only gap;
+    `renderpasses.dynamic_rendering.*` triage confirmed already closed.**
+    A sweep of every `mlir::MLIRContext`/`feme::Context` construction site
+    in `feme/lib`/`feme/tools`/`feme/include` found one call site that
+    bypasses `feme::Context` and its `L392` fix entirely:
+    `feme-dxbc-import-fuzzer.cpp` builds a raw
+    `mlir::MLIRContext Context(Registry);` once per fuzz iteration, left at
+    MLIR's default `Threading::ENABLED`. Fixed with the same
+    `Threading::DISABLED` pattern as `L392`; built clean via `ninja
+    feme-dxbc-import-fuzzer`. No conformance-surface effect -- internal
+    tooling fix only, no `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed. Separately, a fresh,
+    from-scratch full re-run of `dEQP-VK.renderpasses.dynamic_rendering.*`
+    (28,898 cases) confirms this family's long-carried-over ordinary-Fail
+    triage item is **already fully resolved**, a side effect of `L387`
+    through `L391`'s own fixes in prior sessions: 12,423 Pass / **0 Fail**
+    / 16,475 NotSupported, 0 Crashes, 0 DeviceLost -- unchanged from the
+    prior session's own full-family sweep. No further triage or fix was
+    needed; the handoff's framing of this item as still outstanding was
+    itself stale.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
