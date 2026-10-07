@@ -116619,3 +116619,95 @@ session doesn't retread this one. `L392` is a brand-new, concretely
 reproduced item worth a session of its own — it's the first *resource leak*
 found in this project's history, a different flavor of bug than the compiler
 correctness issues most sessions have chased.
+
+# Session: L392 root-caused and fixed — MLIR per-Context thread pool churn (2026-10-07)
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed at session start (and will be every session, per standing instructions).
+
+## Done this session
+
+1. Ruled out `QueueExecutor` as `L392`'s leak source. Added temporary
+   `FEME_DEBUG_LEAK_TRACE_L392` tracing, ran the original 250-case repro 3x:
+   clean lifecycle every time (3 ctor/dtor pairs, back to 0). Reverted the
+   tracing before committing anything — it did its job ruling things out,
+   not confirming them.
+2. Broadened to the full 750-case `multisample_resolve.layers_3.*` family.
+   No crash, but real thread growth: 95 → 546+ OS threads over one run
+   (`ps -eLf` sampled every 20s).
+3. Found the actual threads via `/proc/<pid>/task/*/comm`: `llvm-worker-0`
+   through `llvm-worker-5` — `llvm::StdThreadPool`'s own naming, not
+   anything FeMe writes directly.
+4. Used `gdb -batch -ex "break pthread_create" -ex run -ex bt` to capture
+   the **creating** thread's backtrace (not the worker's own idle stack,
+   which only shows `pthread_cond_wait`). That's the one move that cracked
+   this open — static reading of ORC's defaults (correctly) said LLJIT's
+   compile dispatcher shouldn't spin up any threads, which sent the
+   previous session's hypothesis down a dead end. The real backtrace showed
+   `mlir::verify` → `OperationVerifier::verifyOpAndDominance` →
+   `mlir::parallelForEach` → `llvm::StdThreadPool::asyncEnqueue`, called
+   from `Vulkan/Pipeline.cpp`'s `compileGraphicsStage` via
+   `SPIRVToLLVMDialectTranslator::translate`'s `mlir::PassManager::run`.
+5. Root cause: `feme::Context`'s owned `mlir::MLIRContext` (one fresh
+   instance per shader-stage compile, `Pipeline.cpp:642`) never set
+   `Threading::DISABLED`, so MLIR's default (`Threading::ENABLED`) meant
+   every single shader compile's first pass/verifier call lazily spun up a
+   whole 6-worker `llvm::ThreadPool` — pure overhead for a single,
+   short-lived, one-shader synchronous compile that never benefits from
+   MLIR's own internal pass-level parallelism.
+6. **Fix:** `feme/lib/Core/Context.cpp` now constructs the owned
+   `mlir::MLIRContext` with `Threading::DISABLED`. Confirmed via reading
+   `mlir::parallelForEach`/`failableParallelForEach` that this makes every
+   call fall back to fully sequential processing, touching no thread pool
+   at all (checked via `context->isMultithreadingEnabled()`).
+7. Added `ContextTest.OwnedMLIRContextHasMultithreadingDisabled` asserting
+   `isMultithreadingEnabled() == false`.
+8. **Verified:** reran the same 750-case family post-fix — identical
+   results (600 Pass / 0 Fail / 150 NotSupported), but OS thread count
+   sampled every 15s stayed **flat at 7** for the whole run, instead of
+   climbing past 500. `ninja check-feme`: 3,606/3,609 Passed, 3 Unsupported,
+   0 Failed, 0 regressions.
+9. Updated `Roadmap.md`'s `L392` row and `VulkanCTSReport.md`'s
+   current-triage section (item 22) with the full root-cause writeup.
+10. Committed in two pieces: the fix+test, then the docs.
+
+## Why this was the right priority
+
+The handoff offered two items: `L375` (thrice-failed `DiamondFlattener`
+design problem, explicitly "do not re-attempt without real design time") and
+`L392` (brand-new, concretely reproduced resource-pool churn with a clear
+"use a tool, not more guessing" next step). `L392` had a tractable,
+evidence-driven path; `L375` did not, this session. Deliberately deferred
+`L375` again rather than risk a fourth failed attempt.
+
+## Commits this session
+
+1. `[feme] L392: disable MLIR multithreading for per-shader Context` —
+   `feme/lib/Core/Context.cpp`, `feme/unittests/Core/ContextTest.cpp`.
+2. `[feme] docs: record L392 root cause and fix` — `Roadmap.md`,
+   `VulkanCTSReport.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change —
+internal compile-path fix only, no conformance-surface change. No
+offload-test-suite changes this session. No issues found outside `feme/`.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, dedicated design session, unchanged**: `L375`
+   (`DiamondFlattener` double-visitation of ordinary merge blocks). Three
+   attempts have failed across three sessions. Do not retry ad hoc —
+   `Roadmap.md`'s `L375` entry has the full root-cause writeup and two
+   candidate designs (structurally prevent the overlap, or make the memo
+   re-threadable). Pick one and actually design it before touching code.
+2. **~15 min, cheap follow-up to this session's fix**: now that `L392`'s
+   root cause (MLIR's per-Context default threading) is confirmed, grep
+   for any *other* `mlir::MLIRContext` construction in `feme/lib`/
+   `feme/tools` that might have the same issue (e.g. `feme-opt`,
+   `feme-translate` — those are fine to leave multithreaded since they're
+   not latency/thread-count-sensitive CLI tools, but worth a quick check
+   that nothing else in the hot Vulkan ICD path builds a second context).
+3. **~30 min, low priority, long-carried-over**: the
+   `renderpasses.dynamic_rendering.*` remaining ordinary-Fail bucket's
+   largest sub-families — still not triaged, same `gdb bt`-per-family
+   approach that has worked repeatedly.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented, no action needed.
