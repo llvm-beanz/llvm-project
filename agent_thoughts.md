@@ -116923,3 +116923,37 @@ verify, per standing guidance's intent).
    `robustness`'s 8 `DeviceLost` cases (never had case names recorded).
 3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
+
+# Session: L375 5th investigation (overlap mechanism corrected, no fix) + L394 pipeline-DeviceLost fix + robustness/pipeline CTS reconciliation (2026-10-07)
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed at session start and again at session end, via the ICD at `build/tools/feme/tools/feme-vulkan/feme_icd.json` (per standing instructions, every session, every time).
+
+## Done this session
+
+1. `L375` 5th investigation (committed separately before this segment, `aed114eeccde`): corrected the 4th session's root-cause theory. The real overlap is `LoopLinearizer::linearizeCycle`'s scan-driver vs. `flattenLoopBodyRegion`, not `DiamondFlattener::run()`'s `Roots` loop as previously believed. No code fix — still a design item, now carried across five sessions. Full mechanistic writeup is in `Roadmap.md`'s `L375` entry; do not re-read this file for it, go straight there.
+2. Handoff item 2: reconcile `VulkanCTSReport.md`'s stale `pipeline` `Crash=46`/`DeviceLost=12` table figures.
+   - Tried a full `dEQP-VK.pipeline.*` sweep first (the "obvious" approach). **Dead end**: confirmed via `--deqp-runmode=stdout-caselist` and raw mustpass case-list line counts that this family is ~1.17-1.64 million cases, not the tens-of-thousands a full sweep would need to be tractable. Estimated ~74+ hours at the observed rate. Stopped it.
+   - **Pivoted**: recovered the 12 `pipeline` `DeviceLost` case names from the old baseline artifact `/home/dev/dev/VK-GL-CTS/run/feme-20261005-full-1170553-complete/report.txt` (same technique a prior session used for 53 crash names) and re-ran just those 12 by exact name.
+   - All 12 reproduced as a single real bug, not a stale-table artifact: `stencilTestEnable` on with no bound stencil attachment, hard-rejected at two separate layers (`CommandBuffer.cpp` draw-time check, `Executor.cpp` executor-level check) that both assumed this combination could never be legal. It is legal — the CTS test (`vktPipelineStencilTests.cpp`'s `NoStencilAttachmentInstance`) exists specifically to verify the stencil test is silently skipped, not rejected.
+3. **Fixed as `L394`** (commit `a533f3fdded7`): removed the `CommandBuffer.cpp` hard error (and the now-dead `needsStencilAttachment` helper); `Executor.cpp`'s `executeDraws` now forces `TestEnable` false on a local `StencilState` copy when stencil data is empty, instead of erroring — this keeps `testDepthStencil`'s own dereference precondition intact (a naive blanket removal of both checks would have caused a SIGSEGV there instead). New unit test: `ExecutorTest.StencilTestEnabledToleratesNoBoundStencilAttachment`.
+4. **Verified**: all 12 originally-DeviceLost cases now Pass; 12 `static_enable` siblings also Pass; 10,505-case `pipeline.*.stencil.*` sample shows 0 Fail/Crash/DeviceLost; `ninja check-feme` 3606/3609, 0 regressions.
+5. **Caught and corrected my own mistake mid-session**: initially wrote in `VulkanCTSReport.md` that an earlier-completed "13,786-case full `robustness` sweep" had already found the true `DeviceLost` count (claimed 1). That number was from a narrower `index_access`-only subset run earlier in this session (before compaction), not the true full family. Caught this by actually re-measuring the full family's case count (`98,776`, confirmed via `--deqp-runmode=stdout-caselist`) before trusting the old number.
+6. Ran a genuine full, from-scratch `dEQP-VK.robustness.*` sweep (98,776 cases, background, `/tmp/robustness_full_sweep/`). Result: the table's existing `DeviceLost=8` was already accurate, not stale — but item 9's complaint that it "never had case names recorded" was correct, and is now fixed: all 8 case names captured (`index_access.draw_indexed{,_indirect}_pipeline_robustness_1_vert{,_geom,_tess,_tess_geom}_frag`). Also found 2 new, previously-unrecorded ordinary Fails (`non_robust_buffer_access.unexecuted_oob_{overflow,underflow}`).
+7. Tried re-running one of the 8 `robustness` DeviceLost cases in isolation — it **passed cleanly standalone**, meaning this is an order/accumulated-process-state-dependent bug (same symptom shape as the already-fixed `L392`), not a single-case content bug like `L394` was. Did not chase further — out of budget this session, left as a named follow-up with case names now on record (a first for this item).
+8. Updated `VulkanCTSReport.md` (items 24-25 + group-accounting table: `pipeline` DeviceLost 12→0, `robustness` Pass 685→683/Fail 0→2 reflecting deqp folding DeviceLost into its Fail total) and `Roadmap.md` (new `L394` row). Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` — no stencil-related rows match this fix's shape (internal core-1.0 draw-time correctness only), no change needed.
+
+## Commits this session (small, separate, as instructed)
+
+1. `aed114eeccde` — `L375` 5th investigation write-up (no code change)
+2. `a533f3fdded7` — `L394` fix (CommandBuffer.cpp, GraphicsPipeline.h, Executor.cpp, ExecutorTest.cpp)
+3. `2f9c6563ca32` — `VulkanCTSReport.md` reconciliation
+4. `c956d1d4a7db` — `Roadmap.md` L394 entry
+5. this commit — `agent_thoughts.md`
+
+## Next steps (in priority order)
+
+1. **~1 day, dedicated design+implementation session, carried over a 6th time**: `L375`. Do not retry ad hoc. `Roadmap.md`'s `L375` entry has the corrected root-cause mechanism (the real overlap is `LoopLinearizer::linearizeCycle`'s scan-driver vs. `flattenLoopBodyRegion`) and the same two candidate design directions as before — pick one and design it before touching code.
+2. **~1 day, needs a reproducer that preserves full-sweep ordering, not a single isolated case**: the 8 `robustness.index_access.draw_indexed*pipeline_robustness_1*` `DeviceLost` cases. Case names are now recorded (see item 25 in `VulkanCTSReport.md`). Isolated re-runs don't reproduce — start by running the full `index_access.*` sub-family (not all of `robustness.*`) to narrow how many preceding cases are actually needed to trigger it, the same bisection approach that worked for `L392`.
+3. **~30 min**: triage the 2 new `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails found this session — never investigated, no hypothesis yet.
+4. **Still infeasible, don't attempt a full sweep**: `pipeline`'s own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Item 9's own 53-case targeted re-run (3 crashes, all `L375`) remains the best evidence it's stale. If a future session wants to move this forward, extend item 9's targeted-case-name technique rather than a full sweep.
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
