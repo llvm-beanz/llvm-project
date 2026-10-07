@@ -776,6 +776,47 @@ The largest ordinary-failure changes by group are:
     this session; see `Roadmap.md`'s new `L392` entry for the reproducer
     and next-step recommendation (a memory/handle-counting tool, not more
     `ps -eLf` sampling).
+22. **`L392` root-caused and fixed: every shader-stage compile was spinning
+    up (and only eventually tearing down) a whole six-worker OS thread
+    pool it never needed.** `QueueExecutor` (the one long-lived
+    per-`VkQueue` background thread) was instrumented and traced first and
+    ruled out: its construct/destroy lifecycle stayed clean (3 clean
+    cycles) across four separate repro attempts that could not even
+    reproduce the originally-reported crash. Broadening the repro to the
+    full 750-case `multisample_resolve.layers_3.*` family (not just the
+    85-case `samples_8` sub-family) reliably reproduced the thread growth
+    itself (95 to 546+ OS threads over one run via `ps -eLf` sampling)
+    without a crash, and `/proc/<pid>/task/*/comm` enumeration identified
+    the growing threads as `llvm-worker-0` through `llvm-worker-5` --
+    `llvm::StdThreadPool`'s own worker-naming convention. A `gdb` breakpoint
+    on `pthread_create` (not more static reading) captured the real
+    creation backtrace: `mlir::verify`'s `OperationVerifier::
+    verifyOpAndDominance` calling `mlir::parallelForEach`, reached from
+    `Vulkan/Pipeline.cpp`'s `compileGraphicsStage`/`compileComputePipeline`
+    via `SPIRVToLLVMDialectTranslator::translate`'s `mlir::PassManager::
+    run`. Root cause: `feme::Context`'s owned `mlir::MLIRContext` (one
+    fresh instance per shader-stage compile, per `Pipeline.cpp:642`) used
+    MLIR's own default `Threading::ENABLED`, so the first pass/verifier
+    call on *any* new context lazily constructs a brand-new `llvm::
+    ThreadPool` -- even though every owned context is a single,
+    short-lived, single-shader synchronous compile that gains nothing from
+    MLIR's own internal parallelism. Fixed by constructing the owned
+    `mlir::MLIRContext` with `Threading::DISABLED`
+    (`feme/lib/Core/Context.cpp`), confirmed via
+    `mlir::parallelForEach`/`failableParallelForEach`'s own
+    `isMultithreadingEnabled()` check in `mlir/include/mlir/IR/
+    Threading.h` to fall back to fully sequential processing with no
+    thread pool touched at all when disabled. **Verified:** a post-fix
+    rerun of the same 750-case `multisample_resolve.layers_3.*` family
+    shows unchanged results (600 Pass / **0 Fail** / 150 NotSupported) with
+    the process's OS thread count sampled every 15s for the whole run and
+    staying flat at 7 throughout (vs. the pre-fix climb past 500). `ninja
+    check-feme`: 3,606/3,609 Passed, 3 Unsupported, 0 Failed, 0
+    regressions (including a new `ContextTest.
+    OwnedMLIRContextHasMultithreadingDisabled` regression test). No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- internal compile-path efficiency/stability fix only, no
+    conformance-surface change.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
