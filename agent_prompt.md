@@ -63,23 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, dedicated design+implementation session, now with a fully
-   confirmed mechanism and two concrete design options**: implement
-   `L375` direction (b) first — change `DiamondFlattener::run()`'s root
-   selection/ordering so a block already known (via `PDT`, computed once
-   up front) to be the immediate post-dominator of an earlier-discovered,
-   not-yet-flattened divergent branch is never independently added as its
-   own `Roots` entry. If that proves structurally awkward, fall back to
-   direction (a): refuse a `RedirectTo` rewrite that would steal a
-   predecessor edge from an already-`phi`-finalized merge block (a
-   `CycleBoundaryMasks`-style extension). Re-verify against all four
-   known reproducers: `switch_continue_{geom,tessc,tesse}` and
-   `graphicsfuzz.nested-for-loops-switch-fallthrough` (`L383(a)`).
-2. **~30 min**: reconcile `VulkanCTSReport.md`'s `pipeline` Crash=46/
-   DeviceLost=12 table figures against item 9's "only 3 crashes remain"
-   finding — re-run a fresh full `dEQP-VK.pipeline.*` sweep (or at least
-   recapture `Crash`/`DeviceLost` case names) to confirm whether the table
-   is stale or whether new crashes exist. Also still completely untriaged:
-   `robustness`'s 8 `DeviceLost` cases (never had case names recorded).
-3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+1. **~1 day, dedicated design+implementation session, carried over a 6th time**:
+   `L375`. Do not retry ad hoc. `Roadmap.md`'s `L375` entry has the corrected
+   root-cause mechanism (the real overlap is `LoopLinearizer::linearizeCycle`'s
+   scan-driver vs. `flattenLoopBodyRegion`) and the same two candidate design
+   directions as before — pick one and design it before touching code.
+2. **~1 day, needs a reproducer that preserves full-sweep ordering, not a single
+   isolated case**: the 8
+   `robustness.index_access.draw_indexed*pipeline_robustness_1*` `DeviceLost`
+   cases. Case names are now recorded (see item 25 in `VulkanCTSReport.md`).
+   Isolated re-runs don't reproduce — start by running the full `index_access.*`
+   sub-family (not all of `robustness.*`) to narrow how many preceding cases are
+   actually needed to trigger it, the same bisection approach that worked for
+   `L392`.
+3. **~30 min**: triage the 2 new
+   `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails found
+   this session — never investigated, no hypothesis yet.
+4. **Still infeasible, don't attempt a full sweep**: `pipeline`'s own `Crash=46`
+   figure remains unconfirmed (~1.17-1.64M cases). Item 9's own 53-case targeted
+   re-run (3 crashes, all `L375`) remains the best evidence it's stale. If a
+   future session wants to move this forward, extend item 9's targeted-case-name
+   technique rather than a full sweep.
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
