@@ -858,6 +858,61 @@ The largest ordinary-failure changes by group are:
     prior session's own full-family sweep. No further triage or fix was
     needed; the handoff's framing of this item as still outstanding was
     itself stale.
+24. **`L394` fixed: all 12 `pipeline` `DeviceLost` cases named and closed.**
+    Item 9's long-standing "12 `pipeline`/8 `robustness` `DeviceLost` never
+    had case names recorded" gap is resolved for `pipeline` this session.
+    The 12 case names were recovered intact from the original
+    `feme-20261005-full-1170553-complete/report.txt` baseline artifact (the
+    same source item 9 used for its own 53-case crash re-run) and re-run
+    verbatim via `deqp-vk -n <names> --deqp-terminate-on-device-lost=disable`:
+    all 12 were a single real, reproducible bug (`L394`, see item above) --
+    stencil testing enabled against a render target with no stencil
+    attachment -- now fixed, all 12 Pass. **Group accounting table below
+    updated:** `pipeline` `DeviceLost` 12 -> 0 (Pass +12). `pipeline`
+    `Crash` (46, per item 9 likely stale but still unconfirmed) remains
+    unresolved -- a `dEQP-VK.pipeline.*` re-sweep to pin it down precisely
+    is infeasible in a single session (~1.17-1.64M cases, confirmed via
+    `--deqp-runmode=stdout-caselist` and the mustpass case list, not the
+    tens-of-thousands earlier handoffs assumed). `check-feme`: 3606/3609
+    Passed, 3 Unsupported, 0 Failed, 0 regressions. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- internal core-1.0 draw-time correctness fix only.
+25. **`robustness` `DeviceLost=8` case names recovered via a genuine full
+    re-sweep -- the figure itself was not stale, but item 9's "never had
+    case names recorded" gap is now closed.** Confirmed `dEQP-VK.robustness.*`
+    is a tractable 98,776 cases (`--deqp-runmode=stdout-caselist`), unlike
+    `pipeline`; ran it fully, from scratch, in the background
+    (`/tmp/robustness_full_sweep/`, `--deqp-terminate-on-device-lost=disable
+    --deqp-terminate-on-fail=disable`): deqp's own summary totals (683
+    Pass / 10 Fail / 98,083 NotSupported) fold `DeviceLost` results into
+    the `Fail` count; per-case grepping splits that 10 into **8
+    DeviceLost (an exact match for the stale table's own figure -- that
+    cell was already accurate, not stale) + 2 genuine ordinary Fail**
+    (previously counted as 0, since the table's prior `685 Pass / 0 Fail`
+    cell predates this session's re-sweep). (An earlier draft of this
+    item wrongly claimed a prior, already-completed "13,786-case full
+    sweep" had found only 1 DeviceLost; that was actually a narrower
+    `index_access`-only subset run during a now-compacted part of this
+    session, not the true full family -- logged here as a correction.)
+    All 8 DeviceLost cases share one shape:
+    `dEQP-VK.robustness.index_access.draw_indexed{,_indirect}_pipeline_
+    robustness_1_vert{,_geom,_tess,_tess_geom}_frag` (case names now
+    recorded for the first time). Re-running one of the 8 in isolation
+    (`draw_indexed_pipeline_robustness_1_vert_frag` alone) **does not
+    reproduce** the DeviceLost -- it passes cleanly standalone, matching
+    `L392`'s own earlier-documented symptom shape (an order/accumulated-
+    process-state-dependent bug, not a per-case-content bug) rather than
+    `L394`'s single-case-reproducible shape. Not root-caused or fixed this
+    session -- needs a dedicated investigation reproducing the full-sweep
+    ordering rather than a single isolated case, out of this session's
+    remaining budget. The 2 ordinary `Fail`s
+    (`non_robust_buffer_access.unexecuted_oob_{overflow,underflow}`) are a
+    new, previously-unrecorded, separate finding, also not triaged this
+    session. **Group accounting table:** `robustness` `Pass` 685 -> 683,
+    `Fail` 0 -> 2 (the 8 DeviceLost were already counted in this row's
+    total, just uncredited to any specific case name); case names for
+    both the 8 DeviceLost and 2 Fail are now on record above for a future
+    session.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
@@ -896,7 +951,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `memory_model` | 18,530 | 161 | 52 | 18,317 | 0 | 0 | 0 | 0 | 0 | -114 |
 | `mesh_shader` | 28,044 | 468 | 69 | 27,507 | 0 | 0 | 0 | 0 | 0 | -21 |
 | `multiview` | 838 | 643 | 0 | 195 | 0 | 0 | 0 | 0 | 0 | +0 |
-| `pipeline` | 1,172,229 | 259,017 | 39,644 | 873,467 | 43 | 0 | 12 | 46 | 0 | +35,934 |
+| `pipeline` | 1,172,229 | 259,029 | 39,644 | 873,467 | 43 | 0 | 0 | 46 | 0 | +35,934 |
 | `postmortem` | 24 | 0 | 0 | 24 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `protected_memory` | 6,000 | 0 | 0 | 6,000 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `query_pool` | 19,276 | 16,587 | 0 | 2,689 | 0 | 0 | 0 | 0 | 0 | -328 |
@@ -905,7 +960,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `ray_tracing_pipeline` | 22,659 | 0 | 0 | 22,659 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `reconvergence` | 6,253 | 0 | 0 | 6,253 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `renderpasses` | 81,188 | 30,399 | 4,845 | 45,616 | 0 | 0 | 328 | 0 | 0 | -3,009 |
-| `robustness` | 98,776 | 685 | 0 | 98,083 | 0 | 0 | 8 | 0 | 0 | -8 |
+| `robustness` | 98,776 | 683 | 2 | 98,083 | 0 | 0 | 8 | 0 | 0 | +2 |
 | `shader_object` | 243,853 | 6 | 0 | 243,847 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `sparse_resources` | 19,402 | 0 | 0 | 19,402 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `spirv_assembly` | 68,734 | 10,081 | 458 | 58,193 | 0 | 0 | 0 | 2 | 0 | -537 |
