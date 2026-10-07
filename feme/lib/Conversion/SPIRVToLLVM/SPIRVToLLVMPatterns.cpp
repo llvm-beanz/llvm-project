@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
+#include "feme/Core/StageOps.h"
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
@@ -8444,9 +8445,6 @@ public:
     mlir::spirv::GlobalVariableOp Global = SubpassAccess->Global;
     auto IndexAttr =
         Global->getAttrOfType<mlir::IntegerAttr>("input_attachment_index");
-    if (!IndexAttr)
-      return Rewriter.notifyMatchFailure(
-          Op, "subpass image variable has no InputAttachmentIndex decoration");
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
@@ -8462,10 +8460,24 @@ public:
     mlir::Location Loc = Op.getLoc();
     mlir::LLVM::LLVMFuncOp Callee = getOrInsertSubpassLoadFunc(
         Rewriter, Op->getParentOfType<mlir::ModuleOp>(), ElementTy);
+    // Roadmap L390: a subpass-input variable with no `InputAttachmentIndex`
+    // decoration at all (GLSL `layout(binding=N) uniform subpassInput`,
+    // deliberately omitting `input_attachment_index` -- see
+    // `kSubpassLoadDirectDepthAttachmentIndex`'s own comment) reads the
+    // current subpass's depth/stencil attachment directly; which of the
+    // two is determined by the element type exactly like the ordinary,
+    // indexed case already distinguishes a plain `subpassInput` (`f32`)
+    // from an `isubpassInput`/`usubpassInput` (`i32`) -- GLSL has no
+    // integer-typed depth attachment or float-typed stencil attachment.
+    uint32_t IndexValue =
+        IndexAttr
+            ? static_cast<uint32_t>(IndexAttr.getInt()) +
+                  SubpassAccess->ArrayIndexOffset
+            : (ElementTy.isF32() ? feme::kSubpassLoadDirectDepthAttachmentIndex
+                                : feme::kSubpassLoadDirectStencilAttachmentIndex);
     mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, Rewriter.getI32Type(),
-        Rewriter.getI32IntegerAttr(static_cast<int32_t>(
-            IndexAttr.getInt() + SubpassAccess->ArrayIndexOffset)));
+        Rewriter.getI32IntegerAttr(static_cast<int32_t>(IndexValue)));
     mlir::Value SampleVal =
         HasSample ? Adaptor.getOperandArguments()[0]
                   : mlir::LLVM::ConstantOp::create(
