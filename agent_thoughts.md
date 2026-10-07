@@ -116343,3 +116343,82 @@ No work done outside `feme/` this session — nothing found to isolate/fix in an
 ## A process note for future sessions
 
 This session is the second in a row (after `L386`'s own stale-predecessor bug last session) where the fix itself introduced a bug that was caught by re-verifying against the *full* CTS sweep rather than just the one scoped reproducer. Both times, the fix passed its own narrow unit test and `check-feme` cleanly — neither exercised the specific edge case (a stale cached predecessor pointer; a null optional-array pointer) that the fix's own new code path needed to handle. The common thread: **re-sweeping the *entire* targeted CTS family after a fix, not just the original scoped reproducer, is what caught both bugs.** Keep doing the full-family sweep, not just the single-case check, even when the single case already passes — it would have missed both of these.
+
+# Session: L375 non-fix + root-cause refinement, L390 root-caused, L391 fixed (VK_RENDERING_RESUMING_BIT) (2026-10-06)
+
+Device check: `VK_ICD_FILENAMES=$(find build -iname feme_icd.json) VK_DRIVER_FILES=$(find build -iname feme_icd.json) vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start and end; plain `vulkaninfo --summary` without the env vars still reports the ambient `llvmpipe` default — expected, documented in `feme/.instructions.md`, not a bug).
+
+## Start here: what's fixed vs. what's still open
+
+**Fixed and CTS-verified this session: `L391`** (`VK_RENDERING_RESUMING_BIT` ignored `loadOp` was never implemented). 60 CTS Fails → 0.
+
+**Not fixed, two root-caused-but-deferred items:**
+- `L375` (assigned top priority this session): two fix attempts tried, both failed, real mechanism now fully understood, no working fix found. Still blocking, still needs a dedicated design session.
+- `L390`: root cause now understood (not just "found" — actually traced to the exact pattern and exact missing case), still needs implementation.
+
+## `L375`: two failed fix attempts, then the real mechanism
+
+This session resumed mid-investigation with a hypothesis from before compaction: "two separate `DiamondFlattener` instances reuse a stale PDT." Both of the two fix attempts built on that hypothesis:
+
+1. Recompute `DT`/`PDT` right before `flattenLoopBodyRegion`'s own `DiamondFlattener` construction (mirroring an existing precedent elsewhere in the file) — rebuilt, retested against all 4 reproducers (`switch_continue_{geom,tessc,tesse}`, `graphicsfuzz.nested-for-loops-switch-fallthrough`). **Still crashed, identically.**
+2. Recompute `DT`/`PDT` unconditionally inside `flatten()`'s own loop, before every `immediatePostDom` query. **Still crashed, identically.**
+
+A `gdb bt` after attempt 1 failed showed the crash was inside a `flatten → flatten` recursive chain, not between two separate top-level instances — invalidating the original hypothesis outright, not just the fix.
+
+Added temporary `errs()` prints (env-var gated, same convention the file already uses, removed before commit) at both `pred_begin(R)` sites plus an unconditional per-iteration print. Traced the real mechanism: **the same physical merge block gets visited by two independent top-level `flatten()` calls**, not one call's own stale state. The first call reaches it as a clean 2-predecessor diamond and processes it normally. A second, independent top-level call later reaches a different block its own walk hadn't covered yet, flattens *that* block's diamond, and its recursive arm reaches the *same* merge block a second time — but now with only 1 real predecessor, because the first call already consumed one of its two edges. **Recomputing PDT cannot fix this**: the predecessor count genuinely is 1 by the second visit. This is a generalization of the already-solved `CycleBoundaryMasks`/H120 mechanism (built for a very similar "reached twice" problem, but only for cycle-boundary blocks) to ordinary merge blocks.
+
+Reverted all code changes (`git checkout --`) — the file is clean, no diagnostic code or failed fix remains. Documented the full finding in `Roadmap.md`'s `L375` row, explicitly steering the next session away from PDT-recompute ideas and toward a `FlattenedBlockMasks`-style memoization design.
+
+**Why no fix this session**: the real fix needs to distinguish "this walk has fully reconverged past `Cur`" from "mid-walk, still heading forward" — unlike the cycle-boundary case, which always stops and records a terminal answer. That's a real design problem, not a patch, and two failed attempts already used up the session's safe experimentation budget for this item.
+
+## `L390`: root-caused, not fixed (this is new progress, previously it was just "found")
+
+4 CTS cases (`depth_stencil_mapping_to_no_index[_depth_clear|_stencil_clear]`, `input_attachments_without_mapping`) fail `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`. Previously scoped only as far as "swallowed error, needs `FEME_VULKAN_LOG_CREATION_ERRORS=1`." This session went further:
+
+1. `FEME_VULKAN_LOG_CREATION_ERRORS=1` on all 4 (not just 1) confirms one shared error: a `Dim::SubpassData` (dim code 6) image handle reaching `BoundResourceNormalizationPass` unconverted.
+2. `FEME_DUMP_IR_PRENORM=1` shows the handle flows into `llvm.spv.resource.getpointer` (a raw storage-image texel pointer), not the dedicated `feme.stage.subpass.load` ABI a `subpassInput` read should use.
+3. Traced to `ImageTexelPointerPattern` (`SPIRVToLLVMPatterns.cpp`): built for roadmap `R39`/`H8u`'s atomic-on-storage-image support, it lowers *any* image dimension the same way, with no `Dim::SubpassData` case the way `SubpassLoadPattern` has for plain `OpImageRead`. These 4 cases' depth/stencil subpass reads apparently go through `OpImageTexelPointer`, not `OpImageRead`, so `SubpassLoadPattern` never sees them.
+4. Confirmed via the full sweep (below) that all 3 command-buffer variants hit this identically — 12 Fails total, not just the originally-scoped 4.
+
+No code change: the real fix (a `Dim::SubpassData` special case in `ImageTexelPointerPattern`) touches a shared, high-traffic conversion pattern and deserves its own verified session.
+
+## `L391`: VK_RENDERING_RESUMING_BIT fixed — 60 Fails to 0
+
+Picked up the carried-over "low-priority 30-minute triage" item (re-run the `renderpasses.dynamic_rendering.*` Fail bucket's largest sub-families through a quick check). Bucketed the 828 Fails: `primary_cmd_buff.random` (756, individually-seeded, too fragmented to usefully sub-bucket), `primary_cmd_buff.basic` (60), `local_read` (12, see `L390` above).
+
+All 60 `basic` Fails share one substring: `resuming`. A `grep` for `RESUMING`/`SUSPENDING` across the whole Vulkan/Graphics layer found **zero matches** — `VK_RENDERING_SUSPENDING_BIT`/`VK_RENDERING_RESUMING_BIT` were entirely unhandled, a missing-feature gap, not a subtle logic bug.
+
+Per spec, a resuming instance's own `loadOp` must be ignored (treated as `LOAD`), but `vkCmdBeginRenderingKHR` applied it verbatim — and real apps/CTS specify the same `loadOp` (often `CLEAR`) on every begin call in a suspend/resume chain, so resuming re-cleared data the suspended instance had already drawn.
+
+Fix: force every attachment's `LoadOp` away from `CLEAR` when `VK_RENDERING_RESUMING_BIT` is set, reusing `applyClear`'s existing "LOAD/DONT_CARE/NONE are all a no-op" handling. `StoreOp` needed no change — this renderer already always preserves written memory regardless of `StoreOp` (no discard-on-store to skip), which is exactly `STORE`'s suspend-side spec behavior.
+
+Added `DrawTest.DynamicRenderingResumingIgnoresLoadOp`. Confirmed it fails pre-fix via a `git checkout --`/rebuild A/B (first attempt at the test was actually broken — both the suspended and resuming draw used the same red color over overlapping areas, so the assertion passed even without the fix; caught this by actually doing the A/B check rather than trusting the test in isolation, then fixed the test to issue no draw on the resuming instance so the left-half color exclusively reflects whether the resume's own `CLEAR` was honored).
+
+## Verification
+
+1. `primary_cmd_buff.basic.*resuming*` (140 cases): 60 Fail → 0 Fail (70 Pass, 70 `VK_KHR_maintenance10`-gated NotSupported).
+2. Full `renderpasses.dynamic_rendering.*` (28,898 cases): 828 Fail → 12 Fail, the remaining 12 confirmed by exact case name to be `L390`'s own cases, unaffected.
+3. `FeMeVulkanTests`: 803/803 Passed (802 baseline, +1 new test).
+4. `ninja check-feme`: 3,604/3,607 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+5. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked by grep — `VK_KHR_dynamic_rendering`/`VK_KHR_dynamic_rendering_local_read` already listed "Advertised," no change needed (this corrects already-claimed functionality's behavior, not its advertised support).
+
+## Commits this session
+
+1. `feme: document L375 root-cause refinement (cross-root revisit, not stale PDT)` — docs only, no code change (both fix attempts reverted).
+2. `feme: root-cause L390 (SubpassData via ImageTexelPointer unhandled)` — docs only, no code change (root-cause investigation only).
+3. `feme: honor VK_RENDERING_RESUMING_BIT, ignore loadOp on resume (L391)` — the fix + regression test.
+4. `feme: update Roadmap/VulkanCTSReport for the L391 fix, expand L390 scope` — docs for `L391`, plus expanding `L390`'s scope to all 3 command-buffer variants.
+5. This `agent_thoughts.md` commit.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in another LLVM subproject.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, the only remaining design-session item, carried over across many sessions now (unchanged from last session — genuinely not touched this session beyond two more failed attempts)**: `L375` (`DiamondFlattener` double-visitation of ordinary merge blocks by independent top-level `flatten()` calls). Do NOT re-attempt a PDT/DT recompute — two independent attempts this session both failed and the real mechanism (confirmed via tracing, not guessing) shows recompute cannot work. Next real step: design a `FlattenedBlockMasks`-style memoization recording a block's final `Masks` once a walk fully reconverges past it, consulted (instead of re-deriving) by any later walk reaching the same block — generalizing the existing `CycleBoundaryMasks`/H120 mechanism beyond cycle-boundary blocks.
+2. **~1 day, needs a dedicated design session**: `L390` — give `ImageTexelPointerPattern` (`SPIRVToLLVMPatterns.cpp`) a `Dim::SubpassData` case mirroring `SubpassLoadPattern`'s own `input_attachment_index` lookup, routing to the subpass-input heap mechanism instead of `createResourcePointer`. Confirm first whether atomics-against-a-subpass-image are a real, reachable shape this target needs (if not, a clean `notifyMatchFailure` is an acceptable interim fix — but confirm with `FEME_DUMP_IR_PRENORM` per-case first, since the error message's own text warns an unrelated resource in the same function can be the real blocker).
+3. **~30 min**: the `primary_cmd_buff.random` bucket (756 Fails, by far the largest remaining) — not triaged this session (ran out of budget after `L391`). These are individually-seeded random render-graph cases; try one `gdb bt`/error-message check on 2-3 samples to see if they share a cause before assuming a large triage effort.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
+
+## A process note for future sessions
+
+My first version of `L391`'s regression test passed even *without* the fix — both the suspended and resuming instance drew the same color over an overlapping area, so the assertion couldn't distinguish "resume honored CLEAR" from "resume's own draw just overwrote the pixel anyway." Caught this only by actually doing the `git checkout --`/rebuild A/B check that past sessions' own process notes recommend, rather than trusting a test that merely compiled and passed once. Keep doing the A/B check even when a test looks obviously correct on inspection — "looks right" and "proven right" are not the same thing, and this is now the third session in a row where that gap mattered (after `L386`'s and `L388`'s own self-caught bugs).
