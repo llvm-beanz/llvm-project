@@ -63,18 +63,21 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, needs a reproducer preserving full-sweep ordering** (carried over,
-   untouched): 8 `robustness.index_access.draw_indexed*pipeline_robustness_1*`
-   `DeviceLost` cases. Case names recorded in `VulkanCTSReport.md` item 25.
-   Isolated re-runs don't reproduce — bisect the full `index_access.*`
-   sub-family first (the approach that worked for `L392`).
-2. **~30 min, carried over, untouched**: triage
-   `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` — 2 Fails, no
-   hypothesis yet.
-3. **Infeasible as a full sweep, carried over**: `pipeline`'s own `Crash=46`
-   figure is unconfirmed (~1.17-1.64M cases). Best evidence it's stale: item 9's
-   own 53-case targeted re-run found only 3 crashes, all now fixed
-   (`L375`/`L395`). Extend that targeted-case-name technique rather than a full
-   sweep if revisited.
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed.
+1. **Still infeasible as a full sweep, carried over unchanged**: `pipeline`'s
+   own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Best evidence
+   it's stale: item 9's 53-case targeted re-run found only 3 crashes, all now
+   fixed (`L375`/`L395`). If revisited, extend that targeted-case-name technique
+   (recover case names from the baseline full-run artifact the way `L394`/item 9
+   did) rather than attempting a full sweep.
+2. **~1 day, dedicated design session, unchanged, now the only standing
+   design-session item**: `L375` (`DiamondFlattener`/`LoopLinearizer`
+   double-visitation of ordinary merge blocks via `linearizeCycle`'s scan-driver
+   vs. `flattenLoopBodyRegion` overlap). `Roadmap.md`'s own `L375` entry has the
+   full root-cause writeup and two candidate designs — pick one and design it
+   before touching code.
+3. **No action needed**: `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence
+   item — already resolved/documented in a prior session.
+4. **No new stability work queued**: this session's fix closed both items it was
+   handed off. A fresh full-CTS sweep (not attempted this session — would take
+   many hours) is the only way to surface the next batch of untriaged failures;
+   absent that, there is no next concrete bug to hand off.
