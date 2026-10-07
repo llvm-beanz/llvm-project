@@ -36,9 +36,21 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   // construction, matching feme::registerDXSAImportBinTranslation
   // (TranslateRegistration.cpp), the non-fuzzer entry point to the same
   // deserialize() call.
+  //
+  // (roadmap L392) Unlike the SPIR-V/DXIL importer fuzzers (which get this
+  // for free from `feme::Context`'s own owned `mlir::MLIRContext`, see
+  // Context.cpp), this harness constructs its `mlir::MLIRContext` directly
+  // and must disable multithreading explicitly: each fuzz iteration parses
+  // one small, single-threaded binary blob that gains nothing from MLIR's
+  // internal pass/verifier parallelism, and a libFuzzer run constructs this
+  // context far more often (potentially millions of iterations) than any
+  // other call site in the codebase -- left at MLIR's default
+  // `Threading::ENABLED`, every iteration would pay to spin up and tear
+  // down a whole OS thread pool, exactly the overhead/churn `L392` found
+  // and fixed for the Vulkan ICD's own per-shader-compile contexts.
   mlir::DialectRegistry Registry;
   Registry.insert<dxsa::DXSADialect>();
-  mlir::MLIRContext Context(Registry);
+  mlir::MLIRContext Context(Registry, mlir::MLIRContext::Threading::DISABLED);
   llvm::SourceMgr SourceMgr;
   SourceMgr.AddNewSourceBuffer(
       llvm::MemoryBuffer::getMemBuffer(
