@@ -63,34 +63,16 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, needs a dedicated design session, the only remaining design-session
-   item, carried over across many sessions now (genuinely not touched this
-   session — deliberately deferred, consistent with explicit guidance carried
-   over from the prior two sessions that two independent fix attempts already
-   failed and a real design sitting is needed)**: `L375` (`DiamondFlattener`
-   double-visitation of ordinary merge blocks by independent top-level
-   `flatten()` calls). Do **not** re-attempt a PDT/DT recompute — confirmed via
-   tracing (not guessing) that the predecessor count genuinely is 1 by the
-   second visit, so recomputing cannot help. The next real step is a
-   `FlattenedBlockMasks`-style memoization recording a block's final `Masks`
-   once a walk fully reconverges past it, generalizing the existing
-   `CycleBoundaryMasks`/H120 mechanism beyond cycle-boundary blocks to ordinary
-   merge blocks.
-2. **~30 min, low priority, carried over from last session, still not done**:
-   the `primary_cmd_buff.random` bucket (756 Fails from the *old*,
-   pre-`L390`/`L391` baseline — note this bucket's current Fail count needs
-   re-confirming now that both `L390` and `L391` are fixed, since the full sweep
-   above showed 0 Fail family-wide, meaning this bucket may already be fully
-   resolved as a side effect and this item may simply be closed; check the full
-   sweep's log for `random` case names before spending any time here, since the
-   numbers may no longer apply).
-3. **~1 hour, new this session**: investigate the 1,125-thread /
-   brief-futex-stall anomaly observed during the
-   `multisample_resolve.layers_3.*samples_8*` sweep (see the performance note
-   above) — not a confirmed bug yet, just an anomaly worth a dedicated look with
-   a narrower, isolated reproducer (a single `samples_8_baseLayer*` case run
-   standalone, checked for thread count via `ps -eLf` before assuming it's
-   actually a problem rather than expected CPU-renderer-under-heavy-MSAA-load
-   behavior).
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
-   resolved/documented, no action needed.
+1. **~1 day, needs a dedicated design session, carried over yet again, now
+   with a third failed attempt's lessons baked in**: `L375`. Do **not** try
+   another "replay recorded concrete values" memoization — that's now
+   twice-confirmed unsound whenever two walks with different masking
+   semantics (fresh-seeded vs. loop-carried) can reach the same block. Pick
+   one of the two directions in `Roadmap.md`'s `L375` entry (prevent the
+   overlap structurally, or make the memo re-threadable) and actually design
+   it before touching code.
+2. **~1 day, new this session, needs a memory/handle-counting tool**:
+   `L392` (the `multisample_resolve` thread/resource leak). Start with
+   `valgrind --tool=massif` or a temporary allocation-count log in whichever
+   pool is suspected (thread pool first, since that's the most visible
+   symptom) against the reproducer in `Roadmap.md`'s `L392` entry.
