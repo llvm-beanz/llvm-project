@@ -63,29 +63,18 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, dedicated design session, still the right scope**: `L383(a)`
-   (`graphicsfuzz.nested-for-loops-switch-fallthrough`). Confirmed this session
-   (again) to be a genuinely different mechanism from `L375`'s now-fixed
-   cross-instance collision — an edge is silently stolen via a `RedirectTo`
-   rewrite from a block that is never itself revisited as `Cur`, so no amount of
-   `MergeVisited`-style visited-tracking at the `Cur`-visitation level can catch
-   it. Needs its own root-cause trace starting from the `RedirectTo` call sites
-   in `DiamondFlattener::flatten`/`validate`, looking for where a predecessor
-   edge gets reassigned without any accompanying visited-set update.
-2. **~1 day, needs a reproducer that preserves full-sweep ordering, not a single
-   isolated case** (carried over, untouched this session): the 8
-   `robustness.index_access.draw_indexed*pipeline_robustness_1*` `DeviceLost`
-   cases. Case names are recorded (item 25 in `VulkanCTSReport.md`). Isolated
-   re-runs don't reproduce — start by running the full `index_access.*`
-   sub-family (not all of `robustness.*`) to narrow how many preceding cases are
-   needed to trigger it, the bisection approach that worked for `L392`.
-3. **~30 min, carried over, untouched this session**: triage the 2
-   `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails — never
-   investigated, no hypothesis yet.
-4. **Still infeasible, don't attempt a full sweep, carried over**: `pipeline`'s
-   own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Item 9's own
-   53-case targeted re-run (3 crashes, all `L375`, now fixed) remains the best
-   evidence it's stale. If a future session wants to move this forward, extend
-   item 9's targeted-case-name technique rather than a full sweep.
-5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
-   resolved/documented, no action needed.
+1. **~1 day, needs a reproducer preserving full-sweep ordering** (carried over,
+   untouched): 8 `robustness.index_access.draw_indexed*pipeline_robustness_1*`
+   `DeviceLost` cases. Case names recorded in `VulkanCTSReport.md` item 25.
+   Isolated re-runs don't reproduce — bisect the full `index_access.*`
+   sub-family first (the approach that worked for `L392`).
+2. **~30 min, carried over, untouched**: triage
+   `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` — 2 Fails, no
+   hypothesis yet.
+3. **Infeasible as a full sweep, carried over**: `pipeline`'s own `Crash=46`
+   figure is unconfirmed (~1.17-1.64M cases). Best evidence it's stale: item 9's
+   own 53-case targeted re-run found only 3 crashes, all now fixed
+   (`L375`/`L395`). Extend that targeted-case-name technique rather than a full
+   sweep if revisited.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed.
