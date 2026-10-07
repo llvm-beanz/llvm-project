@@ -4366,6 +4366,25 @@ RenderTargetView normalizeRenderingAttachment(
   return View;
 }
 
+/// (Roadmap L391) `VK_RENDERING_RESUMING_BIT` means this `vkCmdBeginRendering`
+/// instance continues a render pass instance an earlier, `VK_RENDERING_
+/// SUSPENDING_BIT`-flagged instance (in this command buffer or another one
+/// submitted earlier, possibly to a different queue) left suspended --
+/// per the spec, "loadOp is ignored" for such an attachment, and
+/// implementations "must not" clear or otherwise discard its contents, the
+/// same as `VK_ATTACHMENT_LOAD_OP_LOAD`. Forcing every attachment's `LoadOp`
+/// away from `CLEAR` here is sufficient to get that behavior for free from
+/// `applyClear`'s own existing "LOAD/DONT_CARE/NONE all take the same `do
+/// nothing` path" handling (see its comment) -- `StoreOp` needs no matching
+/// override on the suspending side, since this software renderer already
+/// always preserves written memory regardless of `StoreOp` (see
+/// `RenderTargetView::StoreOp`'s own comment), which is exactly `STORE`'s
+/// spec-mandated suspend-side behavior too.
+void forceLoadForResuming(RenderTargetView &View) {
+  if (View.LoadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+    View.LoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+}
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
@@ -4389,6 +4408,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
     Binding.Stencil =
         normalizeRenderingAttachment(*pRenderingInfo->pStencilAttachment,
                                      isSupportedStencilAttachmentFormat);
+  // (Roadmap L391) see `forceLoadForResuming`'s own comment.
+  if (pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT) {
+    for (RenderTargetView &Color : Binding.Colors)
+      forceLoadForResuming(Color);
+    if (Binding.Depth)
+      forceLoadForResuming(*Binding.Depth);
+    if (Binding.Stencil)
+      forceLoadForResuming(*Binding.Stencil);
+  }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->beginRendering(std::move(Binding));
 }

@@ -3273,6 +3273,77 @@ TEST_F(DrawTest, RendersThroughDynamicRendering) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap L391: `VK_RENDERING_RESUMING_BIT` continues a render-pass
+/// instance an earlier `VK_RENDERING_SUSPENDING_BIT` instance left
+/// suspended -- per spec, the resuming instance's own `loadOp` must be
+/// ignored and the attachment's contents preserved, as if `LOAD_OP_LOAD`
+/// had been given instead, even though this instance's own
+/// `VkRenderingAttachmentInfo::loadOp` still says `CLEAR` (real CTS cases,
+/// e.g. `dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.
+/// single_cmdbuffer_resuming`, suspend/resume a single render pass instance
+/// across two `vkCmdBeginRenderingKHR` calls in the very same command
+/// buffer, both specifying `CLEAR`, relying on the resume to not actually
+/// re-clear). Draws red into the left half before suspending, green into
+/// the right half after resuming; a `CLEAR`-honoring (pre-fix) resume would
+/// wipe the first draw's red back to the clear color.
+TEST_F(DrawTest, DynamicRenderingResumingIgnoresLoadOp) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, &Rendering);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  // First instance: an ordinary `CLEAR` begin, suspended before ending.
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = ColorView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachment.clearValue.color = {{0.0f, 1.0f, 0.0f, 1.0f}};
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.flags = VK_RENDERING_SUSPENDING_BIT;
+  RenderingInfo.renderArea = {{0, 0}, {Extent / 2, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+
+  // Second instance: resumes the first, still specifying `CLEAR` (as real
+  // CTS cases do) over the *same* left-half area -- deliberately issuing no
+  // draw of its own, so the left half's final color exclusively reflects
+  // whether this resume's `CLEAR` was (wrongly) honored or (correctly,
+  // per spec) ignored in favor of preserving the first instance's result.
+  RenderingInfo.flags = VK_RENDERING_RESUMING_BIT;
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // The first (suspended) instance's draw survived the resume: still red,
+  // not cleared back to green by the resuming instance's own `CLEAR`.
+  EXPECT_EQ(texel(0, 0)[0], 0xFF);
+  EXPECT_EQ(texel(0, 0)[1], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// Roadmap E5 (`VK_KHR_maintenance5`): a `VkRenderingAttachmentInfo` whose
 /// `imageView` is `VK_NULL_HANDLE` is a color slot that is present (it
 /// still counts against the pipeline's `colorAttachmentCount`) but unused
