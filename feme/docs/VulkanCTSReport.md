@@ -296,6 +296,25 @@ The largest ordinary-failure changes by group are:
    fold into `L375`. No FeMe source code change -- a documentation/triage-
    closure finding only, since every underlying crash was already fixed
    by `L381`/`L382`/`L384`.
+
+   **Update (this session): flagging an unresolved discrepancy for the next
+   stability session, not re-triaged here (this session's budget went to
+   `L375` root-cause work, see `Roadmap.md`).** The "Complete group
+   accounting" table below still shows `pipeline` Crash=46 and `pipeline`
+   DeviceLost=12, not the 3 crashes (all `L375`) this item's own 53-case
+   re-run found. Since item 9's re-run was scoped to only the 53 case names
+   recorded in the old `feme-20261005-full-1170553-complete` baseline
+   artifact, not a fresh full `dEQP-VK.pipeline.*` sweep, this 46-vs-3 gap
+   most likely means the group-accounting table's 46/12 figures are
+   themselves stale (carried forward from before `L381`/`L382`/`L384`
+   fixed most of that family) rather than evidence of new crashes --
+   **but this has not been confirmed with a fresh full-family sweep**, so
+   do not assume it is stale without checking. Next session: re-run the
+   full `dEQP-VK.pipeline.*` group (or at least re-capture its `Unrun`/
+   `Crash`/`DeviceLost` case names from a fresh run) and reconcile the
+   table's 46/12 figures against item 9's 3-crash finding before trusting
+   either number further; the same applies to `robustness`'s 8 `DeviceLost`
+   results, which have never had case names recorded at all.
 10. **`L379(a)`'s per-attachment color `resolveMode` gap: fixed in two
     parts, 48 of 120 `ds_resolve_sample_zero*` cases now Pass.** Traced why
     the previously-committed dynamic-rendering `ColorResolveModes`
