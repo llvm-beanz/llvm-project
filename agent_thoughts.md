@@ -116711,3 +116711,102 @@ offload-test-suite changes this session. No issues found outside `feme/`.
    approach that has worked repeatedly.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
+
+# Session: L392 fuzzer-sweep follow-up closed; renderpasses.dynamic_rendering.* triage confirmed already resolved (2026-10-07)
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed at session start (and will be every session, per standing instructions).
+
+## Done this session
+
+1. Handoff offered two items: `L375` (explicitly deferred again, no new
+   evidence to break the "do not retry ad hoc" guidance) and a ~15 min
+   `MLIRContext` construction sweep following up on last session's `L392`
+   fix, plus a ~30 min renderpass triage item. Worked both of the latter,
+   in order.
+2. **MLIRContext sweep**: grepped `feme/lib`, `feme/tools`, `feme/include`
+   for every `MLIRContext`/`Context` construction site. Confirmed every
+   call site that routes through `feme::Context` (including both
+   `feme-spirv-import-fuzzer` and `feme-dxil-import-fuzzer`'s own
+   per-iteration `Context Ctx;`) already inherits last session's
+   `Threading::DISABLED` fix automatically. `feme-cpu-restructure-fuzzer`
+   only touches a raw `llvm::LLVMContext` (no MLIR, not affected).
+   `feme-vulkan-pipeline-cache-fuzzer` has no direct MLIR reference in its
+   own file.
+3. **Found one real gap**: `feme-dxbc-import-fuzzer.cpp` builds a raw
+   `mlir::MLIRContext Context(Registry);` directly, bypassing
+   `feme::Context` entirely, once per `LLVMFuzzerTestOneInput` call —
+   potentially millions of times across a sustained libFuzzer run, the
+   exact same unneeded-thread-pool-spin-up pattern as `L392`, arguably hit
+   even more often here than in the actual Vulkan ICD path.
+4. **Fix:** changed the constructor call to
+   `mlir::MLIRContext Context(Registry, mlir::MLIRContext::Threading::DISABLED);`
+   with a short comment cross-referencing `L392`/`Context.cpp`. Built
+   clean via `ninja feme-dxbc-import-fuzzer`. No new unit test — this is a
+   standalone fuzz harness with no existing test fixture, and the change
+   is a direct, inspectable one-line mirror of `L392`'s own already-tested
+   fix.
+5. **Renderpass triage**: before picking a sub-family to `gdb bt`, ran a
+   fresh, from-scratch, full `dEQP-VK.renderpasses.dynamic_rendering.*`
+   sweep (28,898 cases, `--deqp-log-images=disable`) to get current counts,
+   since the documented 2,506-Fail baseline predates `L390`/`L391`. Result:
+   **12,423 Pass / 0 Fail / 16,475 NotSupported, 0 Crashes, 0 DeviceLost.**
+   This matches the prior session's own full-family sweep (also 0 Fail,
+   recorded in `VulkanCTSReport.md` item 20) — the family is already fully
+   resolved as a side effect of `L387` through `L391`. No `gdb bt` triage
+   was actually needed; there was nothing left to triage. The handoff's
+   framing of this as "still not triaged" was itself stale, carried over
+   from before those fixes landed.
+6. Updated `Roadmap.md` (new `L393` row covering both findings) and
+   `VulkanCTSReport.md` (new item 23, plus an inline pointer-forward note
+   on item 3's original stale 2,506-Fail text).
+7. Ran `ninja check-feme`: 3,606/3,609 Passed, 3 Unsupported, 0 Failed, 0
+   regressions.
+8. Committed in two pieces: the fuzzer fix, then the docs.
+
+## Why this was the right priority
+
+With `L375` explicitly flagged "do not retry ad hoc" after three failed
+attempts and no new design input offered this session, the two remaining
+items were both small, bounded, evidence-first tasks with a clear
+stopping point — exactly the right shape for a session that shouldn't
+gamble on a fourth `L375` attempt. Both turned out to be genuinely quick:
+one real code fix (one line) and one triage item that resolved itself to
+"already fixed, confirm and move on" rather than requiring new
+investigation.
+
+## Commits this session
+
+1. `[feme] L392 follow-up: disable MLIR threading in DXBC import fuzzer` —
+   `feme/tools/feme-dxbc-import-fuzzer/feme-dxbc-import-fuzzer.cpp`.
+2. `[feme] docs: L393 - MLIRContext sweep follow-up + renderpass triage
+   re-confirmation` — `Roadmap.md`, `VulkanCTSReport.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change —
+both findings are internal tooling/re-verification only, no
+conformance-surface change. No offload-test-suite changes this session.
+No issues found outside `feme/` (the one fuzzer-tool change is inside
+`feme/`, not an "outside FeMe" fix).
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, dedicated design session, unchanged, carried over yet
+   again**: `L375` (`DiamondFlattener` double-visitation of ordinary merge
+   blocks). Still the only standing design-session item, now carried
+   across four sessions. Do not retry ad hoc — `Roadmap.md`'s `L375` entry
+   has the full root-cause writeup and two candidate designs (structurally
+   prevent the overlap, or make the memo re-threadable). Pick one and
+   actually design it before touching code.
+2. **Needs its own dedicated investigation with a memory/handle-counting
+   tool**: no new item surfaced this session matching this shape — `L392`
+   itself (and now its fuzzer follow-up) is fully closed. If a future
+   session wants a similarly tractable target, the next candidate is the
+   remaining 20 `DeviceLost` results (12 `pipeline`, 8 `robustness`) noted
+   in `VulkanCTSReport.md` item 5, still untriaged, and the 46 `pipeline`
+   `SIGSEGV`s flagged as "the next stability-triage priority" repeatedly
+   but not yet started with case names recorded.
+3. `renderpasses.dynamic_rendering.*` triage: **closed, no further action
+   needed** — confirmed 0 Fail this session, matching the prior session's
+   own full-family sweep. Do not re-open without new evidence of a
+   regression.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented, no action needed.
