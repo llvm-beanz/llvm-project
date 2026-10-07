@@ -671,6 +671,58 @@ The largest ordinary-failure changes by group are:
     already advertised as accepted; this corrects their handling, not
     their advertised support.
 
+20. **`L390` fixed: `local_read`'s 4 no-index depth/stencil
+    `subpassInput`/`usubpassInput` cases, 12 Fails across all 3
+    command-buffer variants.** Continuing from item 18's root-cause:
+    further tracing found the real shape is not `ImageTexelPointerPattern`
+    mishandling `Dim::SubpassData` after all, but a
+    `subpassInput`/`usubpassInput` SPIR-V variable with **no
+    `input_attachment_index` decoration at all** -- a deliberate,
+    spec-legal shape (`VkRenderingInputAttachmentIndexInfoKHR`'s own
+    semantics) for a shader reading the *current* subpass's depth/
+    stencil attachment directly, with no indexed local-read mapping ever
+    engaged. **Fix:** reuse `StageOpKind::SubpassLoad` unchanged --
+    `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) now bakes one of two
+    new reserved sentinel constants
+    (`kSubpassLoadDirectDepthAttachmentIndex`/
+    `kSubpassLoadDirectStencilAttachmentIndex`, `StageOps.h`) as the
+    `attachment_index` operand instead of declining the match when
+    `input_attachment_index` is absent; `lowerFragmentSubpassLoad`
+    (`FragmentWrapper.cpp`) detects the sentinel at runtime and resolves
+    it against `SubpassInputHeapCount - 2`/`- 1`; `buildSubpassInputHeap`
+    (`CommandBuffer.cpp`) always appends two trailing descriptor slots
+    populated from `DepthStencil.Depth`/`.Stencil` directly. Needs zero
+    new ABI struct fields and zero new function parameters. **Two
+    regressions found and fixed during implementation:** (1)
+    `Executor.cpp`'s pre-existing `HasSelfReferencingDepthStencilInput`
+    feedback-loop detector (roadmap `L330`) compares every
+    `SubpassInputHeap` entry's `Data` pointer against `DepthStencil.
+    Depth`/`Stencil`'s own -- since the two new trailing slots always
+    equal that same pointer by construction, this initially
+    false-positived on *every* depth/stencil draw, forcing the late
+    depth/stencil-test path even for fixed-function-only draws with no
+    fragment stage at all (a `FeMeVulkanTests` regression,
+    `DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave`); fixed
+    by excluding exactly the last two heap entries from that scan, since
+    a true feedback-loop self-reference can only ever happen through a
+    real, indexed `subpassLoad`. (2) An interim attempt at fixing (1) by
+    gating the two trailing slots' construction on whether this draw
+    already uses an indexed subpass input for *something* broke
+    `depth_stencil_mapping_to_no_index_depth_clear`/`_stencil_clear`
+    specifically -- their shaders read *only* the no-index depth/stencil
+    input, with zero indexed subpass input anywhere else in the same
+    subpass; reverted that gate, keeping only fix (1) above. **Verified:**
+    new unit test `DrawTest.
+    SubpassLoadReadsBackTheDepthAttachmentItWroteWithNoIndex` reproduces
+    the second regression's exact shape and passes. `FeMeVulkanTests`:
+    804/804 Passed (+1 new unit test). `ninja check-feme`: 3,605/3,608
+    Passed, 3 Unsupported, 0 Failed, 0 regressions. Full `local_read`
+    CTS sub-family (182 cases): 105 Passed, 0 Failed, 77 NotSupported
+    (`shader_object`, expected) -- the originally-targeted 12 cases all
+    now Pass. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
+    md` change needed -- an internal correctness fix to already-
+    advertised `VK_KHR_dynamic_rendering_local_read` functionality.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
