@@ -964,7 +964,60 @@ The largest ordinary-failure changes by group are:
     (item 25) -- none investigated this session, budget went entirely to
     `L375`.
 
-Important confirmed improvements include zero failures or abnormal outcomes
+27. **`L395` fixed (this session): `L383(a)`'s own, previously-mischaracterized
+    `graphicsfuzz.nested-for-loops-switch-fallthrough` crash is a
+    *different* mechanism from `L375` after all, now fixed too -- the
+    last remaining process crash in the entire measured abnormal set.**
+    Item 26's own "closed as a duplicate of `L375`" classification for
+    `L383(a)` (carried from an even earlier session's shallow `gdb bt`
+    match) was wrong: a dedicated, fully live-traced re-investigation this
+    session (new, temporary `FLATTENTRACE`/`VALIDATETRACE` instrumentation
+    gated behind `FEME_DEBUG_FLATTEN_TRACE`, removed once the fix was
+    confirmed) found `L375`'s own fix only guards `validate()`'s
+    `CondBr`-terminated diamond-start blocks against cross-walk
+    collisions -- it does not guard a plain pass-through (`UncondBr`-only)
+    block against the same collision. This reproducer's crash is exactly
+    that gap: an outer divergent diamond's own true-arm is a straight-line
+    chain that happens to pass through the *same physical block*
+    (confirmed via pointer-identity trace) that a nested *uniform* diamond
+    (found later, while validating the outer diamond's own false-arm)
+    also branches to directly as one of its own two successors -- both
+    diamonds' own `hasNPredecessors(2)` check at their (coincidentally
+    identical) shared reconvergence point passes individually, so the
+    overlap is invisible until `flatten`'s "unconditional fallthrough"
+    rewrite steals one of the shared block's two real predecessor edges
+    out from under the nested diamond's own, not-yet-processed merge.
+    **Fix:** `validate()`'s `MergeVisited` uniqueness check now runs for
+    *every* visited block (`ReturnInst`/`UncondBr`/`CondBr` alike), not
+    only `CondBr`-terminated diamond starts, while still letting the
+    cycle-boundary exemption run first (preserving its own legitimate
+    multi-visit tolerance). **Verified:** the reproducer no longer
+    crashes -- a clean `Fail` diagnostic instead of a `SIGSEGV`/assert
+    abort. All four known `L375`/`L383(a)` reproducers
+    (`switch_continue_{geom,tessc,tesse}`,
+    `nested-for-loops-switch-fallthrough`) re-verified unaffected/fixed as
+    expected. **Regression-verified:**
+    `spirv_assembly.instruction.graphics.loop.*` unchanged (32/35 Pass, 3
+    Fail, 0 Crash); full `graphicsfuzz.*` now runs all 757 cases (the
+    reproducer no longer needs excluding) -- 666 Pass (unchanged), 83 Fail
+    (+1, exactly the former crash converted to an ordinary `Fail`), 8 Not
+    Supported (unchanged), **0 Crash**. New regression unit test:
+    `shared-pass-through-block-between-arms.ll`, confirmed via `git
+    stash`/rebuild A-B testing to crash with the identical assertion
+    pre-fix and produce the expected clean diagnostic post-fix. `ninja
+    check-feme`: 3,607/3,610 Passed (+1 new test), 3 Unsupported, 0
+    Failed, 0 regressions. **Group accounting table:** `graphicsfuzz`
+    `Crash` 1 -> 0, `Fail` 82 -> 83. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- internal correctness fix only. **The entire measured
+    abnormal set's original 53 crash/`Unrun` cases are now fully
+    accounted for and fixed (0 remain).** Items 9's still-open `pipeline`
+    `Crash=46` figure reconciliation, `robustness`'s 8 `index_access`
+    `DeviceLost` ordering-dependent bisection (item 25), and the 2
+    `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails
+    (item 25) remain untouched this session.
+
+
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
 
@@ -992,7 +1045,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `fragment_shading_rate` | 110,603 | 0 | 0 | 110,603 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `geometry` | 200 | 190 | 1 | 9 | 0 | 0 | 0 | 0 | 0 | -40 |
 | `glsl` | 28,420 | 19,442 | 15 | 8,963 | 0 | 0 | 0 | 0 | 0 | -2,918 |
-| `graphicsfuzz` | 757 | 666 | 82 | 8 | 0 | 0 | 0 | 1 | 0 | +11 |
+| `graphicsfuzz` | 757 | 666 | 83 | 8 | 0 | 0 | 0 | 0 | 0 | +12 |
 | `image` | 143,086 | 29,901 | 14 | 113,171 | 0 | 0 | 0 | 0 | 0 | -6,927 |
 | `image_processing` | 1,211 | 0 | 0 | 1,211 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `imageless_framebuffer` | 12 | 4 | 0 | 8 | 0 | 0 | 0 | 0 | 0 | +0 |
