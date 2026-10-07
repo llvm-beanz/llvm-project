@@ -63,16 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, needs a dedicated design session, carried over yet again, now
-   with a third failed attempt's lessons baked in**: `L375`. Do **not** try
-   another "replay recorded concrete values" memoization — that's now
-   twice-confirmed unsound whenever two walks with different masking
-   semantics (fresh-seeded vs. loop-carried) can reach the same block. Pick
-   one of the two directions in `Roadmap.md`'s `L375` entry (prevent the
-   overlap structurally, or make the memo re-threadable) and actually design
-   it before touching code.
-2. **~1 day, new this session, needs a memory/handle-counting tool**:
-   `L392` (the `multisample_resolve` thread/resource leak). Start with
-   `valgrind --tool=massif` or a temporary allocation-count log in whichever
-   pool is suspected (thread pool first, since that's the most visible
-   symptom) against the reproducer in `Roadmap.md`'s `L392` entry.
+1. **~1 day, dedicated design session, unchanged**: `L375`
+   (`DiamondFlattener` double-visitation of ordinary merge blocks). Three
+   attempts have failed across three sessions. Do not retry ad hoc —
+   `Roadmap.md`'s `L375` entry has the full root-cause writeup and two
+   candidate designs (structurally prevent the overlap, or make the memo
+   re-threadable). Pick one and actually design it before touching code.
+2. **~15 min, cheap follow-up to this session's fix**: now that `L392`'s
+   root cause (MLIR's per-Context default threading) is confirmed, grep
+   for any *other* `mlir::MLIRContext` construction in `feme/lib`/
+   `feme/tools` that might have the same issue (e.g. `feme-opt`,
+   `feme-translate` — those are fine to leave multithreaded since they're
+   not latency/thread-count-sensitive CLI tools, but worth a quick check
+   that nothing else in the hot Vulkan ICD path builds a second context).
+3. **~30 min, low priority, long-carried-over**: the
+   `renderpasses.dynamic_rendering.*` remaining ordinary-Fail bucket's
+   largest sub-families — still not triaged, same `gdb bt`-per-family
+   approach that has worked repeatedly.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented, no action needed.
