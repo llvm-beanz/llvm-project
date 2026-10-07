@@ -1754,11 +1754,44 @@ Error buildSubpassInputHeap(
     if (Gfx.StencilInputAttachmentIndex)
       considerIndex(*Gfx.StencilInputAttachmentIndex);
   }
-  if (!Any)
+  // (Roadmap L390) A `subpassInput`/`usubpassInput` variable with no
+  // `InputAttachmentIndex` decoration at all reads the current subpass's
+  // depth/stencil attachment *directly* -- legal only when
+  // `pDepthInputAttachmentIndex`/`pStencilInputAttachmentIndex` is `NULL`,
+  // meaning no ordinary index ever maps to it (see
+  // `feme::kSubpassLoadDirectDepthAttachmentIndex`'s own comment in
+  // StageOps.h for the full mechanism). Two extra descriptor slots for
+  // this direct access are therefore appended unconditionally, after
+  // every ordinary indexed slot, whenever this draw has depth/stencil
+  // data to serve them from -- independent of whether
+  // `Gfx.DepthInputAttachmentIndex`/`StencilInputAttachmentIndex` is set,
+  // and independent of `Any` (this draw may have *no* indexed subpass
+  // input at all and still need a direct depth/stencil read -- see
+  // `DEPTH_STENCIL_MAPPING_TO_NO_INDEX_DEPTH_CLEAR`/`_STENCIL_CLEAR`'s own
+  // single-input-attachment shader in `vktDynamicRenderingLocalReadTests.
+  // cpp`), since whether the bound fragment shader actually reaches one is
+  // a shader-side fact this host-side function cannot see. (Always
+  // appending a placeholder even when no shader ever reads it costs only
+  // two descriptor-sized memory writes per draw, with no new
+  // normalization-time ambiguity: see `Executor.cpp`'s own
+  // `HasSelfReferencingDepthStencilInput`, which excludes exactly these
+  // two trailing slots from its "does a real indexed subpass input
+  // self-reference this attachment" feedback-loop scan, since they always
+  // equal `DepthStencil.Depth`/`Stencil`'s own pointer by construction and
+  // would otherwise force every single depth/stencil draw onto the late
+  // depth/stencil-test path --
+  // `DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave`, this
+  // mechanism's own regression test, caught exactly that.)
+  bool NeedsDirectDepthStencil =
+      !DepthStencil.Depth.Data.empty() || !DepthStencil.Stencil.Data.empty();
+  if (!Any && !NeedsDirectDepthStencil)
     return Error::success();
 
-  Heap.assign(MaxIndex + 1, feme::cpu::FemeImageDescriptor{});
-  Layouts.assign(MaxIndex + 1, feme::cpu::FemeImageSubresourceLayout{});
+  uint32_t IndexedCount = Any ? MaxIndex + 1 : 0;
+  uint32_t DirectDepthIdx = IndexedCount;
+  uint32_t DirectStencilIdx = IndexedCount + 1;
+  Heap.assign(IndexedCount + 2, feme::cpu::FemeImageDescriptor{});
+  Layouts.assign(IndexedCount + 2, feme::cpu::FemeImageSubresourceLayout{});
 
   auto populate = [&](uint32_t Idx, const feme::graphics::AttachmentView &View,
                       uint32_t ViewSampleCount) -> Error {
@@ -1806,20 +1839,50 @@ Error buildSubpassInputHeap(
                             ViewSampleCount))
         return E;
     }
-    return Error::success();
+  } else {
+    for (size_t I = 0; I != Attachments.size(); ++I)
+      if (Error E = populate(ColorIndexFor(I), Attachments[I], SampleCount))
+        return E;
+    if (Gfx.DepthInputAttachmentIndex)
+      if (Error E = populate(*Gfx.DepthInputAttachmentIndex,
+                            DepthStencil.Depth, SampleCount))
+        return E;
+    if (Gfx.StencilInputAttachmentIndex)
+      if (Error E = populate(*Gfx.StencilInputAttachmentIndex,
+                            DepthStencil.Stencil, SampleCount))
+        return E;
   }
-
-  for (size_t I = 0; I != Attachments.size(); ++I)
-    if (Error E = populate(ColorIndexFor(I), Attachments[I], SampleCount))
-      return E;
-  if (Gfx.DepthInputAttachmentIndex)
-    if (Error E = populate(*Gfx.DepthInputAttachmentIndex, DepthStencil.Depth,
-                          SampleCount))
-      return E;
-  if (Gfx.StencilInputAttachmentIndex)
-    if (Error E = populate(*Gfx.StencilInputAttachmentIndex,
-                          DepthStencil.Stencil, SampleCount))
-      return E;
+  // (Roadmap L390) The two always-appended tail slots, independent of any
+  // index mapping above, are populated from whatever `Depth`/`Stencil`
+  // view this draw already has -- for a classic render pass with no
+  // subpass input declared at all (this function's early call sites
+  // above never touch `DepthStencil` in that case), that view may still
+  // be raw, not-yet-per-aspect-split combined depth-stencil data (e.g.
+  // `VK_FORMAT_D24_UNORM_S8_UINT`'s own packed texel layout) that
+  // `getFixtureFormatElementSize` (via `populate`'s own `ElemSize` call)
+  // has no entry for, unlike the legitimately-indexed slots above, which
+  // are only ever populated from a real, already-per-aspect-resolved
+  // attachment view a decorated `SubpassLoad` can actually reach. Rather
+  // than failing the whole draw over a placeholder slot no legally-
+  // generated shader could ever read anyway (a `subpassInput` with no
+  // `InputAttachmentIndex` is impossible to declare unless the matching
+  // index was genuinely left `NULL` at the API level -- see
+  // `kSubpassLoadDirectDepthAttachmentIndex`'s own comment), silently
+  // leave such a slot as an empty placeholder instead.
+  auto populateDirect = [&](uint32_t Idx,
+                           const feme::graphics::AttachmentView &View,
+                           uint32_t ViewSampleCount) -> Error {
+    if (Error E = populate(Idx, View, ViewSampleCount)) {
+      consumeError(std::move(E));
+      return Error::success();
+    }
+    return Error::success();
+  };
+  if (Error E = populateDirect(DirectDepthIdx, DepthStencil.Depth, SampleCount))
+    return E;
+  if (Error E =
+          populateDirect(DirectStencilIdx, DepthStencil.Stencil, SampleCount))
+    return E;
   return Error::success();
 }
 

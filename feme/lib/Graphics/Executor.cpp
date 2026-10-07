@@ -2784,11 +2784,30 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // self-referencing input attachment's heap entry and `Draw.DepthStencil.
   // Depth`/`Stencil` always share the identical base pointer when they
   // name the same image.
+  // (Roadmap L390) `CommandBuffer.cpp`'s `buildSubpassInputHeap` always
+  // appends two trailing placeholder slots to `Draw.SubpassInputHeap` --
+  // for a `subpassInput`/`usubpassInput` variable with no
+  // `InputAttachmentIndex` decoration at all, reading the current
+  // subpass's depth/stencil attachment *directly* -- populated from
+  // `Draw.DepthStencil.Depth`/`Stencil`'s own pointer unconditionally,
+  // independent of whether any shader in this draw's pipeline actually
+  // reaches one. Unlike every other (indexed) entry, which only exists
+  // because a real `InputAttachmentIndex`-decorated `subpassLoad` can
+  // reach it, these two always equal `Depth`/`Stencil`'s own pointer by
+  // construction and so must be excluded from this self-referencing scan
+  // -- otherwise *every* depth/stencil draw would false-positive here,
+  // even ones with no fragment stage at all to declare any kind of
+  // subpass input
+  // (`DepthStencilResolveSkipsAspectResolveAttachmentDoesNotHave`, this
+  // mechanism's own regression test, caught exactly that).
   bool HasSelfReferencingDepthStencilInput = false;
   if (NeedsDepthStencil) {
     const uint8_t *DepthData = Draw.DepthStencil.Depth.Data.data();
     const uint8_t *StencilData = Draw.DepthStencil.Stencil.Data.data();
-    for (const cpu::FemeImageDescriptor &Entry : Draw.SubpassInputHeap) {
+    size_t TrailingDirectSlots =
+        std::min<size_t>(2, Draw.SubpassInputHeap.size());
+    for (const cpu::FemeImageDescriptor &Entry :
+        Draw.SubpassInputHeap.drop_back(TrailingDirectSlots)) {
       if (!Entry.Data)
         continue;
       if ((DepthData && Entry.Data == DepthData) ||
