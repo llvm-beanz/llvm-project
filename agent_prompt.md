@@ -63,24 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, dedicated design session, unchanged, carried over yet
-   again**: `L375` (`DiamondFlattener` double-visitation of ordinary merge
-   blocks). Still the only standing design-session item, now carried
-   across four sessions. Do not retry ad hoc — `Roadmap.md`'s `L375` entry
-   has the full root-cause writeup and two candidate designs (structurally
-   prevent the overlap, or make the memo re-threadable). Pick one and
-   actually design it before touching code.
-2. **Needs its own dedicated investigation with a memory/handle-counting
-   tool**: no new item surfaced this session matching this shape — `L392`
-   itself (and now its fuzzer follow-up) is fully closed. If a future
-   session wants a similarly tractable target, the next candidate is the
-   remaining 20 `DeviceLost` results (12 `pipeline`, 8 `robustness`) noted
-   in `VulkanCTSReport.md` item 5, still untriaged, and the 46 `pipeline`
-   `SIGSEGV`s flagged as "the next stability-triage priority" repeatedly
-   but not yet started with case names recorded.
-3. `renderpasses.dynamic_rendering.*` triage: **closed, no further action
-   needed** — confirmed 0 Fail this session, matching the prior session's
-   own full-family sweep. Do not re-open without new evidence of a
-   regression.
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+1. **~1 day, dedicated design+implementation session, now with a fully
+   confirmed mechanism and two concrete design options**: implement
+   `L375` direction (b) first — change `DiamondFlattener::run()`'s root
+   selection/ordering so a block already known (via `PDT`, computed once
+   up front) to be the immediate post-dominator of an earlier-discovered,
+   not-yet-flattened divergent branch is never independently added as its
+   own `Roots` entry. If that proves structurally awkward, fall back to
+   direction (a): refuse a `RedirectTo` rewrite that would steal a
+   predecessor edge from an already-`phi`-finalized merge block (a
+   `CycleBoundaryMasks`-style extension). Re-verify against all four
+   known reproducers: `switch_continue_{geom,tessc,tesse}` and
+   `graphicsfuzz.nested-for-loops-switch-fallthrough` (`L383(a)`).
+2. **~30 min**: reconcile `VulkanCTSReport.md`'s `pipeline` Crash=46/
+   DeviceLost=12 table figures against item 9's "only 3 crashes remain"
+   finding — re-run a fresh full `dEQP-VK.pipeline.*` sweep (or at least
+   recapture `Crash`/`DeviceLost` case names) to confirm whether the table
+   is stale or whether new crashes exist. Also still completely untriaged:
+   `robustness`'s 8 `DeviceLost` cases (never had case names recorded).
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
