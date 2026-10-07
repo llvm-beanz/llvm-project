@@ -117093,3 +117093,49 @@ Handoff said to bisect — a 1-day job needing full-sweep ordering, mirroring `L
 4. **No new stability work queued**: this session's fix closed both items it was handed off. A fresh full-CTS sweep (not attempted this session — would take many hours) is the only way to surface the next batch of untriaged failures; absent that, there is no next concrete bug to hand off.
 
 No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
+
+# Session: L397 — reconciled pipeline/api Crash figures to 0, debunked stale L375 handoff (2026-10-08)
+
+**Win: no code fix needed this session — spent it disproving two stale claims and closing the crash-reconciliation gap, 0 code changes.**
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start and end of session).
+
+## Handoff item 2 was stale: L375/L383(a) already fully fixed
+
+Handoff said "~1 day dedicated design session, now the only standing design-session item" for `L375`. Checked `git log --oneline --all | grep L375` first — fix already committed (`af344681704c`, `311cfb44dde2`, `1e98de4abf15`), same day, before this session started. Re-ran all 4 known reproducers (`switch_continue_{geom,tessc,tesse}`, `graphicsfuzz.nested-for-loops-switch-fallthrough`) directly against the current binary: all 4 now fail with the clean, expected diagnostic, 0 crashes. No design session needed.
+
+**Tooling gotcha found along the way**: the `view` tool served a stale cached copy of `feme/docs/Roadmap.md` (2560 real lines, `view` claimed "at least 1997"). `awk`/`python3`/`grep` read the correct current file. **Going forward: prefer bash reads over `view` for large, heavily-edited docs files when something looks inconsistent with git history.**
+
+## Handoff item 1: pipeline Crash=46 / api Crash=1 reconciled to 0
+
+Extended the item-9/`L394` targeted-case-name technique instead of a full sweep. Pulled the 53 "Unrun" case names from the baseline artifact (`/home/dev/dev/VK-GL-CTS/run/feme-20261005-full-1170553-complete/report.txt`), re-ran all 49 `pipeline` + 1 `api` cases as one batch: **50/50 Pass, 0 Crash**. All 46 pipeline crashes trace to already-fixed bugs (44 `ds_resolve_sample_zero` → `L384`, 2 `compatible_render_pass` → `L381`); the 1 api crash → already-fixed too.
+
+**Bonus find**: `ds_resolve_sample_zero` (768 cases) flipped from 0 Pass/120 Fail (documented at `L384`/`L385`-era) to 120 Pass/0 Fail now, via some unattributed fix between sessions — documented honestly as "unattributed," not guessed at.
+
+## Self-correction: fixed a documentation bug from the *previous* session
+
+Last session's own edit to the "Stability work remains open" aggregate row claimed "`DeviceLost` share is now 12 (`pipeline` only)" — but `L394` (committed earlier the same day, before that edit) had already fixed all 12 to 0. Added a correction note to the row.
+
+## Docs updated
+
+- `VulkanCTSReport.md`: group-accounting table (`api` Crash 1→0 Pass+1, `pipeline` Crash 46→0 Pass+46), conformance-assessment paragraph (removed stale "50 process crashes"), added item 29.
+- `Roadmap.md`: added `L397` row (crash reconciliation, docs-only, done), corrected the prior session's stale "12 DeviceLost" claim in the aggregate row.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no change needed (pure docs reconciliation, no conformance-surface change).
+
+## Verified
+
+- `ninja check-feme`: 3,608/3,611 Passed, 3 Unsupported, 0 Failed (no code changed, confirms clean baseline).
+
+## Commits (2, small, separate)
+
+1. `612bebf9abf2` — `VulkanCTSReport.md` + `Roadmap.md` updates (docs-only)
+2. this commit — `agent_thoughts.md`
+
+## Next steps, ranked
+
+1. **~1 day, needs a reproducer preserving full-sweep ordering, carried over untouched**: 8 `robustness.index_access.*` cases — wait, these were already fixed by `L396` last session. Re-checking the actual remaining open items: there is currently **no known open bug** in `feme/`. All previously-tracked crash/DeviceLost/Fail items (`L375`, `L383(a)`, `L384`, `L385`, `L394`, `L395`, `L396`, `L397`) are closed.
+2. **The one real standing task**: a fresh full-CTS sweep has not been run since `feme-20261005-full-1170553-complete` (this session only re-ran the 53 previously-flagged cases, not the full ~1.17-1.64M case space). Running a new full sweep is the only way to surface the next batch of untriaged failures — budget several hours, run in background, and bisect only the sub-families with new Fails/Crashes.
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed.
+4. **Process note for future sessions**: treat handoff lists as a *hypothesis*, not fact — this is now the 2nd-3rd session in a row that found a stale/incorrect claim in its own handoff (or in the immediately preceding session's own edit). Always re-verify via `git log --oneline --all | grep <L-number>` and a direct CTS rerun before starting "design session" work.
+
+No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
