@@ -730,6 +730,53 @@ The largest ordinary-failure changes by group are:
     own cases) are now gone, with no new Fails introduced anywhere else
     in the family.
 
+21. **`L375` -- a third fix attempt this session, also reverted; `L392` found
+    and confirmed instead.** Continued `L375`'s cross-root
+    `FlattenedBlockMasks` memoization design from the prior session: traced
+    the memo's own lookups and confirmed the map worked exactly as designed
+    (a second visit to the same block correctly resumed from the first
+    walk's recorded answer instead of re-deriving it) -- but this still
+    crashed identically, root-caused to `LoopLinearizer::linearizeCycle`
+    constructing **two separate `DiamondFlattener` objects** for one cycle
+    (their matching `this` pointers across traces were coincidental stack-
+    address reuse between two sequential, non-overlapping object lifetimes,
+    not genuine shared-instance reuse -- confirmed via a map-size dump, not
+    pointer equality). Fixed that by threading a single
+    `SharedFlattenedBlockMasks` map by pointer into every `DiamondFlattener`
+    construction within one `linearizeCycle` call. This made the original
+    `pred_iterator out of range!` assertion disappear on all three
+    reproducers -- but uncovered a *worse*, silent failure: `verifyModule`/
+    `Module::print` would themselves segfault later from memory corruption,
+    because the memoized masks (seeded fresh/unconditional by
+    `flattenLoopBodyDiamond`'s own sweep) are semantically incompatible with
+    `flattenLoopBodyRegion`'s own loop-carried-masking contract -- resuming
+    the second walk with the first walk's stale masks silently discards the
+    real loop-carried state, corrupting IR in a way that only crashes much
+    later, not at the actual mistake. Fully reverted (`git checkout --`),
+    confirmed via rebuild that the tree is back to the original, clean
+    assertion-crash baseline; no code committed. See `Roadmap.md`'s `L375`
+    entry for the complete, detailed root-cause writeup and the two
+    candidate next-step designs. Re-checked this session's two other
+    carried-over triage items: the `primary_cmd_buff.random` bucket (800
+    cases) is confirmed fully resolved already, a side effect of `L390`/
+    `L391` -- 800 Passed, 0 Failed. The `multisample_resolve.layers_3.
+    *samples_8*` thread-count anomaly flagged (unconfirmed) by the prior
+    session is now **confirmed real and tracked as `L392`**: an isolated
+    single-case run, and a 5-case back-to-back run of the same format's
+    whole `samples_8*` sub-family, both pass cleanly, but running the
+    *entire* ~85-case `samples_8` sub-family from one process start (the
+    shape the original full sweep exercised) reproducibly shows the
+    process's own OS thread count climbing monotonically, never shrinking,
+    across cases (15 to 85 sampled), then a genuine `VK_TIMEOUT` on one
+    case's fence wait, followed immediately by the *next* case (confirmed
+    to pass in total isolation) crashing with `unhandled VkImageViewType` /
+    `UNREACHABLE` inside `ImageView::dimension()` -- not a bug in that
+    already-exhaustive switch itself, but a symptom of whatever resource is
+    silently accumulating corrupting later state once exhausted. Not fixed
+    this session; see `Roadmap.md`'s new `L392` entry for the reproducer
+    and next-step recommendation (a memory/handle-counting tool, not more
+    `ps -eLf` sampling).
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
