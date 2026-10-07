@@ -942,8 +942,9 @@ bool hasStageMaskOps(Function &F) {
 class DiamondFlattener {
 public:
   DiamondFlattener(Function &F, DominatorTree &DT, PostDominatorTree &PDT,
-                   CycleInfo &CI, UniformityInfo &UI)
-      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI) {}
+                   CycleInfo &CI, UniformityInfo &UI,
+                   SmallPtrSetImpl<BasicBlock *> &MergeVisited)
+      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI), MergeVisited(MergeVisited) {}
 
   /// Validates and then flattens every divergent diamond reachable from
   /// \p F's entry block, or from the exit block of any cycle reached along
@@ -1319,6 +1320,38 @@ private:
   /// other "not this shape" validation failure -- a clean diagnostic, not
   /// a crash -- is always safe, never a false rejection of real shader
   /// code.
+  ///
+  /// Roadmap L375 (6th investigation): detects a block that is a genuine
+  /// diamond-start (an ordinary, non-cycle-boundary two-way branch)
+  /// reached more than once across *different* roots `run` processes --
+  /// e.g. one root's own reconvergence point happening to also be a
+  /// *different*, earlier root's own later diamond-start, found via live
+  /// tracing on `dEQP-VK.spirv_assembly.instruction.graphics.loop.
+  /// switch_continue_{geom,tessc,tesse}`'s own `Flow26.Flow27_crit_edge`
+  /// block (reached once as `run`'s own cycle-exit root for one cycle,
+  /// and again mid-walk from an entirely different, earlier root, via two
+  /// structurally-unrelated paths neither this function's own single-call
+  /// recursion nor the entry-root/cycle-exit-root split in `run` has any
+  /// way to see are the same physical block until it is too late).
+  /// `flatten` (see its own comment on `CycleBoundaryMasks`) already
+  /// tolerates exactly this shape for a *cycle-boundary* block, where it
+  /// is an expected, correctly-handled convergence of an enclosing
+  /// diamond's own arm and a nested cycle's own exit root (see `RootEnd`)
+  /// -- but an *ordinary* (non-cycle-boundary) merge block has no such
+  /// handling: a second walk reaching it re-derives its own reconvergence
+  /// point and re-flattens it from scratch, silently stealing a
+  /// predecessor edge from the first walk's already-finalized `phi`s and
+  /// tripping `flatten`'s own "exactly two predecessors" assertion later.
+  /// `R->hasNPredecessors(2)` above already guards a diamond's own
+  /// *reconvergence* point against an unexpected third predecessor; this
+  /// is the missing, symmetric guard on the diamond's own *start* against
+  /// being an unexpected second entry into a block some other root
+  /// already claimed. Tracked in `MergeVisited` -- a per-instance member,
+  /// deliberately *not* reset between roots the way `CycleBoundaryBlocks`
+  /// is (see `run`'s own loop) -- rather than a parameter threaded only
+  /// through one top-level call's own recursion, since (as the live trace
+  /// above shows) the collision is not confined to a single top-level
+  /// call's own arms.
   bool validate(BasicBlock *Start, BasicBlock *End, bool Quiet = false,
                unsigned Depth = 0);
 
@@ -1343,6 +1376,21 @@ private:
   /// since a cycle's own body is `LoopLinearizer`'s problem, but the code
   /// after it is squarely this pass's.
   SmallPtrSet<BasicBlock *, 8> CycleBoundaryBlocks;
+
+  /// Roadmap L375 (6th investigation): every ordinary (non-cycle-boundary)
+  /// diamond-start block `validate` has approved so far -- a *reference*
+  /// to state owned by `LinearizePass::run`'s own per-`Function` driver
+  /// (see its own comment), shared across every `DiamondFlattener`
+  /// instance constructed for that one `Function` (this whole-function
+  /// pass's own instance, and every one `LoopLinearizer` separately
+  /// constructs internally for a single cycle or candidate block) --
+  /// *not* a member owned by any single instance, since the live-traced
+  /// collision this exists to reject (see `validate`'s own comment) can
+  /// span two entirely different, sequentially-constructed-and-destroyed
+  /// `DiamondFlattener` objects, not just two roots within one object's
+  /// own `run()`. Unlike `CycleBoundaryBlocks` below, deliberately never
+  /// cleared for the lifetime of that per-`Function` driver.
+  SmallPtrSetImpl<BasicBlock *> &MergeVisited;
 
   /// Roadmap H95a: for every block `flatten` itself stopped at (the same
   /// boundary `CycleBoundaryBlocks` records during `validate`, see above),
@@ -1462,6 +1510,25 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
       // masked it correctly.
       CycleBoundaryEnd.try_emplace(Cur, End);
       return true; // Stop here; LoopLinearizer's problem, not an error.
+    }
+
+    // Roadmap L375 (6th investigation): see `MergeVisited`'s own comment
+    // for the exact shape this rejects -- an ordinary (non-cycle-boundary)
+    // diamond-start block some *other*, already-processed root already
+    // claimed as its own. Checked here (after the cycle-boundary early
+    // return above has already had its chance to accept a legitimate
+    // multi-visit) and keyed on `Cur` itself, not `R`:
+    // `R->hasNPredecessors(2)` below only catches a reconvergence point
+    // with an unexpected third predecessor, not a diamond-start block
+    // that is itself an unexpected second entry into territory another
+    // root already validated.
+    if (!MergeVisited.insert(Cur).second) {
+      if (!Quiet)
+        diagnose(F, "block '" + Cur->getName() +
+                        "' is reached by more than one divergent root "
+                        "(a shared merge point outside a cycle boundary); "
+                        "unsupported (roadmap milestone 6 deviation, L375)");
+      return false;
     }
 
     BasicBlock *R = immediatePostDom(Cur);
@@ -1614,6 +1681,24 @@ DiamondFlattener::flattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End,
 MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
                                    MaskPair Masks, BasicBlock *RedirectTo) {
   for (;;) {
+    // Debug aid: with `FEME_DEBUG_FLATTEN_TRACE` set in the environment,
+    // print every block this walk's own `for (;;)` loop -- including
+    // every nested recursive call this makes for a diamond's own arms --
+    // visits as `Cur`, along with that call's own `End`/`RedirectTo` and
+    // the owning `DiamondFlattener`'s own `this` pointer (to distinguish
+    // genuinely different instances from heap-address reuse across
+    // short-lived ones). Added while root-causing roadmap `L375`'s 6th
+    // investigation: pinpointed the exact block (and the exact two,
+    // structurally-independent paths reaching it) a predecessor-count
+    // assertion was silently tripping over, by diffing this trace against
+    // itself across the scan-driver-exclusion hypothesis vs. unmodified
+    // baseline code.
+    if (::getenv("FEME_DEBUG_FLATTEN_TRACE"))
+      errs() << "FLATTENTRACE: Cur=" << Cur->getName()
+             << " End=" << (End ? End->getName() : "<null>")
+             << " RedirectTo="
+             << (RedirectTo ? RedirectTo->getName() : "<null>")
+             << " this=" << (void *)this << "\n";
     if (Cur == End) {
       // A trivial (already-empty) walk: nothing to redirect, `Cur` itself
       // is the join point. Only reachable when this call's own arm has no
@@ -1952,8 +2037,9 @@ public:
   LoopLinearizer(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
       UniformityInfo &UI,
-      const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks)
-      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI),
+      const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks,
+      SmallPtrSetImpl<BasicBlock *> &MergeVisited)
+      : F(F), DT(DT), PDT(PDT), CI(CI), MergeVisited(MergeVisited), UI(UI),
         DiamondFlattenedEntryMasks(DiamondFlattenedEntryMasks) {}
 
   /// Validates and linearizes every leaf cycle in \p F matching the shape
@@ -1965,6 +2051,15 @@ private:
   DominatorTree &DT;
   PostDominatorTree &PDT;
   CycleInfo &CI;
+
+  /// Roadmap L375 (6th investigation): see `DiamondFlattener::MergeVisited`
+  /// for the full rationale -- the exact same `SmallPtrSet`
+  /// `LinearizePass::run`'s own per-`Function` driver owns, threaded in by
+  /// reference here so every `DiamondFlattener` this class constructs
+  /// internally (for a single cycle's scan-driver candidates, or for one
+  /// `flattenLoopBodyRegion` call) shares it too, rather than each getting
+  /// its own, empty, unaware-of-the-others set.
+  SmallPtrSetImpl<BasicBlock *> &MergeVisited;
 
   /// Roadmap L40: computed once, before any cycle in \p F is linearized
   /// (see `LinearizePass::run`), and deliberately *not* recomputed per
@@ -3614,7 +3709,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // use-after-free for the former, and staleness against blocks this
     // same fixed-point loop itself inserts for the latter). No extra
     // plumbing is needed at this call site as a result.
-    DiamondFlattener DF(F, DT, PDT, CI, UI);
+    DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited);
     bool FlattenedAny = true;
     while (FlattenedAny) {
       FlattenedAny = false;
@@ -4332,7 +4427,20 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // whole cycle is about to be diagnosed and left alone, never reaching
     // `addLatchIncoming` below), breaking module verification.
     {
-      DiamondFlattener Precheck(F, DT, PDT, CI, UI);
+      // Roadmap L375 (6th investigation): deliberately a fresh, local set,
+      // not the real `MergeVisited` shared with the whole rest of this
+      // function's processing -- this is a read-only feasibility probe
+      // before any mutation below, and the real, authoritative check is
+      // `DF.flattenLoopBodyRegion`'s own call just below, which *does*
+      // share `MergeVisited` and is the one that actually decides whether
+      // to proceed. If this precheck optimistically passes but the real
+      // call then disagrees (because some other, already-processed
+      // cycle's own candidate claimed a block this region also reaches),
+      // the `if (!MasksAtLatch)` diagnostic below still catches it
+      // cleanly -- no worse than this precheck not existing at all for
+      // that one case.
+      SmallPtrSet<BasicBlock *, 16> PrecheckMergeVisited;
+      DiamondFlattener Precheck(F, DT, PDT, CI, UI, PrecheckMergeVisited);
       if (!Precheck.canFlattenLoopBodyRegion(HeaderStayInLoop, Latch)) {
         diagnose(F, "loop at '" + Header->getName() +
                         "' has an internal branch in a body shape this "
@@ -4348,7 +4456,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     applyStageMasks(*Header, Masks);
     rethreadNestedEntryMasks(Header, Masks);
 
-    DiamondFlattener DF(F, DT, PDT, CI, UI);
+    DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited);
     std::optional<MaskPair> MasksAtLatch =
         DF.flattenLoopBodyRegion(HeaderStayInLoop, Latch, Masks);
     if (!MasksAtLatch) {
@@ -4820,9 +4928,15 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     UniformityInfo UI = computeWaveUniformity(F, DT, CI);
 
     DenseMap<BasicBlock *, MaskPair> DiamondFlattenedEntryMasks;
+    // Roadmap L375 (6th investigation): see `DiamondFlattener::MergeVisited`
+    // for why this lives here -- one set per `Function`, outliving every
+    // individual `DiamondFlattener`/`LoopLinearizer` instance constructed
+    // below for it, so a block two of them separately claim as their own
+    // diamond-start is caught instead of silently mutated twice.
+    SmallPtrSet<BasicBlock *, 16> MergeVisited;
     {
       PostDominatorTree PDT(F);
-      DiamondFlattener DF(F, DT, PDT, CI, UI);
+      DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited);
       Changed |= DF.run();
       // Roadmap L286: captured *before* `DF` (and the `PDT` it holds a
       // reference to) goes out of scope -- see `LoopLinearizer`'s own
@@ -4849,7 +4963,8 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CI2.compute(F);
     UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
     bool CycleChanged =
-        LoopLinearizer(F, DT2, PDT2, CI2, UI2, DiamondFlattenedEntryMasks)
+        LoopLinearizer(F, DT2, PDT2, CI2, UI2, DiamondFlattenedEntryMasks,
+                       MergeVisited)
             .run();
     // Roadmap H94b: eliminating a loop's divergent exit `CondBr` in favor
     // of an unconditional fall-through plus a mask computation (this
