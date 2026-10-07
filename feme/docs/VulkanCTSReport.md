@@ -603,6 +603,74 @@ The largest ordinary-failure changes by group are:
     needed -- internal correctness fix only, no feature/extension-surface
     change.
 
+18. **`L390` root-caused (not fixed): `local_read`'s 4 depth/stencil
+    `VK_ERROR_INITIALIZATION_FAILED` cases are a `Dim::SubpassData`
+    image reaching resource normalization unconverted via
+    `OpImageTexelPointer`, not `OpImageRead`.** `FEME_VULKAN_LOG_
+    CREATION_ERRORS=1` on all 4 cases (`depth_stencil_mapping_to_
+    no_index`, `_depth_clear`, `_stencil_clear`, `input_attachments_
+    without_mapping`) confirms one shared error: an
+    `llvm.spv.resource.handlefrombinding` call on a
+    `target("spirv.Image", ..., 6, ...)` handle (SPIR-V `Dim::
+    SubpassData`, dim code 6) that `BoundResourceNormalizationPass`
+    cannot normalize. `FEME_DUMP_IR_PRENORM=1` shows the handle flows
+    into `llvm.spv.resource.getpointer` (a raw storage-image texel
+    address), not the `feme.stage.subpass.load` ABI `SPIRVToLLVM
+    Patterns.cpp`'s `SubpassLoadPattern` builds for an ordinary
+    `OpImageRead`-based `subpassInput` read. Root cause:
+    `ImageTexelPointerPattern` (built for roadmap `R39`/`H8u`'s
+    atomic-on-storage-image support) unconditionally lowers *any*
+    image dimension via `createResourcePointer`, with no `Dim::
+    SubpassData` special case the way `SubpassLoadPattern` has --
+    these 4 cases' depth/stencil local-read shaders apparently reach
+    their subpass image through `OpImageTexelPointer` rather than
+    plain `OpImageRead`, so `SubpassLoadPattern` never sees them.
+    Confirmed via a full sweep (below) that this affects all 3
+    command-buffer variants identically (`primary_cmd_buff`/
+    `partial_secondary_cmd_buff`/`graphics_pipeline_library`), 12
+    Fails total. No code changed -- the real fix (a `Dim::SubpassData`
+    case in `ImageTexelPointerPattern`, routed through the subpass-input
+    heap mechanism) needs its own verified design session.
+
+19. **`L391` fixed: `VK_RENDERING_RESUMING_BIT`/`VK_RENDERING_
+    SUSPENDING_BIT` were entirely unhandled, re-clearing a suspended
+    dynamic-rendering instance's contents on resume -- 60 Fails, now
+    0.** Item 3 of this session's carried-over low-priority triage:
+    bucketed the 828-case `renderpasses.dynamic_rendering.*` Fail set
+    by sub-family (`primary_cmd_buff.random` 756, `primary_cmd_buff.
+    basic` 60, `local_read` 12 -- see item 18) and sampled the `basic`
+    bucket. All 60 failing case names share one substring: `resuming`.
+    A `grep` for `RESUMING`/`SUSPENDING` across `feme/lib/Vulkan`/
+    `feme/lib/Graphics` found zero matches -- `VkRenderingInfo::flags`'
+    suspend/resume bits were silently ignored everywhere. Per spec, a
+    resuming instance's own `VkRenderingAttachmentInfo::loadOp` must be
+    ignored (treated as `LOAD`, preserving the suspended instance's
+    contents), but `vkCmdBeginRenderingKHR` applied it verbatim --
+    real CTS cases (and most real applications) specify the same
+    `loadOp` (often still `CLEAR`) on every begin call in a suspend/
+    resume chain, so the resume re-cleared data the suspended instance
+    had already drawn. **Fixed this session**: `vkCmdBeginRenderingKHR`
+    now forces every attachment's `LoadOp` away from `CLEAR` when
+    `VK_RENDERING_RESUMING_BIT` is set, reusing `applyClear`'s existing
+    "`LOAD`/`DONT_CARE`/`NONE` are all a no-op" handling. `StoreOp`
+    needed no matching change: this software renderer already always
+    preserves written memory regardless of `StoreOp`, matching `STORE`'s
+    spec-mandated suspend-side behavior. Added `DrawTest.
+    DynamicRenderingResumingIgnoresLoadOp` (confirmed to fail pre-fix
+    via a `git checkout --`/rebuild A/B, pass post-fix). **Verified:**
+    `primary_cmd_buff.basic.*resuming*` (140 cases: 70 run, 70
+    `VK_KHR_maintenance10`-gated NotSupported) goes from 60 Fail to 0
+    Fail. Full `renderpasses.dynamic_rendering.*` re-sweep (28,898
+    cases): 12,411 Pass / 12 Fail / 16,475 NotSupported (Fail 828 ->
+    12, the remaining 12 being exactly item 18's `L390` cases, confirmed
+    by identical case names before and after). `FeMeVulkanTests`:
+    803/803 Passed (+1 new unit test). `ninja check-feme`: 3,604/3,607
+    Passed, 3 Unsupported, 0 Failed, 0 regressions. No
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+    needed -- `VK_KHR_dynamic_rendering`'s suspend/resume flags were
+    already advertised as accepted; this corrects their handling, not
+    their advertised support.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
