@@ -1017,6 +1017,71 @@ The largest ordinary-failure changes by group are:
     `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails
     (item 25) remain untouched this session.
 
+28. **`L396` fixed (this session): the 8 `robustness.index_access.draw_
+    indexed{,_indirect}_pipeline_robustness_1_*` `DeviceLost` cases were
+    never order-dependent at all -- item 25's own "does not reproduce in
+    isolation" finding was simply stale/wrong, and the real bug reproduces
+    every single time, standalone.** Re-running one of the 8 in isolation
+    this session (`draw_indexed_pipeline_robustness_1_vert_frag` alone,
+    3x for determinism) reproduced `DeviceLost` every time, contradicting
+    item 25's record -- no bisection was needed at all.
+    `FEME_VULKAN_LOG_CREATION_ERRORS=1` immediately surfaced the real
+    error: `"vkQueueSubmit: the indexed draw's index range exceeds
+    maxDrawIndexedIndexValue"`. Root cause: this CTS test family
+    deliberately sets `firstIndex` to `UINT32_MAX - 100` (or, for the
+    8/16-bit-index variants, just past the index buffer's own end) to
+    exercise `VK_EXT_pipeline_robustness`'s/`robustBufferAccess`'s
+    "out-of-bounds index buffer read returns zero" guarantee -- but this
+    ICD's own `CommandBuffer.cpp::validateDrawFetchBounds` pre-rejected
+    any indexed draw whose index range reached past its bound index
+    buffer, and a second, independently wrong check in
+    `validateDrawCounts` additionally rejected whenever `firstIndex +
+    indexCount` (a buffer-byte-range quantity) exceeded
+    `maxDrawIndexedIndexValue` (a limit on actual index *values* fetched
+    from the buffer, an unrelated quantity); even past both of those,
+    `Executor.cpp`'s own index fetch loop still hard-errored on an
+    out-of-range read instead of reading zero. This is exactly the same
+    bug shape F10 already fixed for vertex-attribute fetches
+    (`Roadmap.md`'s F10 entry) -- F10's own audit simply missed the index
+    buffer read path itself. **Fix:** removed both pre-validation
+    rejections (`validateDrawFetchBounds`'s index-range-overrun check,
+    `validateDrawCounts`'s mismatched `maxDrawIndexedIndexValue` check for
+    indexed draws) and changed `Executor.cpp`'s index fetch to read index
+    value `0` for any out-of-range slot, mirroring the vertex-attribute
+    fetch's own existing zero-fill convention immediately below it in the
+    same function. Two pre-existing unit tests
+    (`RejectsOutOfBoundsIndexRange`,
+    `RejectsIndexRangeBeyondBindIndexBuffer2Size`) asserted the old,
+    now-incorrect `VK_ERROR_DEVICE_LOST` behavior; both renamed
+    (`IndexBufferReadPastEndReadsZero`,
+    `IndexBufferReadBeyondBindIndexBuffer2SizeReadsZero`) and rewritten to
+    assert success plus the correct degenerate-triangle (clear-color-only)
+    pixel output instead. New unit test
+    `IndexBufferReadWithHugeFirstIndexReadsZero` covers the exact
+    `firstIndex = UINT32_MAX - 100` reproducer shape. `ninja check-feme`:
+    3,608/3,611 Passed (+1 new test, net of the 2 renames), 3 Unsupported,
+    0 Failed, 0 regressions. **Verified:** all 8 target cases now Pass; a
+    full `dEQP-VK.robustness.index_access.*` re-run (53 cases) is 8 Pass /
+    0 Fail / 45 NotSupported (was 0 Pass / 8 Fail among the executable
+    subset); a full `dEQP-VK.robustness.*` re-sweep is **693 Pass / 0 Fail
+    / 98,083 NotSupported** (was 683/10/98,083) -- the same single fix
+    also silently resolved item 25's other, previously-untriaged finding:
+    the 2 `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}`
+    Fails both now Pass too (re-verified standalone and as a full
+    `non_robust_buffer_access.*` sub-family run, 2/2 Pass), confirming
+    they were never a separate bug -- they were collateral damage from a
+    preceding case's `DeviceLost` corrupting shared process state within
+    the same `deqp-vk` run, consistent with item 25's original (correct,
+    just misattributed) "order-dependent" symptom observation. A targeted
+    `dEQP-VK.draw.*` regression sweep (29,451 cases) confirms 0 Fail, no
+    regression from relaxing the two removed validation checks.
+    **Group accounting table:** `robustness` `Pass` 683 -> 693, `Fail` 2
+    -> 0, `DeviceLost` 8 -> 0. No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only, no new feature surfaced. Handoff items 1 and 2 (bisection
+    and oob triage) are therefore both fully closed this session, with no
+    further action needed on either.
+
 
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
@@ -1063,7 +1128,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `ray_tracing_pipeline` | 22,659 | 0 | 0 | 22,659 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `reconvergence` | 6,253 | 0 | 0 | 6,253 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `renderpasses` | 81,188 | 30,399 | 4,845 | 45,616 | 0 | 0 | 328 | 0 | 0 | -3,009 |
-| `robustness` | 98,776 | 683 | 2 | 98,083 | 0 | 0 | 8 | 0 | 0 | +2 |
+| `robustness` | 98,776 | 693 | 0 | 98,083 | 0 | 0 | 0 | 0 | 0 | -2 |
 | `shader_object` | 243,853 | 6 | 0 | 243,847 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `sparse_resources` | 19,402 | 0 | 0 | 19,402 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `spirv_assembly` | 68,734 | 10,081 | 460 | 58,193 | 0 | 0 | 0 | 0 | 0 | -535 |
@@ -1082,7 +1147,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 
 ## Conformance assessment
 
-This is not a conformant result. There are 47,174 ordinary failures, 348
+This is not a conformant result. There are 47,172 ordinary failures, 340
 `DeviceLost` results, 50 process crashes, and 2,546,724 `NotSupported`
 outcomes. The latter include mandatory core capability gaps as well as
 optional extensions, so eliminating ordinary failures alone would not
