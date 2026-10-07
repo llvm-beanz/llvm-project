@@ -63,21 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **Still infeasible as a full sweep, carried over unchanged**: `pipeline`'s
-   own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Best evidence
-   it's stale: item 9's 53-case targeted re-run found only 3 crashes, all now
-   fixed (`L375`/`L395`). If revisited, extend that targeted-case-name technique
-   (recover case names from the baseline full-run artifact the way `L394`/item 9
-   did) rather than attempting a full sweep.
-2. **~1 day, dedicated design session, unchanged, now the only standing
-   design-session item**: `L375` (`DiamondFlattener`/`LoopLinearizer`
-   double-visitation of ordinary merge blocks via `linearizeCycle`'s scan-driver
-   vs. `flattenLoopBodyRegion` overlap). `Roadmap.md`'s own `L375` entry has the
-   full root-cause writeup and two candidate designs — pick one and design it
-   before touching code.
-3. **No action needed**: `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence
-   item — already resolved/documented in a prior session.
-4. **No new stability work queued**: this session's fix closed both items it was
-   handed off. A fresh full-CTS sweep (not attempted this session — would take
-   many hours) is the only way to surface the next batch of untriaged failures;
-   absent that, there is no next concrete bug to hand off.
+1. **~1 day, needs a reproducer preserving full-sweep ordering, carried over
+   untouched**: 8 `robustness.index_access.*` cases — wait, these were already
+   fixed by `L396` last session. Re-checking the actual remaining open items:
+   there is currently **no known open bug** in `feme/`. All previously-tracked
+   crash/DeviceLost/Fail items (`L375`, `L383(a)`, `L384`, `L385`, `L394`,
+   `L395`, `L396`, `L397`) are closed.
+2. **The one real standing task**: a fresh full-CTS sweep has not been run since
+   `feme-20261005-full-1170553-complete` (this session only re-ran the 53
+   previously-flagged cases, not the full ~1.17-1.64M case space). Running a new
+   full sweep is the only way to surface the next batch of untriaged failures —
+   budget several hours, run in background, and bisect only the sub-families
+   with new Fails/Crashes.
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed.
+4. **Process note for future sessions**: treat handoff lists as a *hypothesis*,
+   not fact — this is now the 2nd-3rd session in a row that found a
+   stale/incorrect claim in its own handoff (or in the immediately preceding
+   session's own edit). Always re-verify via `git log --oneline --all | grep
+   <L-number>` and a direct CTS rerun before starting "design session" work.
