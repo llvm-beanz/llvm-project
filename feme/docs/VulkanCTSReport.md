@@ -722,6 +722,13 @@ The largest ordinary-failure changes by group are:
     now Pass. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.
     md` change needed -- an internal correctness fix to already-
     advertised `VK_KHR_dynamic_rendering_local_read` functionality.
+    **Full-family re-sweep confirmation (same session, after the above):**
+    the entire `dEQP-VK.renderpasses.dynamic_rendering.*` family
+    (28,898 cases) was re-run in full. Totals: 12,423 Passed, **0
+    Failed**, 16,475 Not supported, 0 Warnings, 0 Waived -- the 12
+    remaining Fails from `L391`'s own full-family sweep (all `L390`'s
+    own cases) are now gone, with no new Fails introduced anywhere else
+    in the family.
 
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
