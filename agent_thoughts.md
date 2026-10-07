@@ -116479,3 +116479,143 @@ No work done outside `feme/` this session — nothing found to isolate/fix in an
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already resolved/documented, no action needed.
 
 **Big picture**: with the full `dynamic_rendering.*` family now at 0 Fail family-wide, `L375` is unambiguously the single remaining substantial open item in the FeMe backlog — every other queued triage/fix item from the last several sessions has been resolved. Next session should very likely just go straight at `L375`'s design problem rather than look for more small wins first.
+
+# Session: L375 third fix attempt fails, reverted; L392 found and confirmed (2026-10-07)
+
+Device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed start and end).
+
+## tl;dr
+
+Spent most of this session on `L375`, built a working-as-designed cross-root
+memoization fix, found it introduces *silent memory corruption* instead of
+the original clean assertion crash, and reverted it completely. **No code
+committed this session.** Stopped iterating on `L375` after this third failed
+attempt (first two were prior-session PDT/DT recompute attempts) rather than
+spiral further — documented the full root cause and two concrete next-step
+designs in `Roadmap.md` instead. Used the remaining time to close out two
+carried-over low-priority items: confirmed `primary_cmd_buff.random` (800
+cases) is already fully fixed, and promoted the `multisample_resolve`
+thread-count anomaly from "unconfirmed" to a new, fully-reproduced bug
+(`L392`): a resource leak that eventually causes a real `VK_TIMEOUT` and
+corrupts state for whatever case runs next.
+
+## 1. What I tried on `L375` (all reverted, zero net code change)
+
+1. Picked up where the prior session left off: implement
+   `FlattenedBlockMasks`, a `DenseMap` memoizing each flattened diamond's
+   post-dominator + merged masks, consulted on a second visit instead of
+   re-deriving.
+2. Built it as a **per-`DiamondFlattener`-instance** member first. Rebuilt,
+   reran all 3 reproducers — **still crashed identically.**
+3. Added tracing to find out why. The map was being hit correctly... except
+   it was completely empty (`MapSize=0`) on the second visit despite
+   matching `this` pointers in the trace. That was the big "aha": the
+   matching pointers were **coincidental stack-address reuse** between two
+   sequential, non-overlapping `DiamondFlattener` object lifetimes inside
+   `LoopLinearizer::linearizeCycle`, not the same live object. Lesson:
+   verify object identity via content/state, never bare pointer equality,
+   whenever stack reuse is plausible.
+4. Redesigned: a single `SharedFlattenedBlockMasks` map, owned locally in
+   `linearizeCycle`, threaded by pointer into every `DiamondFlattener`
+   constructed in that call (3 construction sites). Rebuilt, reran — **the
+   original `pred_iterator` assertion was gone on all 3 reproducers.** Felt
+   like a real fix at this point.
+5. It wasn't. `gdb -ex run -ex bt` showed a **new** segfault: `verifyModule`
+   crashing inside `Verifier::visitInstruction`/`llvm::TypeFinder` — memory
+   corruption, not a clean diagnosable failure, and non-deterministic (a
+   repeat run crashed in a different function). This is strictly worse than
+   the original bug: a loud assertion is debuggable; silent corruption is
+   not.
+6. Root-caused *that* too: the memoized masks `flattenLoopBodyDiamond`'s
+   sweep records are seeded from a fresh, unconditional `AllActive` pair.
+   But the second walk that hits the memo is `flattenLoopBodyRegion`, whose
+   entire reason to exist is threading an **externally supplied,
+   already loop-carried** mask through the region instead of ever
+   reseeding fresh (for `feme.stage.discard`/`.demote` state that must
+   accumulate across loop iterations). Resuming walk 2 with walk 1's stale,
+   wrongly-seeded masks silently drops the real loop-carried state —
+   corrupting IR in a way that only crashes much later, nowhere near the
+   actual mistake.
+7. **Reverted everything**: `git checkout --` on both touched files,
+   rebuilt, reran the reproducer — confirmed back to the original, clean
+   `pred_iterator out of range!` assertion. Clean baseline restored.
+
+## 2. Why I stopped here instead of trying a 4th design
+
+Three independent fix attempts (two recomputes from a prior session, this
+session's memoization) have now failed on `L375`, the last one in a way
+that's actively worse (silent corruption vs. loud crash). That's exactly
+the "debug spiral" pattern worth naming an assumption and stopping, rather
+than trying a 4th patch in the same style. The next real fix needs actual
+design time on one of two directions (both written up in detail in
+`Roadmap.md`'s `L375` entry):
+
+- Prevent `flattenLoopBodyDiamond`'s own fixed-point sweep from ever
+  touching blocks that `flattenLoopBodyRegion` will later need to handle
+  with loop-carried masking (requires knowing `CycleHasMaskOps`/
+  `HasDeferredDivergentCandidates` *before* the sweep runs, not just after).
+- Make the memo record something re-threadable (e.g. the diamond's
+  *shape*, not its *concrete mask values*), so a second walk can re-apply
+  its own externally-supplied masks through the same already-known
+  structure instead of replaying stale values.
+
+## 3. Two carried-over items closed out
+
+- **`primary_cmd_buff.random` (800 cases): confirmed already fully fixed.**
+  This was carried over across several sessions as "756 Fails, needs
+  triage" from a stale pre-`L390`/`L391` baseline. Ran the real 800-case
+  family fresh: 800 Passed, 0 Failed. Closed, no code needed — already a
+  side effect of `L390`/`L391`.
+- **`multisample_resolve.layers_3.*samples_8*` thread anomaly: confirmed
+  real, now tracked as `L392`.** The prior session flagged a 1,125-thread
+  spike as "maybe nothing." It's something: running the ~85-case
+  `samples_8` sub-family from one process start shows thread count climbing
+  monotonically (15 → 85, never shrinking) across cases, then a real
+  `VK_TIMEOUT`, then the *next* case (which passes fine standalone) crashes
+  with an `UNREACHABLE` in `ImageView::dimension()` — state corruption from
+  whatever's accumulating, not a bug in that function itself (it already
+  handles every real `VkImageViewType`). Not fixed — needs a memory/handle-
+  counting tool next time, not more `ps -eLf` snapshots. Full writeup in
+  `Roadmap.md`'s new `L392` entry.
+
+## Commits this session
+
+1. `feme: document Roadmap.md's L375 with the third failed fix attempt` —
+   docs only (the code changes themselves were reverted, never committed).
+2. `feme: add L392 for the confirmed multisample_resolve thread/resource leak` —
+   docs only (investigation, no code change).
+3. `feme: update VulkanCTSReport.md with this session's L375/L392 findings` —
+   docs.
+4. This `agent_thoughts.md` commit.
+
+No work done outside `feme/` this session — nothing found to isolate/fix in
+another LLVM subproject. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed, nothing shipped this
+session that changes advertised feature/extension surface.
+
+## Next steps (ranked, with time estimates)
+
+1. **~1 day, needs a dedicated design session, carried over yet again, now
+   with a third failed attempt's lessons baked in**: `L375`. Do **not** try
+   another "replay recorded concrete values" memoization — that's now
+   twice-confirmed unsound whenever two walks with different masking
+   semantics (fresh-seeded vs. loop-carried) can reach the same block. Pick
+   one of the two directions in `Roadmap.md`'s `L375` entry (prevent the
+   overlap structurally, or make the memo re-threadable) and actually design
+   it before touching code.
+2. **~1 day, new this session, needs a memory/handle-counting tool**:
+   `L392` (the `multisample_resolve` thread/resource leak). Start with
+   `valgrind --tool=massif` or a temporary allocation-count log in whichever
+   pool is suspected (thread pool first, since that's the most visible
+   symptom) against the reproducer in `Roadmap.md`'s `L392` entry.
+3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
+   resolved/documented, no action needed.
+4. `primary_cmd_buff.random`: definitively closed this session (800/800
+   Pass) — no further action needed, don't re-open.
+
+**Big picture**: `L375` is still the single real design-session item on the
+backlog, now with a third failed attempt's lessons on file so the next
+session doesn't retread this one. `L392` is a brand-new, concretely
+reproduced item worth a session of its own — it's the first *resource leak*
+found in this project's history, a different flavor of bug than the compiler
+correctness issues most sessions have chased.
