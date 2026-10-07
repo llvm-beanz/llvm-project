@@ -5227,18 +5227,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                             : Draw.IndexBuffer.Type == IndexType::UInt16 ? 2
                                                                          : 4;
           size_t Off = (size_t)IndexPos * ElemSize;
-          if (Off + ElemSize > Draw.IndexBuffer.Data.size())
-            return createStringError(inconvertibleErrorCode(),
-                                     "index buffer read is out of bounds");
-          uint32_t RawIndex;
-          if (ElemSize == 1) {
-            RawIndex = Draw.IndexBuffer.Data[Off];
-          } else if (ElemSize == 2) {
-            uint16_t V;
-            memcpy(&V, Draw.IndexBuffer.Data.data() + Off, 2);
-            RawIndex = V;
-          } else {
-            memcpy(&RawIndex, Draw.IndexBuffer.Data.data() + Off, 4);
+          // (roadmap L396) An index-buffer read reaching past the bound
+          // buffer's end is a buffer read like any other `robustBufferAccess`
+          // covers (unconditionally on for this ICD, see
+          // `PhysicalDeviceInfo.cpp`'s own comment): it reads as index value
+          // zero rather than failing the whole draw, mirroring this same
+          // loop's own vertex-attribute fetch below, which already zero-fills
+          // rather than rejects (roadmap F10). `dEQP-VK.robustness.
+          // index_access.*_pipeline_robustness_*` deliberately binds a
+          // `firstIndex` past the index buffer's end to exercise exactly
+          // this path.
+          uint32_t RawIndex = 0;
+          if (Off + ElemSize <= Draw.IndexBuffer.Data.size()) {
+            if (ElemSize == 1) {
+              RawIndex = Draw.IndexBuffer.Data[Off];
+            } else if (ElemSize == 2) {
+              uint16_t V;
+              memcpy(&V, Draw.IndexBuffer.Data.data() + Off, 2);
+              RawIndex = V;
+            } else {
+              memcpy(&RawIndex, Draw.IndexBuffer.Data.data() + Off, 4);
+            }
           }
           if (RestartEnabled && RawIndex == RestartValue)
             IsRestart[J] = true;

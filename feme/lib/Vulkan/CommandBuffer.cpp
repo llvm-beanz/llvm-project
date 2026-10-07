@@ -2510,23 +2510,26 @@ Error runMeshDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
                         Prepared);
 }
 
-/// Validates a draw's *index* fetch (an indexed draw's index range against
-/// its bound index buffer): "read once, bounds-checked against the bound
-/// buffers and the advertised limits, and rejected rather than clamped when
-/// they cannot be honored. `firstInstance`/`vertexOffset` participate in the
-/// fetch bounds check, not only in the index arithmetic."
+/// Validates a draw's *index* fetch (an indexed draw has a real index
+/// buffer bound at all) and its vertex/instance attribute bindings.
 ///
-/// A vertex/instance *attribute* fetch past its own bound buffer's end is
-/// deliberately **not** rejected here, unlike the index range below
-/// (roadmap F10): `robustBufferAccess` is unconditionally on for this ICD
-/// (`PhysicalDeviceInfo.cpp`'s own comment), and `VkPipelineRobustnessCreate
-/// Info::vertexInputs` (once a pipeline opts into it, see Pipeline.h) makes
-/// such a read legal, well-defined API usage -- not an error to reject --
-/// so it is left to `Executor.cpp`'s own per-component fetch, which reads
-/// it as zero instead. An indexed draw's vertex reach depends on index
-/// values this does not read, so only its index *range* is checked here;
-/// a non-indexed draw's only remaining check is that every declared
-/// binding is actually bound to something.
+/// (roadmap L396) An indexed draw's index *range* reaching past its bound
+/// index buffer is **not** rejected here, matching F10's own precedent for
+/// a vertex/instance *attribute* fetch past its own bound buffer's end:
+/// `robustBufferAccess` is unconditionally on for this ICD
+/// (`PhysicalDeviceInfo.cpp`'s own comment), and an index buffer is a
+/// buffer like any other it covers -- an out-of-range index *read* is
+/// legal, well-defined API usage (deliberately exercised by, e.g.,
+/// `dEQP-VK.robustness.index_access.*_pipeline_robustness_*`, whose
+/// `firstIndex` is set past the bound index buffer's end on purpose), not
+/// an error to reject. F10's own first pass fixed exactly this shape for
+/// vertex attributes but missed the index buffer itself; this closes that
+/// gap the same way, leaving the actual zero-fill to `Executor.cpp`'s own
+/// index fetch. (This is distinct from an *indirect* draw's own argument
+/// buffer, whose attacker-controlled contents are still read once and
+/// rejected rather than clamped when they cannot be honored -- see
+/// `runValidatedDraw`'s own comment -- since that is a separate buffer
+/// from the index buffer an index read here might reach past.)
 Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
                               const GraphicsState &Gfx,
                               const feme::graphics::DrawCommand &Draw) {
@@ -2534,30 +2537,6 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     if (!Gfx.IndexBufferBound)
       return createStringError(inconvertibleErrorCode(),
                                "an indexed draw has no bound index buffer");
-    // (Roadmap L134(a)) A `VK_KHR_maintenance6`-legal `VK_NULL_HANDLE`
-    // index-buffer bind (`Gfx.IndexBufferBound` true, `Gfx.IndexBuffer`
-    // itself null) has no real buffer to range-check an index fetch
-    // against; `Executor.cpp`'s own fetch already rejects reading from
-    // the resulting empty `IndexBufferBinding::Data` span, so there is
-    // nothing further to validate here.
-    if (!Gfx.IndexBuffer)
-      return Error::success();
-    // (Roadmap E5) A `vkCmdBindIndexBuffer2` bind narrows the readable
-    // range to `offset + size` rather than the whole buffer; `VK_WHOLE_
-    // SIZE` (also what a plain `vkCmdBindIndexBuffer` bind always uses)
-    // keeps this the buffer's own end.
-    uint64_t BoundEnd = Gfx.IndexBufferSize == VK_WHOLE_SIZE
-                            ? Gfx.IndexBuffer->size()
-                            : Gfx.IndexBufferOffset + Gfx.IndexBufferSize;
-    uint64_t IndexSize = Gfx.IndexType == VK_INDEX_TYPE_UINT8    ? 1
-                         : Gfx.IndexType == VK_INDEX_TYPE_UINT16 ? 2
-                                                                 : 4;
-    uint64_t End = (uint64_t(Draw.FirstIndex) + Draw.VertexCount) * IndexSize +
-                   Gfx.IndexBufferOffset;
-    if (End > BoundEnd)
-      return createStringError(inconvertibleErrorCode(),
-                               "the indexed draw's index range overruns its "
-                               "bound index buffer");
     return Error::success();
   }
 
@@ -2578,6 +2557,22 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
 
 /// Validates a draw's own counts against the advertised limits, per "every
 /// one of them is checked at pipeline creation and at draw time".
+///
+/// (roadmap L396) An indexed draw's own `firstIndex`/index-count pair is
+/// **not** checked against `maxDrawIndexedIndexValue` here, even though an
+/// earlier version of this function did: that limit bounds the actual
+/// *index value* a shader invocation's `VertexIndex` builtin can observe
+/// (an index fetched from the index buffer, plus `vertexOffset`) per the
+/// spec's own wording, not the `firstIndex`/count pair naming which index
+/// buffer *slots* are read -- the two are unrelated arithmetic, and
+/// conflating them rejected well-formed draws whose index buffer read
+/// itself reaches past the bound buffer's end (now legal, see
+/// `validateDrawFetchBounds`'s own comment) merely because `firstIndex`
+/// happens to be large, with no real index value ever exceeding the
+/// limit. Nothing actually enforces the real limit today; like any other
+/// value the application supplies directly (not through an indirect
+/// buffer), exceeding it is the application's own responsibility to avoid
+/// per the spec, not something this ICD rejects proactively.
 Error validateDrawCounts(const PhysicalDeviceInfo *Info,
                          const feme::graphics::DrawCommand &Draw) {
   if (!Info)
@@ -2587,13 +2582,6 @@ Error validateDrawCounts(const PhysicalDeviceInfo *Info,
     return createStringError(inconvertibleErrorCode(),
                              "the draw's vertex count exceeds the advertised "
                              "maximum");
-  if (Draw.Indexed) {
-    uint64_t LastIndex = uint64_t(Draw.FirstIndex) + Draw.VertexCount;
-    if (LastIndex > Limits.maxDrawIndexedIndexValue)
-      return createStringError(inconvertibleErrorCode(),
-                               "the indexed draw's index range exceeds "
-                               "maxDrawIndexedIndexValue");
-  }
   return Error::success();
 }
 

@@ -34,6 +34,7 @@
 #include "gtest/gtest.h"
 
 #include <cstring>
+#include <limits>
 #include <vector>
 
 using namespace feme::vulkan;
@@ -2193,11 +2194,20 @@ TEST_F(DrawTest, RendersIndexedDrawThroughBindIndexBuffer2) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap E5: `vkCmdBindIndexBuffer2`'s `size` bounds the readable index
-/// range to less than the whole buffer -- a draw whose index range would
-/// have fit the whole buffer, but not the narrower bound `size` gives it,
-/// is rejected.
-TEST_F(DrawTest, RejectsIndexRangeBeyondBindIndexBuffer2Size) {
+/// (roadmap L396) Roadmap E5: `vkCmdBindIndexBuffer2`'s `size` narrows the
+/// readable index range to less than the whole buffer the same way
+/// `IndexBufferReadPastEndReadsZero`'s plain `vkCmdBindIndexBuffer` bind
+/// does -- a draw whose index range would have fit the whole buffer, but
+/// not the narrower bound `size` gives it, reads the out-of-range slot as
+/// index value zero rather than being rejected, this test's own prior
+/// name/expectation. Only indices 0 and 1 (values 0 and 1) are within the
+/// narrowed 2-index bind; index slot 2's own real buffer value (2) would
+/// place `FullscreenVertexSource`'s third vertex at its own
+/// `VertexIndex == 2` "else" case, but the narrowed bind's own zero-fill
+/// makes it read as 0 instead, landing on the same `(-1, -1)` point as the
+/// first vertex -- a degenerate zero-area triangle that rasterizes
+/// nothing, so the clear color is still the only thing visible.
+TEST_F(DrawTest, IndexBufferReadBeyondBindIndexBuffer2SizeReadsZero) {
   VkShaderModule Vertex = createModule(FullscreenVertexSource);
   VkShaderModule Fragment = createModule(RedFragmentSource);
   VkPipeline Pipe = createPipeline(Vertex, Fragment);
@@ -2211,13 +2221,18 @@ TEST_F(DrawTest, RejectsIndexRangeBeyondBindIndexBuffer2Size) {
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
-  // Only the first 2 indices are bound; drawing all 3 overruns that bound.
+  // Only the first 2 indices are bound; drawing all 3 reaches past that
+  // bound.
   vkCmdBindIndexBuffer2(Cmd, IndexBuffer, 0, 2 * sizeof(uint32_t),
                         VK_INDEX_TYPE_UINT32);
   vkCmdDrawIndexed(Cmd, 3, 1, 0, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0x00);
+  EXPECT_EQ(texel(2, 2)[1], 0x00);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
 
   vkDestroyBuffer(Device, IndexBuffer, nullptr);
   vkFreeMemory(Device, IndexMemory, nullptr);
@@ -3225,9 +3240,19 @@ TEST_F(DrawTest, DrawMeshTasksWithoutBoundPipelineFails) {
   EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
 }
 
-/// An indexed draw whose index range overruns its bound index buffer is
-/// rejected before anything is fetched.
-TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
+/// (roadmap L396) An indexed draw whose index range reaches past its bound
+/// index buffer must read the out-of-range index *slots* as index value
+/// zero and let the draw finish, matching `robustBufferAccess`'s
+/// unconditional "on" state (`PhysicalDeviceInfo.cpp`) -- not fail the
+/// whole submit, unlike this test's own prior name/expectation. The bound
+/// index buffer (3 zero-initialized `uint32_t`s) makes every in-range read
+/// (slots 0-2) *and* every out-of-range read (slots 3-5, now zero-filled by
+/// this same robustness rule) resolve to vertex index 0: all 6 of
+/// `FullscreenVertexSource`'s vertices land on its own `VertexIndex == 0`
+/// case, a degenerate zero-area "triangle" that rasterizes nothing, so the
+/// clear color is still the only thing visible -- the real, affirmative
+/// proof this reads as zero rather than merely not crashing.
+TEST_F(DrawTest, IndexBufferReadPastEndReadsZero) {
   VkShaderModule Vertex = createModule(FullscreenVertexSource);
   VkShaderModule Fragment = createModule(RedFragmentSource);
   VkPipeline Pipe = createPipeline(Vertex, Fragment);
@@ -3242,7 +3267,48 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
   vkCmdDrawIndexed(Cmd, 6, 1, 0, 0, 0);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
-  EXPECT_EQ(submit(), VK_ERROR_DEVICE_LOST);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0x00);
+  EXPECT_EQ(texel(2, 2)[1], 0x00);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
+
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap L396) The same shape as `IndexBufferReadPastEndReadsZero`, but
+/// with `firstIndex` itself set almost to `UINT32_MAX`
+/// (`dEQP-VK.robustness.index_access.*_pipeline_robustness_1_*`'s own
+/// reproducer shape, found via a real CTS run logged with
+/// `FEME_VULKAN_LOG_CREATION_ERRORS=1`): every index slot this draw reads
+/// is out of range, so every vertex lands on `VertexIndex == 0` the same
+/// way, and the draw must still succeed rather than report
+/// `VK_ERROR_DEVICE_LOST`.
+TEST_F(DrawTest, IndexBufferReadWithHugeFirstIndexReadsZero) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), Memory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer(Cmd, IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 6, 1, std::numeric_limits<uint32_t>::max() - 100u, 0,
+                   0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0x00);
+  EXPECT_EQ(texel(2, 2)[1], 0x00);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
 
   vkDestroyBuffer(Device, IndexBuffer, nullptr);
   vkFreeMemory(Device, Memory, nullptr);
