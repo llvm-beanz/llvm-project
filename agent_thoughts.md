@@ -117045,3 +117045,51 @@ Device check: `FeMe CPU Vulkan Device` (confirmed, start and end of session).
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed.
 
 No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
+
+# Session: L396 fixed — index-buffer read robustness, closing handoff items 1+2 in one shot (2026-10-08)
+
+**Win: both of this session's starting handoff items are done — turned out to be the same bug.** All 8 `robustness.index_access.*_pipeline_robustness_1_*` `DeviceLost` cases and both `non_robust_buffer_access.unexecuted_oob_*` Fails now Pass.
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start of session).
+
+## Big surprise: the handoff's own "doesn't reproduce in isolation" record was wrong
+
+Handoff said to bisect — a 1-day job needing full-sweep ordering, mirroring `L392`. I ran the full `index_access.*` sub-family once to confirm the 8 cases still failed (they did), then re-ran one of the 8 **alone**, 3 times. It failed every time, standalone, no bisection needed. The item-25 note that isolated reruns pass clean was stale/incorrect.
+
+## Root cause, one paragraph
+
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` immediately printed the real error: `"the indexed draw's index range exceeds maxDrawIndexedIndexValue"`. This CTS family deliberately sets `firstIndex` to `UINT32_MAX - 100` to exercise `VK_EXT_pipeline_robustness`'s "out-of-bounds index buffer read returns zero" guarantee. Three places in FeMe still hard-rejected this instead: `CommandBuffer.cpp`'s `validateDrawFetchBounds` (index-range-overrun check), `validateDrawCounts` (comparing `firstIndex+indexCount`, a byte range, against `maxDrawIndexedIndexValue`, which actually bounds index *values* — unrelated quantities), and `Executor.cpp`'s index fetch loop (hard error instead of zero-fill). This is exactly F10's own already-fixed vertex-attribute-fetch bug shape; F10's audit simply missed the index buffer itself.
+
+## Fix (3 steps, ~2 hours total incl. verification)
+
+1. Removed both pre-validation rejections in `CommandBuffer.cpp`.
+2. `Executor.cpp`: out-of-range index read now resolves to index value `0`, mirroring the vertex-attribute fetch's existing zero-fill immediately below it.
+3. Updated 2 unit tests that asserted the old `VK_ERROR_DEVICE_LOST` behavior (`RejectsOutOfBoundsIndexRange` → `IndexBufferReadPastEndReadsZero`, `RejectsIndexRangeBeyondBindIndexBuffer2Size` → `IndexBufferReadBeyondBindIndexBuffer2SizeReadsZero`), each now asserting success + the correct degenerate-triangle pixel output. Added `IndexBufferReadWithHugeFirstIndexReadsZero` for the exact reproducer shape.
+
+## Verified (all green, 0 regressions)
+
+1. `dEQP-VK.robustness.index_access.*` (53 cases): 8 Pass / 0 Fail (was 0 Pass / 8 Fail among executables).
+2. `dEQP-VK.robustness.*` full re-sweep (98,776 cases): **693 Pass / 0 Fail** (was 683/10) — the 2 `non_robust_buffer_access.unexecuted_oob_*` Fails (handoff item 2, never triaged before) also cleared as a side effect: they were collateral damage from a preceding `DeviceLost` corrupting shared process state, not an independent bug.
+3. `dEQP-VK.draw.*` regression sweep (29,451 cases): 0 Fail — no collateral breakage from relaxing the two validation checks.
+4. `ninja check-feme`: 3,608/3,611 Passed (+1 net new test), 3 Unsupported, 0 Failed.
+
+## Docs updated
+
+- `Roadmap.md`: added `L396` row; updated the "Stability work remains open" aggregate row (`robustness` `DeviceLost` 8 → 0).
+- `VulkanCTSReport.md`: added item 28; updated the `robustness` group-accounting row (`Pass` 683→693, `Fail` 2→0, `DeviceLost` 8→0) and the conformance-assessment summary totals.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change — internal correctness fix, no conformance-surface change.
+
+## Commits (2, small, separate)
+
+1. code fix (`CommandBuffer.cpp`, `Executor.cpp`) + updated/new unit tests (`DrawTest.cpp`)
+2. `Roadmap.md` + `VulkanCTSReport.md` updates
+3. this commit — `agent_thoughts.md`
+
+## Next steps, ranked
+
+1. **Still infeasible as a full sweep, carried over unchanged**: `pipeline`'s own `Crash=46` figure remains unconfirmed (~1.17-1.64M cases). Best evidence it's stale: item 9's 53-case targeted re-run found only 3 crashes, all now fixed (`L375`/`L395`). If revisited, extend that targeted-case-name technique (recover case names from the baseline full-run artifact the way `L394`/item 9 did) rather than attempting a full sweep.
+2. **~1 day, dedicated design session, unchanged, now the only standing design-session item**: `L375` (`DiamondFlattener`/`LoopLinearizer` double-visitation of ordinary merge blocks via `linearizeCycle`'s scan-driver vs. `flattenLoopBodyRegion` overlap). `Roadmap.md`'s own `L375` entry has the full root-cause writeup and two candidate designs — pick one and design it before touching code.
+3. **No action needed**: `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item — already resolved/documented in a prior session.
+4. **No new stability work queued**: this session's fix closed both items it was handed off. A fresh full-CTS sweep (not attempted this session — would take many hours) is the only way to surface the next batch of untriaged failures; absent that, there is no next concrete bug to hand off.
+
+No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
