@@ -914,6 +914,56 @@ The largest ordinary-failure changes by group are:
     both the 8 DeviceLost and 2 Fail are now on record above for a future
     session.
 
+26. **`L375` fixed (7th investigation, this session): `DiamondFlattener`
+    cross-instance merge-block collision, 2 of 2 `spirv_assembly` crashes
+    now clean diagnostics.** The real root cause (finally confirmed, after
+    six prior sessions' disproven theories): `LoopLinearizer::
+    linearizeCycle` constructs *multiple separate* `DiamondFlattener`
+    instances for the same `Function` (the scan-driver loop's `DF`, a
+    read-only `Precheck` probe, and the real `DF` used for
+    `flattenLoopBodyRegion`), each previously tracking "merge blocks
+    already claimed" only via its own per-call or per-instance state, so
+    one instance had no memory of what a different, sequentially
+    constructed-and-destroyed instance already claimed. Fix: thread one
+    `SmallPtrSet<BasicBlock *>` owned by the per-`Function` driver
+    (`LinearizePass::run`) through every `DiamondFlattener`/
+    `LoopLinearizer` instance via a `SmallPtrSetImpl<BasicBlock *> &`
+    reference member; `validate()` gains a uniqueness check that now
+    produces a clean diagnostic instead of asserting when a merge block is
+    revisited. `Precheck` deliberately keeps its own local, non-shared set
+    (a read-only feasibility probe that must not pollute or be polluted by
+    the real, mutating call's state). **Verified:** both
+    `spirv_assembly.switch_continue_{geom,tesse}` (item 5/9's own 2
+    `spirv_assembly` crashes) now produce a clean `Fail
+    (VK_ERROR_INITIALIZATION_FAILED)` instead of asserting --
+    `switch_continue_tessc` (not previously counted as a crash) also now
+    produces the same clean `Fail`, confirming no regression there either.
+    The remaining crash, `graphicsfuzz.nested-for-loops-switch-
+    fallthrough`, is confirmed (again, via live trace) a *different*
+    mechanism -- the colliding block is never itself visited twice as
+    `Cur`; an edge is silently stolen via a `RedirectTo` rewrite without a
+    literal double-visit -- matching item 7's already-tracked `L383(a)`,
+    deliberately left open per standing guidance that it needs its own
+    dedicated design session. **Regression-verified:** full
+    `spirv_assembly.instruction.graphics.loop.*` (32/35 Pass, 3 expected
+    Fail, 0 Crash) and full `graphicsfuzz.*` minus the one known `L383(a)`
+    crash (666/756 Pass, 82 Fail, 8 Not Supported -- an *exact* match to
+    this table's already-recorded 666/82/8 figures, confirming zero
+    regressions anywhere in the family); `ninja check-feme`: 3,606/3,609
+    Passed, 3 Unsupported, 0 Failed. **Group accounting table:**
+    `spirv_assembly` `Crash` 2 -> 0, `Fail` 458 -> 460 (the 2 former
+    crashes now counted as ordinary `Fail`s); `graphicsfuzz` unchanged (0
+    regressions, the 1 remaining crash is the separately-tracked
+    `L383(a)`). No `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md` change needed -- internal correctness
+    fix only. Item 9's still-open `pipeline` Crash=46/DeviceLost=12
+    reconciliation (a fresh full-family sweep) and `robustness`'s 8
+    `index_access` DeviceLost ordering-dependent bisection (item 25) both
+    remain untouched this session, as does the 2 new
+    `non_robust_buffer_access.unexecuted_oob_{overflow,underflow}` Fails
+    (item 25) -- none investigated this session, budget went entirely to
+    `L375`.
+
 Important confirmed improvements include zero failures or abnormal outcomes
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
@@ -963,7 +1013,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `robustness` | 98,776 | 683 | 2 | 98,083 | 0 | 0 | 8 | 0 | 0 | +2 |
 | `shader_object` | 243,853 | 6 | 0 | 243,847 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `sparse_resources` | 19,402 | 0 | 0 | 19,402 | 0 | 0 | 0 | 0 | 0 | +0 |
-| `spirv_assembly` | 68,734 | 10,081 | 458 | 58,193 | 0 | 0 | 0 | 2 | 0 | -537 |
+| `spirv_assembly` | 68,734 | 10,081 | 460 | 58,193 | 0 | 0 | 0 | 0 | 0 | -535 |
 | `ssbo` | 12,225 | 3,242 | 0 | 8,983 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `subgroups` | 48,705 | 888 | 0 | 47,817 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `synchronization` | 64,872 | 18,420 | 0 | 46,452 | 0 | 0 | 0 | 0 | 0 | -3,128 |
