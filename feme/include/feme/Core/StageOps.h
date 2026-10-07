@@ -254,6 +254,33 @@ enum class StageOpKind : uint8_t {
   NumStageOpKinds,
 };
 
+/// Reserved `SubpassLoad` `attachment_index` sentinel values (roadmap
+/// L390): `feme::spirv::SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) bakes
+/// one of these, instead of an ordinary decoration-derived index, for a
+/// `subpassInput`/`usubpassInput` variable with no `InputAttachmentIndex`
+/// decoration at all. Per `VkRenderingInputAttachmentIndexInfoKHR`'s own
+/// man page, such a variable is only legal when
+/// `pDepthInputAttachmentIndex`/`pStencilInputAttachmentIndex` is `NULL`,
+/// and reads the current subpass's depth/stencil attachment *directly*,
+/// bypassing the index-remapping array entirely -- there is no small
+/// integer index to recover at SPIR-V-conversion time, since the choice of
+/// which physical attachment this is is only known once the Vulkan API
+/// resolves it per draw. `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad`
+/// recognizes these two reserved values and resolves them against the two
+/// extra descriptor slots `feme::vulkan::buildSubpassInputHeap`
+/// (CommandBuffer.cpp) always appends at the tail of the regular,
+/// index-addressed subpass-input heap, computing the real runtime slot as
+/// `SubpassInputHeapCount - 2` (depth) / `- 1` (stencil) rather than using
+/// either sentinel as a literal heap index. Chosen far outside any real
+/// `InputAttachmentIndex` a shader could legally declare (SPIR-V places no
+/// explicit numeric limit on the decoration, but every real Vulkan
+/// implementation's own `maxPerStageDescriptorInputAttachments`-style
+/// limits keep an ordinary index many orders of magnitude below either
+/// value).
+inline constexpr uint32_t kSubpassLoadDirectDepthAttachmentIndex = 0xFFFFFFFEu;
+inline constexpr uint32_t kSubpassLoadDirectStencilAttachmentIndex =
+    0xFFFFFFFDu;
+
 /// Whether \p Kind's value operand/result participates in the type-mangling
 /// suffix `getOrInsertStageOp` appends (true for every op with a generic
 /// "value" operand or result; false for the fixed-signature ops --
