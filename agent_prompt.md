@@ -64,30 +64,33 @@ Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
 1. **~1 day, needs a dedicated design session, the only remaining design-session
-   item, carried over across many sessions now (unchanged from last session —
-   genuinely not touched this session beyond two more failed attempts)**: `L375`
-   (`DiamondFlattener` double-visitation of ordinary merge blocks by independent
-   top-level `flatten()` calls). Do NOT re-attempt a PDT/DT recompute — two
-   independent attempts this session both failed and the real mechanism
-   (confirmed via tracing, not guessing) shows recompute cannot work. Next real
-   step: design a `FlattenedBlockMasks`-style memoization recording a block's
-   final `Masks` once a walk fully reconverges past it, consulted (instead of
-   re-deriving) by any later walk reaching the same block — generalizing the
-   existing `CycleBoundaryMasks`/H120 mechanism beyond cycle-boundary blocks.
-2. **~1 day, needs a dedicated design session**: `L390` — give
-   `ImageTexelPointerPattern` (`SPIRVToLLVMPatterns.cpp`) a `Dim::SubpassData`
-   case mirroring `SubpassLoadPattern`'s own `input_attachment_index` lookup,
-   routing to the subpass-input heap mechanism instead of
-   `createResourcePointer`. Confirm first whether
-   atomics-against-a-subpass-image are a real, reachable shape this target needs
-   (if not, a clean `notifyMatchFailure` is an acceptable interim fix — but
-   confirm with `FEME_DUMP_IR_PRENORM` per-case first, since the error message's
-   own text warns an unrelated resource in the same function can be the real
-   blocker).
-3. **~30 min**: the `primary_cmd_buff.random` bucket (756 Fails, by far the
-   largest remaining) — not triaged this session (ran out of budget after
-   `L391`). These are individually-seeded random render-graph cases; try one
-   `gdb bt`/error-message check on 2-3 samples to see if they share a cause
-   before assuming a large triage effort.
+   item, carried over across many sessions now (genuinely not touched this
+   session — deliberately deferred, consistent with explicit guidance carried
+   over from the prior two sessions that two independent fix attempts already
+   failed and a real design sitting is needed)**: `L375` (`DiamondFlattener`
+   double-visitation of ordinary merge blocks by independent top-level
+   `flatten()` calls). Do **not** re-attempt a PDT/DT recompute — confirmed via
+   tracing (not guessing) that the predecessor count genuinely is 1 by the
+   second visit, so recomputing cannot help. The next real step is a
+   `FlattenedBlockMasks`-style memoization recording a block's final `Masks`
+   once a walk fully reconverges past it, generalizing the existing
+   `CycleBoundaryMasks`/H120 mechanism beyond cycle-boundary blocks to ordinary
+   merge blocks.
+2. **~30 min, low priority, carried over from last session, still not done**:
+   the `primary_cmd_buff.random` bucket (756 Fails from the *old*,
+   pre-`L390`/`L391` baseline — note this bucket's current Fail count needs
+   re-confirming now that both `L390` and `L391` are fixed, since the full sweep
+   above showed 0 Fail family-wide, meaning this bucket may already be fully
+   resolved as a side effect and this item may simply be closed; check the full
+   sweep's log for `random` case names before spending any time here, since the
+   numbers may no longer apply).
+3. **~1 hour, new this session**: investigate the 1,125-thread /
+   brief-futex-stall anomaly observed during the
+   `multisample_resolve.layers_3.*samples_8*` sweep (see the performance note
+   above) — not a confirmed bug yet, just an anomaly worth a dedicated look with
+   a narrower, isolated reproducer (a single `samples_8_baseLayer*` case run
+   standalone, checked for thread count via `ps -eLf` before assuming it's
+   actually a problem rather than expected CPU-renderer-under-heavy-MSAA-load
+   behavior).
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
