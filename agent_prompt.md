@@ -63,22 +63,24 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, dedicated design session, unchanged**: `L375`
-   (`DiamondFlattener` double-visitation of ordinary merge blocks). Three
-   attempts have failed across three sessions. Do not retry ad hoc —
-   `Roadmap.md`'s `L375` entry has the full root-cause writeup and two
-   candidate designs (structurally prevent the overlap, or make the memo
-   re-threadable). Pick one and actually design it before touching code.
-2. **~15 min, cheap follow-up to this session's fix**: now that `L392`'s
-   root cause (MLIR's per-Context default threading) is confirmed, grep
-   for any *other* `mlir::MLIRContext` construction in `feme/lib`/
-   `feme/tools` that might have the same issue (e.g. `feme-opt`,
-   `feme-translate` — those are fine to leave multithreaded since they're
-   not latency/thread-count-sensitive CLI tools, but worth a quick check
-   that nothing else in the hot Vulkan ICD path builds a second context).
-3. **~30 min, low priority, long-carried-over**: the
-   `renderpasses.dynamic_rendering.*` remaining ordinary-Fail bucket's
-   largest sub-families — still not triaged, same `gdb bt`-per-family
-   approach that has worked repeatedly.
+1. **~1 day, dedicated design session, unchanged, carried over yet
+   again**: `L375` (`DiamondFlattener` double-visitation of ordinary merge
+   blocks). Still the only standing design-session item, now carried
+   across four sessions. Do not retry ad hoc — `Roadmap.md`'s `L375` entry
+   has the full root-cause writeup and two candidate designs (structurally
+   prevent the overlap, or make the memo re-threadable). Pick one and
+   actually design it before touching code.
+2. **Needs its own dedicated investigation with a memory/handle-counting
+   tool**: no new item surfaced this session matching this shape — `L392`
+   itself (and now its fuzzer follow-up) is fully closed. If a future
+   session wants a similarly tractable target, the next candidate is the
+   remaining 20 `DeviceLost` results (12 `pipeline`, 8 `robustness`) noted
+   in `VulkanCTSReport.md` item 5, still untriaged, and the 46 `pipeline`
+   `SIGSEGV`s flagged as "the next stability-triage priority" repeatedly
+   but not yet started with case names recorded.
+3. `renderpasses.dynamic_rendering.*` triage: **closed, no further action
+   needed** — confirmed 0 Fail this session, matching the prior session's
+   own full-family sweep. Do not re-open without new evidence of a
+   regression.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache-persistence item: already
    resolved/documented, no action needed.
