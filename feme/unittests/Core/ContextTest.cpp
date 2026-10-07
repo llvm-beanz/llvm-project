@@ -42,6 +42,18 @@ TEST(ContextTest, WrapsExternallyOwnedMLIRContext) {
   EXPECT_EQ(&Ctx.getMLIRContext(), &External);
 }
 
+TEST(ContextTest, OwnedMLIRContextHasMultithreadingDisabled) {
+  // (roadmap L392) Each owned MLIRContext backs exactly one short-lived,
+  // single-threaded shader-stage compile; MLIR's own pass/verifier
+  // parallelism has nothing to gain there, and was confirmed (via live
+  // tracing of a CTS run) to be the source of unbounded `llvm-worker-N`
+  // thread churn when left at MLIR's default `Threading::ENABLED`. This
+  // must stay disabled so every pass/verifier call runs on the calling
+  // thread instead of lazily spinning up a whole OS thread pool.
+  Context Ctx;
+  EXPECT_FALSE(Ctx.getMLIRContext().isMultithreadingEnabled());
+}
+
 TEST(ContextTest, DiagnoseWithNoHandlerInstalledDoesNotCrash) {
   // No default handler is installed (see DiagnosticHandlerTy's comment in
   // feme/Core/Diagnostic.h): diagnose() must be safe to call regardless.
