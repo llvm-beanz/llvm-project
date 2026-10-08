@@ -1164,6 +1164,44 @@ The largest ordinary-failure changes by group are:
     `/home/dev/dev/VK-GL-CTS/run/feme-20261007-full/report.txt`
     (509MB).
 
+31. **`L399` root-caused and fixed (this session): 190 of its 192-case
+    `DeviceLost` cluster closed.** `FEME_VULKAN_LOG_CREATION_ERRORS=1`
+    (not set by item 30's repro) immediately surfaced the real error:
+    `vkQueueSubmit: vkCmdClearAttachments names the depth attachment,
+    which is not bound`. Root cause, in `feme/lib/Vulkan/ImageOps.cpp`'s
+    `runClearAttachments`: a subpass that never references a depth/
+    stencil attachment at all (`VK_ATTACHMENT_UNUSED`, so `Binding.
+    Depth`/`Binding.Stencil` is unset entirely) was hard-errored instead
+    of treated as a no-op -- a genuinely distinct, equally legal "unused"
+    shape from the already-handled present-but-unused case (`Binding.
+    Depth` set, `.View` null, for dynamic rendering's `VK_NULL_HANDLE`
+    `imageView`). Confirmed the fix direction via the `dynamic_rendering`
+    sibling CTS case (identical scenario shape, different API path),
+    which already passes cleanly. **Fix:** removed the two hard-error
+    paths, changed the two view-null checks to also require the
+    `optional` itself be set. New regression unit test
+    `ClearAttachmentsSkipsUnboundDepthStencilAttachment`
+    (`DrawTest.cpp`) covers this exact shape; confirmed it fails
+    (`VK_ERROR_DEVICE_LOST`) before the fix and passes after.
+    `FeMeVulkanTests`: 806/806 Passed (+1 net new test), 0 regressions.
+    **Verified:** the original failing case now passes standalone; all
+    190 `unused_clear_attachments` cases from the cluster (excluding the
+    2 `multisample_resolve` cases) now Pass (190/190); a
+    `dEQP-VK.renderpasses.*.suballocation.*` regression sweep (21,932
+    cases, excluding the still-broken `multisample_resolve` family) shows
+    14,931 Pass / 36 Fail / 6,965 NotSupported, 0 DeviceLost -- the 36
+    Fails are pre-existing `subpass_dependencies.late_fragment_tests`
+    cases, confirmed byte-for-byte identical to the Oct-7 baseline
+    (`feme-20261007-full/report.txt`), i.e. zero regressions from
+    relaxing the removed validation. **The remaining 2
+    `multisample_resolve.mixed_sample_count.
+    mixed_sample_count_subpasses` cases (`renderpass1`/`renderpass2`) are
+    a separate, unrelated bug** (`vkQueueSubmit: vertex binding 0 is not
+    bound to a buffer`) -- not addressed by this fix, left open for a
+    future session. `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed -- internal
+    correctness fix only, no feature/extension-surface change.
+
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
 
