@@ -63,20 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker — likely finished
-   by now. If so, concatenate all 6 `logs/part*.stdout.log`, re-run the
-   `sed`/`sort`/`uniq -c` clustering technique across the *entire* case space,
-   and separately investigate **why `part1` stopped silently and `part2` crashed
-   with `terminate called without an active exception`** — a crash during a live
-   sweep is itself exactly the kind of robustness bug this project tracks (c.f.
-   `L398`), and right now there's no stack trace or isolated reproducer for
-   either.
-2. **(~1 day, dedicated session)** `part4`'s unusually high 13,971-Fail bucket
-   (2.8% of 499,208 cases) — cluster it the same way `L399`-`L402` were found;
-   likely several distinct new bugs bundled together given the raw count.
-3. **(long-carried-over, still open)** `L375`:
+1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker (PID 70573 at last
+   check, ~83% done) — once finished, concatenate all 6 `logs/part*.stdout.log`
+   and re-cluster the *entire* case space. **Remember `part6`'s
+   `transform_feedback.primitives_generated_query` bucket there is `L403`-stale,
+   not new** — skip it when re-clustering, don't re-diagnose it.
+2. **(~1 day, dedicated session)** Build isolated reproducers for `part1`'s
+   SIGSEGV (last case before the crash:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`)
+   and `part2`'s `std::terminate`/`Aborted` (immediately after
+   `dEQP-VK.memory.concurrent_access.shader_and_host`'s `DeviceLost`) — two
+   distinct, concrete, case-pinned crash leads, neither chased this session due
+   to time. Both are new-information (exact trigger case identified) versus
+   every prior session's "aggregate counts only" status on this item.
+3. **(~1 day, dedicated session)** `part4`'s 13,754-case `DeviceLost` cluster in
+   `pipeline_library.vertex_input.*` — confirmed still present, completely
+   separate from this session's `L404` `Fail`-bucket fix, not yet clustered by
+   sub-shape or root-caused at all.
+4. **(long-carried-over, still open)** `L375`:
    `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not
    touched this session, needs its own dedicated design session per the existing
    roadmap entry.
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see
    `L380`), no action needed, carried forward unchanged for the record only.
