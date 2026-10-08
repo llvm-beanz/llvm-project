@@ -117546,3 +117546,46 @@ Generated a fresh flat case list via `deqp-vk --deqp-runmode=txt-caselist` (3,24
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
 
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L403 fixed — primitives_generated_query stream-count bug (2026-10-09)
+
+**Device check (start):** `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES` set explicitly per command — the shell's own ambient value points at `lvp_icd.json`/llvmpipe instead).
+
+**Task (carried over from prior session's handoff item 1): finish root-causing/fixing `dEQP-VK.transform_feedback.primitives_generated_query.{get,copy}`** (1,308 failing cases, filed as `L403`). A prior session found one real bug (a `Stream`-decoration member-forwarding gap) but a retest still showed 132/396 cases failing — this session picks up from there.
+
+**Found two more bugs, both needed on top of the prior session's fix:**
+
+1. `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT` silently dropped their own `index` parameter — the stream a `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` query counts — always scoping to stream 0 regardless of what the app asked for.
+2. The actual failing CTS shader (`no_xfb`/`pgq_1`/`pgq_2` variant) calls `EmitStreamVertex(N); EndStreamPrimitive(N);` with **zero** output-variable writes at all — no `Stream`-decorated SPIR-V struct member ever exists for this shape, so the prior session's member-decoration fix had nothing to apply to. `Executor.cpp`'s `StreamCount` (derived purely from signature elements) stayed stuck at 1 no matter what.
+
+**Fix for bug 2** (the deeper, more interesting one): SPIR-V has no execution mode for "stream count" — the only ground truth is the constant `stream` operand on every `EmitStreamVertex`/`EndStreamPrimitive` call in the entry point's own body. Added a scan in `ConvertSPIRVToLLVMPass.cpp` that walks those ops, extracts their constant operands, and attaches the result as a new `feme.geometry.stream_count` passthrough attribute — mirroring the existing `feme.geometry.invocations` convention exactly (absent = default, "derive the old way"). Read back into a new `GeometryState::StreamCount` field (`Geometry.h`/`.cpp`).
+
+**Found a third bug after fixing (1) and (2):** `Executor.cpp`'s per-stream primitive-count loop iterated only `GSOutputElementsByStream`'s *keys* (streams with ≥1 signature element) — a stream with zero signature elements but real emitted-vertex activity was silently skipped even once `StreamCount` was correct. Fixed by iterating `0..StreamCount` directly, reading `Combined.getVertices(Stream)`/`getStrips(Stream)` (independent of the signature, driven by actual runtime emits).
+
+**Verified:**
+1. Single originally-failing case: now Pass.
+2. Full 396-case retest subset from the prior session: 396/396 Pass.
+3. Full `dEQP-VK.transform_feedback.primitives_generated_query.*` family (107,866 cases): **0 Fail** (was 1,308), 4,926 Pass, 102,940 NotSupported (expected — `transformFeedbackQueries` disabled, unrelated). Re-ran this a second time after all commits landed, same result.
+4. `ninja check-feme`: 3616/3619 Passed (+2 net new unit tests), 3 Unsupported, 0 Failed — 0 regressions.
+
+**Docs updated:** `Roadmap.md` (new `L403` row, done), `VulkanCTSReport.md` (item 36 added, `transform_feedback` group-accounting row updated: 1,918→610 Fail, +1,308 Pass), `FeMeGraphicsDesign.md` (new paragraph documenting `feme.geometry.stream_count`/`GeometryState::StreamCount` right after the existing `Invocations` writeup it mirrors). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — internal correctness fix to an already-advertised extension, no feature/extension-surface change.
+
+**Commits (5):**
+1. `[FeMe] Forward Stream decoration for SPIR-V struct members (L403)` — `SPIRVToLLVMPatterns.cpp` + its unit test (made last session, confirmed still correct this session).
+2. `[FeMe] Derive geometry stream count from Emit*/End*Stream call operands (L403)` — `ConvertSPIRVToLLVMPass.cpp`, `Geometry.h`, `Geometry.cpp`, lit test.
+3. `[FeMe] Compute primitives-generated counts for every declared stream (L403)` — `PreparedDraw.h`, `Executor.cpp`, `ExecutorTest.cpp`.
+4. `[FeMe] Thread vkCmdBeginQueryIndexedEXT's index into PRIMITIVES_GENERATED_EXT queries (L403)` — `CommandBuffer.h`/`.cpp`, `CommandBufferTest.cpp`.
+5. `[feme] Update roadmap/CTS report/design docs for L403` — docs only.
+
+**No issues found outside `feme/` this session** — nothing to isolate/reproduce/fix in another subproject. (Did confirm, while tracing, that MLIR's own SPIR-V deserializer generically preserves any member decoration including `Stream` — it was never the bottleneck, so no upstream MLIR fix was needed.)
+
+**Found but not pursued — a leftover background sweep from a prior session (`feme-20261008-full/`):** checked `ps aux` — only 1 of the original 6 workers (`part3`) is still running (144 CPU-minutes in, 99.8% CPU, not yet finished). Of the other 5: `part4`/`part5`/`part6` completed cleanly with totals (19,157/13,971/499,208 Fail-heavy; 44,103/51/507,574 mostly-clean; 78,284/2,414/604,747 respectively — note `part4`'s 13,971 Fail count is unusually high and worth prioritizing). `part1` stopped with no trailing summary and no crash message (silently killed or lost, cause unknown). `part2` crashed outright (`terminate called without an active exception`, right after a run of `memory.binding.regular.suballocated.image_*` `DeviceLost`s) — this looks like the same general "oversubscribed host instability" class as `L398`'s now-fixed `Fence` UAF, but is a **different** process/log (`part2`, not `part3`'s earlier worker), so needs its own fresh triage, not assumed-fixed.
+
+**Next steps, in priority order:**
+
+1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker — likely finished by now. If so, concatenate all 6 `logs/part*.stdout.log`, re-run the `sed`/`sort`/`uniq -c` clustering technique across the *entire* case space, and separately investigate **why `part1` stopped silently and `part2` crashed with `terminate called without an active exception`** — a crash during a live sweep is itself exactly the kind of robustness bug this project tracks (c.f. `L398`), and right now there's no stack trace or isolated reproducer for either.
+2. **(~1 day, dedicated session)** `part4`'s unusually high 13,971-Fail bucket (2.8% of 499,208 cases) — cluster it the same way `L399`-`L402` were found; likely several distinct new bugs bundled together given the raw count.
+3. **(long-carried-over, still open)** `L375`: `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not touched this session, needs its own dedicated design session per the existing roadmap entry.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
+
+**Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
