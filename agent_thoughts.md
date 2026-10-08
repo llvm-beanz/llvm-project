@@ -117222,3 +117222,105 @@ Both `L398` and `L399` are "found, not fixed" — each needs its own dedicated r
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed, carried forward unchanged for the record only.
 
 No issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
+
+# Session: L399 root-caused and fixed, L400 filed
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start of session).
+
+## Start here next session
+
+No open code-fix work queued. Pick `L400` (vertex-binding bug in
+`multisample_resolve.mixed_sample_count`) or `L398` (QueueExecutor/Fence
+teardown deadlock) — both are "found, not fixed," each needs ~1 day.
+
+## What happened, in order
+
+1. Picked up the prior session's handoff: `L399` (192-case `renderpasses.*.
+   suballocation.{unused_clear_attachments,multisample_resolve}` DeviceLost)
+   and `L398` (QueueExecutor/Fence deadlock). Verified handoff was accurate
+   (clean tree, fresh build).
+2. Reproduced `L399`'s case with `FEME_VULKAN_LOG_CREATION_ERRORS=1` (not set
+   last session) — got the real diagnostic: `vkQueueSubmit:
+   vkCmdClearAttachments names the depth attachment, which is not bound`.
+3. Root-caused in `feme/lib/Vulkan/ImageOps.cpp`'s `runClearAttachments`: a
+   subpass that never references a depth/stencil attachment at all
+   (`VK_ATTACHMENT_UNUSED`, so `Binding.Depth`/`Binding.Stencil` is unset
+   entirely, not merely its `.View`) hard-errored instead of being treated
+   as a no-op — a different "unused" shape from the already-handled
+   present-but-unused case (`Binding.Depth` set, `.View` null, dynamic
+   rendering's `VK_NULL_HANDLE`).
+4. Confirmed the fix direction via the `dynamic_rendering` sibling CTS case
+   (identical scenario, different API path) — it already passes cleanly,
+   proving a silent no-op is correct, not an error.
+5. Wrote the fix (remove 2 hard-error paths, require the `optional` itself
+   be set before dereferencing `.View`) and a new regression test
+   (`ClearAttachmentsSkipsUnboundDepthStencilAttachment`, `DrawTest.cpp`).
+   **A/B verified**: stashed the fix, confirmed the new test fails
+   (`VK_ERROR_DEVICE_LOST`) pre-fix; restored, confirmed it passes.
+6. `FeMeVulkanTests`: 806/806 (was 805, +1 new test), 0 regressions.
+7. Rebuilt the ICD (`.so`), re-ran the original failing case standalone:
+   now **Pass**.
+8. Extracted all 192 case names from the `L399` cluster from the baseline
+   sweep report (`feme-20261007-full/report.txt`), ran the 190
+   `unused_clear_attachments` cases together (excluding 2
+   `multisample_resolve` cases): **190/190 Pass**.
+9. Discovered the 2 `multisample_resolve` cases are a **different,
+   unrelated bug**: `vkQueueSubmit: vertex binding 0 is not bound to a
+   buffer` — not touched by this fix. Filed as `L400`.
+10. Broader regression sweep: `renderpasses.*.suballocation.*` (21,932
+    cases, excluding the still-broken `multisample_resolve` family):
+    14,931 Pass / 36 Fail / 6,965 NotSupported, **0 DeviceLost**. The 36
+    Fails are confirmed byte-for-byte pre-existing
+    (`subpass_dependencies.late_fragment_tests`, identical to the Oct-7
+    baseline) — zero regressions from relaxing the validation.
+11. Committed the fix (code + test) separately from the doc updates
+    (`Roadmap.md` L399 marked done + L400 filed, `VulkanCTSReport.md` item
+    31 added).
+12. Ran full `check-feme`: **3609/3612 Passed** (3 Unsupported, 0 Failed),
+    confirmed ccache + assertions + no-PCH build config, all target deps
+    built before tests ran.
+
+## Why only one bug fixed this session
+
+`L399` turned out to be two independent bugs sharing one 192-case cluster
+(depth/stencil-clear handling + vertex-binding setup for a specific
+multi-sample-count-subpass shape). Fixing and fully verifying the first one
+(root cause, fix, A/B test, 3 separate verification sweeps, full
+`check-feme`) used the full session budget. `L398` not started this
+session — carried forward unchanged.
+
+## Visible wins this session
+
+- 190 of 192 `L399` DeviceLost cases now Pass (was 0/192).
+- `FeMeVulkanTests` 806/806 (new regression test for this exact bug shape).
+- `check-feme` 3609/3612, 0 Fail, 0 regressions from the fix.
+- Confirmed via direct A/B testing (stash/rebuild/test, twice) that the fix
+  is both necessary (test fails without it) and sufficient (test + CTS case
+  + full cluster all pass with it).
+
+## Next steps, ranked
+
+1. **(~1 day, dedicated session)** `L400`: `dEQP-VK.renderpasses.
+   {renderpass1,renderpass2}.suballocation.multisample_resolve.
+   mixed_sample_count.mixed_sample_count_subpasses` — `vkQueueSubmit:
+   vertex binding 0 is not bound to a buffer`, 2 cases. Start by tracing
+   `feme/lib/Vulkan/CommandBuffer.cpp`'s vertex-binding-table setup against
+   this case's specific multi-subpass/mixed-sample-count configuration —
+   `mixed_sample_count` implies several subpasses with differing sample
+   counts in one render pass, likely exposing a vertex-binding-table
+   reset/carry-over bug across subpass transitions.
+2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown
+   deadlock — unchanged from last session's handoff. Build a *spec-valid*
+   reproducer (`vkDeviceWaitIdle` before destroying anything but the fence
+   itself) to isolate the fence-specific race from the broader
+   object-lifetime class a prior reproducer attempt accidentally also hit.
+3. **(~30 min)** Cluster the 3,519 Fail / 1,656 ResourceError cases from
+   `feme-20261007-full/report.txt` (same `sed`/`sort`/`uniq -c` technique
+   that found `L399`) — carried over, still not attempted.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no
+   action needed, carried forward unchanged for the record only.
+
+No issues found outside `feme/` this session — nothing to isolate/reproduce/
+fix in another subproject.
+
+Device check (end of session): `FeMe CPU Vulkan Device` (confirmed).
