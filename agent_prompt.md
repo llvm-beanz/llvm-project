@@ -63,19 +63,17 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(check in next session)** Full sweep in
-   `/home/dev/dev/VK-GL-CTS/run/feme-20261008-full/` — check `ps aux | grep
-   deqp-vk` for whether it's still running or done; if done, concatenate
-   `qpa/part*.qpa` or `logs/part*.stdout.log` and re-run the `sed`/`sort`/`uniq
-   -c` clustering technique across the *entire* case space (not just
-   `renderpasses.*`) to find the next untriaged cluster(s) — likely several,
-   since this is the first full sweep since `L398`'s fix and since `L399`-`L401`
-   landed.
-2. **(~1 day, dedicated session)** `L402`:
-   `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36
-   cases) — start from the reproducer above and trace
-   `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT`-scoped depth/stencil
-   subpass-dependency handling across `vkCmdNextSubpass`.
+1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker — likely finished
+   by now. If so, concatenate all 6 `logs/part*.stdout.log`, re-run the
+   `sed`/`sort`/`uniq -c` clustering technique across the *entire* case space,
+   and separately investigate **why `part1` stopped silently and `part2` crashed
+   with `terminate called without an active exception`** — a crash during a live
+   sweep is itself exactly the kind of robustness bug this project tracks (c.f.
+   `L398`), and right now there's no stack trace or isolated reproducer for
+   either.
+2. **(~1 day, dedicated session)** `part4`'s unusually high 13,971-Fail bucket
+   (2.8% of 499,208 cases) — cluster it the same way `L399`-`L402` were found;
+   likely several distinct new bugs bundled together given the raw count.
 3. **(long-carried-over, still open)** `L375`:
    `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not
    touched this session, needs its own dedicated design session per the existing
