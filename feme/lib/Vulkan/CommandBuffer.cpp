@@ -954,6 +954,16 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
 struct ActivePipelineStatsQuery {
   QueryPool *Pool = nullptr;
   uint32_t Query = 0;
+  /// (roadmap H21d) The geometry-shader output stream this query is
+  /// scoped to -- `vkCmdBeginQueryIndexedEXT`'s `index`, 0 for a plain
+  /// `vkCmdBeginQuery` or an explicit stream-0/default index (the CTS's
+  /// own `streamIndices[]` maps both to the same scope). Only
+  /// `accumulatePrimitivesGenerated`'s caller (`accumulatePipelineStats`)
+  /// consults this -- `accumulatePipelineStatistics` has no per-stream
+  /// concept, so a `VK_QUERY_TYPE_PIPELINE_STATISTICS` entry simply
+  /// carries whatever stream its own (irrelevant) `vkCmdBeginQuery` call
+  /// happened to pass, same as any other unused field.
+  uint32_t Stream = 0;
 };
 
 /// (roadmap H9) Projects `feme::graphics::PreparedDraw::
@@ -962,11 +972,18 @@ struct ActivePipelineStatsQuery {
 /// -ordered shape, then sums the result into every one of \p
 /// ActivePipelineStatsQueries -- shared by every draw path
 /// (`runPreparedDraw`) since all of them fill the same counters struct.
-/// (Roadmap H21d) Also feeds `Stats.ClippingInvocations` to
-/// `accumulatePrimitivesGenerated` for the same list's own
-/// `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` entries, if any -- see
-/// `ActivePipelineStatsQuery`'s own comment for why both types share one
-/// list.
+/// (Roadmap H21d) Also feeds `accumulatePrimitivesGenerated` for the same
+/// list's own `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` entries, if any --
+/// see `ActivePipelineStatsQuery`'s own comment for why both types share
+/// one list. A query's own `Stream` selects which value it gets: `0`
+/// (a plain `vkCmdBeginQuery`, or an explicit stream-0/default index) keeps
+/// using `Stats.ClippingInvocations` exactly as before (the single value
+/// every already-passing `pgq_default`/`pgq_0` CTS case already confirms
+/// correct); any other stream looks up `Stats.
+/// PrimitivesGeneratedByStream`, falling back to `ClippingInvocations` only
+/// if that stream never appeared in `GSOutputElementsByStream`
+/// (`Executor.cpp`) -- i.e. a non-geometry-shader draw, where no
+/// `PrimitivesGeneratedByStream` entry for any stream can ever exist.
 void accumulatePipelineStats(
     llvm::ArrayRef<ActivePipelineStatsQuery> ActivePipelineStatsQueries,
     const feme::graphics::PreparedDraw::PipelineStatsCounters &Stats) {
@@ -1003,8 +1020,13 @@ void accumulatePipelineStats(
       Stats.TessEvalShaderInvocations;
   for (const ActivePipelineStatsQuery &Query : ActivePipelineStatsQueries) {
     Query.Pool->accumulatePipelineStatistics(Query.Query, Counters);
-    Query.Pool->accumulatePrimitivesGenerated(Query.Query,
-                                              Stats.ClippingInvocations);
+    uint64_t Primitives = Stats.ClippingInvocations;
+    if (Query.Stream != 0) {
+      auto It = Stats.PrimitivesGeneratedByStream.find(Query.Stream);
+      if (It != Stats.PrimitivesGeneratedByStream.end())
+        Primitives = It->second;
+    }
+    Query.Pool->accumulatePrimitivesGenerated(Query.Query, Primitives);
   }
 }
 
@@ -3015,7 +3037,7 @@ Error executeCommandsInto(
         // its own expected query type, so entries of either type coexist
         // here safely.
         ActivePipelineStatsQueries.push_back(
-            {Cmd.TargetQueryPool, Cmd.FirstQuery});
+            {Cmd.TargetQueryPool, Cmd.FirstQuery, Cmd.Count[1]});
       break;
     }
     case RecordedCommand::Kind::EndQuery: {
@@ -5180,19 +5202,27 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndTransformFeedbackEXT(
                              std::move(Offsets));
 }
 
-// (roadmap H21b) `index` selects which geometry-shader-output stream a
-// `VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT` query counts -- a query
-// type this ICD does not implement yet (roadmap H21d), so it is accepted
-// but otherwise ignored here, exactly like `vkCmdWriteTimestamp2` above
-// delegates straight to its non-2 counterpart's identical payload once its
-// own new argument is dropped.
+// (roadmap H21b) `index` selects which geometry-shader-output stream the
+// query counts. For the still-unimplemented `VK_QUERY_TYPE_TRANSFORM_
+// FEEDBACK_STREAM_EXT` query type it remains accepted but ignored here.
+// (Roadmap H21d) `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` shares these same
+// entry points, and *does* use `index` -- it is threaded through to
+// `beginQuery` (`Cmd.Count[1]`, see `RecordedCommand`'s own comment) so
+// `accumulatePipelineStats` (`CommandBuffer.cpp`) can route each query to
+// its own requested stream's primitive count instead of always
+// `ClippingInvocations`'s single (stream-0) value.
 VKAPI_ATTR void VKAPI_CALL
 vkCmdBeginQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
-                          uint32_t query, VkQueryControlFlags, uint32_t) {
+                          uint32_t query, VkQueryControlFlags, uint32_t index) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->beginQuery(fromHandle<QueryPool>(queryPool), query);
+      ->beginQuery(fromHandle<QueryPool>(queryPool), query, index);
 }
 
+// `vkCmdEndQueryIndexedEXT`'s own `index` needs no payload here: ending a
+// query only needs its pool+query-index identity to find the matching
+// `ActivePipelineStatsQuery`/`ActiveOcclusionQuery` entry `beginQuery`
+// already recorded (stream included), so it is accepted but unused, same
+// as the unimplemented `TRANSFORM_FEEDBACK_STREAM_EXT` case above.
 VKAPI_ATTR void VKAPI_CALL
 vkCmdEndQueryIndexedEXT(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
                         uint32_t query, uint32_t) {

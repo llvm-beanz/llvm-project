@@ -224,10 +224,13 @@ struct RecordedCommand {
   QueryPool *TargetQueryPool = nullptr;
   /// `ResetQueryPool`: `[FirstQuery, FirstQuery+QueryCount)` (`Count[0]`
   /// reused for `QueryCount`). `BeginQuery`/`EndQuery`/`WriteTimestamp`: the
-  /// single query index (`FirstQuery`). `CopyQueryPoolResults`: the same
-  /// range as `ResetQueryPool`, plus `DstBuffer`/`DstOffset` (reused above)
-  /// and `DstSize` (reused for `stride`) and `FillData` (reused for
-  /// `VkQueryResultFlags`).
+  /// single query index (`FirstQuery`). `BeginQuery` additionally reuses
+  /// `Count[1]` for `vkCmdBeginQueryIndexedEXT`'s `index` (the
+  /// geometry-shader output stream a `VK_QUERY_TYPE_PRIMITIVES_GENERATED_
+  /// EXT` query is scoped to, roadmap H21d; 0 for a plain `vkCmdBeginQuery`).
+  /// `CopyQueryPoolResults`: the same range as `ResetQueryPool`, plus
+  /// `DstBuffer`/`DstOffset` (reused above) and `DstSize` (reused for
+  /// `stride`) and `FillData` (reused for `VkQueryResultFlags`).
   uint32_t FirstQuery = 0;
   /// `ExecuteCommands`: the secondary command buffers to interpret into
   /// this (primary) command buffer's own execution state, in order (see
@@ -588,12 +591,19 @@ public:
     Cmd.Count[0] = QueryCount;
     Commands.push_back(Cmd);
   }
-  /// `vkCmdBeginQuery`.
-  void beginQuery(QueryPool *Pool, uint32_t Query) {
+  /// `vkCmdBeginQuery`/`vkCmdBeginQueryIndexedEXT`: \p Stream is the
+  /// latter's `index` argument (`Count[1]` reused to carry it through to
+  /// replay, see `RecordedCommand::Kind::BeginQuery`'s own comment),
+  /// defaulted to 0 for a plain (non-indexed) `vkCmdBeginQuery` -- the same
+  /// stream a `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` query implicitly
+  /// scopes to when `primitivesGeneratedQueryWithNonZeroStreams` is never
+  /// exercised (roadmap H21d).
+  void beginQuery(QueryPool *Pool, uint32_t Query, uint32_t Stream = 0) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BeginQuery;
     Cmd.TargetQueryPool = Pool;
     Cmd.FirstQuery = Query;
+    Cmd.Count[1] = Stream;
     Commands.push_back(Cmd);
   }
   /// `vkCmdEndQuery`.

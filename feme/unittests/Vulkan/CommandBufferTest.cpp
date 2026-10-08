@@ -3821,11 +3821,17 @@ TEST_F(CommandBufferTest, TransformFeedbackRejectsEndWithNoBegin) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Failed());
 }
 
-/// (Roadmap H21b) `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT`
-/// delegate straight to `vkCmdBeginQuery`/`vkCmdEndQuery`, ignoring
-/// `index` -- confirmed the same way `QueryPoolWriteTimestampThenGetResults`
-/// above confirms its own non-indexed counterpart, by reading back a real
-/// query result.
+/// (Roadmap H21b, updated by L403) `vkCmdBeginQueryIndexedEXT`/
+/// `vkCmdEndQueryIndexedEXT` behave exactly like `vkCmdBeginQuery`/
+/// `vkCmdEndQuery` for any query type other than
+/// `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` -- `index` only ever
+/// selects which geometry-shader output stream a primitives-generated
+/// query counts (see `CommandBuffer.cpp`'s own `beginQuery`/
+/// `accumulatePipelineStats`), so a plain
+/// `VK_QUERY_TYPE_PIPELINE_STATISTICS` pool like this one ignores it
+/// precisely as before -- confirmed the same way
+/// `QueryPoolWriteTimestampThenGetResults` above confirms its own
+/// non-indexed counterpart, by reading back a real query result.
 TEST_F(CommandBufferTest, QueryIndexedDelegatesToNonIndexedQuery) {
   VkQueryPoolCreateInfo PoolInfo{};
   PoolInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
