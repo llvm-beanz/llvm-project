@@ -63,27 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session)** `L401`: `dEQP-VK.renderpasses.
-   {renderpass1,renderpass2}.suballocation.multisample_resolve.
-   mixed_sample_count.mixed_sample_count_subpasses` — "Resolved tile
-   mismatch detected at pixel (63, 66)! RTV B color does not match RTV A
-   reference.", 2 cases. Start by tracing
-   `feme/lib/Graphics/Executor.cpp`'s / `feme/lib/Vulkan/ImageOps.cpp`'s
-   multisample-resolve implementation against this case's specific
-   multi-subpass, *mixed* sample-count configuration (several subpasses
-   with differing sample counts resolving into one image) — both API
-   variants fail identically at the same pixel, so the bug is almost
-   certainly shared non-dynamic-rendering resolve code.
-2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence`
-   teardown deadlock — unchanged from last session's handoff. Build a
-   *spec-valid* reproducer (`vkDeviceWaitIdle` before destroying anything
-   but the fence itself) to isolate the fence-specific race.
-3. **(~1-2 hrs)** Clustering the global 3,519 Fail / 1,656 ResourceError
-   cases needs a *fresh* run producing a flat per-case result list (a
-   real `.qpa` log, or `--deqp-runmode=txt-caselist`-style export), not
-   the comparison-style `feme-20261007-full/report.txt` this session
-   discovered lacks one — budget time for the run itself (likely several
-   hours for a full-case-space sweep) separately from the ~30 min
-   clustering step.
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no
-   action needed, carried forward unchanged for the record only.
+1. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown
+   deadlock — unchanged from prior handoffs. Build a *spec-valid* reproducer
+   (`vkDeviceWaitIdle` before destroying anything but the fence itself) to
+   isolate the fence-specific race from the broader object-lifetime class a
+   prior reproducer attempt accidentally also hit.
+2. **(~30 min)** Cluster the global Fail/ResourceError cases from a *fresh* full
+   sweep with a flat per-case result list (a real `.qpa`/`txt-caselist` export)
+   — the Oct-7 `report.txt` was confirmed in an earlier session to be a
+   diff/comparison artifact unsuitable for direct clustering; the clean
+   `renderpasses.*`-only sweep this session ran
+   (`/tmp/l401_regression_renderpasses_stdout.txt`) is usable for that one group
+   right now if someone wants to pre-triage it before a full-case-space run.
+3. **(~several hours, background)** A fresh full-case-space CTS sweep (last
+   genuine one: `feme-20261005-full-1170553-complete`, Oct 5) — this session
+   only ran the 2 `L401` cases plus one `renderpasses.*` group (81,188 cases),
+   not the full ~1.17-1.64M case space. Running one is the only way to surface
+   the next batch of untriaged failures across groups other than `renderpasses`.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see
+   `L380`), no action needed, carried forward unchanged for the record only.
