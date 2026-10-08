@@ -63,32 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session)** `L399`:
-   `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.{unused_clear_attachments,multisample_resolve}`
-   DeviceLost, 192 cases. Repro:
-   ```
-   VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json \
-     /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
-     --deqp-case=dEQP-VK.renderpasses.renderpass1.suballocation.unused_clear_attachments.colorunused_colorunused_colorunused_colorunused_depthonly_d32_unused \
-     --deqp-log-filename=/tmp/repro.qpa
-   ```
-   Start by tracing `vkCmdBeginRenderPass`/subpass-attachment-reference handling
-   in `feme/lib/Vulkan/CommandBuffer.cpp` and `feme/lib/Graphics/Executor.cpp`
-   for how "unused" attachments (present in the render pass, not referenced by
-   the active subpass) are resolved — both `renderpass1` and `renderpass2` API
-   variants fail equally, so the bug is almost certainly shared
-   non-dynamic-rendering code.
+1. **(~1 day, dedicated session)** `L400`: `dEQP-VK.renderpasses.
+   {renderpass1,renderpass2}.suballocation.multisample_resolve.
+   mixed_sample_count.mixed_sample_count_subpasses` — `vkQueueSubmit:
+   vertex binding 0 is not bound to a buffer`, 2 cases. Start by tracing
+   `feme/lib/Vulkan/CommandBuffer.cpp`'s vertex-binding-table setup against
+   this case's specific multi-subpass/mixed-sample-count configuration —
+   `mixed_sample_count` implies several subpasses with differing sample
+   counts in one render pass, likely exposing a vertex-binding-table
+   reset/carry-over bug across subpass transitions.
 2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown
-   deadlock. Build a *spec-valid* reproducer first (call `vkDeviceWaitIdle`
-   before destroying anything except the fence itself, isolating the
-   fence-specific race from the broader object-lifetime class this session's
-   reverted reproducer accidentally also hit). If it reproduces, the fix is
-   likely `std::shared_ptr`-based reference counting on `Fence` (and possibly
-   other in-flight-task-referenced objects) so destruction defers until no task
-   still references them.
+   deadlock — unchanged from last session's handoff. Build a *spec-valid*
+   reproducer (`vkDeviceWaitIdle` before destroying anything but the fence
+   itself) to isolate the fence-specific race from the broader
+   object-lifetime class a prior reproducer attempt accidentally also hit.
 3. **(~30 min)** Cluster the 3,519 Fail / 1,656 ResourceError cases from
-   `feme-20261007-full/report.txt` the same way `L399` was found
-   (`sed`/`sort`/`uniq -c` by 4-component case-name prefix) — not attempted this
-   session, time ran out.
-4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed, carried forward unchanged for the record only.
+   `feme-20261007-full/report.txt` (same `sed`/`sort`/`uniq -c` technique
+   that found `L399`) — carried over, still not attempted.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no
+   action needed, carried forward unchanged for the record only.
