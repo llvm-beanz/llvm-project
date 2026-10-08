@@ -1471,6 +1471,49 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     ~4,598-case `pipeline_library.vertex_input.*` `DeviceLost` cluster
     in the same test family remains open and untouched.
 
+38. **`L405` root-caused and fixed (this session): the remaining
+    ~4,598-case `pipeline.pipeline_library.vertex_input.*` `DeviceLost`
+    cluster `L404` left open.** Reproduced deterministically and
+    standalone (`max_attributes.query_max_attributes.binding_one_to_many.
+    interleaved`), confirming a genuine FeMe bug, not an environmental/
+    concurrency artifact. `FEME_VULKAN_LOG_CREATION_ERRORS=1` surfaced
+    the real error: `"vkQueueSubmit: vertex input location 2 has no
+    bound vertex buffer attribute"`. Root cause: this CTS shape's
+    vertex shader declares a single array-typed input,
+    `layout(location = 1) in vec4 attr[numAttributes-1];`, reflecting
+    as one `feme::SignatureElement` with `Location == 1` spanning
+    `RowCount` consecutive locations (1 through 15) -- the same
+    matrix/array-spanning shape `Executor.cpp`'s vertex-fetch loop
+    already walks correctly via `RowLocation = *Elt.Location + Row`.
+    `GraphicsPipeline.cpp`'s `validateStageInterfaces` (which builds
+    the `UsedVertexInputLocations` set `L400`'s fix introduced) checked
+    and recorded only the base `*VSIn.Location`, silently ignoring
+    every other row -- so for this shape only location 1 was ever
+    recorded as "used." Since `BINDING_MAPPING_ONE_TO_MANY` splits this
+    array input's 15 locations across two different vertex bindings
+    (alternating by each location's input-rate relative to the first
+    attribute's), `CommandBuffer.cpp`'s `bindingHasAnyAttribute`
+    wrongly judged the binding supplying locations 2, 4, 6, ..., 14 as
+    "unused" and skipped fetching it entirely, leaving those locations
+    unbound at draw time. **Fix:** changed `validateStageInterfaces`'s
+    per-input check/record loop to iterate `Row` from `0` to
+    `VSIn.RowCount-1`, using `RowLocation = *VSIn.Location + Row` for
+    both the "is this location supplied" check and the
+    `UsedVertexInputLocations` insertion, mirroring `Executor.cpp`'s own
+    existing per-row fetch pattern. New regression test
+    `L405SplitBindingArrayAttributeRepro` (`DrawTest.cpp`): a minimal
+    `RowCount == 2` array input split across two separate bindings,
+    confirmed to fail (`VK_ERROR_DEVICE_LOST`) pre-fix and pass
+    post-fix. `ninja check-feme`: 3,618 Passed (+1 net new test), 3
+    Unsupported, 0 Failed, 0 regressions. **Verified:** the single
+    reproducer case Fail -> Pass; a full
+    `pipeline.pipeline_library.vertex_input.*` family regression sweep
+    (9,208 cases) shows 4,816 Pass / 0 Fail / 0 DeviceLost / 4,389
+    NotSupported / 3 QualityWarning -- the entire cluster is resolved.
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+    change needed -- internal correctness fix only, no feature/
+    extension-surface change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
