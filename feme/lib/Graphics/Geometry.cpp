@@ -47,6 +47,10 @@ StringRef getGeometryMaxOutputVerticesAttrName() {
   return "feme.geometry.max_output_vertices";
 }
 
+StringRef getGeometryStreamCountAttrName() {
+  return "feme.geometry.stream_count";
+}
+
 static std::optional<GeometryInputPrimitive>
 parseInputPrimitiveAttr(StringRef Attr) {
   if (Attr == "points")
@@ -121,6 +125,19 @@ std::optional<GeometryState> getGeometryState(const Function &F) {
     if (Invocations.getAsInteger(10, InvocationsValue))
       return std::nullopt;
     State.Invocations = InvocationsValue;
+  }
+
+  // (L403) `StreamCount` defaults to 0 (see `GeometryState::StreamCount`'s
+  // own comment) if this entry point's body never used
+  // `EmitStreamVertex`/`EndStreamPrimitive` with a stream above 0 -- the
+  // attribute's own absence signals that, same as `Invocations` above.
+  if (F.hasFnAttribute(getGeometryStreamCountAttrName())) {
+    StringRef StreamCount =
+        F.getFnAttribute(getGeometryStreamCountAttrName()).getValueAsString();
+    uint32_t StreamCountValue = 0;
+    if (StreamCount.getAsInteger(10, StreamCountValue))
+      return std::nullopt;
+    State.StreamCount = StreamCountValue;
   }
   return State;
 }

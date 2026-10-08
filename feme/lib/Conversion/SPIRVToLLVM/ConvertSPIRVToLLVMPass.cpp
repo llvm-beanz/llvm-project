@@ -140,6 +140,25 @@ struct EntryPointInfo {
   /// (`GeometryState::Invocations`'s own comment) when a geometry entry
   /// point's module never declares it explicitly.
   uint32_t GeometryInvocations = 1;
+  /// (L403) The number of output-primitive streams a geometry entry point
+  /// actually addresses, derived by scanning its body for the highest
+  /// constant `stream` operand any `spirv.EmitStreamVertex`/
+  /// `spirv.EndStreamPrimitive` instruction uses, plus one. SPIR-V has no
+  /// execution mode that declares a stream *count* directly -- unlike
+  /// `Invocations`/`OutputVertices`, which this entry's `GeometryState`
+  /// takes verbatim off an execution mode, "how many streams exist" is
+  /// only ever implicit in which stream numbers the body's `Emit`/`End`
+  /// calls happen to use. A shader that calls `EmitStreamVertex(1)` but
+  /// never writes any stream-decorated output variable (e.g. a geometry
+  /// shader written purely to feed `VK_EXT_primitives_generated_query`'s
+  /// per-stream counter, with no interpolated data at all) would
+  /// otherwise leave `Executor.cpp`'s element-decoration-derived stream
+  /// count stuck at 1, making `GeometryWrapper.cpp`'s runtime bounds
+  /// check silently drop every vertex/primitive emitted to any stream
+  /// past the first. Defaults to 0 (meaning "no stream instructions
+  /// found"); `Executor.cpp` takes the larger of this and its own
+  /// element-derived count.
+  uint32_t GeometryStreamCount = 0;
   /// (Roadmap H6a) A mesh entry point's declared shape: its output
   /// topology (SPIR-V's `OutputPoints`/`OutputLinesEXT`/
   /// `OutputTrianglesEXT` execution modes -- `OutputPoints` shared, at the
@@ -540,6 +559,40 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
       It->second.NeedsStrictFPForPerInstructionRounding = true;
   }
 
+  // (L403) A geometry entry point's output-primitive stream *count* has no
+  // execution mode of its own (unlike `Invocations`/`OutputVertices`
+  // above): it is only ever implicit in the highest stream number any
+  // `spirv.EmitStreamVertex`/`spirv.EndStreamPrimitive` instruction in the
+  // body uses. Scan for that here, while the body still exists in the
+  // SPIR-V dialect, so `EntryPointInfo::GeometryStreamCount` can carry it
+  // through to the LLVM-level attribute `Executor.cpp` reads at runtime.
+  for (auto Func : Module.getOps<mlir::spirv::FuncOp>()) {
+    auto It = EntryPoints.find(Func.getName());
+    if (It == EntryPoints.end() || It->second.Stage != feme::ShaderStage::Geometry)
+      continue;
+    uint32_t MaxStream = 0;
+    bool SawAny = false;
+    auto ScanStreamOperand = [&](mlir::Value Stream) {
+      auto ConstOp = Stream.getDefiningOp<mlir::spirv::ConstantOp>();
+      if (!ConstOp)
+        return;
+      auto IntAttr = mlir::dyn_cast<mlir::IntegerAttr>(ConstOp.getValue());
+      if (!IntAttr)
+        return;
+      SawAny = true;
+      MaxStream = std::max(
+          MaxStream, static_cast<uint32_t>(IntAttr.getValue().getZExtValue()));
+    };
+    Func.walk([&](mlir::spirv::EmitStreamVertexOp Op) {
+      ScanStreamOperand(Op.getStream());
+    });
+    Func.walk([&](mlir::spirv::EndStreamPrimitiveOp Op) {
+      ScanStreamOperand(Op.getStream());
+    });
+    if (SawAny)
+      It->second.GeometryStreamCount = MaxStream + 1;
+  }
+
   // `FPFastMathDefault` (roadmap F15d) is a whole-entry-point default, one
   // `spirv.ExecutionModeId` per floating-point type, so -- like
   // `RoundingModeRTZ`/`DenormFlushToZero` above, and unlike the
@@ -661,6 +714,15 @@ void applyEntryPointAttributes(
       addPassthroughAttribute(Func,
                               feme::graphics::getGeometryInvocationsAttrName(),
                               std::to_string(It->second.GeometryInvocations));
+      // (L403) Only attached when the body actually used
+      // `EmitStreamVertex`/`EndStreamPrimitive` with a stream above 0 --
+      // its absence means `feme::graphics::getGeometryState` should fall
+      // back on its own default (0, "derive purely from signature
+      // elements") rather than see a spurious explicit 0.
+      if (It->second.GeometryStreamCount > 1)
+        addPassthroughAttribute(
+            Func, feme::graphics::getGeometryStreamCountAttrName(),
+            std::to_string(It->second.GeometryStreamCount));
     }
     // (Roadmap H6a) A mesh entry point's output topology, maximum
     // emitted vertex count and maximum emitted primitive count always

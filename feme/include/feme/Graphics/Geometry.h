@@ -84,12 +84,22 @@ struct GeometryState {
   /// per invocation -- the bound `feme::graphics::GeometryStreamBuilder`'s
   /// `MaxVerticesPerStream` is constructed with.
   uint32_t MaxOutputVertices = 0;
+  /// (L403) The number of output-primitive streams this entry point's
+  /// body actually addresses via `EmitStreamVertex`/`EndStreamPrimitive`,
+  /// or 0 if it never used a stream above 0 (see
+  /// `EntryPointInfo::GeometryStreamCount`'s own comment in
+  /// ConvertSPIRVToLLVMPass.cpp for why this can't simply be read off an
+  /// execution mode the way `Invocations`/`MaxOutputVertices` are).
+  /// `Executor.cpp` takes the larger of this and its own
+  /// signature-element-derived stream count.
+  uint32_t StreamCount = 0;
 };
 
 llvm::StringRef getGeometryInputPrimitiveAttrName();
 llvm::StringRef getGeometryOutputPrimitiveAttrName();
 llvm::StringRef getGeometryInvocationsAttrName();
 llvm::StringRef getGeometryMaxOutputVerticesAttrName();
+llvm::StringRef getGeometryStreamCountAttrName();
 
 /// Returns the geometry state encoded on \p F by the SPIR-V import path, or
 /// `std::nullopt` if \p F carries no geometry attributes at all (not a
