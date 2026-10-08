@@ -63,26 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker (PID 70573 at last
-   check, ~83% done) — once finished, concatenate all 6 `logs/part*.stdout.log`
-   and re-cluster the *entire* case space. **Remember `part6`'s
-   `transform_feedback.primitives_generated_query` bucket there is `L403`-stale,
-   not new** — skip it when re-clustering, don't re-diagnose it.
-2. **(~1 day, dedicated session)** Build isolated reproducers for `part1`'s
-   SIGSEGV (last case before the crash:
-   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`)
-   and `part2`'s `std::terminate`/`Aborted` (immediately after
-   `dEQP-VK.memory.concurrent_access.shader_and_host`'s `DeviceLost`) — two
-   distinct, concrete, case-pinned crash leads, neither chased this session due
-   to time. Both are new-information (exact trigger case identified) versus
-   every prior session's "aggregate counts only" status on this item.
-3. **(~1 day, dedicated session)** `part4`'s 13,754-case `DeviceLost` cluster in
-   `pipeline_library.vertex_input.*` — confirmed still present, completely
-   separate from this session's `L404` `Fail`-bucket fix, not yet clustered by
-   sub-shape or root-caused at all.
+1. **(~5 min)** Check on `part1`/`part2`/`part3` (PIDs 7228/14336/70573) — if
+   any have finished or crashed, read their logs. `part2` finishing cleanly
+   would be strong additional confirmation of both this session's VK-GL-CTS
+   fixes; `part1` crashing would finally give a reproducible lead on its
+   still-unexplained SIGSEGV.
+2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced or
+   root-caused across *multiple* sessions now (last known trigger case:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`,
+   unconfirmed as the actual cause since the repro hasn't crashed again yet).
+3. **(~1 day, dedicated session)** `query_pool.statistics_query.*` — the second
+   major `part4` sub-cluster (8,751 cases across `host_query_reset`,
+   `clipping_primitives`, `clipping_invocations`, `reset_after_copy`, and
+   several smaller buckets), not investigated at all yet.
 4. **(long-carried-over, still open)** `L375`:
-   `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not
-   touched this session, needs its own dedicated design session per the existing
-   roadmap entry.
-5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see
-   `L380`), no action needed, carried forward unchanged for the record only.
+   `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — needs its
+   own dedicated design session, unchanged status.
+5. Once `part3` finishes: concatenate all 6 `logs/part*.stdout.log` and
+   re-cluster the *entire* case space (long-standing item, blocked only on
+   `part3` actually finishing). Remember `part6`'s
+   `transform_feedback.primitives_generated_query` bucket is `L403`-stale, skip
+   it.
+6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed, record-only.
