@@ -5958,7 +5958,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       llvm::DenseMap<uint32_t, SmallVector<const SignatureElement *, 4>>
           GSOutputElementsByStream;
       llvm::DenseMap<uint32_t, uint32_t> ScalarsPerStream;
-      uint32_t StreamCount = 1;
+      // (L403) Start from whichever is larger: what the signature's own
+      // output elements declare, or what `GState.StreamCount` found by
+      // scanning the body's `EmitStreamVertex`/`EndStreamPrimitive` calls
+      // (`ConvertSPIRVToLLVMPass.cpp`) -- a shader that emits to a stream
+      // without ever writing a stream-decorated output variable (see
+      // `GeometryState::StreamCount`'s own comment) would otherwise leave
+      // `StreamCount` stuck below what it actually needs to be.
+      uint32_t StreamCount = std::max(1u, GState.StreamCount);
       for (const SignatureElement &Elt : GSSig->Elements)
         if (Elt.Direction == SignatureDirection::Output) {
           GSOutputElementsByStream[Elt.Stream].push_back(&Elt);
@@ -6163,6 +6170,42 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             GState.OutputPrimitive == GeometryOutputPrimitive::Points
                 ? MergedVerts.size()
                 : AbsTriIndices.size() + AbsLineIndices.size();
+        // (roadmap H21d) Every other declared output stream's own
+        // primitive count, for a `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`
+        // query `vkCmdBeginQueryIndexedEXT` scoped to it (`PreparedDraw.h`'s
+        // `PrimitivesGeneratedByStream` comment) -- the same per-topology
+        // strip-to-primitive-count rule as `AbsTriIndices`/
+        // `AbsLineIndices` above, just counted rather than materialized
+        // (no rasterization ever consumes a non-`RasterizationStream`
+        // stream's own indices), and keyed by stream since a query may be
+        // scoped to any one of several simultaneously.
+        // (L403) Every declared stream, not just ones with their own
+        // output elements in the signature -- a stream used purely for a
+        // `VK_EXT_primitives_generated_query` count, with no
+        // stream-decorated output variable at all (see
+        // `GeometryState::StreamCount`'s own comment), still has real
+        // vertices/strips recorded in `Combined` by
+        // `lowerGeometryStreamEmit`'s runtime `EmitStreamVertex` calls;
+        // `GSOutputElementsByStream` would silently skip it.
+        for (uint32_t Stream = 0; Stream < StreamCount; ++Stream) {
+          if (Stream == RasterizationStream)
+            continue;
+          uint64_t Count = 0;
+          switch (GState.OutputPrimitive) {
+          case GeometryOutputPrimitive::Points:
+            Count = Combined.getVertices(Stream).size();
+            break;
+          case GeometryOutputPrimitive::LineStrip:
+            for (const StreamStrip &S : Combined.getStrips(Stream))
+              Count += S.Begin + 2 <= S.End ? S.End - S.Begin - 1 : 0;
+            break;
+          case GeometryOutputPrimitive::TriangleStrip:
+            for (const StreamStrip &S : Combined.getStrips(Stream))
+              Count += S.Begin + 3 <= S.End ? S.End - S.Begin - 2 : 0;
+            break;
+          }
+          Draw.Stats->PrimitivesGeneratedByStream[Stream] += Count;
+        }
       }
       RasterOut = &GeomStreamOutput;
 

@@ -30,6 +30,7 @@
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
@@ -305,6 +306,17 @@ struct PreparedDraw {
     uint64_t FragmentShaderInvocations = 0;
     uint64_t TessControlShaderPatches = 0;
     uint64_t TessEvalShaderInvocations = 0;
+    /// (roadmap H21d) Per-geometry-shader-output-stream primitive counts,
+    /// keyed by `layout(stream=N)` (`SignatureElement::Stream`), for every
+    /// stream *other than* `RasterizationStream` (`Executor.cpp`'s own
+    /// `GSOutputElementsByStream` loop) -- `RasterizationStream`'s own
+    /// count stays exactly `ClippingInvocations` above, unchanged, since
+    /// that is the value every already-passing `VK_QUERY_TYPE_PRIMITIVES_
+    /// GENERATED_EXT` default/stream-0 CTS case already confirms correct.
+    /// A `vkCmdBeginQueryIndexedEXT`-scoped query for any other stream
+    /// (`CommandBuffer.cpp`'s `accumulatePipelineStats`) reads its own
+    /// entry here instead. Empty for any non-geometry-shader draw.
+    llvm::SmallDenseMap<uint32_t, uint64_t, 4> PrimitivesGeneratedByStream;
   };
   PipelineStatsCounters *Stats = nullptr;
   /// (roadmap H21c) One entry per currently-bound `VK_EXT_transform_
