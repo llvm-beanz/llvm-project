@@ -34,6 +34,7 @@
 #include "feme/Target/CPU/RuntimeABI.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/bit.h"
 
@@ -2317,10 +2318,29 @@ Error runPreparedDraw(const GraphicsPipeline &Pipeline,
 /// between `runDraw`'s own per-binding fetch loop and
 /// `validateDrawFetchBounds`'s pre-draw check so the two can never
 /// disagree on which bindings are actually load-bearing.
+///
+/// (roadmap L400) A `VkVertexInputAttributeDescription` referencing \p
+/// Binding is not, by itself, enough: the Vulkan spec's draw-time
+/// requirement (e.g. VUID-vkCmdDraw-None-04914) only covers bindings
+/// "accessed via vertex input variables declared in the vertex shader
+/// entry point's interface" -- a vertex shader may legally never declare
+/// an input at a location the pipeline's own attribute table names (e.g.
+/// one that draws entirely from `gl_VertexIndex`-indexed constants,
+/// ignoring the CTS framework's own default one-binding/one-attribute
+/// vertex input state wholesale, as
+/// `dEQP-VK.renderpasses.*.suballocation.multisample_resolve.
+/// mixed_sample_count.mixed_sample_count_subpasses` does). Consulting
+/// `Pipeline.usedVertexInputLocations()` (populated from the vertex
+/// shader's own reflected signature, not the pipeline's attribute table)
+/// tells the two cases apart.
 bool bindingHasAnyAttribute(const GraphicsPipeline &Pipeline,
                             uint32_t Binding) {
+  llvm::ArrayRef<uint32_t> UsedLocations = Pipeline.usedVertexInputLocations();
+  auto isUsed = [&](uint32_t Location) {
+    return llvm::is_contained(UsedLocations, Location);
+  };
   for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes())
-    if (Attr.Binding == Binding)
+    if (Attr.Binding == Binding && isUsed(Attr.Location))
       return true;
   return false;
 }

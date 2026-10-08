@@ -385,6 +385,18 @@ struct GraphicsPipelineArtifact {
   feme::graphics::TessellationState Tessellation;
   feme::graphics::GeometryState Geometry;
   feme::graphics::MeshState Mesh;
+
+  /// (roadmap L400) The `Location` of every vertex-shader-declared input
+  /// `validateStageInterfaces` found at pipeline-creation time -- a
+  /// property of `VertexStage`'s own compiled module alone, so (per the
+  /// same reasoning as `Tessellation`/`Geometry`/`Mesh` above) it belongs
+  /// here rather than being re-derived per creation. Empty for a mesh
+  /// pipeline (no `VertexStage` to validate at all). `CommandBuffer.cpp`'s
+  /// `bindingHasAnyAttribute` uses this to tell "the vertex shader actually
+  /// reads this binding's attribute" apart from "the pipeline's own
+  /// `VkVertexInputAttributeDescription` table merely names this binding" --
+  /// only the former needs a bound vertex buffer at draw time.
+  std::vector<uint32_t> UsedVertexInputLocations;
 };
 
 /// One graphics pipeline's compiled stages plus its whole translated,
@@ -508,6 +520,11 @@ public:
   }
   llvm::ArrayRef<VertexInputAttribute> vertexAttributes() const {
     return State.VertexAttributes;
+  }
+  /// (roadmap L400) See `GraphicsPipelineArtifact::UsedVertexInputLocations`
+  /// own comment.
+  llvm::ArrayRef<uint32_t> usedVertexInputLocations() const {
+    return State.Artifact->UsedVertexInputLocations;
   }
   uint32_t colorAttachmentCount() const {
     return static_cast<uint32_t>(State.ColorBlends.size());

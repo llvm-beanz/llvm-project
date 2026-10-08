@@ -705,13 +705,31 @@ getStageSignature(const feme::cpu::CompiledStage &Stage) {
 /// `SV_Position`/`gl_Position` entirely is legal per the Vulkan spec for
 /// any pipeline, `rasterizerDiscardEnable` or not (see the comment on
 /// `Position`'s own check below).
-Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
-                              const feme::cpu::CompiledStage *FragmentStage,
-                              const feme::cpu::CompiledStage *DomainStage,
-                              const feme::cpu::CompiledStage *GeometryStage,
-                              llvm::ArrayRef<AttachmentFormat> ColorAttachments,
-                              llvm::ArrayRef<VertexInputAttribute> Attributes,
-                              llvm::ArrayRef<uint32_t> ColorAttachmentLocations) {
+///
+/// (roadmap L400) \p UsedVertexInputLocations, if non-null, is filled with
+/// the `Location` of every vertex-shader-declared input this function
+/// validates below -- i.e. every location the vertex shader's own entry
+/// signature actually reads from, as opposed to every location the
+/// pipeline's `VkVertexInputAttributeDescription`s merely declare. The
+/// Vulkan spec's draw-time "every vertex input binding must have a bound
+/// buffer" requirement (e.g. VUID-vkCmdDraw-None-04914) is scoped to
+/// "vertex input bindings accessed via vertex input variables declared in
+/// the vertex shader entry point's interface" -- a binding whose only
+/// attribute the shader never actually declares as an input (a vertex
+/// shader may ignore a `VkVertexInputAttributeDescription` entirely, e.g.
+/// one driving a draw purely from `gl_VertexIndex`-indexed constants) is
+/// not "accessed" by that definition and so needs no buffer bound at all.
+/// `CommandBuffer.cpp`'s `bindingHasAnyAttribute` uses this to tell the two
+/// cases apart at draw time.
+Error validateStageInterfaces(
+    const feme::cpu::CompiledStage &VertexStage,
+    const feme::cpu::CompiledStage *FragmentStage,
+    const feme::cpu::CompiledStage *DomainStage,
+    const feme::cpu::CompiledStage *GeometryStage,
+    llvm::ArrayRef<AttachmentFormat> ColorAttachments,
+    llvm::ArrayRef<VertexInputAttribute> Attributes,
+    llvm::ArrayRef<uint32_t> ColorAttachmentLocations,
+    std::vector<uint32_t> *UsedVertexInputLocations = nullptr) {
   Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
   if (!VSSig)
     return VSSig.takeError();
@@ -949,6 +967,13 @@ Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
                                "vertex input location %u has no matching "
                                "VkVertexInputAttributeDescription",
                                *VSIn.Location);
+    // (roadmap L400) This location is genuinely read by the vertex
+    // shader's own entry signature -- record it so draw time can tell
+    // "the shader needs this binding's buffer" apart from "the pipeline
+    // merely declared an attribute at this binding that the shader never
+    // actually reads."
+    if (UsedVertexInputLocations)
+      UsedVertexInputLocations->push_back(*VSIn.Location);
   }
   return Error::success();
 }
@@ -2678,16 +2703,19 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   // roadmap H6i's job); `validateStageInterfaces` is entirely a "primitive"
   // pipeline concept, skipped here rather than called against a vertex
   // stage that does not exist for one.
+  std::vector<uint32_t> UsedVertexInputLocations;
   if (VertexStage) {
     if (Error E = validateStageInterfaces(
             *VertexStage, FragmentStage.get(), DomainStage.get(),
             GeometryStageCompiled.get(), ColorAttachments,
-            VertexAttributes, ColorAttachmentLocations))
+            VertexAttributes, ColorAttachmentLocations,
+            &UsedVertexInputLocations))
       return std::move(E);
   }
 
   auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
   Artifact->Ctx = std::move(Ctx);
+  Artifact->UsedVertexInputLocations = std::move(UsedVertexInputLocations);
   Artifact->VertexStage = std::move(VertexStage);
   Artifact->FragmentStage = std::move(FragmentStage);
   Artifact->HullStage = std::move(HullStage);
