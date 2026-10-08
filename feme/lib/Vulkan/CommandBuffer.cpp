@@ -1596,6 +1596,32 @@ llvm::BitVector viewsToClear(const RenderTargetBinding &Binding) {
   return llvm::BitVector(Binding.Layers, /*t=*/true);
 }
 
+/// (Roadmap L401) Marks \p ResolveView as "loaded" for \p ViewsToClear's own
+/// views, the same bookkeeping `applyClear` does for a directly-bound
+/// attachment, but without actually clearing it: a color/depth/stencil
+/// attachment that is only ever *resolved into* by an earlier subpass (its
+/// own `View.View` in every subpass so far was some other, multisampled
+/// image, never this one) still counts as used, for
+/// `VK_ATTACHMENT_LOAD_OP_CLEAR`'s "applied once, at first use" rule, from
+/// the subpass that first resolves into it onward. Without this, a later
+/// subpass that goes on to bind that same image *directly* (e.g. a
+/// single-sample attachment a render pass resolves into at the end of
+/// subpass 0, then renders into directly, no longer as a resolve target, in
+/// subpass 1) is wrongly treated as that attachment's first use and gets
+/// re-cleared, erasing `resolveSubpassColorAttachments`'s own just-written
+/// resolve result (found via
+/// `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.
+/// multisample_resolve.mixed_sample_count.mixed_sample_count_subpasses`,
+/// whose second subpass does exactly this).
+void markResolveViewLoaded(
+    ImageView *ResolveView, AttachmentKind Kind,
+    const llvm::BitVector &ViewsToClear,
+    llvm::DenseMap<uintptr_t, llvm::BitVector> &AlreadyLoaded) {
+  if (!ResolveView)
+    return;
+  AlreadyLoaded[loadedViewMaskKey(ResolveView, Kind)] |= ViewsToClear;
+}
+
 /// Applies every attachment's load op for the current subpass -- once when
 /// a render pass instance begins, and (roadmap H2i) again at every
 /// `vkCmdNextSubpass`, so a later subpass's own new views of an
@@ -1603,21 +1629,30 @@ llvm::BitVector viewsToClear(const RenderTargetBinding &Binding) {
 Error applyLoadOps(const RenderTargetBinding &Binding,
                    llvm::DenseMap<uintptr_t, llvm::BitVector> &AlreadyLoaded) {
   llvm::BitVector ViewsToClear = viewsToClear(Binding);
-  for (const RenderTargetView &View : Binding.Colors)
+  for (const RenderTargetView &View : Binding.Colors) {
     if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea,
                              AttachmentKind::Color, ViewsToClear,
                              AlreadyLoaded))
       return E;
-  if (Binding.Depth)
+    markResolveViewLoaded(View.ResolveView, AttachmentKind::Color,
+                         ViewsToClear, AlreadyLoaded);
+  }
+  if (Binding.Depth) {
     if (Error E = applyClear(*Binding.Depth, Binding.Depth->SampleCount,
                              Binding.RenderArea, AttachmentKind::Depth,
                              ViewsToClear, AlreadyLoaded))
       return E;
-  if (Binding.Stencil)
+    markResolveViewLoaded(Binding.Depth->ResolveView, AttachmentKind::Depth,
+                         ViewsToClear, AlreadyLoaded);
+  }
+  if (Binding.Stencil) {
     if (Error E = applyClear(*Binding.Stencil, Binding.Stencil->SampleCount,
                              Binding.RenderArea, AttachmentKind::Stencil,
                              ViewsToClear, AlreadyLoaded))
       return E;
+    markResolveViewLoaded(Binding.Stencil->ResolveView, AttachmentKind::Stencil,
+                         ViewsToClear, AlreadyLoaded);
+  }
   return Error::success();
 }
 
