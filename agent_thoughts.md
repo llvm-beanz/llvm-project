@@ -117324,3 +117324,141 @@ No issues found outside `feme/` this session — nothing to isolate/reproduce/
 fix in another subproject.
 
 Device check (end of session): `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L400 root-caused and fixed, L401 filed (2026-10-08)
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start of session).
+
+## Start here next session
+
+No open code-fix work queued. Pick `L401` (multisample-resolve pixel
+mismatch) or `L398` (QueueExecutor/Fence teardown deadlock) — both
+"found, not fixed," each needs ~1 day.
+
+## What happened, in order
+
+1. Picked up the prior session's handoff: `L400` (`vkQueueSubmit: vertex
+   binding 0 is not bound to a buffer`, 2 cases). Verified handoff was
+   accurate (clean tree, prior session's commits present).
+2. Reproduced `L400`'s case with `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+3. Read the CTS test source (`vktRenderPassMultisampleResolveTests.cpp`):
+   the test's pipeline calls `setupVertexInputState()` with no arguments,
+   which falls back to the CTS framework's own filler default state (one
+   binding, one attribute at location 0) — the test's actual vertex
+   shader draws entirely from `gl_VertexIndex`-indexed constants and never
+   declares a `layout(location=...) in` variable at all.
+4. Confirmed via web search the real Vulkan VUID scoping: the draw-time
+   "every binding must be bound" requirement applies only to bindings
+   "accessed via vertex input variables declared in the vertex shader
+   entry point's interface" — not merely named in the pipeline's own
+   attribute table.
+5. Found FeMe's existing `L127` fix (`bindingHasAnyAttribute`,
+   `CommandBuffer.cpp`) only checks the pipeline's attribute table, with
+   no awareness of what the vertex shader itself declares — exactly the
+   gap causing `L400`.
+6. Found `GraphicsPipeline.cpp`'s `validateStageInterfaces` already parses
+   the vertex shader's reflected `feme::EntrySignature` at
+   pipeline-creation time and computes, in-loop, exactly the "does the
+   shader read location N" data needed — but discarded it after
+   validating.
+7. Fix: extended `validateStageInterfaces` with an optional
+   `UsedVertexInputLocations` out-parameter; cached the result on
+   `GraphicsPipelineArtifact` (the shareable, shader-derived,
+   cache-friendly struct, following the existing
+   `Tessellation`/`Geometry`/`Mesh` precedent); added a new
+   `GraphicsPipeline::usedVertexInputLocations()` accessor;
+   `bindingHasAnyAttribute` now also requires the matching attribute's
+   `Location` be in this set.
+8. Wrote a new regression test
+   (`RendersWithAVertexInputAttributeTheShaderNeverDeclares`,
+   `DrawTest.cpp`). **A/B verified**: stashed the fix, confirmed the new
+   test fails (`VK_ERROR_DEVICE_LOST`) pre-fix; restored, confirmed it
+   passes.
+9. `FeMeVulkanTests`: 807/807 (was 806, +1 new test), 0 regressions.
+10. Rebuilt the ICD, re-ran both original `L400` cases
+    (`renderpass1`/`renderpass2`) standalone: the `DeviceLost` is gone —
+    both now fail with a different, genuine pixel-mismatch `Fail`
+    ("Resolved tile mismatch detected at pixel (63, 66)"). Filed as
+    `L401` — a real rendering-correctness bug `L400`'s fix was
+    unblocking, not causing or fixing.
+11. Ran a full `dEQP-VK.renderpasses.*` regression sweep (81,188 cases,
+    the entire group — broader than planned, since the change touches
+    general-purpose vertex-binding validation, not a render-pass-specific
+    path): 35,521 Pass / 51 Fail / 45,616 NotSupported, **0 DeviceLost**
+    (down from the Oct-7 baseline's 328). The 51 Fails are all
+    pre-existing (9 `depth_stencil_write_conditions`, 36
+    `subpass_dependencies.late_fragment_tests`, 4
+    `depth_stencil_resolve`) plus the 2 new `L401` cases — zero
+    regressions.
+12. Ran full `check-feme`: 3610/3613 Passed (3 Unsupported, 0 Failed).
+    One timing-flaky `SyncTest` case failed under concurrent CPU load
+    from this session's own background CTS sweep; re-ran it in isolation
+    and confirmed it passes cleanly — unrelated to this change, a
+    pre-existing load-sensitivity issue in that test's own timing
+    assertion, not touched this session.
+13. Committed the fix (code), the regression test, and the doc updates
+    (`Roadmap.md` L400 marked done + L401 filed, `VulkanCTSReport.md`
+    item 32 added) as three separate commits.
+14. Attempted item 3 from the prior handoff (clustering the 3,519
+    Fail/1,656 ResourceError cases from `feme-20261007-full/report.txt`):
+    found this report is a diff/comparison-style artifact (a "Changed
+    case names: X: A -> B" list relative to an older baseline), not a
+    flat per-case result list — there is no direct "list every case
+    currently in state Fail" section to cluster from. Clustering needs a
+    fresh run with `--deqp-log-filename` producing a real `.qpa` (or a
+    dedicated flat caselist export), not this comparison-report format.
+    Left this for a future session with a purpose-built run.
+
+## Why only one bug fixed this session
+
+Same pattern as last session: the 2-case `L400` cluster turned out to
+contain its own fix (draw-time validation) plus an entirely separate,
+previously-hidden bug (`L401`, multisample-resolve pixel correctness) the
+fix exposed rather than touched. Root-causing, fixing, and fully verifying
+`L400` (A/B test, standalone re-run, a full 81,188-case group regression
+sweep, full `check-feme`) used the full session budget.
+
+## Visible wins this session
+
+- Both `L400` cases no longer `DeviceLost` — the vertex-binding bug is
+  fully fixed.
+- `FeMeVulkanTests` 807/807 (new regression test for this exact bug
+  shape), `check-feme` 3610/3613 (0 Fail).
+- `dEQP-VK.renderpasses.*` group-wide `DeviceLost` count: 328 -> 0.
+- Confirmed via direct A/B testing (stash/rebuild/test) that the fix is
+  both necessary and sufficient.
+- Found the next bug (`L401`) immediately via standalone re-verification,
+  same technique that found `L400` last session — this handoff pattern is
+  now reliable.
+
+## Next steps, ranked
+
+1. **(~1 day, dedicated session)** `L401`: `dEQP-VK.renderpasses.
+   {renderpass1,renderpass2}.suballocation.multisample_resolve.
+   mixed_sample_count.mixed_sample_count_subpasses` — "Resolved tile
+   mismatch detected at pixel (63, 66)! RTV B color does not match RTV A
+   reference.", 2 cases. Start by tracing
+   `feme/lib/Graphics/Executor.cpp`'s / `feme/lib/Vulkan/ImageOps.cpp`'s
+   multisample-resolve implementation against this case's specific
+   multi-subpass, *mixed* sample-count configuration (several subpasses
+   with differing sample counts resolving into one image) — both API
+   variants fail identically at the same pixel, so the bug is almost
+   certainly shared non-dynamic-rendering resolve code.
+2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence`
+   teardown deadlock — unchanged from last session's handoff. Build a
+   *spec-valid* reproducer (`vkDeviceWaitIdle` before destroying anything
+   but the fence itself) to isolate the fence-specific race.
+3. **(~1-2 hrs)** Clustering the global 3,519 Fail / 1,656 ResourceError
+   cases needs a *fresh* run producing a flat per-case result list (a
+   real `.qpa` log, or `--deqp-runmode=txt-caselist`-style export), not
+   the comparison-style `feme-20261007-full/report.txt` this session
+   discovered lacks one — budget time for the run itself (likely several
+   hours for a full-case-space sweep) separately from the ~30 min
+   clustering step.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no
+   action needed, carried forward unchanged for the record only.
+
+No issues found outside `feme/` this session — nothing to isolate/
+reproduce/fix in another subproject.
+
+Device check (end of session): `FeMe CPU Vulkan Device` (confirmed).
