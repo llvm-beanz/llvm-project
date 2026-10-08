@@ -1426,6 +1426,51 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     (`VK_EXT_primitives_generated_query`), no feature/extension-surface
     change.
 
+37. **`L404` fixed (this session): `pipeline.pipeline_library.
+    vertex_input.*`'s `mat2`/`mat3`/narrow-matrix `Fail` cluster, 217
+    cases, `feme-graphics-validate-stage` "component N is out of range
+    for element M" at pipeline-creation time.** Found via clustering a
+    prior session's full-sweep `part4` 13,971-Fail bucket (13,754 of
+    which are a separate, already-known, unrelated `DeviceLost`
+    cluster, left open). Root-caused via `FEME_DUMP_IR_PRECANON`/
+    `FEME_DUMP_IR_POSTCANON` IR dumps: `CanonicalizeStage.cpp`'s
+    `resolveRowComponent`, which reverse-engineers a scalar stage-IO
+    access's `(Row, Component)` pair from its byte offset, disambiguates
+    between a narrow (<4-lane) vector array's tight (12-byte, e.g. a
+    `mat3` column) and padded (16-byte) per-row stride candidates by
+    requiring the residual divide the candidate exactly -- true only
+    for each row's first lane, with every other in-row component
+    falling back to a tie-break keyed on `hasXfbBufferDecoration`,
+    which is unconditionally false for ordinary vertex `Input` globals
+    (XFB capture never applies to shader inputs) and so always defaults
+    to the wrong, padded stride -- even though the SPIR-V spec
+    guarantees `Input`/`Output` interface variables can never carry
+    `ArrayStride`/`MatrixStride` decorations, making the tight stride
+    the only architecturally-possible answer. Confirmed via a Python
+    simulation of the exact heuristic against the real captured byte
+    offsets (0, 4, 8, ..., 32) reproducing the exact wrong
+    `(Row, Component)` pairs observed, including the literal
+    out-of-range `Component == 3`. Fixed, scoped only to the
+    single-global (bare interface variable) access path: relaxed
+    `resolveRowComponent`'s validity check to accept any in-range
+    residual when the caller signals "known-tight", and forced that
+    signal on for every `Input`-direction single-global access in
+    `resolveOffsetWithinElement`, independent of
+    `hasXfbBufferDecoration`; `Output`-direction (XFB-decoration-keyed)
+    behavior and the struct/block-member recursive path are both
+    completely unchanged. New unit test
+    `ResolvesScalarComponentsOfOrdinaryNarrowVectorMatrixColumnsAtTightStride`.
+    `ninja check-feme`: 3,617 Passed, 3 Unsupported, 0 Failed (0
+    regressions). **Verified:**
+    `single_attribute.mat3.as_r32g32b32_sfloat_rate_vertex` Fail ->
+    Pass; all 142 `single_attribute.mat*` cases now 0 Fail;
+    `multiple_attributes.binding_one_to_many.attributes.f16vec2.mat2.
+    mat3` Fail -> Pass. `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed -- internal
+    correctness fix, no feature/extension-surface change. The separate
+    ~4,598-case `pipeline_library.vertex_input.*` `DeviceLost` cluster
+    in the same test family remains open and untouched.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
