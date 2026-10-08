@@ -117462,3 +117462,38 @@ No issues found outside `feme/` this session — nothing to isolate/
 reproduce/fix in another subproject.
 
 Device check (end of session): `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L401 root-caused and fixed (2026-10-08)
+
+**Device check (start):** `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES` set explicitly).
+
+**Bug:** 2 CTS cases (`dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.multisample_resolve.mixed_sample_count.mixed_sample_count_subpasses`) failed with "Resolved tile mismatch... RTV B color does not match RTV A reference" — a genuine pixel-correctness bug, left behind once `L400` (last session) fixed a separate vertex-binding crash in the same cases.
+
+**Root cause:** `CommandBuffer.cpp`'s `applyLoadOps` tracks which attachment views already had `LOAD_OP_CLEAR` applied, so a later subpass referencing the same attachment doesn't get re-cleared. It only recorded *direct* binds (`RenderTargetView::View`), never a `ResolveView`. The failing case's subpass 0 resolves its MSAA attachment into a single-sample attachment; subpass 1 then binds *that same attachment directly* as a plain color attachment. Since the resolve-only use was never recorded, subpass 1 looked like a first use and re-ran `LOAD_OP_CLEAR`, wiping out subpass 0's resolve result right before `vkCmdEndRenderPass`.
+
+**Fix:** 1-function addition, `markResolveViewLoaded`, called from `applyLoadOps` for every color/depth/stencil entry's own `ResolveView`.
+
+**Verified:**
+1. New regression test `DrawTest.ResolveTargetSurvivesALaterSubpassThatBindsItDirectly` — A/B'd via `git stash` (fails pre-fix with the predicted green-marker symptom, passes post-fix).
+2. `FeMeVulkanTests`: 808/808 Passed (+1 net new).
+3. Both original CTS cases: now Pass.
+4. Full `dEQP-VK.renderpasses.*` sweep (81,188 cases): 35,523 Pass / 49 Fail / 45,616 NotSupported, 0 DeviceLost, 0 Crash — the 49 Fails are the exact same pre-existing families `L400` already found (zero new regressions).
+5. `ninja check-feme`: 3611/3614 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+
+**Docs updated:** `Roadmap.md` (`L401` marked done with writeup), `VulkanCTSReport.md` (item 33 added). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — internal correctness fix, no feature/extension-surface change.
+
+**Commits (3, this session):**
+1. `[feme] L401: mark a color/depth/stencil attachment's resolve target loaded` (the fix, `CommandBuffer.cpp`)
+2. `[feme] L401: regression test for resolve-target-survives-next-subpass` (`DrawTest.cpp`)
+3. `[feme] L401: update Roadmap.md/VulkanCTSReport.md for the resolve fix` (docs)
+
+**No issues found outside `feme/` this session** — nothing to isolate/reproduce/fix in another subproject.
+
+**Next steps, in priority order:**
+
+1. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown deadlock — unchanged from prior handoffs. Build a *spec-valid* reproducer (`vkDeviceWaitIdle` before destroying anything but the fence itself) to isolate the fence-specific race from the broader object-lifetime class a prior reproducer attempt accidentally also hit.
+2. **(~30 min)** Cluster the global Fail/ResourceError cases from a *fresh* full sweep with a flat per-case result list (a real `.qpa`/`txt-caselist` export) — the Oct-7 `report.txt` was confirmed in an earlier session to be a diff/comparison artifact unsuitable for direct clustering; the clean `renderpasses.*`-only sweep this session ran (`/tmp/l401_regression_renderpasses_stdout.txt`) is usable for that one group right now if someone wants to pre-triage it before a full-case-space run.
+3. **(~several hours, background)** A fresh full-case-space CTS sweep (last genuine one: `feme-20261005-full-1170553-complete`, Oct 5) — this session only ran the 2 `L401` cases plus one `renderpasses.*` group (81,188 cases), not the full ~1.17-1.64M case space. Running one is the only way to surface the next batch of untriaged failures across groups other than `renderpasses`.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
+
+**Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
