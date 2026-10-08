@@ -7,11 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
+#include "Sync.h"
 #include "CommandBuffer.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
-#include "Sync.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -24,8 +24,11 @@
 
 #include "gtest/gtest.h"
 
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 using namespace feme::vulkan;
 
@@ -164,6 +167,54 @@ protected:
   VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
   VkCommandBuffer CmdBufB = VK_NULL_HANDLE;
 };
+
+// Roadmap L398: a direct, deterministic (non-timing-dependent) test of
+// `Fence`'s deferred-destroy bookkeeping, exercising the exact sequence
+// that used to free a `Fence` out from under a `QueueExecutor` worker
+// thread still about to call `signal()` on it -- a live CTS sweep's
+// `gdb`-inspected hang found that crash as a `pthread_mutex_lock` stuck
+// forever on already-freed memory (see `Fence::requestDestroy`'s comment,
+// `Sync.h`). Simulates `vkQueueSubmit`'s retain, `vkDestroyFence` arriving
+// *before* the fence-signal task actually runs (the exact ordering a
+// real crash needs), and only then the task itself releasing/signaling --
+// entirely through `Fence`'s own public API, so this is reliable under
+// any thread scheduling, unlike a true multi-thread stress test.
+TEST(FenceLifetimeTest, DestroyDefersUntilPendingSignalTaskReleases) {
+  auto *F = new Fence(/*Signaled=*/false);
+
+  // `vkQueueSubmit`'s retain, before enqueuing the fence-signal task.
+  F->retainForPendingSignal();
+
+  // `vkDestroyFence` arrives first (the hazardous ordering): must defer,
+  // not free `F` here.
+  EXPECT_FALSE(F->requestDestroy(nullptr));
+
+  // The fence-signal task finally runs: signaling a still-live `Fence` is
+  // well defined (no use-after-free)...
+  F->signal();
+  EXPECT_TRUE(F->isSignaled());
+
+  // ...and releasing it now reports the deferred destroy is due, so the
+  // caller (the real `makeFenceSignalTask` closure) deletes `F` itself.
+  const VkAllocationCallbacks *Callbacks =
+      reinterpret_cast<const VkAllocationCallbacks *>(
+          static_cast<uintptr_t>(1));
+  EXPECT_TRUE(F->releasePendingSignalAndTakeDeferredDestroy(Callbacks));
+  EXPECT_EQ(Callbacks, nullptr); // The `nullptr` given to `requestDestroy`.
+
+  delete F;
+}
+
+// The ordinary case -- no `QueueExecutor` task ever enqueued for this
+// fence at all -- must still let `vkDestroyFence` free it immediately,
+// matching every other `TEST_F(SyncTest, ...)` in this file that destroys
+// a fence without ever calling `vkQueueSubmit` on it (`ResetFenceReturnsTo
+// Unsignaled` above).
+TEST(FenceLifetimeTest, DestroyWithNoPendingSignalFreesImmediately) {
+  auto *F = new Fence(/*Signaled=*/false);
+  EXPECT_TRUE(F->requestDestroy(nullptr));
+  delete F;
+}
 
 // The V1 milestone's own end-to-end scenario: submit a recorded empty
 // compute dispatch to a queue, and observe its fence signal. (Roadmap
@@ -553,7 +604,8 @@ TEST_F(SyncTest, QueueSubmitReturnsPromptlyThenCompletesAfterHostSignal) {
 // `vkQueueSubmit` this deadlocked outright: the first submission's own
 // blocking wait, executed inline, meant this thread could never reach
 // the `vkSignalSemaphore` call below that would have satisfied it.
-TEST_F(SyncTest, TimelineSemaphoreCrossQueueSubmitChainCompletesAfterHostSignal) {
+TEST_F(SyncTest,
+       TimelineSemaphoreCrossQueueSubmitChainCompletesAfterHostSignal) {
   VkSemaphoreTypeCreateInfo TypeInfo{};
   TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
   TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
@@ -662,7 +714,8 @@ TEST_F(SyncTest, QueueSubmit2DispatchAndWaitOnFence) {
 // `SubmitEnqueuesPromptlyThenLatchesDeviceLostOnUnmetBinaryWait` above
 // through `vkQueueSubmit2`'s `VkSemaphoreSubmitInfo` shape -- genuinely
 // waits out the safety-net timeout, same as that test.
-TEST_F(SyncTest, QueueSubmit2EnqueuesPromptlyThenLatchesDeviceLostOnUnmetBinaryWait) {
+TEST_F(SyncTest,
+       QueueSubmit2EnqueuesPromptlyThenLatchesDeviceLostOnUnmetBinaryWait) {
   VkSemaphoreCreateInfo SemInfo{};
   VkSemaphore Sem = VK_NULL_HANDLE;
   ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
@@ -1000,3 +1053,74 @@ TEST(SafetyNetTimeoutEnvTest, ValidOverrideIsHonoredAndConvertedToNs) {
 }
 
 } // namespace
+
+// Roadmap L398: spec-valid repro attempt for the `QueueExecutor`/`Fence`
+// teardown hang. Many host threads concurrently create a fence, submit a
+// dispatch with it, wait on just that one fence (never a device-wide
+// `vkDeviceWaitIdle`, matching the ordinary CTS idiom the handoff called
+// out), then destroy it -- while *other* threads keep doing the same on
+// the same two queues at the same time, so a destroyed fence's
+// `QueueExecutor` task might still be mid-flight when freed, without a
+// device-wide wait ever masking the race. Each thread gets its own
+// command buffer (so no two threads ever resubmit the same one without
+// `VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT`) and queue access to each
+// of the two shared queues is serialized by a mutex (the spec's "host
+// access to `queue` must be externally synchronized" requirement) --
+// everything else is left as racy as real concurrent CTS usage can be.
+TEST_F(SyncTest, StressFenceCreateSubmitWaitDestroyNoGlobalWait) {
+  constexpr int kThreads = 8;
+  constexpr int kItersPerThread = 400;
+
+  std::vector<VkCommandBuffer> CmdBufs(kThreads);
+  for (int T = 0; T != kThreads; ++T) {
+    VkCommandBufferAllocateInfo AllocInfo{};
+    AllocInfo.commandPool = (T % 2 == 0) ? Pool : PoolB;
+    AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    AllocInfo.commandBufferCount = 1;
+    ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBufs[T]),
+              VK_SUCCESS);
+    VkCommandBufferBeginInfo BeginInfo{};
+    ASSERT_EQ(vkBeginCommandBuffer(CmdBufs[T], &BeginInfo), VK_SUCCESS);
+    vkCmdBindPipeline(CmdBufs[T], VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+    vkCmdDispatch(CmdBufs[T], 2, 2, 2);
+    ASSERT_EQ(vkEndCommandBuffer(CmdBufs[T]), VK_SUCCESS);
+  }
+
+  std::mutex QueueMutex, QueueBMutex;
+  std::atomic<bool> Failed{false};
+  auto Worker = [&](VkQueue Q, std::mutex &QMutex, VkCommandBuffer CB) {
+    for (int I = 0; I != kItersPerThread && !Failed.load(); ++I) {
+      VkFenceCreateInfo FenceInfo{};
+      VkFence F = VK_NULL_HANDLE;
+      if (vkCreateFence(Device, &FenceInfo, nullptr, &F) != VK_SUCCESS) {
+        Failed = true;
+        return;
+      }
+      VkSubmitInfo Submit{};
+      Submit.commandBufferCount = 1;
+      Submit.pCommandBuffers = &CB;
+      VkResult SubmitResult;
+      {
+        std::lock_guard<std::mutex> Lock(QMutex);
+        SubmitResult = vkQueueSubmit(Q, 1, &Submit, F);
+      }
+      if (SubmitResult != VK_SUCCESS) {
+        Failed = true;
+        return;
+      }
+      if (vkWaitForFences(Device, 1, &F, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        Failed = true;
+        return;
+      }
+      vkDestroyFence(Device, F, nullptr);
+    }
+  };
+  std::vector<std::thread> Threads;
+  for (int T = 0; T != kThreads; ++T)
+    Threads.emplace_back(Worker, (T % 2 == 0) ? Queue : QueueB,
+                         std::ref((T % 2 == 0) ? QueueMutex : QueueBMutex),
+                         CmdBufs[T]);
+  for (auto &Th : Threads)
+    Th.join();
+  EXPECT_FALSE(Failed.load());
+}
