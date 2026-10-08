@@ -1360,6 +1360,29 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     needed -- internal correctness fix only, no feature/extension-surface
     change.
 
+35. **`L402` filed (this session): `subpass_dependencies.late_fragment_tests`
+    depth/stencil `Fail` cluster, not yet root-caused.** Re-clustered the
+    `renderpasses.*`-only sweep already on disk from a prior session
+    (81,188 cases) by extracting every `Fail`/`ResourceError` case name
+    and grouping by prefix -- the same technique that found `L399`-`L401`.
+    Found 36 cases, all `dEQP-VK.{renderpass1,renderpass2}.suballocation.
+    subpass_dependencies.late_fragment_tests.*` (every combination of
+    `render_size_{32,64,128}_{32,64,128}` x `subpass_count_{2,3,5}` x
+    `d24_unorm_s8_uint`/`d32_sfloat_s8_uint`) -- a family both `L400`'s
+    and `L401`'s own sweeps had already noted in passing as pre-existing,
+    but which had never been given its own roadmap entry or
+    investigation. Confirmed independently reproducible via a standalone
+    rerun of one case (`...render_size_32_32.subpass_count_2.
+    d24_unorm_s8_uint`): `Fail (Depth compare failed.)` -- a genuine
+    rendering-correctness mismatch, not a `DeviceLost`/`Crash`/timeout.
+    Not root-caused this session (found via the ~30 min clustering task
+    only) -- filed as `L402` for a dedicated session, with a pointer to
+    `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT`-scoped depth/stencil
+    subpass-dependency handling across `vkCmdNextSubpass` as the likely
+    area (the test group exercises exactly that). No code change.
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+    needed -- investigation only.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
