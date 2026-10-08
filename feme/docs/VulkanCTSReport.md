@@ -1256,6 +1256,59 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     `VulkanExtensionInventory.md`: no change needed -- internal
     correctness fix only, no feature/extension-surface change.
 
+33. **`L401` root-caused and fixed (this session): both cases of its
+    2-case cluster closed.** The failing render pass has 2 subpasses
+    sharing one single-sample attachment two different ways: subpass 0
+    renders into a separate 4x MSAA color attachment and resolves it
+    into this attachment at the subpass boundary; subpass 1 then binds
+    the *same* attachment directly as its own plain color attachment (no
+    resolve of its own, no draw of its own in the failing CTS case's
+    narrow repro). `CommandBuffer.cpp`'s `applyLoadOps` (roadmap H2i)
+    tracks, per attachment `ImageView*`, which of its views have already
+    had their `VK_ATTACHMENT_LOAD_OP_CLEAR` load op applied in this
+    render-pass instance, so a later subpass's new reference to an
+    already-used attachment doesn't get wrongly re-cleared -- but it only
+    ever recorded a *directly-bound* `RenderTargetView::View` as "used",
+    never a color/depth/stencil attachment's own `ResolveView`. Subpass
+    1's direct binding of the resolve target therefore looked like that
+    attachment's first use, and its `LOAD_OP_CLEAR` ran a second time at
+    the `vkCmdNextSubpass` boundary, overwriting subpass 0's
+    `resolveSubpassColorAttachments` resolve result with the attachment's
+    own clear value just before `vkCmdEndRenderPass` -- exactly the
+    "Resolved tile mismatch detected at pixel (63, 66)! RTV B color does
+    not match RTV A reference" symptom (RTV B, the test render pass's
+    resolve output, silently reverted to background/clear color; RTV A,
+    the reference render pass's single-subpass resolve, correctly kept
+    its drawn content). **Fix:** a new `markResolveViewLoaded` helper,
+    called from `applyLoadOps` for every one of `Binding.Colors`'/
+    `Binding.Depth`'s/`Binding.Stencil`'s own `ResolveView`, right after
+    that entry's own `applyClear` call -- marking the resolve target's
+    `loadedViewMaskKey` as loaded for the current subpass's own
+    `ViewsToClear` views, without actually clearing it (the resolve
+    itself, not a clear, is what first writes real data there). New
+    regression test
+    `DrawTest.ResolveTargetSurvivesALaterSubpassThatBindsItDirectly`: a
+    minimal 2-subpass render pass (no draws at all -- the MSAA
+    attachment's own `LOAD_OP_CLEAR` to solid red is enough to exercise
+    the resolve, and the single-sample attachment's own distinct green
+    `LOAD_OP_CLEAR` marker value makes an erroneous re-clear
+    unmistakable), confirmed via `git stash` A/B to fail (every pixel of
+    the resolve target reads back the green marker instead of the
+    resolved red) pre-fix and pass post-fix. `FeMeVulkanTests`: 808/808
+    Passed (+1 net new test), 0 regressions. **Verified:** both original
+    `L401` cases now Pass (`Pass (Dynamic MSAA resolve is compliant)`).
+    A full `dEQP-VK.renderpasses.*` regression sweep (81,188 cases, the
+    entire group) shows 35,523 Pass / 49 Fail / 45,616 NotSupported,
+    **0 DeviceLost, 0 Crash** -- the 49 Fails are exactly the same
+    pre-existing families item 32 already identified (9
+    `depth_stencil_write_conditions`, 36
+    `subpass_dependencies.late_fragment_tests`, 4
+    `depth_stencil_resolve`), with the 2 `L401` cases now moved from
+    Fail to Pass and zero new Fails introduced anywhere else in the
+    group. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+    no change needed -- internal correctness fix only, no
+    feature/extension-surface change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
