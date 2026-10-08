@@ -63,13 +63,32 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(ongoing, ~10-11 hrs, unattended)**: let the sweep above finish. Nothing
-   else to do until `report.txt` lands.
-2. **(~1-2 hrs, once report lands)**: diff the fresh totals against the Oct-5
-   baseline, re-cluster the Fail list by sub-family, identify the single largest
-   new untriaged cluster, and file it as a fresh roadmap `L`-item (next
-   available number — `L397` was last used, so start at `L398`).
-3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed.
-4. No code changes this session — nothing to build/test beyond the existing
-   `check-feme` baseline (unchanged, not re-run since no source touched).
+1. **(~1 day, dedicated session)** `L399`:
+   `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.{unused_clear_attachments,multisample_resolve}`
+   DeviceLost, 192 cases. Repro:
+   ```
+   VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+     /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+     --deqp-case=dEQP-VK.renderpasses.renderpass1.suballocation.unused_clear_attachments.colorunused_colorunused_colorunused_colorunused_depthonly_d32_unused \
+     --deqp-log-filename=/tmp/repro.qpa
+   ```
+   Start by tracing `vkCmdBeginRenderPass`/subpass-attachment-reference handling
+   in `feme/lib/Vulkan/CommandBuffer.cpp` and `feme/lib/Graphics/Executor.cpp`
+   for how "unused" attachments (present in the render pass, not referenced by
+   the active subpass) are resolved — both `renderpass1` and `renderpass2` API
+   variants fail equally, so the bug is almost certainly shared
+   non-dynamic-rendering code.
+2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown
+   deadlock. Build a *spec-valid* reproducer first (call `vkDeviceWaitIdle`
+   before destroying anything except the fence itself, isolating the
+   fence-specific race from the broader object-lifetime class this session's
+   reverted reproducer accidentally also hit). If it reproduces, the fix is
+   likely `std::shared_ptr`-based reference counting on `Fence` (and possibly
+   other in-flight-task-referenced objects) so destruction defers until no task
+   still references them.
+3. **(~30 min)** Cluster the 3,519 Fail / 1,656 ResourceError cases from
+   `feme-20261007-full/report.txt` the same way `L399` was found
+   (`sed`/`sort`/`uniq -c` by 4-component case-name prefix) — not attempted this
+   session, time ran out.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed, carried forward unchanged for the record only.
