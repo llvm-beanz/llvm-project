@@ -1309,6 +1309,57 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     no change needed -- internal correctness fix only, no
     feature/extension-surface change.
 
+34. **`L398` root-caused and fixed (this session): `Fence`
+    use-after-free during `QueueExecutor`/device teardown.** A prior
+    session's `gdb` inspection of a genuinely stuck full-case-space sweep
+    worker found the main thread blocked forever in `vkDestroyDevice ->
+    QueueExecutor::~QueueExecutor() -> std::thread::join()`, waiting on a
+    worker thread itself blocked forever in `pthread_mutex_lock` inside
+    `Fence::signal()`'s own `Mutex` -- a `std::mutex` locked (or merely
+    accessed) after its owning object has been destroyed is undefined
+    behavior, and in practice hangs forever rather than crashing cleanly.
+    Root cause: `vkDestroyFence` freed its `Fence` object with zero
+    synchronization against the same fence's own `QueueExecutor`
+    fence-signal task (`makeFenceSignalTask`) -- if that task had not run
+    yet when `vkDestroyFence` was called, the worker thread would later
+    call `signal()` on already-freed memory. Ordinary `vkWaitForFences`-
+    then-`vkDestroyFence` usage was never actually exposed to this
+    (`Fence::wait`/`isSignaled` cannot observe a signal before `signal()`
+    itself has fully completed), but a host machine heavily
+    oversubscribed by many concurrent CTS workers -- exactly this
+    project's own full-sweep harness -- can make
+    `QueueExecutor::waitIdle`'s own generous safety-net timeout
+    (`vkQueueWaitIdle`/`vkDeviceWaitIdle`) lapse from pure scheduling
+    contention rather than a real hang, and an application that then
+    treats that as "safe to tear down" must not be able to free memory a
+    worker thread still intends to touch. **Fix:** `Fence` gained simple
+    retain/release bookkeeping for its own outstanding `QueueExecutor`
+    fence-signal tasks. `vkQueueSubmit`/`vkQueueSubmit2` retain the fence
+    synchronously on the submitting host thread before enqueuing its
+    signal task; `vkDestroyFence` frees the object immediately if none is
+    outstanding (the ordinary case), or otherwise defers, remembering the
+    caller's `VkAllocationCallbacks*`; the fence-signal task itself
+    performs the deferred free once it finishes running, if one was
+    requested. New regression tests: `FenceLifetimeTest.
+    DestroyDefersUntilPendingSignalTaskReleases`/`DestroyWithNoPendingSign
+    alFreesImmediately` deterministically exercise `Fence`'s new
+    bookkeeping through its own public API (not timing-dependent);
+    `SyncTest.StressFenceCreateSubmitWaitDestroyNoGlobalWait` is a
+    broader multi-thread, multi-queue stress test of the same lifecycle
+    under real `vkQueueSubmit` dispatch (did not itself reproduce a hang,
+    pre- or post-fix, in this single-process environment -- the live
+    sweep's trigger needs genuine host oversubscription across several
+    concurrent `deqp-vk` processes this test cannot recreate -- but is
+    kept as ongoing coverage). `FeMeVulkanTests`: all 24 `SyncTest`/
+    `FenceLifetimeTest` cases Pass; full `check-feme`: 3614/3617 Passed, 3
+    Unsupported, 0 Failed. **Verified:** a targeted CTS sweep of
+    `dEQP-VK.api.smoke.*`, every `dEQP-VK.synchronization*.*fence*` case,
+    and `dEQP-VK.api.object_management.single.fence*` (18,302 cases total)
+    shows 9764 Pass / 0 Fail / 8538 NotSupported -- no regressions.
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+    needed -- internal correctness fix only, no feature/extension-surface
+    change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
