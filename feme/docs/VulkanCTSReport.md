@@ -1124,6 +1124,46 @@ The largest ordinary-failure changes by group are:
     item.
 
 
+30. **First-ever genuine full-case-space sweep completes (this session):
+    `feme-20261007-full` (3,237,548 total cases, the full `vk-default`
+    mustpass index, vs. the Oct-5 baseline's partial 1,170,553) finished
+    after this session unblocked it by killing one worker stuck 6+ hours
+    in a real `QueueExecutor`/`Fence`-teardown deadlock (see `L398`,
+    `Roadmap.md`) -- the sweep itself continued and completed cleanly
+    afterward. Result counts: 688,262 Pass / 2,539,673 NotSupported /
+    3,519 Fail / 192 DeviceLost / 1,656 ResourceError / 46
+    QualityWarning / 4,200 Unrun (3,233,348 completed). Because this is
+    the *first* run of the ~2.07M cases the Oct-5 baseline never
+    reached, nearly every "changed" entry is `Unrun -> X`, not a true
+    regression -- diffing against a never-run baseline mostly surfaces
+    previously-unmeasured, not newly-broken, results. **The single
+    largest, cleanly-clustered new finding: all 192 `DeviceLost` cases
+    are `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.
+    {unused_clear_attachments,multisample_resolve}`** (95 + 95 +
+    1 + 1), nearly half of each `unused_clear_attachments` variant's own
+    208-case family. Re-ran one case standalone to confirm it is
+    genuinely, deterministically reproducible (not an artifact of the
+    sweep's own worker-kill): `dEQP-VK.renderpasses.renderpass1.
+    suballocation.unused_clear_attachments.colorunused_colorunused_
+    colorunused_colorunused_depthonly_d32_unused` fails immediately
+    (`TestDuration` 120,548us, far under the 5s `SafetyNetTimeoutNs`
+    default -- this is **not** the `L398` hang/timeout path, a
+    different, fast-failing bug) with `vk.waitForFences(...):
+    VK_ERROR_DEVICE_LOST at vkCmdUtil.cpp:296` and no
+    `FEME_VULKAN_LOG_CREATION_ERRORS=1` diagnostic emitted. Filed as
+    `L399` (`Roadmap.md`) for a dedicated future root-cause session; not
+    root-caused or fixed this session (reasoning-effort/time-budget
+    reasons -- this item was found only in the sweep's final minutes).
+    The other two result buckets (3,519 `Fail`, 1,656 `ResourceError`)
+    show no comparably clean single-sub-family cluster on a quick
+    `sed`/`sort`/`uniq -c` pass and are left untriaged -- a future
+    session should re-run this same clustering technique against them
+    specifically. No code changed this item -- a sweep-monitoring and
+    reconciliation finding only. `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed. Full artifact:
+    `/home/dev/dev/VK-GL-CTS/run/feme-20261007-full/report.txt`
+    (509MB).
+
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
 
