@@ -63,22 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown
-   deadlock — unchanged from prior handoffs. Build a *spec-valid* reproducer
-   (`vkDeviceWaitIdle` before destroying anything but the fence itself) to
-   isolate the fence-specific race from the broader object-lifetime class a
-   prior reproducer attempt accidentally also hit.
-2. **(~30 min)** Cluster the global Fail/ResourceError cases from a *fresh* full
-   sweep with a flat per-case result list (a real `.qpa`/`txt-caselist` export)
-   — the Oct-7 `report.txt` was confirmed in an earlier session to be a
-   diff/comparison artifact unsuitable for direct clustering; the clean
-   `renderpasses.*`-only sweep this session ran
-   (`/tmp/l401_regression_renderpasses_stdout.txt`) is usable for that one group
-   right now if someone wants to pre-triage it before a full-case-space run.
-3. **(~several hours, background)** A fresh full-case-space CTS sweep (last
-   genuine one: `feme-20261005-full-1170553-complete`, Oct 5) — this session
-   only ran the 2 `L401` cases plus one `renderpasses.*` group (81,188 cases),
-   not the full ~1.17-1.64M case space. Running one is the only way to surface
-   the next batch of untriaged failures across groups other than `renderpasses`.
+1. **(check in next session)** Full sweep in
+   `/home/dev/dev/VK-GL-CTS/run/feme-20261008-full/` — check `ps aux | grep
+   deqp-vk` for whether it's still running or done; if done, concatenate
+   `qpa/part*.qpa` or `logs/part*.stdout.log` and re-run the `sed`/`sort`/`uniq
+   -c` clustering technique across the *entire* case space (not just
+   `renderpasses.*`) to find the next untriaged cluster(s) — likely several,
+   since this is the first full sweep since `L398`'s fix and since `L399`-`L401`
+   landed.
+2. **(~1 day, dedicated session)** `L402`:
+   `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36
+   cases) — start from the reproducer above and trace
+   `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT`-scoped depth/stencil
+   subpass-dependency handling across `vkCmdNextSubpass`.
+3. **(long-carried-over, still open)** `L375`:
+   `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not
+   touched this session, needs its own dedicated design session per the existing
+   roadmap entry.
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see
    `L380`), no action needed, carried forward unchanged for the record only.
