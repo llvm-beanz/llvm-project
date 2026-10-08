@@ -4132,6 +4132,38 @@ resolveRowComponent(Type *MemberTy, uint64_t Residual, Type *ValueTy,
                        Residual / PackedSize < NumElements;
     bool PaddedValid = PaddedSize && Residual % PaddedSize == 0 &&
                        Residual / PaddedSize < NumElements;
+    // (Roadmap L404) The exact-division tests above only ever recognize
+    // an access to component 0 of its row as "valid" for a given
+    // candidate stride -- any other in-row component (e.g. a `mat3`
+    // column's 2nd/3rd lane) leaves a nonzero \p Residual after
+    // subtracting that row's own start, which divides *evenly* by
+    // \p PackedSize/\p PaddedSize only by coincidence (typically never,
+    // since neither stride is 1). \p UseTightArrayStride's caller
+    // (resolveOffsetWithinElement) sets this specifically for an
+    // ordinary, undecorated `Input`-direction stage-IO global -- never
+    // true for the XFB-decorated-Output case L272's own comment above
+    // still governs -- which the SPIR-V spec guarantees always folds
+    // its GEPs against the tight, ABI-padding-free stride (no
+    // `Input`/`Output` interface variable may carry an `ArrayStride`/
+    // `MatrixStride` decoration at all), so there is no genuine
+    // ambiguity left to resolve for it the way a decorated `Buffer`-
+    // backed member's padded-vs-tight stride still can be: recognize
+    // *any* in-range packed row here, component included, rather than
+    // only a component-0 one. Scoped to \p UseTightArrayStride alone
+    // (not applied unconditionally) so the XFB/Buffer-member self-
+    // discovery this generalizes stays byte-for-byte unchanged for
+    // every other caller. Found via `dEQP-VK.pipeline.pipeline_library.
+    // vertex_input.single_attribute.mat3.as_r32g32b32_sfloat_rate_vertex`
+    // (and the wider `vertex_input.*` family sharing this matrix/narrow-
+    // vector Input-attribute load path), whose `mat3` attribute's 2nd and
+    // 3rd column components landed on the wrong row and/or a
+    // `component ... out of range` validator error (ValidateStage.cpp)
+    // before this fix.
+    if (!PackedValid && UseTightArrayStride && PackedSize) {
+      uint64_t Idx = Residual / PackedSize;
+      if (Idx < NumElements)
+        PackedValid = true;
+    }
     uint64_t RowSize;
     if (PackedValid != PaddedValid)
       RowSize = PackedValid ? PackedSize : PaddedSize;
@@ -4375,8 +4407,22 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   if (IDs.size() == 1) {
     if (ValueTy == ElemTy)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
-    auto [Row, Component] = resolveRowComponent(ElemTy, ByteOffset, ValueTy,
-                                                DL, UseTightArrayStride);
+    // (Roadmap L404) An ordinary, single-global `Input` access (e.g. a
+    // vertex attribute or fragment varying read, as opposed to a
+    // `Buffer`-backed struct member reached by the `IDs.size() != 1`
+    // path below) is never subject to any `ArrayStride`/`MatrixStride`
+    // decoration at all -- the SPIR-V spec permits those only on a
+    // `Block`/`BufferBlock`-decorated struct member, never on a bare
+    // `Input`/`Output` interface variable -- so its GEPs always fold
+    // against the tight, ABI-padding-free stride, unlike the genuinely
+    // ambiguous (sometimes padded) case `UseTightArrayStride`'s own
+    // caller-supplied `hasXfbBufferDecoration` value models for an
+    // `Output` (see `resolveRowComponent`'s own L272 comment). Force it
+    // on here for `Input` regardless of what was passed in, leaving
+    // `Output`'s own XFB-decoration-keyed value (and every other,
+    // `IDs.size() != 1` caller) untouched.
+    auto [Row, Component] = resolveRowComponent(
+        ElemTy, ByteOffset, ValueTy, DL, UseTightArrayStride || !IsOutput);
     return StageIOAccess{IDs, AsConstant(Row), AsConstant(Component), Vertex,
                          IsOutput};
   }

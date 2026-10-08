@@ -1180,6 +1180,106 @@ TEST(CanonicalizeStageTest,
   EXPECT_EQ(SeenRows, (std::set<uint64_t>{0, 1, 2, 3}));
 }
 
+/// (Roadmap L404) `ResolvesOrdinaryNarrowVectorMatrixColumnsAtPaddedStrideNotTightStride`
+/// above only exercises a *whole-column* load (`ValueTy` is the entire
+/// `<3 x float>` column, so `resolveRowComponent`'s own array-peeling
+/// loop stops the moment it lands on any in-range row, regardless of
+/// which candidate stride -- tight or padded -- produced it, since the
+/// loop's `isShapeCompatible` check fires immediately either way and no
+/// `Component` is ever computed). A genuine *per-component* scalar load
+/// of one lane of a `mat3`'s column -- `dEQP-VK.pipeline.
+/// pipeline_library.vertex_input.single_attribute.mat3.
+/// as_r32g32b32_sfloat_rate_vertex`'s own real shape, and every other
+/// matrix/narrow-vector-column `Input` attribute whose per-row width is
+/// not a power of two -- has nowhere to hide a wrong stride choice this
+/// way: `SPIRVToLLVMPatterns.cpp`'s own SPIR-V `Input`-storage-class
+/// `spirv.MatrixType` conversion (see that file's own "MLIR upstream has
+/// no spirv.MatrixType conversion" comment) always folds a bare,
+/// undecorated `Input` global's GEPs at the *tight*, ABI-padding-free
+/// stride (12 bytes for a `<3 x float>` column, never the 16-byte
+/// `getTypeAllocSize`-rounded one `ResolvesOrdinaryNarrowVectorMatrix
+/// ColumnsAtPaddedStrideNotTightStride`'s own padded-stride global uses
+/// instead -- no `Input`/`Output` interface variable may ever carry an
+/// `ArrayStride`/`MatrixStride` decoration at all, so there is no
+/// genuine SPIR-V-spec-sanctioned ambiguity left for this shape the way
+/// a `Buffer`-backed member still has). Before this fix,
+/// `resolveRowComponent`'s stride-discovery heuristic still defaulted to
+/// the padded stride for any access whose byte offset did not divide
+/// *exactly* by either candidate (true for almost every nonzero in-row
+/// component, since the per-row width here, 3, divides neither 12 nor 16
+/// cleanly against an arbitrary residual) -- column 1's 2nd component
+/// (byte offset 20) resolved to `Row 1, Component 1` instead of `Row 1,
+/// Component 2`, and column 2's 2nd component (byte offset 28) resolved
+/// to the flatly wrong `Row 1, Component 3` -- one past `ComponentCount
+/// == 3`'s own last valid lane, `feme-graphics-validate-stage`'s own
+/// "component 3 is out of range for element 0"
+/// `vkCreateGraphicsPipelines`-time rejection every `mat3`/similarly
+/// narrow matrix vertex-input attribute hit (217 `dEQP-VK.pipeline.
+/// pipeline_library.vertex_input.*` cases, a fresh full-sweep cluster).
+/// Fixed by (1) generalizing `resolveRowComponent`'s stride-validity
+/// check so a `UseTightArrayStride`-signalled candidate need only land
+/// an in-range row, not divide the whole byte offset exactly, and (2)
+/// forcing that signal on for every ordinary (`IDs.size() == 1`)
+/// `Input`-direction global in `resolveOffsetWithinElement`, regardless
+/// of `hasXfbBufferDecoration` (which, for an `Input`, is always false
+/// and never a meaningful signal in the first place -- XFB capture only
+/// ever decorates certain `Output`s).
+TEST(CanonicalizeStageTest,
+    ResolvesScalarComponentsOfOrdinaryNarrowVectorMatrixColumnsAtTightStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_mat3 = external addrspace(7) constant [3 x <3 x float>], !spirv.Decorations !0
+    define void @main() #0 {
+      %c0r0 = load float, ptr addrspace(7) @in_mat3
+      %c0r1 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 4)
+      %c0r2 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 8)
+      %c1r0 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 12)
+      %c1r1 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 16)
+      %c1r2 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 20)
+      %c2r0 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 24)
+      %c2r1 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 28)
+      %c2r2 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 32)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 3u);
+  EXPECT_EQ(Elt.ComponentCount, 3u);
+  EXPECT_FALSE(Elt.XfbBuffer.has_value());
+
+  // Every one of the 9 scalar loads must resolve to its own distinct
+  // (Row, Component) pair, matching exactly which column/lane its own
+  // byte offset addresses -- (0,0) (0,1) (0,2) (1,0) (1,1) (1,2) (2,0)
+  // (2,1) (2,2) -- not the wrong, collision-prone pairs (including a
+  // flatly out-of-range `Component == 3`) the padded-stride-defaulting
+  // heuristic produced before this fix.
+  std::set<std::pair<uint64_t, uint64_t>> SeenPairs;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Row.has_value());
+    ASSERT_TRUE(Component.has_value());
+    SeenPairs.insert({*Row, *Component});
+  }
+  EXPECT_EQ(SeenPairs,
+           (std::set<std::pair<uint64_t, uint64_t>>{
+               {0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1}, {1, 2}, {2, 0}, {2, 1},
+               {2, 2}}));
+}
 
 /// H101k/H101l's own "leading `[N x i8]` pad" shape
 /// (`layOutStructIfOffsetsMatch`, SPIRVToLLVMPatterns.cpp) with this
