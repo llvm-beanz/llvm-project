@@ -1205,6 +1205,57 @@ The largest ordinary-failure changes by group are:
 across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 14; `glsl` to 15; `texture` to 2; and `tessellation` to 30.
 
+32. **`L400` root-caused and fixed (this session): both cases of its
+    2-case cluster closed.** The CTS case's pipeline calls
+    `GraphicsPipelineWrapper::setupVertexInputState()` with no arguments,
+    which falls back to the CTS framework's own filler default vertex
+    input state (one binding, one attribute at location 0) -- never read
+    by the test's actual vertex shader, which draws entirely from
+    `gl_VertexIndex`-indexed constants and declares no
+    `layout(location=...) in` variable at all. FeMe's existing `L127`
+    fix (`bindingHasAnyAttribute`, `CommandBuffer.cpp`) considered a
+    binding load-bearing (requiring a bound buffer at draw time) if
+    *any* pipeline attribute referenced it, regardless of whether the
+    vertex shader itself ever reads that attribute's location -- but the
+    real VUID (e.g. VUID-vkCmdDraw-None-04914) is scoped to bindings
+    "accessed via vertex input variables declared in the vertex shader
+    entry point's interface". **Fix:** `GraphicsPipeline.cpp`'s
+    `validateStageInterfaces` (which already parses the vertex shader's
+    reflected `feme::EntrySignature` at pipeline-creation time to
+    validate every shader-declared input `Location` against the
+    pipeline's attribute table, previously discarding that data once
+    validation passed) gained an optional `UsedVertexInputLocations`
+    out-parameter; the result is now cached on `GraphicsPipelineArtifact`
+    (the shareable, shader-derived, cache-friendly struct, following the
+    existing `Tessellation`/`Geometry`/`Mesh` precedent) and exposed via
+    a new `GraphicsPipeline::usedVertexInputLocations()` accessor.
+    `bindingHasAnyAttribute` now also requires the matching attribute's
+    `Location` be in this set before treating the binding as
+    load-bearing. New regression test
+    `RendersWithAVertexInputAttributeTheShaderNeverDeclares`
+    (`DrawTest.cpp`), confirmed to fail (`VK_ERROR_DEVICE_LOST`) pre-fix
+    and pass post-fix. `FeMeVulkanTests`: 807/807 Passed (+1 net new
+    test), 0 regressions; `check-feme`: 3610/3613 Passed, 3 Unsupported,
+    0 Failed (one pre-existing timing-flaky `SyncTest` case under
+    concurrent CPU load from this session's own CTS sweep, confirmed
+    unrelated and passing cleanly in isolation). **Verified:** both
+    original `L400` cases no longer `DeviceLost` -- the vertex-binding
+    error is gone, replaced by an unrelated pixel-mismatch `Fail`
+    ("Resolved tile mismatch detected at pixel (63, 66)! RTV B color
+    does not match RTV A reference."), filed separately as `L401`
+    (a genuine rendering-correctness bug `L400`'s draw-time validation
+    fix was merely unblocking, not fixing). A full
+    `dEQP-VK.renderpasses.*` regression sweep (81,188 cases, the entire
+    group) shows 35,521 Pass / 51 Fail / 45,616 NotSupported, **0
+    DeviceLost** (down from the Oct-7 baseline's 328 recorded in the
+    group-accounting table below) -- the 51 Fails are all pre-existing
+    (9 `depth_stencil_write_conditions`, 36
+    `subpass_dependencies.late_fragment_tests`, 4
+    `depth_stencil_resolve`, the 2 new `L401` cases), confirming zero
+    regressions from this fix. `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed -- internal
+    correctness fix only, no feature/extension-surface change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
