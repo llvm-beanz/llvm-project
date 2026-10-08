@@ -619,20 +619,20 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
     // one call); handle them independently rather than as mutually
     // exclusive so that case clears both halves.
     if (WantDepth) {
-      if (!Binding.Depth)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vkCmdClearAttachments names the depth "
-                                 "attachment, which is not bound");
-      // (roadmap H11) Mirrors the color-slot skip above: a depth
-      // attachment can also be present-but-unused (`Binding.Depth` itself
-      // set, but its own `View` null) whenever `VkRenderingAttachmentInfo::
-      // imageView` was `VK_NULL_HANDLE` for the depth aspect specifically
-      // (e.g. a combined depth/stencil `VkClearAttachment` naming both
-      // aspects while only stencil is actually bound this draw). Guarded
-      // by `if`, not `continue`, since a stencil clear on the very same
-      // `VkClearAttachment` entry (below) must still run even when depth
+      // (roadmap L399) A subpass that never references a depth/stencil
+      // attachment at all (`VkSubpassDescription{,2}::pDepthStencilAttachment
+      // == VK_ATTACHMENT_UNUSED`, so `Binding.Depth` itself is unset, not
+      // merely its `View`) is a distinct, equally legal "unused" shape from
+      // the present-but-unused one the comment below already handles --
+      // `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.
+      // unused_clear_attachments.*` exercises exactly this (and the
+      // `dynamic_rendering` sibling of the same case shape already passes
+      // cleanly, confirming a silent no-op, not an error, is the expected
+      // outcome). Guarded by `if`, not `continue`, for the same reason as
+      // the `Binding.Depth->View` check just below: a stencil clear on the
+      // very same `VkClearAttachment` entry must still run even when depth
       // itself has nothing to clear.
-      if (Binding.Depth->View) {
+      if (Binding.Depth && Binding.Depth->View) {
         feme::cpu::ResourceFormat Format = Binding.Depth->Format;
         double Depth = Clear.clearValue.depthStencil.depth;
         if (Error E = clearAttachmentRects(
@@ -644,12 +644,10 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
       }
     }
     if (WantStencil) {
-      if (!Binding.Stencil)
-        return createStringError(inconvertibleErrorCode(),
-                                 "vkCmdClearAttachments names the stencil "
-                                 "attachment, which is not bound");
-      // (roadmap H11) See the matching depth-slot comment above.
-      if (Binding.Stencil->View) {
+      // (roadmap L399) See the matching depth-slot comment above -- an
+      // unreferenced-by-the-subpass stencil attachment (`Binding.Stencil`
+      // itself unset) is just as legal a no-op as a present-but-unused one.
+      if (Binding.Stencil && Binding.Stencil->View) {
         feme::cpu::ResourceFormat Format = Binding.Stencil->Format;
         uint32_t Stencil = Clear.clearValue.depthStencil.stencil;
         if (Error E = clearAttachmentRects(

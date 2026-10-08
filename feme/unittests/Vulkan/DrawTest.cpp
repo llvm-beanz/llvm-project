@@ -3875,6 +3875,57 @@ TEST_F(DrawTest, ClearsAttachmentInsideRenderPass) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap L399) `vkCmdClearAttachments` naming the depth and/or stencil
+/// aspect when the *current subpass* never references a depth/stencil
+/// attachment at all (`VkSubpassDescription::pDepthStencilAttachment ==
+/// nullptr`/`VK_ATTACHMENT_UNUSED`, the fixture's own default `Pass` --
+/// see `createRenderPassAndFramebuffer()` -- which declares only a color
+/// attachment) must be a silent no-op, the same as the already-handled
+/// present-but-unused (`Binding.Depth->View == nullptr`) case just below --
+/// not an error that aborts the queue with `VK_ERROR_DEVICE_LOST`.
+/// Discovered via a real `dEQP-VK.renderpasses.{renderpass1,renderpass2}.
+/// suballocation.unused_clear_attachments.*` re-run (192 cases): the
+/// `dynamic_rendering` sibling of the exact same case shape already passes
+/// cleanly, confirming a no-op (not an error) is the expected outcome.
+TEST_F(DrawTest, ClearAttachmentsSkipsUnboundDepthStencilAttachment) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+
+  // One VkClearAttachment combining a real color clear with a depth+stencil
+  // clear this subpass has no attachment for at all -- the depth/stencil
+  // half must be silently ignored, not reject the whole call.
+  VkClearAttachment Clears[2]{};
+  Clears[0].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  Clears[0].colorAttachment = 0;
+  Clears[0].clearValue.color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+  Clears[1].aspectMask =
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  Clears[1].clearValue.depthStencil = {1.0f, 0u};
+  VkClearRect Rect{};
+  Rect.rect = {{0, 0}, {2, 2}};
+  Rect.layerCount = 1;
+  vkCmdClearAttachments(Cmd, 2, Clears, 1, &Rect);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // The real color clear still took effect; no crash/DeviceLost from the
+  // unbound depth/stencil half of the same call.
+  EXPECT_EQ(texel(0, 0)[2], 0xFF);
+  EXPECT_EQ(texel(0, 0)[0], 0x00);
+  EXPECT_EQ(texel(3, 3)[0], 0xFF);
+  EXPECT_EQ(texel(3, 3)[2], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (Roadmap H11) `vkCmdClearAttachments` naming a color index that is
 /// present (counts against `colorAttachmentCount`) but backed by a
 /// `VK_NULL_HANDLE` imageView -- the same "present but unused" dynamic-
