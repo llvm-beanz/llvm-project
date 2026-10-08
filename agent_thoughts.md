@@ -117178,3 +117178,47 @@ Verified the premise first (per the handoff's own item 4 process note): `git log
 4. No code changes this session — nothing to build/test beyond the existing `check-feme` baseline (unchanged, not re-run since no source touched).
 
 No new issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
+
+# Session: L398 found (QueueExecutor/Fence teardown deadlock) + sweep unblocked + L399 found (192-case renderpass DeviceLost cluster) (2026-10-08)
+
+**Next action for the next session: start on `L399`.** Run `dEQP-VK.renderpasses.renderpass1.suballocation.unused_clear_attachments.colorunused_colorunused_colorunused_colorunused_depthonly_d32_unused` standalone (command below) and start tracing `vkCmdBeginRenderPass`'s unused-attachment handling.
+
+Device check: `FeMe CPU Vulkan Device` (confirmed, start of session).
+
+## What happened, in order
+
+1. Checked on the background full-CTS sweep (handoff's "only remaining task"). It was **not just slow — genuinely stuck**: one of 6 workers (PID `74427`, batch `initial-00505`) sat at near-zero CPU for 6+ hours. Confirmed via repeated `.qpa` file-size checks (zero growth) and `ps` runtime.
+2. `gdb -p 74427 -batch -ex "thread apply all bt"` gave a clean, conclusive backtrace: main thread blocked forever in `vkDestroyDevice -> QueueExecutor::~QueueExecutor() -> std::thread::join()`, waiting on a worker thread itself blocked forever in `pthread_mutex_lock` inside a fence-signal task. All 1800 cases in the batch had **already fully completed** — this is a teardown-time deadlock, not a mid-test hang.
+3. Read `feme/lib/Vulkan/Sync.h`/`Sync.cpp`: `makeFenceSignalTask` resolves a raw `VkFence` handle to a `Fence*` only when the task *runs*, not when enqueued. `vkDestroyFence` destroys the object with zero synchronization against any in-flight task still holding that handle — a plausible UAF. **Filed as `L398`** (`Roadmap.md`), not fixed — needs a dedicated session with a cleaner, spec-valid reproducer (this session's own reproducer attempt used deliberately-invalid API usage and produced a different symptom, a crash not a hang — inconclusive, reverted, not committed).
+4. **Killed PID `74427`** to unblock the sweep. Confirmed safe first: `vk_cts_reconcile.py`'s `read_qpa` only needs matched `#beginTestCaseResult`/`#endTestCaseResult` pairs, which the batch already had in full — no data lost, no re-run needed for that batch.
+5. Sweep resumed immediately (watched it move from stalled → recovery rounds → `report.txt` written, roughly 10 minutes after the kill).
+6. **First-ever genuine full-case-space sweep now complete**: 3,237,548 cases (vs. the Oct-5 baseline's partial 1,170,553). Result counts: 688,262 Pass / 2,539,673 NotSupported / 3,519 Fail / 192 DeviceLost / 1,656 ResourceError / 46 QualityWarning / 4,200 Unrun.
+7. Clustered the 192 DeviceLost cases by sub-family (`sed`/`sort`/`uniq -c`): **all 192 are `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.{unused_clear_attachments,multisample_resolve}`** (95+95+1+1) — a single, clean, dominant cluster, nearly half of each `unused_clear_attachments` variant's own 208-case family.
+8. Re-ran one case standalone to rule out "artifact of killing a process mid-sweep": genuinely, deterministically reproducible. Fails in ~0.12s (`TestDuration` 120,548us) — far under the 5s safety-net timeout, so this is a **different, faster bug than `L398`**, not the same mechanism surfacing differently. `FEME_VULKAN_LOG_CREATION_ERRORS=1` shows no FeMe-side diagnostic. **Filed as `L399`** (`Roadmap.md`), not root-caused (ran out of session time).
+9. The other two buckets (3,519 Fail, 1,656 ResourceError) showed no comparably clean single-cluster on a quick pass — left untriaged, flagged for a future session to run the same clustering technique.
+
+## Visible wins this session
+
+- Sweep that was stuck for 6+ hours is unstuck and **complete**, with a report for the first time ever covering the *entire* CTS case space (previous baselines were always partial).
+- Two new, concretely-named bugs found and filed with reproducers: `L398` (deadlock, needs cleaner repro) and `L399` (192-case DeviceLost cluster, has a working standalone repro command already).
+- `check-feme`/`FeMeVulkanTests` confirmed still green (805/805) after reverting this session's exploratory, non-matching reproducer test — tree is clean, no half-finished code committed.
+
+## Why no fix this session
+
+Both `L398` and `L399` are "found, not fixed" — each needs its own dedicated root-cause session (same pattern as `L375`/`L383(a)` before them). Time this session went to: discovering the stuck sweep, `gdb` investigation, one reproducer attempt (reverted), unblocking the sweep, waiting for it to finish, then clustering/confirming the new finding. No time budget left to start root-causing `L399` itself.
+
+## Next steps, ranked
+
+1. **(~1 day, dedicated session)** `L399`: `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.{unused_clear_attachments,multisample_resolve}` DeviceLost, 192 cases. Repro:
+   ```
+   VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json \
+     /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan/deqp-vk \
+     --deqp-case=dEQP-VK.renderpasses.renderpass1.suballocation.unused_clear_attachments.colorunused_colorunused_colorunused_colorunused_depthonly_d32_unused \
+     --deqp-log-filename=/tmp/repro.qpa
+   ```
+   Start by tracing `vkCmdBeginRenderPass`/subpass-attachment-reference handling in `feme/lib/Vulkan/CommandBuffer.cpp` and `feme/lib/Graphics/Executor.cpp` for how "unused" attachments (present in the render pass, not referenced by the active subpass) are resolved — both `renderpass1` and `renderpass2` API variants fail equally, so the bug is almost certainly shared non-dynamic-rendering code.
+2. **(~1 day, dedicated session)** `L398`: `QueueExecutor`/`Fence` teardown deadlock. Build a *spec-valid* reproducer first (call `vkDeviceWaitIdle` before destroying anything except the fence itself, isolating the fence-specific race from the broader object-lifetime class this session's reverted reproducer accidentally also hit). If it reproduces, the fix is likely `std::shared_ptr`-based reference counting on `Fence` (and possibly other in-flight-task-referenced objects) so destruction defers until no task still references them.
+3. **(~30 min)** Cluster the 3,519 Fail / 1,656 ResourceError cases from `feme-20261007-full/report.txt` the same way `L399` was found (`sed`/`sort`/`uniq -c` by 4-component case-name prefix) — not attempted this session, time ran out.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed, carried forward unchanged for the record only.
+
+No issues found outside `feme/` this session — nothing to isolate/reproduce/fix in another subproject.
