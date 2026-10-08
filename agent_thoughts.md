@@ -117589,3 +117589,55 @@ Generated a fresh flat case list via `deqp-vk --deqp-runmode=txt-caselist` (3,24
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
 
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L404 fixed — mat3/narrow-matrix vertex-input Row/Component bug (2026-10-09)
+
+**Device check (start):** `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES` set explicitly per command).
+
+**Task (prior session's handoff item 1): check `feme-20261008-full/`'s `part3` worker, and investigate `part1`'s silent stop / `part2`'s crash.**
+
+1. `part3` is **still running** (PID 70573, 211+ CPU-minutes, ~83% through its caselist — 447,475/540,779 cases done). Not finished; left running in the background, untouched.
+2. `part1`'s silent stop is now **explained, not just observed**: it SIGSEGV'd. Confirmed directly in this session's own terminal (a leftover detached shell from the launching session surfaced the OS-level message once its own buffer finally flushed): `Segmentation fault ./deqp-vk --deqp-caselist-file=...part1 ...`. Last case started, never finished: `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`. **Concrete repro candidate for next session.**
+3. `part2`'s crash is now also pinned to an exact case: `terminate called without an active exception` struck immediately after `dEQP-VK.memory.concurrent_access.shader_and_host` went `DeviceLost`. The OS-level message (`Aborted`) confirms this is a C++ `std::terminate`, not a signal — likely a destructor throwing (or a second exception during unwind) somewhere in CTS's own post-`DeviceLost` cleanup path, or in FeMe's. **Concrete repro candidate for next session**, distinct from `part1`'s.
+4. `part4`/`part5`/`part6` all completed. Clustered each:
+   - `part4`: 13,971 Fail = 13,754 `DeviceLost` (separate, already-known, unrelated cluster — not investigated further this session, still open) + **217 `Fail`, all `pipeline.pipeline_library.vertex_input.*` narrow-matrix cases** → this became the session's main fix, see below.
+   - `part5`: 51 Fail, all already-known (`L402`'s `subpass_dependencies.late_fragment_tests`, pre-existing `depth_stencil_resolve`/`depth_stencil_write_conditions` stragglers). Nothing new.
+   - `part6`: 2,414 Fail, dominated by a 1,308-case `transform_feedback.primitives_generated_query.{get,copy}.{queue_reset,host_reset}` bucket. **This is a stale-build artifact, not a new bug** — confirmed via timestamps: the sweep's caselist/processes started Oct 8 16:43-18:08, but `libfeme_vulkan.so` wasn't rebuilt with `L403`'s already-landed fix until this session's 21:00 build. The exact sub-bucket counts (516/264/264/264) match `L403`'s original cluster precisely. **Do not re-investigate this as new** — it's `L403`, already fixed, just not yet reflected in this particular leftover sweep's stale binary. The remainder (~1,106 cases: `spirv_assembly.*`, `transform_feedback.fuzz.*`, etc.) was not further clustered this session — small enough each to likely be its own one-off, worth a fresh look once a non-stale full sweep exists.
+
+**Root-caused and fixed `L404`** (the 217-case `part4` bucket): every failing case is a `mat2`/`mat3`/narrow-matrix vertex-input attribute (minimal repro: `single_attribute.mat3.as_r32g32b32_sfloat_rate_vertex`), rejected at `vkCreateGraphicsPipelines` time by `feme-graphics-validate-stage`'s "component N is out of range for element M" check.
+
+Root cause: `CanonicalizeStage.cpp`'s `resolveRowComponent` reverse-engineers a scalar stage-IO access's `(Row, Component)` pair from its GEP-folded byte offset, disambiguating a narrow (<4-lane) vector array's tight (e.g. 12-byte `mat3` column) vs. padded (16-byte) stride by requiring the residual divide the candidate *exactly* — true only for each row's first lane. Every other in-row component fell back to a tie-break keyed on `hasXfbBufferDecoration`, which is **always false** for ordinary vertex `Input` globals (XFB never applies to shader inputs) — so it always defaulted to the *wrong*, padded stride, even though the SPIR-V spec guarantees `Input`/`Output` interface variables can never carry `ArrayStride`/`MatrixStride` decorations at all (making tight the *only* architecturally-possible answer here).
+
+Used `FEME_DUMP_IR_PRECANON=1`/`FEME_DUMP_IR_POSTCANON=1` (env vars already in `GraphicsPipeline.cpp`) to compare real GEP-folded byte offsets (0, 4, 8, ..., 32 — confirmed tight) against the wrong `(Row, Component)` pairs produced from them; a standalone Python simulation of the exact buggy heuristic against those real offsets reproduced the captured wrong output bit-for-bit, including the literal out-of-range `Component == 3`.
+
+**Fix** (scoped only to the single bare-global access path — struct/block members, which retain genuine padding ambiguity, are untouched):
+1. `resolveRowComponent`: accept any in-range residual less than the packed-per-row size as valid when the caller signals "known-tight", not only exact multiples.
+2. `resolveOffsetWithinElement`'s single-global branch: force that signal on for every `Input`-direction access, independent of `hasXfbBufferDecoration`. `Output`-direction (the existing `L259`/`L272`-tuned XFB-decoration-keyed logic) is completely untouched.
+
+**Verified:**
+1. `single_attribute.mat3.as_r32g32b32_sfloat_rate_vertex`: Fail → Pass.
+2. All 142 `single_attribute.mat*` cases: 0 Fail.
+3. `multiple_attributes.binding_one_to_many.attributes.f16vec2.mat2.mat3`: Fail → Pass.
+4. New unit test `ResolvesScalarComponentsOfOrdinaryNarrowVectorMatrixColumnsAtTightStride` (modeled directly on the captured precanon IR, asserts all 9 `(Row, Component)` pairs of a scalar-loaded `mat3` Input).
+5. Full `CanonicalizeStageTest.*` suite: 126/126 pass (the pre-existing `ResolvesOrdinaryNarrowVectorMatrixColumnsAtPaddedStrideNotTightStride` test — a *whole-column* load, which short-circuits before `Component` is ever computed — still passes unmodified, as expected; confirmed by actually running it, not just reasoning about it).
+6. `ninja check-feme`: 3,617 Passed, 3 Unsupported, 0 Failed. 0 regressions.
+
+**Not pursued this session** (explicitly out of scope, flagged for later): whether other pipeline construction types (`monolithic`, `fast_linked_library`) or other stages (fragment varyings, geometry/tess inputs) sharing the same code path also benefit — architecturally almost certain, not spot-checked. Also: the already-known, separate ~4,598-case `pipeline_library.vertex_input.*` `DeviceLost` cluster in the *same* test family remains completely open and untouched — don't conflate "vertex_input is fixed" with "this one Fail-bucket is fixed."
+
+**Docs updated:** `Roadmap.md` (new `L404` row), `VulkanCTSReport.md` (item 37 added). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — internal correctness fix, no feature/extension-surface change.
+
+**Commits (2):**
+1. `[feme] Fix mat3/narrow-matrix vertex-input Row/Component resolution (L404)` — `CanonicalizeStage.cpp` + new unit test, one commit (test validates the fix directly, kept together deliberately rather than split).
+2. `[feme] docs: record L404 mat3 vertex-input fix in Roadmap/CTS report` — docs only.
+
+**No issues found outside `feme/` this session** — nothing to isolate/reproduce/fix in another subproject.
+
+**Next steps, in priority order:**
+
+1. **(~30 min)** Check `feme-20261008-full/`'s `part3` worker (PID 70573 at last check, ~83% done) — once finished, concatenate all 6 `logs/part*.stdout.log` and re-cluster the *entire* case space. **Remember `part6`'s `transform_feedback.primitives_generated_query` bucket there is `L403`-stale, not new** — skip it when re-clustering, don't re-diagnose it.
+2. **(~1 day, dedicated session)** Build isolated reproducers for `part1`'s SIGSEGV (last case before the crash: `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`) and `part2`'s `std::terminate`/`Aborted` (immediately after `dEQP-VK.memory.concurrent_access.shader_and_host`'s `DeviceLost`) — two distinct, concrete, case-pinned crash leads, neither chased this session due to time. Both are new-information (exact trigger case identified) versus every prior session's "aggregate counts only" status on this item.
+3. **(~1 day, dedicated session)** `part4`'s 13,754-case `DeviceLost` cluster in `pipeline_library.vertex_input.*` — confirmed still present, completely separate from this session's `L404` `Fail`-bucket fix, not yet clustered by sub-shape or root-caused at all.
+4. **(long-carried-over, still open)** `L375`: `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not touched this session, needs its own dedicated design session per the existing roadmap entry.
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
+
+**Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
