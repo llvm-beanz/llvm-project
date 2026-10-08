@@ -117641,3 +117641,62 @@ Used `FEME_DUMP_IR_PRECANON=1`/`FEME_DUMP_IR_POSTCANON=1` (env vars already in `
 5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
 
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L405 fixed — array-typed vertex-input RowCount dropped past Row 0, closes the 4,598-case pipeline_library.vertex_input.* DeviceLost cluster (2026-10-09)
+
+**Device check:** `FeMe CPU Vulkan Device` (confirmed at start).
+
+**Done:** `L405` is fixed and committed. The entire ~4,598-case `pipeline.pipeline_library.vertex_input.*` `DeviceLost` cluster `L404` left open last session is now resolved (verified: 0 Fail / 0 DeviceLost across the whole 9,208-case family).
+
+**Root cause:** `GraphicsPipeline.cpp`'s `validateStageInterfaces` built the `UsedVertexInputLocations` set (the data `CommandBuffer.cpp`'s `bindingHasAnyAttribute` consults to decide which vertex bindings actually need a bound buffer at draw time) using only each shader input's *base* `Location`, never its `RowCount`. An array-typed input like `layout(location=1) in vec4 attr[15];` (the real CTS shape, from `max_attributes.query_max_attributes.*`) is one `SignatureElement` spanning locations 1 through 15 — `Executor.cpp`'s own vertex-fetch loop already knew this (`RowLocation = *Elt.Location + Row`), but `validateStageInterfaces` didn't. When `BINDING_MAPPING_ONE_TO_MANY` splits those 15 locations across two different vertex bindings, only the binding holding location 1 ever got marked "used" — the other binding (holding locations 2, 4, 6, ..., 14) was wrongly treated as unused and skipped at draw time, leaving those locations unbound → `DeviceLost`.
+
+**Fix (1 line of logic, `GraphicsPipeline.cpp`):** loop `Row` from `0` to `RowCount-1`, check/record `Location + Row` instead of just `Location`.
+
+**New test:** `L405SplitBindingArrayAttributeRepro` (`DrawTest.cpp`) — minimal `RowCount==2` array input, 2 separate bindings, asserts the correct sum renders red. Confirmed fails pre-fix (`VK_ERROR_DEVICE_LOST`), passes post-fix — proved this by actually reverting the fix, rebuilding, and rerunning the test, not just reasoning about it.
+
+**Verified:**
+1. Original reproducer (`max_attributes.query_max_attributes.binding_one_to_many.interleaved`): DeviceLost → Pass.
+2. Full `pipeline.pipeline_library.vertex_input.*` sweep (9,208 cases): 4,816 Pass / 0 Fail / 0 DeviceLost / 4,389 NotSupported / 3 QualityWarning.
+3. `ninja check-feme`: 3,618 Passed (+1 net new test), 3 Unsupported, 0 Failed, 0 regressions.
+
+**Docs updated:** `Roadmap.md` (new `L405` row, marked done), `VulkanCTSReport.md` (item 38). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change — internal correctness fix only.
+
+**Commits (2, both in `llvm-project`):**
+1. `[feme] Fix L405: array-typed vertex input locations dropped past Row 0` — `GraphicsPipeline.cpp` + new unit test, kept together deliberately (test proves the fix directly).
+2. `[feme] docs: record L405 fix in Roadmap.md and VulkanCTSReport.md` — docs only.
+
+## Two bugs found outside FeMe this session, both fixed and committed in VK-GL-CTS
+
+Both found while re-verifying last session's `part2` `std::terminate` fix under real 3-way concurrent CTS load (the same oversubscription conditions that originally triggered it). Both are isolated, self-contained fixes to CTS's own test-harness code — neither touches or depends on the device/ICD under test, so they'd crash identically against any real GPU driver too.
+
+**Bug 1 (`memory.concurrent_access.shader_and_host`):** `testShaderAndHostAccess` spawns a joinable `std::thread` before calling `submitCommandsAndWait()`. If that throws (e.g. `DeviceLost` under load), the exception unwinds past the still-joinable thread → `std::thread`'s destructor calls `std::terminate()` → whole `deqp-vk` process aborts, losing every other queued test. **Fix:** wrap the submit in `try`/`catch(...)`, unblock + join the thread, rethrow.
+
+**Bug 2 (`memory.pipeline_barrier` destructor):** `MemoryTestInstance::~MemoryTestInstance()` unconditionally calls `resetResources()`, which does `VK_CHECK(vkd.deviceWaitIdle(...))`. If this destructor runs while a `DeviceLost` from a preceding `iterate()` is already unwinding, `deviceWaitIdle` throws a *second* exception from inside a destructor → `std::terminate()` again. Found via `gdb` backtrace on a captured core dump. **Fix:** wrap `resetResources()` in `try`/`catch(...)`, swallow — nothing more can be validly done once the device is lost, and destructors must never let exceptions escape.
+
+**Verification method:** relaunched the full `part2` case-list sweep (`/tmp/part2_repro_fixed2/`) with both fixes applied, running concurrently alongside last session's still-live, unpatched `part1`/`part3` processes (replicating the original 3-way contention). Confirmed via `.qpa` grep that the run passed through *both* crash-trigger test cases (`shader_and_host`, `pipeline_barrier.compute.host_read_host_write`) without terminating, and the process was still alive and progressing ~24 minutes in — well past where it died before (previously crashed ~25 min in on the first bug, then again shortly after on the second once that was also patched).
+
+**Commits (2, both in VK-GL-CTS, `main` branch — this is the existing checkout's branch, not a feature branch):**
+1. `Fix std::terminate() crash in memory.concurrent_access.shader_and_host`
+2. `Fix std::terminate() crash in memory.pipeline_barrier destructor`
+
+## Status check: part1/part2/part3 processes (carried over from last session, still running)
+
+All three still alive and running at session end:
+- `part1` (PID 7228, unpatched repro, ~66 min elapsed) — still hunting its own SIGSEGV, hasn't crashed again yet in this repro attempt.
+- `part2` (PID 14336, both fixes applied, ~24 min elapsed) — verification run for this session's two fixes, confirmed past both crash points, still going.
+- `part3` (PID 70573, original sweep worker, ~308 min elapsed) — still the long-running original full-sweep worker, not yet finished.
+
+None of these are blocking — left running in the background for a future session to check on.
+
+**Next steps, in priority order:**
+
+1. **(~5 min)** Check on `part1`/`part2`/`part3` (PIDs 7228/14336/70573) — if any have finished or crashed, read their logs. `part2` finishing cleanly would be strong additional confirmation of both this session's VK-GL-CTS fixes; `part1` crashing would finally give a reproducible lead on its still-unexplained SIGSEGV.
+2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced or root-caused across *multiple* sessions now (last known trigger case: `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`, unconfirmed as the actual cause since the repro hasn't crashed again yet).
+3. **(~1 day, dedicated session)** `query_pool.statistics_query.*` — the second major `part4` sub-cluster (8,751 cases across `host_query_reset`, `clipping_primitives`, `clipping_invocations`, `reset_after_copy`, and several smaller buckets), not investigated at all yet.
+4. **(long-carried-over, still open)** `L375`: `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — needs its own dedicated design session, unchanged status.
+5. Once `part3` finishes: concatenate all 6 `logs/part*.stdout.log` and re-cluster the *entire* case space (long-standing item, blocked only on `part3` actually finishing). Remember `part6`'s `transform_feedback.primitives_generated_query` bucket is `L403`-stale, skip it.
+6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed, record-only.
+
+**Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+**Cleanup still pending:** `/tmp/part1_repro`, `/tmp/part1_repro2`, `/tmp/part2_repro`, `/tmp/part2_repro_fixed` (first, abandoned attempt), large `core` dump files from the `pipeline_barrier` crash analysis, `/tmp/vi*.qpa`/`.log` scratch files, `/tmp/vi_full2*` — not cleaned up this session since `part1`/`part2` are still live and using their directories; defer to whichever session confirms both have finished.
