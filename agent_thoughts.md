@@ -117497,3 +117497,52 @@ Device check (end of session): `FeMe CPU Vulkan Device` (confirmed).
 4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
 
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L398 Fence UAF fixed, L402 filed, fresh full-case-space sweep launched (2026-10-08)
+
+**Device check (start):** `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES` set explicitly).
+
+**Priority item from handoff: `L398`, `QueueExecutor`/`Fence` teardown deadlock.**
+
+**Root cause:** `vkDestroyFence` freed its `Fence` object with zero synchronization against the same fence's own `QueueExecutor` fence-signal task (`makeFenceSignalTask`). If that task hadn't run yet when `vkDestroyFence` was called, the worker thread would later call `signal()` on already-freed memory — a `std::mutex` touched after destruction, which hangs forever in `pthread_mutex_lock` rather than crashing cleanly (exactly matching the prior session's `gdb` backtrace). Ordinary `vkWaitForFences`-then-destroy usage can't trigger this (`Fence::signal()` holds its mutex until fully done, so `wait()`/`isSignaled()` can't observe a premature signal) — but a host oversubscribed by many concurrent CTS workers (this project's own sweep harness) can make `QueueExecutor::waitIdle`'s safety-net timeout lapse from scheduling contention alone, and an app that treats that non-spec `VK_TIMEOUT` as "safe to tear down" can race ahead of a still-enqueued signal task.
+
+**Fix:** Minimal retain/release counter on `Fence` itself (not a broader `shared_ptr` refactor of all in-flight-referenced objects). `vkQueueSubmit`/`vkQueueSubmit2` retain synchronously before enqueuing; `vkDestroyFence` frees immediately if nothing's outstanding, else defers (remembering the `VkAllocationCallbacks*`); the signal task itself does the deferred free when it finishes.
+
+**Verified:**
+1. Built a spec-valid 8-thread/2-queue stress reproducer (`SyncTest.StressFenceCreateSubmitWaitDestroyNoGlobalWait`) — ran 15x under `timeout 30`, no hang (expected; confirms ordinary spec-valid usage alone can't trigger this within one process — the real trigger needs genuine multi-process host oversubscription this test can't recreate). Kept as ongoing coverage.
+2. New deterministic white-box tests `FenceLifetimeTest.DestroyDefersUntilPendingSignalTaskReleases`/`DestroyWithNoPendingSignalFreesImmediately` — exercise the new API directly, no timing dependency.
+3. `FeMeVulkanTests`: all 24 `SyncTest`/`FenceLifetimeTest` cases Pass.
+4. `ninja check-feme`: 3614/3617 Passed, 3 Unsupported, 0 Failed — 0 regressions.
+5. Targeted CTS sweep (`api.smoke.*`, every `synchronization*.*fence*` case, `api.object_management.single.fence*`, 18,302 cases): 0 Fail.
+
+**Docs updated:** `Roadmap.md` (`L398` row updated in place, marked done), `VulkanCTSReport.md` (item 34 added). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — internal correctness fix only.
+
+**Commits (3):**
+1. `[feme] L398: fix Fence use-after-free in QueueExecutor teardown` (`Sync.h`, `Sync.cpp`)
+2. `[feme] L398: regression tests for Fence deferred-destroy bookkeeping` (`SyncTest.cpp`)
+3. `[feme][docs] Close out L398: Fence UAF root-caused and fixed` (`Roadmap.md`, `VulkanCTSReport.md`)
+
+**Handoff item 2: cluster the global Fail/ResourceError cases.**
+
+Couldn't find the exact harness/script from the Oct-7 6-worker sweep (no driver script survived in `/tmp` or the run directory — only its `.qpa`/`report.txt` outputs did, and `report.txt` is a diff/comparison artifact, already confirmed unusable for clustering by an earlier session). Used the `renderpasses.*`-only sweep already on disk from last session (`/tmp/l401_regression_renderpasses_stdout.txt`, 81,188 cases) instead, since it's a flat per-case stdout log. Extracted every `Fail`/`ResourceError` case name and clustered by its first-five-component prefix (same `grep`/`sed`/`sort`/`uniq -c` technique that found `L399`-`L401`). Found one real, previously-unfiled 36-case cluster: `subpass_dependencies.late_fragment_tests` (18 `renderpass1` + 18 `renderpass2`, every `render_size`/`subpass_count`/depth-stencil-format combination) — `L400` and `L401` had both already mentioned this family in passing as "pre-existing" but neither filed it as its own item. Confirmed independently reproducible (`Fail (Depth compare failed.)`, not a hang/crash). Filed as **`L402`**, not root-caused (pointer left: `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT`-scoped depth/stencil subpass-dependency handling across `vkCmdNextSubpass`, since `L401`'s fix in the same area only touched color/resolve load-op bookkeeping).
+
+**Docs updated:** `Roadmap.md` (new `L402` row), `VulkanCTSReport.md` (item 35). Committed separately: `[feme][docs] File L402: subpass_dependencies.late_fragment_tests Fail cluster`.
+
+**Handoff item 3: fresh full-case-space CTS sweep.**
+
+Generated a fresh flat case list via `deqp-vk --deqp-runmode=txt-caselist` (3,244,369 `dEQP-VK.*` cases — close to, slightly more than, the Oct-7 baseline's 3,237,548). Split into 6 roughly-equal chunks and launched 6 `deqp-vk` workers in parallel (matching the ~6-concurrent-worker pattern used before), each with its own caselist/qpa/stdout-log, `--deqp-terminate-on-fail=disable --deqp-terminate-on-device-lost=disable` so one bad case can't abort a whole chunk. Output: `/home/dev/dev/VK-GL-CTS/run/feme-20261008-full/{qpa,logs}/part{1..6}.*`.
+
+**Caught myself making a tooling mistake:** first launch used shell-level `nohup ... & disown`, which the tool-usage policy explicitly forbids (must use the bash tool's own `detach: true`, not manual shell detachment). Killed all 7 processes individually (`kill <pid>`, one per call — `pkill`/wildcard kill is also disallowed), cleaned the partial `.qpa`/log output, and relaunched correctly via `bash(..., mode="async", detach=true)`. Confirmed all 6 workers running and producing output afterward.
+
+**Status at session end:** sweep running, all 6 workers active and progressing (confirmed via `ps aux` + tailing each `part*.stdout.log`), fully detached so it survives this session ending. Expected to take several hours (matching the Oct-5/Oct-7 precedent).
+
+**No issues found outside `feme/` this session** — nothing to isolate/reproduce/fix in another subproject.
+
+**Next steps, in priority order:**
+
+1. **(check in next session)** Full sweep in `/home/dev/dev/VK-GL-CTS/run/feme-20261008-full/` — check `ps aux | grep deqp-vk` for whether it's still running or done; if done, concatenate `qpa/part*.qpa` or `logs/part*.stdout.log` and re-run the `sed`/`sort`/`uniq -c` clustering technique across the *entire* case space (not just `renderpasses.*`) to find the next untriaged cluster(s) — likely several, since this is the first full sweep since `L398`'s fix and since `L399`-`L401` landed.
+2. **(~1 day, dedicated session)** `L402`: `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36 cases) — start from the reproducer above and trace `VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT`-scoped depth/stencil subpass-dependency handling across `vkCmdNextSubpass`.
+3. **(long-carried-over, still open)** `L375`: `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — not touched this session, needs its own dedicated design session per the existing roadmap entry.
+4. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved (see `L380`), no action needed, carried forward unchanged for the record only.
+
+**Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
