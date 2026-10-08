@@ -2512,6 +2512,105 @@ TEST_F(DrawTest, RendersWithAnUnusedVertexInputBindingLeftUnbound) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L400) A `VkVertexInputAttributeDescription` the vertex
+/// *shader* never actually declares as an input -- here, location 0 /
+/// binding 0, with `FullscreenVertexSource` reading only `gl_VertexIndex`
+/// into constants and declaring no `layout(location=...) in` variable at
+/// all -- must not require a bound vertex buffer at draw time either,
+/// exactly matching the real
+/// `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.
+/// multisample_resolve.mixed_sample_count.mixed_sample_count_subpasses`
+/// CTS case's own shape: it calls `GraphicsPipelineWrapper::
+/// setupVertexInputState()` with no arguments at all, which falls back to
+/// a filler one-binding/one-attribute default state the test's own
+/// shaders never read from. Before this fix, `bindingHasAnyAttribute`
+/// (roadmap L127) considered *any* attribute referencing a binding enough
+/// to make it load-bearing, regardless of whether the vertex shader
+/// itself ever reads that attribute's location -- rejecting this
+/// otherwise-valid draw with "vertex binding 0 is not bound to a buffer".
+TEST_F(DrawTest, RendersWithAVertexInputAttributeTheShaderNeverDeclares) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  // The CTS framework's own `defaultVertexInputState`: one binding (0),
+  // one attribute (location 0, binding 0) -- never read by
+  // `FullscreenVertexSource` above, and (this test's whole point) never
+  // bound to any buffer below either.
+  VkVertexInputBindingDescription BindingDesc{0, sizeof(float) * 4,
+                                              VK_VERTEX_INPUT_RATE_VERTEX};
+  VkVertexInputAttributeDescription AttrDesc{0, 0,
+                                             VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.vertexBindingDescriptionCount = 1;
+  VertexInput.pVertexBindingDescriptions = &BindingDesc;
+  VertexInput.vertexAttributeDescriptionCount = 1;
+  VertexInput.pVertexAttributeDescriptions = &AttrDesc;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  // No vertex buffer is ever bound to binding 0 -- that is the point.
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF);
+  EXPECT_EQ(texel(2, 2)[1], 0x00);
+  EXPECT_EQ(texel(2, 2)[2], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap F10) An out-of-bounds vertex attribute fetch must read as zero
 /// and let the draw finish, matching `robustBufferAccess`'s unconditional
 /// "on" state (`PhysicalDeviceInfo.cpp`) and, once opted into per pipeline,
