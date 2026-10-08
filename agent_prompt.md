@@ -63,22 +63,13 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **~1 day, needs a reproducer preserving full-sweep ordering, carried over
-   untouched**: 8 `robustness.index_access.*` cases — wait, these were already
-   fixed by `L396` last session. Re-checking the actual remaining open items:
-   there is currently **no known open bug** in `feme/`. All previously-tracked
-   crash/DeviceLost/Fail items (`L375`, `L383(a)`, `L384`, `L385`, `L394`,
-   `L395`, `L396`, `L397`) are closed.
-2. **The one real standing task**: a fresh full-CTS sweep has not been run since
-   `feme-20261005-full-1170553-complete` (this session only re-ran the 53
-   previously-flagged cases, not the full ~1.17-1.64M case space). Running a new
-   full sweep is the only way to surface the next batch of untriaged failures —
-   budget several hours, run in background, and bisect only the sub-families
-   with new Fails/Crashes.
+1. **(ongoing, ~10-11 hrs, unattended)**: let the sweep above finish. Nothing
+   else to do until `report.txt` lands.
+2. **(~1-2 hrs, once report lands)**: diff the fresh totals against the Oct-5
+   baseline, re-cluster the Fail list by sub-family, identify the single largest
+   new untriaged cluster, and file it as a fresh roadmap `L`-item (next
+   available number — `L397` was last used, so start at `L398`).
 3. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
    needed.
-4. **Process note for future sessions**: treat handoff lists as a *hypothesis*,
-   not fact — this is now the 2nd-3rd session in a row that found a
-   stale/incorrect claim in its own handoff (or in the immediately preceding
-   session's own edit). Always re-verify via `git log --oneline --all | grep
-   <L-number>` and a direct CTS rerun before starting "design session" work.
+4. No code changes this session — nothing to build/test beyond the existing
+   `check-feme` baseline (unchanged, not re-run since no source touched).
