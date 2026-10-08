@@ -1799,6 +1799,27 @@ total across every row, not a single row's own `GState.MaxOutputVertices`
 bound alone, or later rows' emissions are silently truncated by the merge's
 checked prefix sum once an earlier row's own budget is exhausted.
 
+`GeometryState::StreamCount` (`L403`) models the multi-stream
+(`GL_ARB_gpu_shader5`-style `EmitStreamVertex`/`EndStreamPrimitive`) case: a
+geometry entry point's output-stream *count* has no SPIR-V execution mode
+of its own, and is observable from signature elements' own `Stream`
+decorations only when a stream's output actually writes an interpolated
+variable at all -- a shader that calls, e.g., `EmitStreamVertex(1)` purely
+to drive `VK_EXT_primitives_generated_query`'s per-stream counter, writing
+no output variable whatsoever, has no `Stream`-decorated signature element
+for *any* stream to derive a count from. `ConvertSPIRVToLLVMPass` closes
+this gap by directly scanning a geometry entry point's own body for its
+`EmitStreamVertex`/`EndStreamPrimitive` calls' constant stream operands,
+attaching the result (when more than 1) as a `feme.geometry.stream_count`
+passthrough attribute -- mirroring `feme.geometry.invocations`'s own
+"absence means the non-multi-stream default" convention exactly.
+`Executor.cpp`'s own `StreamCount` then takes the larger of this and the
+signature-derived count, and its per-stream `PrimitivesGeneratedByStream`
+loop iterates every stream below that count directly (via
+`GeometryStreamBuilder::getVertices(Stream)`/`getStrips(Stream)`, which are
+independent of the signature) rather than only streams that happen to
+have their own signature element.
+
 Roadmap H5e closes the Vulkan-API acceptance half of this model:
 `vkCreateGraphicsPipelines` now accepts `VK_SHADER_STAGE_GEOMETRY_BIT`
 alongside vertex/fragment/tessellation, compiling the module into a

@@ -1383,6 +1383,49 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
     needed -- investigation only.
 
+36. **`L403` fixed (this session):
+    `transform_feedback.primitives_generated_query.{get,copy}`, 1,308
+    cases, `pgqGenerated == 0, expected N`.** Found via re-clustering a
+    fresh full-case-space sweep (`feme-20261008-full/`); root-caused to
+    two layered bugs, both needed together to fix the cluster:
+    (1) `vkCmdBeginQueryIndexedEXT`/`vkCmdEndQueryIndexedEXT` silently
+    dropped their own `index` parameter (which stream a
+    `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT` query counts), always
+    scoping to stream 0; (2) `buildMemberDecorationTuple`
+    (`SPIRVToLLVMPatterns.cpp`) had no case for SPIR-V's `Stream`
+    decoration on a struct *member* (only whole variables), so a
+    multi-stream geometry shader whose only output is `gl_Position`
+    inside `gl_PerVertex` never got its `Stream` tag recovered at all;
+    and (3), found only after (1)/(2) alone still left the cluster
+    failing: the specific CTS shader variant under test
+    (`PrimitivesGeneratedQueryTestCase::initPrograms`'s `no_xfb`/
+    `pgq_1`/`pgq_2` branch) calls `EmitStreamVertex(N)`/
+    `EndStreamPrimitive(N)` with **no** output-variable write at all, so
+    no signature element of any kind ever carries a `Stream` tag for
+    (2) to even apply to -- `Executor.cpp`'s `StreamCount` (derived
+    purely from signature elements) stayed stuck at 1 regardless.
+    Fixed by scanning each geometry entry point's own
+    `EmitStreamVertex`/`EndStreamPrimitive` call operands at SPIR-V-to-
+    LLVM conversion time (`ConvertSPIRVToLLVMPass.cpp`, new
+    `feme.geometry.stream_count` passthrough attribute /
+    `GeometryState::StreamCount`), taking the larger of that and the
+    signature-derived count in `Executor.cpp`, and populating
+    `PrimitivesGeneratedByStream` for every declared stream (not just
+    ones with their own signature elements). Four commits, one per
+    layer, each with its own unit/lit test coverage spanning SPIR-V
+    deserialization, the SPIR-V-to-LLVM conversion pass, `CommandBuffer`
+    recording/replay, and `Executor`'s runtime statistics computation.
+    `check-feme`: 3616/3619 Passed, 3 Unsupported, 0 Failed (up from
+    3614/3617 before the 2 new unit tests this session added).
+    **Verified:** the full `dEQP-VK.transform_feedback.
+    primitives_generated_query.*` family (107,866 cases): 0 Fail (down
+    from 1,308), 4,926 Pass, 102,940 NotSupported (unrelated --
+    `transformFeedbackQueries` disabled). `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed -- internal
+    correctness fix to an already-advertised extension
+    (`VK_EXT_primitives_generated_query`), no feature/extension-surface
+    change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
@@ -1436,7 +1479,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `tensor` | 2,811 | 0 | 0 | 2,811 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `tessellation` | 1,114 | 646 | 30 | 438 | 0 | 0 | 0 | 0 | 0 | -366 |
 | `texture` | 25,669 | 9,808 | 2 | 15,859 | 0 | 0 | 0 | 0 | 0 | -451 |
-| `transform_feedback` | 133,719 | 4,814 | 1,918 | 126,987 | 0 | 0 | 0 | 0 | 0 | -135 |
+| `transform_feedback` | 133,719 | 6,122 | 610 | 126,987 | 0 | 0 | 0 | 0 | 0 | -1,443 |
 | `ubo` | 13,240 | 5,687 | 0 | 7,553 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `video` | 9,471 | 0 | 0 | 9,471 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `wsi` | 36,880 | 51 | 4 | 36,825 | 0 | 0 | 0 | 0 | 0 | +4 |
