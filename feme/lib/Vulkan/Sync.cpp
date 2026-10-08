@@ -41,8 +41,8 @@ uint64_t parseSafetyNetTimeoutMsEnv(const char *Env) {
 }
 
 uint64_t getSafetyNetTimeoutNs() {
-  static const uint64_t TimeoutNs =
-      parseSafetyNetTimeoutMsEnv(std::getenv("FEME_VULKAN_SAFETY_NET_TIMEOUT_MS"));
+  static const uint64_t TimeoutNs = parseSafetyNetTimeoutMsEnv(
+      std::getenv("FEME_VULKAN_SAFETY_NET_TIMEOUT_MS"));
   return TimeoutNs;
 }
 
@@ -124,8 +124,8 @@ std::function<void()> makeSubmissionTask(Device &Dev,
           Signals = std::move(Signals)]() mutable {
     if (Dev.isLost())
       return;
-    if (consumeWaits(Waits) != VK_SUCCESS || executeCommandBuffers(CmdBufs) !=
-                                                  VK_SUCCESS) {
+    if (consumeWaits(Waits) != VK_SUCCESS ||
+        executeCommandBuffers(CmdBufs) != VK_SUCCESS) {
       Dev.markLost();
       return;
     }
@@ -137,10 +137,21 @@ std::function<void()> makeSubmissionTask(Device &Dev,
 /// its own trailing task on the queue so it stays ordered after every
 /// submission's own task above (including when `submitCount` is `0`,
 /// which the spec says must still signal an already-provided fence).
+///
+/// (Roadmap L398) The caller must already have called
+/// `Fence::retainForPendingSignal` on \p FenceHandle's underlying object
+/// before enqueuing this closure -- matched here by
+/// `releasePendingSignalAndTakeDeferredDestroy`, which finishes a
+/// `vkDestroyFence` call this task's own enqueueing raced with (see that
+/// method's comment, `Sync.h`).
 std::function<void()> makeFenceSignalTask(Device &Dev, VkFence FenceHandle) {
   return [&Dev, FenceHandle]() {
+    Fence *F = fromHandle<Fence>(FenceHandle);
     if (!Dev.isLost())
-      fromHandle<Fence>(FenceHandle)->signal();
+      F->signal();
+    const VkAllocationCallbacks *DeferredCallbacks = nullptr;
+    if (F->releasePendingSignalAndTakeDeferredDestroy(DeferredCallbacks))
+      Allocator(DeferredCallbacks).destroy(F);
   };
 }
 
@@ -165,8 +176,14 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyFence(
     VkDevice, VkFence fence, const VkAllocationCallbacks *pAllocator) {
   if (!fence)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Fence>(fence));
+  Fence *F = fromHandle<Fence>(fence);
+  // (Roadmap L398) If a `QueueExecutor` fence-signal task enqueued by
+  // `vkQueueSubmit`/`vkQueueSubmit2` for this fence has not run yet,
+  // `requestDestroy` defers freeing `F` until that task finishes instead
+  // of freeing it here -- see its own comment (`Sync.h`) for why.
+  if (!F->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(F);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice, uint32_t fenceCount,
@@ -183,9 +200,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device,
   return fromHandle<Fence>(fence)->isSignaled() ? VK_SUCCESS : VK_NOT_READY;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
-               VkBool32 waitAll, uint64_t timeout) {
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice device,
+                                               uint32_t fenceCount,
+                                               const VkFence *pFences,
+                                               VkBool32 waitAll,
+                                               uint64_t timeout) {
   // (Roadmap L228(h)/(i)) Genuinely blocks: a fence's `QueueExecutor`
   // task may not have run yet on its own queue's worker thread (see
   // `Sync.h`'s file comment). `applyWaitSafetyNet` clamps even a literal
@@ -195,8 +214,8 @@ vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
   Device *Dev = fromHandle<Device>(device);
 
   if (waitAll) {
-    auto Deadline = std::chrono::steady_clock::now() +
-                    std::chrono::nanoseconds(timeout);
+    auto Deadline =
+        std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout);
     for (uint32_t I = 0; I != fenceCount; ++I) {
       Fence *F = fromHandle<Fence>(pFences[I]);
       // (Roadmap L234) Poll in `DeviceLostPollSliceNs` slices rather than
@@ -213,10 +232,9 @@ vkWaitForFences(VkDevice device, uint32_t fenceCount, const VkFence *pFences,
             timeout == UINT64_MAX
                 ? UINT64_MAX
                 : static_cast<uint64_t>(std::max<int64_t>(
-                      0,
-                      std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          Deadline - std::chrono::steady_clock::now())
-                          .count()));
+                      0, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             Deadline - std::chrono::steady_clock::now())
+                             .count()));
         if (Remaining == 0)
           return VK_TIMEOUT;
         uint64_t Slice = std::min(Remaining, DeviceLostPollSliceNs);
@@ -277,8 +295,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
     for (const auto *Base =
              static_cast<const VkBaseInStructure *>(Submit.pNext);
          Base; Base = Base->pNext)
-      if (Base->sType ==
-          VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
+      if (Base->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
         TimelineInfo =
             reinterpret_cast<const VkTimelineSemaphoreSubmitInfo *>(Base);
         break;
@@ -316,8 +333,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
     Q->getExecutor().enqueue(makeSubmissionTask(
         Dev, std::move(Waits), std::move(CmdBufs), std::move(Signals)));
   }
-  if (fence)
+  if (fence) {
+    // (Roadmap L398) Retain before enqueuing, not after -- see
+    // `Fence::retainForPendingSignal`'s own comment (`Sync.h`) for why
+    // this must happen on this calling host thread, synchronously,
+    // before any other thread can possibly call `vkDestroyFence` on
+    // this same fence.
+    fromHandle<Fence>(fence)->retainForPendingSignal();
     Q->getExecutor().enqueue(makeFenceSignalTask(Dev, fence));
+  }
   return VK_SUCCESS;
 }
 
@@ -364,8 +388,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
     Q->getExecutor().enqueue(makeSubmissionTask(
         Dev, std::move(Waits), std::move(CmdBufs), std::move(Signals)));
   }
-  if (fence)
+  if (fence) {
+    // (Roadmap L398) Retain before enqueuing, not after -- see
+    // `Fence::retainForPendingSignal`'s own comment (`Sync.h`) for why
+    // this must happen on this calling host thread, synchronously,
+    // before any other thread can possibly call `vkDestroyFence` on
+    // this same fence.
+    fromHandle<Fence>(fence)->retainForPendingSignal();
     Q->getExecutor().enqueue(makeFenceSignalTask(Dev, fence));
+  }
   return VK_SUCCESS;
 }
 
@@ -378,10 +409,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
   return Q->getDevice().isLost() ? VK_ERROR_DEVICE_LOST : VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateSemaphore(VkDevice, const VkSemaphoreCreateInfo *pCreateInfo,
-                  const VkAllocationCallbacks *pAllocator,
-                  VkSemaphore *pSemaphore) {
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(
+    VkDevice, const VkSemaphoreCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkSemaphore *pSemaphore) {
   bool Timeline = false;
   uint64_t InitialValue = 0;
   for (const auto *Base =
@@ -404,9 +434,8 @@ vkCreateSemaphore(VkDevice, const VkSemaphoreCreateInfo *pCreateInfo,
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkDestroySemaphore(VkDevice, VkSemaphore semaphore,
-                   const VkAllocationCallbacks *pAllocator) {
+VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(
+    VkDevice, VkSemaphore semaphore, const VkAllocationCallbacks *pAllocator) {
   if (!semaphore)
     return;
   Allocator Alloc(pAllocator);
@@ -420,9 +449,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreCounterValue(VkDevice,
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo *pWaitInfo,
-                 uint64_t timeout) {
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphores(
+    VkDevice, const VkSemaphoreWaitInfo *pWaitInfo, uint64_t timeout) {
   // (Roadmap L228) Genuinely blocks: a real, concurrently running host
   // thread's own `vkSignalSemaphore` call, or a different queue's own
   // `QueueExecutor` worker thread's own signal (roadmap L228(h)/(i)), may
@@ -450,15 +478,14 @@ vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo *pWaitInfo,
     return Reached ? VK_SUCCESS : VK_TIMEOUT;
   }
 
-
   bool WaitAll = (pWaitInfo->flags & VK_SEMAPHORE_WAIT_ANY_BIT) == 0;
   if (WaitAll) {
     // Blocking on each semaphore in turn is equivalent to waiting for all
     // of them together (a signaled timeline counter never un-signals), so
     // long as each one's own share of the overall \p timeout is tracked
     // rather than re-applying the full budget to every semaphore in turn.
-    auto Deadline = std::chrono::steady_clock::now() +
-                    std::chrono::nanoseconds(timeout);
+    auto Deadline =
+        std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout);
     for (uint32_t I = 0; I != pWaitInfo->semaphoreCount; ++I) {
       uint64_t Remaining =
           timeout == UINT64_MAX
@@ -500,7 +527,7 @@ vkSignalSemaphore(VkDevice, const VkSemaphoreSignalInfo *pSignalInfo) {
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateEvent(VkDevice, const VkEventCreateInfo *,
-             const VkAllocationCallbacks *pAllocator, VkEvent *pEvent) {
+              const VkAllocationCallbacks *pAllocator, VkEvent *pEvent) {
   Allocator Alloc(pAllocator);
   Event *Obj = Alloc.create<Event>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
   if (!Obj)
@@ -518,8 +545,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyEvent(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetEventStatus(VkDevice, VkEvent event) {
-  return fromHandle<Event>(event)->isSignaled() ? VK_EVENT_SET
-                                                : VK_EVENT_RESET;
+  return fromHandle<Event>(event)->isSignaled() ? VK_EVENT_SET : VK_EVENT_RESET;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkSetEvent(VkDevice, VkEvent event) {
@@ -533,4 +559,3 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetEvent(VkDevice, VkEvent event) {
 }
 
 } // namespace feme::vulkan
-

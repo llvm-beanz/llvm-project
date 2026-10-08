@@ -65,6 +65,8 @@
 #ifndef FEME_LIB_VULKAN_SYNC_H
 #define FEME_LIB_VULKAN_SYNC_H
 
+#include <vulkan/vulkan_core.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -120,7 +122,6 @@ uint64_t parseSafetyNetTimeoutMsEnv(const char *Env);
 inline uint64_t getQueueIdleSafetyNetTimeoutNs() {
   return 4 * getSafetyNetTimeoutNs();
 }
-
 
 /// (Roadmap L234) The longest `vkWaitForFences`'s `waitAll == VK_TRUE`
 /// path ever blocks on one fence's own `Fence::wait` before re-checking
@@ -178,11 +179,78 @@ public:
   bool wait(uint64_t TimeoutNs) const {
     std::unique_lock<std::mutex> Lock(Mutex);
     return CV.wait_for(Lock, std::chrono::nanoseconds(TimeoutNs),
-                        [this] { return Signaled; });
+                       [this] { return Signaled; });
+  }
+
+  /// (Roadmap L398) Called by `vkQueueSubmit`/`vkQueueSubmit2` on the
+  /// calling host thread, before enqueuing this fence's own
+  /// `makeFenceSignalTask` closure onto its `QueueExecutor` -- see
+  /// `requestDestroy` below for why this object must know how many such
+  /// tasks are still outstanding.
+  void retainForPendingSignal() {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    ++PendingSignalTasks;
+  }
+
+  /// Called by a `makeFenceSignalTask` closure once it finishes running
+  /// (whether it actually called `signal()` or skipped it because the
+  /// device was already lost). If a `vkDestroyFence` call already asked
+  /// to destroy this object while this was the last outstanding task
+  /// (`requestDestroy` below returned false), returns true and sets \p
+  /// OutCallbacks to the `VkAllocationCallbacks*` that call was given --
+  /// the caller must then free this object with an `Allocator` built from
+  /// that pointer. Otherwise returns false and leaves \p OutCallbacks
+  /// untouched.
+  bool releasePendingSignalAndTakeDeferredDestroy(
+      const VkAllocationCallbacks *&OutCallbacks) {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    --PendingSignalTasks;
+    if (PendingSignalTasks != 0 || !DestroyRequested)
+      return false;
+    OutCallbacks = PendingDestroyCallbacks;
+    return true;
+  }
+
+  /// `vkDestroyFence`: returns true if the caller may free this object
+  /// immediately (the ordinary case: every `QueueExecutor` fence-signal
+  /// task `vkQueueSubmit`/`vkQueueSubmit2` ever enqueued for this fence
+  /// has already run). Returns false if at least one such task has not
+  /// run yet -- in that case this object defers its own destruction
+  /// (remembering \p Callbacks) until that task finishes
+  /// (`releasePendingSignalAndTakeDeferredDestroy` above), instead of
+  /// letting the caller free memory a `QueueExecutor` worker thread might
+  /// still dereference.
+  ///
+  /// The Vulkan spec lets an application destroy a fence as soon as
+  /// `vkWaitForFences`/`vkGetFenceStatus` observes it signaled, and this
+  /// class's own `wait`/`isSignaled` cannot return true before `signal()`
+  /// has itself already fully run (see that method's own comment) -- so
+  /// under ordinary spec-valid use this path is never actually taken.
+  /// It exists for the same reason the whole file's safety-net timeouts
+  /// do (see the file comment): a host machine heavily oversubscribed by
+  /// many concurrent CTS workers can make `QueueExecutor::waitIdle`'s own
+  /// generous bound (`vkQueueWaitIdle`/`vkDeviceWaitIdle`) lapse from pure
+  /// scheduling contention, not a real hang, and an application that (not
+  /// unreasonably) treats that as "safe to tear down now" must not be
+  /// able to trigger a use-after-free merely for having done so (roadmap
+  /// L398: this is exactly the backtrace a stuck CTS worker's `gdb`
+  /// inspection found -- a `QueueExecutor` worker thread stuck forever in
+  /// `pthread_mutex_lock` inside `Fence::signal()`, because the `Fence`
+  /// it was signaling had already been freed out from under it).
+  bool requestDestroy(const VkAllocationCallbacks *Callbacks) {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    if (PendingSignalTasks == 0)
+      return true;
+    DestroyRequested = true;
+    PendingDestroyCallbacks = Callbacks;
+    return false;
   }
 
 private:
   bool Signaled;
+  int PendingSignalTasks = 0;
+  bool DestroyRequested = false;
+  const VkAllocationCallbacks *PendingDestroyCallbacks = nullptr;
   mutable std::mutex Mutex;
   mutable std::condition_variable CV;
 };
@@ -265,7 +333,7 @@ public:
   bool waitAndConsumeBinary(uint64_t TimeoutNs = getSafetyNetTimeoutNs()) {
     std::unique_lock<std::mutex> Lock(Mutex);
     bool Reached = CV.wait_for(Lock, std::chrono::nanoseconds(TimeoutNs),
-                                [this] { return Value != 0; });
+                               [this] { return Value != 0; });
     if (Reached)
       Value = 0;
     return Reached;
@@ -340,7 +408,9 @@ public:
   /// Each enqueued task is itself responsible for latching device loss
   /// (`Device::markLost`, `Objects.h`) if it fails -- `QueueExecutor`
   /// itself is device-agnostic, just a FIFO task runner.
-  QueueExecutor() { Worker = std::thread([this] { run(); }); }
+  QueueExecutor() {
+    Worker = std::thread([this] { run(); });
+  }
 
   QueueExecutor(const QueueExecutor &) = delete;
   QueueExecutor &operator=(const QueueExecutor &) = delete;
@@ -377,12 +447,12 @@ public:
   /// multiple of `getSafetyNetTimeoutNs()` (rather than that same bound), so
   /// this can never spuriously time out merely because it happened to be
   /// called at nearly the same moment some already-running task's own
-  /// single blocking wait started its own, independent `getSafetyNetTimeoutNs()`
-  /// countdown; a queue only ever fails to drain within this longer bound
-  /// if a whole *chain* of tasks each separately hit their own safety net,
-  /// or a task is genuinely stuck outside any bounded wait at all (a FeMe
-  /// bug either way). Returns whether the queue was actually drained
-  /// (false only on a genuine timeout).
+  /// single blocking wait started its own, independent
+  /// `getSafetyNetTimeoutNs()` countdown; a queue only ever fails to drain
+  /// within this longer bound if a whole *chain* of tasks each separately hit
+  /// their own safety net, or a task is genuinely stuck outside any bounded
+  /// wait at all (a FeMe bug either way). Returns whether the queue was
+  /// actually drained (false only on a genuine timeout).
   bool waitIdle() {
     std::unique_lock<std::mutex> Lock(Mutex);
     return CV.wait_for(
