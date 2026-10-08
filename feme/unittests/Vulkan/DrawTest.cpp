@@ -855,6 +855,84 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// A hand-minimized vertex shader whose single `vec4 attr[2]` Input
+/// (`Location == 1`, `RowCount == 2`) is fed by *two separate* vertex
+/// buffer bindings -- `attr[0]` (location 1) bound to binding 0, `attr[1]`
+/// (location 2) bound to binding 1 -- mirroring the real `dEQP-VK.
+/// pipeline.{monolithic,pipeline_library}.vertex_input.max_attributes.
+/// query_max_attributes.binding_one_to_many.*` CTS shape's own `vec4
+/// attr[numAttributes-1]` single array-typed input, whose locations get
+/// split across alternating bindings by `getAttributeBinding`'s
+/// `BINDING_MAPPING_ONE_TO_MANY` policy (`vktPipelineVertexInputTests.
+/// cpp`). Writes a fullscreen oversized triangle (the same
+/// `FullscreenVertexSource` position trick above) and passes
+/// `attr[0].x + attr[1].x == 30.0` (red if true, blue if false) to the
+/// fragment stage as `vColor`, so a binding whose fetch silently reads as
+/// zero shows up as the wrong color rather than merely a crash.
+///
+/// Regression test for roadmap `L405`: `GraphicsPipeline.cpp`'s
+/// `validateStageInterfaces` built its `UsedVertexInputLocations` set (and
+/// ran its "every located vertex input must be supplied" check) using only
+/// each `SignatureElement`'s base `*VSIn.Location`, ignoring `RowCount`
+/// entirely -- so for this shape, only location 1 (on binding 0) was ever
+/// recorded as "used." `CommandBuffer.cpp`'s `bindingHasAnyAttribute`
+/// (roadmap `L127`/`L400`) consults that same set to decide which
+/// bindings are load-bearing at draw time; with only location 1 recorded,
+/// binding 1 (which supplies location 2, i.e. `attr[1]`, this element's
+/// second row) was wrongly judged "unused" and skipped, leaving
+/// `attr[1]` unbound -- exactly the real CTS failure's "vertex input
+/// location 2 has no bound vertex buffer attribute" `DeviceLost`.
+/// `Executor.cpp`'s own vertex-fetch loop already iterated every row
+/// correctly; the fix makes `validateStageInterfaces` do the same, walking
+/// `Row` from `0` to `VSIn.RowCount-1` and using `*VSIn.Location + Row`
+/// for both the "is this location supplied" check and the
+/// `UsedVertexInputLocations` insertion.
+constexpr llvm::StringLiteral L405SplitBindingArrayVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @attr {location = 1 : i32} : !spirv.ptr<!spirv.array<2 x vector<4xf32>>, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @vColor {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+
+    %attrp = spirv.mlir.addressof @attr : !spirv.ptr<!spirv.array<2 x vector<4xf32>>, Input>
+    %e0p = spirv.AccessChain %attrp[%c0, %c0] : !spirv.ptr<!spirv.array<2 x vector<4xf32>>, Input>, i32, i32 -> !spirv.ptr<f32, Input>
+    %e0 = spirv.Load "Input" %e0p : f32
+    %e1p = spirv.AccessChain %attrp[%c1, %c0] : !spirv.ptr<!spirv.array<2 x vector<4xf32>>, Input>, i32, i32 -> !spirv.ptr<f32, Input>
+    %e1 = spirv.Load "Input" %e1p : f32
+    %sum = spirv.FAdd %e0, %e1 : f32
+    %expected = spirv.Constant 30.0 : f32
+    %ok = spirv.FOrdEqual %sum, %expected : f32
+    %f0 = spirv.Constant 0.0 : f32
+    %f1 = spirv.Constant 1.0 : f32
+    %red = spirv.CompositeConstruct %f1, %f0, %f0, %f1 : (f32, f32, f32, f32) -> vector<4xf32>
+    %blue = spirv.CompositeConstruct %f0, %f0, %f1, %f1 : (f32, f32, f32, f32) -> vector<4xf32>
+    %color = spirv.Select %ok, %red, %blue : i1, vector<4xf32>
+    %vcp = spirv.mlir.addressof @vColor : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %vcp, %color : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @attr, @pos, @vColor
+}
+)mlir";
+
 /// A fragment stage passing its location-0 input straight through to
 /// SV_Target0, for `PerInstanceColorVertexSource`'s varying.
 constexpr llvm::StringLiteral PassthroughColorFragmentSource = R"mlir(
@@ -11600,6 +11678,120 @@ TEST_F(DrawTest, L128ARowCount5Repro) {
 
   vkDestroyBuffer(Device, VertexBuffer, nullptr);
   vkFreeMemory(Device, VertexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Regression test for roadmap `L405` (see
+/// `L405SplitBindingArrayVertexSource`'s doc comment for the full
+/// root-cause writeup): an array-typed vertex input (`RowCount == 2`)
+/// whose two locations are bound to two *different* vertex bindings must
+/// have both bindings' buffers actually fetched at draw time, not just
+/// the one supplying the element's base location. Before the fix,
+/// binding 1 (supplying `attr[1]`/location 2) was wrongly treated as
+/// not load-bearing and skipped, so `attr[1]` always read as zero
+/// (robustness zero-fill) instead of the bound buffer's real value --
+/// this test's `attr[0].x + attr[1].x != 30.0` would render blue instead
+/// of red.
+TEST_F(DrawTest, L405SplitBindingArrayAttributeRepro) {
+  VkShaderModule Vertex = createModule(L405SplitBindingArrayVertexSource);
+  VkShaderModule Fragment = createModule(PassthroughColorFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+
+  // Two separate bindings, one per row of the array input, each read at
+  // instance rate so every vertex of the single oversized triangle sees
+  // the same (only) element in each buffer.
+  VkVertexInputBindingDescription BindingDescs[2] = {
+      {0, sizeof(float) * 4, VK_VERTEX_INPUT_RATE_INSTANCE},
+      {1, sizeof(float) * 4, VK_VERTEX_INPUT_RATE_INSTANCE},
+  };
+  VkVertexInputAttributeDescription AttrDescs[2] = {
+      {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
+      {2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
+  };
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VertexInput.vertexBindingDescriptionCount = 2;
+  VertexInput.pVertexBindingDescriptions = BindingDescs;
+  VertexInput.vertexAttributeDescriptionCount = 2;
+  VertexInput.pVertexAttributeDescriptions = AttrDescs;
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkDeviceMemory Memory0 = VK_NULL_HANDLE, Memory1 = VK_NULL_HANDLE;
+  VkBuffer Buffer0 = createBuffer(sizeof(float) * 4, Memory0,
+                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  VkBuffer Buffer1 = createBuffer(sizeof(float) * 4, Memory1,
+                                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  // attr[0].x == 10, attr[1].x == 20 -- sum == 30 iff both bindings are
+  // actually fetched.
+  float Data0[4] = {10.0f, 0.0f, 0.0f, 0.0f};
+  float Data1[4] = {20.0f, 0.0f, 0.0f, 0.0f};
+  std::memcpy(fromHandle<Buffer>(Buffer0)->data(), Data0, sizeof(Data0));
+  std::memcpy(fromHandle<Buffer>(Buffer1)->data(), Data1, sizeof(Data1));
+
+  VkBuffer Buffers[2] = {Buffer0, Buffer1};
+  VkDeviceSize Offsets[2] = {0, 0};
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindVertexBuffers(Cmd, 0, 2, Buffers, Offsets);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF) << "attr[0]+attr[1] == 30.0 renders red";
+  EXPECT_EQ(texel(2, 2)[2], 0x00) << "attr[0]+attr[1] == 30.0 renders red";
+
+  vkDestroyBuffer(Device, Buffer0, nullptr);
+  vkDestroyBuffer(Device, Buffer1, nullptr);
+  vkFreeMemory(Device, Memory0, nullptr);
+  vkFreeMemory(Device, Memory1, nullptr);
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);

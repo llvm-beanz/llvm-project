@@ -959,21 +959,44 @@ Error validateStageInterfaces(
       return createStringError(inconvertibleErrorCode(),
                                "vertex input element %u has no location",
                                VSIn.ElementID);
-    bool Found = false;
-    for (const VertexInputAttribute &Attr : Attributes)
-      Found |= Attr.Location == *VSIn.Location;
-    if (!Found)
-      return createStringError(inconvertibleErrorCode(),
-                               "vertex input location %u has no matching "
-                               "VkVertexInputAttributeDescription",
-                               *VSIn.Location);
-    // (roadmap L400) This location is genuinely read by the vertex
-    // shader's own entry signature -- record it so draw time can tell
-    // "the shader needs this binding's buffer" apart from "the pipeline
-    // merely declared an attribute at this binding that the shader never
-    // actually reads."
-    if (UsedVertexInputLocations)
-      UsedVertexInputLocations->push_back(*VSIn.Location);
+    // (roadmap L405) A matrix vertex input (or, equivalently, an
+    // array-typed one, e.g. `dEQP-VK.pipeline.*.vertex_input.max_
+    // attributes.query_max_attributes.*`'s `vec4 attr[N]`) reflects as a
+    // *single* `SignatureElement` whose `RowCount` spans `RowCount`
+    // consecutive locations starting at `*VSIn.Location` -- exactly the
+    // same shape `Executor.cpp`'s own vertex-fetch loop already walks via
+    // `RowLocation = *Elt.Location + Row`. Checking/recording only the
+    // base `*VSIn.Location` here (as this loop used to) silently ignores
+    // every row beyond the first: a binding supplying *only* those later
+    // rows' attributes (as happens whenever `BINDING_MAPPING_ONE_TO_MANY`
+    // splits a single multi-row element's rows across more than one
+    // binding -- not just across separate attributes) would never be
+    // recorded into `UsedVertexInputLocations`, making
+    // `CommandBuffer.cpp`'s `bindingHasAnyAttribute` wrongly treat that
+    // binding as unused and skip fetching it at draw time, reading those
+    // rows as zero instead of their actual bound data -- or, once those
+    // rows' own locations are consulted elsewhere (e.g. `Executor.cpp`'s
+    // own fetch, which already walks every row), surfacing as a draw-time
+    // "vertex input location N has no bound vertex buffer attribute"
+    // failure instead.
+    for (uint32_t Row = 0; Row != VSIn.RowCount; ++Row) {
+      uint32_t RowLocation = *VSIn.Location + Row;
+      bool Found = false;
+      for (const VertexInputAttribute &Attr : Attributes)
+        Found |= Attr.Location == RowLocation;
+      if (!Found)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vertex input location %u has no matching "
+                                 "VkVertexInputAttributeDescription",
+                                 RowLocation);
+      // (roadmap L400) This location is genuinely read by the vertex
+      // shader's own entry signature -- record it so draw time can tell
+      // "the shader needs this binding's buffer" apart from "the pipeline
+      // merely declared an attribute at this binding that the shader never
+      // actually reads."
+      if (UsedVertexInputLocations)
+        UsedVertexInputLocations->push_back(RowLocation);
+    }
   }
   return Error::success();
 }
