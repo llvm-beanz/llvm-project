@@ -220,6 +220,32 @@ TEST(SPIRVToLLVMTest, BuiltinInterfaceBlockPreservesMemberDecorations) {
       << Result;
 }
 
+// (L403) A builtin interface block member (e.g. `gl_PerVertex`'s own
+// `Position`) that also carries a `Stream` decoration -- the shape a
+// multi-stream geometry shader with no separate user-declared output
+// variable produces -- preserves `Stream` in the member-decorations
+// attribute exactly like `BuiltIn` above, rather than being silently
+// dropped the way `buildMemberDecorationTuple`'s missing `Stream` case
+// used to (`dEQP-VK.transform_feedback.primitives_generated_query.*`'s
+// `pgq_1`/`pgq_2` cases, which emit only to a non-zero stream and never
+// write any other output variable).
+TEST(SPIRVToLLVMTest, BuiltinInterfaceBlockMemberPreservesStreamDecoration) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, "
+      "Geometry, GeometryStreams], []> "
+      "{ spirv.GlobalVariable @gl_PerVertex : "
+      "!spirv.ptr<!spirv.struct<(vector<4xf32> [BuiltIn=0 : i32, Stream=1 : "
+      "i32])>, Output> }");
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(
+      Result.find(feme::spirv::getStageIOMemberDecorationsAttrName().str()),
+      std::string::npos)
+      << Result;
+  // The Stream decoration's own code (29) and value (1) both show up in
+  // the encoded member-decorations attribute.
+  EXPECT_NE(Result.find("29"), std::string::npos) << Result;
+}
+
 // (Roadmap H5g) A geometry entry's own per-vertex builtin interface block
 // (`gl_in[]`) is shaped one array dimension further out than
 // `gl_PerVertex` above -- an `Input` array-of-struct, since SPIR-V still

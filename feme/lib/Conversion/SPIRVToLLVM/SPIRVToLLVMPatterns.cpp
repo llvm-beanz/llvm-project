@@ -3019,7 +3019,29 @@ mlir::Attribute buildMemberDecorationTuple(
   case mlir::spirv::Decoration::BuiltIn:
   case mlir::spirv::Decoration::Location:
   case mlir::spirv::Decoration::Component:
-  case mlir::spirv::Decoration::Index: {
+  case mlir::spirv::Decoration::Index:
+  // (Roadmap H21d) `Stream` (code 29) -- unlike `BuiltIn`/`Location`/
+  // `Component`/`Index` above, which every stage-IO block already needed
+  // per-member, `Stream` was missing here entirely: the SPIR-V spec
+  // allows `Stream` to decorate either a whole `Variable` or a struct
+  // `Member` (`buildStageIODecorationsAttr`'s own `addIntDecoration(29,
+  // ...)` above already forwards the whole-variable case), but a
+  // multi-stream geometry shader with *no* separate user-declared output
+  // variable -- only `gl_Position` (part of the `gl_PerVertex` block) --
+  // decorates `Stream` on that block's own `Position` member instead,
+  // via `OpMemberDecorate`. Omitting it here left `CanonicalizeStage.
+  // cpp`'s `parseSPIRVDecorations` never see a `Stream` decoration for
+  // that element at all, so `SignatureElement::Stream` silently defaulted
+  // to 0 (its own documented "absent" default) regardless of which
+  // stream `EmitStreamVertex(N)`/`EndStreamPrimitive(N)` actually
+  // targeted -- found via `dEQP-VK.transform_feedback.primitives_
+  // generated_query.{get,copy}.*.pgq_1.*` (stream 1, no other output
+  // variable than `gl_Position`), where `GeometryStageEnv::StreamCount`
+  // (derived from this same signature, `Executor.cpp`) then stayed 1,
+  // making `lowerGeometryStreamEmit`'s own defensive `StreamInBounds`
+  // check (`GeometryWrapper.cpp`) silently drop every `EmitStreamVertex
+  // (1)` call as out-of-bounds.
+  case mlir::spirv::Decoration::Stream: {
     auto Value =
         mlir::dyn_cast_or_null<mlir::IntegerAttr>(Info.decorationValue);
     if (!Value)
