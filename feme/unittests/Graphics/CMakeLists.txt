@@ -28,6 +28,7 @@ add_feme_unittest(FeMeGraphicsTests
   TaskPayloadTest.cpp
   TessellationTest.cpp
   TessellatorTest.cpp
+  TriangleRasterizationTest.cpp
   )
 target_link_libraries(FeMeGraphicsTests
   PRIVATE

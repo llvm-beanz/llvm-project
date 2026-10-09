@@ -21,6 +21,7 @@ add_feme_library(FeMeGraphics
   TaskPayload.cpp
   Tessellation.cpp
   Tessellator.cpp
+  TriangleRasterization.cpp
 
   LINK_COMPONENTS
   Core
