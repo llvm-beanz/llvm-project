@@ -63,26 +63,24 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Check on `part1`/`part2`/`part3` (PIDs 7228/14336/70573) — if
-   any have finished or crashed, read their logs. `part2` finishing cleanly
-   would be strong additional confirmation of both this session's VK-GL-CTS
-   fixes; `part1` crashing would finally give a reproducible lead on its
-   still-unexplained SIGSEGV.
-2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced or
-   root-caused across *multiple* sessions now (last known trigger case:
+1. **(~5 min)** Check `part1`/`part2`/`part3` (PIDs 7228/14336/70573) again —
+   `part3` is closest to finishing (~98%). Once it finishes, concatenate all 6
+   `logs/part*.stdout.log` and re-cluster the entire case space (skip `part6`'s
+   `L403`-stale `transform_feedback.primitives_generated_query` bucket).
+2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced
+   across multiple sessions now (last known trigger case:
    `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`,
-   unconfirmed as the actual cause since the repro hasn't crashed again yet).
-3. **(~1 day, dedicated session)** `query_pool.statistics_query.*` — the second
-   major `part4` sub-cluster (8,751 cases across `host_query_reset`,
-   `clipping_primitives`, `clipping_invocations`, `reset_after_copy`, and
-   several smaller buckets), not investigated at all yet.
-4. **(long-carried-over, still open)** `L375`:
-   `switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion — needs its
-   own dedicated design session, unchanged status.
-5. Once `part3` finishes: concatenate all 6 `logs/part*.stdout.log` and
-   re-cluster the *entire* case space (long-standing item, blocked only on
-   `part3` actually finishing). Remember `part6`'s
-   `transform_feedback.primitives_generated_query` bucket is `L403`-stale, skip
-   it.
-6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed, record-only.
+   unconfirmed).
+3. **(~1 day, dedicated session)** `L402`:
+   `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36
+   cases, filed but not fixed per `VulkanCTSReport.md` item 35) — the next
+   concrete, already-scoped bug to root-cause.
+4. **(~30 min, low priority)** Roadmap.md strikethrough cleanup: several IDs
+   (`L377`, `L378`, `L380`, `L381`, base IDs without a lettered suffix, plus
+   likely more) are fully resolved per `VulkanCTSReport.md` but not struck
+   through — the same bookkeeping gap that caused `L375` to be repeatedly
+   mis-handed-off as open. Worth a dedicated pass to prevent future sessions
+   wasting a check-in on already-closed items.
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed, record-only (carried forward unchanged across many sessions now —
+   safe to stop repeating in future handoffs).
