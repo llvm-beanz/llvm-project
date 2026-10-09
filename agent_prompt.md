@@ -63,24 +63,28 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Check `part1`/`part2`/`part3` (PIDs 7228/14336/70573) again —
-   `part3` is closest to finishing (~98%). Once it finishes, concatenate all 6
-   `logs/part*.stdout.log` and re-cluster the entire case space (skip `part6`'s
-   `L403`-stale `transform_feedback.primitives_generated_query` bucket).
-2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced
-   across multiple sessions now (last known trigger case:
-   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`,
-   unconfirmed).
-3. **(~1 day, dedicated session)** `L402`:
-   `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36
-   cases, filed but not fixed per `VulkanCTSReport.md` item 35) — the next
-   concrete, already-scoped bug to root-cause.
-4. **(~30 min, low priority)** Roadmap.md strikethrough cleanup: several IDs
-   (`L377`, `L378`, `L380`, `L381`, base IDs without a lettered suffix, plus
-   likely more) are fully resolved per `VulkanCTSReport.md` but not struck
-   through — the same bookkeeping gap that caused `L375` to be repeatedly
-   mis-handed-off as open. Worth a dedicated pass to prevent future sessions
-   wasting a check-in on already-closed items.
-5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed, record-only (carried forward unchanged across many sessions now —
-   safe to stop repeating in future handoffs).
+1. **(~5 min)** Check `part1`/`part2` (PIDs 7228/14336) and the
+   `pipeline.pipeline_library.stencil` sweep (PID 28827,
+   `/tmp/stencil_sweep/stencil.qpa`) — if the stencil sweep finished clean (0
+   Fail/DeviceLost), that's another "already fixed by `L398`-`L405`" cluster to
+   cross off; no further action needed beyond noting it in `VulkanCTSReport.md`.
+2. **(~1 day, dedicated session)** `L402`: build a minimal standalone reproducer
+   that renders *just the two or three triangles actually responsible* for one
+   of the 17 failing pixels (e.g. extract triangle 24's exact vertices for
+   `render_size_32_32`/`subpass_count_2`), bypassing the full
+   128-triangle/CTS-test machinery, and directly compare FeMe's
+   edge-function/top-left-rule evaluation (`isTopLeftEdge`, the `E0`/`E1`/`E2`
+   barycentric setup around `Executor.cpp` line ~3900) against `tcu`'s own
+   reference rasterizer's for that exact triangle/pixel pair, at full double
+   precision. This is the concrete next action to actually root-cause (not just
+   narrow) `L402`.
+3. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced
+   across multiple sessions now (unchanged from every prior handoff).
+4. **(long-carried-over, still open)** `L375` — wait, already struck through
+   last session; drop this from future handoffs (see last session's entry for
+   why it kept reappearing).
+5. **(~30 min, low priority, still deferred)** Roadmap.md strikethrough cleanup
+   pass for other already-resolved-but-unstruck IDs.
+6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
+   needed, record-only (last repeat of this note — safe to drop from future
+   handoffs after this).
