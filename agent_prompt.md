@@ -63,28 +63,28 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Check `part1`/`part2` (PIDs 7228/14336) and the
-   `pipeline.pipeline_library.stencil` sweep (PID 28827,
-   `/tmp/stencil_sweep/stencil.qpa`) — if the stencil sweep finished clean (0
-   Fail/DeviceLost), that's another "already fixed by `L398`-`L405`" cluster to
-   cross off; no further action needed beyond noting it in `VulkanCTSReport.md`.
-2. **(~1 day, dedicated session)** `L402`: build a minimal standalone reproducer
-   that renders *just the two or three triangles actually responsible* for one
-   of the 17 failing pixels (e.g. extract triangle 24's exact vertices for
-   `render_size_32_32`/`subpass_count_2`), bypassing the full
-   128-triangle/CTS-test machinery, and directly compare FeMe's
-   edge-function/top-left-rule evaluation (`isTopLeftEdge`, the `E0`/`E1`/`E2`
-   barycentric setup around `Executor.cpp` line ~3900) against `tcu`'s own
-   reference rasterizer's for that exact triangle/pixel pair, at full double
-   precision. This is the concrete next action to actually root-cause (not just
-   narrow) `L402`.
-3. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced
-   across multiple sessions now (unchanged from every prior handoff).
-4. **(long-carried-over, still open)** `L375` — wait, already struck through
-   last session; drop this from future handoffs (see last session's entry for
-   why it kept reappearing).
-5. **(~30 min, low priority, still deferred)** Roadmap.md strikethrough cleanup
-   pass for other already-resolved-but-unstruck IDs.
-6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action
-   needed, record-only (last repeat of this note — safe to drop from future
-   handoffs after this).
+1. **(~5 min)** Check `part1` (PID 7228), `part2` (PID 14336), and the
+   stencil sweep (PID 28827) again:
+   ```
+   ps aux | grep deqp-vk
+   grep -c "^Test case" /tmp/part1_repro2/stdout.log /tmp/part2_repro_fixed2/stdout.log /tmp/stencil_sweep/stdout.log
+   ```
+   If the stencil sweep finished with 0 Fail/0 DeviceLost, note it in
+   `VulkanCTSReport.md` as another already-fixed-by-`L398`-`L405` cluster,
+   no code change needed.
+2. **(~1 day, dedicated session)** `L406`: port `rrRasterizer.cpp`'s
+   `toSubpixelCoord`/fixed-point edge-function logic into `Executor.cpp`'s
+   triangle coverage test, parameterized on the existing
+   `LineSubPixelPrecisionBits` constant. Build and unit-test it standalone
+   first (axis-aligned, 45-degree, and this session's own triangle-24/
+   pixel-`(8,0)` near-tie as regression cases) before wiring it into
+   `executeDraws`. Once landed, close `L402` by re-running its 36-case
+   cluster plus the broader `renderpasses.*.suballocation.*` family.
+3. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still unreproduced
+   across many sessions now; last known (unconfirmed) trigger case:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.
+   transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
+4. Drop from future hand-offs — already fully resolved, no action needed:
+   `L375` (struck through 3 sessions ago), `LLVM_EXTERNAL_PROJECTS=OffloadTest`
+   cache item (resolved via `L380`), the roadmap strikethrough cleanup pass
+   (done this session, 76 rows fixed).
