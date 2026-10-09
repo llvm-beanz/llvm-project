@@ -1514,6 +1514,55 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     change needed -- internal correctness fix only, no feature/
     extension-surface change.
 
+39. **`L402` root-caused this session (not yet fixed): the
+    `subpass_dependencies.late_fragment_tests` 36-case `Fail` cluster
+    is a triangle-rasterizer fixed-point-precision gap, not a subpass
+    hand-off bug.** First disproved the hand-off's own hypothesis (a
+    cross-subpass depth/stencil hand-off bug): re-reading
+    `vktRenderPassSubpassDependencyTests.cpp` showed each subpass owns
+    its own separately-cleared depth/stencil attachment (not one
+    shared attachment reused across subpasses), and a temporary,
+    fully-reverted pointer/value trace confirmed the cross-subpass
+    `subpassLoad` hand-off and depth-test logic are both correct. The
+    real cause: `Executor.cpp`'s triangle coverage test
+    (`edgeFnD`/`isTopLeftEdge`, the `E0`/`E1`/`E2` barycentric setup)
+    evaluates every sample in full `double` precision against the
+    vertices' `float` screen-space coordinates, with no fixed-point
+    subpixel snapping -- but FeMe advertises `subPixelPrecisionBits ==
+    4` (`PhysicalDeviceInfo.cpp`), and VK-GL-CTS's own reference
+    rasterizer (`framework/referencerenderer/rrRasterizer.cpp`'s
+    `TriangleRasterizer`) snaps every vertex to that exact 4-bit
+    fixed-point grid (`toSubpixelCoord`) before its own edge test, by
+    design. Replicated the CTS test's exact vertex-generation PRNG
+    (`deRandom`, fixed seed `5`) in a standalone C program to recover
+    the one standalone-reproduced failing case's (`render_size_32_32`/
+    `subpass_count_2`/`d24_unorm_s8_uint`, pixel `(8,0)`) covering
+    triangle's exact vertices (confirmed its generated depth,
+    `0.473101437`, matches a prior session's own trace exactly), then
+    computed the full-double-precision edge function: the pixel center
+    lands *inside* the triangle by only ~0.018 pixels -- a genuine
+    near-tie. Replicating `rrRasterizer.cpp`'s own fixed-point
+    algorithm (`bits=4`) for the same triangle/pixel pair in Python
+    flips that edge's sign negative -- the reference rasterizer
+    correctly excludes the triangle at FeMe's own advertised
+    precision, while FeMe's full-precision test wrongly includes it.
+    Cross-checked against the actual Reference/Result PNGs from an
+    earlier `--deqp-log-images=enable` run: pixel `(8,0)`'s reference
+    value (250/255, matching the clear-value-propagated-through-
+    subpass-1 math, `1.0 - 0.02 = 0.98 -> 250`) confirms the reference
+    image agrees no triangle covers it there, while FeMe's result
+    value (116/255) matches the covering triangle's depth propagating
+    through instead -- a real coverage-decision mismatch, not a
+    cosmetic one. This is the triangle-rasterizer analogue of the
+    already-known `L326`-`L328` line-rasterizer gap (FeMe advertises a
+    `subPixelPrecisionBits` it doesn't actually honor in its coverage
+    test). Not fixed this session -- a precision-grid-snapping change
+    to the hot triangle-coverage path risks regressing every other
+    passing rasterization test; filed as `L406` for a dedicated
+    session, mirroring the existing `L326`->`L327` split. No code
+    change. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+    no change needed -- investigation only.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
