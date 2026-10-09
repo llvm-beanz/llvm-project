@@ -117774,3 +117774,93 @@ Confirming the actual root cause (an edge-function/tie-break numerical discrepan
 6. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed, record-only (last repeat of this note — safe to drop from future handoffs after this).
 
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
+
+# Session: L402 fully confirmed as a triangle-rasterizer subpixel-precision gap, filed as L406; roadmap strikethrough cleanup done (2026-10-09)
+
+**Start here next session:** check `part1`/`part2`/stencil sweeps (commands below), then start `L406` (port `rrRasterizer.cpp`'s fixed-point coverage test into `Executor.cpp`) if a dedicated day is available.
+
+## What got done this session (3 commits, all docs-only, no code changed)
+
+1. **`L402` root-caused, for real this time.** Confirmed via a standalone
+   repro (not just more tracing) that `subpass_dependencies.late_fragment_tests`'
+   36-case `Fail` cluster is a genuine triangle-coverage-decision mismatch
+   between FeMe and VK-GL-CTS's reference rasterizer, not a subpass hand-off
+   bug (that hypothesis was already disproved last session).
+2. **Filed `L406`** as the dedicated-session fix item, deliberately split out
+   from `L402` (same pattern as `L326`->`L327`) since the fix touches a hot
+   path shared by every passing rasterization test.
+3. **Struck through 76 already-"done" roadmap rows** that were missing the
+   `~~` convention — the bookkeeping gap several past hand-offs flagged
+   (`L377`, `L378`, `L380`, `L381` were the named examples; turned out `L377`/
+   `L378` were already struck, but `L380`/`L381` and 74 others were not).
+4. Checked `part1`/`part2`/stencil-verification sweeps 3 separate times
+   across the session: all three still running the whole time, 0 crashes,
+   0 Fail/0 DeviceLost on the stencil sweep so far. No new information to
+   act on yet.
+
+## How `L402` was actually nailed down (the technique, if you need to repeat it)
+
+1. Wrote a ~40-line C program replicating `deRandom`'s exact PRNG algorithm
+   (`framework/delibs/debase/deRandom.c`) with the test's fixed seed `5`, to
+   recover triangle 24's exact clip-space vertices and depth. Confirmed
+   correct because the depth it produced (`0.473101437`) matched a value a
+   *prior* session had already captured via live tracing, byte for byte.
+2. Converted those vertices to screen space and ran FeMe's own `edgeFnD`
+   logic (copied straight from `Executor.cpp`'s comments) in Python/`double`:
+   pixel `(8,0)`'s center lands *inside* the triangle, but only by ~0.018
+   pixels along one edge — a real near-tie, not a coincidence.
+3. Found `rrRasterizer.cpp` (CTS's reference software rasterizer) snaps
+   every vertex to a `toSubpixelCoord`-style fixed-point grid, sized by
+   `subPixelPrecisionBits`, before its own edge test — and FeMe advertises
+   `subPixelPrecisionBits == 4` but never actually snaps to that grid in
+   `Executor.cpp`'s coverage test (raw float/double instead).
+4. Replicated the reference's exact fixed-point algorithm at `bits=4` for
+   the same triangle/pixel: the edge sign **flips negative** — the
+   reference says "not covered," FeMe's full-precision test says "covered."
+5. Cross-checked against decoded Reference/Result PNGs still on disk from
+   an earlier session's `--deqp-log-images=enable` run: reference pixel
+   value (250/255) matches the clear-value math exactly (`1.0 - 0.02 =
+   0.98`), FeMe's result value (116/255) matches the wrongly-covering
+   triangle's depth propagating through instead. Confirms the mismatch is
+   real, not a rounding artifact of the 8-bit PNG encoding.
+
+This is the same gap `L326`-`L328` already found and only half-fixed for
+*line* rasterization (`LineSubPixelPrecisionBits` is advertised but not
+honored everywhere) — now proven for *triangle* rasterization too.
+
+## Why `L406` wasn't fixed this session (not just time pressure)
+
+The fix touches `Executor.cpp`'s triangle coverage test, which every single
+passing rasterization test in the CTS suite exercises. A rushed port risks
+turning 36 known failures into an unknown, much larger number of new ones.
+`L327` (the line-rasterization analogue) already set the precedent of
+building and unit-testing the fixed-point primitive standalone before
+wiring it into the live path — `L406` should do the same.
+
+## Next steps, ranked
+
+1. **(~5 min)** Check `part1` (PID 7228), `part2` (PID 14336), and the
+   stencil sweep (PID 28827) again:
+   ```
+   ps aux | grep deqp-vk
+   grep -c "^Test case" /tmp/part1_repro2/stdout.log /tmp/part2_repro_fixed2/stdout.log /tmp/stencil_sweep/stdout.log
+   ```
+   If the stencil sweep finished with 0 Fail/0 DeviceLost, note it in
+   `VulkanCTSReport.md` as another already-fixed-by-`L398`-`L405` cluster,
+   no code change needed.
+2. **(~1 day, dedicated session)** `L406`: port `rrRasterizer.cpp`'s
+   `toSubpixelCoord`/fixed-point edge-function logic into `Executor.cpp`'s
+   triangle coverage test, parameterized on the existing
+   `LineSubPixelPrecisionBits` constant. Build and unit-test it standalone
+   first (axis-aligned, 45-degree, and this session's own triangle-24/
+   pixel-`(8,0)` near-tie as regression cases) before wiring it into
+   `executeDraws`. Once landed, close `L402` by re-running its 36-case
+   cluster plus the broader `renderpasses.*.suballocation.*` family.
+3. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still unreproduced
+   across many sessions now; last known (unconfirmed) trigger case:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.
+   transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
+4. Drop from future hand-offs — already fully resolved, no action needed:
+   `L375` (struck through 3 sessions ago), `LLVM_EXTERNAL_PROJECTS=OffloadTest`
+   cache item (resolved via `L380`), the roadmap strikethrough cleanup pass
+   (done this session, 76 rows fixed).
