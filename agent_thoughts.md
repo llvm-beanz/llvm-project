@@ -117700,3 +117700,33 @@ None of these are blocking — left running in the background for a future sessi
 **Device check (end):** `FeMe CPU Vulkan Device` (confirmed).
 
 **Cleanup still pending:** `/tmp/part1_repro`, `/tmp/part1_repro2`, `/tmp/part2_repro`, `/tmp/part2_repro_fixed` (first, abandoned attempt), large `core` dump files from the `pipeline_barrier` crash analysis, `/tmp/vi*.qpa`/`.log` scratch files, `/tmp/vi_full2*` — not cleaned up this session since `part1`/`part2` are still live and using their directories; defer to whichever session confirms both have finished.
+
+# Session: query_pool.statistics_query confirmed fixed, L375 stale roadmap entry corrected, L402/stability sweeps still running (2026-10-09)
+
+**Device check:** `FeMe CPU Vulkan Device` (confirmed — required explicit `VK_ICD_FILENAMES=/home/dev/dev/llvm-project/build/tools/feme/tools/feme-vulkan/feme_icd.json`, since this fresh shell's default env pointed at lavapipe's `lvp_icd.json` instead). Re-confirmed again at session end.
+
+**No FeMe code changed this session.** This was a verification + documentation-bookkeeping session: confirm a stale handoff item is actually already resolved, fix a stale roadmap marker that caused it to keep being mis-reported, and keep monitoring the long-running background sweeps.
+
+## What I found
+
+1. **`query_pool.statistics_query.*` is already fixed — confirmed via a full, correctly-scoped sweep.** Handoff had this listed as "the second major `part4` sub-cluster, 8,751 cases, not investigated at all." Built the correct 18,775-case caselist (`grep`'d out of `feme_full_caselist_part4`/`part5` — the `-n "...*"` wildcard flag undercounts this family, a prior-segment discovery) and ran it standalone. Result: **16,182 Pass / 2,593 NotSupported / 0 Fail / 0 DeviceLost** — the whole family is clean. Matches the `VulkanCTSReport.md` "Complete group accounting" table's `query_pool` row (already showing 0 Fail / 0 DeviceLost), so this was likely a side effect of `L398`'s Fence/QueueExecutor fix, just never independently re-verified until now.
+2. **`L375` was already fixed and committed** (commit `af344681704c`, 7th investigation, confirmed in `VulkanCTSReport.md` item 26 with a clean regression sweep) — but its Roadmap.md row's ID was never struck through, so multiple recent session handoffs kept re-listing it as "still open, needs its own dedicated design session." Fixed: struck through `L375`'s ID in `feme/docs/Roadmap.md`. Committed separately (`4997205079c6`), no code change.
+3. **Did not do a wholesale strikethrough cleanup pass** on other apparently-complete-but-unstruck IDs (spot-checked `L377`/`L378`/`L380`/`L381`/`L399` and found the same inconsistency repeated) — out of scope for this session's budget, flagged below as a possible future cleanup task.
+
+## Sweep status at session end (all still running, none crashed)
+
+| Sweep | File | Progress | PID |
+|---|---|---|---|
+| `part1` (SIGSEGV repro) | `/tmp/part1_repro2/part1_repro2.qpa` | 344,490 / 555,650 (62%) | 7228 |
+| `part2` (fix verification) | `/tmp/part2_repro_fixed2/part2_repro_fixed2.qpa` | 398,930 / 536,411 (74%) | 14336 |
+| `part3` (original full sweep) | `.../feme-20261008-full/qpa/part3.qpa` | 529,543 / 540,779 (98%) | 70573 |
+
+`part3` is closest to done (~11,000 cases left) but moving slowly (~3 cases/sec under 3-way CPU contention); did not wait for it to finish this session — would likely need another 30-60+ minutes.
+
+## Next steps
+
+1. **(~5 min)** Check `part1`/`part2`/`part3` (PIDs 7228/14336/70573) again — `part3` is closest to finishing (~98%). Once it finishes, concatenate all 6 `logs/part*.stdout.log` and re-cluster the entire case space (skip `part6`'s `L403`-stale `transform_feedback.primitives_generated_query` bucket).
+2. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still not reproduced across multiple sessions now (last known trigger case: `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`, unconfirmed).
+3. **(~1 day, dedicated session)** `L402`: `subpass_dependencies.late_fragment_tests` depth/stencil `Fail` cluster (36 cases, filed but not fixed per `VulkanCTSReport.md` item 35) — the next concrete, already-scoped bug to root-cause.
+4. **(~30 min, low priority)** Roadmap.md strikethrough cleanup: several IDs (`L377`, `L378`, `L380`, `L381`, base IDs without a lettered suffix, plus likely more) are fully resolved per `VulkanCTSReport.md` but not struck through — the same bookkeeping gap that caused `L375` to be repeatedly mis-handed-off as open. Worth a dedicated pass to prevent future sessions wasting a check-in on already-closed items.
+5. `LLVM_EXTERNAL_PROJECTS=OffloadTest` cache item: already resolved, no action needed, record-only (carried forward unchanged across many sessions now — safe to stop repeating in future handoffs).
