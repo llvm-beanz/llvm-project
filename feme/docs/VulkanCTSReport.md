@@ -1991,6 +1991,78 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       change needed -- internal correctness fix only, no feature/
       extension-surface change.
 
+48. **`L410`: fixed the same use-after-free class for `Buffer`, the
+    first of the six object types item 47's own follow-up scope
+    (`L410`) identified as still vulnerable.**
+    - `Buffer` now inherits `PendingExecutionRefCounted`
+      (`feme/lib/Vulkan/ExecutionLifetime.h`, unchanged from item 47);
+      `vkDestroyBuffer` (`Buffer.cpp`) now calls `requestDestroy` and
+      only frees immediately if it returns true, mirroring
+      `vkDestroyPipeline`'s own now-fixed pattern exactly.
+    - `Sync.cpp`'s `ExecutionRefs`/`collectExecutionRefs`/
+      `retainExecutionRefs`/`releaseExecutionRefs` quadruple now also
+      walks every `Buffer *` field a `RecordedCommand` can populate:
+      `IndirectBuffer`, `CountBuffer`, `SrcBuffer`, `DstBuffer`
+      (single pointers, reused across many `Kind`s -- e.g.
+      `SrcBuffer`/`DstBuffer` serve `CopyBuffer`, `FillBuffer`,
+      `UpdateBuffer`, `CopyQueryPoolResults`,
+      `CopyBufferToImage`/`CopyImageToBuffer`, and
+      `BindIndexBuffer` simultaneously), plus `VertexBuffers` and
+      `XfbBuffers` (`std::vector<Buffer *>`, bound vertex buffers and
+      transform-feedback buffers/counters respectively). Each field is
+      checked unconditionally for non-null rather than switching on
+      `Cmd.Op` first, matching the existing `Cmd.Pipeline`/
+      `Cmd.BeginPass`/`Cmd.BeginFramebuffer` pattern.
+    - New regression test (`SyncTest.cpp`):
+      `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds` --
+      `vkCmdCopyBuffer` between two buffers, then immediately
+      `vkDestroyBuffer` on both with no wait at all (device memory is
+      freed only after the subsequent `vkQueueWaitIdle`, since freeing
+      memory still bound to a buffer referenced by an incomplete
+      submission is independently invalid API usage, distinct from
+      this fix's actual scope: the `Buffer` wrapper object's own
+      lifetime). Note: unlike item 47's `leakprobe_uaf.cpp`-confirmed
+      `Pipeline` case, this specific race did not reproduce a
+      deterministic pre-fix crash in this non-ASan build across 200
+      repeats either with or without the fix -- the test documents and
+      locks in the fix's intended behavior rather than demonstrating a
+      guaranteed-reproducible pre-fix failure.
+    - `check-feme`: 3626/3629 Passed (+1 net new test), 3 Unsupported,
+      0 Failed, 0 regressions.
+    - **Verified against CTS:** a combined 2,352-case sample
+      (352 `dEQP-VK.draw.*indirect*`/`*indirect_indexed*` cases plus a
+      random 2,000-case sample of the 128,426-case
+      `dEQP-VK.transform_feedback.*` family -- chosen as the two
+      families most likely to exercise `Buffer`'s newly-covered
+      `RecordedCommand` fields) shows **0 `DeviceLost`/crashes**: 78
+      Pass, 6 Fail, 2,268 NotSupported. The 6 Fails
+      (`dEQP-VK.transform_feedback.simple_optimized_gpl.*`, e.g.
+      `streams_culldistance_6`, `winding_line_strip_8`) are pre-
+      existing transform-feedback vertex-data-verification issues,
+      unrelated to buffer lifetime -- same class of pre-existing,
+      lower-priority pixel/data-correctness bug as the still-open
+      `L378(a)` and the 4 `b10g11r11_ufloat_pack32` dual-source-blend
+      mismatches from item 47 -- not new regressions from this fix,
+      and not chased further this session.
+    - Also resolved this session (no code change): `part1`'s multi-
+      session SIGSEGV-reproduction attempt (PID 7228) finished
+      cleanly with **0 crashes ever observed** across its full
+      555,650-case run (205,359 Pass / 37 Fail / 350,254
+      NotSupported). The 37 Fails are all pre-existing, unrelated
+      issues (18 `api.info.*` consistency checks, 12
+      `api.copy_and_blit.*` ASTC block-compressed blit limitations, 3
+      `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
+      `get_device_proc_addr`/`driver_properties`) -- none are
+      `DeviceLost` or crashes. This fully resolves the long-running
+      `part1` crash mystery carried across many prior sessions'
+      handoffs by non-occurrence; drop it from future handoffs.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **Still open (`L410`'s remaining scope):** `Image`/`ImageView`,
+      `DescriptorSet`, `Event`, `QueryPool` -- not yet audited or
+      fixed.
+
 ## Complete group accounting
 
 
