@@ -1933,6 +1933,64 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       change needed -- investigation only, no feature/extension-surface
       change.
 
+47. **`L409`: fixed the use-after-free this session's own item 46
+    root-caused, for the three object types its standalone reproducer
+    proved vulnerable (`Pipeline`, `RenderPass`, `Framebuffer`).**
+    - Generalized `Fence`'s own `L398` retain/release-with-deferred-
+      destroy pattern into a reusable mixin,
+      `PendingExecutionRefCounted` (new file,
+      `feme/lib/Vulkan/ExecutionLifetime.h`):
+      `retainForExecution()`/`releaseAndTakeDeferredDestroy()`/
+      `requestDestroy()`, `const`-callable (since
+      `RecordedCommand::BeginPass`/`BeginFramebuffer` are stored as
+      `const RenderPass *`/`const Framebuffer *`). `Pipeline`,
+      `RenderPass`, and `Framebuffer` now inherit it.
+    - `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`
+      now call `requestDestroy` and only free immediately if it
+      returns true, instead of freeing unconditionally.
+    - `Sync.cpp`'s `makeSubmissionTask` gained a new
+      `collectExecutionRefs`/`retainExecutionRefs`/
+      `releaseExecutionRefs` triple: every `Pipeline`/`RenderPass`/
+      `Framebuffer` a submission's command buffers reference --
+      recursing into `vkCmdExecuteCommands`' secondary command buffers
+      too -- is retained synchronously before the submission's task
+      closure is ever returned (i.e. before any other thread could
+      possibly run it), and released again (via `llvm::scope_exit`,
+      covering every exit path) once that closure finishes running,
+      freeing via `Allocator` for any object that had a `vkDestroy*`
+      call deferred against it in the meantime.
+    - New regression tests (`SyncTest.cpp`):
+      `ExecutionLifetimeTest.DestroyDefersUntilRetainedTaskReleases`/
+      `DestroyWithNoPendingTasksFreesImmediately`/
+      `DestroyDefersUntilAllRetainedTasksRelease` (deterministic,
+      through `PendingExecutionRefCounted`'s own public API, mirroring
+      the existing `FenceLifetimeTest` precedent) and
+      `SyncTest.SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds`
+      (the real end-to-end scenario `leakprobe_uaf.cpp` first proved
+      crashes: submit, then immediately destroy the bound pipeline
+      with no wait at all).
+    - `ninja check-feme`: 3,625/3,628 Passed (+4 net new tests), 3
+      Unsupported, 0 Failed, 0 regressions.
+    - **Verified against a live CTS re-run:** a 5,000-case random
+      sample of `part2`'s own
+      `pipeline.{fast_linked_library,monolithic}.{stencil,
+      blend.dual_source}.*` family (74,652 matching cases total in
+      the full caselist) shows **0 `DeviceLost`** (down from the
+      22.74%/22.9% baseline measured in items 46/the earlier
+      `part2_repro*` artifacts) -- 3,084 Pass (61.7%), 1,912
+      NotSupported (38.2%), 4 Fail (0.1%, all
+      `b10g11r11_ufloat_pack32` dual-source-blend pixel-mismatch
+      cases, unrelated to this fix -- not yet filed as their own
+      roadmap item).
+    - **Not yet audited or fixed:** `Buffer`, `Image`, `ImageView`,
+      `DescriptorSet`, `Event`, `QueryPool` are referenced by recorded
+      commands the identical raw-pointer-no-keep-alive way and are
+      very likely subject to the same race -- filed as explicit
+      follow-up `L410` in `Roadmap.md`.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+
 ## Complete group accounting
 
 
