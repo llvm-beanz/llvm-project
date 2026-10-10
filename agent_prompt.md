@@ -63,31 +63,27 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session)** Fix `L409`. Start by generalizing
-   `Fence`'s retain/release pattern (`L398`, `Sync.cpp`) to `Pipeline`
-   first (the type proven here), using `leakprobe_uaf.cpp` as the
-   regression test (add it as a proper gtest-based unit test once the fix
-   lands, not just a standalone throwaway). Confirm the exact same crash
-   reproduces in a current `check-feme`-style unit test shape before
-   fixing, then confirm it's gone after.
-2. **(~2-4 hours after the above)** Audit whether `RenderPass`,
-   `Framebuffer`, descriptor sets, images, and buffers share the same raw-
-   pointer-capture-with-no-keep-alive pattern (only `Pipeline` and the
-   render-pass/framebuffer pair are directly proven so far). Fix each one
-   found, following the same retain/release template.
-3. **(~30 min, after the fix lands)** Re-run `part2`'s full caselist
-   (`/tmp/feme_full_caselist_part2` or similar) and confirm the
-   `DeviceLost` rate drops from 22.74% toward 0%. This is the real
-   acceptance criterion for closing `L409`.
-4. **(~5 min)** Check `part1` (PID 7228) one more time before starting the
-   `L409` fix session — if it's finally crashed, grab the backtrace before
-   doing anything else; it may now be directly explainable by `L409`
-   without needing further investigation.
-5. Drop from future hand-offs — fully resolved, stop citing: `L407`
-   (closed, not a leak — see 3 sessions ago), the "resource-table
-   exhaustion" hypothesis from the last handoff (superseded by this
-   session's actual finding), `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest`
-   (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`,
-   `pipeline_library.stencil` verification, `part1`'s
-   `use_after_copy.a8b8g8r8_srgb_pack32...` case (confirmed not a
-   deterministic trigger).
+1. **(~5 min)** Check `part1` (PID 7228) again next session — still no
+   crash as of this session's end, 637+ CPU-minutes in.
+2. **(~2-4 hours)** `L410`: audit and fix `Buffer` first (the type
+   most commonly bound in every draw/dispatch, so highest-value next
+   target) — inherit `PendingExecutionRefCounted`, guard
+   `vkDestroyBuffer`, extend `Sync.cpp`'s `collectExecutionRefs` to walk
+   bound vertex/index buffers in `RecordedCommand`. Use the exact same
+   3-commit pattern this session used for `Pipeline`/`RenderPass`/
+   `Framebuffer` (mixin wiring → destroy guard → retain/release
+   activation), each independently buildable and testable.
+3. **(~2-4 hours after that)** Repeat for `Image`/`ImageView`,
+   `DescriptorSet`, `Event`, `QueryPool` — one type per session/commit
+   group, not all at once.
+4. **(~30 min)** Investigate the 4 `b10g11r11_ufloat_pack32`
+   dual-source-blend pixel-mismatch Fails found during this session's
+   verification sample. Start with `--deqp-log-images=enable` on one
+   case and diff against the golden image — same technique recommended
+   for the still-open `L378(a)` LOD-bias bug.
+5. Drop from future hand-offs — fully resolved, stop citing: `L409`
+   (closed this session, verified against CTS), `L407`, the
+   "resource-table exhaustion" hypothesis, `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
+   cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
+   `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
