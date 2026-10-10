@@ -63,26 +63,31 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Check `part1` (PID 7228, 377,991+ cases, no crash) again
-   next session. It is the longest-running unresolved lead in this
-   investigation — either it finally crashes with a real stack trace, or
-   it keeps running and becomes less and less likely to ever reproduce.
-2. **(~1 day, dedicated session)** Since memory leaks are now ruled out,
-   pivot the stability investigation to **resource-table/descriptor-count
-   exhaustion**: look for any fixed-size handle table, descriptor pool, or
-   similar bounded structure in FeMe's object-tracking code
-   (`Objects.h`/`Device.h`/descriptor-pool allocation path) that could run
-   out or wrap around after hundreds of thousands of distinct
-   create/destroy cycles, producing `DEVICE_LOST` or a null-deref
-   `SIGSEGV` instead of a clean `VK_ERROR_*` return. This is the next-most-
-   likely mechanism now that the obvious memory-growth hypothesis is shut.
-3. **(~30 min)** `part2`'s own caselist run (`pipeline.{fast_linked_library,
-   monolithic}.{stencil,blend.dual_source}.*` `DeviceLost`) — re-check its
-   current progress/case count; if it has finished, grab the final
-   DeviceLost percentage for comparison against earlier mid-run snapshots.
-4. **(~1 day)** If resource-table exhaustion doesn't pan out either:
-   consider that `DeviceLost`/`SIGSEGV` might be a genuine logic bug in a
-   specific high-combinatorial-state test family (stencil/dual-source
-   blend state permutations) rather than a resource-accounting problem at
-   all — would need case-by-case narrowing within `part2`'s caselist,
-   similar to the narrowing approach that worked for `L402`/`L406`.
+1. **(~1 day, dedicated session)** Fix `L409`. Start by generalizing
+   `Fence`'s retain/release pattern (`L398`, `Sync.cpp`) to `Pipeline`
+   first (the type proven here), using `leakprobe_uaf.cpp` as the
+   regression test (add it as a proper gtest-based unit test once the fix
+   lands, not just a standalone throwaway). Confirm the exact same crash
+   reproduces in a current `check-feme`-style unit test shape before
+   fixing, then confirm it's gone after.
+2. **(~2-4 hours after the above)** Audit whether `RenderPass`,
+   `Framebuffer`, descriptor sets, images, and buffers share the same raw-
+   pointer-capture-with-no-keep-alive pattern (only `Pipeline` and the
+   render-pass/framebuffer pair are directly proven so far). Fix each one
+   found, following the same retain/release template.
+3. **(~30 min, after the fix lands)** Re-run `part2`'s full caselist
+   (`/tmp/feme_full_caselist_part2` or similar) and confirm the
+   `DeviceLost` rate drops from 22.74% toward 0%. This is the real
+   acceptance criterion for closing `L409`.
+4. **(~5 min)** Check `part1` (PID 7228) one more time before starting the
+   `L409` fix session — if it's finally crashed, grab the backtrace before
+   doing anything else; it may now be directly explainable by `L409`
+   without needing further investigation.
+5. Drop from future hand-offs — fully resolved, stop citing: `L407`
+   (closed, not a leak — see 3 sessions ago), the "resource-table
+   exhaustion" hypothesis from the last handoff (superseded by this
+   session's actual finding), `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest`
+   (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`,
+   `pipeline_library.stencil` verification, `part1`'s
+   `use_after_copy.a8b8g8r8_srgb_pack32...` case (confirmed not a
+   deterministic trigger).
