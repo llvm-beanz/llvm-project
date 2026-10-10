@@ -118165,3 +118165,76 @@ deterministic trigger two sessions ago).
    should have a smaller default for CTS-scale workloads.
 4. **(~5 min)** Check `part1` (PID 7228) again — still no crash as of
    this session's end.
+
+# Session: L407 CLOSED — both memory-growth effects confirmed bounded, not leaks (2026-10-11)
+
+**Run this now:** `vulkaninfo --summary | grep deviceName` → confirmed `FeMe CPU Vulkan Device` (done, see step 1 below).
+
+## What just happened
+
+1. Confirmed device: `FeMe CPU Vulkan Device`. ✅
+2. Checked `part1` (PID 7228) repeatedly all session: still running clean,
+   374,962 → 377,991+ cases, zero crashes. No new information.
+3. Built `leakprobe_devicerecreate.cpp` (new probe, `/tmp/leakprobe_work/`,
+   persisted to session workspace `files/leakprobe/`): creates/destroys a
+   fresh `VkDevice` every 300 iterations, 15 generations (4,500 cycles
+   total). **Result: generations 1-14 hold rock solid at ~737-742 MB. No
+   compounding growth.** `vkDestroyDevice` does NOT leak the ~740 MB
+   implicit pipeline cache found last session. Committed: `deac85cefa80`.
+4. Re-ran `leakprobe_uniqueshader` for 10,000 iterations (vs. last
+   session's 3,000) with fine-grained (every-200) sampling. **Result: RSS
+   plateaus completely flat at 750,060 KB from iteration ~2800 onward —
+   7,200 more iterations, zero net growth.** The "~2.5 KB/iteration
+   residual creep" reported last session was a measurement artifact of a
+   too-short sampling window, not a real leak. Committed: `0d13337f3a3d`.
+
+## The big finding
+
+**`L407` is closed. There is no FeMe memory leak.** Both growth effects
+found during this investigation (the ~740 MB implicit pipeline cache, and
+the smaller "residual creep") are bounded, by-design caching behavior that
+fully plateaus and is correctly released by `vkDestroyDevice`. Struck
+through in `Roadmap.md`.
+
+This means `part2`'s climbing `DeviceLost` rate and `part1`'s long-
+unreproduced `SIGSEGV` are **NOT explained** by a memory leak after all —
+three sessions' worth of leak-hunting hypothesis is now ruled out. The real
+cause is still unknown.
+
+## Drop from future hand-offs (fully resolved, stop citing)
+
+- `L407`'s "~740 MB implicit pipeline cache might be a leak" — closed,
+  confirmed bounded and correctly torn down (this session).
+- `L407`'s "~2.5 KB/iteration residual creep" — closed, confirmed to be a
+  measurement artifact, not a real creep (this session).
+- `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap
+  strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil`
+  verification — all resolved in prior sessions, still fully resolved.
+- `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case — confirmed not
+  a deterministic trigger two sessions ago, drop from handoffs.
+
+## Next steps, ranked
+
+1. **(~5 min)** Check `part1` (PID 7228, 377,991+ cases, no crash) again
+   next session. It is the longest-running unresolved lead in this
+   investigation — either it finally crashes with a real stack trace, or
+   it keeps running and becomes less and less likely to ever reproduce.
+2. **(~1 day, dedicated session)** Since memory leaks are now ruled out,
+   pivot the stability investigation to **resource-table/descriptor-count
+   exhaustion**: look for any fixed-size handle table, descriptor pool, or
+   similar bounded structure in FeMe's object-tracking code
+   (`Objects.h`/`Device.h`/descriptor-pool allocation path) that could run
+   out or wrap around after hundreds of thousands of distinct
+   create/destroy cycles, producing `DEVICE_LOST` or a null-deref
+   `SIGSEGV` instead of a clean `VK_ERROR_*` return. This is the next-most-
+   likely mechanism now that the obvious memory-growth hypothesis is shut.
+3. **(~30 min)** `part2`'s own caselist run (`pipeline.{fast_linked_library,
+   monolithic}.{stencil,blend.dual_source}.*` `DeviceLost`) — re-check its
+   current progress/case count; if it has finished, grab the final
+   DeviceLost percentage for comparison against earlier mid-run snapshots.
+4. **(~1 day)** If resource-table exhaustion doesn't pan out either:
+   consider that `DeviceLost`/`SIGSEGV` might be a genuine logic bug in a
+   specific high-combinatorial-state test family (stencil/dual-source
+   blend state permutations) rather than a resource-accounting problem at
+   all — would need case-by-case narrowing within `part2`'s caselist,
+   similar to the narrowing approach that worked for `L402`/`L406`.
