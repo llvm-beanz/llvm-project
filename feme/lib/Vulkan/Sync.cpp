@@ -11,8 +11,11 @@
 #include "Diagnostics.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "Pipeline.h"
+#include "RenderPass.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
@@ -109,6 +112,72 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
   return VK_SUCCESS;
 }
 
+/// (Roadmap L409) Every `Pipeline`/`RenderPass`/`Framebuffer` a submission's
+/// command buffers (including, recursively, any secondary command buffers
+/// `vkCmdExecuteCommands` interprets into them) reference -- gathered by
+/// `collectExecutionRefs` synchronously on the submitting host thread,
+/// before a submission's own `QueueExecutor` task is enqueued, so each one
+/// can be retained (`retainExecutionRefs`) before that task might start
+/// running on another thread, and released again (`releaseExecutionRefs`)
+/// once it finishes, whether it actually executed them or not. See
+/// `PendingExecutionRefCounted`'s own comment (`ExecutionLifetime.h`) for
+/// why this is necessary: without it, a `vkDestroyPipeline`/
+/// `vkDestroyRenderPass`/`vkDestroyFramebuffer` call made (fully legally)
+/// right after `vkQueueSubmit` returns, with no wait at all, races this
+/// same task's own still-pending read of that object.
+struct ExecutionRefs {
+  std::vector<Pipeline *> Pipelines;
+  std::vector<const RenderPass *> RenderPasses;
+  std::vector<const Framebuffer *> Framebuffers;
+};
+
+void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
+  for (const RecordedCommand &Cmd : CmdBuf.commands()) {
+    if (Cmd.Pipeline)
+      Refs.Pipelines.push_back(Cmd.Pipeline);
+    if (Cmd.BeginPass)
+      Refs.RenderPasses.push_back(Cmd.BeginPass);
+    if (Cmd.BeginFramebuffer)
+      Refs.Framebuffers.push_back(Cmd.BeginFramebuffer);
+    if (Cmd.Op == RecordedCommand::Kind::ExecuteCommands)
+      for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
+        collectExecutionRefs(*Secondary, Refs);
+  }
+}
+
+ExecutionRefs collectExecutionRefs(ArrayRef<CommandBuffer *> CmdBufs) {
+  ExecutionRefs Refs;
+  for (const CommandBuffer *CmdBuf : CmdBufs)
+    collectExecutionRefs(*CmdBuf, Refs);
+  return Refs;
+}
+
+void retainExecutionRefs(const ExecutionRefs &Refs) {
+  for (Pipeline *P : Refs.Pipelines)
+    P->retainForExecution();
+  for (const RenderPass *RP : Refs.RenderPasses)
+    RP->retainForExecution();
+  for (const Framebuffer *FB : Refs.Framebuffers)
+    FB->retainForExecution();
+}
+
+/// The release half of `retainExecutionRefs`: for each retained object,
+/// finishes a `vkDestroy*` call this task's own enqueueing raced with (see
+/// `PendingExecutionRefCounted::releaseAndTakeDeferredDestroy`'s own
+/// comment), freeing it if so.
+void releaseExecutionRefs(const ExecutionRefs &Refs) {
+  const VkAllocationCallbacks *Callbacks = nullptr;
+  for (Pipeline *P : Refs.Pipelines)
+    if (P->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(P);
+  for (const RenderPass *RP : Refs.RenderPasses)
+    if (RP->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(const_cast<RenderPass *>(RP));
+  for (const Framebuffer *FB : Refs.Framebuffers)
+    if (FB->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(const_cast<Framebuffer *>(FB));
+}
+
 /// (Roadmap L228(h)/(i)) Builds the closure a `QueueExecutor` task runs
 /// for one submission: consume \p Waits, execute \p CmdBufs, then apply
 /// \p Signals -- exactly the work `vkQueueSubmit`'s own loop body used to
@@ -116,12 +185,22 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
 /// failure latches \p Dev lost (`Device::markLost`) rather than trying to
 /// report it back through the `vkQueueSubmit` call that already returned
 /// by the time this runs.
+///
+/// (Roadmap L409) Every `Pipeline`/`RenderPass`/`Framebuffer` \p CmdBufs
+/// references is retained here, synchronously, before the closure is ever
+/// returned (i.e. before any other thread could possibly call this
+/// submission's own task) -- see `ExecutionRefs`'s own comment above for
+/// why -- and released again once the closure finishes running, on every
+/// exit path (including an early return for an already-lost device).
 std::function<void()> makeSubmissionTask(Device &Dev,
                                          std::vector<SemaphoreOp> Waits,
                                          std::vector<CommandBuffer *> CmdBufs,
                                          std::vector<SemaphoreOp> Signals) {
+  ExecutionRefs Refs = collectExecutionRefs(CmdBufs);
+  retainExecutionRefs(Refs);
   return [&Dev, Waits = std::move(Waits), CmdBufs = std::move(CmdBufs),
-          Signals = std::move(Signals)]() mutable {
+          Signals = std::move(Signals), Refs = std::move(Refs)]() mutable {
+    auto ReleaseGuard = llvm::scope_exit([&Refs] { releaseExecutionRefs(Refs); });
     if (Dev.isLost())
       return;
     if (consumeWaits(Waits) != VK_SUCCESS ||
