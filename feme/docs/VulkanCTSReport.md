@@ -1626,6 +1626,72 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
     change needed.
 
+42. **Stability triage (`part1` SIGSEGV, `part2` `pipeline.*.blend.
+    dual_source`/`stencil` `DeviceLost` growth): investigated, not
+    fixed, three new data points narrowing the search space.** Not
+    fixed this session -- in progress, filed as `L407` for a dedicated
+    root-cause session. No code change.
+    - `part2`'s `pipeline.{monolithic,fast_linked_library}.blend.
+      dual_source.*` `DeviceLost` cluster is **not** a per-case blend-
+      logic bug: a single isolated case from the failing streak passed
+      (`r8g8_unorm` 4-attachment state combo), and a 200-case
+      contiguous batch pulled from the exact point in `part2`'s
+      caselist where the failures were occurring also passed 196/196
+      (5 `NotSupported` for an unrelated format reason), both in
+      isolation. The failures only reproduce inside `part2`'s single
+      long-running process (531,232 cases processed so far this
+      session, 119,904 of them `DeviceLost` -- a 22.6% rate, up from
+      the single-digit aggregate percentage in earlier sessions'
+      handoffs, i.e. this is actively getting worse as the process
+      keeps running).
+    - `part1`'s previously-suspected (never-confirmed) SIGSEGV trigger
+      case, `dEQP-VK.api.copy_and_blit.core.use_after_copy.
+      a8b8g8r8_srgb_pack32.transfer_dst_optimal.
+      1024x1024x2_tq_color_att_flag_img2img_msaa`, passed cleanly this
+      run (confirmed via its own log line: `Pass (Pass)`). `part1` has
+      now run past that case's line number in its caselist without
+      crashing in this specific run -- this effectively rules it out
+      as a deterministic single-case trigger; whatever triggers the
+      SIGSEGV is order/state/volume-dependent, not tied to that one
+      case in isolation.
+    - `part2`'s RSS grew measurably over a ~5-minute sampling window
+      late in its run (2,903,640 KB -> 2,908,780 KB while processing
+      ~1,200 more cases, roughly 4 KB/case average over that window),
+      consistent with a slow, real memory leak compounding over very
+      large sequential case counts, not a one-shot startup cost. A
+      quick source skim of the likely culprits (`JITEngine.cpp`,
+      `CompiledStage.cpp`'s `orc::LLJIT` lifetime, `PipelineCache.cpp`)
+      found no obvious global/static unbounded cache -- `LLJIT` is
+      owned per-`CompiledStage` via `unique_ptr` with a default (non-
+      custom) destructor, and `PipelineCache` is a per-object, not a
+      process-global, container. If the leak is real, it is likely a
+      smaller, subtler per-object leak (e.g. in command-buffer or
+      image/memory cleanup) that only becomes visible in RSS after
+      hundreds of thousands of iterations, and needs a proper leak
+      detector (ASan/LeakSanitizer or valgrind) rather than source
+      inspection to pin down.
+    - Attempted to isolate this further by replaying one single case
+      thousands of times in a tight loop (to separate "many iterations
+      of the literal same case" from "many iterations of diverse
+      cases") -- blocked by `deqp-vk` itself: it hard-errors on a
+      caselist containing a duplicate case name
+      (`FATAL ERROR: Failed to initialize dEQP: Duplicate test case`),
+      and `--deqp-test-iteration-count` only applies to tests that
+      already support internal iteration counts, not a generic repeat
+      wrapper. A real repeat-stress harness would need either a
+      custom caselist-independent driver loop (bypassing `deqp-vk`'s
+      CLI) or a leak detector attached to one of the existing long
+      sweeps directly.
+    - No code change this session -- filed as `L407` in `Roadmap.md`
+      for the dedicated session this needs (see that entry for the
+      concrete next steps: attach ASan/LeakSanitizer or valgrind
+      massif to a fresh `check-feme`-built `deqp-vk` run against a
+      large-but-bounded caselist, e.g. the `dual_source` family full
+      8,078 cases, looking for the leak's actual allocation site
+      rather than just its aggregate RSS symptom).
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- investigation only.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
