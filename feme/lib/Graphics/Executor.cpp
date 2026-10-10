@@ -79,6 +79,7 @@
 #include "feme/Graphics/StageLink.h"
 #include "feme/Graphics/StageStorage.h"
 #include "feme/Graphics/TaskPayload.h"
+#include "feme/Graphics/TriangleRasterization.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -852,28 +853,6 @@ constexpr int32_t TileSize = 16;
 float edgeFn(std::array<float, 2> A, std::array<float, 2> B,
              std::array<float, 2> P) {
   return (P[0] - A[0]) * (B[1] - A[1]) - (P[1] - A[1]) * (B[0] - A[0]);
-}
-
-/// Same directed-edge function as `edgeFn`, but evaluated in `double`
-/// precision. Two triangles sharing an exact edge (the tessellator's own
-/// crack-free bridging, or a quad/triangle-domain core lattice's per-cell
-/// diagonal split) reuse the *same* pair of `float` vertex positions for
-/// that shared edge, each in the opposite direction; the `float`-precision
-/// `edgeFn` above is not antisymmetric bit-for-bit under that reversal (its
-/// two directions subtract different operand pairs, e.g. `P - A` versus
-/// `P - B`), so a sample that lies almost exactly on the shared edge can
-/// round to a tiny negative value from *both* directions, leaving a
-/// 1-sample gap neither triangle covers (roadmap H4j). Evaluating in
-/// `double` does not change the geometry -- the `float` vertex positions
-/// convert to `double` exactly, with no precision lost -- but shrinks the
-/// rounding of the edge function itself (still a sum of products, so not
-/// bit-exactly antisymmetric either) from `float`'s ~2^-23 relative
-/// precision to `double`'s ~2^-52, several orders of magnitude below any
-/// real crack this rasterizer's own coordinate range produces.
-double edgeFnD(std::array<float, 2> A, std::array<float, 2> B,
-               std::array<float, 2> P) {
-  double Ax = A[0], Ay = A[1], Bx = B[0], By = B[1], Px = P[0], Py = P[1];
-  return (Px - Ax) * (By - Ay) - (Py - Ay) * (Bx - Ax);
 }
 
 /// Whether the directed edge A->B is a "top" or "left" edge of a
@@ -3877,6 +3856,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         // primitive's synthetic triangle carries a meaningful
         // `ArcLength`, and only when the pipeline actually stipples.
         bool NeedsStippleTest = Tri.IsLine && Raster.StippledLineEnable;
+        // (roadmap L406) The stipple test's own barycentric weights
+        // must divide a fixed-point `E0`/`E1`/`E2` (below) by a
+        // denominator in that *same* fixed-point scale, not the plain
+        // float `Area` above: `fixedPointEdgeFn`'s quantized coordinates
+        // make every one of its results `(1 << Bits)^2` times larger
+        // than the equivalent unquantized `edgeFn` value, so dividing by
+        // `Area` directly silently returned weights off by that same
+        // `(1 << Bits)^2` factor -- harmless for the coverage test
+        // itself (a sign-only comparison against zero, scale-invariant),
+        // but not for the stipple test, which needs this quotient's
+        // actual magnitude to recover a meaningful interpolated
+        // `ArcLength`.
+        int64_t FixedArea = NeedsStippleTest
+                                 ? fixedPointEdgeFn(Tri.Pos[0], Tri.Pos[1],
+                                                     Tri.Pos[2],
+                                                     LineSubPixelPrecisionBits)
+                                 : 0;
         for (int32_t QY = QStartY; QY < QMaxY; QY += 2) {
           for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
             PendingQuad Quad;
@@ -3902,25 +3898,37 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                 for (uint32_t S = 0; S != SampleCount; ++S) {
                   std::array<float, 2> Offset = (*SamplePositions)[S];
                   std::array<float, 2> P{PX + Offset[0], PY + Offset[1]};
-                  // The inside test itself is evaluated in `double`
-                  // (`edgeFnD`, see its own comment) so that two triangles
-                  // sharing an exact edge cannot both round a shared-edge
-                  // sample to a (spuriously) negative value and leave a
-                  // crack -- the barycentric weights derived from this
-                  // same sample below stay in `float` (this is a coverage
-                  // decision, not an interpolated value).
-                  double E0 = edgeFnD(Tri.Pos[1], Tri.Pos[2], P);
-                  double E1 = edgeFnD(Tri.Pos[2], Tri.Pos[0], P);
-                  double E2 = edgeFnD(Tri.Pos[0], Tri.Pos[1], P);
+                  // (roadmap L406) The inside test itself is evaluated in
+                  // fixed-point, on the device's own advertised
+                  // `subPixelPrecisionBits` (`fixedPointEdgeFn`, see its
+                  // own comment) rather than unlimited precision: VK-GL-
+                  // CTS's reference rasterizer snaps every vertex to that
+                  // same coarser grid before its own edge test, so a
+                  // sample within a few thousandths of a pixel of a true
+                  // geometric edge must agree with *that* grid's answer,
+                  // not a mathematically "more correct" unlimited-
+                  // precision one (roadmap L402). This also keeps two
+                  // triangles sharing an exact edge from both rounding a
+                  // shared-edge sample to a (spuriously) negative value
+                  // and leaving a crack -- the barycentric weights
+                  // derived from this same sample below stay in `float`
+                  // (this is a coverage decision, not an interpolated
+                  // value).
+                  int64_t E0 = fixedPointEdgeFn(Tri.Pos[1], Tri.Pos[2], P,
+                                                 LineSubPixelPrecisionBits);
+                  int64_t E1 = fixedPointEdgeFn(Tri.Pos[2], Tri.Pos[0], P,
+                                                 LineSubPixelPrecisionBits);
+                  int64_t E2 = fixedPointEdgeFn(Tri.Pos[0], Tri.Pos[1], P,
+                                                 LineSubPixelPrecisionBits);
                   bool In0 =
-                      E0 > 0.0 ||
-                      (E0 == 0.0 && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
+                      E0 > 0 ||
+                      (E0 == 0 && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
                   bool In1 =
-                      E1 > 0.0 ||
-                      (E1 == 0.0 && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
+                      E1 > 0 ||
+                      (E1 == 0 && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
                   bool In2 =
-                      E2 > 0.0 ||
-                      (E2 == 0.0 && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
+                      E2 > 0 ||
+                      (E2 == 0 && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
                   if (!(In0 && In1 && In2))
                     continue;
                   // (roadmap F5) The stipple test rejects an otherwise-
@@ -3930,8 +3938,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   // one of `StipplePattern`'s "off" bits: bit `floor(
                   // Arc / StippleFactor) % 16` gates this exact sample,
                   // matching a real stipple's per-sample granularity.
+                  // (roadmap L406) `E0`/`E1`/`E2` are fixed-point
+                  // `int64_t` coverage values; dividing by the
+                  // same-scale `FixedArea` (not the plain float `Area`,
+                  // see its own comment above) recovers the same
+                  // (approximate, interpolation-only) barycentric
+                  // weights this stipple test has always used.
                   if (NeedsStippleTest) {
-                    float B0 = E0 / Area, B1 = E1 / Area, B2 = E2 / Area;
+                    float FA = static_cast<float>(FixedArea);
+                    float B0 = static_cast<float>(E0) / FA,
+                          B1 = static_cast<float>(E1) / FA,
+                          B2 = static_cast<float>(E2) / FA;
                     float Arc = B0 * Tri.ArcLength[0] + B1 * Tri.ArcLength[1] +
                                 B2 * Tri.ArcLength[2];
                     uint32_t Bit = static_cast<uint32_t>(
