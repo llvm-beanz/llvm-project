@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Sync.h"
+#include "Buffer.h"
 #include "CommandBuffer.h"
 #include "Diagnostics.h"
 #include "Icd.h"
@@ -112,23 +113,25 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
   return VK_SUCCESS;
 }
 
-/// (Roadmap L409) Every `Pipeline`/`RenderPass`/`Framebuffer` a submission's
-/// command buffers (including, recursively, any secondary command buffers
-/// `vkCmdExecuteCommands` interprets into them) reference -- gathered by
-/// `collectExecutionRefs` synchronously on the submitting host thread,
-/// before a submission's own `QueueExecutor` task is enqueued, so each one
-/// can be retained (`retainExecutionRefs`) before that task might start
-/// running on another thread, and released again (`releaseExecutionRefs`)
-/// once it finishes, whether it actually executed them or not. See
-/// `PendingExecutionRefCounted`'s own comment (`ExecutionLifetime.h`) for
-/// why this is necessary: without it, a `vkDestroyPipeline`/
-/// `vkDestroyRenderPass`/`vkDestroyFramebuffer` call made (fully legally)
-/// right after `vkQueueSubmit` returns, with no wait at all, races this
-/// same task's own still-pending read of that object.
+/// (Roadmap L409/L410) Every `Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`
+/// a submission's command buffers (including, recursively, any secondary
+/// command buffers `vkCmdExecuteCommands` interprets into them) reference --
+/// gathered by `collectExecutionRefs` synchronously on the submitting host
+/// thread, before a submission's own `QueueExecutor` task is enqueued, so
+/// each one can be retained (`retainExecutionRefs`) before that task might
+/// start running on another thread, and released again
+/// (`releaseExecutionRefs`) once it finishes, whether it actually executed
+/// them or not. See `PendingExecutionRefCounted`'s own comment
+/// (`ExecutionLifetime.h`) for why this is necessary: without it, a
+/// `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`/
+/// `vkDestroyBuffer` call made (fully legally) right after `vkQueueSubmit`
+/// returns, with no wait at all, races this same task's own still-pending
+/// read of that object.
 struct ExecutionRefs {
   std::vector<Pipeline *> Pipelines;
   std::vector<const RenderPass *> RenderPasses;
   std::vector<const Framebuffer *> Framebuffers;
+  std::vector<Buffer *> Buffers;
 };
 
 void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
@@ -139,6 +142,27 @@ void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
       Refs.RenderPasses.push_back(Cmd.BeginPass);
     if (Cmd.BeginFramebuffer)
       Refs.Framebuffers.push_back(Cmd.BeginFramebuffer);
+    // (Roadmap L410) Every `Buffer *` field `RecordedCommand` ever
+    // populates, regardless of which `Kind` this command is: each field
+    // is only ever non-null for the `Kind`(s) that actually use it (see
+    // `RecordedCommand`'s own per-field comments, `CommandBuffer.h`), so
+    // checking all of them unconditionally here, instead of switching on
+    // `Cmd.Op`, needs no per-`Kind` maintenance as new command kinds are
+    // added.
+    if (Cmd.IndirectBuffer)
+      Refs.Buffers.push_back(Cmd.IndirectBuffer);
+    if (Cmd.CountBuffer)
+      Refs.Buffers.push_back(Cmd.CountBuffer);
+    if (Cmd.SrcBuffer)
+      Refs.Buffers.push_back(Cmd.SrcBuffer);
+    if (Cmd.DstBuffer)
+      Refs.Buffers.push_back(Cmd.DstBuffer);
+    for (Buffer *VB : Cmd.VertexBuffers)
+      if (VB)
+        Refs.Buffers.push_back(VB);
+    for (Buffer *XB : Cmd.XfbBuffers)
+      if (XB)
+        Refs.Buffers.push_back(XB);
     if (Cmd.Op == RecordedCommand::Kind::ExecuteCommands)
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
         collectExecutionRefs(*Secondary, Refs);
@@ -159,6 +183,8 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     RP->retainForExecution();
   for (const Framebuffer *FB : Refs.Framebuffers)
     FB->retainForExecution();
+  for (Buffer *B : Refs.Buffers)
+    B->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -170,6 +196,9 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
   for (Pipeline *P : Refs.Pipelines)
     if (P->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(P);
+  for (Buffer *B : Refs.Buffers)
+    if (B->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(B);
   for (const RenderPass *RP : Refs.RenderPasses)
     if (RP->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(const_cast<RenderPass *>(RP));

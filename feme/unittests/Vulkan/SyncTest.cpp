@@ -1248,3 +1248,73 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds) {
 
   vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
+
+// (Roadmap L410) `Buffer`'s analog of
+// `SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds` above: the same
+// hazardous ordering (destroy with no wait, right after `vkQueueSubmit`
+// returns), but for a `Buffer` referenced via `vkCmdCopyBuffer`'s
+// `SrcBuffer`/`DstBuffer` fields instead of `Cmd.Pipeline`.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 16;
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VkBuffer DstBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &DstBuf), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 16;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE, DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, DstBuf, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferCopy Region{};
+  Region.size = 16;
+  vkCmdCopyBuffer(TestCmdBuf, SrcBuf, DstBuf, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: destroy the `VkBuffer` wrapper objects the
+  // just-enqueued submission references with no wait at all. Pre-fix,
+  // this raced the `QueueExecutor` worker thread's own read of
+  // `SrcBuf`/`DstBuf` (the C++ `Buffer` objects themselves -- their
+  // `size()`/`data()`, not the contents of the backing `VkDeviceMemory`,
+  // which is a separate Vulkan object; freeing memory still bound to a
+  // buffer referenced by a submission not yet complete is independently
+  // invalid API usage per the spec, so this test deliberately leaves
+  // `SrcMemory`/`DstMemory` alive until after the wait below, matching
+  // `SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds`'s scope: the
+  // UAF class `L409`/`L410` fix is about the wrapper object's lifetime,
+  // not shared/backing memory contents).
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkDestroyBuffer(Device, DstBuf, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed `Buffer` objects.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+}
