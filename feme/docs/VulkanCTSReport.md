@@ -1787,6 +1787,40 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
       change needed -- investigation only.
 
+45. **`L407`: confirmed the ~2.5 KB/iteration residual creep is also
+    NOT an unbounded leak -- closes `L407` (this session).** Not a
+    code bug -- both memory-growth effects found during this
+    investigation are now confirmed bounded, by-design caching
+    behavior. No code change.
+    - Re-ran `leakprobe_uniqueshader` (single device, no recreation)
+      for 10,000 iterations instead of the prior session's 3,000,
+      sampling `VmRSS` every 200 iterations.
+    - Result: RSS climbs through the already-known ~740 MB pipeline-
+      cache fill (iterations 0-2800), then **fully plateaus at
+      750,060 KB from iteration ~2800 through iteration 10,000** --
+      7,200 further iterations with zero net growth, only
+      +/-2,048 KB page-granularity jitter.
+    - **Conclusion: the previously-reported "~2.5 KB/iteration"
+      residual creep was a measurement artifact of too short a
+      sampling window (3,000 iterations), which stopped before this
+      second, slightly-higher plateau was reached -- it is not a
+      real, ongoing leak.**
+    - This closes `L407` as a memory-leak investigation: both the big
+      ~740 MB implicit pipeline cache (item 43) and the smaller
+      residual creep (this item) are confirmed bounded/by-design, and
+      `vkDestroyDevice` releases everything cleanly on teardown (item
+      44). The real root cause of `part2`'s climbing `DeviceLost` rate
+      and `part1`'s long-unreproduced `SIGSEGV` remains open, but is
+      no longer attributable to a FeMe memory leak -- next session
+      should look at resource-table/descriptor-count exhaustion (e.g.
+      a fixed-size handle table or descriptor pool running out over
+      hundreds of thousands of distinct cases) as the next-most-likely
+      mechanism.
+    - No code change this session -- updated `L407` in `Roadmap.md`,
+      marking it closed with this conclusion.
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- investigation only.
+
 ## Complete group accounting
 
 
