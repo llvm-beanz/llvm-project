@@ -1614,6 +1614,18 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     honored in the triangle rasterizer (the line rasterizer already
     honors it per `L326`-`L328`), no feature/extension-surface change.
 
+41. **`dEQP-VK.pipeline.pipeline_library.stencil.*` verification sweep
+    (carried over from a prior session, finished this session): 0
+    Fail, 0 DeviceLost.** A standalone 58,478-case sweep
+    (`/tmp/stencil_sweep`) left running by a prior session (to check
+    whether this family was already fixed by `L398`-`L405`, without a
+    dedicated re-investigation) finished cleanly this session: 41,770
+    Pass / 0 Fail / 16,708 NotSupported / 0 Warnings. Confirms the
+    family needs no further code change -- recorded here for the
+    record only, no code change this session. No code change.
+    `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+    change needed.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
