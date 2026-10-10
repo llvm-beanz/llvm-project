@@ -30,6 +30,8 @@
 #ifndef FEME_LIB_VULKAN_RENDERPASS_H
 #define FEME_LIB_VULKAN_RENDERPASS_H
 
+#include "ExecutionLifetime.h"
+
 #include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -115,7 +117,7 @@ struct SubpassDescription {
 /// (`VK_DEPENDENCY_VIEW_LOCAL_BIT`) is accepted for the same reason: the
 /// per-view join it describes is also already satisfied by this ICD's
 /// strictly sequential execution.
-class RenderPass {
+class RenderPass : public PendingExecutionRefCounted {
 public:
   RenderPass(std::vector<AttachmentDescription> Attachments,
              std::vector<SubpassDescription> Subpasses)
@@ -158,7 +160,7 @@ private:
 /// imageless framebuffer validates its per-instance views' `layerCount`
 /// against it the same way `isCompatibleAttachmentView` validates a
 /// concrete one's at creation time.
-class Framebuffer {
+class Framebuffer : public PendingExecutionRefCounted {
 public:
   Framebuffer(std::vector<ImageView *> Attachments, uint32_t Width,
               uint32_t Height, uint32_t Layers, bool Imageless = false)

@@ -19,6 +19,7 @@
 #define FEME_LIB_VULKAN_PIPELINE_H
 
 #include "Descriptor.h"
+#include "ExecutionLifetime.h"
 #include "GroupSize.h"
 
 #include "feme/Core/ShaderStage.h"
@@ -194,7 +195,7 @@ resolvePipelineRobustness(const void *PipelinePNext, const void *StagePNext);
 /// The common base of every `VkPipeline` object, so the single Vulkan
 /// handle type can carry either bind point (V6 adds the graphics one) and
 /// `vkDestroyPipeline` can free either without knowing which it holds.
-class Pipeline {
+class Pipeline : public PendingExecutionRefCounted {
 public:
   enum class Kind : uint8_t {
     Compute,
