@@ -416,9 +416,20 @@ public:
   QueueExecutor &operator=(const QueueExecutor &) = delete;
 
   /// Drains every task already enqueued (matching real Vulkan usage,
-  /// which must not destroy a device with work still pending -- see
-  /// "Object Lifetimes"), signals the worker thread to stop once its
-  /// queue is empty, and joins it.
+  /// which must not destroy a *device* with work still pending), signals
+  /// the worker thread to stop once its queue is empty, and joins it.
+  ///
+  /// NOTE: this only protects the device-teardown case. It does NOT
+  /// protect individual resources (pipelines, render passes,
+  /// framebuffers, ...) referenced by an already-enqueued-but-not-yet-
+  /// executed task: `vkCmd*` recording captures those as raw pointers
+  /// with no keep-alive reference, and the corresponding `vkDestroy*`
+  /// entry points free them immediately with no synchronization against
+  /// this worker thread. This is a real, reproduced use-after-free --
+  /// see roadmap item `L409` (`docs/Roadmap.md`) for the root-cause
+  /// analysis, a standalone reproducer, and the recommended fix
+  /// (generalizing `Fence`'s existing retain/release pattern, `L398`,
+  /// to every bound-resource object type).
   ~QueueExecutor() {
     {
       std::lock_guard<std::mutex> Lock(Mutex);

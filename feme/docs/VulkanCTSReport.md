@@ -1821,6 +1821,118 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
       change needed -- investigation only.
 
+46. **`L409`: root-caused `part2`'s `DeviceLost` cascade and (almost
+    certainly) `part1`'s long-unreproduced `SIGSEGV` to a genuine
+    use-after-free between asynchronous `vkQueueSubmit` and resource
+    destruction -- found and reliably reproduced standalone this
+    session; fix deferred to a dedicated future session.** No code
+    change this session (investigation only).
+    - Followed up on `L407`'s own closing handoff (pivot from "memory
+      leak" to "resource-table exhaustion" as the next hypothesis for
+      `part2`'s `DeviceLost`/`part1`'s `SIGSEGV`).
+    - Analyzed `part2`'s finished run (536,411 cases, 122,004
+      `DeviceLost`, 22.74%) programmatically: found 93% of all
+      non-`NotSupported` results *after* the first `DeviceLost`
+      occurrence (`dEQP-VK.draw.renderpass.point_size_clamp.point_size_clamp_max`,
+      caselist line 25048) were also `DeviceLost` -- strong evidence of
+      a single triggering event cascading forward, not independent
+      per-case resource exhaustion.
+    - Ruled out a per-case logic bug (trigger case passes cleanly in
+      isolation) and simple deterministic case-position exhaustion (a
+      full, same-order replay of the 25,048-case lead-up on a single
+      device does not reproduce under normal timing).
+    - Found `Sync.cpp`/`Sync.h`'s `getSafetyNetTimeoutNs()` (default
+      5s, overridable via `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) clamps
+      every blocking wait (`Fence::wait`, semaphore waits,
+      `QueueExecutor::waitIdle`) -- a software TDR analogue. Shrinking
+      it to 1ms and replaying the full lead-up caselist reliably
+      produced a crash: an LLVM `ValueHandleBase` list-corruption
+      assertion in a *subsequent* pipeline's JIT compile, immediately
+      after a `vkWaitForFences` call returned `VK_TIMEOUT`.
+    - A core-dump backtrace of this crash showed the main/host thread
+      corrupting `ScalarEvolution`/LLVM-IR structures while JIT-
+      compiling a new pipeline, concurrent with a `QueueExecutor`
+      worker thread still executing an *earlier* submission's software
+      rasterization -- consistent with heap corruption from a freed-
+      and-reused allocation, not a live two-compiler data race (ruled
+      out separately: `JITEngine::dispatch` only runs already-compiled
+      code, no lazy JIT-at-dispatch-time).
+    - **Built a clean, minimal, 100%-reproducing standalone C++
+      reproducer** (`leakprobe_uaf.cpp`, not part of the feme tree,
+      persisted to the session workspace), requiring **no CTS, no
+      artificial timeout shrink, and no multi-hour contention at
+      all**: create device/pipeline/render-pass/framebuffer, submit
+      one draw against a 2048x2048 framebuffer (large enough that
+      software rasterization takes measurably long), then
+      **immediately** (no wait at all -- fully legal per the Vulkan
+      spec) `vkDestroyPipeline`/`vkDestroyRenderPass`/
+      `vkDestroyFramebuffer`/etc., only calling `vkQueueWaitIdle` at
+      the very end of each iteration, long after every resource the
+      submission referenced has already been freed from the host
+      thread's point of view.
+    - This crashes within the first few iterations, **every single
+      run**, with `std::length_error` thrown from `vector::reserve`
+      deep inside `buildRenderTargetBinding` (an internal helper
+      reading a freed `RenderPass`/`Framebuffer`'s now-garbage member
+      data). A core-dump backtrace conclusively confirms: the crashing
+      thread is the `QueueExecutor` worker thread itself, executing
+      `executeCommandBuffer` -> `executeCommandsInto` ->
+      `buildRenderTargetBinding` against the already-destroyed
+      objects, **while the main thread is correctly, harmlessly
+      blocked in `vkQueueWaitIdle`/`QueueExecutor::waitIdle()` the
+      entire time** -- proof this is a genuine use-after-free race
+      between two threads, not a single-threaded logic bug.
+    - **Root cause:** since the async `QueueExecutor` redesign
+      (`L228(h)/(i)`), `vkQueueSubmit`/`vkQueueSubmit2` only enqueue a
+      submission and return immediately; execution happens later, on a
+      dedicated worker thread. Every `vkCmd*` recording call
+      (`vkCmdBindPipeline`, `vkCmdBeginRenderPass`, etc.) captures the
+      resources it references as **raw pointers**
+      (`CommandBuffer::bindPipeline(vulkan::Pipeline*)`,
+      `CommandBuffer.h:432`, and equivalently for
+      `RenderPass`/`Framebuffer`), with **no shared-ownership/keep-
+      alive mechanism**. Every `vkDestroy*` entry point (confirmed:
+      `vkDestroyPipeline`, `Pipeline.cpp:883-891`) frees its object
+      **immediately**, with **zero synchronization** against any
+      `QueueExecutor` task that might still be executing a command
+      buffer referencing it. This is exactly the shape of bug that
+      only an async-execution redesign (vs. the prior synchronous
+      `vkQueueSubmit`) can introduce, since previously there was never
+      a legal window for an application to destroy a still-in-use
+      resource.
+    - This also conclusively confirms the safety-net-timeout-triggered
+      crash discovered earlier this investigation was the **same**
+      root cause manifesting via a *different* trigger path (a timed-
+      out wait causing CTS's own test harness to destroy the previous
+      case's objects early, rather than this probe's direct
+      immediate-destroy) -- not a separate bug.
+    - **Not yet scoped:** whether the same raw-pointer-capture-with-
+      no-keep-alive pattern also affects other `vkCmd*`-bound resource
+      types (descriptor sets, images, buffers) beyond the two types
+      (`Pipeline`, `RenderPass`/`Framebuffer`) directly proven here --
+      needs an audit in the dedicated fix session.
+    - **Recommended fix direction** (not attempted this session,
+      correctly scoped as a dedicated architectural session given its
+      project-wide scope across the whole bound-resource object
+      model, per this project's own precedent for similarly deep
+      issues, e.g. `L375`): give every FeMe object type referenced by
+      a recorded command buffer some form of shared-ownership/keep-
+      alive tracking across the submit-to-execute window -- e.g.
+      `CommandBuffer` capturing `std::shared_ptr`-style references (or
+      an equivalent intrusive refcount) to every resource it records a
+      reference to, with the `QueueExecutor` task closure holding
+      those references alive for the duration of its own execution,
+      and `vkDestroy*` entry points deferring the actual free until
+      the last such reference drops -- mirroring the retain/release
+      pattern `L398` already established for `Fence` lifetime
+      (`Fence::retain`/`release`) and the existing `shared_ptr`-based
+      artifact ownership in `PipelineCache.h`, generalized to the
+      whole bound-resource object model.
+    - No code change this session -- filed as `L409` in `Roadmap.md`.
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- investigation only, no feature/extension-surface
+      change.
+
 ## Complete group accounting
 
 
