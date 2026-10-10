@@ -18,6 +18,7 @@
 #ifndef FEME_LIB_VULKAN_BUFFER_H
 #define FEME_LIB_VULKAN_BUFFER_H
 
+#include "ExecutionLifetime.h"
 #include "Format.h"
 #include "Memory.h"
 
@@ -30,7 +31,16 @@
 namespace feme::vulkan {
 
 /// A `VkBuffer`. Not dispatchable.
-class Buffer {
+///
+/// (Roadmap L410) Inherits `PendingExecutionRefCounted` (see its own file
+/// comment, `ExecutionLifetime.h`) for the same reason `Pipeline`/
+/// `RenderPass`/`Framebuffer` do (`L409`): `RecordedCommand` captures every
+/// `Buffer *` it references (`IndirectBuffer`/`CountBuffer`/`SrcBuffer`/
+/// `DstBuffer`/`VertexBuffers`/`XfbBuffers`, `CommandBuffer.h`) as a raw
+/// pointer with no keep-alive, so a `vkDestroyBuffer` call made right
+/// after `vkQueueSubmit` returns, with no wait at all, can otherwise race
+/// a still-pending `QueueExecutor` task's own read of it.
+class Buffer : public PendingExecutionRefCounted {
 public:
   Buffer(VkDeviceSize Size, VkBufferUsageFlags Usage)
       : Size(Size), Usage(Usage) {}
