@@ -1692,6 +1692,62 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
       change needed -- investigation only.
 
+43. **`L407` substantially narrowed this session via a standalone
+    leak-probe tool, bypassing `deqp-vk` entirely.** Not fixed --
+    root-cause isolated to a specific, size-quantified cache, not yet
+    decided whether that itself is a bug or just needs retuning. No
+    code change.
+    - Built a throwaway C++ program (`/tmp/leakprobe*.cpp`, direct
+      Vulkan-loader client, not part of the feme tree) replicating
+      CTS's own per-test-case resource lifecycle (image, render pass,
+      framebuffer, shader modules, pipeline: create, one draw, full
+      destroy) in a tight loop against the real FeMe ICD, sampling
+      `/proc/self/status`'s `VmRSS` every N iterations -- entirely
+      skipping `deqp-vk`'s own test-tree-construction overhead, which
+      a prior `massif` attempt this session found dominates any
+      small-scale profiling run.
+    - Three variants -- plain single-attachment (200,000 iterations),
+      4-attachment `dualSrcBlend`-enabled with blend factor/op cycled
+      every iteration (300,000 iterations), and descriptor-pool/set
+      plus uniform buffer (300,000 iterations) -- all three held
+      perfectly flat RSS after an initial warm-up: **no leak in the
+      basic create-destroy cycle when the same shader content is
+      reused every iteration.**
+    - A fourth variant that patches one SPIR-V constant word so every
+      iteration's fragment shader is byte-for-byte unique (mirroring
+      how real CTS cases actually differ from each other) immediately
+      reproduced large, unmistakable growth: ~2.6 MB RSS per
+      iteration, climbing from ~25 MB to ~740 MB over the first
+      ~250-300 iterations, then plateauing almost exactly at
+      `Device::ImplicitCache`'s `ImplicitPipelineCacheMaxEntries = 256`
+      cap (`feme/lib/Vulkan/Objects.h`). Each cached compiled-pipeline
+      artifact (`PipelineCache.h`'s `CachedPipelineArtifact`) costs
+      roughly 2.6-2.9 MB; the implicit per-device cache retains up to
+      256 of them (~740 MB) whenever pipeline/shader diversity is high
+      enough that every create is a cache miss -- exactly the shape of
+      a CTS state-space-sweeping family like `dual_source`/`stencil`.
+    - A much smaller residual creep (~2.5 KB/iteration, continuing
+      past the 256-entry plateau out to 3,000 iterations) was also
+      observed -- the same order of magnitude as `part2`'s own
+      previously-measured ~4 KB/case average, and not yet isolated to
+      a specific allocation site.
+    - This is a bounded cache, not a classic unbounded leak, by design
+      (`PipelineCache.h`'s own comment notes a live `VkPipeline` holds
+      its own `shared_ptr` to its artifact, so table eviction alone
+      cannot free a still-in-use pipeline's memory) -- but at ~740 MB
+      per device, with real CTS runs creating many distinct `VkDevice`
+      instances over hundreds of thousands of cases, this is a fully
+      plausible, now size-quantified explanation for both `part2`'s
+      climbing `DeviceLost` rate and `part1`'s eventual resource-
+      exhaustion `SIGSEGV`.
+    - No code change this session -- updated `L407` in `Roadmap.md`
+      with concrete next steps: confirm whether `vkDestroyDevice`
+      actually releases the full ~740 MB, decide whether 256
+      entries/~740 MB needs a lower default, and isolate the smaller
+      ~2.5 KB/iteration residual creep separately.
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- investigation only.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
