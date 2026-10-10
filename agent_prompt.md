@@ -60,34 +60,27 @@ file.
 
 # Request
 
-The last session lost internet connectivity, There may be some partial work
-committeed and in git stashes.
-
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Check `part1` (PID 7228), `part2` (PID 14336), and the
-   stencil sweep (PID 28827) again:
-   ```
-   ps aux | grep deqp-vk
-   grep -c "^Test case" /tmp/part1_repro2/stdout.log /tmp/part2_repro_fixed2/stdout.log /tmp/stencil_sweep/stdout.log
-   ```
-   If the stencil sweep finished with 0 Fail/0 DeviceLost, note it in
-   `VulkanCTSReport.md` as another already-fixed-by-`L398`-`L405` cluster,
-   no code change needed.
-2. **(~1 day, dedicated session)** `L406`: port `rrRasterizer.cpp`'s
-   `toSubpixelCoord`/fixed-point edge-function logic into `Executor.cpp`'s
-   triangle coverage test, parameterized on the existing
-   `LineSubPixelPrecisionBits` constant. Build and unit-test it standalone
-   first (axis-aligned, 45-degree, and this session's own triangle-24/
-   pixel-`(8,0)` near-tie as regression cases) before wiring it into
-   `executeDraws`. Once landed, close `L402` by re-running its 36-case
-   cluster plus the broader `renderpasses.*.suballocation.*` family.
-3. **(~1 day, dedicated session)** `part1`'s SIGSEGV — still unreproduced
-   across many sessions now; last known (unconfirmed) trigger case:
-   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.
-   transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
-4. Drop from future hand-offs — already fully resolved, no action needed:
-   `L375` (struck through 3 sessions ago), `LLVM_EXTERNAL_PROJECTS=OffloadTest`
-   cache item (resolved via `L380`), the roadmap strikethrough cleanup pass
-   (done this session, 76 rows fixed).
+1. **(~1 day, dedicated session)** `part1`'s SIGSEGV. Still running,
+   still hasn't crashed again across many sessions now. Last known
+   (unconfirmed) trigger case:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
+   Consider: is a multi-day-running unattended sweep actually likely to
+   reproduce this, or should the next session build a direct,
+   isolated single-case reproducer instead of waiting on the sweep?
+2. **(~1 day, dedicated session)** `part2`'s repeated `DeviceLost` in
+   `pipeline.{fast_linked_library,monolithic}.{stencil,blend.dual_source}.*`.
+   Several distinct sub-areas now (stencil `s8_uint`/`d32_sfloat_s8_uint`
+   states, dual-source blend state combinations) — worth checking if
+   these share one root cause (e.g. a resource/descriptor exhaustion
+   from the sheer combinatorial state-permutation count in this test
+   family, not a per-state bug) before chasing any single case.
+3. **(~30 min)** `part1`/`part2` are still running (364k/555k and
+   529k/536k cases respectively, last checked). Check them again next
+   session — either could finish or crash with new information.
+4. Drop from future hand-offs — already fully resolved: `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
+   strikethrough cleanup pass, `L402`/`L406` (this session),
+   `pipeline_library.stencil` verification (this session).
