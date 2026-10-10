@@ -67,8 +67,15 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(
     VkDevice, VkBuffer buffer, const VkAllocationCallbacks *pAllocator) {
   if (!buffer)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Buffer>(buffer));
+  Buffer *Buf = fromHandle<Buffer>(buffer);
+  // (Roadmap L410) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`, `L409`) -- defers freeing `Buf` until every
+  // `QueueExecutor` task that ever referenced it (as an indirect-draw
+  // buffer, a copy source/destination, a bound vertex buffer, ...) has
+  // finished running.
+  if (!Buf->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(Buf);
 }
 
 VKAPI_ATTR void VKAPI_CALL
