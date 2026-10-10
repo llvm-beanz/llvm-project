@@ -63,19 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2 hours)** Build the device-recreate variant of the leak probe
-   (item 1 above) — this is the single most informative next
-   experiment: it directly answers "is this a real leak or just an
-   expensive-but-correct cache."
-2. **(~1 day)** If device-recreate does NOT free the memory: that's a
-   genuine bug in `Device`/`PipelineCache` teardown — find it with
-   source inspection now that the exact object type and rough size are
-   known, no more blind leak-hunting needed.
-3. **(~1 day)** If device-recreate DOES free the memory cleanly: the
-   740 MB-per-device cache is a real but "working as designed" memory
-   cost; shift focus to the smaller ~2.5 KB/iteration residual creep
-   (item 2 above) as the more likely explanation for `part2`'s
-   behavior, and consider whether `ImplicitPipelineCacheMaxEntries`
-   should have a smaller default for CTS-scale workloads.
-4. **(~5 min)** Check `part1` (PID 7228) again — still no crash as of
-   this session's end.
+1. **(~5 min)** Check `part1` (PID 7228, 377,991+ cases, no crash) again
+   next session. It is the longest-running unresolved lead in this
+   investigation — either it finally crashes with a real stack trace, or
+   it keeps running and becomes less and less likely to ever reproduce.
+2. **(~1 day, dedicated session)** Since memory leaks are now ruled out,
+   pivot the stability investigation to **resource-table/descriptor-count
+   exhaustion**: look for any fixed-size handle table, descriptor pool, or
+   similar bounded structure in FeMe's object-tracking code
+   (`Objects.h`/`Device.h`/descriptor-pool allocation path) that could run
+   out or wrap around after hundreds of thousands of distinct
+   create/destroy cycles, producing `DEVICE_LOST` or a null-deref
+   `SIGSEGV` instead of a clean `VK_ERROR_*` return. This is the next-most-
+   likely mechanism now that the obvious memory-growth hypothesis is shut.
+3. **(~30 min)** `part2`'s own caselist run (`pipeline.{fast_linked_library,
+   monolithic}.{stencil,blend.dual_source}.*` `DeviceLost`) — re-check its
+   current progress/case count; if it has finished, grab the final
+   DeviceLost percentage for comparison against earlier mid-run snapshots.
+4. **(~1 day)** If resource-table exhaustion doesn't pan out either:
+   consider that `DeviceLost`/`SIGSEGV` might be a genuine logic bug in a
+   specific high-combinatorial-state test family (stencil/dual-source
+   blend state permutations) rather than a resource-accounting problem at
+   all — would need case-by-case narrowing within `part2`'s caselist,
+   similar to the narrowing approach that worked for `L402`/`L406`.
