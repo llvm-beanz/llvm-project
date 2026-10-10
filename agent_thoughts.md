@@ -118238,3 +118238,136 @@ cause is still unknown.
    blend state permutations) rather than a resource-accounting problem at
    all — would need case-by-case narrowing within `part2`'s caselist,
    similar to the narrowing approach that worked for `L402`/`L406`.
+
+# Session: L409 FOUND — DeviceLost/SIGSEGV root cause is a real use-after-free, not a resource leak (2026-10-11)
+
+Device check: `FeMe CPU Vulkan Device` confirmed (needs explicit
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json` — the
+shell's ambient `VK_ICD_FILENAMES` points at Mesa Lavapipe by default, known
+quirk, noted in multiple prior sessions).
+
+## The big finding: root cause found, reproduced cleanly, not yet fixed
+
+Last session's handoff said "pivot to resource-table exhaustion." That
+hypothesis is now **superseded** — the real cause is a genuine use-after-free,
+found and proven with a 20-line standalone reproducer.
+
+**What's broken:** `vkQueueSubmit` only enqueues work onto a background
+thread and returns immediately (the async `QueueExecutor` design, `L228(h)/(i)`).
+`vkCmdBindPipeline`/`vkCmdBeginRenderPass` record raw pointers to
+`Pipeline`/`RenderPass`/`Framebuffer` with no keep-alive reference. The
+matching `vkDestroy*` calls free that memory **immediately**, with zero
+synchronization against the background thread. An app that submits a draw
+and destroys the pipeline right away (fully legal — the spec only requires
+keeping the *command buffer* alive, not its referenced resources) races the
+background thread's own in-flight read of that same freed memory.
+
+**How this was proven, step by step:**
+1. Found `part2` (the DeviceLost sweep) had finished: 536,411 cases,
+   122,004 `DeviceLost` (22.74%).
+2. Parsed its log programmatically: 93% of all non-`NotSupported` results
+   *after* the first `DeviceLost` were also `DeviceLost` — a cascade from
+   one trigger, not independent per-case failures.
+3. First trigger case passes standalone; replaying the full 25,048-case
+   lead-up at normal speed does **not** reproduce it (race window too
+   narrow without contention).
+4. Shrunk `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` (the blocking-wait TDR clamp,
+   `Sync.h`) from its 5s default to 1ms, forcing the race window open.
+   Replaying the lead-up now crashes: an LLVM `ValueHandleBase` assertion
+   mid-JIT-compile, right after a `vkWaitForFences` timeout.
+5. Core-dump backtrace of that crash showed a background `QueueExecutor`
+   thread still mid-rasterization for an *earlier* submission while the
+   main thread JIT-compiled a *new* pipeline — consistent with freed
+   memory being reused, not a live two-compiler race (`JITEngine::dispatch`
+   only runs already-compiled code, confirmed no lazy-JIT-on-dispatch path).
+6. Built a **clean, minimal, always-reproduces, no-CTS-needed** standalone
+   probe (`leakprobe_uaf.cpp`, persisted to this session's workspace):
+   submit one draw against a 2048×2048 framebuffer, immediately destroy
+   every resource it references with zero wait, only call
+   `vkQueueWaitIdle` at the very end. **Crashes every run, within the
+   first few iterations**, `std::length_error` from `vector::reserve`
+   inside `buildRenderTargetBinding`, reading freed `RenderPass`/
+   `Framebuffer` memory.
+7. Core dump of *that* crash is the smoking gun: the crashing thread is
+   the `QueueExecutor` worker itself, mid-execution against freed objects,
+   while the main thread sits harmlessly blocked in `vkQueueWaitIdle` —
+   definitive proof of a cross-thread use-after-free, not a logic bug.
+
+This also explains why `part1`'s `SIGSEGV` has been so hard to pin down for
+so many sessions: it needs the right timing/memory-reuse alignment to crash
+outright rather than just corrupt enough state to produce `DeviceLost`.
+
+## What I did NOT do this session
+
+Did not attempt a fix. The correct fix (generalizing `Fence`'s existing
+retain/release lifetime pattern, from `L398`, to the whole bound-resource
+object model — `Pipeline`, `RenderPass`, `Framebuffer`, and almost
+certainly descriptor sets/images/buffers too, not yet audited) is
+architecturally wide. Per this project's own precedent for similarly deep
+issues (`L375`), this is correctly scoped as its own dedicated session, not
+a bolt-on patch here.
+
+## What's committed
+
+1. `feme/docs/Roadmap.md`: new row `L409`, full root-cause writeup,
+   status `open`, explicitly cross-referencing `L407` (superseded
+   hypothesis), `L228(h)/(i)` (the redesign that introduced the race), and
+   `L398` (the template fix pattern). Commit `184c64046d38`.
+2. `feme/docs/VulkanCTSReport.md`: item 46, same finding. Commit
+   `184c64046d38` (combined with Roadmap.md).
+3. `feme/lib/Vulkan/Sync.h`: fixed a dangling "Object Lifetimes" doc
+   reference (pointed at a design-doc section that never existed) to
+   instead point at `L409`. Comment-only, no behavior change. Same commit.
+4. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+   needed — this is an internal correctness finding, not a feature/
+   extension-surface change.
+
+## Artifacts persisted to session workspace (`files/leakprobe/`)
+
+- `leakprobe_uaf.cpp` — the standalone reproducer, ready to compile and run
+  again next session (`g++ -std=c++17 -O2 leakprobe_uaf.cpp -o leakprobe_uaf -lvulkan`,
+  then run with `VK_ICD_FILENAMES` pointed at the FeMe ICD and
+  `ulimit -c unlimited` set in the same shell invocation if you want a core
+  dump).
+- `uaf_crash_backtrace.log` — the definitive `gdb thread apply all bt`
+  output proving the cross-thread UAF.
+
+## part1 status
+
+Still running cleanly, PID 7228, no crash this session either. Given `L409`
+now explains the *mechanism* that most likely produces `part1`'s `SIGSEGV`
+(timing/memory-reuse-dependent, hence rare), I'd now treat "keep watching
+`part1`" as lower-value than "fix `L409`" — a fix should make `part1`'s
+crash stop reproducing entirely, which is a cleaner validation signal than
+waiting for it to crash again un-instrumented.
+
+## Next steps, ranked
+
+1. **(~1 day, dedicated session)** Fix `L409`. Start by generalizing
+   `Fence`'s retain/release pattern (`L398`, `Sync.cpp`) to `Pipeline`
+   first (the type proven here), using `leakprobe_uaf.cpp` as the
+   regression test (add it as a proper gtest-based unit test once the fix
+   lands, not just a standalone throwaway). Confirm the exact same crash
+   reproduces in a current `check-feme`-style unit test shape before
+   fixing, then confirm it's gone after.
+2. **(~2-4 hours after the above)** Audit whether `RenderPass`,
+   `Framebuffer`, descriptor sets, images, and buffers share the same raw-
+   pointer-capture-with-no-keep-alive pattern (only `Pipeline` and the
+   render-pass/framebuffer pair are directly proven so far). Fix each one
+   found, following the same retain/release template.
+3. **(~30 min, after the fix lands)** Re-run `part2`'s full caselist
+   (`/tmp/feme_full_caselist_part2` or similar) and confirm the
+   `DeviceLost` rate drops from 22.74% toward 0%. This is the real
+   acceptance criterion for closing `L409`.
+4. **(~5 min)** Check `part1` (PID 7228) one more time before starting the
+   `L409` fix session — if it's finally crashed, grab the backtrace before
+   doing anything else; it may now be directly explainable by `L409`
+   without needing further investigation.
+5. Drop from future hand-offs — fully resolved, stop citing: `L407`
+   (closed, not a leak — see 3 sessions ago), the "resource-table
+   exhaustion" hypothesis from the last handoff (superseded by this
+   session's actual finding), `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest`
+   (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`,
+   `pipeline_library.stencil` verification, `part1`'s
+   `use_after_copy.a8b8g8r8_srgb_pack32...` case (confirmed not a
+   deterministic trigger).
