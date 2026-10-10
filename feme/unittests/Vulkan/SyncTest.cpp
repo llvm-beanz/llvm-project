@@ -10,8 +10,10 @@
 #include "Sync.h"
 #include "CommandBuffer.h"
 #include "EntryPoints.h"
+#include "ExecutionLifetime.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "Pipeline.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -214,6 +216,66 @@ TEST(FenceLifetimeTest, DestroyWithNoPendingSignalFreesImmediately) {
   auto *F = new Fence(/*Signaled=*/false);
   EXPECT_TRUE(F->requestDestroy(nullptr));
   delete F;
+}
+
+// Roadmap L409: `PendingExecutionRefCounted` is `Fence`'s own
+// `L398`-era retain/release/deferred-destroy pattern (immediately above)
+// generalized to `Pipeline`/`RenderPass`/`Framebuffer` -- applied to
+// `Pipeline` here (the type the standalone `leakprobe_uaf.cpp` reproducer
+// proved vulnerable), tested directly through the mixin's own API,
+// deterministically, for the same reason the `FenceLifetimeTest`s above
+// do: no real thread scheduling needed to exercise every ordering.
+TEST(ExecutionLifetimeTest, DestroyDefersUntilRetainedTaskReleases) {
+  auto *P = new PendingExecutionRefCounted();
+
+  // `vkQueueSubmit`'s retain-sweep, before enqueuing the submission task.
+  P->retainForExecution();
+
+  // `vkDestroyPipeline` arrives first (the hazardous ordering): must
+  // defer, not free `P` here.
+  EXPECT_FALSE(P->requestDestroy(nullptr));
+
+  // The submission task finishes running (whether it actually executed
+  // the command buffer, failed, or skipped because the device was
+  // already lost -- all three call `releaseAndTakeDeferredDestroy`
+  // exactly once, same as here): releasing now reports the deferred
+  // destroy is due.
+  const VkAllocationCallbacks *Callbacks =
+      reinterpret_cast<const VkAllocationCallbacks *>(
+          static_cast<uintptr_t>(1));
+  EXPECT_TRUE(P->releaseAndTakeDeferredDestroy(Callbacks));
+  EXPECT_EQ(Callbacks, nullptr); // The `nullptr` given to `requestDestroy`.
+
+  delete P;
+}
+
+// The ordinary case -- no `QueueExecutor` task ever enqueued for this
+// object at all (e.g. a pipeline created and destroyed without ever being
+// bound in a submitted command buffer) -- must still free it immediately.
+TEST(ExecutionLifetimeTest, DestroyWithNoPendingTasksFreesImmediately) {
+  auto *P = new PendingExecutionRefCounted();
+  EXPECT_TRUE(P->requestDestroy(nullptr));
+  delete P;
+}
+
+// Multiple overlapping tasks (e.g. a pipeline bound in two submissions
+// still in flight at once): the object must not be freed until *every*
+// one of them has released it, not just the first.
+TEST(ExecutionLifetimeTest, DestroyDefersUntilAllRetainedTasksRelease) {
+  auto *P = new PendingExecutionRefCounted();
+  P->retainForExecution();
+  P->retainForExecution();
+  EXPECT_FALSE(P->requestDestroy(nullptr));
+
+  const VkAllocationCallbacks *Callbacks = nullptr;
+  // The first of the two tasks to finish must not yet see a deferred
+  // destroy: the second task might still be reading `P`.
+  EXPECT_FALSE(P->releaseAndTakeDeferredDestroy(Callbacks));
+  // Only once the second (last) task releases does the deferred destroy
+  // become due.
+  EXPECT_TRUE(P->releaseAndTakeDeferredDestroy(Callbacks));
+
+  delete P;
 }
 
 // The V1 milestone's own end-to-end scenario: submit a recorded empty
@@ -1123,4 +1185,66 @@ TEST_F(SyncTest, StressFenceCreateSubmitWaitDestroyNoGlobalWait) {
   for (auto &Th : Threads)
     Th.join();
   EXPECT_FALSE(Failed.load());
+}
+
+// Roadmap L409: the real, end-to-end scenario `leakprobe_uaf.cpp` first
+// proved crashes without this fix -- submit a dispatch bound to a
+// dedicated pipeline, then *immediately* destroy that pipeline, with no
+// wait at all in between (spec-legal: the application only has to keep
+// the command buffer alive until the submission completes, not the
+// resources recorded into it). Before this fix, the `QueueExecutor`
+// worker thread's own still-pending `executeCommandBuffer` call read the
+// `Pipeline` through `CommandBuffer.cpp`'s raw `Cmd.Pipeline` right after
+// this test's `vkDestroyPipeline` had already freed it -- a real,
+// nondeterministically-timed use-after-free that this test cannot force
+// to manifest on every run, but which this test's pipeline is retained
+// across (`retainForExecution`/`requestDestroy`) deterministically
+// regardless of scheduling, so this is a direct regression test even
+// though the crash itself was timing-dependent.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds) {
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  VkPipelineLayout TestLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &TestLayout),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = Module;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = TestLayout;
+  VkPipeline TestPipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &TestPipeline),
+            VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdBindPipeline(TestCmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, TestPipeline);
+  vkCmdDispatch(TestCmdBuf, 2, 2, 2);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: destroy everything the just-enqueued
+  // submission references with no wait at all. Pre-fix, this raced the
+  // `QueueExecutor` worker thread's own read of `TestPipeline`.
+  vkDestroyPipeline(Device, TestPipeline, nullptr);
+  vkDestroyPipelineLayout(Device, TestLayout, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed `TestPipeline`.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
