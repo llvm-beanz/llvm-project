@@ -117864,3 +117864,88 @@ wiring it into the live path — `L406` should do the same.
    `L375` (struck through 3 sessions ago), `LLVM_EXTERNAL_PROJECTS=OffloadTest`
    cache item (resolved via `L380`), the roadmap strikethrough cleanup pass
    (done this session, 76 rows fixed).
+
+# Session: L406 landed, closing L402; stashed WIP from a disconnected session recovered (2026-10-10)
+
+**What's done.** `L406` is fixed and committed. `L402` is closed. Both
+struck through in `Roadmap.md`.
+
+**Starting state this session:** the previous session lost internet
+mid-work. Found 3 `git stash` entries on resume:
+1. `stash@{0}` — the actual in-progress `Executor.cpp` fix for `L406`
+   (real, recovered, see below).
+2. `stash@{1}` — a `Roadmap.md` strikethrough diff. Checked: every ID
+   it touched was already struck through in the committed history
+   (`0ca0c6f50642`). Stale duplicate, dropped.
+3. `stash@{2}` — deletion of `output.ll`, a stray debug artifact
+   (`/Users/cbieneman/...` path embedded in it, not from this repo).
+   Applied and committed separately (`a321789824ca`) since it's an
+   unrelated cleanup.
+
+Lesson for future sessions: **always run `git stash list` on resume**,
+not just `git status`. Uncommitted work survives a lost connection only
+in the stash, not the working tree. Picture a worker who can't WIP
+elsewhere.
+
+**The `L406` fix itself**, once recovered from the stash:
+1. Root cause (found before the disconnect, confirmed again this
+   session): `Executor.cpp`'s coverage test now computes `E0`/`E1`/`E2`
+   via the new `fixedPointEdgeFn` (quantized coordinates), making them
+   `(1 << Bits)^2`-times larger than before — but the stipple test's
+   `B0 = E0 / Area` still divided by the *old*, unquantized float
+   `Area`. Scale mismatch, silently wrong barycentric weights, wrong
+   `ArcLength` interpolation, wrong stipple-pattern bit.
+2. Fix: compute `FixedArea` (same `fixedPointEdgeFn`, same quantized
+   scale) and divide by that instead, only when a stipple test is
+   actually needed.
+3. Verified `FeMeGraphicsTests`: 414/414 (was 2 failing before the
+   fix: `RendersAStippledLine`, `BresenhamStippleCounterCountsFragmentsNotDistance`).
+4. Verified `check-feme`: 3620/3624. The 1 failure
+   (`SyncTest.TimelineSemaphoreWaitBlocksUntilHostSignal`) is a timing
+   flake under CPU contention from 3 concurrent CTS sweeps — confirmed
+   passing 5/5 in isolation, unrelated to this change.
+5. Verified `L402`'s own 36-case cluster: 36/36 Pass (was 36/36 Fail).
+6. Verified the broader `renderpasses.*.suballocation.*` family
+   (30,794 cases, every other test sharing this coverage-test code
+   path): 0 Fail / 0 DeviceLost / 0 Crash. Zero regressions.
+
+**Commits this session** (in order):
+1. `a321789824ca` — remove stray `output.ll` (stashed cleanup from a
+   prior disconnected session, unrelated to `L406`).
+2. `e63885620eff` — wire `fixedPointEdgeFn` into the coverage test,
+   including the `FixedArea` stipple-test fix.
+3. `2cb9ac6271eb` — `Roadmap.md`/`VulkanCTSReport.md`: strike through
+   `L402`/`L406`, document the fix and its verification (item 40).
+4. `6bc2e44b04d1` — record the `pipeline_library.stencil` verification
+   sweep's clean result (41,770 Pass / 0 Fail / 16,708 NotSupported),
+   carried over from a prior session, finished this session.
+
+**Also checked, no action needed:** the device check
+(`vulkaninfo --summary`) confirmed `FeMe CPU Vulkan Device` at both the
+start and throughout this session. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed no change needed — internal
+precision-correctness fix only.
+
+## Next steps
+
+1. **(~1 day, dedicated session)** `part1`'s SIGSEGV. Still running,
+   still hasn't crashed again across many sessions now. Last known
+   (unconfirmed) trigger case:
+   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
+   Consider: is a multi-day-running unattended sweep actually likely to
+   reproduce this, or should the next session build a direct,
+   isolated single-case reproducer instead of waiting on the sweep?
+2. **(~1 day, dedicated session)** `part2`'s repeated `DeviceLost` in
+   `pipeline.{fast_linked_library,monolithic}.{stencil,blend.dual_source}.*`.
+   Several distinct sub-areas now (stencil `s8_uint`/`d32_sfloat_s8_uint`
+   states, dual-source blend state combinations) — worth checking if
+   these share one root cause (e.g. a resource/descriptor exhaustion
+   from the sheer combinatorial state-permutation count in this test
+   family, not a per-state bug) before chasing any single case.
+3. **(~30 min)** `part1`/`part2` are still running (364k/555k and
+   529k/536k cases respectively, last checked). Check them again next
+   session — either could finish or crash with new information.
+4. Drop from future hand-offs — already fully resolved: `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
+   strikethrough cleanup pass, `L402`/`L406` (this session),
+   `pipeline_library.stencil` verification (this session).
