@@ -63,24 +63,29 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session)** `part1`'s SIGSEGV. Still running,
-   still hasn't crashed again across many sessions now. Last known
-   (unconfirmed) trigger case:
-   `dEQP-VK.api.copy_and_blit.core.use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.1024x1024x2_tq_color_att_flag_img2img_msaa`.
-   Consider: is a multi-day-running unattended sweep actually likely to
-   reproduce this, or should the next session build a direct,
-   isolated single-case reproducer instead of waiting on the sweep?
-2. **(~1 day, dedicated session)** `part2`'s repeated `DeviceLost` in
-   `pipeline.{fast_linked_library,monolithic}.{stencil,blend.dual_source}.*`.
-   Several distinct sub-areas now (stencil `s8_uint`/`d32_sfloat_s8_uint`
-   states, dual-source blend state combinations) — worth checking if
-   these share one root cause (e.g. a resource/descriptor exhaustion
-   from the sheer combinatorial state-permutation count in this test
-   family, not a per-state bug) before chasing any single case.
-3. **(~30 min)** `part1`/`part2` are still running (364k/555k and
-   529k/536k cases respectively, last checked). Check them again next
-   session — either could finish or crash with new information.
+1. **(~1 day, dedicated session)** `L407`: attach a leak detector
+   (ASan/`LeakSanitizer`, or `valgrind --tool=massif` for a growth
+   graph without ASan's slowdown) to a fresh `deqp-vk` build/run
+   against a large-but-bounded caselist — the full `dual_source`
+   family (8,078 cases, `/tmp/dual_source_all.txt` still on disk) is a
+   good target: single test family, previously confirmed to plateau in
+   RSS over its first ~125 cases in a quick, non-instrumented run, so
+   a leak detector should be able to point at the actual allocation
+   site directly instead of just watching aggregate RSS. This is a
+   fundamentally different kind of session than code-reading — plan
+   for build/tooling setup time (ASan build of FeMe + deqp-vk, or
+   getting valgrind to tolerate the ICD's JIT-generated code pages)
+   before any actual leak-hunting starts.
+2. **(~30 min, quick housekeeping)** Drop `part1`'s
+   `use_after_copy.a8b8g8r8_srgb_pack32...` case name from all future
+   handoffs — confirmed not a deterministic trigger this session (see
+   Finding 2 above). Stop citing it.
+3. **(~5 min)** Check `part1` (PID 7228, 365,862+ cases so far, no
+   crash yet) and `part2` (PID 14336, 531,232+ cases, 119,904
+   `DeviceLost` so far — a 22.6% rate, worth watching whether it keeps
+   climbing) again next session before starting new work — either
+   could finish or crash with new, actionable information.
 4. Drop from future hand-offs — already fully resolved: `L375`,
    `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
-   strikethrough cleanup pass, `L402`/`L406` (this session),
-   `pipeline_library.stencil` verification (this session).
+   strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.
+   stencil` verification (all prior sessions).
