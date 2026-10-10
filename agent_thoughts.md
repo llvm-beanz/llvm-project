@@ -118471,3 +118471,27 @@ waiting for it to crash again un-instrumented.
    `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
    cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
    `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+
+# Session: L410 Buffer use-after-free closed, part1's crash mystery resolved by non-occurrence (2026-10-12b)
+
+## Do this first
+1. Run `vulkaninfo --summary | grep deviceName` with `VK_ICD_FILENAMES=.../feme_icd.json` set — confirmed `FeMe CPU Vulkan Device` at session start and again after the fix, per standing instruction. No action needed, just a reminder this is mandatory every session.
+
+## What got done, in order
+1. **`part1` (PID 7228) checked — it's done, not a bug.** After 638+ CPU-minutes across many sessions of "still running, no crash," it finished cleanly: 205,359/555,650 Pass (37.0%), 37 Fail (0.0%), 350,254 NotSupported (63.0%), **0 crashes ever**. The 37 Fails are all pre-existing/unrelated (18 `api.info.*`, 12 `api.copy_and_blit.*` ASTC blit limits, 3 `binding_model.stages.*`, 2 `api.version_check.*`, 1 each `get_device_proc_addr`/`driver_properties`). **Drop `part1` entirely from future handoffs — this mystery is closed.**
+2. **Fixed `L410`'s `Buffer` scope** (the first of 6 remaining types from `L409`'s follow-up list), in the same 3-commit pattern as `L409`:
+   - Commit 1: `Buffer` inherits `PendingExecutionRefCounted` (`Buffer.h`).
+   - Commit 2: `vkDestroyBuffer` calls `requestDestroy`, only frees if true (`Buffer.cpp`).
+   - Commit 3: `Sync.cpp`'s `collectExecutionRefs`/`retainExecutionRefs`/`releaseExecutionRefs` now walk all 6 `Buffer *` fields in `RecordedCommand` (`IndirectBuffer`, `CountBuffer`, `SrcBuffer`, `DstBuffer`, `VertexBuffers`, `XfbBuffers`) — covers indirect draw/dispatch, copy/fill/update-buffer, bound index/vertex buffers, transform-feedback. New test `SyncTest.SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds`.
+3. **Docs updated**: `Roadmap.md`'s `L410` row (status: open → in progress, Buffer done, 5 types still open), `VulkanCTSReport.md` item 48 (fix + verification + `part1`'s resolution).
+4. **Verification**: `check-feme` 3626/3629 Passed, 0 Failed, 0 regressions. CTS sample (2,352 cases: 352 indirect-draw + 2,000 random transform-feedback) — **0 DeviceLost/crashes**, 6 pre-existing unrelated transform-feedback data-verification Fails (not new).
+
+## One thing worth knowing
+The `Buffer` regression test does **not** reproduce a deterministic crash pre-fix in this non-ASan build (tried 200 repeats, both with and without the fix — neither crashed). Unlike `Pipeline`'s race (`leakprobe_uaf.cpp`, crashes every time within a handful of iterations), this specific race window is apparently too tight to hit reliably without a sanitizer or a much larger/slower command. The fix itself is correct by code inspection (same pattern proven for `Pipeline`/`RenderPass`/`Framebuffer`, same raw-pointer-capture-with-no-keep-alive bug class in `RecordedCommand`), and the test still documents/locks in the intended behavior — just don't expect it to fail loudly if someone accidentally reverts the fix later. If this matters more later: a dedicated ASan build of `feme_vulkan` + a tighter, larger-buffer version of this test would likely make it deterministic, same as `leakprobe_uaf.cpp` needed for `Pipeline`.
+
+## Next steps, ranked
+1. **(~2-4 hours)** `Image`/`ImageView` next for `L410` — likely the next highest-value target (bound via descriptor writes and render-pass attachments). Same 3-commit pattern. Will need a wider `Sync.cpp` audit since images are referenced indirectly through descriptor sets, not just direct `RecordedCommand` fields — check whether `DescriptorSet`'s own bound image/buffer views need to be walked too, or whether `Image`/`ImageView`'s own fix can be scoped independently first.
+2. **(~2-4 hours each)** Then `DescriptorSet`, `Event`, `QueryPool` — one per session, same pattern.
+3. **(~30 min)** Still outstanding, lower priority: `L378(a)` (`max_sampler_lod_bias.shader_bias` pixel bug) and the 4 `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session — both pixel-correctness issues, unrelated to the UAF work, use `--deqp-log-images=enable` + golden-image diff for both.
+4. **(~30 min)** The 37 new `part1` Fails (api.info/copy_and_blit/binding_model) are a new, low-priority, not-yet-filed finding — worth a roadmap entry if a future session has spare time, but not urgent (pre-existing feature-consistency/ASTC-blit-limit issues, not regressions).
+5. Drop from future handoffs — fully resolved, stop citing: `part1`'s crash mystery (closed this session, see above), `L409` (closed, Pipeline/RenderPass/Framebuffer fixed and verified), `L407`, the "resource-table exhaustion" hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
