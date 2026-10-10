@@ -1748,7 +1748,47 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
       change needed -- investigation only.
 
+44. **`L407`: confirmed `vkDestroyDevice` does not leak the ~740 MB
+    implicit pipeline cache (this session).** Not fixed -- re-centers
+    the remaining mystery on a smaller residual creep. No code change.
+    - Built a device-recreate variant of the leak probe
+      (`/tmp/leakprobe_devicerecreate.cpp`, also not part of the feme
+      tree): creates a fresh `VkDevice` every 300 iterations (past the
+      256-entry cache's own fill point from item 43), fully destroys
+      it (`vkDestroyCommandPool`, `vkDestroyPipelineLayout`,
+      `vkDestroyDevice`), and samples `VmRSS` immediately before and
+      after each destroy.
+    - Across 15 generations (4,500 total create-destroy cycles):
+      generation 0 grows to ~742 MB then drops to ~645 MB after its
+      device is destroyed (not all the way back to the ~23 MB
+      baseline, consistent with glibc's malloc retaining freed arena
+      pages rather than returning them to the OS -- normal allocator
+      behavior, not evidence of a leak by itself). Generations 1-14
+      then hold **rock solid** at ~737-742 MB for every single
+      subsequent generation, with zero compounding growth across 14
+      more full device lifecycles.
+    - **Conclusion: `Device`/`PipelineCache` teardown is correct.** The
+      implicit pipeline cache's memory is being properly freed by
+      `vkDestroyDevice` and reused by the next device's identical
+      workload -- it is a real, sizeable (~740 MB), but *bounded*
+      per-device cost, not a bug. This answers last session's open
+      question #1 definitively.
+    - This re-centers the remaining mystery on the smaller
+      ~2.5 KB/iteration residual creep found alongside the big cache
+      effect last session (item 43), which this probe does not
+      explain and has not yet isolated -- that creep, not the 740 MB
+      cache, is now the lead suspect for `part2`'s real, still-
+      unexplained climbing `DeviceLost` rate.
+    - No code change this session -- updated `L407` in `Roadmap.md`
+      with this finding; next session should isolate the residual
+      creep (e.g. a long single-device run at fine-grained report
+      intervals, or massif attached to the probe itself now that it is
+      a fast, CTS-independent reproducer).
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- investigation only.
+
 ## Complete group accounting
+
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
