@@ -60,6 +60,9 @@ file.
 
 # Request
 
+The last session lost internet connectivity, There may be some partial work
+committeed and in git stashes.
+
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
