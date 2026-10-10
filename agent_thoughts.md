@@ -118371,3 +118371,103 @@ waiting for it to crash again un-instrumented.
    `pipeline_library.stencil` verification, `part1`'s
    `use_after_copy.a8b8g8r8_srgb_pack32...` case (confirmed not a
    deterministic trigger).
+
+# Session: L409 FIXED and CTS-verified — Pipeline/RenderPass/Framebuffer use-after-free closed, Buffer/Image/etc. scoped as L410 (2026-10-12)
+
+**Confirmed device:** `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. ✓
+
+## What I did
+
+1. Generalized `Fence`'s `L398` retain/release/deferred-destroy pattern
+   into a reusable mixin, `PendingExecutionRefCounted`
+   (new file: `feme/lib/Vulkan/ExecutionLifetime.h`).
+2. Made `Pipeline`, `RenderPass`, `Framebuffer` inherit it.
+3. Changed `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`
+   to call `requestDestroy` instead of freeing unconditionally.
+4. Changed `Sync.cpp`'s `makeSubmissionTask` to retain every
+   `Pipeline`/`RenderPass`/`Framebuffer` a submission's command buffers
+   reference (recursing into `vkCmdExecuteCommands` secondary buffers)
+   *before* the task closure is ever returned, and release them all
+   (via `llvm::scope_exit`, covering every exit path) once the closure
+   finishes running.
+5. Added 4 new regression tests (`SyncTest.cpp`): 3 deterministic
+   `ExecutionLifetimeTest` cases mirroring the existing `FenceLifetimeTest`
+   precedent, plus one real end-to-end test
+   (`SubmitThenImmediatelyDestroyPipelineWithNoWaitSucceeds`) matching
+   `leakprobe_uaf.cpp`'s exact crash scenario.
+
+## Wins — visible now
+
+- **0 `DeviceLost`** in a 5,000-case random sample of `part2`'s own
+  `pipeline.{fast_linked_library,monolithic}.{stencil,blend.dual_source}.*`
+  family (74,652 matching cases total), down from the 22.74%/22.9%
+  baseline. 61.7% Pass, 38.2% NotSupported, 0.1% Fail (4 cases, unrelated
+  pixel-mismatch bug, not UAF — see below).
+- `check-feme`: 3625/3628 Passed (+4 net new tests), 3 Unsupported,
+  **0 Failed, 0 regressions**.
+- 5 commits, each builds and passes standalone:
+  1. `1a0da4c2a7a4` — mixin + inheritance wiring (no behavior change)
+  2. `3d5df686fdff` — destroy-path guards (still no behavior change:
+     nothing retains yet)
+  3. `4350b0a8579a` — retain/release wiring in `Sync.cpp` (the fix
+     actually activates here)
+  4. `58efce6427e3` — regression tests
+  5. `cbf0a16136c6` — doc updates (`Roadmap.md`, `VulkanCTSReport.md`
+     item 47)
+- `Roadmap.md`: `L409` struck through (`done`), new `L410` entry filed
+  for the remaining audit scope.
+
+## What's still open
+
+- **`L410`** (new, filed this session): `Buffer`, `Image`, `ImageView`,
+  `DescriptorSet`, `Event`, `QueryPool` likely have the identical
+  raw-pointer-no-keep-alive vulnerability — not yet confirmed per-type,
+  not yet fixed. The mixin (`ExecutionLifetime.h`) is already written
+  and reusable; this is "apply the same template" work, not new design.
+- **4 unrelated `b10g11r11_ufloat_pack32` dual-source-blend Fail cases**
+  found during this session's verification sample — pixel mismatches,
+  not `DeviceLost`/crashes, not yet filed as their own roadmap item.
+- **`part1`** (PID 7228): still running, no crash, as of this session's
+  end. 637+ CPU-minutes so far with zero new information.
+
+## What I did NOT do this session
+
+- Did not attempt `L410` (the `Buffer`/`Image`/etc. audit) — scoped only,
+  per the "small, separately-committed changes" standing instruction.
+  Doing it properly means auditing 6 more types' `RecordedCommand`
+  fields, one at a time, which is its own multi-hour session.
+- Did not re-run `part2`'s *full* 536,411-case caselist (would take
+  hours) — a 5,000-case random sample across the exact previously-`
+  DeviceLost`-heavy sub-families was the pragmatic verification; 0/5,000
+  `DeviceLost` is strong enough evidence the fix works.
+- Did not file the 4 `b10g11r11_ufloat_pack32` blend-mismatch cases as
+  their own roadmap item — flagging here instead so the next session
+  can decide whether to open a new entry or fold it into existing
+  blend-precision tracking.
+
+## Next steps, ranked
+
+1. **(~5 min)** Check `part1` (PID 7228) again next session — still no
+   crash as of this session's end, 637+ CPU-minutes in.
+2. **(~2-4 hours)** `L410`: audit and fix `Buffer` first (the type
+   most commonly bound in every draw/dispatch, so highest-value next
+   target) — inherit `PendingExecutionRefCounted`, guard
+   `vkDestroyBuffer`, extend `Sync.cpp`'s `collectExecutionRefs` to walk
+   bound vertex/index buffers in `RecordedCommand`. Use the exact same
+   3-commit pattern this session used for `Pipeline`/`RenderPass`/
+   `Framebuffer` (mixin wiring → destroy guard → retain/release
+   activation), each independently buildable and testable.
+3. **(~2-4 hours after that)** Repeat for `Image`/`ImageView`,
+   `DescriptorSet`, `Event`, `QueryPool` — one type per session/commit
+   group, not all at once.
+4. **(~30 min)** Investigate the 4 `b10g11r11_ufloat_pack32`
+   dual-source-blend pixel-mismatch Fails found during this session's
+   verification sample. Start with `--deqp-log-images=enable` on one
+   case and diff against the golden image — same technique recommended
+   for the still-open `L378(a)` LOD-bias bug.
+5. Drop from future hand-offs — fully resolved, stop citing: `L409`
+   (closed this session, verified against CTS), `L407`, the
+   "resource-table exhaustion" hypothesis, `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
+   cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
+   `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
