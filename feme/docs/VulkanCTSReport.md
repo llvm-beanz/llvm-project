@@ -1563,6 +1563,57 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     change. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
     no change needed -- investigation only.
 
+40. **`L406` fixed this session, closing `L402`: fixed-point triangle
+    coverage test landed, matching VK-GL-CTS's reference rasterizer's
+    own advertised precision.** Added a standalone, unit-tested
+    `feme::graphics::fixedPointEdgeFn` primitive
+    (`TriangleRasterization.h`/`.cpp`, in its own commit first) that
+    mirrors `edgeFn`'s own directed-edge formula but operates on
+    `toSubpixelCoord`-quantized coordinates, reusing the existing
+    `toSubpixelCoord`/`LineSubPixelPrecisionBits` the line rasterizer's
+    `L326`-`L328` work already introduced rather than duplicating them.
+    Three new unit tests (axis-aligned interior coverage, a shared-edge
+    top-left-rule tie-break, and `L402`'s own triangle-24/pixel-`(8,0)`
+    near-tie as an explicit regression case) all passed before any
+    wiring into the live rasterizer. Wired the primitive into
+    `Executor.cpp`'s coverage test in a second commit, replacing the
+    prior `edgeFnD`-based unlimited-double-precision inside test (now
+    removed) with the fixed-point one, keeping the same
+    `isTopLeftEdge`-based tie-break logic unchanged. A full `check-feme`
+    run against this wiring (before the fix below) found 2 regressions,
+    both stipple-pattern tests (`RendersAStippledLine`,
+    `BresenhamStippleCounterCountsFragmentsNotDistance`): the stipple
+    test's barycentric-weight reconstruction (`B0`/`B1`/`B2`, used to
+    interpolate a stippled line's `ArcLength`) divided the new
+    fixed-point `E0`/`E1`/`E2` -- now `(1 << Bits)^2` times larger than
+    before, since they're computed on quantized coordinates -- by the
+    old, still-unquantized float `Area`, silently returning weights off
+    by that same scale factor. This didn't affect the coverage test
+    itself (a sign-only comparison against zero, scale-invariant), only
+    the stipple test's magnitude-sensitive interpolation. **Fix:**
+    compute a same-scale `FixedArea` (via `fixedPointEdgeFn` on the
+    triangle's own 3 vertices) once per quad, and divide by that instead
+    of the float `Area`, only when a stipple test is actually needed
+    (avoiding the extra computation on the hot non-stippled path).
+    **Verified:** `FeMeGraphicsTests` 414/414 Passed (0 regressions);
+    `check-feme` 3620/3624 Passed, 3 Unsupported, 1 Failed -- the sole
+    failure, `SyncTest.TimelineSemaphoreWaitBlocksUntilHostSignal`,
+    confirmed a pre-existing CPU-contention-sensitive timing flake (3
+    other CTS sweeps were running concurrently on the same machine),
+    reproduced passing 5/5 in isolation; `L402`'s own 36-case
+    `dEQP-VK.renderpasses.{renderpass1,renderpass2}.suballocation.
+    subpass_dependencies.late_fragment_tests.*` cluster, 36/36 Pass (0
+    Fail, closing `L402`); the broader
+    `dEQP-VK.renderpasses.*.suballocation.*` family (30,794 cases, a
+    regression check covering every other triangle-rasterization-
+    dependent test sharing this same coverage-test code path): 21,019
+    Pass / 0 Fail / 9,775 NotSupported / 0 DeviceLost / 0 Crash -- 0
+    regressions. `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed -- this only makes
+    an already-advertised `subPixelPrecisionBits` limit actually
+    honored in the triangle rasterizer (the line rasterizer already
+    honors it per `L326`-`L328`), no feature/extension-surface change.
+
 ## Complete group accounting
 
 | Group | Total | Pass | Fail | NotSupported | QW | IE | DeviceLost | Crash | Unrun | Fail delta |
