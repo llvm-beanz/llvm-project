@@ -117949,3 +117949,107 @@ precision-correctness fix only.
    `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
    strikethrough cleanup pass, `L402`/`L406` (this session),
    `pipeline_library.stencil` verification (this session).
+
+# Session: L407 filed — stability triage narrowed (not fixed): part2's DeviceLost rate traced to a likely slow memory leak, part1's suspected SIGSEGV trigger ruled out (2026-10-10)
+
+**What's done:** no code fix this session — pure investigation, filed
+as `L407`. Three concrete findings narrow the search space for the
+next dedicated session.
+
+**Starting state:** `part1` (SIGSEGV hunt) and `part2` (DeviceLost
+growth) sweeps both still running from prior sessions, unattended for
+days now. Picked up the two highest-priority handoff items (1 and 2)
+rather than just re-checking status.
+
+**Finding 1 — `part2`'s `DeviceLost` cluster is not a blend-state
+logic bug.** Pulled one failing case verbatim from `part2`'s live
+output and a 200-case contiguous batch from the exact point in its
+caselist where failures were happening. Both pass 100% in isolation
+(196/196, 5 unrelated `NotSupported`). Whatever's wrong only shows up
+inside `part2`'s own single, very-long-running process — ruling out
+"broken blend math for this state combination" as the cause.
+
+**Finding 2 — `part1`'s only previously-suspected SIGSEGV trigger case
+is cleared.** `dEQP-VK.api.copy_and_blit.core.use_after_copy.
+a8b8g8r8_srgb_pack32.transfer_dst_optimal.
+1024x1024x2_tq_color_att_flag_img2img_msaa` has been "unconfirmed" for
+many sessions now. This run's own log shows it already passed cleanly
+mid-sweep (`Pass (Pass)`), and the process kept running well past it
+without crashing. **Drop this case name from future handoffs** — it's
+not a deterministic single-case trigger.
+
+**Finding 3 — `part2`'s RSS is genuinely growing, slowly.** Sampled
+twice, ~5 minutes apart, late in its run: 2,903,640 KB -> 2,908,780 KB
+while processing ~1,200 more cases (~4 KB/case average over that
+window). At 531,232 cases processed so far this session, that's
+consistent with a real leak compounding over hundreds of thousands of
+iterations — not a one-time startup cost. This is the best candidate
+for a **single unifying root cause** for both `part1`'s crash and
+`part2`'s rising failure rate: a slow leak that, deep enough into a
+long run, causes a real allocation to fail, and FeMe maps that failure
+to `DEVICE_LOST` in one code path and (unsafely, without a null check)
+a `SIGSEGV` in another.
+
+**What I checked and ruled out as the *obvious* smoking gun:** skimmed
+`JITEngine.cpp`, `CompiledStage.cpp` (owns `orc::LLJIT` via
+`unique_ptr`, default destructor — looks correctly scoped), and
+`PipelineCache.cpp` (per-`VkPipelineCache` object, not a process
+global) for an unbounded static/global cache. Found none. The leak, if
+real, is something smaller and more mundane — a per-object cleanup gap
+somewhere in command-buffer, image, or memory-binding teardown that
+only adds up to something visible after a very large number of
+iterations.
+
+**Also tried and hit a wall:** wanted to isolate "does replaying the
+exact same case thousands of times leak, with zero case-diversity
+confound" — `deqp-vk` hard-rejects a caselist with a duplicate case
+name (`FATAL ERROR: Duplicate test case`), and
+`--deqp-test-iteration-count` only applies to tests that already
+support internal iteration counts. A real repeat-stress test needs
+either a custom driver outside `deqp-vk`'s CLI, or attaching a leak
+detector directly to one of the existing long sweeps.
+
+**Also tried and gave up on (too slow for remaining budget):** running
+the full `dual_source` family (8,078 cases) standalone to watch RSS
+over its complete run. Progress rate (~124 cases / 6.5 min) projected
+to ~7 hours to finish — would have blown the whole session's time
+budget for a single data point. Killed it after confirming RSS
+plateaued (not growing) across the first ~125 cases, which is
+consistent with Finding 1 (needs volume/diversity beyond one family to
+show up) but inconclusive on its own.
+
+**Commits this session:**
+1. `64151afea77e` — `Roadmap.md` row `L407`, `VulkanCTSReport.md` item
+   42, documenting all three findings. No code change.
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed at both start and
+end of session.
+
+## Next steps
+
+1. **(~1 day, dedicated session)** `L407`: attach a leak detector
+   (ASan/`LeakSanitizer`, or `valgrind --tool=massif` for a growth
+   graph without ASan's slowdown) to a fresh `deqp-vk` build/run
+   against a large-but-bounded caselist — the full `dual_source`
+   family (8,078 cases, `/tmp/dual_source_all.txt` still on disk) is a
+   good target: single test family, previously confirmed to plateau in
+   RSS over its first ~125 cases in a quick, non-instrumented run, so
+   a leak detector should be able to point at the actual allocation
+   site directly instead of just watching aggregate RSS. This is a
+   fundamentally different kind of session than code-reading — plan
+   for build/tooling setup time (ASan build of FeMe + deqp-vk, or
+   getting valgrind to tolerate the ICD's JIT-generated code pages)
+   before any actual leak-hunting starts.
+2. **(~30 min, quick housekeeping)** Drop `part1`'s
+   `use_after_copy.a8b8g8r8_srgb_pack32...` case name from all future
+   handoffs — confirmed not a deterministic trigger this session (see
+   Finding 2 above). Stop citing it.
+3. **(~5 min)** Check `part1` (PID 7228, 365,862+ cases so far, no
+   crash yet) and `part2` (PID 14336, 531,232+ cases, 119,904
+   `DeviceLost` so far — a 22.6% rate, worth watching whether it keeps
+   climbing) again next session before starting new work — either
+   could finish or crash with new, actionable information.
+4. Drop from future hand-offs — already fully resolved: `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
+   strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.
+   stencil` verification (all prior sessions).
