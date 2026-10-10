@@ -887,8 +887,15 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
   // Either bind point's object is freed through the common `Pipeline` base,
   // whose destructor is virtual precisely so this call site does not have to
   // know which kind it holds.
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Pipeline>(pipeline));
+  Pipeline *P = fromHandle<Pipeline>(pipeline);
+  // (Roadmap L409) If a `QueueExecutor` task enqueued for a submission
+  // referencing this pipeline (`vkCmdBindPipeline`) has not finished
+  // running yet, defer freeing `P` until it does instead of freeing
+  // memory that task might still be reading -- see
+  // `PendingExecutionRefCounted`'s own comment (`ExecutionLifetime.h`).
+  if (!P->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(P);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(

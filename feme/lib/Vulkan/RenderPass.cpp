@@ -603,8 +603,13 @@ vkDestroyRenderPass(VkDevice, VkRenderPass renderPass,
                     const VkAllocationCallbacks *pAllocator) {
   if (!renderPass)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<RenderPass>(renderPass));
+  RenderPass *RP = fromHandle<RenderPass>(renderPass);
+  // (Roadmap L409) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`) -- defers freeing `RP` until every `QueueExecutor`
+  // task that `vkCmdBeginRenderPass` ever bound it to has finished.
+  if (!RP->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(RP);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -718,8 +723,13 @@ vkDestroyFramebuffer(VkDevice, VkFramebuffer framebuffer,
                      const VkAllocationCallbacks *pAllocator) {
   if (!framebuffer)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Framebuffer>(framebuffer));
+  Framebuffer *FB = fromHandle<Framebuffer>(framebuffer);
+  // (Roadmap L409) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`) -- defers freeing `FB` until every `QueueExecutor`
+  // task that `vkCmdBeginRenderPass` ever bound it to has finished.
+  if (!FB->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(FB);
 }
 
 } // namespace feme::vulkan
