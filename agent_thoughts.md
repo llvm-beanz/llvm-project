@@ -118053,3 +118053,115 @@ end of session.
    `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
    strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.
    stencil` verification (all prior sessions).
+
+# Session: L407 root cause isolated to a 256-entry, ~740 MB implicit pipeline cache (2026-10-11)
+
+**Do this first:** read `feme/docs/Roadmap.md`'s `L407` row and
+`VulkanCTSReport.md` item 43 (just written). They have the full data;
+this is the short version.
+
+## What happened, in order
+
+1. Device check: `FeMe CPU Vulkan Device` confirmed (start and end).
+2. `part1` (PID 7228) still running clean, 373,674+ cases, no crash
+   this session either. `part2` already finished last session (not
+   re-checked — nothing new to find there).
+3. Built a standalone leak-probe tool (`/tmp/leakprobe*.cpp`, also
+   copied into this session's `files/leakprobe/` for next time) — a
+   direct Vulkan-loader C++ program, no `deqp-vk`, no LLVM build
+   system. It creates one instance/device/queue once, then loops N
+   times creating+destroying a full render target + pipeline + one
+   draw, sampling `VmRSS` every N iterations.
+4. **Finding: reusing identical shader bytes every iteration never
+   leaks.** Three variants (plain 1-attachment, 4-attachment
+   `dualSrcBlend` with blend state cycled per-iteration, descriptor-
+   set+uniform-buffer), 200k-300k iterations each — all flat after
+   warm-up.
+5. **Finding: unique shader bytes every iteration leaks hard.** Patched
+   one SPIR-V constant word per iteration so every fragment shader
+   module byte-differs. RSS grew ~2.6 MB/iteration, 25 MB → 740 MB
+   over ~250-300 iterations, then **plateaued** almost exactly at
+   `Device::ImplicitCache`'s `ImplicitPipelineCacheMaxEntries = 256`
+   (`feme/lib/Vulkan/Objects.h`). Ran to 3,000 iterations to confirm
+   the plateau holds — it mostly does, but with a small residual
+   creep (~2.5 KB/iteration) on top, the same order of magnitude as
+   `part2`'s previously-measured ~4 KB/case average.
+
+## Why this matters
+
+This is the first time this investigation has a **number**: ~2.6-2.9
+MB per cached pipeline artifact × 256 entries ≈ 740 MB per `VkDevice`,
+whenever pipeline/shader diversity is high enough that every create is
+a cache miss. `dual_source`/`stencil` CTS families sweep huge
+combinatorial state spaces — exactly this shape. If real CTS runs
+create many distinct `VkDevice`s over hundreds of thousands of cases
+(normal CTS behavior), each paying ~740 MB independently, that is a
+fully plausible, quantified explanation for `part2`'s climbing
+`DeviceLost` rate and `part1`'s eventual `SIGSEGV`.
+
+**Important nuance:** `PipelineCache.h` says outright that a live
+`VkPipeline` holds its own `shared_ptr` to its cached artifact, so
+table eviction alone can't free memory a live pipeline still owns. My
+probe destroys every pipeline it creates, so the plateau behavior
+(not unbounded growth) is consistent with that design working as
+intended — this might not be a bug, just a cache that's very
+expensive per entry. Whether 740 MB/device is "fine" or "needs a
+lower default" is a design question for next session, not yet
+answered.
+
+## What's still open (don't re-derive this, just do it)
+
+1. **Does `vkDestroyDevice` actually free the ~740 MB?** My probe never
+   destroys/recreates the device mid-run. Next: wrap the probe's inner
+   loop so it creates a fresh device every ~300 iterations (past the
+   cache's own plateau point), destroys the old one, and watches
+   whether RSS drops back down before climbing again. If it doesn't
+   drop, that's the real bug — a destroyed device's cache not actually
+   releasing its artifacts.
+2. **The smaller ~2.5 KB/iteration residual creep**, visible even after
+   the cache plateaus (741,660 KB at iter 300 → 748,516 KB at iter
+   3,000 in this session's own run) — not yet isolated to any specific
+   object or allocation site. Could be the "real" leak matching
+   `part2`'s ~4 KB/case number; the 740 MB cache effect might be a
+   separate, unrelated (if alarming) memory-footprint issue.
+3. **Is 256 entries / ~740 MB an intentional tradeoff or accidental?**
+   Check `PipelineCache.h`'s design-doc cross-references and git blame
+   for why `256` was chosen, and whether `CachedPipelineArtifact`'s
+   ~2.6-2.9 MB size is expected (e.g., does it retain uncompressed
+   LLVM IR or JIT object code that could be dropped once compiled and
+   only the native function pointer kept?).
+4. `part1`'s SIGSEGV — still unreproduced, still running (373,674+
+   cases this session). Keep checking each session; no new action
+   needed beyond watching it.
+
+## Drop from future hand-offs (resolved / stop repeating)
+
+`L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), the roadmap
+strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil`
+verification, `part1`'s `use_after_copy...` case (confirmed not a
+deterministic trigger two sessions ago).
+
+## Commits this session
+
+1. `896913d30b38` — `Roadmap.md` `L407` row update + `VulkanCTSReport.md`
+   item 43: the leak-probe findings above. No code change (investigation
+   only).
+
+## Next steps, ranked
+
+1. **(~2 hours)** Build the device-recreate variant of the leak probe
+   (item 1 above) — this is the single most informative next
+   experiment: it directly answers "is this a real leak or just an
+   expensive-but-correct cache."
+2. **(~1 day)** If device-recreate does NOT free the memory: that's a
+   genuine bug in `Device`/`PipelineCache` teardown — find it with
+   source inspection now that the exact object type and rough size are
+   known, no more blind leak-hunting needed.
+3. **(~1 day)** If device-recreate DOES free the memory cleanly: the
+   740 MB-per-device cache is a real but "working as designed" memory
+   cost; shift focus to the smaller ~2.5 KB/iteration residual creep
+   (item 2 above) as the more likely explanation for `part2`'s
+   behavior, and consider whether `ImplicitPipelineCacheMaxEntries`
+   should have a smaller default for CTS-scale workloads.
+4. **(~5 min)** Check `part1` (PID 7228) again — still no crash as of
+   this session's end.
