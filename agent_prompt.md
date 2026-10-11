@@ -67,17 +67,19 @@ suggested the next steps:
    rasterization/subpixel-coverage precision in the 66-case
    `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
    comparing per-row coverage/edge-function values near x=12/x=20, not blend
-   arithmetic — ruled out as a blend-formula bug last session.
-2. **(~2-4 hours, new)** `L414`'s 23-limit "pure constant" bucket. Before
-   raising any of them: audit whether `DescriptorSet.cpp`/`Pipeline.cpp` size
-   any table off the current (low) limit value. If clean, this is a mechanical
-   batch of constant bumps in `PhysicalDeviceInfo.cpp` (lines ~251-486) — pick
-   the easy wins first (e.g. `maxPushConstantsSize`, `maxSamplerLodBias`) to
-   re-test incrementally rather than changing all 23 at once.
-3. **(~1-2 hours each, new, lower priority)** `L414`'s 4-limit "real work"
-   bucket: `timestampComputeAndGraphics`, `standardSampleLocations`,
-   `subgroupSupportedStages`, `shaderSignedZeroInfNanPreserveFloat16` — each
-   needs its own feasibility check before committing to implement.
-4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
+   arithmetic.
+2. **(~1-2 hours each, new)** `L414(a)`'s 5-item "real work" bucket:
+   `timestampComputeAndGraphics`, `standardSampleLocations`,
+   `vk11Properties.subgroupSupportedStages`,
+   `vk12Properties.shaderSignedZeroInfNanPreserveFloat16`,
+   `vk12Properties.shaderSignedZeroInfNanPreserveFloat32` — each needs its own
+   feasibility check (is this even implementable in FeMe's current
+   architecture?) before committing to implement. Suggest starting with
+   `shaderSignedZeroInfNanPreserveFloat32` (narrowest, might just be a
+   reported-bit flip if the CPU backend's float32 codegen already preserves
+   IEEE-754 signed-zero/Inf/NaN — worth checking before assuming it needs real
+   codegen work).
+3. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
    `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
-   `get_device_proc_addr`/`driver_properties` — untouched this session.
+   `get_device_proc_addr`/`driver_properties` — still untouched across several
+   sessions now.
