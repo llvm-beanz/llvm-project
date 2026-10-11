@@ -3539,6 +3539,45 @@ TEST_F(PushConstantDispatchTest,
   vkFreeMemory(Device, Buf.Memory, nullptr);
 }
 
+/// (roadmap L412(f)) Regression test for `vkCmdBindDescriptorSets2`'s own
+/// state-dropping bug this session found while triaging
+/// `dEQP-VK.binding_model.stages.*`: a single call whose `stageFlags`
+/// includes both a graphics stage (e.g. `VK_SHADER_STAGE_FRAGMENT_BIT`) and
+/// `VK_SHADER_STAGE_COMPUTE_BIT` must bind the same descriptor sets to
+/// *both* pipeline bind points (per spec: "If a ... value corresponding to
+/// a shader stage used in a graphics pipeline is included in stageFlags,
+/// the graphics pipeline bind point is included. If ...
+/// VK_SHADER_STAGE_COMPUTE_BIT ... is included ..., the compute pipeline
+/// bind point is included."), not just one. A prior version silently
+/// dropped the graphics bind.
+TEST_F(PushConstantDispatchTest,
+       BindDescriptorSets2WithCombinedStageFlagsBindsBothPoints) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+
+  VkBindDescriptorSetsInfo BindInfo{};
+  BindInfo.sType = VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO;
+  BindInfo.stageFlags =
+      VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+  BindInfo.layout = Layout;
+  BindInfo.firstSet = 0;
+  BindInfo.descriptorSetCount = 1;
+  BindInfo.pDescriptorSets = &Set;
+  BindInfo.dynamicOffsetCount = 0;
+  BindInfo.pDynamicOffsets = nullptr;
+  vkCmdBindDescriptorSets2(CmdBuf, &BindInfo);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  llvm::ArrayRef<RecordedCommand> Commands = Recorded->commands();
+  ASSERT_EQ(Commands.size(), 2u);
+  EXPECT_EQ(Commands[0].Op, RecordedCommand::Kind::BindDescriptorSets);
+  EXPECT_EQ(Commands[0].BindPoint, VK_PIPELINE_BIND_POINT_GRAPHICS);
+  EXPECT_EQ(Commands[1].Op, RecordedCommand::Kind::BindDescriptorSets);
+  EXPECT_EQ(Commands[1].BindPoint, VK_PIPELINE_BIND_POINT_COMPUTE);
+}
+
 /// (roadmap L129) Regression test for the push-constant state-isolation
 /// bug this milestone found while fixing `L125(t)`'s own descriptor-set
 /// equivalent: per Vulkan spec ("Descriptor Model"), "Graphics and Compute

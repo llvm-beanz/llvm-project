@@ -3831,34 +3831,54 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
                            pipelineBindPoint);
 }
 
-// (roadmap E6) `VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2`: the same
-// arguments as `vkCmdBindDescriptorSets` above, wrapped in a single
+// (roadmap L412(f)) `VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2`: the
+// same arguments as `vkCmdBindDescriptorSets` above, wrapped in a single
 // `pNext`-extensible `VkBindDescriptorSetsInfo` in place of a
 // `pipelineBindPoint` argument plus five flat array arguments. Unlike
 // `vkCmdBindDescriptorSets`'s own `pipelineBindPoint`, this struct instead
-// carries a `stageFlags` mask -- the bind point this bind targets is
-// derived from it (`VK_SHADER_STAGE_COMPUTE_BIT` selects compute,
-// otherwise graphics, matching "Descriptor Model": ray tracing stage bits
-// never appear here since this ICD advertises no ray-tracing bind point).
+// carries a `stageFlags` mask -- per spec ("If stageFlags includes one or
+// more graphics stages... the compute pipeline bind point if
+// VK_SHADER_STAGE_COMPUTE_BIT is included"), this bind can legitimately
+// target *both* bind points with the same call (e.g.
+// `dEQP-VK.binding_model.stages.*` sets
+// `VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT` to update
+// both bind points' state in one call). A prior version of this function
+// picked only one bind point (compute if its bit was set, else graphics),
+// silently dropping the other -- fixed by recording a bind for each bind
+// point whose stage bit is actually present, mirroring `PushConstants`'s
+// own `ToCompute`/`ToGraphics` split above. Ray tracing stage bits never
+// appear here since this ICD advertises no ray-tracing bind point.
 VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
     VkCommandBuffer commandBuffer,
     const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo) {
-  std::vector<DescriptorSet *> Sets;
-  Sets.reserve(pBindDescriptorSetsInfo->descriptorSetCount);
-  for (uint32_t I = 0; I != pBindDescriptorSetsInfo->descriptorSetCount; ++I)
-    Sets.push_back(
-        fromHandle<DescriptorSet>(pBindDescriptorSetsInfo->pDescriptorSets[I]));
-  std::vector<uint32_t> Offsets(
-      pBindDescriptorSetsInfo->pDynamicOffsets,
-      pBindDescriptorSetsInfo->pDynamicOffsets +
-          pBindDescriptorSetsInfo->dynamicOffsetCount);
-  VkPipelineBindPoint BindPoint =
-      (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
-          ? VK_PIPELINE_BIND_POINT_COMPUTE
-          : VK_PIPELINE_BIND_POINT_GRAPHICS;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, std::move(Sets),
-                           std::move(Offsets), BindPoint);
+  auto MakeSets = [&]() {
+    std::vector<DescriptorSet *> Sets;
+    Sets.reserve(pBindDescriptorSetsInfo->descriptorSetCount);
+    for (uint32_t I = 0; I != pBindDescriptorSetsInfo->descriptorSetCount; ++I)
+      Sets.push_back(fromHandle<DescriptorSet>(
+          pBindDescriptorSetsInfo->pDescriptorSets[I]));
+    return Sets;
+  };
+  auto MakeOffsets = [&]() {
+    return std::vector<uint32_t>(
+        pBindDescriptorSetsInfo->pDynamicOffsets,
+        pBindDescriptorSetsInfo->pDynamicOffsets +
+            pBindDescriptorSetsInfo->dynamicOffsetCount);
+  };
+  bool ToCompute =
+      (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) !=
+      0;
+  bool ToGraphics =
+      (pBindDescriptorSetsInfo->stageFlags & ~VK_SHADER_STAGE_COMPUTE_BIT) !=
+      0;
+  vulkan::CommandBuffer *CmdBuf =
+      fromHandle<vulkan::CommandBuffer>(commandBuffer);
+  if (ToGraphics)
+    CmdBuf->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, MakeSets(),
+                               MakeOffsets(), VK_PIPELINE_BIND_POINT_GRAPHICS);
+  if (ToCompute)
+    CmdBuf->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, MakeSets(),
+                               MakeOffsets(), VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
 // (roadmap F12) `VK_KHR_push_descriptor`'s own binding-to-heap-slot
@@ -3976,18 +3996,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplateKHR(
       commandBuffer, descriptorUpdateTemplate, layout, set, pData);
 }
 
-// (roadmap F12) `VK_KHR_maintenance6`'s `vkCmdPushDescriptorSet2`: the same
-// arguments as `vkCmdPushDescriptorSet` above, wrapped in a single
+// (roadmap F12/L412(f)) `VK_KHR_maintenance6`'s `vkCmdPushDescriptorSet2`:
+// the same arguments as `vkCmdPushDescriptorSet` above, wrapped in a single
 // `pNext`-extensible `VkPushDescriptorSetInfo` in place of a
 // `pipelineBindPoint` argument plus four flat ones -- sharing the same
 // underlying mechanism these two rows agreed to be sequenced or implemented
 // together over (see Roadmap.md's F12/E6 dependency notes), exactly like
 // `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2` already share
 // `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording above.
-// `stageFlags` needs no validation here, the same way `vkCmdBindDescriptorSets2
-// `'s own comment documents for its sibling field -- but it does select
-// which bind point's own bound-set state this push targets, the same way
-// `vkCmdBindDescriptorSets2`'s does.
+// Like `vkCmdBindDescriptorSets2` (see its own comment, fixed under
+// `L412(f)`), `stageFlags` can legitimately target *both* bind points at
+// once, so each bind point whose stage bit is present gets its own push.
 VKAPI_ATTR void VKAPI_CALL
 vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
                         const VkPushDescriptorSetInfo *pPushDescriptorSetInfo) {
@@ -3995,17 +4014,24 @@ vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
       fromHandle<PipelineLayout>(pPushDescriptorSetInfo->layout);
   if (pPushDescriptorSetInfo->set >= Layout->setLayouts().size())
     return;
-  VkPipelineBindPoint BindPoint =
-      (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
-          ? VK_PIPELINE_BIND_POINT_COMPUTE
-          : VK_PIPELINE_BIND_POINT_GRAPHICS;
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->pushDescriptorSet(
-          pPushDescriptorSetInfo->set,
-          *Layout->setLayouts()[pPushDescriptorSetInfo->set],
-          llvm::ArrayRef(pPushDescriptorSetInfo->pDescriptorWrites,
-                         pPushDescriptorSetInfo->descriptorWriteCount),
-          BindPoint);
+  bool ToCompute =
+      (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+  bool ToGraphics =
+      (pPushDescriptorSetInfo->stageFlags & ~VK_SHADER_STAGE_COMPUTE_BIT) !=
+      0;
+  vulkan::CommandBuffer *CmdBuf =
+      fromHandle<vulkan::CommandBuffer>(commandBuffer);
+  llvm::ArrayRef<VkWriteDescriptorSet> Writes(
+      pPushDescriptorSetInfo->pDescriptorWrites,
+      pPushDescriptorSetInfo->descriptorWriteCount);
+  if (ToGraphics)
+    CmdBuf->pushDescriptorSet(pPushDescriptorSetInfo->set,
+                              *Layout->setLayouts()[pPushDescriptorSetInfo->set],
+                              Writes, VK_PIPELINE_BIND_POINT_GRAPHICS);
+  if (ToCompute)
+    CmdBuf->pushDescriptorSet(pPushDescriptorSetInfo->set,
+                              *Layout->setLayouts()[pPushDescriptorSetInfo->set],
+                              Writes, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
