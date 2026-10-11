@@ -2350,6 +2350,85 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       figure from all future handoffs** -- it is now confirmed
       resolved, not merely suspected.
 
+54. **`L411` continuation: corrected the prior session's "boundary
+    misplacement" characterization, found and fixed a second real
+    precision bug (double rounding), and ruled out a basic
+    blend-equation-formula bug -- the residual 66-case
+    `b10g11r11_ufloat_pack32` dual-source-blend family is still open.**
+    - Re-examined `createOverlappingQuadsDualSource`'s own geometry
+      (`vktPipelineVertexUtil.cpp`): its 4 quads' NDC translations map
+      exactly to pixel boundaries x=12 and x=20 in the 32-wide render
+      target, and FeMe reproduces those boundaries pixel-for-pixel.
+      **There is no geometry/rasterization boundary bug** -- the prior
+      session's "blend-state/sub-region boundary misplacement" framing
+      (item 52) was incorrect. The real residual mismatch is confined
+      to the sub-region where all 4 sequential draws' blend passes
+      compound (x=[12,20) of a 32-wide image), is single-channel (R
+      only in the diffed case), and has a small, fixed-delta pattern
+      (`+5`/`-9` out of 255 in the PNG-encoded display representation).
+    - Found a second genuine bug independent of item 52's fix: both
+      pack sites still rounded each channel *twice* -- once to
+      binary16's own 10-bit mantissa, then again down to this format's
+      narrower 6-bit (R/G) or 5-bit (B) field. Classic double rounding;
+      confirmed with a standalone Python simulation (~1.5-3% mismatch
+      rate vs. a single correctly-rounded conversion across 200,000
+      random inputs) before writing any code. **Fixed** both sites by
+      replacing the two-step conversion with a single
+      round-to-nearest-ties-to-even step computed directly from the
+      input's own IEEE-754 bits. New regression tests:
+      `ImageFixtureTest.PacksR11G11B10FloatAvoidsDoubleRounding` and
+      `ImageSamplingTest.
+      StoreWritesTexelIntoR11G11B10FloatAvoidsDoubleRounding`, using
+      `0.06298828125` (a value verified via Python to round differently
+      under the two approaches). `check-feme`: 3634/3637 Passed, 3
+      Unsupported, 0 Failed, 0 regressions.
+    - **Verified against CTS:** re-ran the same 788-case family and the
+      specific failing case with `--deqp-log-images=enable`. The fix is
+      real and independently verified (both new unit tests fail
+      without it), but it **does not change this family's Fail count
+      at all** -- still the same 66 Fails, and the specific case's
+      per-pixel mismatch is byte-for-byte identical before and after
+      this fix. This particular case's actual blend-factor chain simply
+      never crosses a double-rounding-sensitive value.
+    - Hand-simulated (Python) the exact 4-draw blend chain for the
+      specific failing case (blend states extracted directly from its
+      `CasePath`:
+      `color_o_cc_add_alpha_o_s1a_add-color_1mdc_1mcc_min_alpha_1ms1c_1mcc_sub-color_sas_1msa_sub_alpha_s1c_1mda_add-color_1msa_o_add_alpha_dc_sc_sub`)
+      under two precision-accumulation models: (A) quantize to
+      `R11G11B10_FLOAT` after every draw -- confirmed to match both
+      FeMe's own behavior and `vktPipelineReferenceRenderer.cpp`'s own
+      `ReferenceRenderer` constructor, which allocates its internal
+      `m_colorBuffer` at the test's actual target format, not a
+      higher-precision stand-in -- and (B) accumulate at full float32
+      precision across all 4 draws and quantize once at the end (the
+      model `DualSourceBlendTestInstance::verifyImage`'s own
+      `refRenderer64`/`access64` fallback `floatThresholdCompare`
+      already accounts for, read directly from
+      `vktPipelineBlendTests.cpp`). **Both models agree** on the final
+      R value for this case, ruling out a basic blend-factor/operand-
+      selection bug in `blendColor`/`blendFactorValue`
+      (`Executor.cpp`'s own blend arithmetic): the correct formula
+      produces the same answer either way.
+    - This leaves **subpixel rasterization/coverage precision** (the
+      exact coverage FeMe's rasterizer computes for a row/column near
+      the quads' shared boundary, vs. the reference rasterizer's own
+      `subPixelPrecisionBits`-driven coverage) as the new leading
+      hypothesis for the residual bug -- not yet confirmed. This is a
+      different class of investigation (rasterization edge-function
+      precision, not blend arithmetic or format packing) and needs its
+      own dedicated session: compare FeMe's and the reference
+      rasterizer's per-pixel coverage/edge-function values directly for
+      rows near x=12/x=20, rather than continuing to treat this as a
+      blend- or pack-precision problem.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **Still open:** the 66-case `b10g11r11_ufloat_pack32`
+      dual-source-blend family itself (root cause now narrowed to
+      rasterization/subpixel-coverage precision, not blend arithmetic
+      or format packing); `L411` remains open (not struck through) on
+      `Roadmap.md`.
+
 ## Complete group accounting
 
 
