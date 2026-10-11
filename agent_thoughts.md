@@ -118641,3 +118641,106 @@ Device check: `FeMe CPU Vulkan Device` confirmed (start and end of session).
    citing the "4 Fails" `b10g11r11_ufloat_pack32` figure — it's 66/788,
    corrected this session (`L411`), and the format-precision half of the
    bug is now fixed; only the sub-region boundary bug remains.**
+
+# Session: L411 continuation + L412(a) fillFeatures2Chain fix, CTS-verified (2026-10-12g)
+
+Run `check-feme` with ccache + assertions. Device confirmed: `FeMe CPU
+Vulkan Device` (checked at session start and before ending).
+
+## What I did, in order
+
+1. **L411 continuation** (carried in from before compaction): confirmed
+   the double-rounding fix from last session is real but has zero effect
+   on the residual 66/788 `b10g11r11_ufloat_pack32` Fails. Ruled out a
+   basic blend-formula bug via a two-model Python blend-chain simulation.
+   Corrected last session's "boundary misplacement" framing — the quad
+   boundaries are pixel-perfect, the real bug is confined to where 4
+   sequential blend passes compound. New leading hypothesis: subpixel
+   rasterization/coverage precision. Not fixed — needs its own session.
+   Committed as `d1b62361c008`.
+2. **L412 triage**: before touching code, checked `Roadmap.md` for the
+   12-case ASTC-blit sub-bucket — it's already `L265` (deferred, genuine
+   tie-breaking conflict, no further action useful). Avoided redundant
+   work.
+3. **Found the real win**: `fillFeatures2Chain` (`EntryPoints.cpp`) had
+   no `switch` case at all for 14 dedicated, pre-1.1/1.2/1.3-promotion
+   feature structs — only their aggregate `VkPhysicalDeviceVulkan1x
+   Features` equivalent was ever filled in. Root cause: CTS's
+   `api.info.*` consistency check pre-fills with two different byte
+   patterns across two queries and asserts agreement; an unmatched
+   `sType` just falls through untouched.
+4. **Fixed it**: added all 14 missing cases, each matching the existing
+   aggregate struct's value exactly (critical for
+   `vulkan1p2.feature_extensions_consistency` too).
+5. **Hit a real bug while writing the test**: first unit-test run
+   SIGSEGV'd inside `fillFeatures2Chain` itself. Cause: forgot to set
+   `.pNext = nullptr` on the terminal struct in the chain after a 0xFF
+   memset — the loop walked off into garbage memory. Fixed by setting
+   `pNext = nullptr` explicitly on every chain's last struct. Lesson for
+   next time: always set the terminal `pNext` *after* the adversarial
+   memset, not before.
+6. **Verified**: `check-feme` 3637/3637 Passed (3 new tests, 3
+   Unsupported as before). CTS `dEQP-VK.api.info.*` (10,488 cases):
+   Fails dropped 18 → 3.
+7. **Triaged the remaining 3 Fails** (not fixed, different bugs):
+   - `properties.basic`: same missing-case bug, but in
+     `fillProperties2Chain` (the *properties* counterpart), not
+     `fillFeatures2Chain`. Didn't fix — out of scope for this commit,
+     noted as a future `L412`-family entry.
+   - `shader_subgroup_rotate_property_consistency_khr`: cross-struct
+     check between `shaderSubgroupRotate` and
+     `VkPhysicalDeviceSubgroupProperties.supportedOperations`'s own
+     rotate flag bits — not a missing-case bug, needs its own
+     investigation.
+   - `vulkan1p4_limits_validation.general`: bare `Fail (fail)`, no
+     detail in the log, completely untriaged.
+8. Updated `Roadmap.md` (new `L412(a)` row, struck through/done; `L412`
+   itself updated but NOT struck through — 3 Fails + other part1 buckets
+   remain) and `VulkanCTSReport.md` (item 55). No
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+   needed — this is an internal consistency fix to already-correct
+   values, not a new capability.
+
+## Commits this session (3, each separately committed)
+
+1. `[FeMe] L412(a): fix missing dedicated feature-struct cases in vkGetPhysicalDeviceFeatures2`
+2. `[FeMe] L412(a): document fillFeatures2Chain fix in Roadmap/CTS report`
+3. (this file, committed separately at end of session)
+
+## Next steps, ranked
+
+1. **(~30 min)** `L412`'s `properties.basic` Fail: same missing-case bug
+   pattern, but in `fillProperties2Chain` instead of
+   `fillFeatures2Chain` — look for `VkPhysicalDeviceSamplerFilterMinmax
+   Properties`'s own missing `case`. Should be a near-identical,
+   mechanical fix to this session's — probably the fastest remaining
+   win available.
+2. **(~1 hour)** `L412`'s `shader_subgroup_rotate_property_consistency_khr`
+   Fail: trace why `VkPhysicalDeviceSubgroupProperties.supportedOperations`
+   doesn't report `VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR`/
+   `_CLUSTERED_BIT_KHR` even though the feature bits themselves are
+   `VK_TRUE` — look at wherever `supportedOperations` gets built
+   (probably `PhysicalDeviceInfo.cpp`).
+3. **(~30 min)** `L412`'s `vulkan1p4_limits_validation.general` Fail —
+   completely untriaged, bare `Fail (fail)`. Re-run just that one case
+   with more verbose logging to get an actual error message first.
+4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
+   `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
+   `get_device_proc_addr`/`driver_properties` — none yet looked at.
+5. **(~2-4 hours, standing item, several sessions old)** `L411`'s real
+   residual bug: subpixel rasterization/coverage precision in the
+   66-case `b10g11r11_ufloat_pack32` family. Needs a dedicated
+   rasterization-focused session — compare FeMe's and the CTS reference
+   rasterizer's per-pixel coverage/edge-function values directly near
+   the quad boundaries (x=12/x=20), not blend arithmetic.
+6. Drop from future handoffs — fully resolved: `L412`'s 12-case ASTC-blit
+   sub-bucket (it's `L265`, already deferred, don't re-investigate
+   without new diagnostic data), the `api.info.*` 18-Fail bucket (now 3,
+   different bugs — see items 1-3 above), `L378(a)`, `L409`/`L410` in
+   their entirety, the "46 SIGSEGV + 328 DeviceLost" stability baseline,
+   `part1`'s crash mystery, `L407`, the "resource-table exhaustion"
+   hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`),
+   `L402`/`L406`, `pipeline_library.stencil` verification. **Stop citing
+   "37 part1 Fails" as one bucket — it's now 3 `api.info` + 12 `L265`
+   (deferred) + 10 untriaged (binding_model/version_check/proc_addr/
+   driver_properties); track these as separate items going forward.**
