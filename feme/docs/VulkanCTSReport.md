@@ -2638,6 +2638,60 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       each needing real new backend capability, not a constant bump --
       filed as `L414(a)`.
 
+60. **`L414(a)`: fixed 2 of the 5-item "real functional work" bucket --
+    `shaderSignedZeroInfNanPreserveFloat16`/`Float32`, both now `VK_TRUE`.**
+    - The prior session's blanket comment ("flipping any float-controls
+      field to `VK_TRUE` trips an unrelated resource-lowering bug") was
+      never isolated to a specific field -- tested empirically instead
+      of trusting it: flipped only `SignedZeroInfNanPreserve`
+      (`RoundingModeRTZ`/`DenormFlushToZero`/`RoundingModeRTE`/
+      `DenormPreserve` left untouched, still `VK_FALSE`).
+    - Root cause of why it's safe: `SignedZeroInfNanPreserve` describes
+      behavior FeMe's codegen already provides unconditionally -- no FP
+      op conversion pattern ever sets a fast-math flag that would let
+      LLVM discard a signed zero, an infinity, or a NaN (see
+      `ExecutionModePattern`'s own doc comment,
+      `SPIRVToLLVMPatterns.cpp`). `RoundingModeRTZ`/`DenormFlushToZero`
+      by contrast require genuinely conditional lowering
+      (`FloatControlArithmeticPattern`), which is what trips the
+      unrelated resource-lowering gap -- `SignedZeroInfNanPreserve` has
+      no such conditional path to trip it on.
+    - **Fixed**: `shaderSignedZeroInfNanPreserveFloat16`/`Float32` raised
+      to `VK_TRUE` in both `VkPhysicalDeviceFloatControlsProperties` and
+      its promoted `VkPhysicalDeviceVulkan12Properties` twin
+      (`EntryPoints.cpp`), which must agree. `Float64` deliberately left
+      `VK_FALSE`: `shaderFloat64` itself is never advertised anywhere in
+      this file, so no shader could declare this execution mode at that
+      width, and the CTS check being fixed never flagged `Float64` in
+      the first place -- raising it would be an unrequested, untested,
+      zero-effect change.
+    - New unit test:
+      `PhysicalDeviceProperties2Test.FloatControlsPropertiesSignedZeroInfNanPreserveMatchesBothWidths`,
+      covering the dedicated/promoted-struct agreement and pinning
+      Float16/32 `VK_TRUE`, Float64 `VK_FALSE`.
+    - `check-feme`: 3640/3640 Passed (+1 new test), 3 Unsupported, 0
+      regressions.
+    - **Verified against CTS**:
+      `dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp16.*`
+      (1,270 cases): 148 Passed, 0 Failed, 1,122 NotSupported.
+      `...fp32.*` (655 cases): 148 Passed (up from 140 before Float16
+      was also flipped -- `conv_from_fp16_*` fp32 cases need both
+      widths' preserve property to reach pipeline creation), 0 Failed,
+      507 NotSupported. Re-ran `dEQP-VK.api.info.*` (10,488 cases):
+      still 1 Fail overall (`vulkan1p4_limits_validation.general`), its
+      own sub-failure list dropped from 5 to 3:
+      `timestampComputeAndGraphics`, `standardSampleLocations`,
+      `vk11Properties.subgroupSupportedStages`.
+    - `Vulkan14FeatureInventory.md` updated to list
+      `shaderSignedZeroInfNanPreserveFloat16`/`Float32` as supported
+      under `VK_KHR_shader_float_controls`; `VulkanExtensionInventory.md`
+      unchanged (the extension itself was already listed as supported).
+    - **Still open:** the remaining 3-item bucket --
+      `timestampComputeAndGraphics`, `standardSampleLocations`,
+      `vk11Properties.subgroupSupportedStages` -- still filed under
+      `L414(a)` (no new letter-nesting added, per the "no more than one
+      lowercase letter deep" rule).
+
 ## Complete group accounting
 
 

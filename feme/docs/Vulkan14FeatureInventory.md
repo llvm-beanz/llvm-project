@@ -191,7 +191,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_2 | `VK_KHR_separate_depth_stencil_layouts` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | yes | not advertised by name: roadmap L414(a), `shaderSignedZeroInfNanPreserveFloat16`/`Float32` genuinely `VK_TRUE` (honored unconditionally by every FP op conversion pattern -- no fast-math flag ever discards a signed zero/Inf/NaN); `RoundingModeRTZ`/`DenormFlushToZero`/`RoundingModeRTE`/`DenormPreserve` and `Float64` still `VK_FALSE` (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_spirv_1_4` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_timeline_semaphore` | yes | core, not advertised by name: V3's timeline semaphores (Sync.cpp) |
