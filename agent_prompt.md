@@ -68,19 +68,17 @@ suggested the next steps:
    `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
    comparing per-row coverage/edge-function values near x=12/x=20, not blend
    arithmetic.
-2. **(~1 hour)** `L414(a)`'s next item: `vk11Properties.subgroupSupportedStages`
-   — audit which shader stages `feme::cpu`'s wave-intrinsic lowering genuinely
-   supports outside compute before advertising them
-   (`VkPhysicalDeviceSubgroupProperties.supportedStages`, currently
-   `32`/`COMPUTE`-only, needs `>=48`). Likely the next-narrowest item in the
-   remaining 3 since it's a one-field audit+bump like Float16/32 was, not a new
-   rasterizer feature.
-3. **(~1-2 hours each)** `L414(a)`'s remaining 2 items:
-   `timestampComputeAndGraphics` (needs real compute-queue timestamp-query
-   support) and `standardSampleLocations` (needs the Vulkan-spec-standard
-   multisample sample-location pattern in the rasterizer) — each is real new
-   backend work, not a reported-bit flip; check feasibility before committing.
+2. **(~1-2 hours)** `L414(a)`'s next item: `standardSampleLocations` — needs the
+   Vulkan-spec-standard multisample sample-location pattern implemented in the
+   rasterizer, not a reported-bit flip. Check the spec's table of standard
+   locations per sample count first, then find where FeMe's rasterizer currently
+   picks sample positions.
+3. **(~1-2 hours)** `L414(a)`'s last item: `timestampComputeAndGraphics` — needs
+   real compute-queue timestamp-query support (currently only graphics-queue).
+   Check `QueryPool.cpp`/whatever handles `vkCmdWriteTimestamp` for queue-family
+   gating first.
 4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
    `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
    `get_device_proc_addr`/`driver_properties` — still untouched across several
-   sessions now.
+   sessions now. Oldest-standing untriaged item in any handoff; worth picking up
+   soon just to stop it recurring unchanged.
