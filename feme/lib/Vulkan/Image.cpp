@@ -922,8 +922,14 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySampler(
     VkDevice, VkSampler sampler, const VkAllocationCallbacks *pAllocator) {
   if (!sampler)
     return;
+  // (roadmap L410) Same deferred-destroy guard as `vkDestroyBufferView`
+  // above -- a `Sampler` is reached only through a `DescriptorSet`'s own
+  // retain sweep (`Sync.cpp`'s `collectDescriptorSetRefs`).
+  auto *Obj = fromHandle<Sampler>(sampler);
+  if (!Obj->requestDestroy(pAllocator))
+    return;
   Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Sampler>(sampler));
+  Alloc.destroy(Obj);
 }
 
 } // namespace feme::vulkan

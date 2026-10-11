@@ -188,8 +188,15 @@ vkDestroyBufferView(VkDevice, VkBufferView bufferView,
                     const VkAllocationCallbacks *pAllocator) {
   if (!bufferView)
     return;
+  // (roadmap L410) Defer the actual free if a `QueueExecutor` task still
+  // holds this view retained (reached through a `DescriptorSet`'s own
+  // retain sweep, `Sync.cpp`'s `collectDescriptorSetRefs`) -- mirrors
+  // `vkDestroyBuffer`/`vkDestroyImageView`'s own now-fixed pattern.
+  auto *View = fromHandle<vulkan::BufferView>(bufferView);
+  if (!View->requestDestroy(pAllocator))
+    return;
   Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<vulkan::BufferView>(bufferView));
+  Alloc.destroy(View);
 }
 
 } // namespace feme::vulkan

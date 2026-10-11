@@ -465,6 +465,15 @@ public:
   explicit DescriptorPool(uint32_t MaxSets)
       : MaxSets(MaxSets), RemainingSets(MaxSets) {}
 
+  /// (roadmap L410) `Sets`' owned `DescriptorSet`s may have a deferred
+  /// destroy pending (see `free`/`reset`'s own comments below) when this
+  /// pool itself is destroyed (`vkDestroyDescriptorPool`) -- the default
+  /// destructor would free them unconditionally by destroying `Sets`,
+  /// unconditionally invalidating any `QueueExecutor` task still reading
+  /// one. Declared out of line (`Descriptor.cpp`) since it shares `free`'s
+  /// own per-set deferred-destroy helper.
+  ~DescriptorPool();
+
   /// Allocates one set from \p Layout, or null if the pool has no
   /// remaining set slots (`VK_ERROR_OUT_OF_POOL_MEMORY`). \p
   /// VariableDescriptorCount is forwarded to `DescriptorSet`'s own
@@ -474,10 +483,26 @@ public:
            std::optional<uint32_t> VariableDescriptorCount = std::nullopt);
 
   /// `vkFreeDescriptorSets`: returns \p Set's slot to the pool.
+  ///
+  /// (roadmap L410) Unlike the generic-`Allocator`-owned types this
+  /// mirrors (`Buffer`/`Image`/...), a `DescriptorSet` is owned here via
+  /// `std::unique_ptr` in `Sets`, not through an `Allocator`, since
+  /// `vkFreeDescriptorSets` takes no `pAllocator` parameter at all (sets
+  /// are always sub-allocated from their pool, per spec). `free` still
+  /// calls `requestDestroy(nullptr)` (the `nullptr` is never consulted --
+  /// see `releaseExecutionRefs`'s own comment, `Sync.cpp`): if it returns
+  /// true, the set is destroyed immediately as before (dropping `Sets`'
+  /// owning `unique_ptr`); if false, a `QueueExecutor` task still has it
+  /// retained, so `free` instead releases the `unique_ptr`'s ownership
+  /// (without deleting) and lets that task's own eventual
+  /// `releaseAndTakeDeferredDestroy` call `delete` it once the last
+  /// reference drops.
   void free(DescriptorSet *Set);
 
   /// `vkResetDescriptorPool`: destroys every set allocated from this pool
-  /// and restores its full `maxSets` capacity.
+  /// and restores its full `maxSets` capacity -- same per-set
+  /// deferred-destroy handling as `free` above, applied to every set at
+  /// once.
   void reset();
 
 private:

@@ -229,18 +229,45 @@ DescriptorPool::allocate(const DescriptorSetLayout &Layout,
   return Result;
 }
 
+namespace {
+/// (roadmap L410) Shared by `DescriptorPool::free`/`reset`/`~DescriptorPool`:
+/// requests \p Owned's destroy and either lets it destruct normally (the
+/// ordinary case, `unique_ptr` going out of scope when this function
+/// returns) or, if a `QueueExecutor` task still has it retained, releases
+/// \p Owned's ownership without deleting -- the eventual
+/// `releaseAndTakeDeferredDestroy` call (`Sync.cpp`'s `releaseExecutionRefs`)
+/// takes over responsibility for `delete`-ing it once the last reference
+/// drops. See `DescriptorSet`'s own class comment for why this doesn't go
+/// through an `Allocator` the way `Buffer`/`Image`/etc. do.
+void destroyOrDeferSet(std::unique_ptr<DescriptorSet> Owned) {
+  if (Owned->requestDestroy(/*Callbacks=*/nullptr))
+    return; // Destroyed when `Owned` goes out of scope below.
+  Owned.release();
+}
+} // namespace
+
 void DescriptorPool::free(DescriptorSet *Set) {
-  size_t SizeBefore = Sets.size();
-  llvm::erase_if(Sets, [&](const std::unique_ptr<DescriptorSet> &Owned) {
+  auto It = llvm::find_if(Sets, [&](const std::unique_ptr<DescriptorSet> &Owned) {
     return Owned.get() == Set;
   });
-  if (Sets.size() != SizeBefore)
-    ++RemainingSets;
+  if (It == Sets.end())
+    return;
+  ++RemainingSets;
+  std::unique_ptr<DescriptorSet> Owned = std::move(*It);
+  Sets.erase(It);
+  destroyOrDeferSet(std::move(Owned));
 }
 
 void DescriptorPool::reset() {
+  for (std::unique_ptr<DescriptorSet> &Owned : Sets)
+    destroyOrDeferSet(std::move(Owned));
   Sets.clear();
   RemainingSets = MaxSets;
+}
+
+DescriptorPool::~DescriptorPool() {
+  for (std::unique_ptr<DescriptorSet> &Owned : Sets)
+    destroyOrDeferSet(std::move(Owned));
 }
 
 namespace feme::vulkan {
