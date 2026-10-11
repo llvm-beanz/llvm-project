@@ -68,17 +68,19 @@ suggested the next steps:
    `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
    comparing per-row coverage/edge-function values near x=12/x=20, not blend
    arithmetic.
-2. **(~1-2 hours)** `L414(a)`'s next item: `standardSampleLocations` — needs the
+2. **(~1-2 hours)** `L414(a)`'s `standardSampleLocations` item — needs the
    Vulkan-spec-standard multisample sample-location pattern implemented in the
-   rasterizer, not a reported-bit flip. Check the spec's table of standard
-   locations per sample count first, then find where FeMe's rasterizer currently
-   picks sample positions.
-3. **(~1-2 hours)** `L414(a)`'s last item: `timestampComputeAndGraphics` — needs
-   real compute-queue timestamp-query support (currently only graphics-queue).
-   Check `QueryPool.cpp`/whatever handles `vkCmdWriteTimestamp` for queue-family
-   gating first.
-4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
-   `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
-   `get_device_proc_addr`/`driver_properties` — still untouched across several
-   sessions now. Oldest-standing untriaged item in any handoff; worth picking up
-   soon just to stop it recurring unchanged.
+   rasterizer, not a reported-bit flip.
+3. **(~1-2 hours)** `L414(a)`'s `timestampComputeAndGraphics` item — needs real
+   compute-queue timestamp-query support (currently graphics-queue only). Check
+   `QueryPool.cpp`'s `vkCmdWriteTimestamp` queue-family gating first.
+4. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
+   per-device `EnabledExtensions` tracking plus a command-to-owning-extension(s)
+   map so `vkGetDeviceProcAddr` can correctly return null for a disabled
+   extension's functions. This is now the single remaining item blocking a clean
+   `api.version_check.entry_points`/`api.get_device_proc_addr.non_enabled` pair.
+5. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
+   `entry_points`'s 8 genuinely-unimplemented functions (sparse residency, YCbCr
+   conversion, buffer device address) — worth a feasibility check per function
+   before committing to implement any of them; none has an assigned roadmap item
+   yet.
