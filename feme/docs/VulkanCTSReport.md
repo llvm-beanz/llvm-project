@@ -2248,6 +2248,78 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `BufferView`, `Sampler`, `Event`, `QueryPool`) are fixed and
       CTS-verified. Struck through on `Roadmap.md`.
 
+52. **`L411`: fixed a real truncation-bias precision bug in
+    `R11G11B10_FLOAT`'s pack path, but it does not fully resolve the
+    `b10g11r11_ufloat_pack32` dual-source-blend Fails -- a second,
+    distinct bug remains.**
+    - First corrected the scope: the "4 Fails" figure carried across
+      several prior handoffs (from item 47/`L409`'s own 5,000-case
+      *random sample* of a 74,652-case family) understated the real
+      count. A full run of just `dEQP-VK.pipeline.*.blend.dual_source.
+      *b10g11r11_ufloat_pack32*` (788 cases) found **66 Fails (8.4%)**,
+      525 Pass (66.6%), 197 NotSupported (25.0%, `VK_EXT_shader_object`
+      gaps) -- all generic "Image mismatch", spanning nearly every
+      blend-state combination rather than a narrow subset, pointing at
+      a format-precision bug rather than a blend-equation-specific one.
+    - Root-caused via `--deqp-log-images=enable` + a Python script that
+      decodes the QPA's embedded base64 PNGs and diffs Result against
+      Reference pixel-by-pixel (the same technique `L378(a)` used):
+      both of this format's pack sites --
+      `femeRTPackR11G11B10Float` (`runtime/CPU/FeMeRuntimeCPU.c`, the
+      shader texel-store path) and `encodeR11G11B10Float`
+      (`ImageFixture.cpp`, the `packClearColor`/`Executor.cpp`
+      `mergeColor` attachment-write-back path blending round-trips an
+      attachment's existing texel through on every merge) -- narrowed
+      each channel's binary16 encoding down to its own narrower
+      mantissa field (6-bit for R/G, 5-bit for B) with a plain right
+      shift, which truncates (rounds toward zero) instead of rounding
+      to nearest, biasing every channel low. Confirmed numerically with
+      a standalone Python simulation before touching any code.
+    - **Fixed** both sites: add half an ULP of the target field before
+      the shift, so a mantissa-overflow carry propagates into the
+      exponent exactly like an ordinary floating-point round (the two
+      fields are contiguous bits here, same as binary16 itself); even
+      the rare carry all the way to this minifloat's own infinity
+      encoding still fits the field width.
+    - New regression tests:
+      `ImageFixtureTest.PacksR11G11B10FloatRoundsToNearestNotTruncates`
+      and
+      `ImageSamplingTest.StoreWritesTexelIntoR11G11B10FloatRoundsToNearest`,
+      both using `0.999` -- a value just below `1.0`'s rounding
+      boundary for this format's mantissa widths, so a truncating
+      encode keeps it just under `1.0` while a correctly rounding one
+      rounds up to exactly `1.0`.
+    - `check-feme`: 3632/3635 Passed, 3 Unsupported, 0 Failed, 0
+      regressions.
+    - **Verified against CTS:** re-ran the same 788-case family and the
+      one specific failing case used for root-causing, with
+      `--deqp-log-images=enable` both times. The fix is real and
+      measurable -- that one case's per-pixel mismatch count dropped
+      from 828/1024 to 88/1024 pixels, and several individual channel
+      values moved from a wrong value to exactly matching the
+      reference -- but **the family's Pass/Fail outcome is unchanged:
+      still 66 Fails, the identical 66 case names as before the fix**.
+      The residual mismatch in the same diffed case is a flat,
+      sharply-bounded rectangular sub-region of the image pegged at a
+      constant wrong value (e.g. `B=177` across an 8x11 block) where
+      the reference instead transitions to that same value later,
+      across a different region boundary -- this is a **second,
+      distinct, unresolved bug**: a blend-state/sub-region boundary
+      misplacement specific to this test family's multi-state grid
+      layout (the test applies several different blend-state
+      combinations across sub-regions of one image), not a
+      format-precision issue. This needs its own dedicated root-cause
+      session; not attempted further this session given the time
+      already spent confirming the precision fix's real-but-partial
+      effect.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **Still open:** the 66-case `b10g11r11_ufloat_pack32`
+      dual-source-blend family itself (root cause now narrowed to a
+      blend-state/sub-region boundary bug, not a format bug); `L411`
+      left open (not struck through) on `Roadmap.md` to reflect this.
+
 ## Complete group accounting
 
 
