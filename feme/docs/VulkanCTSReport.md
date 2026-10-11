@@ -2926,6 +2926,66 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       sample-location pattern implemented in the rasterizer, a real new
       backend feature, not a reported-bit flip.
 
+67. **`L414(a)`: `standardSampleLocations` investigated, not closed --
+    `Executor.cpp`'s `samplePositions` table fixed, but a new rasterizer
+    precision blocker found (`L414b`).**
+    - `Executor.cpp`'s `samplePositions` 1/4-sample tables already
+      exactly matched the Vulkan spec's own "Standard Sample Locations"
+      table; the 2-sample table had the same two values in the opposite
+      order, and the 8-sample table was FeMe's own "N-rooks" pattern,
+      not the spec's.
+    - **Fixed**: reordered the 2-sample table to
+      `{(0.75,0.75),(0.25,0.25)}` (the spec's own order) and replaced
+      the 8-sample table with the spec's literal values (cross-checked
+      against CTS's own `vktPipelineMultisampleImageTests.cpp`
+      `getStandardSampleLocations` table):
+      `(0.5625,0.3125),(0.4375,0.6875),(0.8125,0.5625),(0.3125,0.1875),
+      (0.1875,0.8125),(0.0625,0.4375),(0.6875,0.9375),(0.9375,0.0625)`.
+      Updated the function's inline comment (the prior "not a copy of
+      Vulkan's ... table" rationale is now obsolete) and
+      `FeMeGraphicsDesign.md`'s own "N-rooks" mention.
+    - Updated one existing unit test whose geometric expectations
+      depended on the old 2-sample order,
+      `ExecutorTest.SideEffectMaskNarrowsToThePassSpecificSampleNotThe
+      WholeLane` (sample 0 and sample 1's covered/uncovered expectations
+      swapped).
+    - Tried flipping `Limits.standardSampleLocations` to `VK_TRUE` to
+      match, but found a real, new blocker: `dEQP-VK.pipeline.*.
+      multisample.std_sample_locations.verify_location.
+      samples_8_invariable` (plus its 2 sibling `standardsampleposition.
+      *.samples_8` cases) renders a sub-pixel probe triangle at
+      1/16-pixel resolution (the precision `stdPrecision =
+      log2(numSamples*2)` the test computes requires for 8 samples) and
+      gets zero coverage back from FeMe's rasterizer -- confirmed, via
+      the identical probe shape at 1/8-pixel resolution (the 4-sample
+      case) passing cleanly, that this is a genuine sub-pixel rasterizer
+      precision limit at that fine a scale, not a bug in which 8 literal
+      values are used.
+    - Reverted `Limits.standardSampleLocations` back to `VK_FALSE`
+      rather than advertise a limit real conformance tests still fail --
+      kept the `samplePositions` table fix itself (strictly more
+      spec-compliant than before, confirmed zero regressions).
+    - `check-feme`: 3646/3649 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: `dEQP-VK.api.info.
+      vulkan1p4_limits_validation.general`: still Fails, now solely on
+      `standardSampleLocations=0` (confirmed via the qpa log's own
+      per-limit text). `dEQP-VK.pipeline.*.multisample.*` (39,880
+      cases): 80 Fails, byte-for-byte the same case-name list as a
+      same-session baseline rebuild with the `samplePositions` fix
+      reverted (confirming zero regressions from the table change
+      itself); the 8 new Fails the fixed table exposes
+      (`standardsampleposition`/`std_sample_locations` 8-sample cases)
+      only appear once `standardSampleLocations` is flipped `VK_TRUE`,
+      which this update does not ship. `dEQP-VK.rasterization.*sample*`
+      (6,521 cases): 0 Fail.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- the limit stays `VK_FALSE`, no feature/extension status
+      changed.
+    - **Still open:** `standardSampleLocations` itself (blocked on the
+      new `L414b` sub-pixel rasterizer precision bug, not yet
+      root-caused) and `L411`'s own long-standing residual bug remain
+      the two oldest open items from this session's handoff list.
+
 ## Complete group accounting
 
 
