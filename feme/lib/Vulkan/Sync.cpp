@@ -11,6 +11,7 @@
 #include "CommandBuffer.h"
 #include "Diagnostics.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 #include "Pipeline.h"
 #include "RenderPass.h"
@@ -113,26 +114,41 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
   return VK_SUCCESS;
 }
 
-/// (Roadmap L409/L410) Every `Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`
-/// a submission's command buffers (including, recursively, any secondary
-/// command buffers `vkCmdExecuteCommands` interprets into them) reference --
-/// gathered by `collectExecutionRefs` synchronously on the submitting host
-/// thread, before a submission's own `QueueExecutor` task is enqueued, so
-/// each one can be retained (`retainExecutionRefs`) before that task might
-/// start running on another thread, and released again
-/// (`releaseExecutionRefs`) once it finishes, whether it actually executed
-/// them or not. See `PendingExecutionRefCounted`'s own comment
-/// (`ExecutionLifetime.h`) for why this is necessary: without it, a
-/// `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`/
-/// `vkDestroyBuffer` call made (fully legally) right after `vkQueueSubmit`
-/// returns, with no wait at all, races this same task's own still-pending
-/// read of that object.
+/// (Roadmap L409/L410) Every `Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`/
+/// `Image`/`ImageView` a submission's command buffers (including,
+/// recursively, any secondary command buffers `vkCmdExecuteCommands`
+/// interprets into them) reference -- gathered by `collectExecutionRefs`
+/// synchronously on the submitting host thread, before a submission's own
+/// `QueueExecutor` task is enqueued, so each one can be retained
+/// (`retainExecutionRefs`) before that task might start running on another
+/// thread, and released again (`releaseExecutionRefs`) once it finishes,
+/// whether it actually executed them or not. See
+/// `PendingExecutionRefCounted`'s own comment (`ExecutionLifetime.h`) for
+/// why this is necessary: without it, a `vkDestroyPipeline`/
+/// `vkDestroyRenderPass`/`vkDestroyFramebuffer`/`vkDestroyBuffer`/
+/// `vkDestroyImage`/`vkDestroyImageView` call made (fully legally) right
+/// after `vkQueueSubmit` returns, with no wait at all, races this same
+/// task's own still-pending read of that object.
 struct ExecutionRefs {
   std::vector<Pipeline *> Pipelines;
   std::vector<const RenderPass *> RenderPasses;
   std::vector<const Framebuffer *> Framebuffers;
   std::vector<Buffer *> Buffers;
+  std::vector<Image *> Images;
+  std::vector<ImageView *> ImageViews;
 };
+
+/// Records \p View (if non-null) into \p Refs, plus the `Image` it wraps
+/// (`ImageView::image()`) -- an `ImageView` is a thin reference onto its
+/// `Image`'s own storage, so retaining only the view and not the image it
+/// points to would leave the same use-after-free race open one level down.
+void collectImageViewRef(ImageView *View, ExecutionRefs &Refs) {
+  if (!View)
+    return;
+  Refs.ImageViews.push_back(View);
+  if (Image *Img = View->image())
+    Refs.Images.push_back(Img);
+}
 
 void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
   for (const RecordedCommand &Cmd : CmdBuf.commands()) {
@@ -140,8 +156,53 @@ void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
       Refs.Pipelines.push_back(Cmd.Pipeline);
     if (Cmd.BeginPass)
       Refs.RenderPasses.push_back(Cmd.BeginPass);
-    if (Cmd.BeginFramebuffer)
+    if (Cmd.BeginFramebuffer) {
       Refs.Framebuffers.push_back(Cmd.BeginFramebuffer);
+      // (Roadmap L410) `Framebuffer` itself is already retained just
+      // above, but that does not keep its own attachment `ImageView`s
+      // (and the `Image`s they wrap) alive -- a classic `VkRenderPass`
+      // instance reads them via `Cmd.BeginFramebuffer->attachments()` at
+      // execution time (`buildRenderTargetBinding`), not through any
+      // separately-retained reference.
+      for (ImageView *View : Cmd.BeginFramebuffer->attachments())
+        collectImageViewRef(View, Refs);
+    }
+    // (Roadmap C6) Imageless framebuffer's own per-instance attachment
+    // views, when `BeginFramebuffer` carries none of its own (see
+    // `BeginAttachments`'s own comment, `CommandBuffer.h`).
+    for (ImageView *View : Cmd.BeginAttachments)
+      collectImageViewRef(View, Refs);
+    // (Roadmap L410) `vkCmdBeginRendering`'s own render-target binding,
+    // built directly at record time with no render pass/framebuffer in
+    // between (`RenderTargetBinding`, RenderPass.h) -- every attachment
+    // view it names needs the same retain `BeginAttachments`/
+    // `BeginFramebuffer` above get.
+    for (const RenderTargetView &Color : Cmd.RenderingBinding.Colors) {
+      collectImageViewRef(Color.View, Refs);
+      collectImageViewRef(Color.ResolveView, Refs);
+    }
+    if (Cmd.RenderingBinding.Depth) {
+      collectImageViewRef(Cmd.RenderingBinding.Depth->View, Refs);
+      collectImageViewRef(Cmd.RenderingBinding.Depth->ResolveView, Refs);
+    }
+    if (Cmd.RenderingBinding.Stencil) {
+      collectImageViewRef(Cmd.RenderingBinding.Stencil->View, Refs);
+      collectImageViewRef(Cmd.RenderingBinding.Stencil->ResolveView, Refs);
+    }
+    for (ImageView *Input : Cmd.RenderingBinding.Inputs)
+      collectImageViewRef(Input, Refs);
+    // (Roadmap L410) Every `Image *` field `RecordedCommand` ever
+    // populates (`CopyImage`/`BlitImage`/`ResolveImage`/
+    // `CopyBufferToImage`/`CopyImageToBuffer`'s `SrcImage`/`DstImage`,
+    // `ClearColorImage`/`ClearDepthStencilImage`'s `DstImage`), plus every
+    // `vkCmdPipelineBarrier` image-layout-transition target.
+    if (Cmd.SrcImage)
+      Refs.Images.push_back(Cmd.SrcImage);
+    if (Cmd.DstImage)
+      Refs.Images.push_back(Cmd.DstImage);
+    for (const ImageLayoutTransition &Barrier : Cmd.ImageBarriers)
+      if (Barrier.Img)
+        Refs.Images.push_back(Barrier.Img);
     // (Roadmap L410) Every `Buffer *` field `RecordedCommand` ever
     // populates, regardless of which `Kind` this command is: each field
     // is only ever non-null for the `Kind`(s) that actually use it (see
@@ -185,6 +246,10 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     FB->retainForExecution();
   for (Buffer *B : Refs.Buffers)
     B->retainForExecution();
+  for (Image *Img : Refs.Images)
+    Img->retainForExecution();
+  for (ImageView *View : Refs.ImageViews)
+    View->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -196,6 +261,12 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
   for (Pipeline *P : Refs.Pipelines)
     if (P->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(P);
+  for (ImageView *View : Refs.ImageViews)
+    if (View->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(View);
+  for (Image *Img : Refs.Images)
+    if (Img->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(Img);
   for (Buffer *B : Refs.Buffers)
     if (B->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(B);

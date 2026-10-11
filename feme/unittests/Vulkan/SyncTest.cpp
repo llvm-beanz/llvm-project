@@ -1318,3 +1318,73 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds) {
   vkFreeMemory(Device, DstMemory, nullptr);
   vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
+
+// (Roadmap L410) `Image`/`ImageView`'s analog of
+// `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds` above: the same
+// hazardous ordering, but for `Image`s referenced via `vkCmdCopyImage`'s
+// `SrcImage`/`DstImage` fields.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {2, 2, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  VkImage SrcImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &SrcImg), VK_SUCCESS);
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &DstImg), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE, DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, SrcImg, SrcMemory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(TestCmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                DstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: destroy the `VkImage` wrapper objects the
+  // just-enqueued submission references with no wait at all (see
+  // `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds`'s comment for
+  // why backing `VkDeviceMemory` is freed only after the wait below --
+  // the same reasoning applies here).
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed `Image` objects.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+}
