@@ -3671,7 +3671,10 @@ dynamic state C4c's own note describes. `rectangularLines`/
 `bresenhamLines`/`smoothLines` and their three `stippled*` variants are
 advertised `VK_TRUE` (the aggregate `VkPhysicalDeviceVulkan14Features`
 struct and the dedicated `VkPhysicalDeviceLineRasterizationFeaturesKHR`
-struct), and `lineSubPixelPrecisionBits` is a real `4` in both the
+struct), and `lineSubPixelPrecisionBits` is a real `8` (roadmap `L414b` raised it
+from `4`; CTS's `std_sample_locations.verify_location.samples_8_
+invariable` probe triangle needs sub-1/16-pixel fixed-point resolution
+to survive quantization non-degenerate) in both the
 aggregate `VkPhysicalDeviceVulkan14Properties` struct and the dedicated
 `VkPhysicalDeviceLineRasterizationPropertiesKHR` struct -- the same
 conservative floor `subPixelPrecisionBits`/`subTexelPrecisionBits`
