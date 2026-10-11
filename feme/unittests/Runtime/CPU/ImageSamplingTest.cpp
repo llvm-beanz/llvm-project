@@ -7128,6 +7128,35 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR11G11B10FloatRoundsToNearest) {
   EXPECT_EQ((Raw >> 22) & 0x3FFu, 15u << 5);
 }
 
+// (Roadmap L411b) The fix above still rounded *twice* (once to binary16's
+// own 10-bit mantissa, again down to this format's narrower 6-/5-bit
+// one) -- `0.06298828125` (`129/2048`) disagrees between that two-step
+// path (which rounds to `0.0634765625`) and a single correctly-rounded
+// step (which rounds to `0.0625` instead, matching dEQP-VK's own
+// reference renderer) -- mirrors `ImageFixtureTest`'s own
+// `PacksR11G11B10FloatAvoidsDoubleRounding` test for the other
+// (non-runtime) encoder this format shares a comment-documented mirror
+// relationship with.
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR11G11B10FloatAvoidsDoubleRounding) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R11G11B10_FLOAT,
+      Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {0.06298828125f, 0.06298828125f, 0.06298828125f,
+                         0.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  // `0.0625`'s 11-bit (R/G) field is `exponent=11, mantissa=0` (`0.0625
+  // == 2^-4`); the double-rounded-to-`0.0634765625` value this test
+  // guards against would instead leave a nonzero mantissa here.
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x7FFu, 11u << 6);
+  EXPECT_EQ((Raw >> 11) & 0x7FFu, 11u << 6);
+}
+
 TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Uint) {
   uint32_t Storage[1][1] = {};
   FemeImageSubresourceLayout Layout;

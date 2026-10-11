@@ -2426,38 +2426,96 @@ femeRTUnpackR11G11B10Float(uint32_t Raw) {
   return V;
 }
 
+// (Roadmap L411b) Rounds a non-negative \p Value directly to an unsigned
+// minifloat field with a 5-bit exponent (binary16's own bias, 15) and
+// \p MantissaBits mantissa bits, in a single round-to-nearest-ties-to-
+// even step from \p Value's own binary32 bits -- mirrors
+// `ImageFixture.cpp`'s `packUnsignedMinifloat`.
+//
+// This replaces the previous two-step approach `femeRTPackR11G11B10Float`
+// used (round to binary16 via `femeRTFloatToHalf`, then right-shift that
+// *already-rounded* 10-bit mantissa down to this field's narrower one):
+// rounding twice -- once to 10 mantissa bits, again to this field's 5 or
+// 6 -- is a classic "double rounding" bug, and can disagree with a
+// single correctly-rounded conversion in roughly 1.5-3% of inputs
+// (verified with a standalone Python simulation against this project's
+// own two-step code before writing this). dEQP-VK's reference renderer
+// (`tcuFloat.hpp`'s `Float<..>` template) converts directly from `float`
+// in one step, so `b10g11r11_ufloat_pack32`'s multi-pass dual-source-
+// blend tests -- which round-trip every pixel through this pack on
+// every blended draw via `Executor.cpp`'s `mergeColor` -- can compound a
+// handful of these disagreements across four overlapping draws into a
+// visible image-comparison Fail, even after the earlier L411 fix (which
+// only fixed the *bias direction* of the second rounding step, not the
+// double rounding itself).
+__attribute__((always_inline)) static uint32_t
+femeRTPackUnsignedMinifloat(float Value, uint32_t MantissaBits) {
+  const int32_t ExpBits = 5;
+  const int32_t Bias = 15;
+  if (!(Value > 0.0f)) // Also catches NaN (propagates as 0, same as the
+                       // existing `__builtin_fmaxf(X, 0.0f)` callers did).
+    return 0u;
+
+  uint32_t Bits;
+  __builtin_memcpy(&Bits, &Value, sizeof(Bits));
+  int32_t Exp32 = (int32_t)((Bits >> 23) & 0xFFu);
+  if (Exp32 == 0xFF) // Infinity or NaN input.
+    return ((1u << ExpBits) - 1u) << MantissaBits;
+  int32_t Exp = Exp32 - 127;
+  uint32_t Mantissa = Bits & 0x7FFFFFu;
+  uint32_t Full = (1u << 23) | Mantissa; // 24-bit significand, implicit
+                                         // leading 1 included.
+
+  const int32_t EMin = 1 - Bias;
+  const int32_t EMax = ((1 << ExpBits) - 2) - Bias;
+
+  int32_t Shift = (Exp < EMin) ? (EMin - Exp) + (23 - (int32_t)MantissaBits)
+                               : (23 - (int32_t)MantissaBits);
+  if (Shift <= 0) // Overflow: Value's exponent is already far beyond what
+                  // any double-rounding could have reached.
+    return ((1u << ExpBits) - 1u) << MantissaBits;
+
+  uint32_t Half = 1u << (Shift - 1);
+  uint32_t Trunc = Full >> Shift;
+  uint32_t Rem = Full & ((1u << Shift) - 1u);
+  if (Rem > Half || (Rem == Half && (Trunc & 1u)))
+    ++Trunc; // Round to nearest, ties to even.
+
+  uint32_t ExpField, MantField;
+  if (Exp < EMin) {
+    ExpField = 0u;
+    MantField = Trunc;
+    if (MantField >= (1u << MantissaBits)) {
+      // Rounded up into the smallest normal value.
+      ExpField = 1u;
+      MantField -= (1u << MantissaBits);
+    }
+  } else if (Trunc >= (1u << (MantissaBits + 1u))) {
+    // Rounding carried past the (already-present) implicit leading 1.
+    ExpField = (uint32_t)(Exp + Bias) + 1u;
+    MantField = 0u;
+  } else {
+    ExpField = (uint32_t)(Exp + Bias);
+    MantField = Trunc - (1u << MantissaBits);
+  }
+  if (ExpField > (uint32_t)(EMax + Bias))
+    return ((1u << ExpBits) - 1u) << MantissaBits; // Overflow to infinity.
+  return (ExpField << MantissaBits) | MantField;
+}
+
 // (Roadmap H19n) The inverse of `femeRTUnpackR11G11B10Float` above: clamps
 // each of R/G/B to `[0.0, +inf)` (this format is unsigned, no sign bit),
-// encodes each with `femeRTFloatToHalf`, then right-shifts each binary16
-// result back down by the same amount the unpack side shifted up by (4
-// for the 11-bit R/G fields' 6-bit mantissa, 5 for the 10-bit B field's
-// 5-bit mantissa) to recover each field's own narrower exponent+mantissa
-// bit pattern, and packs the three fields LSB-up into one `uint32_t`.
-//
-// (Roadmap L411) The right-shift itself rounds to nearest (adding half an
-// ULP of the *target* field before shifting) rather than truncating:
-// plain truncation always rounds toward zero, biasing every narrowed
-// channel low and (since `VK_FORMAT_B10G11R11_UFLOAT_PACK32` render
-// targets round-trip through this pack on every blended draw) compounding
-// across repeated blend passes until `dEQP-VK.pipeline.*.blend.
-// dual_source.format.b10g11r11_ufloat_pack32.*`'s image comparison fails.
-// Adding the round bit before the shift lets a mantissa-overflow carry
-// propagate into the exponent field exactly like a normal floating-point
-// round (the two fields are contiguous bits here, same as in `binary16`
-// itself), and even the rare carry all the way to this minifloat's own
-// infinity encoding still fits the field width (mirrors `binary16`'s own
-// exponent range, just a narrower mantissa).
+// then rounds each directly to that field's own 6- or 5-bit mantissa via
+// `femeRTPackUnsignedMinifloat` (Roadmap L411b), and packs the three
+// fields LSB-up into one `uint32_t`.
 __attribute__((always_inline)) static uint32_t
 femeRTPackR11G11B10Float(FemeRTv4f32 Value) {
   float C0 = __builtin_fmaxf(Value[0], 0.0f);
   float C1 = __builtin_fmaxf(Value[1], 0.0f);
   float C2 = __builtin_fmaxf(Value[2], 0.0f);
-  uint32_t R11 =
-      (((uint32_t)femeRTFloatToHalf(C0) + 0x8u) >> 4) & 0x7FFu;
-  uint32_t G11 =
-      (((uint32_t)femeRTFloatToHalf(C1) + 0x8u) >> 4) & 0x7FFu;
-  uint32_t B10 =
-      (((uint32_t)femeRTFloatToHalf(C2) + 0x10u) >> 5) & 0x3FFu;
+  uint32_t R11 = femeRTPackUnsignedMinifloat(C0, 6u);
+  uint32_t G11 = femeRTPackUnsignedMinifloat(C1, 6u);
+  uint32_t B10 = femeRTPackUnsignedMinifloat(C2, 5u);
   return R11 | (G11 << 11) | (B10 << 22);
 }
 

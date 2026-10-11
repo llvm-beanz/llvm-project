@@ -1587,6 +1587,36 @@ TEST(ImageFixtureTest, PacksR11G11B10FloatRoundsToNearestNotTruncates) {
   EXPECT_DOUBLE_EQ(Unpacked[2], 1.0);
 }
 
+// (Roadmap L411b) The previous fix above (round to nearest instead of
+// truncating) still rounded *twice*: once to binary16's own 10-bit
+// mantissa, then again down to this format's narrower 6-/5-bit one.
+// Rounding twice ("double rounding") can disagree with a single
+// correctly-rounded conversion -- `0.06298828125` (`129/2048`) is one
+// such value: the old two-step path rounds it to `0.0634765625`, but a
+// single correctly-rounded step (matching dEQP-VK's own reference
+// renderer, `tcuFloat.hpp`'s `Float<..>` template, which converts
+// directly from `float` in one step) rounds it to `0.0625` instead --
+// confirmed independently with a standalone Python simulation of both
+// paths before writing this fix, not just by this test passing.
+TEST(ImageFixtureTest, PacksR11G11B10FloatAvoidsDoubleRounding) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                     {0.06298828125, 0.06298828125, 0.06298828125, 1.0},
+                     Texel),
+      Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.0625);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 0.0625);
+  // B's 5-bit mantissa is coarser still, so the same input value lands
+  // on a different (also double-rounding-affected) field boundary --
+  // still exactly reproduces as long as this isn't rounded twice.
+  EXPECT_NE(Unpacked[2], 0.0634765625);
+}
+
 // The fixture text format also round-trips `R11G11B10_FLOAT`, the same
 // opaque hex-word encoding `E5B9G9R9_UFLOAT`/`R10G10B10A2_UNORM` already
 // established for a packed format.

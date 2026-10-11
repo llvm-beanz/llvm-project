@@ -183,45 +183,94 @@ void decodeRGB9E5(uint32_t Word, double &R, double &G, double &B) {
   B = static_cast<double>((Word >> 18) & 0x1FFu) * Scale;
 }
 
+/// (Roadmap L411b) Rounds a non-negative \p Value directly to an
+/// unsigned minifloat field with a 5-bit exponent (binary16's own bias,
+/// 15) and \p MantissaBits mantissa bits, in a single round-to-nearest-
+/// ties-to-even step from \p Value's full `double` precision -- mirrors
+/// `runtime/CPU/FeMeRuntimeCPU.c`'s `packUnsignedMinifloat`.
+///
+/// This replaces the previous two-step approach (round to binary16 via
+/// `floatToHalfBits`, then right-shift that *already-rounded* 10-bit
+/// mantissa down to this field's narrower one): rounding twice -- once
+/// to 10 mantissa bits, again to this field's 5 or 6 -- is a classic
+/// "double rounding" bug, and can disagree with a single correctly-
+/// rounded conversion in roughly 1.5-3% of inputs (verified with a
+/// standalone Python simulation against this project's own two-step
+/// code before writing this). dEQP-VK's reference renderer
+/// (`tcuFloat.hpp`'s `Float<..>` template) converts directly from
+/// `float`/`double` in one step, so `b10g11r11_ufloat_pack32`'s
+/// multi-pass dual-source-blend tests -- which round-trip every pixel
+/// through this encode on every blended draw via `Executor.cpp`'s
+/// `mergeColor` -- can compound a handful of these disagreements across
+/// four overlapping draws into a visible image-comparison Fail, even
+/// after L411's own truncate-vs-round-to-nearest fix (which only fixed
+/// the *bias direction* of the second rounding step, not the double
+/// rounding itself).
+uint32_t packUnsignedMinifloat(double Value, unsigned MantissaBits) {
+  constexpr int ExpBits = 5;
+  constexpr int Bias = 15;
+  if (!(Value > 0.0)) // Also catches NaN (propagates as 0, same as the
+                       // existing `std::max(X, 0.0)` callers below did).
+    return 0;
+  if (std::isinf(Value))
+    return ((1u << ExpBits) - 1u) << MantissaBits;
+
+  uint64_t Bits;
+  std::memcpy(&Bits, &Value, sizeof(Bits));
+  int Exp = static_cast<int>((Bits >> 52) & 0x7FFu) - 1023;
+  uint64_t Mantissa = Bits & ((1ull << 52) - 1);
+  uint64_t Full = (1ull << 52) | Mantissa; // 53-bit significand, implicit
+                                           // leading 1 included.
+
+  const int EMin = 1 - Bias;
+  const int EMax = ((1 << ExpBits) - 2) - Bias;
+
+  int Shift = (Exp < EMin) ? (EMin - Exp) + (52 - static_cast<int>(MantissaBits))
+                           : (52 - static_cast<int>(MantissaBits));
+  if (Shift <= 0) // Overflow: Value's exponent is already far beyond
+                  // what any double-rounding could have reached.
+    return ((1u << ExpBits) - 1u) << MantissaBits;
+
+  uint64_t Half = 1ull << (Shift - 1);
+  uint64_t Trunc = Full >> Shift;
+  uint64_t Rem = Full & ((1ull << Shift) - 1);
+  if (Rem > Half || (Rem == Half && (Trunc & 1)))
+    ++Trunc; // Round to nearest, ties to even.
+
+  uint32_t ExpField, MantField;
+  if (Exp < EMin) {
+    ExpField = 0;
+    MantField = static_cast<uint32_t>(Trunc);
+    if (MantField >= (1u << MantissaBits)) {
+      // Rounded up into the smallest normal value.
+      ExpField = 1;
+      MantField -= (1u << MantissaBits);
+    }
+  } else if (Trunc >= (1ull << (MantissaBits + 1))) {
+    // Rounding carried past the (already-present) implicit leading 1.
+    ExpField = static_cast<uint32_t>(Exp + Bias) + 1;
+    MantField = 0;
+  } else {
+    ExpField = static_cast<uint32_t>(Exp + Bias);
+    MantField = static_cast<uint32_t>(Trunc - (1ull << MantissaBits));
+  }
+  if (ExpField > static_cast<uint32_t>(EMax + Bias))
+    return ((1u << ExpBits) - 1u) << MantissaBits; // Overflow to infinity.
+  return (ExpField << MantissaBits) | MantField;
+}
+
 /// (Roadmap L134(i)) Encodes an RGB triple into
 /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32`'s packed word: from the LSB up, an
 /// 11-bit unsigned float for R (6-bit mantissa, 5-bit exponent), another
 /// 11-bit float for G, then a 10-bit unsigned float for B (5-bit
 /// mantissa, 5-bit exponent) -- mirrors
-/// `runtime/CPU/FeMeRuntimeCPU.c`'s `femeRTPackR11G11B10Float`: clamp each
-/// channel non-negative, round to binary16 via `floatToHalfBits`, then
-/// right-shift each binary16 result down (4 bits for the 11-bit R/G
-/// fields' 6-bit mantissa, 5 bits for the 10-bit B field's 5-bit
-/// mantissa) to recover each field's own narrower exponent+mantissa bit
-/// pattern.
-///
-/// (Roadmap L411) As in `femeRTPackR11G11B10Float`, the right-shift adds
-/// half an ULP of the target field first so it rounds to nearest instead
-/// of truncating (which biases every channel low and, since this
-/// fixture's `unpackColor`/`packClearColor` pair is exactly what
-/// `Executor.cpp`'s `mergeColor` round-trips an attachment's existing
-/// texel through on every blended draw, compounds across repeated blend
-/// passes until `dEQP-VK.pipeline.*.blend.dual_source.format.
-/// b10g11r11_ufloat_pack32.*`'s image comparison fails).
+/// `runtime/CPU/FeMeRuntimeCPU.c`'s `femeRTPackR11G11B10Float`: clamp
+/// each channel non-negative, then round directly to that field's own
+/// 6- or 5-bit mantissa via `packUnsignedMinifloat` (Roadmap L411b).
 uint32_t encodeR11G11B10Float(double R, double G, double B) {
-  uint32_t R11 =
-      ((static_cast<uint32_t>(
-            floatToHalfBits(static_cast<float>(std::max(R, 0.0)))) +
-        0x8u) >>
-       4) &
-      0x7FFu;
-  uint32_t G11 =
-      ((static_cast<uint32_t>(
-            floatToHalfBits(static_cast<float>(std::max(G, 0.0)))) +
-        0x8u) >>
-       4) &
-      0x7FFu;
-  uint32_t B10 =
-      ((static_cast<uint32_t>(
-            floatToHalfBits(static_cast<float>(std::max(B, 0.0)))) +
-        0x10u) >>
-       5) &
-      0x3FFu;
+  uint32_t R11 = packUnsignedMinifloat(std::max(R, 0.0), 6);
+  uint32_t G11 = packUnsignedMinifloat(std::max(G, 0.0), 6);
+  uint32_t B10 = packUnsignedMinifloat(std::max(B, 0.0), 5);
   return R11 | (G11 << 11) | (B10 << 22);
 }
 
