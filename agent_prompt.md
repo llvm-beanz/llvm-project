@@ -63,23 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** `DescriptorSet` next for `L410` — same 3-commit pattern
-   (mixin → destroy guard → retain/release). This is also the one that finally
-   closes the descriptor-indirect image/buffer gap noted above, since
-   `DescriptorSet`'s own retain sweep is the natural place to walk its bound
-   image/buffer views.
-2. **(~2-4 hours each)** Then `Event`, `QueryPool` — one per session, same
-   pattern. `L410` is then fully closed.
-3. **(~30 min)** Still outstanding, unrelated pixel-correctness bugs, lower
+1. **(~2-4 hours each)** `Event`, `QueryPool` — the last two types from `L409`'s
+   original 6-type follow-up list. Same 3-commit pattern (mixin → destroy guard
+   → retain/release), one per session. Once both land, `L410` is **fully
+   closed** — worth striking through on the roadmap at that point.
+2. **(~30 min)** Still outstanding, unrelated pixel-correctness bugs, lower
    priority: `L378(a)` (`max_sampler_lod_bias.shader_bias`) and the 4
    `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session.
-   Use `--deqp-log-images=enable` + golden-image diff for both.
-4. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still
-   a not-yet-filed, low-priority roadmap entry candidate if a future session has
-   spare time.
-5. Drop from future handoffs — fully resolved, stop citing: `L409` (closed,
-   verified), `Buffer`'s own `L410` fix (closed, verified), `part1`'s crash
-   mystery, `L407`, the "resource-table exhaustion" hypothesis, `L375`,
-   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup
-   pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s
-   `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+   Use `--deqp-log-images=enable` + golden-image diff for both — this has been
+   recommended for several sessions now and still hasn't been picked up; if a
+   session has genuinely nothing else to do, this is the one to grab.
+3. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still
+   a not-yet-filed, low-priority roadmap entry candidate.
+4. Drop from future handoffs — fully resolved, stop citing: `L409` (closed,
+   verified), `Buffer`'s own `L410` fix (closed, verified),
+   `Image`/`ImageView`'s own `L410` fix (closed, verified),
+   `DescriptorSet`/`BufferView`/`Sampler`'s own `L410` fix (closed this session,
+   verified), `part1`'s crash mystery, `L407`, the "resource-table exhaustion"
+   hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap
+   strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil`
+   verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
