@@ -2692,6 +2692,74 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `L414(a)` (no new letter-nesting added, per the "no more than one
       lowercase letter deep" rule).
 
+61. **`L414(a)`: fixed item 3 of the remaining 3-item bucket --
+    `vk11Properties.subgroupSupportedStages` now advertises
+    `VK_SHADER_STAGE_FRAGMENT_BIT` alongside `VK_SHADER_STAGE_COMPUTE_BIT`
+    (48, matching the Vulkan-1.4-roadmap-profile minimum).**
+    - Architectural audit: `feme::cpu::SIMDizePass` (Phase 4,
+      stage-agnostic) already vectorizes one subgroup's `WaveSize`
+      invocations into a single straight-line instruction stream for
+      *every* shader stage, not just compute -- so within-subgroup
+      barrier convergence for fragment shaders was already guaranteed by
+      construction, unlike compute's genuinely divergent wave-loop
+      iterations (which is why compute needs real wave-body splitting at
+      group-sync barriers, see `EntryWrapper.cpp`).
+    - The real gap: `FragmentWrapper.cpp` never called
+      `feme::cpu::matchBarrierCall` at all (every other per-stage
+      wrapper -- `EntryWrapper.cpp`, `GeometryWrapper.cpp`,
+      `DomainWrapper.cpp`, `HullWrapper.cpp`,
+      `PatchConstantWrapper.cpp` -- already does), so a fragment shader
+      calling `subgroupBarrier()` survived unhandled all the way to raw
+      LLVM instruction selection, hitting a fatal `Cannot select:
+      intrinsic %llvm.spv.all.memory.barrier.with.group.sync` error
+      (confirmed by first flipping the reported bit alone, without any
+      `FragmentWrapper.cpp` change, as a deliberate negative-control
+      experiment).
+    - Why a plain `fence` suffices for every barrier reaching this
+      stage, no splitting needed: per the SPIR-V spec, `OpControlBarrier`
+      with `Workgroup` execution scope is only legal under the
+      `GLCompute`/`TaskEXT`/`MeshEXT` execution models -- a fragment
+      entry point has no "workgroup" at all, so it can only ever emit a
+      `Subgroup`-scope (or stricter) barrier, and that barrier's
+      convergence requirement is already met by the vectorization above;
+      only the memory-ordering half of its semantics needs any code,
+      exactly like a memory-only barrier.
+    - **Fixed**: added `lowerFragmentBarriers`/`fragmentBarrierSyncScope`
+      to `FragmentWrapper.cpp` (mirroring `EntryWrapper.cpp`'s
+      `syncScopeFor`/`replaceMemoryOnlyBarriers`), called unconditionally
+      at the top of `lowerFragmentStageOps` (before the `UsesStageOps`
+      early-return gate, so a shader using only a barrier call with no
+      other stage I/O is still handled). Raised
+      `Info.SubgroupSupportedStages` in `PhysicalDeviceInfo.cpp`.
+    - Updated unit test:
+      `PhysicalDeviceInfo.SubgroupSizeIsAPowerOfTwoInRange`.
+    - `check-feme`: 3640/3640 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: `dEQP-VK.subgroups.basic.graphics.*` (the
+      originally-crashing bucket, 5 cases): 5 Passed, 0 Failed -- crash
+      gone, real correct results, not just a graceful `NotSupported`.
+      `dEQP-VK.subgroups.*.graphics.*` (3,912 cases): 313 Passed, 0
+      Failed, 3,599 NotSupported (all for unrelated reasons -- long
+      vectors, ray tracing, mesh shading, unsupported formats).
+      `dEQP-VK.subgroups.*.framebuffer.*` (15,657 cases): 7 Passed, 0
+      Failed, 15,650 NotSupported (mostly vertex/tessellation/geometry
+      stage variants, correctly still unsupported since only
+      compute/fragment are now advertised). Broader
+      `dEQP-VK.subgroups.*` sweep (partial, 900s budget covered ~38,000
+      of ~48,705 cases before timing out, not a crash): 546 Passed, 0
+      Failed observed in the covered portion. Re-ran
+      `dEQP-VK.api.info.*` (10,488 cases): still 1 Fail overall
+      (`vulkan1p4_limits_validation.general`), its own sub-failure list
+      dropped from 3 to 2: `timestampComputeAndGraphics`,
+      `standardSampleLocations`.
+    - `Vulkan14FeatureInventory.md` updated to reflect
+      `subgroupSupportedStages` now including `VK_SHADER_STAGE_FRAGMENT_BIT`;
+      `VulkanExtensionInventory.md` unchanged (no new extension).
+    - **Still open:** the remaining 2-item bucket --
+      `timestampComputeAndGraphics`, `standardSampleLocations` -- still
+      filed under `L414(a)`, each real new backend work (compute-queue
+      timestamp-query support; standard multisample sample-location
+      pattern in the rasterizer) needing its own feasibility check.
+
 ## Complete group accounting
 
 
