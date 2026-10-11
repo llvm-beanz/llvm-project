@@ -68,18 +68,19 @@ suggested the next steps:
    `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
    comparing per-row coverage/edge-function values near x=12/x=20, not blend
    arithmetic.
-2. **(~1-2 hours each, new)** `L414(a)`'s 5-item "real work" bucket:
-   `timestampComputeAndGraphics`, `standardSampleLocations`,
-   `vk11Properties.subgroupSupportedStages`,
-   `vk12Properties.shaderSignedZeroInfNanPreserveFloat16`,
-   `vk12Properties.shaderSignedZeroInfNanPreserveFloat32` — each needs its own
-   feasibility check (is this even implementable in FeMe's current
-   architecture?) before committing to implement. Suggest starting with
-   `shaderSignedZeroInfNanPreserveFloat32` (narrowest, might just be a
-   reported-bit flip if the CPU backend's float32 codegen already preserves
-   IEEE-754 signed-zero/Inf/NaN — worth checking before assuming it needs real
-   codegen work).
-3. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
+2. **(~1 hour)** `L414(a)`'s next item: `vk11Properties.subgroupSupportedStages`
+   — audit which shader stages `feme::cpu`'s wave-intrinsic lowering genuinely
+   supports outside compute before advertising them
+   (`VkPhysicalDeviceSubgroupProperties.supportedStages`, currently
+   `32`/`COMPUTE`-only, needs `>=48`). Likely the next-narrowest item in the
+   remaining 3 since it's a one-field audit+bump like Float16/32 was, not a new
+   rasterizer feature.
+3. **(~1-2 hours each)** `L414(a)`'s remaining 2 items:
+   `timestampComputeAndGraphics` (needs real compute-queue timestamp-query
+   support) and `standardSampleLocations` (needs the Vulkan-spec-standard
+   multisample sample-location pattern in the rasterizer) — each is real new
+   backend work, not a reported-bit flip; check feasibility before committing.
+4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
    `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
    `get_device_proc_addr`/`driver_properties` — still untouched across several
    sessions now.
