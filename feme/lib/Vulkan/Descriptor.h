@@ -99,6 +99,8 @@
 #ifndef FEME_LIB_VULKAN_DESCRIPTOR_H
 #define FEME_LIB_VULKAN_DESCRIPTOR_H
 
+#include "ExecutionLifetime.h"
+
 #include "llvm/ADT/ArrayRef.h"
 
 #include <vulkan/vulkan_core.h>
@@ -290,7 +292,19 @@ struct DescriptorImageBinding {
 /// lock is released, since a caller reading through it afterward would
 /// race with -- and could observe a torn write from -- the very update
 /// this lock is meant to guard against.
-class DescriptorSet {
+///
+/// (roadmap L410) Inherits `PendingExecutionRefCounted` (`ExecutionLifetime.h`):
+/// a `vkCmdBindDescriptorSets` (or push-descriptor-set) command captures a
+/// `DescriptorSet *` the same raw-pointer, no-keep-alive way `Pipeline`/
+/// `RenderPass`/`Buffer`/`Image` were before `L409`/`L410` fixed them, and
+/// `vkFreeDescriptorSets`/`vkResetDescriptorPool`/`vkDestroyDescriptorPool`
+/// can all race a still-executing submission's read of it. Unlike those
+/// types, a `DescriptorSet` is owned by its `DescriptorPool` via
+/// `std::unique_ptr` (`DescriptorPool::Sets`), not through the generic
+/// `Allocator` -- see `DescriptorPool::free`/`reset`'s own comments
+/// (`Descriptor.cpp`) for how `requestDestroy`'s deferred-destroy path
+/// integrates with that ownership instead of an `Allocator`-based one.
+class DescriptorSet : public PendingExecutionRefCounted {
 public:
   /// Constructs a set from \p Layout, sizing every binding's array to its
   /// declared `Count` -- except (roadmap L12c) the layout's own

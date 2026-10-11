@@ -79,7 +79,16 @@ private:
 /// uniform/storage texel buffer descriptor (see "Descriptor Model" in
 /// feme/docs/FeMeVulkanDesign.md's texel-buffer rows, and Descriptor.h's
 /// file comment for exactly which formats V4 supports). Not dispatchable.
-class BufferView {
+///
+/// (roadmap L410) Inherits `PendingExecutionRefCounted` (`ExecutionLifetime.h`)
+/// since a `BufferView` can be bound into a `DescriptorSet`'s texel-buffer
+/// binding, and a submission referencing that descriptor set may still be
+/// executing on a `QueueExecutor` worker thread when `vkDestroyBufferView`
+/// is called -- the same raw-pointer-capture-with-no-keep-alive race
+/// `L409`/`L410` fixed for directly-recorded resource types, reached here
+/// only indirectly through `DescriptorSet`'s own retain sweep
+/// (`Sync.cpp`'s `collectDescriptorSetRefs`).
+class BufferView : public PendingExecutionRefCounted {
 public:
   BufferView(Buffer *Buf, feme::cpu::ResourceFormat Format, VkDeviceSize Offset,
              VkDeviceSize Range)

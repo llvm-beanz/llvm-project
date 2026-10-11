@@ -375,7 +375,14 @@ private:
 /// A `VkSampler`: pure filtering/addressing state translated once, at
 /// creation time, into a `feme::cpu::FemeSamplerDescriptor`. Not
 /// dispatchable.
-class Sampler {
+///
+/// (roadmap L410) Inherits `PendingExecutionRefCounted` (`ExecutionLifetime.h`)
+/// for the same reason `BufferView` does (`Buffer.h`'s comment): a
+/// `Sampler` can be bound (directly, or via an immutable-sampler binding)
+/// into a `DescriptorSet`'s image/sampler binding, reached here only
+/// indirectly through `DescriptorSet`'s own retain sweep (`Sync.cpp`'s
+/// `collectDescriptorSetRefs`).
+class Sampler : public PendingExecutionRefCounted {
 public:
   explicit Sampler(const VkSamplerCreateInfo &CreateInfo);
 
