@@ -15,6 +15,7 @@
 #include "Image.h"
 #include "Objects.h"
 #include "Pipeline.h"
+#include "QueryPool.h"
 #include "RenderPass.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -116,18 +117,19 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
 }
 
 /// (Roadmap L409/L410) Every `Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`/
-/// `Image`/`ImageView` a submission's command buffers (including,
-/// recursively, any secondary command buffers `vkCmdExecuteCommands`
-/// interprets into them) reference -- gathered by `collectExecutionRefs`
-/// synchronously on the submitting host thread, before a submission's own
-/// `QueueExecutor` task is enqueued, so each one can be retained
-/// (`retainExecutionRefs`) before that task might start running on another
-/// thread, and released again (`releaseExecutionRefs`) once it finishes,
-/// whether it actually executed them or not. See
-/// `PendingExecutionRefCounted`'s own comment (`ExecutionLifetime.h`) for
-/// why this is necessary: without it, a `vkDestroyPipeline`/
-/// `vkDestroyRenderPass`/`vkDestroyFramebuffer`/`vkDestroyBuffer`/
-/// `vkDestroyImage`/`vkDestroyImageView` call made (fully legally) right
+/// `Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/
+/// `QueryPool` a submission's command buffers (including, recursively, any
+/// secondary command buffers `vkCmdExecuteCommands` interprets into them)
+/// reference -- gathered by `collectExecutionRefs` synchronously on the
+/// submitting host thread, before a submission's own `QueueExecutor` task
+/// is enqueued, so each one can be retained (`retainExecutionRefs`) before
+/// that task might start running on another thread, and released again
+/// (`releaseExecutionRefs`) once it finishes, whether it actually executed
+/// them or not. See `PendingExecutionRefCounted`'s own comment
+/// (`ExecutionLifetime.h`) for why this is necessary: without it, a
+/// `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`/
+/// `vkDestroyBuffer`/`vkDestroyImage`/`vkDestroyImageView`/
+/// `vkDestroyEvent`/`vkDestroyQueryPool` call made (fully legally) right
 /// after `vkQueueSubmit` returns, with no wait at all, races this same
 /// task's own still-pending read of that object.
 struct ExecutionRefs {
@@ -140,6 +142,8 @@ struct ExecutionRefs {
   std::vector<DescriptorSet *> DescriptorSets;
   std::vector<BufferView *> BufferViews;
   std::vector<Sampler *> Samplers;
+  std::vector<Event *> Events;
+  std::vector<QueryPool *> QueryPools;
 };
 
 /// Records \p View (if non-null) into \p Refs, plus the `Image` it wraps
@@ -279,6 +283,19 @@ void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
     // set itself.
     for (DescriptorSet *Set : Cmd.DescriptorSets)
       collectDescriptorSetRefs(Set, Refs);
+    // (Roadmap L410) `vkCmdSetEvent`/`vkCmdResetEvent`/`vkCmdWaitEvents`
+    // (and their `synchronization2` equivalents, which funnel into the
+    // same `Cmd.Events` field -- see `Event`'s own class comment,
+    // `Sync.h`).
+    for (Event *Ev : Cmd.Events)
+      if (Ev)
+        Refs.Events.push_back(Ev);
+    // (Roadmap L410) `vkCmdResetQueryPool`/`vkCmdBeginQuery`/
+    // `vkCmdEndQuery`/`vkCmdWriteTimestamp`/`vkCmdCopyQueryPoolResults`
+    // (and their `2`-suffixed equivalents) all populate the same single
+    // `TargetQueryPool` field -- see its own comment, `CommandBuffer.h`.
+    if (Cmd.TargetQueryPool)
+      Refs.QueryPools.push_back(Cmd.TargetQueryPool);
     if (Cmd.Op == RecordedCommand::Kind::ExecuteCommands)
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
         collectExecutionRefs(*Secondary, Refs);
@@ -311,6 +328,10 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     View->retainForExecution();
   for (Sampler *Samp : Refs.Samplers)
     Samp->retainForExecution();
+  for (Event *Ev : Refs.Events)
+    Ev->retainForExecution();
+  for (QueryPool *QP : Refs.QueryPools)
+    QP->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -343,6 +364,12 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
   for (Sampler *Samp : Refs.Samplers)
     if (Samp->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(Samp);
+  for (Event *Ev : Refs.Events)
+    if (Ev->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(Ev);
+  for (QueryPool *QP : Refs.QueryPools)
+    if (QP->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(QP);
   // (Roadmap L410) Unlike every type above, `DescriptorSet` was never
   // allocated through the generic `Allocator` (see `DescriptorSet`'s own
   // class comment and `DescriptorPool::free`/`reset`, `Descriptor.cpp`) --

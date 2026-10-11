@@ -1554,3 +1554,84 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyDescriptorSetWithNoWaitSucceeds) {
   vkDestroyPipelineLayout(Device, PLayout, nullptr);
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
+
+// (Roadmap L410) `Event`'s analog of
+// `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds` above: the same
+// hazardous ordering, but for an `Event` referenced via `vkCmdSetEvent`/
+// `vkCmdWaitEvents`.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyEventWithNoWaitSucceeds) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdSetEvent(TestCmdBuf, Ev, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: destroy the `VkEvent` wrapper object the
+  // just-enqueued submission references with no wait at all.
+  vkDestroyEvent(Device, Ev, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed `Event` object.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+}
+
+// (Roadmap L410) `QueryPool`'s analog of
+// `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds` above: the same
+// hazardous ordering, but for a `QueryPool` referenced via
+// `vkCmdBeginQuery`/`vkCmdEndQuery`.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyQueryPoolWithNoWaitSucceeds) {
+  VkQueryPoolCreateInfo QueryPoolInfo{};
+  QueryPoolInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
+  QueryPoolInfo.queryCount = 1;
+  VkQueryPool QP = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &QueryPoolInfo, nullptr, &QP),
+            VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdResetQueryPool(TestCmdBuf, QP, 0, 1);
+  vkCmdBeginQuery(TestCmdBuf, QP, 0, 0);
+  vkCmdEndQuery(TestCmdBuf, QP, 0);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: destroy the `VkQueryPool` wrapper object the
+  // just-enqueued submission references with no wait at all.
+  vkDestroyQueryPool(Device, QP, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed `QueryPool` object.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+}
