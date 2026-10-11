@@ -63,23 +63,20 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours, standing, several sessions old)** `L411`'s real residual bug:
-   rasterization/subpixel-coverage precision in the 66-case
-   `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
-   comparing per-row coverage/edge-function values near x=12/x=20, not blend
-   arithmetic. Worth noting: this and `L414b` are both sub-pixel rasterizer
-   precision bugs found independently — a future session investigating one might
-   want to check whether they share a root cause before assuming they're
-   unrelated.
-2. **(~1-3 hours, new, same priority tier as L411)** `L414b`: root-cause FeMe's
-   rasterizer returning zero coverage for sub-pixel (~1/16-pixel) fully-inside
-   triangles. Start with a minimal `ExecutorTest.cpp` reproducer isolating just
-   the rasterizer, not the full multisample/resolve pipeline.
-3. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
+1. **(~2-4 hours, standing, several sessions old, now the single oldest item)**
+   `L411`'s real residual bug: a flat, sharply-bounded wrong-value sub-region in
+   the 66-case `b10g11r11_ufloat_pack32` dual-source-blend family. Rasterization
+   precision, blend arithmetic, and format packing are all now ruled out as
+   causes — this needs fresh eyes on the test family's own multi-state grid
+   layout (the "sub-region boundary misplacement" the bug most resembles). Start
+   with `--deqp-log-images=enable` on one failing case, find the sub-region's
+   exact pixel boundaries, and check what blend-state index transition happens
+   there.
+2. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
    per-device `EnabledExtensions` tracking plus a command-to-owning-extension(s)
    map so `vkGetDeviceProcAddr` can correctly return null for a disabled
    extension's functions.
-4. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
+3. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
    `entry_points`'s 8 genuinely-unimplemented functions (sparse residency, YCbCr
    conversion, buffer device address) — worth a feasibility check per function
    before committing to implement any of them.
