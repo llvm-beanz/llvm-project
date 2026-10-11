@@ -588,8 +588,15 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
     VkDevice, VkImage image, const VkAllocationCallbacks *pAllocator) {
   if (!image)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Image>(image));
+  Image *Img = fromHandle<Image>(image);
+  // (Roadmap L410) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`, `L409`) -- defers freeing `Img` until every
+  // `QueueExecutor` task that ever referenced it (as a copy source/
+  // destination, a layout-barrier target, or via a still-live `ImageView`)
+  // has finished running.
+  if (!Img->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(Img);
 }
 
 namespace {
@@ -865,8 +872,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(
     VkDevice, VkImageView imageView, const VkAllocationCallbacks *pAllocator) {
   if (!imageView)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<ImageView>(imageView));
+  ImageView *View = fromHandle<ImageView>(imageView);
+  // (Roadmap L410) See `vkDestroyImage`'s comment just above -- defers
+  // freeing `View` until every `QueueExecutor` task that ever referenced it
+  // (as a render-pass/dynamic-rendering attachment) has finished running.
+  if (!View->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(View);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
