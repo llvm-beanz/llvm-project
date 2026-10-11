@@ -3066,7 +3066,7 @@ Error executeCommandsInto(
       break;
     }
     case RecordedCommand::Kind::WriteTimestamp:
-      Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
+      Cmd.TargetQueryPool->writeTimestamp(Cmd.FirstQuery);
       break;
     case RecordedCommand::Kind::CopyQueryPoolResults:
       if (Error E = runCopyQueryPoolResults(

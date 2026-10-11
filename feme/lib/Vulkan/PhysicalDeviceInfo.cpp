@@ -513,7 +513,7 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
       VK_SAMPLE_COUNT_8_BIT;
   Limits.maxSampleMaskWords = 1;
-  Limits.timestampComputeAndGraphics = VK_FALSE;
+  Limits.timestampComputeAndGraphics = VK_TRUE;
   Limits.timestampPeriod = 1.0f;
   Limits.maxClipDistances = 8;
   Limits.maxCullDistances = 8;
@@ -1159,7 +1159,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Universal.queueFlags =
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
   Universal.queueCount = 1;
-  Universal.timestampValidBits = 0;
+  // (roadmap L414a) `timestampComputeAndGraphics` requires every
+  // `GRAPHICS`/`COMPUTE`-capable family to report non-zero
+  // `timestampValidBits`; `QueryPool::writeTimestamp` samples a real
+  // `std::chrono::steady_clock` nanosecond value, which fits the full
+  // 64-bit range this field advertises.
+  Universal.timestampValidBits = 64;
   Universal.minImageTransferGranularity = {1, 1, 1};
 
   // Roadmap C7 ("Queue family capability combinations"): a second,
@@ -1175,6 +1180,10 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   VkQueueFamilyProperties &DedicatedTransfer = Info.QueueFamilies[1];
   DedicatedTransfer.queueFlags = VK_QUEUE_TRANSFER_BIT;
   DedicatedTransfer.queueCount = 1;
+  // (roadmap L414a) Left at `0`: this family is `TRANSFER`-only, which
+  // `timestampComputeAndGraphics` (and the Vulkan spec's own timestamp
+  // rules) place no requirement on -- an honest "transfer queues don't do
+  // timestamps here" rather than an oversight.
   DedicatedTransfer.timestampValidBits = 0;
   DedicatedTransfer.minImageTransferGranularity = {1, 1, 1};
 
@@ -1191,7 +1200,10 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   VkQueueFamilyProperties &DedicatedCompute = Info.QueueFamilies[2];
   DedicatedCompute.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
   DedicatedCompute.queueCount = 1;
-  DedicatedCompute.timestampValidBits = 0;
+  // (roadmap L414a) See `Universal.timestampValidBits` above -- this
+  // family is `COMPUTE`-capable, so it is likewise covered by
+  // `timestampComputeAndGraphics`.
+  DedicatedCompute.timestampValidBits = 64;
   DedicatedCompute.minImageTransferGranularity = {1, 1, 1};
 
   Info.DriverId = VK_DRIVER_ID_MAX_ENUM;

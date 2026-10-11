@@ -11,11 +11,13 @@
 // timestamp, and copy query results"). `VK_QUERY_TYPE_TIMESTAMP`,
 // `VK_QUERY_TYPE_OCCLUSION`, (roadmap H9) `VK_QUERY_TYPE_PIPELINE_
 // STATISTICS`, and (roadmap H21d) `VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT`
-// are accepted at creation. Timestamp queries still report the value zero:
-// this software device has no wall-clock timestamp counter to sample, and
-// zero is a valid (if maximally coarse)
-// `VkPhysicalDeviceLimits::timestampPeriod`-scaled value no application can
-// mistake for a real measurement. Occlusion queries count the exact number
+// are accepted at creation. (roadmap L414a) Timestamp queries sample a real
+// monotonic clock (`std::chrono::steady_clock`, nanosecond-scaled) each time
+// `vkCmdWriteTimestamp`/`vkCmdWriteTimestamp2` executes -- see
+// `writeTimestamp` below -- rather than the V3-through-L413 placeholder of
+// always reporting zero; `timestampPeriod` (`PhysicalDeviceInfo.cpp`) is
+// `1.0f` since the sampled value is already nanosecond-scaled. Occlusion
+// queries count the exact number
 // of covered samples whose depth/stencil tests pass across draws executed
 // between `vkCmdBeginQuery`/`vkCmdEndQuery`, reusing the V6 software
 // rasterizer's real per-sample coverage and depth/stencil results.
@@ -219,6 +221,31 @@ public:
       Active[Query + I] = false;
       Available[Query + I] = true;
     }
+    CV.notify_all();
+  }
+
+  /// (roadmap L414a) `vkCmdWriteTimestamp`/`vkCmdWriteTimestamp2`: samples
+  /// a real monotonic clock (nanoseconds since an arbitrary, device-process-
+  /// local epoch -- `vkGetCalibratedTimestampsEXT` is not implemented, so no
+  /// application can observe this value is not wall-clock-relative) into
+  /// \p Query's own result slot and marks it available. Replaces the V3
+  /// placeholder of always reporting zero (see this header's own file
+  /// comment, pre-L414a): a real counter is required to honestly advertise
+  /// `VkPhysicalDeviceLimits::timestampComputeAndGraphics`/non-zero
+  /// `VkQueueFamilyProperties::timestampValidBits` (`PhysicalDeviceInfo.cpp`),
+  /// which several mandatory `dEQP-VK.pipeline.*.timestamp.*` cases require
+  /// to even run instead of reporting `NotSupported`.
+  void writeTimestamp(uint32_t Query) {
+    uint64_t Now = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    std::lock_guard<std::mutex> Lock(Mutex);
+    if (Type != VK_QUERY_TYPE_TIMESTAMP || Query >= Values.size())
+      return;
+    Active[Query] = false;
+    Values[Query][0] = Now;
+    Available[Query] = true;
     CV.notify_all();
   }
 

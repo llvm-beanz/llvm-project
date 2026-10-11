@@ -3670,13 +3670,15 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
                                   VK_QUERY_RESULT_64_BIT |
                                       VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_NOT_READY); // Query 1 is not yet available.
-  // Every value this ICD reports is zero (see QueryPool.h's file comment);
-  // only the availability flag distinguishes query 0 (written) from query
-  // 1 (reset but never written). Per spec, an unavailable query with
-  // neither VK_QUERY_RESULT_WAIT_BIT nor VK_QUERY_RESULT_PARTIAL_BIT set
-  // has its *value* left untouched (only its availability flag is written)
-  // -- query 1's sentinel value survives unchanged.
-  EXPECT_EQ(Results[0], 0u); // Query 0's value.
+  // Every timestamp query now samples a real monotonic clock (roadmap
+  // L414a; see QueryPool.h's file comment), so query 0's own value is no
+  // longer a fixed, predictable constant -- only that it is non-zero (the
+  // host clock has been running since well before this process started)
+  // and that query 1, which was reset but never written, stays untouched
+  // at its sentinel. Per spec, an unavailable query with neither
+  // VK_QUERY_RESULT_WAIT_BIT nor VK_QUERY_RESULT_PARTIAL_BIT set has its
+  // *value* left untouched (only its availability flag is written).
+  EXPECT_NE(Results[0], 0u); // Query 0's value: a real timestamp.
   EXPECT_EQ(Results[1], 1u); // Query 0's availability: available.
   EXPECT_EQ(Results[2], 0xDEADBEEFDEADBEEFull); // Query 1's value: untouched.
   EXPECT_EQ(Results[3], 0u); // Query 1's availability: unavailable.
@@ -3686,6 +3688,43 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
                                   Availability, sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT),
             VK_NOT_READY); // Query 1 is still unavailable.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
+}
+
+// (Roadmap L414a) Two `vkCmdWriteTimestamp` calls, separated in time by a
+// command-buffer re-submission, sample two independent monotonic-clock
+// values -- unlike the pre-L414a placeholder (always zero), a real second
+// sample is never required to equal the first, and `QueryPool::
+// writeTimestamp` samples `std::chrono::steady_clock` (monotonic, so a
+// later sample is never earlier than a prior one) rather than any
+// wall-clock that could run backwards.
+TEST_F(CommandBufferTest, QueryPoolWriteTimestampTwiceIsMonotonic) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  PoolInfo.queryCount = 2;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 2);
+  vkCmdWriteTimestamp(CmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, QPool, 0);
+  vkCmdWriteTimestamp(CmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, QPool, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 2, sizeof(Results),
+                                  Results, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT),
+            VK_SUCCESS);
+  EXPECT_NE(Results[0], 0u);
+  EXPECT_NE(Results[1], 0u);
+  EXPECT_LE(Results[0], Results[1]); // Monotonic: query 1 ran after query 0.
 
   vkDestroyQueryPool(Device, QPool, nullptr);
 }
@@ -3826,7 +3865,7 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestamp2ThenGetResults) {
                 Device, QPool, 0, 1, sizeof(Results), Results, sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
             VK_SUCCESS);
-  EXPECT_EQ(Results[0], 0u); // Query 0's value.
+  EXPECT_NE(Results[0], 0u); // Query 0's value: a real timestamp.
   EXPECT_EQ(Results[1], 1u); // Query 0's availability: available.
 
   vkDestroyQueryPool(Device, QPool, nullptr);

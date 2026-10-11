@@ -96,10 +96,12 @@ TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
   // adding a second one (see "Graphics queue family").
   EXPECT_TRUE(Family.queueFlags & VK_QUEUE_GRAPHICS_BIT);
   EXPECT_GE(Family.queueCount, 1u);
-  // Timestamp queries report no valid bits: `VkQueryPool` accepts a
-  // timestamp query but every value it produces is zero (see QueryPool.h),
-  // which is exactly what `timestampValidBits == 0` tells an application.
-  EXPECT_EQ(Family.timestampValidBits, 0u);
+  // (roadmap L414a) Timestamp queries now sample a real monotonic clock
+  // (`QueryPool::writeTimestamp`, see QueryPool.h's file comment), so this
+  // graphics/compute-capable family reports a real, non-zero
+  // `timestampValidBits` -- required for `timestampComputeAndGraphics`
+  // (`PhysicalDeviceInfo.cpp`) to honestly be `VK_TRUE`.
+  EXPECT_EQ(Family.timestampValidBits, 64u);
 }
 
 TEST(PhysicalDeviceInfo,
