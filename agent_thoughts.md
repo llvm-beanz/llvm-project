@@ -118495,3 +118495,28 @@ The `Buffer` regression test does **not** reproduce a deterministic crash pre-fi
 3. **(~30 min)** Still outstanding, lower priority: `L378(a)` (`max_sampler_lod_bias.shader_bias` pixel bug) and the 4 `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session — both pixel-correctness issues, unrelated to the UAF work, use `--deqp-log-images=enable` + golden-image diff for both.
 4. **(~30 min)** The 37 new `part1` Fails (api.info/copy_and_blit/binding_model) are a new, low-priority, not-yet-filed finding — worth a roadmap entry if a future session has spare time, but not urgent (pre-existing feature-consistency/ASTC-blit-limit issues, not regressions).
 5. Drop from future handoffs — fully resolved, stop citing: `part1`'s crash mystery (closed this session, see above), `L409` (closed, Pipeline/RenderPass/Framebuffer fixed and verified), `L407`, the "resource-table exhaustion" hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+
+# Session: L410 Image/ImageView use-after-free closed, CTS-verified (2026-10-12c)
+
+Device check: `FeMe CPU Vulkan Device` confirmed (start and end of session).
+
+**Done this session — `Image`/`ImageView` now fixed for `L410`:**
+1. Audited every `Image *`/`ImageView *` field reachable from a `RecordedCommand` — bigger scope than `Buffer`'s fix. Found two gaps `Buffer` didn't have:
+   - `Cmd.BeginFramebuffer->attachments()` — the `Framebuffer` object was already retained (`L409`), but its own attachment `ImageView`s were not. Retaining a container does not protect objects it only points to.
+   - `Cmd.RenderingBinding` (`vkCmdBeginRendering`'s `Colors`/`Depth`/`Stencil`/`Inputs`) — dynamic rendering captures `ImageView *` pointers directly, bypassing the classic framebuffer path entirely.
+2. Commit 1: `Image`/`ImageView` inherit `PendingExecutionRefCounted` (`Image.h`). Built, committed.
+3. Commit 2: `vkDestroyImage`/`vkDestroyImageView` guarded with `requestDestroy` (`Image.cpp`). Built, committed.
+4. Commit 3: `Sync.cpp` extended — new `collectImageViewRef` helper retains a view plus its underlying image together; walks `SrcImage`/`DstImage`, `ImageBarriers[].Img`, `BeginAttachments`, `RenderingBinding`, and `BeginFramebuffer->attachments()`. Added `SyncTest.SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds`. Built, all 25 `SyncTest` cases pass. Committed.
+5. `check-feme`: 3627/3630 Passed (+1 net new test), 3 Unsupported, 0 Failed, 0 regressions.
+6. CTS verification: ~170,000-case `dEQP-VK.api.copy_and_blit.*` sweep + time-boxed `dEQP-VK.renderpasses.dynamic_rendering.*` sample (directly exercises the new `RenderingBinding`/`Framebuffer`-attachment paths). **0 `DeviceLost`/crashes** in both. 12 pre-existing ASTC-blit-limit Fails in `copy_and_blit`, same class as `part1`'s already-known 37 Fails — not a regression.
+7. Docs updated: `Roadmap.md`'s `L410` row, `VulkanCTSReport.md` item 49. Committed separately.
+
+**Explicitly out of scope, called out in writeup:** descriptor-set-indirect image/buffer references (sampled/storage images bound via descriptor writes) aren't covered — `DescriptorSet` itself isn't retained yet. Don't conflate this with `Image`/`ImageView`'s own direct-`RecordedCommand` fix being "done" — it only closes what's captured directly, not the descriptor-indirect path.
+
+## Next steps (ranked)
+
+1. **(~2-4 hours)** `DescriptorSet` next for `L410` — same 3-commit pattern (mixin → destroy guard → retain/release). This is also the one that finally closes the descriptor-indirect image/buffer gap noted above, since `DescriptorSet`'s own retain sweep is the natural place to walk its bound image/buffer views.
+2. **(~2-4 hours each)** Then `Event`, `QueryPool` — one per session, same pattern. `L410` is then fully closed.
+3. **(~30 min)** Still outstanding, unrelated pixel-correctness bugs, lower priority: `L378(a)` (`max_sampler_lod_bias.shader_bias`) and the 4 `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session. Use `--deqp-log-images=enable` + golden-image diff for both.
+4. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still a not-yet-filed, low-priority roadmap entry candidate if a future session has spare time.
+5. Drop from future handoffs — fully resolved, stop citing: `L409` (closed, verified), `Buffer`'s own `L410` fix (closed, verified), `part1`'s crash mystery, `L407`, the "resource-table exhaustion" hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
