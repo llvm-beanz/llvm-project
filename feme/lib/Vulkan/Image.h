@@ -71,6 +71,7 @@
 #ifndef FEME_LIB_VULKAN_IMAGE_H
 #define FEME_LIB_VULKAN_IMAGE_H
 
+#include "ExecutionLifetime.h"
 #include "Memory.h"
 #include "PhysicalDeviceInfo.h"
 
@@ -142,7 +143,16 @@ computeImageCreateInfoSubresourceLayout(const VkImageCreateInfo &CreateInfo,
 /// (`feme::cpu::FemeImageSubresourceLayout`, one entry per mip level) its
 /// bound storage is laid out with, computed once at creation time from the
 /// image's dimensions -- see `computeSubresourceLayouts`.
-class Image {
+///
+/// (Roadmap L410) Inherits `PendingExecutionRefCounted` (see its own file
+/// comment, `ExecutionLifetime.h`) for the same reason `Pipeline`/
+/// `RenderPass`/`Framebuffer`/`Buffer` do (`L409`/`L410`): `RecordedCommand`
+/// captures every `Image *` it references (`SrcImage`/`DstImage`,
+/// `ImageBarriers[].Img`, `CommandBuffer.h`) as a raw pointer with no
+/// keep-alive, so a `vkDestroyImage` call made right after `vkQueueSubmit`
+/// returns, with no wait at all, can otherwise race a still-pending
+/// `QueueExecutor` task's own read of it.
+class Image : public PendingExecutionRefCounted {
 public:
   Image(VkImageType Type, feme::cpu::ImageDimension Dimension,
         feme::cpu::ResourceFormat Format, uint32_t Width, uint32_t Height,
@@ -309,7 +319,17 @@ uint32_t effectiveViewLayerCount(const Image &Img, VkImageViewType ViewType);
 
 /// A `VkImageView`: an `Image` plus a view type, format, and subresource
 /// range. Not dispatchable.
-class ImageView {
+///
+/// (Roadmap L410) Inherits `PendingExecutionRefCounted` for the same reason
+/// `Image` above does: `RecordedCommand` captures an `ImageView *` directly
+/// in several places with no keep-alive (`BeginAttachments`,
+/// `RenderingBinding`'s `RenderTargetView::View`/`ResolveView` and
+/// `Inputs`, `CommandBuffer.h`), and so does `Framebuffer::attachments()`
+/// (`RenderPass.h`) -- a `vkDestroyImageView` call made right after
+/// `vkQueueSubmit` returns, with no wait at all, can otherwise race a
+/// still-pending `QueueExecutor` task's own read of it, the same as
+/// `Image`.
+class ImageView : public PendingExecutionRefCounted {
 public:
   ImageView(Image *Img, VkImageViewType ViewType,
             feme::cpu::ResourceFormat Format,
