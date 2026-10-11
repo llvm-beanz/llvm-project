@@ -118772,3 +118772,34 @@ Done: `properties.basic` and `shader_subgroup_rotate_property_consistency_khr` F
 2. **(~2-4 hours, new)** `L414`'s 23-limit "pure constant" bucket. Before raising any of them: audit whether `DescriptorSet.cpp`/`Pipeline.cpp` size any table off the current (low) limit value. If clean, this is a mechanical batch of constant bumps in `PhysicalDeviceInfo.cpp` (lines ~251-486) — pick the easy wins first (e.g. `maxPushConstantsSize`, `maxSamplerLodBias`) to re-test incrementally rather than changing all 23 at once.
 3. **(~1-2 hours each, new, lower priority)** `L414`'s 4-limit "real work" bucket: `timestampComputeAndGraphics`, `standardSampleLocations`, `subgroupSupportedStages`, `shaderSignedZeroInfNanPreserveFloat16` — each needs its own feasibility check before committing to implement.
 4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3 `binding_model.stages.*`, 2 `api.version_check.*`, 1 each `get_device_proc_addr`/`driver_properties` — untouched this session.
+
+# Session: L414 — fixed the 23-limit "pure constant" bucket, api.info.* Fails 3 → 1
+
+Done: all 23 flagged limits raised to Vulkan-1.4-roadmap-profile minima/maxima. `api.info.*` Fails: 3 → 1 (same single case, sub-failures 29 → 5). 2 commits made.
+
+## What happened, in order
+
+1. **Device check**: `FeMe CPU Vulkan Device` confirmed (every segment, per standing rule).
+2. **Audit first, per last session's own caution**: checked every one of the 23 flagged limits for backend coupling before touching any value.
+   - `DescriptorSet.cpp`/`Descriptor.h`: bindings/sets stored in `std::vector`/`std::map`, never a fixed-size array keyed to a limit constant.
+   - Image-format-properties (`EntryPoints.cpp`), viewport checks and framebuffer/color-attachment checks (`GraphicsPipeline.cpp`/`CommandBuffer.cpp`): all read `Limits` dynamically.
+   - `bufferImageGranularity`: zero consuming code anywhere — purely an advertised number.
+   - **Finding: nothing in FeMe's backend is sized off these 23 constants.** Last session's caution ("audit first, this might not be safe") turned out to be the right call to make, but the audit itself found no landmines — every one of the 23 was safe to raise as a pure reported-value change.
+   - One real coupling found (not a blocker, just needs syncing): `pointSizeRange[1]` must equal `RasterState::MaxPointSize`'s default (`Pipeline.h`), a pre-existing roadmap-H7e contract. Raised both together.
+3. **Fixed**: raised all 23 limits in `PhysicalDeviceInfo.cpp`, each with an inline `roadmap L414` comment recording its own specific audit finding (so a future reader doesn't have to redo this audit). Added test `PhysicalDeviceInfo.LimitsMeetVulkan14RoadmapProfileMinima` covering all 23. Updated a stale comment in `EntryPointsTest.cpp`. Committed (`a908c2dd5e4c`).
+4. **Caught my own mistake via CTS re-run, not guesswork**: first pass set `pointSizeRange[1]`/`MaxPointSize` to 255.0f (matching last session's own estimate literally). Re-running the CTS case afterward showed the real roadmap minimum is 255.875 — 255.0f still failed. Corrected both to 256.0f (lands cleanly on the 0.125 granularity grid from `pointSizeRange[0]=1.0f`), rebuilt, retested. **Lesson for next session: when a prior handoff gives a target number, verify it against the actual CTS failure text rather than trusting the estimate — this is the second time in two sessions that a "looks right" number needed a decimal correction only visible in the qpa log.**
+5. **check-feme**: 3639/3639 Passed (1 new test), 3 Unsupported, 0 Failed, 0 regressions — both before and after the pointSizeRange correction.
+6. **CTS re-verification** (`dEQP-VK.api.info.*`, 10,488 cases): Fails 3 → 1. The one remaining case (`vulkan1p4_limits_validation.general`) now reports only 5 sub-failures, not the original 29 — confirmed by re-reading the qpa log's own `<Text>` entries after the fix, not assumed.
+7. **Found something not in the original estimate**: the "4-limit real work bucket" from the handoff is actually 5 — `vk12Properties.shaderSignedZeroInfNanPreserveFloat32` was hiding behind the 23 constant failures and only surfaced once those were cleared. Filed as part of the new `L414(a)` split, not silently dropped.
+8. Docs: `Roadmap.md`'s `L414` row updated in place with this session's result + new `L414(a)` row for the remaining 5-item bucket; `VulkanCTSReport.md` got item 59. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` checked by grep — no references to any touched limit, confirmed no edit needed. Committed (`f7af8d301320`).
+
+## Stop citing (fully resolved)
+
+- `L414`'s 23-limit "pure constant" bucket — fixed, CTS-verified, tested. Only cite `L414(a)` (the 5-item real-work bucket) going forward.
+- Everything already on prior "drop from future handoffs" lists (`L412(a)/(b)/(c)`, `L409`/`L410` in full, `part1`'s crash mystery, `L407`, resource-table-exhaustion hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest`/`L380`, `L402`/`L406`, `pipeline_library.stencil`, `L378(a)`, the old SIGSEGV/DeviceLost baseline).
+
+## Next steps, ranked
+
+1. **(~2-4 hours, standing, several sessions old)** `L411`'s real residual bug: rasterization/subpixel-coverage precision in the 66-case `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session comparing per-row coverage/edge-function values near x=12/x=20, not blend arithmetic.
+2. **(~1-2 hours each, new)** `L414(a)`'s 5-item "real work" bucket: `timestampComputeAndGraphics`, `standardSampleLocations`, `vk11Properties.subgroupSupportedStages`, `vk12Properties.shaderSignedZeroInfNanPreserveFloat16`, `vk12Properties.shaderSignedZeroInfNanPreserveFloat32` — each needs its own feasibility check (is this even implementable in FeMe's current architecture?) before committing to implement. Suggest starting with `shaderSignedZeroInfNanPreserveFloat32` (narrowest, might just be a reported-bit flip if the CPU backend's float32 codegen already preserves IEEE-754 signed-zero/Inf/NaN — worth checking before assuming it needs real codegen work).
+3. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3 `binding_model.stages.*`, 2 `api.version_check.*`, 1 each `get_device_proc_addr`/`driver_properties` — still untouched across several sessions now.
