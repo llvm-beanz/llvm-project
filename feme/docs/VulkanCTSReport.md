@@ -2760,6 +2760,123 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       timestamp-query support; standard multisample sample-location
       pattern in the rasterizer) needing its own feasibility check.
 
+62. **`L412(d)`: fixed `unavailable_entry_points`'s
+    `VK_ERROR_EXTENSION_NOT_PRESENT` Fail by advertising
+    `VK_KHR_depth_stencil_resolve`/`VK_KHR_create_renderpass2`.**
+    - Both extensions are already fully implemented (depth-stencil
+      resolve handling in `CommandBuffer.cpp`, `vkCreateRenderPass2` in
+      `RenderPass.cpp`) but missing from
+      `getSupportedDeviceExtensions()`'s table, so a custom device at
+      `apiVersion` 1.1 explicitly enabling either by name (as this test
+      does) was rejected at `vkCreateDevice`.
+    - Added both entries to `PhysicalDeviceInfo.cpp`.
+    - Updated `DrawTest.AdvertisesDynamicRenderingExtension`'s hardcoded
+      extension count (38 -> 40) and added explicit `HasExtension`
+      checks for both.
+    - `check-feme`: 3644/3644 Passed, 0 regressions.
+    - **Verified against CTS**: `unavailable_entry_points` now Pass (was
+      Fail).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- both extensions were already listed as
+      implemented, this only fixes device-creation-time advertisement.
+
+63. **`L412(e)`: fixed 15 of `entry_points`'s 26 `vkGetDeviceProcAddr`
+    Fails by adding core-spelled aliases for already-implemented
+    pre-promotion functions.**
+    - `entry_points` creates a zero-extensions device at its own
+      advertised `apiVersion` (1.4) and requires every core command to
+      resolve via `vkGetDeviceProcAddr` by its plain, non-suffixed name.
+      15 of the 26 failing names had a fully-implemented `KHR`/`EXT`-
+      suffixed, pre-core-promotion alias, but `ImplementedEntrypoints.txt`
+      only ever listed the suffixed spelling, so the generated lookup
+      table emitted the plain name as unimplemented (null).
+    - Fixed: declared each core-spelled name in `EntryPoints.h` next to
+      its suffixed counterpart, with a thin one-line forwarding
+      definition tail-calling the suffixed implementation --
+      `vkCmdBeginRendering`/`vkCmdEndRendering`/`vkCmdBindVertexBuffers2`/
+      8 dynamic-state setters/`vkCmdSetPrimitiveTopology`/
+      `vkCmdSetLineStipple` in `CommandBuffer.cpp`,
+      `vkGetRenderingAreaGranularity` in `RenderPass.cpp`,
+      `vkGetImageSubresourceLayout2`/`vkGetDeviceImageSubresourceLayout`
+      in `Image.cpp`.
+    - Build gotcha: each forwarding call must be qualified
+      `feme::vulkan::<name>` -- an unqualified call is ambiguous between
+      this new local declaration and `vulkan_core.h`'s identically-named
+      global-namespace declaration.
+    - New unit tests: `CommandBufferTest.cpp`'s
+      `CoreNamedDynamicStateAliasesRecordSameCommand`, `ImageTest.cpp`'s
+      `GetImageSubresourceLayout2MatchesKHRAlias`/
+      `GetDeviceImageSubresourceLayoutMatchesKHRAlias`,
+      `RenderPassTest.cpp`'s
+      `GetRenderingAreaGranularityMatchesKHRAlias`.
+    - `check-feme`: 3645/3645 Passed, 0 regressions.
+    - **Verified against CTS**: `entry_points` Fails dropped 26 -> 9; the
+      remaining 9 are genuine gaps (sparse-residency queries,
+      `VkSamplerYcbcrConversion` create/destroy, buffer-device-address
+      queries) plus the already-tracked `L236` extension-gating gap
+      (`vkCmdPushDescriptorSetKHR` returned non-null when its extension
+      is not enabled). Also confirmed clean via
+      `dEQP-VK.dynamic_state.*` (0 Fail/671),
+      `dEQP-VK.image.*subresource_layout*` (0 Fail/3553), and a partial
+      `dEQP-VK.renderpasses.dynamic_rendering.*` sweep (0 Fail/10855).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- no new capability, only new names for
+      already-implemented behavior.
+    - **Still open:** the remaining 9 `entry_points` Fails, tracked under
+      `L236` (extension-gating) and as genuine unimplemented-feature gaps
+      (sparse residency, YCbCr conversion, buffer device address).
+
+64. **`L412(f)`: fixed `binding_model.stages.*`'s 3 Fails
+    (`combined_image_sampler`/`storage_buffer`/`uniform_buffer`) --
+    `vkCmdBindDescriptorSets2`/`vkCmdPushDescriptorSet2` now bind every
+    pipeline bind point whose `stageFlags` bit is present, not just one.**
+    - Each failing case binds a descriptor set once via
+      `vkCmdBindDescriptorSets2` with
+      `stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT`,
+      then uses it from both a graphics and a compute pipeline with no
+      second bind call. Per spec, a `stageFlags` mask spanning both a
+      graphics stage and `VK_SHADER_STAGE_COMPUTE_BIT` must bind *both*
+      bind points in one call.
+    - Root cause: `vkCmdBindDescriptorSets2` (and its sibling
+      `vkCmdPushDescriptorSet2`) previously picked only one bind point --
+      compute if its bit was set, else graphics -- silently dropping the
+      other.
+    - **Fixed**: both functions now record a bind for each bind point
+      whose stage bit is present, mirroring the existing
+      `ToCompute`/`ToGraphics` split `vkCmdPushConstants`'s own recording
+      already uses for the identical situation.
+    - New unit test: `CommandBufferTest.cpp`'s
+      `BindDescriptorSets2WithCombinedStageFlagsBindsBothPoints`.
+    - `check-feme`: 3645/3645 Passed, 0 regressions.
+    - **Verified against CTS**: `binding_model.stages.*` now 3/3 Pass
+      (was 3/3 Fail). A partial `dEQP-VK.binding_model.*` regression
+      sweep (2322 cases reached) found zero Fails.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- fixes a correctness bug in already-advertised
+      `VK_KHR_maintenance6` functionality, no capability-surface change.
+
+65. **`L412(g)`: triaged `driver_properties.conformance_version`'s bare
+    Fail -- won't fix, by design.**
+    - `vktApiDriverPropertiesTests.cpp`'s `testVersion` requires
+      `VkPhysicalDeviceDriverProperties.conformanceVersion` to both be
+      `>=` the device's own `apiVersion` *and* exactly match one of
+      CTS's own hardcoded list of real Khronos conformance-program
+      submission versions (`vkKnownConformanceVersions.inl`).
+    - This ICD has never been submitted to (and does not claim) Khronos
+      conformance -- reporting any non-zero `conformanceVersion` here,
+      real or fabricated, would be a false conformance claim, not a bug
+      fix.
+    - **Won't fix**: `Info.ConformanceVersion` stays `{0, 0, 0, 0}`,
+      honestly signaling non-conformance. This case is expected to
+      remain Fail unless/until this ICD is actually submitted for
+      conformance. No code change.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- documentation-only triage.
+    - With items 62-65, every `L412` `part1` sub-bucket (`api.version_check.*`,
+      `binding_model.stages.*`, `get_device_proc_addr`,
+      `driver_properties`) is now fixed, tracked elsewhere (`L236`), or
+      documented won't-fix.
+
 ## Complete group accounting
 
 
