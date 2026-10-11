@@ -2986,6 +2986,92 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       root-caused) and `L411`'s own long-standing residual bug remain
       the two oldest open items from this session's handoff list.
 
+68. **`L414b`: root-caused and fixed -- `LineSubPixelPrecisionBits`
+    raised from 4 to 8 bits, closing `L414(a)`'s last remaining item
+    (`standardSampleLocations`) and `L414(a)` itself.**
+    - Root cause: VK-GL-CTS's `std_sample_locations.verify_location.
+      samples_8_invariable` probe triangle is sized
+      `pixelSize / (1 << stdPrecision)`, where `stdPrecision =
+      log2(numSamples * 2)` is exactly `4` for 8 samples -- the *same*
+      4 bits as `feme::graphics::LineSubPixelPrecisionBits`, the
+      device's own advertised `subPixelPrecisionBits`. Quantizing a
+      triangle that small to the same 4-bit grid used to derive its own
+      size collapses all three vertices (and the sample point) onto one
+      grid cell, producing a degenerate (zero-area) triangle and zero
+      coverage everywhere, instead of covering exactly the one sample it
+      was built around.
+    - Since VK-GL-CTS's own reference rasterizer reads this precision
+      back from the device at runtime rather than hardcoding it (the
+      same property `L402`/`L406`'s near-tie fix relied on), raising
+      the shared constant keeps both sides in lockstep rather than
+      reintroducing a fixed-reference mismatch -- it just gives both
+      sides enough resolution to represent sub-1/16-pixel triangles
+      without losing them to quantization. `int64_t` headroom is
+      enormous at 8 bits (`maxFramebufferWidth`/`Height` is 7680,
+      nowhere near overflowing the fixed-point cross-product terms).
+    - **Fixed**: raised `LineSubPixelPrecisionBits` (shared by both the
+      line and triangle rasterizers) from 4 to 8 in
+      `LineRasterization.h`. Confirmed via a minimal, isolated
+      reproducer directly exercising `fixedPointEdgeFn`/
+      `toSubpixelCoord` (`TriangleRasterizationTest.
+      SubPixelScaleTriangleSurvivesQuantizationAtEightBitsNotFour`) with
+      a tiny triangle at the same scale as CTS's own probe geometry --
+      degenerate at 4 bits, correctly non-degenerate at 8 bits -- before
+      touching CTS at all. Updated the two existing
+      `PhysicalDeviceInfoTest.cpp` expectations that hardcoded the old
+      4-bit value.
+    - With the rasterizer fix landed, flipped `Limits.
+      standardSampleLocations` to `VK_TRUE` in `PhysicalDeviceInfo.cpp`.
+    - `check-feme`: 3647/3650 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: the 3 previously-failing cases
+      (`std_sample_locations.verify_location.samples_8_invariable`,
+      `standardsampleposition.{r32g32b32a32_sfloat,r8g8b8a8_unorm}.
+      samples_8`) now all Pass. Full `dEQP-VK.pipeline.monolithic.
+      multisample.std_sample_locations.*` (610 cases): 488 Passed, 0
+      Failed, 122 NotSupported. Full `dEQP-VK.pipeline.monolithic.
+      multisample.standardsampleposition.*` (12 cases): 6 Passed, 0
+      Failed, 6 NotSupported (unsupported sample counts).
+      `dEQP-VK.api.info.vulkan1p4_limits_validation.general`: now
+      Passes (0 Fails across all of `dEQP-VK.api.info.*`, 10,488 cases
+      -- the entire `L412`/`L414`/`L414(a)`/`L414b` chain of `api.info`
+      work is now fully closed).
+    - **Regression sweeps** (this touches a hot, widely-shared coverage-
+      test code path): full `dEQP-VK.rasterization.*` (15,019 cases): 2
+      Failed, byte-for-byte the same 2 cases
+      (`line_continuity.{line-strip,polygon-mode-lines}`) confirmed via
+      a stashed-changes rebuild to already Fail identically before this
+      fix (a pre-existing, unrelated `DiamondFlattener`/barrier-in-
+      control-flow compile error, not a rasterization-precision issue).
+      Full `dEQP-VK.pipeline.monolithic.multisample.*` (10,636 cases):
+      18 Failed, confirmed via the same stash-and-rebuild technique to
+      be the identical pre-existing `misc.{multi_renderpass,
+      dynamic_rendering.multi_renderpass,multi_subpass}.*.random_*`
+      case list, unrelated to this change. The `L402`/`L406` near-tie
+      regression family (`renderpasses.*.suballocation.
+      subpass_dependencies.late_fragment_tests.*`, 36 cases): still
+      36/36 Pass.
+    - **Checked for a shared root cause with `L411`'s own residual
+      dual-source-blend bug** (both are sub-pixel rasterizer precision
+      bugs found independently, per an explicit prior-session
+      suggestion): re-ran `L411`'s 788-case
+      `b10g11r11_ufloat_pack32` dual-source-blend family, still 66/788
+      Fail, byte-for-byte the same case list as before this fix --
+      confirmed unrelated. `L411`'s own residual bug (a flat, sharply-
+      bounded rectangular sub-region of the image pegged at a constant
+      wrong value) has a different shape than `L414b`'s degenerate-
+      triangle-at-the-grid-boundary mechanism.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- `standardSampleLocations` is a 1.0-core
+      `VkPhysicalDeviceLimits` field, outside both inventories' scope
+      (1.3/1.4-feature and extension surfaces respectively); this is an
+      internal rasterizer precision fix plus a reported-limit
+      correction, not a new feature or extension.
+    - With this fix, `L414(a)`'s entire 5-item bucket is now closed.
+    - **Still open:** `L411`'s own long-standing residual bug (confirmed
+      this session to need its own dedicated rasterization-focused
+      session, unrelated to this fix) is now the single oldest open item
+      from this session's handoff list.
+
 ## Complete group accounting
 
 
