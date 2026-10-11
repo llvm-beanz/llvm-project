@@ -194,19 +194,34 @@ void decodeRGB9E5(uint32_t Word, double &R, double &G, double &B) {
 /// fields' 6-bit mantissa, 5 bits for the 10-bit B field's 5-bit
 /// mantissa) to recover each field's own narrower exponent+mantissa bit
 /// pattern.
+///
+/// (Roadmap L411) As in `femeRTPackR11G11B10Float`, the right-shift adds
+/// half an ULP of the target field first so it rounds to nearest instead
+/// of truncating (which biases every channel low and, since this
+/// fixture's `unpackColor`/`packClearColor` pair is exactly what
+/// `Executor.cpp`'s `mergeColor` round-trips an attachment's existing
+/// texel through on every blended draw, compounds across repeated blend
+/// passes until `dEQP-VK.pipeline.*.blend.dual_source.format.
+/// b10g11r11_ufloat_pack32.*`'s image comparison fails).
 uint32_t encodeR11G11B10Float(double R, double G, double B) {
-  uint32_t R11 = (static_cast<uint32_t>(
-                     floatToHalfBits(static_cast<float>(std::max(R, 0.0)))) >>
-                 4) &
-                0x7FFu;
-  uint32_t G11 = (static_cast<uint32_t>(
-                     floatToHalfBits(static_cast<float>(std::max(G, 0.0)))) >>
-                 4) &
-                0x7FFu;
-  uint32_t B10 = (static_cast<uint32_t>(
-                     floatToHalfBits(static_cast<float>(std::max(B, 0.0)))) >>
-                 5) &
-                0x3FFu;
+  uint32_t R11 =
+      ((static_cast<uint32_t>(
+            floatToHalfBits(static_cast<float>(std::max(R, 0.0)))) +
+        0x8u) >>
+       4) &
+      0x7FFu;
+  uint32_t G11 =
+      ((static_cast<uint32_t>(
+            floatToHalfBits(static_cast<float>(std::max(G, 0.0)))) +
+        0x8u) >>
+       4) &
+      0x7FFu;
+  uint32_t B10 =
+      ((static_cast<uint32_t>(
+            floatToHalfBits(static_cast<float>(std::max(B, 0.0)))) +
+        0x10u) >>
+       5) &
+      0x3FFu;
   return R11 | (G11 << 11) | (B10 << 22);
 }
 

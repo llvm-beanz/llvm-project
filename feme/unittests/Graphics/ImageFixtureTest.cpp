@@ -1560,6 +1560,33 @@ TEST(ImageFixtureTest, PacksAndUnpacksR11G11B10FloatClampsNegativeToZero) {
   EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
 }
 
+// (Roadmap L411) `encodeR11G11B10Float` previously right-shifted each
+// channel's binary16 encoding straight down to its own narrower field
+// width, truncating (rounding toward zero) instead of rounding to
+// nearest -- biasing every channel low. `0.999` sits just below `1.0`'s
+// 6-bit-mantissa (R/G) and 5-bit-mantissa (B) rounding boundary: a
+// truncating encode keeps it just under `1.0`, while a correctly
+// rounding one rounds it up to exactly `1.0` (confirmed independently via
+// this file's own `floatToHalfBits`/manual field-width arithmetic, not
+// just by this fix's own behavior). This is the same kind of repeated
+// round-trip error `dEQP-VK.pipeline.*.blend.dual_source.format.
+// b10g11r11_ufloat_pack32.*`'s real CTS run hit, compounding across a
+// chained blend state's own several merge passes until the result fell
+// outside the test's image-comparison tolerance.
+TEST(ImageFixtureTest, PacksR11G11B10FloatRoundsToNearestNotTruncates) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                                   {0.999, 0.999, 0.999, 1.0}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 1.0);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 1.0);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 1.0);
+}
+
 // The fixture text format also round-trips `R11G11B10_FLOAT`, the same
 // opaque hex-word encoding `E5B9G9R9_UFLOAT`/`R10G10B10A2_UNORM` already
 // established for a packed format.
