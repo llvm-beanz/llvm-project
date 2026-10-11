@@ -33,14 +33,14 @@
 // object directly, which defers the actual free until every such task has
 // released it, exactly mirroring `Fence`'s existing pattern.
 //
-// Applied so far to `Pipeline`, `RenderPass`, and `Framebuffer` --
-// the three object types `L409`'s own standalone reproducer
-// (`leakprobe_uaf.cpp`) directly proved vulnerable. `Buffer`, `Image`,
-// `ImageView`, `DescriptorSet`, `Event`, and `QueryPool` are referenced by
-// recorded commands the exact same way (a raw pointer, no keep-alive) and
-// are very likely subject to the identical race -- auditing and extending
-// this same mixin to them is tracked as follow-up work in `Roadmap.md`'s
-// `L409` entry.
+// Applied so far to `Pipeline`, `RenderPass`, and `Framebuffer` (`L409`'s
+// own standalone reproducer, `leakprobe_uaf.cpp`, directly proved these
+// three vulnerable), and to `Buffer`, `Image`, `ImageView`, `DescriptorSet`,
+// `BufferView`, `Sampler`, `Event`, and `QueryPool` (`L410`'s follow-up
+// audit: referenced by recorded commands the exact same way -- a raw
+// pointer, no keep-alive -- and confirmed subject to the identical race).
+// This closes `L410`'s full six-type follow-up list; see `Roadmap.md`'s
+// `L410` entry.
 //
 //===----------------------------------------------------------------------===//
 

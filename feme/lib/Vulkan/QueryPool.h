@@ -65,6 +65,7 @@
 #ifndef FEME_LIB_VULKAN_QUERYPOOL_H
 #define FEME_LIB_VULKAN_QUERYPOOL_H
 
+#include "ExecutionLifetime.h"
 #include "Sync.h"
 
 #include "llvm/ADT/ArrayRef.h"
@@ -132,7 +133,15 @@ enum class PipelineStatisticIndex : uint32_t {
 /// honor `VK_QUERY_RESULT_WAIT_BIT` instead of racily sampling
 /// `isAvailable` once and reporting `VK_NOT_READY` for a query whose
 /// value the worker thread simply hasn't written yet.
-class QueryPool {
+///
+/// (Roadmap L410) Inherits `PendingExecutionRefCounted`
+/// (`ExecutionLifetime.h`): `vkCmdBeginQuery`/`vkCmdEndQuery`/
+/// `vkCmdWriteTimestamp`/`vkCmdCopyQueryPoolResults` (and their
+/// `2`-suffixed equivalents) each capture a `QueryPool *` the same raw-
+/// pointer, no-keep-alive way `Pipeline`/`Buffer`/`Event`/etc. were before
+/// `L409`/`L410` fixed them, and `vkDestroyQueryPool` can race a still-
+/// executing submission's read of it exactly the same way.
+class QueryPool : public PendingExecutionRefCounted {
 public:
   QueryPool(uint32_t QueryCount, VkQueryType Type,
             VkQueryPipelineStatisticFlags PipelineStatistics = 0)

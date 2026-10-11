@@ -65,6 +65,8 @@
 #ifndef FEME_LIB_VULKAN_SYNC_H
 #define FEME_LIB_VULKAN_SYNC_H
 
+#include "ExecutionLifetime.h"
+
 #include <vulkan/vulkan_core.h>
 
 #include <atomic>
@@ -275,7 +277,16 @@ private:
 /// since-retired fully-synchronous `vkQueueSubmit` (roadmap L228(h)/(i)),
 /// where the host and "worker" were the same thread and no race was
 /// possible.
-class Event {
+///
+/// (Roadmap L410) Inherits `PendingExecutionRefCounted`
+/// (`ExecutionLifetime.h`): a recorded `vkCmdSetEvent`/`vkCmdResetEvent`/
+/// `vkCmdWaitEvents` (and their `synchronization2` equivalents, which all
+/// funnel into the same `CommandBuffer::setEvent`/`resetEvent`/
+/// `waitEvents` calls) captures an `Event *` the same raw-pointer,
+/// no-keep-alive way `Pipeline`/`Buffer`/`DescriptorSet`/etc. were before
+/// `L409`/`L410` fixed them, and `vkDestroyEvent` can race a still-
+/// executing submission's read of it exactly the same way.
+class Event : public PendingExecutionRefCounted {
 public:
   explicit Event(bool Signaled = false) : Signaled(Signaled) {}
 
