@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Graphics/Executor.h"
+#include "feme/Graphics/ImageFixture.h"
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
@@ -337,6 +338,10 @@ compileStage(Context &Ctx, StringRef IR, StringRef EntryName,
 
 /// Builds the color-passthrough vertex+fragment `GraphicsPipeline` the
 /// shaders above implement, with the given raster state and topology.
+/// \p ColorFormat is the single color attachment's format (`R8G8B8A8_
+/// UNORM` for every caller before `L411`, when a test first needed a
+/// pipeline built against a different attachment format -- see
+/// `BlendMaxOpSeesAnUnclampedFloatAttachmentValueAboveOne` below).
 Expected<GraphicsPipeline>
 buildPipeline(Context &Ctx, RasterState Raster,
               PrimitiveTopology Topology = PrimitiveTopology::TriangleList,
@@ -345,7 +350,9 @@ buildPipeline(Context &Ctx, RasterState Raster,
               BlendState ColorBlend = BlendState{}, bool LogicOpEnable = false,
               LogicOp Logic = LogicOp::Copy,
               std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
-              bool PrimitiveRestartEnable = false) {
+              bool PrimitiveRestartEnable = false,
+              cpu::ResourceFormat ColorFormat =
+                  cpu::ResourceFormat::R8G8B8A8_UNORM) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -367,8 +374,7 @@ buildPipeline(Context &Ctx, RasterState Raster,
   if (!FS)
     return FS.takeError();
 
-  std::vector<AttachmentFormat> Attachments = {
-      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  std::vector<AttachmentFormat> Attachments = {{ColorFormat, 4, 4}};
   return GraphicsPipeline(std::move(*VS), std::move(*FS), Topology, Raster,
                           Depth, BlendMode::Replace,
                           /*SampleCount=*/1, std::move(Attachments), Stencil,
@@ -606,6 +612,12 @@ struct TriangleScene {
       {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
       {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
   std::vector<uint32_t> Indices;
+  // The color attachment's own format; every caller before `L411` used the
+  // default `R8G8B8A8_UNORM` (and must keep doing so, since `AttachmentView`'s
+  // own byte layout assumption below -- one packed 32-bit texel, matching
+  // `AttachmentStorage`'s 64-byte/4x4 sizing -- holds for both it and
+  // `R11G11B10_FLOAT`, the only other format a test here uses).
+  cpu::ResourceFormat ColorFormat = cpu::ResourceFormat::R8G8B8A8_UNORM;
 
   AttachmentView Color;
   std::array<AttachmentView, 1> Attachments;
@@ -616,8 +628,7 @@ struct TriangleScene {
 
   PreparedDraw prepare(bool Indexed = false) {
     PreparedDraw Draw;
-    Color = AttachmentView{AttachmentStorage,
-                           cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+    Color = AttachmentView{AttachmentStorage, ColorFormat, 4, 4};
     Attachments = {Color};
     Draw.Attachments = Attachments;
     if (BindDepth)
@@ -4527,6 +4538,88 @@ TEST(ExecutorTest, MinAndMaxBlendOpsIgnoreBothBlendFactorsEntirely) {
     EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 128, 1) << "texel " << I;
     EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 128, 1) << "texel " << I;
     EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 3], 128, 1) << "texel " << I;
+  }
+}
+
+// (Roadmap L411) Reproduces the real, previously-failing `dEQP-VK.pipeline.
+// *.blend.dual_source.*b10g11r11_ufloat_pack32*` CTS family's own shape: an
+// `Add`-blended draw first stores a value *above* `1.0` into an unsigned
+// floating-point (`R11G11B10_FLOAT`, i.e. `B10G11R11_UFLOAT_PACK32`) color
+// attachment -- legal for this format, which (unlike a `_UNORM` format) has
+// no upper bound at `1.0` -- and a second draw's `Max` blend op must then
+// see that whole unclamped value as its "Dst" operand. Before this fix,
+// `blendClampRange` (`Executor.cpp`) was missing `R11G11B10_FLOAT` from its
+// floating-point list, so it fell through to the `[0, 1]` UNORM-style
+// default and silently clamped the first draw's `1.5` result down to `1.0`
+// before the second draw's `Max` could read it -- the `Max` then computed
+// `max(1.0, 1.0) = 1.0` instead of the correct `max(1.0, 1.5) = 1.5`.
+TEST(ExecutorTest, BlendMaxOpSeesAnUnclampedFloatAttachmentValueAboveOne) {
+  Context Ctx;
+
+  BlendState Replace;
+  Replace.BlendEnable = true;
+  Replace.SrcColorFactor = BlendFactor::One;
+  Replace.DstColorFactor = BlendFactor::Zero;
+  Replace.SrcAlphaFactor = BlendFactor::One;
+  Replace.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> ReplacePipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Replace,
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, cpu::ResourceFormat::R11G11B10_FLOAT);
+  ASSERT_THAT_EXPECTED(ReplacePipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.ColorFormat = cpu::ResourceFormat::R11G11B10_FLOAT;
+  // Dst = (1.5, 1.5, 1.5), a full-viewport quad. Legal for this unsigned
+  // float format, which has no `1.0` upper bound (unlike `_UNORM`).
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.5f, 1.5f, 1.5f, 1.0f,
+      3.0f,  -1.0f, 0.0f, 1.5f, 1.5f, 1.5f, 1.0f,
+      -1.0f, 3.0f,  0.0f, 1.5f, 1.5f, 1.5f, 1.0f,
+  };
+  PreparedDraw ReplaceDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*ReplacePipeline, ReplaceDraw),
+                    Succeeded());
+
+  BlendState Max;
+  Max.BlendEnable = true;
+  Max.SrcColorFactor = BlendFactor::Zero;
+  Max.DstColorFactor = BlendFactor::Zero;
+  Max.ColorOp = BlendOp::Max;
+  Max.SrcAlphaFactor = BlendFactor::Zero;
+  Max.DstAlphaFactor = BlendFactor::Zero;
+  Max.AlphaOp = BlendOp::Max;
+  Expected<GraphicsPipeline> MaxPipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Max,
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false, cpu::ResourceFormat::R11G11B10_FLOAT);
+  ASSERT_THAT_EXPECTED(MaxPipeline, Succeeded());
+
+  // Src = (1.0, 1.0, 1.0), lower than the attachment's existing 1.5.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      3.0f,  -1.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      -1.0f, 3.0f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw MaxDraw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*MaxPipeline, MaxDraw), Succeeded());
+
+  // max(Src=1.0, Dst=1.5) = 1.5 for every channel, not clamped to 1.0.
+  for (uint32_t I = 0; I != 16; ++I) {
+    std::array<double, 4> Unpacked{};
+    ASSERT_THAT_ERROR(
+        unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                    ArrayRef(Scene.AttachmentStorage).slice(I * 4, 4),
+                    Unpacked),
+        Succeeded())
+        << "texel " << I;
+    EXPECT_NEAR(Unpacked[0], 1.5, 0.01) << "texel " << I;
+    EXPECT_NEAR(Unpacked[1], 1.5, 0.01) << "texel " << I;
+    EXPECT_NEAR(Unpacked[2], 1.5, 0.01) << "texel " << I;
   }
 }
 
