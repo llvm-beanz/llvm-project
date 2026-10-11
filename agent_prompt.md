@@ -63,30 +63,31 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~30 min)** `L378(a)` (`max_sampler_lod_bias.shader_bias` wrong-pixel bug)
-   — the longest-standing deferred item across multiple sessions now. Use
-   `--deqp-log-images=enable` + golden-image diff. `shader_bias_compute` (same
-   LOD-bias logic, compute pipeline) passes, so this is likely
-   graphics-fragment-path-specific — start there.
-2. **(~30 min)** The 4 `b10g11r11_ufloat_pack32` dual-source-blend
-   pixel-mismatch Fails from the `L409` session — same
-   `--deqp-log-images=enable` + golden-image diff technique.
-3. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still
-   a not-yet-filed, low-priority roadmap entry candidate; file it if a session
-   has spare time and nothing higher-priority to do.
-4. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost from
-   the original full-run baseline) — still not started as its own
-   investigation**, though `L409`/`L410`'s eight fixes may well have already
-   resolved some or all of this count as a side effect (both failure classes are
-   exactly the shape the use-after-free race produces). Recommend: re-run a
-   large sample of `part2`'s full caselist and compare the `DeviceLost` rate
-   against the pre-`L409` 22.74% baseline before investing in further dedicated
-   triage — may already be closed.
-5. Drop from future handoffs — fully resolved, stop citing: `L410` in its
-   entirety (all 8 types:
-   `Buffer`/`Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/`QueryPool`,
-   all CTS-verified), `L409`, `part1`'s crash mystery, `L407`, the
-   "resource-table exhaustion" hypothesis, `L375`,
-   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup
-   pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s
-   `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+1. **(~2-4 hours)** `L411`'s real remaining bug: the blend-state/sub-region
+   boundary misplacement in `b10g11r11_ufloat_pack32` dual-source-blend
+   (66/788 Fails still open). Start from `/tmp/after_0_Result.png` /
+   `/tmp/after_1_Reference.png` (already decoded this session) — the wrong
+   region is x12-19 across most rows of a 32x32 image, pegged at a constant
+   value where the reference transitions later. Check how this test family
+   assigns blend-state sub-regions to pixels (likely a viewport/scissor or
+   vertex-position calculation specific to the 4-state-combo test variant,
+   not the 2-state `multi_attachments` variant which passes cleanly).
+2. **(~1-2 hours)** `L412`: triage the 37 `part1` Fails one bucket at a
+   time. Start with the 12 `copy_and_blit` ASTC-blit-limit cases (already
+   isolated) since they're the largest single bucket.
+3. **(~30 min)** The lone `mesh_shader.ext.properties.task_payload_and_
+   shared_memory_size` `DeviceLost` hit during this session's `L413`
+   re-check sample — one occurrence only, not yet confirmed reproducible.
+   Re-run that specific case a few times in isolation before assuming it's
+   real; could be a genuinely new, narrow bug or a one-off.
+4. Drop from future handoffs — fully resolved: `L378(a)` (closed, confirmed
+   again this session — stop citing it, it keeps coming back stale),
+   `L409`/`L410` in their entirety, the "46 SIGSEGV + 328 DeviceLost"
+   stability baseline (`L413` confirms resolved), `part1`'s crash mystery,
+   `L407`, the "resource-table exhaustion" hypothesis, `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
+   cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
+   `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case. **Also stop
+   citing the "4 Fails" `b10g11r11_ufloat_pack32` figure — it's 66/788,
+   corrected this session (`L411`), and the format-precision half of the
+   bug is now fixed; only the sub-region boundary bug remains.**
