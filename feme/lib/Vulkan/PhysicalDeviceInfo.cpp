@@ -184,10 +184,24 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // "compute a target id, then `llvm.spv.wave.readlane` shuffle to it"
   // shape). See VulkanCTSReport.md's "L90" section for the full CTS
   // sweep confirming this.
+  //
+  // (roadmap L412(c)) `ROTATE_BIT`/`ROTATE_CLUSTERED_BIT` were missing here
+  // even though `shaderSubgroupRotate`/`shaderSubgroupRotateClustered`
+  // (`EntryPoints.cpp`'s `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_
+  // FEATURES`/`SHADER_SUBGROUP_ROTATE_FEATURES` cases) are both genuinely
+  // advertised `VK_TRUE` -- `OpGroupNonUniformRotateKHR` has converted
+  // (`RotateConversionPattern`, roadmap F2) since before those feature bits
+  // were flipped true. `dEQP-VK.api.info.get_physical_device_properties2.
+  // features.shader_subgroup_rotate_property_consistency_khr` requires
+  // these bits agree with the feature bits, exactly as `vktApiFeatureInfo.
+  // cpp`'s own cross-check does for every other subgroup operation this ICD
+  // advertises below.
   Info.SubgroupSupportedOperations =
       VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
       VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
-      VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT;
+      VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+      VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR |
+      VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT_KHR;
 
   // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
   // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than

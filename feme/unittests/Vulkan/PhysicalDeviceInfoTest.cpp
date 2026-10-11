@@ -70,6 +70,15 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
   // `ShuffleUpConversionPattern`/`ShuffleDownConversionPattern` exist.
   EXPECT_TRUE(Info.SubgroupSupportedOperations &
               VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT);
+  // (roadmap L412(c)) `ROTATE_BIT`/`ROTATE_CLUSTERED_BIT` must agree with
+  // `shaderSubgroupRotate`/`shaderSubgroupRotateClustered` (both advertised
+  // `VK_TRUE` since `OpGroupNonUniformRotateKHR` converts, roadmap F2) --
+  // `dEQP-VK.api.info...shader_subgroup_rotate_property_consistency_khr`
+  // enforces exactly this.
+  EXPECT_TRUE(Info.SubgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR);
+  EXPECT_TRUE(Info.SubgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT_KHR);
 }
 
 TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
