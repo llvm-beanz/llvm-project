@@ -2136,6 +2136,75 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     - **Still open (`L410`'s remaining scope):** `DescriptorSet`,
       `Event`, `QueryPool` -- not yet audited or fixed.
 
+50. **`L410`: fixed `DescriptorSet` (plus two descriptor-indirect-only
+    types the audit surfaced, `BufferView` and `Sampler`), closing the
+    "descriptor-indirect image/buffer gap" item 49 explicitly left
+    open -- a `DescriptorSet`'s own bound buffer/image/sampler
+    references are reachable only through its own internal storage,
+    never captured directly in `RecordedCommand`.**
+    - `DescriptorSet`, `BufferView`, and `Sampler` all now inherit
+      `PendingExecutionRefCounted`. `BufferView`/`Sampler` follow the
+      ordinary `Allocator`-based pattern exactly (`vkDestroyBufferView`/
+      `vkDestroySampler` now call `requestDestroy`, `Buffer.cpp`/
+      `Image.cpp`).
+    - **`DescriptorSet` breaks the established pattern:** every prior
+      `L409`/`L410` type is allocated/freed through the generic
+      `Allocator`, but a `DescriptorSet` is owned via `std::unique_ptr`
+      in `DescriptorPool::Sets` (`vkFreeDescriptorSets` takes no
+      `pAllocator` parameter at all, per spec -- sets are always
+      sub-allocated from their pool). `DescriptorPool::free`/`reset`
+      and a new explicit `~DescriptorPool()` (the previous implicit
+      destructor bypassed any guard entirely, destroying `Sets`
+      unconditionally) now route through a shared `destroyOrDeferSet`
+      helper (`Descriptor.cpp`): `requestDestroy(nullptr)` per set,
+      letting the owning `unique_ptr` destroy it normally if true, or
+      releasing ownership without deleting if false -- leaving
+      `Sync.cpp`'s deferred-release path to free it directly via a
+      plain `delete` (not through an `Allocator`, since none was ever
+      involved in this type's lifetime) once the last reference drops.
+    - `Sync.cpp` gained `collectDescriptorSetRefs`: for every bound
+      `DescriptorSet` (`Cmd.DescriptorSets`, populated by
+      `vkCmdBindDescriptorSets`), retains the set itself, every
+      immutable-sampler binding from its layout
+      (`DescriptorSetLayoutBinding::ImmutableSamplers`, fixed for the
+      layout's whole lifetime rather than resupplied per-write), and
+      every `bindingArray`/`imageBindingArray` element's `Buf`/`View`/
+      `Samp` (reusing item 49's `collectImageViewRef` helper for the
+      image half) -- the exact snapshot-style walk
+      `CommandBuffer.cpp`'s own `buildBoundResources` uses at execution
+      time, under the same `Mutex` `DescriptorSet` already requires.
+    - **Push-descriptor-sets confirmed out of scope:** owned by the
+      command buffer itself (`CommandBuffer::PushDescriptorSetStorage`),
+      which the spec already forbids re-recording or freeing while a
+      submission referencing it is still pending (absent the
+      simultaneous-use flag) -- the same invariant the whole `L409`/
+      `L410` design already relies on for command-buffer-owned state,
+      so no separate fix is needed.
+    - New regression test (`SyncTest.cpp`):
+      `SubmitThenImmediatelyDestroyDescriptorSetWithNoWaitSucceeds` --
+      binds one of each new type (`DescriptorSet` itself, a
+      `BufferView` behind a storage-texel-buffer binding, a `Sampler`
+      behind a combined-image-sampler binding), then frees/destroys
+      all three -- including the descriptor pool itself via
+      `vkResetDescriptorPool`, exercising `DescriptorPool`'s own new
+      guard -- with no wait at all. As with items 48/49's tests, this
+      specific race did not reproduce a deterministic pre-fix crash in
+      this non-ASan build; the test documents/locks in the fix's
+      intended behavior.
+    - `check-feme`: 3628/3631 Passed (+1 net new test), 3 Unsupported,
+      0 Failed, 0 regressions.
+    - **Verified against CTS:** a 1,028-case sample of
+      `dEQP-VK.binding_model.descriptorset_random.sets4.*` (directly
+      exercising the new `bindingArray`/`imageBindingArray` walk) plus
+      a 666-case sample of `dEQP-VK.binding_model.shader_access.*`
+      (directly exercising immutable-sampler and combined-image-
+      sampler bindings) show **0 Fail, 0 `DeviceLost`/crashes**.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **Still open (`L410`'s remaining scope):** `Event`, `QueryPool`
+      -- not yet audited or fixed.
+
 ## Complete group accounting
 
 
