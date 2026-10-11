@@ -2429,6 +2429,77 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       or format packing); `L411` remains open (not struck through) on
       `Roadmap.md`.
 
+55. **`L412(a)`: fixed fourteen missing dedicated feature-struct cases in
+    `vkGetPhysicalDeviceFeatures2`, cutting `api.info.*`'s Fail count from
+    18 to 3.**
+    - `L412` cross-referenced its own 12-case `api.copy_and_blit.*`
+      ASTC-blit-limit sub-bucket against the roadmap before investigating
+      further and found it is already a fully-investigated, deferred
+      item (`L265`, a genuine two-case tie-breaking-direction conflict
+      with no single global fix) -- not new work, no action taken on it
+      this session.
+    - Root-caused the other large `L412` sub-bucket instead: 18
+      `api.info.*` Fails, nearly all of the form `Mismatch between
+      VkPhysicalDeviceXFeatures`. `fillFeatures2Chain`
+      (`EntryPoints.cpp`), the `switch(Base->sType)` loop
+      `vkGetPhysicalDeviceFeatures2` runs over its `pNext` chain (no
+      `default` case), had no `case` at all for fourteen dedicated,
+      pre-1.1/1.2/1.3-promotion feature structs -- only their aggregate
+      `VkPhysicalDeviceVulkan1{1,2,3}Features` equivalent was ever
+      filled in. An unmatched `sType` fell straight through untouched,
+      invisible to any ordinary zero-initializing single-query caller
+      (every affected bit's genuinely-correct value happens to be
+      `VK_FALSE`, except `ShaderFloat16Int8Features.shaderFloat16`),
+      but caught deterministically by
+      `dEQP-VK.api.info.get_physical_device_properties2.features.*`'s
+      own consistency check (`vkDeviceFeatures2.inl`), which pre-fills
+      the struct with two different non-zero/zero byte patterns across
+      two back-to-back queries and asserts both agree field-by-field.
+    - **Fixed**: added the fourteen missing cases (`16BitStorage`,
+      `8BitStorage`, `BufferDeviceAddress`, `ImageRobustness`,
+      `ProtectedMemory`, `SamplerYcbcrConversion`, `ScalarBlockLayout`,
+      `ShaderAtomicInt64`, `ShaderDrawParameters`, `ShaderFloat16Int8`,
+      `ShaderFloatControls2`, `TextureCompressionASTCHDR`,
+      `VariablePointers`, `VulkanMemoryModel`), each writing exactly the
+      same per-field value already reported by the corresponding
+      aggregate struct, so `vulkan1p2.feature_extensions_consistency`'s
+      own dedicated-vs-aggregate cross-check also continues to pass.
+      None of these represent a newly discovered capability -- this
+      only fixes the missing explicit write, not what is or isn't
+      supported. New regression tests (`PhysicalDeviceInfoTest.cpp`):
+      `PreVulkan11PromotionDedicatedFeatureStructsAreFullyOverwritten`,
+      `PreVulkan12PromotionDedicatedFeatureStructsAreFullyOverwritten`,
+      `RemainingPreVulkan13PromotionDedicatedFeatureStructsAreOverwritten`,
+      each pre-filling every struct with `0xFF` before the query and
+      verifying both each struct's own correct value and agreement with
+      its aggregate-struct counterpart.
+    - `check-feme`: 3637/3637 Passed (3 new, 3 Unsupported as before), 0
+      regressions.
+    - **Verified against CTS**: re-ran `dEQP-VK.api.info.*` (10,488
+      cases). Fails dropped from 18 to 3. The remaining 3 are confirmed
+      distinct, unrelated root causes (not fixed this session): (1)
+      `properties.basic`'s `Mismatch between
+      VkPhysicalDeviceSamplerFilterMinmaxProperties` -- the analogous
+      missing-case bug in `fillProperties2Chain` instead of
+      `fillFeatures2Chain`; (2)
+      `shader_subgroup_rotate_property_consistency_khr`'s `Mismatch
+      between VkPhysicalDeviceShaderSubgroupRotateFeaturesKHR and
+      VkPhysicalDeviceVulkan11Properties` -- a cross-struct consistency
+      gap between the feature bit and
+      `VkPhysicalDeviceSubgroupProperties.supportedOperations`'s own
+      rotate-related flag bits, not a simple missing-case bug; (3)
+      `vulkan1p4_limits_validation.general`, a bare `Fail (fail)` with
+      no further detail in the log, not yet triaged at all.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- an internal consistency fix to already-
+      correctly-reported feature bits, no new feature/extension-surface
+      change.
+    - **Still open:** the remaining 3 `api.info.*` Fails above, plus
+      `L412`'s other, still-untriaged `part1` buckets (3
+      `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
+      `get_device_proc_addr`/`driver_properties`); `L412` remains open
+      on `Roadmap.md` (`L412(a)` itself is struck through, done).
+
 ## Complete group accounting
 
 
