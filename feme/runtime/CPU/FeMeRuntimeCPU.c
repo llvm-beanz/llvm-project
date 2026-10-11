@@ -2433,14 +2433,31 @@ femeRTUnpackR11G11B10Float(uint32_t Raw) {
 // for the 11-bit R/G fields' 6-bit mantissa, 5 for the 10-bit B field's
 // 5-bit mantissa) to recover each field's own narrower exponent+mantissa
 // bit pattern, and packs the three fields LSB-up into one `uint32_t`.
+//
+// (Roadmap L411) The right-shift itself rounds to nearest (adding half an
+// ULP of the *target* field before shifting) rather than truncating:
+// plain truncation always rounds toward zero, biasing every narrowed
+// channel low and (since `VK_FORMAT_B10G11R11_UFLOAT_PACK32` render
+// targets round-trip through this pack on every blended draw) compounding
+// across repeated blend passes until `dEQP-VK.pipeline.*.blend.
+// dual_source.format.b10g11r11_ufloat_pack32.*`'s image comparison fails.
+// Adding the round bit before the shift lets a mantissa-overflow carry
+// propagate into the exponent field exactly like a normal floating-point
+// round (the two fields are contiguous bits here, same as in `binary16`
+// itself), and even the rare carry all the way to this minifloat's own
+// infinity encoding still fits the field width (mirrors `binary16`'s own
+// exponent range, just a narrower mantissa).
 __attribute__((always_inline)) static uint32_t
 femeRTPackR11G11B10Float(FemeRTv4f32 Value) {
   float C0 = __builtin_fmaxf(Value[0], 0.0f);
   float C1 = __builtin_fmaxf(Value[1], 0.0f);
   float C2 = __builtin_fmaxf(Value[2], 0.0f);
-  uint32_t R11 = ((uint32_t)femeRTFloatToHalf(C0) >> 4) & 0x7FFu;
-  uint32_t G11 = ((uint32_t)femeRTFloatToHalf(C1) >> 4) & 0x7FFu;
-  uint32_t B10 = ((uint32_t)femeRTFloatToHalf(C2) >> 5) & 0x3FFu;
+  uint32_t R11 =
+      (((uint32_t)femeRTFloatToHalf(C0) + 0x8u) >> 4) & 0x7FFu;
+  uint32_t G11 =
+      (((uint32_t)femeRTFloatToHalf(C1) + 0x8u) >> 4) & 0x7FFu;
+  uint32_t B10 =
+      (((uint32_t)femeRTFloatToHalf(C2) + 0x10u) >> 5) & 0x3FFu;
   return R11 | (G11 << 11) | (B10 << 22);
 }
 

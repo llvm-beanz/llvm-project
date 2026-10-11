@@ -7093,6 +7093,41 @@ TEST_F(ImageSamplingTest, StoreWritesTexelIntoR11G11B10FloatViaHalfEncode) {
   EXPECT_EQ(BRaw, (15u << 5) | 16u);
 }
 
+// (Roadmap L411) `femeRTPackR11G11B10Float` previously right-shifted each
+// channel's binary16 encoding straight down to its own narrower field
+// width, truncating (rounding toward zero) instead of rounding to
+// nearest -- biasing every channel low and, since this format's own
+// render-target writes round-trip through this pack on every blended
+// draw, compounding across repeated blends until `dEQP-VK.pipeline.*.
+// blend.dual_source.format.b10g11r11_ufloat_pack32.*`'s real CTS run
+// failed its image comparison. `0.999` sits just below `1.0`'s rounding
+// boundary for both the 6-bit (R/G) and 5-bit (B) mantissas a truncating
+// encode keeps it just under `1.0`; a correctly rounding one rounds up to
+// exactly `1.0` -- mirrors `ImageFixtureTest`'s own
+// `PacksR11G11B10FloatRoundsToNearestNotTruncates` test for the other
+// (non-runtime) encoder this format shares a comment-documented mirror
+// relationship with.
+TEST_F(ImageSamplingTest, StoreWritesTexelIntoR11G11B10FloatRoundsToNearest) {
+  uint32_t Storage[1][1] = {};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R11G11B10_FLOAT,
+      Layout, FEME_IMAGE_STORAGE);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+
+  StoreFn Store = resolveRuntime<StoreFn>("feme.cpu.image.store.2d.v4f32");
+  FeMeTestV4F32 Texel = {0.999f, 0.999f, 0.999f, 0.0f};
+  Store(ImageHeap, 1, 0, 0, 0, Texel, /*Mask=*/true);
+  // Each channel's correctly-rounded binary16 field-width-narrowed
+  // encoding is exactly `1.0`'s bit pattern (`exponent=15, mantissa=0`)
+  // -- a truncating encode instead leaves each field just below it
+  // (see this test's own doc comment above).
+  uint32_t Raw = Storage[0][0];
+  EXPECT_EQ(Raw & 0x7FFu, 15u << 6);
+  EXPECT_EQ((Raw >> 11) & 0x7FFu, 15u << 6);
+  EXPECT_EQ((Raw >> 22) & 0x3FFu, 15u << 5);
+}
+
 TEST_F(ImageSamplingTest, StoreWritesTexelIntoR10G10B10A2Uint) {
   uint32_t Storage[1][1] = {};
   FemeImageSubresourceLayout Layout;
