@@ -63,31 +63,39 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** `L411`'s real remaining bug: the blend-state/sub-region
-   boundary misplacement in `b10g11r11_ufloat_pack32` dual-source-blend
-   (66/788 Fails still open). Start from `/tmp/after_0_Result.png` /
-   `/tmp/after_1_Reference.png` (already decoded this session) — the wrong
-   region is x12-19 across most rows of a 32x32 image, pegged at a constant
-   value where the reference transitions later. Check how this test family
-   assigns blend-state sub-regions to pixels (likely a viewport/scissor or
-   vertex-position calculation specific to the 4-state-combo test variant,
-   not the 2-state `multi_attachments` variant which passes cleanly).
-2. **(~1-2 hours)** `L412`: triage the 37 `part1` Fails one bucket at a
-   time. Start with the 12 `copy_and_blit` ASTC-blit-limit cases (already
-   isolated) since they're the largest single bucket.
-3. **(~30 min)** The lone `mesh_shader.ext.properties.task_payload_and_
-   shared_memory_size` `DeviceLost` hit during this session's `L413`
-   re-check sample — one occurrence only, not yet confirmed reproducible.
-   Re-run that specific case a few times in isolation before assuming it's
-   real; could be a genuinely new, narrow bug or a one-off.
-4. Drop from future handoffs — fully resolved: `L378(a)` (closed, confirmed
-   again this session — stop citing it, it keeps coming back stale),
-   `L409`/`L410` in their entirety, the "46 SIGSEGV + 328 DeviceLost"
-   stability baseline (`L413` confirms resolved), `part1`'s crash mystery,
-   `L407`, the "resource-table exhaustion" hypothesis, `L375`,
-   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
-   cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
-   `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case. **Also stop
-   citing the "4 Fails" `b10g11r11_ufloat_pack32` figure — it's 66/788,
-   corrected this session (`L411`), and the format-precision half of the
-   bug is now fixed; only the sub-region boundary bug remains.**
+1. **(~30 min)** `L412`'s `properties.basic` Fail: same missing-case bug
+   pattern, but in `fillProperties2Chain` instead of
+   `fillFeatures2Chain` — look for `VkPhysicalDeviceSamplerFilterMinmax
+   Properties`'s own missing `case`. Should be a near-identical,
+   mechanical fix to this session's — probably the fastest remaining
+   win available.
+2. **(~1 hour)** `L412`'s `shader_subgroup_rotate_property_consistency_khr`
+   Fail: trace why `VkPhysicalDeviceSubgroupProperties.supportedOperations`
+   doesn't report `VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR`/
+   `_CLUSTERED_BIT_KHR` even though the feature bits themselves are
+   `VK_TRUE` — look at wherever `supportedOperations` gets built
+   (probably `PhysicalDeviceInfo.cpp`).
+3. **(~30 min)** `L412`'s `vulkan1p4_limits_validation.general` Fail —
+   completely untriaged, bare `Fail (fail)`. Re-run just that one case
+   with more verbose logging to get an actual error message first.
+4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
+   `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
+   `get_device_proc_addr`/`driver_properties` — none yet looked at.
+5. **(~2-4 hours, standing item, several sessions old)** `L411`'s real
+   residual bug: subpixel rasterization/coverage precision in the
+   66-case `b10g11r11_ufloat_pack32` family. Needs a dedicated
+   rasterization-focused session — compare FeMe's and the CTS reference
+   rasterizer's per-pixel coverage/edge-function values directly near
+   the quad boundaries (x=12/x=20), not blend arithmetic.
+6. Drop from future handoffs — fully resolved: `L412`'s 12-case ASTC-blit
+   sub-bucket (it's `L265`, already deferred, don't re-investigate
+   without new diagnostic data), the `api.info.*` 18-Fail bucket (now 3,
+   different bugs — see items 1-3 above), `L378(a)`, `L409`/`L410` in
+   their entirety, the "46 SIGSEGV + 328 DeviceLost" stability baseline,
+   `part1`'s crash mystery, `L407`, the "resource-table exhaustion"
+   hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`),
+   `L402`/`L406`, `pipeline_library.stencil` verification. **Stop citing
+   "37 part1 Fails" as one bucket — it's now 3 `api.info` + 12 `L265`
+   (deferred) + 10 untriaged (binding_model/version_check/proc_addr/
+   driver_properties); track these as separate items going forward.**
+
