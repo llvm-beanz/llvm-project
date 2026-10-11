@@ -878,27 +878,27 @@ bool isTopLeftEdge(std::array<float, 2> A, std::array<float, 2> B) {
 
 /// Fixed per-pixel sample offsets (relative to the pixel's top-left
 /// corner) for a given multisample count (roadmap R33, "multisample
-/// coverage and resolves"). These are FeMe's own deterministic convention
+/// coverage and resolves"). These match the Vulkan spec's own "Standard
+/// Sample Locations" table exactly (roadmap L414a: `standardSampleLocations`)
 /// -- "Determinism and Reference Execution" in
-/// feme/docs/FeMeGraphicsDesign.md requires fixed sample locations, not
-/// any particular API's -- rather than a copy of Vulkan's or Direct3D's
-/// standard sample pattern table. 1/2/4/8 samples are implemented; a
-/// higher count is a mechanical, on-demand addition of another row here.
+/// feme/docs/FeMeGraphicsDesign.md requires fixed sample locations, and the
+/// standard table is itself a perfectly valid fixed choice, so there is no
+/// tension between determinism and matching it; the prior session's own
+/// "not a copy of Vulkan's ... table" design note (and the 8-sample
+/// "N-rooks" table it specifically called out) is now obsolete and has been
+/// updated accordingly. 1/2/4/8 samples are implemented; a higher count is
+/// a mechanical, on-demand addition of another row here (16 samples'
+/// standard locations are already published, just not yet wired up).
 Expected<ArrayRef<std::array<float, 2>>> samplePositions(uint32_t Count) {
   static constexpr std::array<float, 2> One[] = {{0.5f, 0.5f}};
-  static constexpr std::array<float, 2> Two[] = {{0.25f, 0.25f},
-                                                 {0.75f, 0.75f}};
+  static constexpr std::array<float, 2> Two[] = {{0.75f, 0.75f},
+                                                 {0.25f, 0.25f}};
   static constexpr std::array<float, 2> Four[] = {
       {0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f}};
-  // An "N-rooks" pattern: each sample's X coordinate is a distinct
-  // 1/16-grid center, and the Y coordinates are the same set cyclically
-  // shifted by three (rather than left in X order, which would put every
-  // sample on the pixel's main diagonal) so no two samples share an X or
-  // a Y coordinate and none coincide.
   static constexpr std::array<float, 2> Eight[] = {
-      {0.0625f, 0.4375f}, {0.1875f, 0.5625f}, {0.3125f, 0.6875f},
-      {0.4375f, 0.8125f}, {0.5625f, 0.9375f}, {0.6875f, 0.0625f},
-      {0.8125f, 0.1875f}, {0.9375f, 0.3125f}};
+      {0.5625f, 0.3125f}, {0.4375f, 0.6875f}, {0.8125f, 0.5625f},
+      {0.3125f, 0.1875f}, {0.1875f, 0.8125f}, {0.0625f, 0.4375f},
+      {0.6875f, 0.9375f}, {0.9375f, 0.0625f}};
   switch (Count) {
   case 1:
     return ArrayRef(One);

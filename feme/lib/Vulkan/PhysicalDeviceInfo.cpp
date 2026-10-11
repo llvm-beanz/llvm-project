@@ -547,6 +547,17 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.pointSizeGranularity = 0.125f;
   Limits.lineWidthGranularity = 0.5f;
   Limits.strictLines = VK_FALSE;
+  // `Executor.cpp`'s `samplePositions` now matches the Vulkan spec's own
+  // "Standard Sample Locations" table exactly for every sample count it
+  // implements (roadmap L414a), but this limit still cannot honestly be
+  // `VK_TRUE`: `dEQP-VK.pipeline.*.multisample.std_sample_locations.
+  // verify_location.samples_8_invariable` (and its 2 sibling
+  // `standardsampleposition.*.samples_8` cases) renders sub-pixel probe
+  // triangles at 1/16-pixel resolution (the precision `stdPrecision`
+  // requires for 8 samples) and gets zero coverage back -- a rasterizer
+  // precision limit at that fine a sub-pixel scale, confirmed unrelated to
+  // which 8 sample-position values are used (the same probe at 1/8-pixel
+  // resolution, used for the 4-sample case, passes). See roadmap L414b.
   Limits.standardSampleLocations = VK_FALSE;
   // Host memory is plain `malloc`/`VkAllocationCallbacks`-backed storage
   // with no device-side copy engine, so there is no meaningful alignment

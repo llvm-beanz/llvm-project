@@ -7032,13 +7032,17 @@ TEST(ExecutorTest, SideEffectMaskNarrowsToThePassSpecificSampleNotTheWholeLane) 
 
   // A quad covering NDC x in [-3, 0] (screen x in [-4, 0.5] for a 1x1
   // viewport -- i.e. the left half of the single pixel) and the whole
-  // height: sample 0's fixed offset (0.25, 0.25) lies inside this half
-  // (screen x == 0.25 < 0.5), sample 1's (0.75, 0.75) does not (screen x
+  // height: sample 1's fixed offset (0.25, 0.25) lies inside this half
+  // (screen x == 0.25 < 0.5), sample 0's (0.75, 0.75) does not (screen x
   // == 0.75 >= 0.5), so this one pixel has exactly one covered and one
   // uncovered sample -- a real, geometric partial-coverage edge, not a
   // shader-side `discard`/`gl_SampleMask` narrowing (which this bug does
   // not affect; see `AlphaToCoverageEnableGeneratesPerSampleCoverageFrom
   // Alpha`/`FragmentSampleMaskOutputNarrowsPerSampleCoverage` above).
+  // (roadmap L414a: `samplePositions`' 2-sample table now matches the
+  // Vulkan spec's own order, `{(0.75,0.75), (0.25,0.25)}` -- sample 0 and
+  // sample 1's offsets swapped places relative to this test's prior
+  // expectations, but the geometric reasoning above is unchanged.)
   std::vector<float> VertexData = {
       -3.0f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
       0.0f,  -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
@@ -7077,18 +7081,18 @@ TEST(ExecutorTest, SideEffectMaskNarrowsToThePassSpecificSampleNotTheWholeLane) 
 
   ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
 
-  // Sample 0 is genuinely covered: its marker is set, and its own
+  // Sample 1 is genuinely covered: its marker is set, and its own
   // fragment invocation's color write landed (red channel saturated).
-  EXPECT_EQ(MarkerBuffer[0], 1);
-  EXPECT_EQ(MSStorage[0 * 4], 255);
-  // Sample 1 is NOT covered by this edge: its marker must stay 0 (no
+  EXPECT_EQ(MarkerBuffer[1], 1);
+  EXPECT_EQ(MSStorage[1 * 4], 255);
+  // Sample 0 is NOT covered by this edge: its marker must stay 0 (no
   // fragment invocation's side effects ever legitimately ran for it),
   // matching its color staying untouched (0, from the zero-initialized
   // `MSStorage`) -- before this fix, the marker went to 1 here even
   // though no real per-sample invocation's depth/color write ever
-  // touched sample 1, exactly the `L310` CTS symptom.
-  EXPECT_EQ(MarkerBuffer[1], 0);
-  EXPECT_EQ(MSStorage[1 * 4], 0);
+  // touched sample 0, exactly the `L310` CTS symptom.
+  EXPECT_EQ(MarkerBuffer[0], 0);
+  EXPECT_EQ(MSStorage[0 * 4], 0);
 }
 
 TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
