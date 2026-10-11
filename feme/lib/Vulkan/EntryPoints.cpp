@@ -1449,6 +1449,123 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderSubgroupExtendedTypes = VK_TRUE;
       break;
     }
+    // (roadmap L412) The following fourteen dedicated, pre-1.1/1.2/1.3-
+    // promotion feature structs had no `case` of their own at all -- only
+    // their aggregate `VkPhysicalDeviceVulkan1{1,2,3}Features` equivalent
+    // below was ever filled in. Since this function's caller
+    // (`vkGetPhysicalDeviceFeatures2`) walks the whole `pNext` chain once
+    // and relies entirely on this `switch` to decide what to overwrite, an
+    // unmatched `sType` falls through with every field left exactly as the
+    // caller passed it in -- invisible to any ordinary single-query caller
+    // (who typically zero-initializes the struct first and therefore
+    // reads back all-`VK_FALSE`, matching every one of these bits'
+    // genuinely-unimplemented `VK_FALSE` value by coincidence), but caught
+    // by `dEQP-VK.api.info.get_physical_device_properties2.features.*`'s
+    // own consistency check (`vkDeviceFeatures2.inl`), which deliberately
+    // pre-fills the struct with two different non-zero/zero byte patterns
+    // across two back-to-back queries and asserts both agree. Every field
+    // below is written explicitly, matching its already-`VK_FALSE`
+    // counterpart in the aggregate struct case further down (or, for
+    // `shaderFloat16`/`shaderFloat16Int8Features` below, the aggregate's
+    // already-`VK_TRUE` value) -- none of these fourteen represent a real,
+    // newly-discovered capability; this only fixes the missing explicit
+    // write, not what is or isn't supported.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevice16BitStorageFeatures *>(Base);
+      Features->storageBuffer16BitAccess = VK_FALSE;
+      Features->uniformAndStorageBuffer16BitAccess = VK_FALSE;
+      Features->storagePushConstant16 = VK_FALSE;
+      Features->storageInputOutput16 = VK_TRUE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevice8BitStorageFeatures *>(Base);
+      Features->storageBuffer8BitAccess = VK_FALSE;
+      Features->uniformAndStorageBuffer8BitAccess = VK_FALSE;
+      Features->storagePushConstant8 = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceBufferDeviceAddressFeatures *>(Base);
+      Features->bufferDeviceAddress = VK_FALSE;
+      Features->bufferDeviceAddressCaptureReplay = VK_FALSE;
+      Features->bufferDeviceAddressMultiDevice = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceImageRobustnessFeatures *>(Base);
+      Features->robustImageAccess = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceProtectedMemoryFeatures *>(Base);
+      Features->protectedMemory = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceSamplerYcbcrConversionFeatures *>(Base);
+      Features->samplerYcbcrConversion = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceScalarBlockLayoutFeatures *>(Base);
+      Features->scalarBlockLayout = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderAtomicInt64Features *>(Base);
+      Features->shaderBufferInt64Atomics = VK_FALSE;
+      Features->shaderSharedInt64Atomics = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceShaderDrawParametersFeatures *>(Base);
+      Features->shaderDrawParameters = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderFloat16Int8Features *>(Base);
+      Features->shaderFloat16 = VK_TRUE;
+      Features->shaderInt8 = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceShaderFloatControls2Features *>(Base);
+      Features->shaderFloatControls2 = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_HDR_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceTextureCompressionASTCHDRFeatures *>(Base);
+      Features->textureCompressionASTC_HDR = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVariablePointersFeatures *>(Base);
+      Features->variablePointersStorageBuffer = VK_FALSE;
+      Features->variablePointers = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVulkanMemoryModelFeatures *>(Base);
+      Features->vulkanMemoryModel = VK_FALSE;
+      Features->vulkanMemoryModelDeviceScope = VK_FALSE;
+      Features->vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
+      break;
+    }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
       // (roadmap H2/H5e) `multiview`/`multiviewGeometryShader` are real
       // (see the dedicated-struct case above); every other 1.1-promoted

@@ -2059,4 +2059,206 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_TRUE(FoundExtension);
 }
 
+TEST_F(PhysicalDeviceProperties2Test,
+       PreVulkan11PromotionDedicatedFeatureStructsAreFullyOverwritten) {
+  // Roadmap L412(a): `fillFeatures2Chain` (EntryPoints.cpp) previously had
+  // no `case` at all for these dedicated, pre-1.1-promotion feature
+  // structs -- only their aggregate `VkPhysicalDeviceVulkan11Features`
+  // equivalent was ever filled in, so an unmatched `sType` fell straight
+  // through the `switch` with every field left exactly as passed in.
+  // `dEQP-VK.api.info.get_physical_device_properties2.features.*` catches
+  // this by pre-filling with a non-zero byte pattern (`0xFF` here, mirroring
+  // the real test) across two back-to-back queries and asserting both
+  // agree -- a pattern already used above
+  // (`DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features`) to
+  // verify a field's explicit `VK_FALSE` write is real, not a pre-existing
+  // zero.
+  VkPhysicalDevice16BitStorageFeatures Storage16{};
+  std::memset(&Storage16, 0xFF, sizeof(Storage16));
+  Storage16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES;
+  VkPhysicalDeviceVariablePointersFeatures VariablePointers{};
+  std::memset(&VariablePointers, 0xFF, sizeof(VariablePointers));
+  VariablePointers.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES;
+  Storage16.pNext = &VariablePointers;
+  VkPhysicalDeviceProtectedMemoryFeatures ProtectedMemory{};
+  std::memset(&ProtectedMemory, 0xFF, sizeof(ProtectedMemory));
+  ProtectedMemory.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES;
+  VariablePointers.pNext = &ProtectedMemory;
+  VkPhysicalDeviceSamplerYcbcrConversionFeatures SamplerYcbcr{};
+  std::memset(&SamplerYcbcr, 0xFF, sizeof(SamplerYcbcr));
+  SamplerYcbcr.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
+  ProtectedMemory.pNext = &SamplerYcbcr;
+  VkPhysicalDeviceShaderDrawParametersFeatures ShaderDrawParams{};
+  std::memset(&ShaderDrawParams, 0xFF, sizeof(ShaderDrawParams));
+  ShaderDrawParams.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
+  SamplerYcbcr.pNext = &ShaderDrawParams;
+  VkPhysicalDeviceVulkan11Features Features11{};
+  std::memset(&Features11, 0xFF, sizeof(Features11));
+  Features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+  Features11.pNext = nullptr;
+  ShaderDrawParams.pNext = &Features11;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Storage16;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Storage16.storageBuffer16BitAccess, VK_FALSE);
+  EXPECT_EQ(Storage16.uniformAndStorageBuffer16BitAccess, VK_FALSE);
+  EXPECT_EQ(Storage16.storagePushConstant16, VK_FALSE);
+  EXPECT_EQ(Storage16.storageInputOutput16, VK_TRUE);
+  EXPECT_EQ(VariablePointers.variablePointersStorageBuffer, VK_FALSE);
+  EXPECT_EQ(VariablePointers.variablePointers, VK_FALSE);
+  EXPECT_EQ(ProtectedMemory.protectedMemory, VK_FALSE);
+  EXPECT_EQ(SamplerYcbcr.samplerYcbcrConversion, VK_FALSE);
+  EXPECT_EQ(ShaderDrawParams.shaderDrawParameters, VK_FALSE);
+
+  // Each dedicated struct's value must also agree with its bit in the
+  // aggregate `VkPhysicalDeviceVulkan11Features` view of the same feature,
+  // per `vulkan1p2.feature_extensions_consistency`'s own cross-check.
+  EXPECT_EQ(Features11.storageBuffer16BitAccess,
+            Storage16.storageBuffer16BitAccess);
+  EXPECT_EQ(Features11.uniformAndStorageBuffer16BitAccess,
+            Storage16.uniformAndStorageBuffer16BitAccess);
+  EXPECT_EQ(Features11.storagePushConstant16, Storage16.storagePushConstant16);
+  EXPECT_EQ(Features11.storageInputOutput16, Storage16.storageInputOutput16);
+  EXPECT_EQ(Features11.variablePointersStorageBuffer,
+            VariablePointers.variablePointersStorageBuffer);
+  EXPECT_EQ(Features11.variablePointers, VariablePointers.variablePointers);
+  EXPECT_EQ(Features11.protectedMemory, ProtectedMemory.protectedMemory);
+  EXPECT_EQ(Features11.samplerYcbcrConversion,
+            SamplerYcbcr.samplerYcbcrConversion);
+  EXPECT_EQ(Features11.shaderDrawParameters,
+            ShaderDrawParams.shaderDrawParameters);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       PreVulkan12PromotionDedicatedFeatureStructsAreFullyOverwritten) {
+  // Roadmap L412(a): the same missing-`case` bug as the test above, for the
+  // pre-1.2-promotion dedicated structs instead.
+  VkPhysicalDevice8BitStorageFeatures Storage8{};
+  std::memset(&Storage8, 0xFF, sizeof(Storage8));
+  Storage8.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES;
+  VkPhysicalDeviceShaderAtomicInt64Features AtomicInt64{};
+  std::memset(&AtomicInt64, 0xFF, sizeof(AtomicInt64));
+  AtomicInt64.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES;
+  Storage8.pNext = &AtomicInt64;
+  VkPhysicalDeviceShaderFloat16Int8Features Float16Int8{};
+  std::memset(&Float16Int8, 0xFF, sizeof(Float16Int8));
+  Float16Int8.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+  AtomicInt64.pNext = &Float16Int8;
+  VkPhysicalDeviceScalarBlockLayoutFeatures ScalarBlockLayout{};
+  std::memset(&ScalarBlockLayout, 0xFF, sizeof(ScalarBlockLayout));
+  ScalarBlockLayout.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
+  Float16Int8.pNext = &ScalarBlockLayout;
+  VkPhysicalDeviceBufferDeviceAddressFeatures BufferDeviceAddress{};
+  std::memset(&BufferDeviceAddress, 0xFF, sizeof(BufferDeviceAddress));
+  BufferDeviceAddress.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+  ScalarBlockLayout.pNext = &BufferDeviceAddress;
+  VkPhysicalDeviceVulkanMemoryModelFeatures MemoryModel{};
+  std::memset(&MemoryModel, 0xFF, sizeof(MemoryModel));
+  MemoryModel.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+  BufferDeviceAddress.pNext = &MemoryModel;
+  VkPhysicalDeviceVulkan12Features Features12{};
+  std::memset(&Features12, 0xFF, sizeof(Features12));
+  Features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  Features12.pNext = nullptr;
+  MemoryModel.pNext = &Features12;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Storage8;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Storage8.storageBuffer8BitAccess, VK_FALSE);
+  EXPECT_EQ(Storage8.uniformAndStorageBuffer8BitAccess, VK_FALSE);
+  EXPECT_EQ(Storage8.storagePushConstant8, VK_FALSE);
+  EXPECT_EQ(AtomicInt64.shaderBufferInt64Atomics, VK_FALSE);
+  EXPECT_EQ(AtomicInt64.shaderSharedInt64Atomics, VK_FALSE);
+  EXPECT_EQ(Float16Int8.shaderFloat16, VK_TRUE);
+  EXPECT_EQ(Float16Int8.shaderInt8, VK_FALSE);
+  EXPECT_EQ(ScalarBlockLayout.scalarBlockLayout, VK_FALSE);
+  EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddress, VK_FALSE);
+  EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddressCaptureReplay, VK_FALSE);
+  EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddressMultiDevice, VK_FALSE);
+  EXPECT_EQ(MemoryModel.vulkanMemoryModel, VK_FALSE);
+  EXPECT_EQ(MemoryModel.vulkanMemoryModelDeviceScope, VK_FALSE);
+  EXPECT_EQ(MemoryModel.vulkanMemoryModelAvailabilityVisibilityChains,
+            VK_FALSE);
+
+  EXPECT_EQ(Features12.storageBuffer8BitAccess,
+            Storage8.storageBuffer8BitAccess);
+  EXPECT_EQ(Features12.uniformAndStorageBuffer8BitAccess,
+            Storage8.uniformAndStorageBuffer8BitAccess);
+  EXPECT_EQ(Features12.storagePushConstant8, Storage8.storagePushConstant8);
+  EXPECT_EQ(Features12.shaderBufferInt64Atomics,
+            AtomicInt64.shaderBufferInt64Atomics);
+  EXPECT_EQ(Features12.shaderSharedInt64Atomics,
+            AtomicInt64.shaderSharedInt64Atomics);
+  EXPECT_EQ(Features12.shaderFloat16, Float16Int8.shaderFloat16);
+  EXPECT_EQ(Features12.shaderInt8, Float16Int8.shaderInt8);
+  EXPECT_EQ(Features12.scalarBlockLayout, ScalarBlockLayout.scalarBlockLayout);
+  EXPECT_EQ(Features12.bufferDeviceAddress,
+            BufferDeviceAddress.bufferDeviceAddress);
+  EXPECT_EQ(Features12.bufferDeviceAddressCaptureReplay,
+            BufferDeviceAddress.bufferDeviceAddressCaptureReplay);
+  EXPECT_EQ(Features12.bufferDeviceAddressMultiDevice,
+            BufferDeviceAddress.bufferDeviceAddressMultiDevice);
+  EXPECT_EQ(Features12.vulkanMemoryModel, MemoryModel.vulkanMemoryModel);
+  EXPECT_EQ(Features12.vulkanMemoryModelDeviceScope,
+            MemoryModel.vulkanMemoryModelDeviceScope);
+  EXPECT_EQ(Features12.vulkanMemoryModelAvailabilityVisibilityChains,
+            MemoryModel.vulkanMemoryModelAvailabilityVisibilityChains);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       RemainingPreVulkan13PromotionDedicatedFeatureStructsAreOverwritten) {
+  // Roadmap L412(a): the remaining three dedicated structs not covered by
+  // the two tests above -- `VkPhysicalDeviceImageRobustnessFeatures` and
+  // `VkPhysicalDeviceTextureCompressionASTCHDRFeatures` (both promoted into
+  // core 1.3) and `VkPhysicalDeviceShaderFloatControls2Features` (a
+  // `VK_KHR_shader_float_controls2` extension struct, no aggregate
+  // `VkPhysicalDeviceVulkan1xFeatures` equivalent exists for it).
+  VkPhysicalDeviceImageRobustnessFeatures ImageRobustness{};
+  std::memset(&ImageRobustness, 0xFF, sizeof(ImageRobustness));
+  ImageRobustness.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES;
+  VkPhysicalDeviceTextureCompressionASTCHDRFeatures ASTCHDR{};
+  std::memset(&ASTCHDR, 0xFF, sizeof(ASTCHDR));
+  ASTCHDR.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_HDR_FEATURES;
+  ImageRobustness.pNext = &ASTCHDR;
+  VkPhysicalDeviceShaderFloatControls2Features FloatControls2{};
+  std::memset(&FloatControls2, 0xFF, sizeof(FloatControls2));
+  FloatControls2.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES;
+  ASTCHDR.pNext = &FloatControls2;
+  VkPhysicalDeviceVulkan13Features Features13{};
+  std::memset(&Features13, 0xFF, sizeof(Features13));
+  Features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+  Features13.pNext = nullptr;
+  FloatControls2.pNext = &Features13;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &ImageRobustness;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(ImageRobustness.robustImageAccess, VK_FALSE);
+  EXPECT_EQ(ASTCHDR.textureCompressionASTC_HDR, VK_FALSE);
+  EXPECT_EQ(FloatControls2.shaderFloatControls2, VK_FALSE);
+  EXPECT_EQ(Features13.robustImageAccess, ImageRobustness.robustImageAccess);
+  EXPECT_EQ(Features13.textureCompressionASTC_HDR,
+            ASTCHDR.textureCompressionASTC_HDR);
+}
+
 } // namespace
