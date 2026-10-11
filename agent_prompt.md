@@ -63,23 +63,30 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours each)** `Event`, `QueryPool` — the last two types from `L409`'s
-   original 6-type follow-up list. Same 3-commit pattern (mixin → destroy guard
-   → retain/release), one per session. Once both land, `L410` is **fully
-   closed** — worth striking through on the roadmap at that point.
-2. **(~30 min)** Still outstanding, unrelated pixel-correctness bugs, lower
-   priority: `L378(a)` (`max_sampler_lod_bias.shader_bias`) and the 4
-   `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session.
-   Use `--deqp-log-images=enable` + golden-image diff for both — this has been
-   recommended for several sessions now and still hasn't been picked up; if a
-   session has genuinely nothing else to do, this is the one to grab.
+1. **(~30 min)** `L378(a)` (`max_sampler_lod_bias.shader_bias` wrong-pixel bug)
+   — the longest-standing deferred item across multiple sessions now. Use
+   `--deqp-log-images=enable` + golden-image diff. `shader_bias_compute` (same
+   LOD-bias logic, compute pipeline) passes, so this is likely
+   graphics-fragment-path-specific — start there.
+2. **(~30 min)** The 4 `b10g11r11_ufloat_pack32` dual-source-blend
+   pixel-mismatch Fails from the `L409` session — same
+   `--deqp-log-images=enable` + golden-image diff technique.
 3. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still
-   a not-yet-filed, low-priority roadmap entry candidate.
-4. Drop from future handoffs — fully resolved, stop citing: `L409` (closed,
-   verified), `Buffer`'s own `L410` fix (closed, verified),
-   `Image`/`ImageView`'s own `L410` fix (closed, verified),
-   `DescriptorSet`/`BufferView`/`Sampler`'s own `L410` fix (closed this session,
-   verified), `part1`'s crash mystery, `L407`, the "resource-table exhaustion"
-   hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap
-   strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil`
-   verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+   a not-yet-filed, low-priority roadmap entry candidate; file it if a session
+   has spare time and nothing higher-priority to do.
+4. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost from
+   the original full-run baseline) — still not started as its own
+   investigation**, though `L409`/`L410`'s eight fixes may well have already
+   resolved some or all of this count as a side effect (both failure classes are
+   exactly the shape the use-after-free race produces). Recommend: re-run a
+   large sample of `part2`'s full caselist and compare the `DeviceLost` rate
+   against the pre-`L409` 22.74% baseline before investing in further dedicated
+   triage — may already be closed.
+5. Drop from future handoffs — fully resolved, stop citing: `L410` in its
+   entirety (all 8 types:
+   `Buffer`/`Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/`QueryPool`,
+   all CTS-verified), `L409`, `part1`'s crash mystery, `L407`, the
+   "resource-table exhaustion" hypothesis, `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup
+   pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s
+   `use_after_copy.a8b8g8r8_srgb_pack32...` case.
