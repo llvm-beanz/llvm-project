@@ -820,7 +820,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   // (roadmap F5) Real once `VK_KHR_line_rasterization` landed: agrees
   // with `VkPhysicalDeviceLineRasterizationPropertiesKHR::
   // lineSubPixelPrecisionBits`'s own dedicated-struct test below.
-  EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 4u);
+  EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 8u);
   // (roadmap F6) Real once `VK_KHR_vertex_attribute_divisor` landed: agrees
   // with `VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`'s own
   // dedicated-struct test below.
@@ -1646,7 +1646,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
   Props2.pNext = &LineProperties;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
-  EXPECT_EQ(LineProperties.lineSubPixelPrecisionBits, 4u);
+  EXPECT_EQ(LineProperties.lineSubPixelPrecisionBits, 8u);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

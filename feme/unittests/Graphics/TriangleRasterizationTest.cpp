@@ -14,7 +14,12 @@ using namespace feme::graphics;
 
 namespace {
 
-constexpr unsigned Bits = 4; // Matches feme::graphics::LineSubPixelPrecisionBits.
+// A fixed `4` independent of the device's own advertised
+// `feme::graphics::LineSubPixelPrecisionBits` (now 8, see roadmap L414b):
+// this is the precision `L402`'s own captured near-tie case was computed
+// and verified against, below, so it must stay pinned at 4 regardless of
+// what the device currently advertises.
+constexpr unsigned Bits = 4;
 
 /// Mirrors `Executor.cpp`'s own top-left tie-break rule
 /// (`isTopLeftEdge`/`In0`/`In1`/`In2` in the triangle coverage test): a
@@ -96,6 +101,40 @@ TEST(TriangleRasterizationTest, L402NearTieMatchesReferenceRasterizer) {
   std::array<float, 2> PixelCenter{8.5f, 0.5f};
 
   EXPECT_FALSE(isInside(V0, V1, V2, PixelCenter, Bits));
+}
+
+/// Roadmap L414b's own minimal reproducer, isolating just the rasterizer:
+/// VK-GL-CTS's `std_sample_locations.verify_location.samples_8_invariable`
+/// test (`vktPipelineMultisampleSampleLocationsExtTests.cpp`,
+/// `VerifyLocationTest::testPixelGrid`) surrounds each sample position with
+/// a tiny probe triangle sized `pixelSize / (1 << stdPrecision)`, where
+/// `stdPrecision = log2(numSamples * 2)` is exactly `4` for 8 samples --
+/// this triangle, built here at that same ~1/16-pixel scale around sample
+/// point (12.5, 12.5), is small enough that quantizing it to a 4-bit
+/// (1/16-pixel) fixed-point grid collapses all three vertices (and the
+/// sample point itself) onto the exact same grid cell, making the
+/// triangle degenerate (zero area) and reporting no coverage anywhere --
+/// not just at this one sample, this is a property of the triangle's
+/// scale relative to the grid, not of where exactly it sits on it. At an
+/// 8-bit (1/256-pixel) grid, fine enough to resolve the triangle's own
+/// sub-1/16-pixel extent, it survives quantization non-degenerate and
+/// correctly reports the sample point as covered. This is why
+/// `LineSubPixelPrecisionBits` (`LineRasterization.h`) was raised from 4
+/// to 8.
+TEST(TriangleRasterizationTest,
+     SubPixelScaleTriangleSurvivesQuantizationAtEightBitsNotFour) {
+  constexpr float PX = 12.5f, PY = 12.5f;
+  constexpr float Offset = 1.0f / 16.0f;
+  constexpr float Y1 = 0.5f * Offset, Y2 = 0.35f * Offset, X1 = 0.5f * Offset;
+
+  // Positive winding: edgeFn(V0, V1, V2) is the triangle's own signed area.
+  std::array<float, 2> V0{PX, PY - Y1};
+  std::array<float, 2> V1{PX - X1, PY + Y2};
+  std::array<float, 2> V2{PX + X1, PY + Y2};
+  std::array<float, 2> SamplePoint{PX, PY};
+
+  EXPECT_FALSE(isInside(V0, V1, V2, SamplePoint, /*Bits=*/4));
+  EXPECT_TRUE(isInside(V0, V1, V2, SamplePoint, /*Bits=*/8));
 }
 
 } // namespace

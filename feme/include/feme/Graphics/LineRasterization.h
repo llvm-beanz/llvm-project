@@ -46,7 +46,27 @@ namespace feme::graphics {
 /// computes with, via `doesLineSegmentExitDiamond` below) must agree on,
 /// so the two can never silently drift apart the way three independently
 /// hardcoded `4` literals previously could.
-constexpr unsigned LineSubPixelPrecisionBits = 4;
+///
+/// `L414b`/`L411`: raised from 4 to 8. VK-GL-CTS's
+/// `vktPipelineMultisampleSampleLocationsExtTests.cpp` (`verify_location`)
+/// builds probe triangles whose extent is a fraction of
+/// `pixelSize / (1 << stdPrecision)`, where `stdPrecision =
+/// log2(numSamples * 2)` -- for the 8-sample case that is exactly `4`,
+/// matching the old value of this constant bit-for-bit. Quantizing a
+/// triangle that small to the *same* 4-bit grid used to generate it
+/// collapses it to a degenerate (zero-area) triangle, producing zero
+/// coverage everywhere instead of covering exactly the one sample it was
+/// built around. Since VK-GL-CTS's own reference rasterizer
+/// (`rrRasterizer.cpp`) reads this value back from the device at runtime
+/// (rather than hardcoding it), raising it keeps both sides in lockstep
+/// the same way the original `4` did for `L402`/`L406`'s near-tie fix --
+/// it does not reintroduce a fixed-reference mismatch, it just gives both
+/// sides enough resolution to represent sub-1/16-pixel triangles without
+/// losing them to quantization. `int64_t` headroom is enormous at this
+/// bit count (`maxFramebufferWidth/Height` is 7680, so the largest
+/// fixed-point coordinate is under 2^21 -- nowhere near overflowing the
+/// cross-product terms computed in fixed point).
+constexpr unsigned LineSubPixelPrecisionBits = 8;
 
 /// Converts a floating-point pixel-space coordinate into a fixed-point
 /// subpixel coordinate with \p Bits fractional bits, rounding to nearest
