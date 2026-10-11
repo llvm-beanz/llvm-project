@@ -797,8 +797,15 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyEvent(
     VkDevice, VkEvent event, const VkAllocationCallbacks *pAllocator) {
   if (!event)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<Event>(event));
+  Event *Ev = fromHandle<Event>(event);
+  // (Roadmap L410) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`, `L409`) -- defers freeing `Ev` until every
+  // `QueueExecutor` task that ever referenced it (a recorded
+  // `vkCmdSetEvent`/`vkCmdResetEvent`/`vkCmdWaitEvents`) has finished
+  // running.
+  if (!Ev->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(Ev);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetEventStatus(VkDevice, VkEvent event) {

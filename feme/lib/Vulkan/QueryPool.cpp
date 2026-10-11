@@ -52,8 +52,15 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyQueryPool(
     VkDevice, VkQueryPool queryPool, const VkAllocationCallbacks *pAllocator) {
   if (!queryPool)
     return;
-  Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<QueryPool>(queryPool));
+  QueryPool *QP = fromHandle<QueryPool>(queryPool);
+  // (Roadmap L410) See `vkDestroyPipeline`'s identical comment
+  // (`Pipeline.cpp`, `L409`) -- defers freeing `QP` until every
+  // `QueueExecutor` task that ever referenced it (a recorded
+  // `vkCmdBeginQuery`/`vkCmdEndQuery`/`vkCmdWriteTimestamp`/
+  // `vkCmdCopyQueryPoolResults`) has finished running.
+  if (!QP->requestDestroy(pAllocator))
+    return;
+  Allocator(pAllocator).destroy(QP);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkResetQueryPool(VkDevice, VkQueryPool queryPool,
