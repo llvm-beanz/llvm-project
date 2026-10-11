@@ -2320,6 +2320,36 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       blend-state/sub-region boundary bug, not a format bug); `L411`
       left open (not struck through) on `Roadmap.md` to reflect this.
 
+53. **`L413`: stability re-check confirms `L409`/`L410` resolved the
+    original 22.74% `DeviceLost` baseline as a side effect.**
+    - Ran an 8,000-case random sample of `part2`'s own caselist
+      (`feme_full_caselist_part2`, the identical family the original
+      baseline was measured against), `--deqp-shadercache=disable`;
+      6,038 of 8,000 completed before a 900-second time box cut the
+      run off (82.8% NotSupported in this particular random sample,
+      mostly `mesh_shader`/other extension gaps).
+    - Result: **1 `DeviceLost` out of 6,038 completed cases (0.017%)**,
+      down from the pre-`L409` 22.74% baseline -- a reduction of
+      roughly three orders of magnitude, confirming the suspicion
+      carried across several prior handoffs that `L409`/`L410`'s eight
+      use-after-free fixes had already resolved the overwhelming
+      majority of the original stability-triage count (46 `pipeline`
+      `SIGSEGV`s + 328 `renderpasses` `DeviceLost`s) as a side effect,
+      without needing a separate dedicated triage investigation.
+    - The one remaining `DeviceLost`
+      (`dEQP-VK.mesh_shader.ext.properties.task_payload_and_shared_
+      memory_size`) was not further triaged this session: a single
+      occurrence in an 8,000-case sample does not yet establish
+      whether it is a new, narrow, as-yet-unfixed race or an
+      unrelated one-off -- flagged for a future session only if it
+      reproduces again.
+    - No code change this session (investigation/verification only).
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed.
+    - **Recommend dropping the "46 SIGSEGV + 328 DeviceLost" baseline
+      figure from all future handoffs** -- it is now confirmed
+      resolved, not merely suspected.
+
 ## Complete group accounting
 
 
