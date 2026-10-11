@@ -2261,4 +2261,37 @@ TEST_F(PhysicalDeviceProperties2Test,
             ASTCHDR.textureCompressionASTC_HDR);
 }
 
+TEST_F(PhysicalDeviceProperties2Test,
+       SamplerFilterMinmaxPropertiesIsFullyOverwritten) {
+  // Roadmap L412(b): `fillProperties2Chain` had no `case` at all for this
+  // dedicated struct -- the exact same missing-case bug `L412(a)` fixed in
+  // `fillFeatures2Chain`, just in the properties-chain counterpart
+  // function, and caught the same way:
+  // `dEQP-VK.api.info.get_physical_device_properties2.properties.basic`
+  // pre-fills every promoted-struct buffer with a guard pattern and fails
+  // if either `VkPhysicalDeviceVulkan12Properties`'s promoted view or this
+  // dedicated struct's own view disagrees or is left unmodified.
+  VkPhysicalDeviceSamplerFilterMinmaxProperties SamplerFilterMinmax{};
+  std::memset(&SamplerFilterMinmax, 0xFF, sizeof(SamplerFilterMinmax));
+  SamplerFilterMinmax.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES;
+  VkPhysicalDeviceVulkan12Properties Props12{};
+  std::memset(&Props12, 0xFF, sizeof(Props12));
+  Props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  Props12.pNext = nullptr;
+  SamplerFilterMinmax.pNext = &Props12;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &SamplerFilterMinmax;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxSingleComponentFormats, VK_FALSE);
+  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxImageComponentMapping, VK_FALSE);
+  EXPECT_EQ(Props12.filterMinmaxSingleComponentFormats,
+            SamplerFilterMinmax.filterMinmaxSingleComponentFormats);
+  EXPECT_EQ(Props12.filterMinmaxImageComponentMapping,
+            SamplerFilterMinmax.filterMinmaxImageComponentMapping);
+}
+
 } // namespace

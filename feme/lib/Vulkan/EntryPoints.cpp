@@ -337,6 +337,25 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       FloatControls->shaderRoundingModeRTZFloat64 = VK_FALSE;
       break;
     }
+    // (roadmap L412(b)) The promoted twin of the filter-minmax half of
+    // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` above;
+    // both must agree
+    // (`dEQP-VK.api.info.get_physical_device_properties2.properties.basic`).
+    // This dedicated struct had no `case` of its own at all -- see
+    // `fillFeatures2Chain`'s own, now-fixed version of this exact bug
+    // (roadmap L412(a)) for the general mechanism (an unmatched `sType`
+    // falls through this `switch` untouched, caught by the same
+    // double-query/byte-pattern-pre-fill consistency-check technique).
+    // Both fields stay `VK_FALSE`: no min/max sampler reduction mode is
+    // implemented for any image format yet.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES: {
+      auto *SamplerFilterMinmax =
+          reinterpret_cast<VkPhysicalDeviceSamplerFilterMinmaxProperties *>(
+              Base);
+      SamplerFilterMinmax->filterMinmaxSingleComponentFormats = VK_FALSE;
+      SamplerFilterMinmax->filterMinmaxImageComponentMapping = VK_FALSE;
+      break;
+    }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: {
       // (roadmap K6) The promoted twin of the resolve-mode half of
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
