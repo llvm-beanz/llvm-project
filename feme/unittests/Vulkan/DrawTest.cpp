@@ -3865,7 +3865,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 38u);
+  ASSERT_EQ(Count, 40u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -3939,6 +3939,9 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   // Roadmap L69.
   EXPECT_TRUE(
       HasExtension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME));
+  // Roadmap L412.
+  EXPECT_TRUE(HasExtension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME));
+  EXPECT_TRUE(HasExtension(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

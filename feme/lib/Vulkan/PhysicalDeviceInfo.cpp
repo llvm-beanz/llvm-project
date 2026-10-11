@@ -1583,6 +1583,27 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // own spec-defined grouping.
       {VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME,
        VK_KHR_COMPUTE_SHADER_DERIVATIVES_SPEC_VERSION},
+      // (roadmap L412) `VkSubpassDescriptionDepthStencilResolve`/
+      // `VkSubpassDescription2`'s depth-stencil resolve path is already
+      // fully implemented (`CommandBuffer.cpp`'s `DepthStencilResolve`
+      // handling, `RenderPass.cpp`'s `vkCreateRenderPass2` validation);
+      // like `synchronization2`/`maintenance5`/`maintenance6` above,
+      // `dEQP-VK.api.version_check.unavailable_entry_points` creates a
+      // custom device at `apiVersion` 1.1 (below this extension's 1.2
+      // core-promotion point) and explicitly enables this extension by
+      // name at `vkCreateDevice`, so it must be listed here too, or that
+      // (and any other test doing the same) fails
+      // `VK_ERROR_EXTENSION_NOT_PRESENT` instead of running for real.
+      {VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
+       VK_KHR_DEPTH_STENCIL_RESOLVE_SPEC_VERSION},
+      // (roadmap L412) `vkCreateRenderPass2` is already implemented as a
+      // core, non-`KHR`-suffixed `VK_VERSION_1_2` entry
+      // (`RenderPass.cpp`); like `VK_KHR_depth_stencil_resolve` just
+      // above, the same `unavailable_entry_points` custom-device-at-1.1
+      // case enables this extension by name too, so it must be listed
+      // here for the same reason.
+      {VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
+       VK_KHR_CREATE_RENDERPASS_2_SPEC_VERSION},
   };
   return Extensions;
 }
