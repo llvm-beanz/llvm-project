@@ -118744,3 +118744,31 @@ Vulkan Device` (checked at session start and before ending).
    "37 part1 Fails" as one bucket — it's now 3 `api.info` + 12 `L265`
    (deferred) + 10 untriaged (binding_model/version_check/proc_addr/
    driver_properties); track these as separate items going forward.**
+
+# Session: L412(b)/L412(c) — closed 2 of 3 remaining api.info.* Fails, L414 split out
+
+Done: `properties.basic` and `shader_subgroup_rotate_property_consistency_khr` Fails fixed. `api.info.*` Fails: 3 → 1. 4 commits made.
+
+## What happened, in order
+
+1. **Device check**: `FeMe CPU Vulkan Device` confirmed (every segment, per standing rule).
+2. **`L412(b)`** — `properties.basic`'s `Mismatch between VkPhysicalDeviceSamplerFilterMinmaxProperties`. Same bug class as last session's `L412(a)`, just in `fillProperties2Chain` (properties pNext-chain switch) instead of `fillFeatures2Chain` (features pNext-chain switch) — these are two independent switch statements in `EntryPoints.cpp`, no shared dispatch table, so the same missing-`case` bug recurs independently in each. Added the case, 1 new unit test, committed (`9ff3f43b4c0f`).
+3. **`L412(c)`** — `shader_subgroup_rotate_property_consistency_khr`. Root cause: `shaderSubgroupRotate`/`Clustered` are genuinely `VK_TRUE` (real `RotateConversionPattern` backs them), but `PhysicalDeviceInfo.cpp`'s `Info.SubgroupSupportedOperations` never got the matching `VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR`/`_CLUSTERED_BIT_KHR` bits added — every *other* subgroup feature bit this ICD advertises already has its pair. Added both bits + 2 new `EXPECT_TRUE`s, committed (`9db7d74a835c`).
+4. **Triaged (did not fix) `vulkan1p4_limits_validation.general`** — the sole remaining `api.info.*` Fail. First attempt failed: do not pass both `--deqp-case` and `-n` (they're aliases, duplicating one errors out). Re-ran with just `-n`, read the qpa log directly (console only prints `Fail (fail)`, zero detail). Found **29 distinct limits** below their Vulkan-1.4-roadmap minimum. This is not a 30-minute fix — it's a new multi-hour-to-multi-session milestone. Split out as new roadmap item `L414`, broken into two buckets:
+   - ~23 look like pure constant bumps in `PhysicalDeviceInfo.cpp` (e.g. `maxImageDimension1D` 4096→8192, `maxBoundDescriptorSets` 4→7) — but each needs a check that no backend table is actually sized off the current lower value first.
+   - 4 need real functional work, not just a number: `timestampComputeAndGraphics`, `standardSampleLocations`, `subgroupSupportedStages` (more stages), `shaderSignedZeroInfNanPreserveFloat16`.
+5. **check-feme**: 3638/3638 Passed both times (one new test per fix), 3 Unsupported, 0 Failed, 0 regressions throughout.
+6. **CTS re-verification** (`dEQP-VK.api.info.*`, 10,488 cases) after each fix: 3 Fails → 2 → 1.
+7. Docs: `Roadmap.md` got `L412(b)`/`L412(c)` struck-through rows + the new `L414` row; `VulkanCTSReport.md` got items 56-58. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` checked — both already correct, no edit needed (confirmed by grep, not just assumed).
+
+## Stop citing (fully resolved)
+
+- `L412(a)`, `L412(b)`, `L412(c)` — all three `api.info.*` sub-bugs they covered are fixed and CTS-verified.
+- Everything already on the "drop from future handoffs" list from prior sessions (`L409`/`L410` in full, `part1`'s crash mystery, `L407`, resource-table-exhaustion hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest`/`L380`, `L402`/`L406`, `pipeline_library.stencil`, `L378(a)`, the old SIGSEGV/DeviceLost baseline).
+
+## Next steps, ranked
+
+1. **(~2-4 hours, standing, several sessions old)** `L411`'s real residual bug: rasterization/subpixel-coverage precision in the 66-case `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session comparing per-row coverage/edge-function values near x=12/x=20, not blend arithmetic — ruled out as a blend-formula bug last session.
+2. **(~2-4 hours, new)** `L414`'s 23-limit "pure constant" bucket. Before raising any of them: audit whether `DescriptorSet.cpp`/`Pipeline.cpp` size any table off the current (low) limit value. If clean, this is a mechanical batch of constant bumps in `PhysicalDeviceInfo.cpp` (lines ~251-486) — pick the easy wins first (e.g. `maxPushConstantsSize`, `maxSamplerLodBias`) to re-test incrementally rather than changing all 23 at once.
+3. **(~1-2 hours each, new, lower priority)** `L414`'s 4-limit "real work" bucket: `timestampComputeAndGraphics`, `standardSampleLocations`, `subgroupSupportedStages`, `shaderSignedZeroInfNanPreserveFloat16` — each needs its own feasibility check before committing to implement.
+4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3 `binding_model.stages.*`, 2 `api.version_check.*`, 1 each `get_device_proc_addr`/`driver_properties` — untouched this session.
