@@ -2877,6 +2877,55 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `driver_properties`) is now fixed, tracked elsewhere (`L236`), or
       documented won't-fix.
 
+66. **`L414(a)`: fixed item 1 of the remaining 2-item bucket --
+    `timestampComputeAndGraphics` now advertises `VK_TRUE`.**
+    - Root cause: `vkCmdWriteTimestamp`/`vkCmdWriteTimestamp2` only ever
+      called `QueryPool::markAvailable` -- marking the query available
+      with no value written at all (the slot kept whatever `reset`/
+      construction had zeroed it to) -- while every queue family's own
+      `timestampValidBits` was hardcoded to `0`, the honest "this device
+      has no timestamp counter" signal for that placeholder behavior
+      (see `QueryPool.h`'s pre-existing file comment).
+    - **Fixed**: added `QueryPool::writeTimestamp(Query)`, sampling a
+      real `std::chrono::steady_clock` nanosecond value and storing it
+      in the query's own result slot before marking it available;
+      `CommandBuffer.cpp`'s `WriteTimestamp` executor case now calls it
+      instead of `markAvailable` directly. Raised
+      `timestampValidBits` to `64` on the `Universal` and
+      `DedicatedCompute` queue families (both `GRAPHICS`/`COMPUTE`-
+      capable) in `PhysicalDeviceInfo.cpp`, left `DedicatedTransfer` at
+      `0` (a `TRANSFER`-only family has no timestamp requirement to
+      begin with). `Limits.timestampComputeAndGraphics` flipped to
+      `VK_TRUE`; `timestampPeriod` stays `1.0f` (the sampled value is
+      already nanosecond-scaled).
+    - Updated two existing unit tests whose old assertions assumed the
+      placeholder zero value
+      (`CommandBufferTest.QueryPoolWriteTimestampThenGetResults`/
+      `QueryPoolWriteTimestamp2ThenGetResults`, now `EXPECT_NE(..., 0u)`
+      instead of `EXPECT_EQ(..., 0u)`) and
+      `PhysicalDeviceInfoTest.UniversalQueueFamilyIsGraphicsComputeAndTransfer`
+      (`timestampValidBits` now `64u`, not `0u`). Added a new test,
+      `CommandBufferTest.QueryPoolWriteTimestampTwiceIsMonotonic`,
+      covering the one behavior the placeholder could never have
+      exercised: two `vkCmdWriteTimestamp` calls in the same command
+      buffer produce two non-zero, monotonically non-decreasing values.
+    - `check-feme`: 3646/3649 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: `dEQP-VK.pipeline.*.timestamp.*` (950
+      cases): 473 Passed, 0 Failed, 477 NotSupported (all for the
+      unrelated, pre-existing `VK_EXT_shader_object` gap -- the
+      `shader_object_unlinked_spirv` variant tree). `dEQP-VK.query_pool.*`
+      (partial sweep, large family): no Fails observed in the covered
+      portion. Re-ran `dEQP-VK.api.info.*` (10,488 cases): still 1 Fail
+      overall (`vulkan1p4_limits_validation.general`), its own
+      sub-failure list dropped from 2 to 1: `standardSampleLocations`.
+    - `Vulkan14FeatureInventory.md` updated to list
+      `timestampComputeAndGraphics` as supported;
+      `VulkanExtensionInventory.md` unchanged (no new extension).
+    - **Still open:** `standardSampleLocations`, the sole remaining
+      `L414(a)` item -- needs the Vulkan-spec-standard multisample
+      sample-location pattern implemented in the rasterizer, a real new
+      backend feature, not a reported-bit flip.
+
 ## Complete group accounting
 
 
