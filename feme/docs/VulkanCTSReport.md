@@ -2063,6 +2063,79 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `DescriptorSet`, `Event`, `QueryPool` -- not yet audited or
       fixed.
 
+49. **`L410`: fixed the same use-after-free class for `Image`/
+    `ImageView`, the second pair of the six object types item 47's own
+    follow-up scope (`L410`) identified as still vulnerable. This pair
+    needed a wider audit than `Buffer`'s: images/views are reachable
+    through several more `RecordedCommand` fields, plus two gaps not
+    present in `Buffer`'s simpler scope.**
+    - `Image` and `ImageView` both now inherit
+      `PendingExecutionRefCounted`; `vkDestroyImage`/
+      `vkDestroyImageView` (`Image.cpp`) now call `requestDestroy` and
+      only free immediately if it returns true, mirroring
+      `vkDestroyBuffer`'s own now-fixed pattern exactly.
+    - `Sync.cpp`'s `ExecutionRefs`/`collectExecutionRefs`/
+      `retainExecutionRefs`/`releaseExecutionRefs` quadruple now also
+      walks: `Cmd.SrcImage`/`Cmd.DstImage` (reused across
+      `CopyImage`/`BlitImage`/`ResolveImage`/`CopyBufferToImage`/
+      `CopyImageToBuffer`/`ClearColorImage`/`ClearDepthStencilImage`),
+      `Cmd.ImageBarriers[].Img` (`vkCmdPipelineBarrier`'s image layout
+      transitions), `Cmd.BeginAttachments` (imageless framebuffer's
+      per-instance views), and `Cmd.RenderingBinding`'s `Colors`/
+      `Depth`/`Stencil`/`Inputs` (`vkCmdBeginRendering`'s own directly-
+      captured `ImageView *` pointers -- a new finding, since dynamic
+      rendering populates this struct straight from the recording
+      call, bypassing the classic render-pass/framebuffer path
+      entirely).
+    - A new helper, `collectImageViewRef`, retains an `ImageView`
+      together with the `Image` it wraps (via `View->image()`), since
+      a view is a thin non-owning reference into its image's own
+      storage -- retaining the view alone would still leave the
+      underlying image's separate `vkDestroyImage` race open.
+    - **Gap found and fixed beyond `Buffer`'s simpler scope:**
+      `Cmd.BeginFramebuffer->attachments()` -- the classic render-pass
+      path's `Framebuffer` object was already retained (item 47,
+      `L409`), but its own attachment `ImageView`s were not. Retaining
+      a container object does not transitively protect objects it
+      merely references by raw pointer; each object independently
+      reachable by a `vkDestroy*` call needs its own entry in the
+      retain sweep, even when some other already-retained object also
+      points to it. This generalizes to future `L410` follow-ups:
+      check not just `RecordedCommand`'s direct fields but also
+      anything reachable through already-fixed types' own accessor
+      methods.
+    - New regression test (`SyncTest.cpp`):
+      `SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds` --
+      `vkCmdCopyImage` between two images, then immediately
+      `vkDestroyImage` on both with no wait at all (same
+      memory-freed-after-wait scoping discipline as item 48's
+      `Buffer` test). As with that test, this specific race did not
+      reproduce a deterministic pre-fix crash in this non-ASan build;
+      the test documents/locks in the fix's intended behavior.
+    - `check-feme`: 3627/3630 Passed (+1 net new test), 3 Unsupported,
+      0 Failed, 0 regressions.
+    - **Verified against CTS:** a ~170,000-case sweep of
+      `dEQP-VK.api.copy_and_blit.*` (directly exercising
+      `SrcImage`/`DstImage`) plus a time-boxed sample of the
+      28,898-case `dEQP-VK.renderpasses.dynamic_rendering.*` family
+      (directly exercising the newly-fixed `RenderingBinding`/
+      `Framebuffer`-attachment paths) show **0 `DeviceLost`/crashes**.
+      The 12 Fails observed in `copy_and_blit`
+      (`blit_image.all_formats.color.2d.astc_*.a2b10g10r10_snorm_pack32.*_linear`)
+      are the same pre-existing ASTC-blit-limit class already counted
+      in item 48's `part1` 37-Fail finding, not new regressions.
+    - **Explicitly out of scope:** descriptor-set-indirect image/
+      buffer references (sampled/storage images bound via descriptor
+      writes, read by the executor through `DescriptorSet`'s own
+      internal storage rather than re-captured in `RecordedCommand`)
+      remain unaddressed -- `DescriptorSet` itself isn't retained yet;
+      that's the next `L410` follow-up, not folded into this fix.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **Still open (`L410`'s remaining scope):** `DescriptorSet`,
+      `Event`, `QueryPool` -- not yet audited or fixed.
+
 ## Complete group accounting
 
 
