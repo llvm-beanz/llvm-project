@@ -9,6 +9,7 @@
 #include "Sync.h"
 #include "Buffer.h"
 #include "CommandBuffer.h"
+#include "Descriptor.h"
 #include "Diagnostics.h"
 #include "Icd.h"
 #include "Image.h"
@@ -136,6 +137,9 @@ struct ExecutionRefs {
   std::vector<Buffer *> Buffers;
   std::vector<Image *> Images;
   std::vector<ImageView *> ImageViews;
+  std::vector<DescriptorSet *> DescriptorSets;
+  std::vector<BufferView *> BufferViews;
+  std::vector<Sampler *> Samplers;
 };
 
 /// Records \p View (if non-null) into \p Refs, plus the `Image` it wraps
@@ -148,6 +152,51 @@ void collectImageViewRef(ImageView *View, ExecutionRefs &Refs) {
   Refs.ImageViews.push_back(View);
   if (Image *Img = View->image())
     Refs.Images.push_back(Img);
+}
+
+/// (Roadmap L410) Retains \p Set itself, plus every `Buffer`/`BufferView`/
+/// `ImageView`/`Image`/`Sampler` it currently has bound, walked snapshot-
+/// style the same way `CommandBuffer.cpp`'s own `buildBoundResources`
+/// reads them at execution time (`Set->bindingArray`/`imageBindingArray`,
+/// both taking `Set`'s own `Mutex` -- see `DescriptorSet`'s class comment).
+/// This is the "descriptor-indirect" half of `L410`: unlike every other
+/// type `collectExecutionRefs` walks directly out of `RecordedCommand`'s
+/// own fields, a descriptor set's bound objects are reachable only through
+/// its own internal storage.
+void collectDescriptorSetRefs(DescriptorSet *Set, ExecutionRefs &Refs) {
+  if (!Set)
+    return;
+  Refs.DescriptorSets.push_back(Set);
+  for (const DescriptorSetLayoutBinding &B : Set->getLayout().bindings()) {
+    // An immutable-sampler binding's `Samp` is fixed for the layout's
+    // whole lifetime (see `DescriptorSetLayoutBinding::ImmutableSamplers`'s
+    // own comment) rather than re-supplied by every `write`, so it must be
+    // retained from the layout's own list, not (only) from each bound
+    // array element below.
+    for (Sampler *Samp : B.ImmutableSamplers)
+      if (Samp)
+        Refs.Samplers.push_back(Samp);
+    // Only one of `bindingArray`/`imageBindingArray` is ever non-empty for
+    // a given binding number -- the two maps are mutually exclusive by
+    // descriptor type, enforced in `DescriptorSet`'s own constructor --
+    // so calling both unconditionally is simple and safe; the "wrong" one
+    // just returns an empty vector.
+    for (const DescriptorBufferBinding &Buf : Set->bindingArray(B.Binding)) {
+      if (Buf.Buf)
+        Refs.Buffers.push_back(Buf.Buf);
+      if (Buf.View) {
+        Refs.BufferViews.push_back(Buf.View);
+        if (Buffer *Underlying = Buf.View->buffer())
+          Refs.Buffers.push_back(Underlying);
+      }
+    }
+    for (const DescriptorImageBinding &Img :
+         Set->imageBindingArray(B.Binding)) {
+      collectImageViewRef(Img.View, Refs);
+      if (Img.Samp)
+        Refs.Samplers.push_back(Img.Samp);
+    }
+  }
 }
 
 void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
@@ -224,6 +273,12 @@ void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
     for (Buffer *XB : Cmd.XfbBuffers)
       if (XB)
         Refs.Buffers.push_back(XB);
+    // (Roadmap L410) `vkCmdBindDescriptorSets`' own bound sets -- see
+    // `collectDescriptorSetRefs`'s own comment for why each set's bound
+    // buffer/image/sampler objects need their own walk here, not just the
+    // set itself.
+    for (DescriptorSet *Set : Cmd.DescriptorSets)
+      collectDescriptorSetRefs(Set, Refs);
     if (Cmd.Op == RecordedCommand::Kind::ExecuteCommands)
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
         collectExecutionRefs(*Secondary, Refs);
@@ -250,6 +305,12 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     Img->retainForExecution();
   for (ImageView *View : Refs.ImageViews)
     View->retainForExecution();
+  for (DescriptorSet *Set : Refs.DescriptorSets)
+    Set->retainForExecution();
+  for (BufferView *View : Refs.BufferViews)
+    View->retainForExecution();
+  for (Sampler *Samp : Refs.Samplers)
+    Samp->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -276,6 +337,23 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
   for (const Framebuffer *FB : Refs.Framebuffers)
     if (FB->releaseAndTakeDeferredDestroy(Callbacks))
       Allocator(Callbacks).destroy(const_cast<Framebuffer *>(FB));
+  for (BufferView *View : Refs.BufferViews)
+    if (View->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(View);
+  for (Sampler *Samp : Refs.Samplers)
+    if (Samp->releaseAndTakeDeferredDestroy(Callbacks))
+      Allocator(Callbacks).destroy(Samp);
+  // (Roadmap L410) Unlike every type above, `DescriptorSet` was never
+  // allocated through the generic `Allocator` (see `DescriptorSet`'s own
+  // class comment and `DescriptorPool::free`/`reset`, `Descriptor.cpp`) --
+  // `Callbacks` is passed through purely for `requestDestroy`/
+  // `releaseAndTakeDeferredDestroy`'s shared signature and is never
+  // consulted for this type, so the actual free here is a plain `delete`,
+  // matching how `DescriptorPool::destroyOrDeferSet` would otherwise have
+  // freed it immediately had this task's retain not still been pending.
+  for (DescriptorSet *Set : Refs.DescriptorSets)
+    if (Set->releaseAndTakeDeferredDestroy(Callbacks))
+      delete Set;
 }
 
 /// (Roadmap L228(h)/(i)) Builds the closure a `QueueExecutor` task runs

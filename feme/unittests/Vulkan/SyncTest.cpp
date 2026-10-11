@@ -1388,3 +1388,169 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds) {
   vkFreeMemory(Device, DstMemory, nullptr);
   vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
+
+// (Roadmap L410) `DescriptorSet`'s analog of
+// `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds`/
+// `...ImageWithNoWaitSucceeds` above, and the one that actually closes the
+// "descriptor-indirect" gap those two left open: a `vkCmdBindDescriptorSets`
+// command only ever captures a raw `DescriptorSet *` in
+// `RecordedCommand::DescriptorSets`, with no further reference to the
+// `BufferView`/`Sampler` objects the set itself has bound -- those are only
+// reachable by walking the set's own storage (`collectDescriptorSetRefs`,
+// `Sync.cpp`). This test binds one of each new mixin type (`DescriptorSet`
+// itself, a `BufferView` behind a storage-texel-buffer binding, and a
+// `Sampler` behind a combined-image-sampler binding) and then frees/destroys
+// all three, plus the descriptor pool itself via `vkResetDescriptorPool`,
+// before waiting for the submission to complete -- exercising
+// `DescriptorPool::free`'s per-set deferred-destroy guard as well as the new
+// mixins' own.
+TEST_F(SyncTest, SubmitThenImmediatelyDestroyDescriptorSetWithNoWaitSucceeds) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Bindings[1].descriptorCount = 1;
+  Bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 2;
+  SetLayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+
+  VkPipelineLayoutCreateInfo PLayoutInfo{};
+  PLayoutInfo.setLayoutCount = 1;
+  PLayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout PLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &PLayoutInfo, nullptr, &PLayout),
+            VK_SUCCESS);
+
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 16;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  VkMemoryAllocateInfo BufAllocInfo{};
+  BufAllocInfo.allocationSize = 16;
+  BufAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory BufMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &BufAllocInfo, nullptr, &BufMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Buf, BufMemory, 0), VK_SUCCESS);
+  VkBufferViewCreateInfo ViewInfo{};
+  ViewInfo.buffer = Buf;
+  ViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  ViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {2, 2, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  VkMemoryAllocateInfo ImgAllocInfo{};
+  ImgAllocInfo.allocationSize = 64;
+  ImgAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory ImgMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &ImgAllocInfo, nullptr, &ImgMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, ImgMemory, 0), VK_SUCCESS);
+  VkImageViewCreateInfo ImgViewInfo{};
+  ImgViewInfo.image = Img;
+  ImgViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ImgViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImgViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkImageView ImgView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ImgViewInfo, nullptr, &ImgView),
+            VK_SUCCESS);
+  VkSamplerCreateInfo SamplerInfo{};
+  VkSampler Samp = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp), VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSizes[2] = {
+      {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1},
+      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+  };
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 2;
+  PoolInfo.pPoolSizes = PoolSizes;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+  VkDescriptorImageInfo ImageInfoWrite{};
+  ImageInfoWrite.sampler = Samp;
+  ImageInfoWrite.imageView = ImgView;
+  ImageInfoWrite.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &View;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Writes[1].pImageInfo = &ImageInfoWrite;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdBindDescriptorSets(TestCmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, PLayout,
+                         0, 1, &Set, 0, nullptr);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: free the `DescriptorSet` (which also destroys
+  // its pool via `vkResetDescriptorPool`, exercising `DescriptorPool`'s own
+  // guard) and destroy the `BufferView`/`Sampler`/`ImageView`/`Image`/
+  // `Buffer` it has bound -- all with no wait at all, right after the
+  // just-enqueued submission references them.
+  vkResetDescriptorPool(Device, DescPool, 0);
+  vkDestroyBufferView(Device, View, nullptr);
+  vkDestroySampler(Device, Samp, nullptr);
+  vkDestroyImageView(Device, ImgView, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkDestroyBuffer(Device, Buf, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this point,
+  // pre-fix, the worker thread may already have run past (or crashed on)
+  // its read of the freed objects.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkFreeMemory(Device, BufMemory, nullptr);
+  vkFreeMemory(Device, ImgMemory, nullptr);
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, PLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
