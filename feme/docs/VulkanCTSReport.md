@@ -2586,6 +2586,58 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     - **Still open:** all 29 limits; `L414` is a new, not-yet-started
       roadmap item.
 
+59. **`L414`: fixed the 23-limit "pure constant" bucket, cutting
+    `api.info.*`'s Fail count back to 1 (same case, far fewer
+    sub-failures).**
+    - Audited every flagged field's real backend usage before raising
+      it: `DescriptorSet.cpp`/`Descriptor.h` store bindings in
+      `std::vector`/`std::map`, never a fixed-size array sized off any
+      of these constants; image-format-properties, viewport-dimension,
+      and framebuffer/color-attachment checks all read `Limits`
+      dynamically; `bufferImageGranularity` has no consuming code at
+      all. Found no unsafe case -- all 23 are pure reported-value
+      changes with zero backend-capacity risk.
+    - **Fixed**: raised `maxImageDimension{1D,2D,3D,Cube}`,
+      `maxImageArrayLayers`, `maxUniformBufferRange`,
+      `maxPushConstantsSize`, `bufferImageGranularity`,
+      `maxBoundDescriptorSets`, `maxPerStageDescriptorUniformBuffers`,
+      `maxPerStageResources`, `maxDescriptorSet{UniformBuffers,
+      StorageBuffers,StorageImages}`,
+      `maxFragmentCombinedOutputResources`, `maxSamplerLodBias`,
+      `maxViewportDimensions`, `viewportBoundsRange`,
+      `maxFramebuffer{Width,Height}`, `maxColorAttachments`,
+      `pointSizeRange[1]`, `pointSizeGranularity`,
+      `lineWidthGranularity` in `PhysicalDeviceInfo.cpp`, each with an
+      inline `roadmap L414` comment documenting its own audit finding.
+    - One real coupling found and preserved: `pointSizeRange[1]` must
+      stay equal to `feme::graphics::RasterState::MaxPointSize`'s own
+      default (pre-existing roadmap-H7e contract). Both raised
+      together -- first tried 255.0f (matching the handoff's own
+      estimate), but re-running the CTS case afterward showed the
+      actual roadmap minimum is 255.875, so both were corrected to
+      256.0f (which also lands cleanly on the 0.125 granularity grid
+      from `pointSizeRange[0]=1.0f`).
+    - New unit test:
+      `PhysicalDeviceInfo.LimitsMeetVulkan14RoadmapProfileMinima`,
+      asserting all 23 raised limits meet their Vulkan-1.4-roadmap-
+      profile minima/maxima.
+    - `check-feme`: 3639/3639 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: re-ran `dEQP-VK.api.info.*` (10,488
+      cases). Fails dropped from 3 to 1 -- the sole remaining case
+      (`vulkan1p4_limits_validation.general` itself) now reports only 5
+      sub-failures, not the original 29: `timestampComputeAndGraphics`,
+      `standardSampleLocations`, `vk11Properties.subgroupSupportedStages`,
+      `vk12Properties.shaderSignedZeroInfNanPreserveFloat16`, and (newly
+      discovered only after fixing the other 23 and re-running --
+      not in the original 4-item "real work" estimate)
+      `vk12Properties.shaderSignedZeroInfNanPreserveFloat32`.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- pure reported-limit corrections, not new features or
+      extensions.
+    - **Still open:** the 5-item "real functional work" bucket above,
+      each needing real new backend capability, not a constant bump --
+      filed as `L414(a)`.
+
 ## Complete group accounting
 
 
