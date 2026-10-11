@@ -547,18 +547,16 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.pointSizeGranularity = 0.125f;
   Limits.lineWidthGranularity = 0.5f;
   Limits.strictLines = VK_FALSE;
-  // `Executor.cpp`'s `samplePositions` now matches the Vulkan spec's own
+  // `Executor.cpp`'s `samplePositions` matches the Vulkan spec's own
   // "Standard Sample Locations" table exactly for every sample count it
-  // implements (roadmap L414a), but this limit still cannot honestly be
-  // `VK_TRUE`: `dEQP-VK.pipeline.*.multisample.std_sample_locations.
-  // verify_location.samples_8_invariable` (and its 2 sibling
-  // `standardsampleposition.*.samples_8` cases) renders sub-pixel probe
-  // triangles at 1/16-pixel resolution (the precision `stdPrecision`
-  // requires for 8 samples) and gets zero coverage back -- a rasterizer
-  // precision limit at that fine a sub-pixel scale, confirmed unrelated to
-  // which 8 sample-position values are used (the same probe at 1/8-pixel
-  // resolution, used for the 4-sample case, passes). See roadmap L414b.
-  Limits.standardSampleLocations = VK_FALSE;
+  // implements (roadmap L414a). `L414b` root-caused the previous `VK_FALSE`
+  // here to `LineSubPixelPrecisionBits` (`LineRasterization.h`) being too
+  // coarse (4 bits, 1/16-pixel grid) to represent the 8-sample
+  // `verify_location` probe triangle without quantizing it to a degenerate
+  // zero-area triangle; raised to 8 bits, that case (and its 2 sibling
+  // `standardsampleposition.*.samples_8` cases) now passes, so this can
+  // honestly be `VK_TRUE`.
+  Limits.standardSampleLocations = VK_TRUE;
   // Host memory is plain `malloc`/`VkAllocationCallbacks`-backed storage
   // with no device-side copy engine, so there is no meaningful alignment
   // restriction beyond ordinary object alignment.
