@@ -1673,6 +1673,56 @@ TEST_F(ImageTest, GetDeviceImageSubresourceLayoutKHRMatchesLiveImage) {
   EXPECT_EQ(Layout2.subresourceLayout.rowPitch, LiveLayout.rowPitch);
 }
 
+// Roadmap L412: `vkGetImageSubresourceLayout2`/`vkGetDeviceImage
+// SubresourceLayout` (promoted to core in 1.4, this driver's advertised
+// `apiVersion`) are thin aliases of their `KHR`-suffixed counterparts
+// above; `dEQP-VK.api.version_check.entry_points` resolves the plain name
+// through `vkGetDeviceProcAddr`, so both names must behave identically.
+TEST_F(ImageTest, GetImageSubresourceLayout2MatchesKHRAlias) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = VkImageSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkSubresourceLayout2 KHRLayout{};
+  vkGetImageSubresourceLayout2KHR(Device, Img, &Sub2, &KHRLayout);
+  VkSubresourceLayout2 CoreLayout{};
+  vkGetImageSubresourceLayout2(Device, Img, &Sub2, &CoreLayout);
+  EXPECT_EQ(CoreLayout.subresourceLayout.offset, KHRLayout.subresourceLayout.offset);
+  EXPECT_EQ(CoreLayout.subresourceLayout.size, KHRLayout.subresourceLayout.size);
+  EXPECT_EQ(CoreLayout.subresourceLayout.rowPitch,
+            KHRLayout.subresourceLayout.rowPitch);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+TEST_F(ImageTest, GetDeviceImageSubresourceLayoutMatchesKHRAlias) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 2;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = VkImageSubresource{VK_IMAGE_ASPECT_COLOR_BIT, 1, 0};
+  VkDeviceImageSubresourceInfo Info{};
+  Info.pCreateInfo = &ImageInfo;
+  Info.pSubresource = &Sub2;
+
+  VkSubresourceLayout2 KHRLayout{};
+  vkGetDeviceImageSubresourceLayoutKHR(Device, &Info, &KHRLayout);
+  VkSubresourceLayout2 CoreLayout{};
+  vkGetDeviceImageSubresourceLayout(Device, &Info, &CoreLayout);
+  EXPECT_EQ(CoreLayout.subresourceLayout.offset, KHRLayout.subresourceLayout.offset);
+  EXPECT_EQ(CoreLayout.subresourceLayout.size, KHRLayout.subresourceLayout.size);
+  EXPECT_EQ(CoreLayout.subresourceLayout.rowPitch,
+            KHRLayout.subresourceLayout.rowPitch);
+}
+
 // A 3D image's subresource size spans every depth slice at that mip level
 // (Image.h's ImageSubresourceLayout comment), unlike a 2D array image's own
 // one-layer-at-a-time size (GetImageSubresourceLayoutMatchesMipChain above).

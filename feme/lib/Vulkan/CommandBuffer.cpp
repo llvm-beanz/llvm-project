@@ -4555,6 +4555,20 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->endRenderPass();
 }
 
+// (roadmap L412) Thin core-named aliases: dynamic rendering is core in 1.3,
+// below this driver's advertised `apiVersion` (1.4), so
+// `dEQP-VK.api.version_check.entry_points` resolves these plain names
+// through `vkGetDeviceProcAddr` too, not only the `KHR`-suffixed ones.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRendering(VkCommandBuffer commandBuffer,
+                    const VkRenderingInfo *pRenderingInfo) {
+  feme::vulkan::vkCmdBeginRenderingKHR(commandBuffer, pRenderingInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRendering(VkCommandBuffer commandBuffer) {
+  feme::vulkan::vkCmdEndRenderingKHR(commandBuffer);
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
                                             VkSubpassContents) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->nextSubpass();
@@ -4630,6 +4644,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2EXT(
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindVertexBuffers(firstBinding, std::move(Buffers), std::move(Offsets),
                           std::move(Strides));
+}
+
+// (roadmap L412) Core in 1.3, below this driver's advertised `apiVersion`.
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+    const VkDeviceSize *pSizes, const VkDeviceSize *pStrides) {
+  feme::vulkan::vkCmdBindVertexBuffers2EXT(commandBuffer, firstBinding, bindingCount,
+                                           pBuffers, pOffsets, pSizes, pStrides);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
@@ -4867,6 +4890,65 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveTopologyEXT(
       ->setPrimitiveTopology(primitiveTopology);
 }
 
+// (roadmap L412) Thin core-named aliases: all nine
+// `VK_EXT_extended_dynamic_state` commands above are core in 1.3, below
+// this driver's advertised `apiVersion` (1.4), so
+// `dEQP-VK.api.version_check.entry_points` resolves each plain name
+// through `vkGetDeviceProcAddr` too, not only the `EXT`-suffixed one.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetCullMode(VkCommandBuffer commandBuffer,
+                                            VkCullModeFlags cullMode) {
+  feme::vulkan::vkCmdSetCullModeEXT(commandBuffer, cullMode);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFace(VkCommandBuffer commandBuffer,
+                                             VkFrontFace frontFace) {
+  feme::vulkan::vkCmdSetFrontFaceEXT(commandBuffer, frontFace);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthTestEnable(VkCommandBuffer commandBuffer,
+                       VkBool32 depthTestEnable) {
+  feme::vulkan::vkCmdSetDepthTestEnableEXT(commandBuffer, depthTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthWriteEnable(VkCommandBuffer commandBuffer,
+                        VkBool32 depthWriteEnable) {
+  feme::vulkan::vkCmdSetDepthWriteEnableEXT(commandBuffer, depthWriteEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthCompareOp(VkCommandBuffer commandBuffer,
+                      VkCompareOp depthCompareOp) {
+  feme::vulkan::vkCmdSetDepthCompareOpEXT(commandBuffer, depthCompareOp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer,
+                             VkBool32 depthBoundsTestEnable) {
+  feme::vulkan::vkCmdSetDepthBoundsTestEnableEXT(commandBuffer, depthBoundsTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilTestEnable(VkCommandBuffer commandBuffer,
+                         VkBool32 stencilTestEnable) {
+  feme::vulkan::vkCmdSetStencilTestEnableEXT(commandBuffer, stencilTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOp(
+    VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+    VkCompareOp compareOp) {
+  feme::vulkan::vkCmdSetStencilOpEXT(commandBuffer, faceMask, failOp, passOp,
+                                     depthFailOp, compareOp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetPrimitiveTopology(VkCommandBuffer commandBuffer,
+                         VkPrimitiveTopology primitiveTopology) {
+  feme::vulkan::vkCmdSetPrimitiveTopologyEXT(commandBuffer, primitiveTopology);
+}
+
 // Four more core commands this ICD must at least resolve (found missing
 // entirely -- a segfault through a null device-dispatch-table entry, the
 // same root cause as the vkTrimCommandPool/vkCreateRenderPass2/
@@ -4897,6 +4979,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
                                                   uint16_t lineStipplePattern) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setLineStipple(lineStippleFactor, lineStipplePattern);
+}
+
+// (roadmap L412) Core in 1.4 (this driver's advertised `apiVersion`), so
+// the plain name needs its own table entry too.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetLineStipple(VkCommandBuffer commandBuffer, uint32_t lineStippleFactor,
+                    uint16_t lineStipplePattern) {
+  feme::vulkan::vkCmdSetLineStippleKHR(commandBuffer, lineStippleFactor,
+                                       lineStipplePattern);
 }
 
 // (roadmap F8) `VK_KHR_dynamic_rendering_local_read`'s

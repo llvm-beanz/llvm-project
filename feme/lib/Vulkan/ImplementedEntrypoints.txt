@@ -100,7 +100,9 @@ vkGetDeviceImageSparseMemoryRequirements
 # (dEQP-VK.image.subresource_layout.*).
 vkGetImageSubresourceLayout
 vkGetImageSubresourceLayout2KHR
+vkGetImageSubresourceLayout2
 vkGetDeviceImageSubresourceLayoutKHR
+vkGetDeviceImageSubresourceLayout
 
 # V6: render passes and framebuffers (see "Render passes and dynamic
 # rendering").
@@ -115,6 +117,7 @@ vkGetRenderAreaGranularity
 # KHR name -- see the entrypoint generator's SUPPORTED_EXTENSIONS comment for
 # why the core name alone is not reachable through the loader.
 vkGetRenderingAreaGranularityKHR
+vkGetRenderingAreaGranularity
 vkCreateFramebuffer
 vkDestroyFramebuffer
 
@@ -236,20 +239,30 @@ vkCmdSetDepthBounds
 vkCmdSetDeviceMask
 # (roadmap C4c) VK_EXT_extended_dynamic_state's 12 dynamic states.
 vkCmdSetCullModeEXT
+vkCmdSetCullMode
 vkCmdSetFrontFaceEXT
+vkCmdSetFrontFace
 vkCmdSetPrimitiveTopologyEXT
+vkCmdSetPrimitiveTopology
 vkCmdSetViewportWithCountEXT
 vkCmdSetScissorWithCountEXT
 vkCmdBindVertexBuffers2EXT
+vkCmdBindVertexBuffers2
 vkCmdSetDepthTestEnableEXT
+vkCmdSetDepthTestEnable
 vkCmdSetDepthWriteEnableEXT
+vkCmdSetDepthWriteEnable
 vkCmdSetDepthCompareOpEXT
+vkCmdSetDepthCompareOp
 vkCmdSetDepthBoundsTestEnableEXT
+vkCmdSetDepthBoundsTestEnable
 vkCmdSetDepthBiasEnable
 vkCmdSetRasterizerDiscardEnable
 vkCmdSetPrimitiveRestartEnable
 vkCmdSetStencilTestEnableEXT
+vkCmdSetStencilTestEnable
 vkCmdSetStencilOpEXT
+vkCmdSetStencilOp
 vkCmdDraw
 vkCmdDrawIndexed
 vkCmdDrawIndirect
@@ -308,7 +321,9 @@ vkQueueSubmit2
 # implemented KHR name, but the core names remain unimplemented and are
 # tracked as an open gap by Roadmap.md's D-series rows).
 vkCmdBeginRenderingKHR
+vkCmdBeginRendering
 vkCmdEndRenderingKHR
+vkCmdEndRendering
 
 # V3: secondary command buffers (see "Command Buffers").
 vkCmdExecuteCommands
@@ -357,6 +372,7 @@ vkGetPrivateData
 # stipple factor/pattern VK_DYNAMIC_STATE_LINE_STIPPLE_KHR declares
 # dynamic (GraphicsPipeline.cpp/CommandBuffer.cpp).
 vkCmdSetLineStippleKHR
+vkCmdSetLineStipple
 
 # Roadmap F8: VK_KHR_dynamic_rendering_local_read's two commands,
 # already core (non-KHR-suffixed) in this driver's advertised 1.4

@@ -629,6 +629,16 @@ VKAPI_ATTR void VKAPI_CALL vkGetRenderingAreaGranularityKHR(
   pGranularity->height = 1;
 }
 
+// (roadmap L412) Core in 1.3, below this driver's advertised `apiVersion`
+// (1.4), so the plain name needs its own table entry too, not only the
+// `KHR`-suffixed one above.
+VKAPI_ATTR void VKAPI_CALL vkGetRenderingAreaGranularity(
+    VkDevice device, const VkRenderingAreaInfo *pRenderingAreaInfo,
+    VkExtent2D *pGranularity) {
+  feme::vulkan::vkGetRenderingAreaGranularityKHR(device, pRenderingAreaInfo,
+                                                 pGranularity);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkDevice, const VkFramebufferCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkFramebuffer *pFramebuffer) {

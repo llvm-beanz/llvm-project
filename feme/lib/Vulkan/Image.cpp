@@ -783,6 +783,25 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
   fillSubresourceLayout2PNextChain(Layout, pLayout->pNext);
 }
 
+// (roadmap L412) Thin core-named aliases: both commands above are
+// promoted to core by 1.4 (this driver's advertised `apiVersion`), so
+// `dEQP-VK.api.version_check.entry_points` resolves each plain name
+// through `vkGetDeviceProcAddr` too, not only the `KHR`-suffixed one.
+VKAPI_ATTR void VKAPI_CALL
+vkGetImageSubresourceLayout2(VkDevice device, VkImage image,
+                            const VkImageSubresource2 *pSubresource,
+                            VkSubresourceLayout2 *pLayout) {
+  feme::vulkan::vkGetImageSubresourceLayout2KHR(device, image, pSubresource,
+                                                pLayout);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkGetDeviceImageSubresourceLayout(VkDevice device,
+                                 const VkDeviceImageSubresourceInfo *pInfo,
+                                 VkSubresourceLayout2 *pLayout) {
+  feme::vulkan::vkGetDeviceImageSubresourceLayoutKHR(device, pInfo, pLayout);
+}
+
 /// (roadmap E4) `VK_KHR_maintenance4`: no sparse residency is supported
 /// (see "Initial Non-Goals"), mirroring
 /// `vkGetPhysicalDeviceSparseImageFormatProperties`'s own empty result --

@@ -243,6 +243,20 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout2KHR(
 VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
     VkDevice device, const VkDeviceImageSubresourceInfo *pInfo,
     VkSubresourceLayout2 *pLayout);
+// (roadmap L412) Core in 1.4 (this driver's advertised `apiVersion`): both
+// of `VK_KHR_maintenance5`'s commands above are promoted to core by 1.4,
+// so `dEQP-VK.api.version_check.entry_points` queries `vkGetDeviceProcAddr`
+// for these plain names too, not only the `KHR`-suffixed ones -- the same
+// "core name also needs its own table entry" gap `vkCmdSetLineStipple`
+// below fixes for its own extension.
+VKAPI_ATTR void VKAPI_CALL
+vkGetImageSubresourceLayout2(VkDevice device, VkImage image,
+                            const VkImageSubresource2 *pSubresource,
+                            VkSubresourceLayout2 *pLayout);
+VKAPI_ATTR void VKAPI_CALL
+vkGetDeviceImageSubresourceLayout(VkDevice device,
+                                 const VkDeviceImageSubresourceInfo *pInfo,
+                                 VkSubresourceLayout2 *pLayout);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateImageView(VkDevice device, const VkImageViewCreateInfo *pCreateInfo,
                   const VkAllocationCallbacks *pAllocator, VkImageView *pView);
@@ -643,6 +657,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass2(
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
     VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer);
+// (roadmap L412) Dynamic rendering is core in 1.3, below this driver's
+// advertised `apiVersion` (1.4), so `dEQP-VK.api.version_check.
+// entry_points` queries `vkGetDeviceProcAddr` for these plain names too.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRendering(VkCommandBuffer commandBuffer,
+                    const VkRenderingInfo *pRenderingInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRendering(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer,
                                                   uint32_t firstBinding,
@@ -650,6 +671,11 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer,
                                                   const VkBuffer *pBuffers,
                                                   const VkDeviceSize *pOffsets);
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2EXT(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+    const VkDeviceSize *pSizes, const VkDeviceSize *pStrides);
+// (roadmap L412) Core in 1.3, below this driver's advertised `apiVersion`.
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2(
     VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
     const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
     const VkDeviceSize *pSizes, const VkDeviceSize *pStrides);
@@ -698,6 +724,39 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
                                                VkCullModeFlags cullMode);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
                                                 VkFrontFace frontFace);
+// (roadmap L412) `vkCmdSetCullMode`/`vkCmdSetFrontFace`/`vkCmdSet
+// DepthTestEnable`/`vkCmdSetDepthWriteEnable`/`vkCmdSetDepthCompareOp`/
+// `vkCmdSetDepthBoundsTestEnable`/`vkCmdSetStencilTestEnable`/`vkCmdSet
+// StencilOp`/`vkCmdSetPrimitiveTopology`: `VK_EXT_extended_dynamic_state`'s
+// commands are all core in 1.3, below this driver's advertised
+// `apiVersion`, so each plain name needs its own table entry too, not only
+// the `EXT`-suffixed one above.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetCullMode(VkCommandBuffer commandBuffer,
+                                            VkCullModeFlags cullMode);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFace(VkCommandBuffer commandBuffer,
+                                             VkFrontFace frontFace);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthTestEnable(VkCommandBuffer commandBuffer,
+                       VkBool32 depthTestEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthWriteEnable(VkCommandBuffer commandBuffer,
+                        VkBool32 depthWriteEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthCompareOp(VkCommandBuffer commandBuffer,
+                      VkCompareOp depthCompareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer,
+                             VkBool32 depthBoundsTestEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilTestEnable(VkCommandBuffer commandBuffer,
+                         VkBool32 stencilTestEnable);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOp(
+    VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+    VkCompareOp compareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetPrimitiveTopology(VkCommandBuffer commandBuffer,
+                         VkPrimitiveTopology primitiveTopology);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetDepthTestEnableEXT(VkCommandBuffer commandBuffer,
                           VkBool32 depthTestEnable);
@@ -733,6 +792,12 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
                        uint32_t lineStippleFactor,
                        uint16_t lineStipplePattern);
+// (roadmap L412) Core in 1.4 (this driver's advertised `apiVersion`), so
+// the plain name needs its own table entry too, the same gap as the other
+// `KHR`/`EXT`-suffixed commands just above.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetLineStipple(VkCommandBuffer commandBuffer, uint32_t lineStippleFactor,
+                    uint16_t lineStipplePattern);
 // (roadmap F8) Core in 1.4 (this driver's advertised `apiVersion`, unlike
 // dynamic rendering itself -- see the `KHR` comment above), so these two
 // names need no `KHR` suffix, matching `vkCmdBindIndexBuffer2`'s own

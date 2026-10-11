@@ -1055,6 +1055,23 @@ TEST_F(RenderPassTest, GetRenderingAreaGranularityReportsNonZeroGranularity) {
   EXPECT_GE(Granularity.height, 1u);
 }
 
+// Roadmap L412: `vkGetRenderingAreaGranularity` (promoted to core in 1.3,
+// below this driver's advertised `apiVersion`) is a thin alias of the
+// `KHR`-suffixed command above; `dEQP-VK.api.version_check.entry_points`
+// resolves the plain name through `vkGetDeviceProcAddr`, so both names
+// must agree.
+TEST_F(RenderPassTest, GetRenderingAreaGranularityMatchesKHRAlias) {
+  VkRenderingAreaInfo Info{};
+  Info.colorAttachmentCount = 0;
+  Info.pColorAttachmentFormats = nullptr;
+  VkExtent2D KHRGranularity{};
+  vkGetRenderingAreaGranularityKHR(Device, &Info, &KHRGranularity);
+  VkExtent2D CoreGranularity{};
+  vkGetRenderingAreaGranularity(Device, &Info, &CoreGranularity);
+  EXPECT_EQ(CoreGranularity.width, KHRGranularity.width);
+  EXPECT_EQ(CoreGranularity.height, KHRGranularity.height);
+}
+
 // Roadmap E29: mirrors dEQP-VK.api.granularity.in_dynamic_render_pass's own
 // full sequence (image, view, layout transition, both granularity queries
 // bracketing a dynamic render pass) for a packed 10-bit-per-component

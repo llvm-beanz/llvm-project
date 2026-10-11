@@ -518,6 +518,50 @@ TEST_F(CommandBufferTest, RecordAndExecuteDispatch) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
 }
 
+// Roadmap L412: each of these commands is promoted to core at or before
+// 1.4 (this driver's advertised `apiVersion`), so the plain name is a thin
+// alias of the `EXT`/`KHR`-suffixed one `dEQP-VK.dynamic_state.*` already
+// exercises -- `dEQP-VK.api.version_check.entry_points` resolves each
+// plain name through `vkGetDeviceProcAddr` too, so both names must record
+// an identical command.
+TEST_F(CommandBufferTest, CoreNamedDynamicStateAliasesRecordSameCommand) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  ASSERT_NE(CmdBuf, VK_NULL_HANDLE);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  vkCmdSetCullMode(CmdBuf, VK_CULL_MODE_FRONT_BIT);
+  vkCmdSetFrontFace(CmdBuf, VK_FRONT_FACE_CLOCKWISE);
+  vkCmdSetDepthTestEnable(CmdBuf, VK_TRUE);
+  vkCmdSetDepthWriteEnable(CmdBuf, VK_TRUE);
+  vkCmdSetDepthCompareOp(CmdBuf, VK_COMPARE_OP_GREATER);
+  vkCmdSetDepthBoundsTestEnable(CmdBuf, VK_TRUE);
+  vkCmdSetStencilTestEnable(CmdBuf, VK_TRUE);
+  vkCmdSetStencilOp(CmdBuf, VK_STENCIL_FACE_FRONT_BIT, VK_STENCIL_OP_KEEP,
+                    VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP,
+                    VK_COMPARE_OP_ALWAYS);
+  vkCmdSetPrimitiveTopology(CmdBuf, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+  vkCmdSetLineStipple(CmdBuf, 3, 0xAAAA);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  const auto &Commands = Recorded->commands();
+  ASSERT_EQ(Commands.size(), 10u);
+  EXPECT_EQ(Commands[0].Op, RecordedCommand::Kind::SetCullMode);
+  EXPECT_EQ(Commands[0].CullModeValue,
+            static_cast<VkCullModeFlags>(VK_CULL_MODE_FRONT_BIT));
+  EXPECT_EQ(Commands[1].Op, RecordedCommand::Kind::SetFrontFace);
+  EXPECT_EQ(Commands[1].FrontFaceValue, VK_FRONT_FACE_CLOCKWISE);
+  EXPECT_EQ(Commands[2].Op, RecordedCommand::Kind::SetDepthTestEnable);
+  EXPECT_EQ(Commands[3].Op, RecordedCommand::Kind::SetDepthWriteEnable);
+  EXPECT_EQ(Commands[4].Op, RecordedCommand::Kind::SetDepthCompareOp);
+  EXPECT_EQ(Commands[5].Op, RecordedCommand::Kind::SetDepthBoundsTestEnable);
+  EXPECT_EQ(Commands[6].Op, RecordedCommand::Kind::SetStencilTestEnable);
+  EXPECT_EQ(Commands[7].Op, RecordedCommand::Kind::SetStencilOp);
+  EXPECT_EQ(Commands[8].Op, RecordedCommand::Kind::SetPrimitiveTopology);
+  EXPECT_EQ(Commands[9].Op, RecordedCommand::Kind::SetLineStipple);
+}
+
 TEST_F(CommandBufferTest, RecordDepthBiasEnable) {
   VkCommandBuffer CmdBuf = allocateCommandBuffer();
   VkCommandBufferBeginInfo BeginInfo{};
