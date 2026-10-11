@@ -118873,3 +118873,50 @@ Done: `subgroupSupportedStages` now advertises `COMPUTE_BIT | FRAGMENT_BIT` (48)
 2. **(~1-2 hours)** `L414(a)`'s next item: `standardSampleLocations` — needs the Vulkan-spec-standard multisample sample-location pattern implemented in the rasterizer, not a reported-bit flip. Check the spec's table of standard locations per sample count first, then find where FeMe's rasterizer currently picks sample positions.
 3. **(~1-2 hours)** `L414(a)`'s last item: `timestampComputeAndGraphics` — needs real compute-queue timestamp-query support (currently only graphics-queue). Check `QueryPool.cpp`/whatever handles `vkCmdWriteTimestamp` for queue-family gating first.
 4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3 `binding_model.stages.*`, 2 `api.version_check.*`, 1 each `get_device_proc_addr`/`driver_properties` — still untouched across several sessions now. Oldest-standing untriaged item in any handoff; worth picking up soon just to stop it recurring unchanged.
+
+# Session: L412 — closed every remaining `part1` sub-bucket (version_check, binding_model.stages, get_device_proc_addr, driver_properties)
+
+Done: 4 commits. `unavailable_entry_points` now Pass. `entry_points`: 26 Fails → 9 genuine gaps. `binding_model.stages.*`: 3/3 Fail → 3/3 Pass (a real state-dropping bug, not a triviality). `driver_properties.conformance_version` triaged won't-fix, documented why. Every `part1` sub-bucket this item has carried across many sessions is now closed one way or another.
+
+## What happened, in order
+
+1. **Device check**: `FeMe CPU Vulkan Device` confirmed (every segment, per standing rule — did this twice more mid-session too, after each ICD rebuild).
+2. **Finished the entry_points/unit-test work left mid-flight from the prior segment**: built `FeMeVulkanTests`, ran the 4 new alias-comparison unit tests — all passed first try. No surprises there.
+3. **Ran full `check-feme`, caught a real regression before it shipped**: `DrawTest.AdvertisesDynamicRenderingExtension` hard-asserted `Count == 38u` for the extension list — the prior segment's `depth_stencil_resolve`/`create_renderpass2` fix (2 new extensions) pushed it to 40. Fixed the assertion and added explicit `HasExtension` checks for both new entries, rather than just bumping the magic number blind.
+4. **Re-ran `check-feme` clean**: 3644/3644, 0 regressions.
+5. **CTS regression sweep, not just the one targeted test**: `dynamic_state.*` (671 cases, 0 Fail), `image.*subresource_layout*` (3553 cases, 0 Fail), partial `renderpasses.dynamic_rendering.*` (10855 cases reached before a 300s time-box, 0 Fail) — confirms the 15 new core-named aliases didn't break anything that used to resolve through a different path.
+6. **Committed in 2 pieces, as instructed**: extension-list fix (`01d1538b2b6f`), entry_points alias fix + its 4 unit tests (`1b26f3a1c189`).
+7. **Picked up the next handoff item**: `binding_model.stages.*`. A targeted `--deqp-case='dEQP-VK.binding_model.*stages*'` run (not the full `binding_model.*`, which takes 45+ min) found the exact 3 failing case names in under a minute — `combined_image_sampler`, `storage_buffer`, `uniform_buffer`, all bare `Fail (Fail)` with zero log detail.
+8. **Went to CTS source instead of guessing**: `vktBindingStagesTests.cpp` binds one descriptor set via `vkCmdBindDescriptorSets2` with `stageFlags = FRAGMENT_BIT | COMPUTE_BIT`, then uses it from both a graphics pipeline and a compute pipeline in the same command buffer — no second bind call. Per spec, that `stageFlags` combination must bind *both* pipeline bind points in one call.
+9. **Found the real bug, not a surface symptom**: `vkCmdBindDescriptorSets2`/`vkCmdPushDescriptorSet2` in `CommandBuffer.cpp` picked exactly one bind point (`COMPUTE` if that bit was set, else `GRAPHICS`), silently dropping the other — a genuine state-dropping bug, not a CTS test quirk. `PushConstants`'s own recording already handles the identical "stageFlags can target both" situation correctly (`ToCompute`/`ToGraphics` split) — descriptor-set binding just never got the same treatment.
+10. **Fixed both functions** (not just the one the failing test exercises — `vkCmdPushDescriptorSet2` has the exact same bug pattern, fixed it too since it's the same root cause and a two-line change once the first was done).
+11. **Rebuilt, re-ran the 3 targeted cases**: 3/3 Pass (was 3/3 Fail).
+12. **Added a real regression test, not just a passing smoke test**: `BindDescriptorSets2WithCombinedStageFlagsBindsBothPoints` — records one call with combined `stageFlags`, asserts the command buffer's recorded command list has *two* `BindDescriptorSets` entries (graphics then compute), not one. Would have caught this bug directly.
+13. **check-feme clean again**: 3645/3645.
+14. **Caught my own stale-background-process mistake**: a `dEQP-VK.binding_model.*` sweep from *before* this fix was built had been running in the background since the start of this segment (46+ minutes of CPU time by the time I noticed). It was dynamically linked against the *old* `.so` the whole time — still valid, just useless as a "does the fix work" signal. Killed it once I realized, ran a fresh targeted sweep against the rebuilt binary instead (2322 cases, 0 Fail) rather than trusting stale results.
+15. **Committed the bind-point fix + its test** (`21c43bdfe102`).
+16. **Triaged `get_device_proc_addr.non_enabled`**: confirmed via direct test run it's the *same* architecture gap as `entry_points`'s remaining 9th Fail (`vkCmdPushDescriptorSetKHR` returning non-null when its extension isn't enabled) — already tracked under the pre-existing `L236` roadmap item from a much earlier session. Did not attempt a fix (genuinely multi-hour: needs per-device `EnabledExtensions` tracking + a command-to-extension map) — just confirmed it's not a *new* issue and updated `L236`'s own text to reflect the missing-1.4-functions half is now closed.
+17. **Triaged `driver_properties.conformance_version`**: read the actual CTS assertion (`vktApiDriverPropertiesTests.cpp:107`) instead of guessing — it requires `conformanceVersion` to both be `>=` the device's `apiVersion` *and* exactly match one of CTS's own hardcoded list of real Khronos conformance-program submission version numbers. This ICD has never been submitted for conformance. Setting any non-zero value here, even one copied from the known-good list, would be a false conformance claim — not a bug fix, a lie. Documented as **won't-fix, by design**, not left as a silent "todo."
+18. **Docs**: `Roadmap.md` — updated `L236`'s row, updated `L412`'s own row with a closing summary, added 4 new rows (`L412(d)`-`(g)`) each following the existing per-sub-item pattern (no new nesting depth, flat `L412(x)` siblings as the user's letter-nesting rule requires). `VulkanCTSReport.md` — items 62-65. `VulkanExtensionInventory.md` — updated the two extensions' notes to say "now also advertised by name." Committed separately (`bb321355ba42`).
+
+## Stop citing (fully resolved)
+
+- `api.version_check.unavailable_entry_points` — fixed (`L412(d)`), CTS-verified.
+- `api.version_check.entry_points`'s 15-of-26 core-name-alias Fails — fixed (`L412(e)`), CTS-verified across 4 regression sweeps totaling 15,000+ cases, 0 Fail.
+- `binding_model.stages.*` (all 3 cases) — fixed (`L412(f)`), a real bug (not a triviality), CTS-verified, unit-tested.
+- `driver_properties.conformance_version` — triaged, won't-fix by design, documented. Stop flagging as "untriaged."
+- `get_device_proc_addr.non_enabled` — confirmed not a new/separate bug, it's `L236`. Cite as `L236` going forward, not as its own open `part1` item.
+- Every "L412's remaining untriaged `part1` buckets" line from the last 4+ handoffs — this phrase can be fully retired now.
+
+## Still open (new, from this session's own work)
+
+- `entry_points`'s remaining 9 Fails: sparse-residency queries (`vkGetImageSparseMemoryRequirements{,2}`, `vkQueueBindSparse`), YCbCr conversion create/destroy, buffer-device-address queries (3 functions) — all genuinely unimplemented, no quick fix. Plus the 9th, `vkCmdPushDescriptorSetKHR`, which is `L236`.
+- `L236` itself (the `vkGetDeviceProcAddr` enabled-extension-gating architecture gap) — still open, still multi-hour, now the *only* thing left in that item since the missing-core-functions half is closed.
+
+## Next steps, ranked
+
+1. **(~2-4 hours, standing, several sessions old)** `L411`'s real residual bug: rasterization/subpixel-coverage precision in the 66-case `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session comparing per-row coverage/edge-function values near x=12/x=20, not blend arithmetic.
+2. **(~1-2 hours)** `L414(a)`'s `standardSampleLocations` item — needs the Vulkan-spec-standard multisample sample-location pattern implemented in the rasterizer, not a reported-bit flip.
+3. **(~1-2 hours)** `L414(a)`'s `timestampComputeAndGraphics` item — needs real compute-queue timestamp-query support (currently graphics-queue only). Check `QueryPool.cpp`'s `vkCmdWriteTimestamp` queue-family gating first.
+4. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add per-device `EnabledExtensions` tracking plus a command-to-owning-extension(s) map so `vkGetDeviceProcAddr` can correctly return null for a disabled extension's functions. This is now the single remaining item blocking a clean `api.version_check.entry_points`/`api.get_device_proc_addr.non_enabled` pair.
+5. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)** `entry_points`'s 8 genuinely-unimplemented functions (sparse residency, YCbCr conversion, buffer device address) — worth a feasibility check per function before committing to implement any of them; none has an assigned roadmap item yet.
