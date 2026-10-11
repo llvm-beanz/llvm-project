@@ -3484,8 +3484,11 @@ Status (roadmap R33, "Depth, stencil, blending, and multisampling"): depth
 (`D16_UNORM`/`D32_FLOAT`)/stencil (`S8_UINT`) testing and writes, full
 blend-factor/op combinations, per-channel write masks, logic ops
 (`R8G8B8A8_*` only), multiple render targets, 1/2/4/8-sample multisampling
-(8 added by roadmap C4b: `samplePositions`' own "N-rooks" 8-sample table in
-Executor.cpp) with coverage/resolve, and a deterministic parallel tile
+(8 added by roadmap C4b: originally an "N-rooks" 8-sample table in
+Executor.cpp, replaced by roadmap L414a with the Vulkan spec's own
+"Standard Sample Locations" table -- the 1/4-sample patterns already
+matched it exactly, so only the 2/8-sample tables' values changed) with
+coverage/resolve, and a deterministic parallel tile
 schedule (a `WorkerCount` worker pool over disjoint tiles, wiring up
 `feme-render`'s previously-inert `--workers`) are all now implemented,
 replacing the "no depth/stencil, no multisampling, `BlendMode::Replace`"
