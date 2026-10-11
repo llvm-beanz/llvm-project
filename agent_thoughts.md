@@ -118571,3 +118571,73 @@ Device check: `FeMe CPU Vulkan Device` confirmed (start and end of session).
 3. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still a not-yet-filed, low-priority roadmap entry candidate; file it if a session has spare time and nothing higher-priority to do.
 4. **Stability triage (46 pipeline SIGSEGV + 328 renderpasses DeviceLost from the original full-run baseline) — still not started as its own investigation**, though `L409`/`L410`'s eight fixes may well have already resolved some or all of this count as a side effect (both failure classes are exactly the shape the use-after-free race produces). Recommend: re-run a large sample of `part2`'s full caselist and compare the `DeviceLost` rate against the pre-`L409` 22.74% baseline before investing in further dedicated triage — may already be closed.
 5. Drop from future handoffs — fully resolved, stop citing: `L410` in its entirety (all 8 types: `Buffer`/`Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/`QueryPool`, all CTS-verified), `L409`, `part1`'s crash mystery, `L407`, the "resource-table exhaustion" hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case.
+
+# Session: L411 R11G11B10_FLOAT precision fix + L412/L413 handoff cleanup (2026-10-12f)
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed.
+
+## What's done
+
+1. **`L378(a)` closed — again.** Prior handoff still listed it as open. It was
+   fixed and struck through in an earlier session. No code change. Dropping
+   this from all future handoffs permanently; it has been a stale carryover
+   for several sessions now.
+2. **`L411` fixed: `R11G11B10_FLOAT` pack truncation bias.** Both pack sites
+   (`femeRTPackR11G11B10Float` in the runtime, `encodeR11G11B10Float` in
+   `ImageFixture.cpp`) right-shifted a binary16 encoding down to a narrower
+   mantissa field without rounding — truncation, not round-to-nearest —
+   biasing every channel low. Fixed both: add half an ULP before the shift.
+   2 commits, 2 new regression tests, `check-feme` 3632/3635 clean.
+3. **`L411` CTS result: real fix, doesn't close the bug.** Confirmed via
+   pixel diff the fix is genuine (one case's mismatch dropped from 828/1024
+   to 88/1024 pixels) but the 66/788 `b10g11r11_ufloat_pack32`
+   dual-source-blend family's Pass/Fail outcome is **unchanged** — same 66
+   case names fail before and after. The residual bug is a flat,
+   sharply-bounded wrong-value rectangle in a different location than the
+   reference's own transition — a blend-state/sub-region boundary bug, not
+   a format bug. Documented, left open on the roadmap.
+4. **`L412` filed**: the 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails,
+   deferred across many sessions, now has a real roadmap row (documentation
+   only, not root-caused).
+5. **`L413` done**: stability re-check. 8,000-case `part2` sample: **1
+   `DeviceLost` / 6,038 completed (0.017%)**, down from the pre-`L409`
+   22.74% baseline. Confirms `L409`/`L410` already fixed this as a side
+   effect. Drop "46 SIGSEGV + 328 DeviceLost" from every future handoff.
+
+## Commits this session (4, each separately committed)
+
+1. `[FeMe] L411: round R11G11B10_FLOAT runtime pack to nearest, not truncate`
+2. `[FeMe] L411: round R11G11B10_FLOAT fixture pack to nearest, not truncate`
+3. `[FeMe] L411: document R11G11B10_FLOAT precision fix, note residual bug`
+4. `[FeMe] L412/L413: file ASTC-blit-limit roadmap entry, confirm stability re-check`
+
+## Next steps, ranked
+
+1. **(~2-4 hours)** `L411`'s real remaining bug: the blend-state/sub-region
+   boundary misplacement in `b10g11r11_ufloat_pack32` dual-source-blend
+   (66/788 Fails still open). Start from `/tmp/after_0_Result.png` /
+   `/tmp/after_1_Reference.png` (already decoded this session) — the wrong
+   region is x12-19 across most rows of a 32x32 image, pegged at a constant
+   value where the reference transitions later. Check how this test family
+   assigns blend-state sub-regions to pixels (likely a viewport/scissor or
+   vertex-position calculation specific to the 4-state-combo test variant,
+   not the 2-state `multi_attachments` variant which passes cleanly).
+2. **(~1-2 hours)** `L412`: triage the 37 `part1` Fails one bucket at a
+   time. Start with the 12 `copy_and_blit` ASTC-blit-limit cases (already
+   isolated) since they're the largest single bucket.
+3. **(~30 min)** The lone `mesh_shader.ext.properties.task_payload_and_
+   shared_memory_size` `DeviceLost` hit during this session's `L413`
+   re-check sample — one occurrence only, not yet confirmed reproducible.
+   Re-run that specific case a few times in isolation before assuming it's
+   real; could be a genuinely new, narrow bug or a one-off.
+4. Drop from future handoffs — fully resolved: `L378(a)` (closed, confirmed
+   again this session — stop citing it, it keeps coming back stale),
+   `L409`/`L410` in their entirety, the "46 SIGSEGV + 328 DeviceLost"
+   stability baseline (`L413` confirms resolved), `part1`'s crash mystery,
+   `L407`, the "resource-table exhaustion" hypothesis, `L375`,
+   `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough
+   cleanup pass, `L402`/`L406`, `pipeline_library.stencil` verification,
+   `part1`'s `use_after_copy.a8b8g8r8_srgb_pack32...` case. **Also stop
+   citing the "4 Fails" `b10g11r11_ufloat_pack32` figure — it's 66/788,
+   corrected this session (`L411`), and the format-precision half of the
+   bug is now fixed; only the sub-region boundary bug remains.**
