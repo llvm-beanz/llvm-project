@@ -52,7 +52,13 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
   EXPECT_LE(Info.SubgroupSize, 128u);
   EXPECT_EQ(Info.SubgroupSize & (Info.SubgroupSize - 1), 0u)
       << "subgroup size must be a power of two";
-  EXPECT_EQ(Info.SubgroupSupportedStages, VK_SHADER_STAGE_COMPUTE_BIT);
+  // (roadmap L414(a)) Fragment now joins Compute: `FragmentWrapper.cpp`
+  // lowers every barrier reaching a fragment shader to a plain `fence`
+  // (no splitting needed, see that file's own comment), so the stage is
+  // safe to advertise.
+  EXPECT_EQ(Info.SubgroupSupportedStages,
+            static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT |
+                                            VK_SHADER_STAGE_FRAGMENT_BIT));
   EXPECT_TRUE(Info.SubgroupSupportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT);
   // (roadmap L7t) `VOTE_BIT` is now safe to advertise (see
   // PhysicalDeviceInfo.cpp's own comment). (roadmap L85) `BALLOT_BIT` is

@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/FragmentWrapper.h"
 
+#include "BarrierCalls.h"
 #include "StageArgsLayout.h"
 #include "StageMaskCalls.h"
 #include "feme/Core/ShaderStage.h"
@@ -888,7 +889,77 @@ void lowerReturnMasks(CallInst &CI, const WaveBodyEnv &WEnv,
   }
 }
 
+/// Maps `feme::cpu::BarrierMemoryScope` to the `fence`'s sync scope,
+/// mirroring `EntryWrapper.cpp`'s own `syncScopeFor` exactly (see that
+/// file's doc comment for the full reasoning): `Group` orders memory only
+/// visible to this one wave, already on the same host thread, so
+/// `SyncScope::SingleThread` suffices; `Device`/`All` may be visible to a
+/// different wave running concurrently on a different host thread, and
+/// need `SyncScope::System`.
+SyncScope::ID fragmentBarrierSyncScope(BarrierMemoryScope Scope) {
+  return Scope == BarrierMemoryScope::Group ? SyncScope::SingleThread
+                                            : SyncScope::System;
+}
+
+/// Lowers every raised barrier intrinsic in \p F (roadmap L414(a)) to a
+/// plain `fence`, regardless of whether it is one of the three `_with_
+/// group_sync` (convergence-requiring) shapes or a memory-ordering-only
+/// one -- unlike `feme::cpu::EntryWrapperPass`'s compute-stage handling
+/// (which must actually split the wave body at a group-sync barrier into
+/// separate per-region wave loops, see EntryWrapper.cpp's file comment),
+/// no splitting is ever needed here, for two independent reasons specific
+/// to the fragment stage:
+///
+///  - **No `Workgroup`-scope barrier can ever reach this function.** Per
+///    the SPIR-V spec, `OpControlBarrier`'s `Workgroup` execution scope is
+///    only legal under the `GLCompute`/`TaskEXT`/`MeshEXT` execution
+///    models; a fragment entry point has no "workgroup" at all, so the
+///    only execution scope a real fragment shader's `subgroupBarrier()`
+///    (GLSL) / `OpControlBarrier` can ever name is `Subgroup` (or a
+///    stricter scope no real shader asks for) -- which
+///    `ControlBarrierConversionPattern` (SPIRVToLLVMPatterns.cpp)
+///    conservatively maps onto the same `_all_memory_barrier_with_group_
+///    sync` intrinsic a `Workgroup`-scope barrier would use, since it does
+///    not distinguish `Subgroup` from any other non-`Workgroup` scope
+///    further (see that pattern's own doc comment) -- but the *intrinsic
+///    shape* reaching this function is never evidence of an actual
+///    cross-wave convergence requirement for this stage, only ever a
+///    within-subgroup one.
+///  - **A within-subgroup convergence requirement is satisfied by
+///    construction.** `feme::cpu::SIMDizePass` (Phase 4, stage-agnostic,
+///    runs identically before every per-stage wrapper) already widens one
+///    fragment wave's `WaveSize` invocations into a single straight-line
+///    vectorized function body -- every lane's instruction stream executes
+///    together, one vector op at a time, with no possibility of one lane
+///    reaching a later program point while another has not, unlike
+///    `GeometryWrapperPass`'s own independent-per-primitive invocations
+///    (see GeometryWrapper.cpp's own barrier-rejection comment), which are
+///    not fused into one shared vectorized instruction stream the same
+///    way. A `Subgroup`-scope barrier's convergence requirement is
+///    therefore already met before this pass ever runs; only the
+///    memory-ordering half of its semantics needs any code at all, exactly
+///    like a memory-only barrier.
+///
+/// Verified empirically against CTS, not just by this architectural
+/// argument alone: see `PhysicalDeviceInfo.cpp`'s own `roadmap L414(a)`
+/// comment at `Info.SubgroupSupportedStages` for the exact case counts.
+void lowerFragmentBarriers(Function &F) {
+  for (Instruction &I : make_early_inc_range(instructions(F))) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+    if (!Matched)
+      continue;
+    IRBuilder<> Builder(CI);
+    Builder.CreateFence(AtomicOrdering::AcquireRelease,
+                        fragmentBarrierSyncScope(Matched->MemoryScope));
+    CI->eraseFromParent();
+  }
+}
+
 bool lowerFragmentStageOps(Function &F) {
+  lowerFragmentBarriers(F);
   std::optional<EntrySignature> Sig = feme::dxil::getEntrySignature(F);
   bool UsesStageOps = false;
   for (Instruction &I : instructions(F))

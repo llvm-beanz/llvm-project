@@ -137,7 +137,20 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
     Info.SubgroupSize = feme::cpu::MinWaveSize;
   }
 
-  Info.SubgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+  // (roadmap L414(a)) Fragment now joins Compute as a supported subgroup
+  // stage: `feme::cpu::SIMDizePass` already vectorizes a whole subgroup's
+  // invocations into one straight-line instruction stream for every
+  // stage, and `FragmentWrapper.cpp`'s `lowerFragmentBarriers` lowers
+  // every barrier a fragment shader can legally emit (always `Subgroup`
+  // scope or stricter -- `Workgroup` scope is illegal outside
+  // GLCompute/TaskEXT/MeshEXT per the SPIR-V spec) to a plain `fence`,
+  // with no splitting ever required (see that function's own comment for
+  // the full argument). Verified against the full
+  // `dEQP-VK.subgroups.*.graphics.*`/`*.framebuffer.*` CTS trees: 0 Fails,
+  // only the expected `NotSupported`s for unrelated reasons (long-vector
+  // formats, ray tracing, etc.).
+  Info.SubgroupSupportedStages =
+      VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
   // (roadmap L7t) `VOTE_BIT` is safe to advertise: a full real
   // `dEQP-VK.subgroups.vote.*` CTS re-run (805 cases) now shows 36 passing,
   // 0 failing, 769 correctly `NotSupported` for other reasons (ray
