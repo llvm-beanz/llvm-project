@@ -63,28 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** `Image`/`ImageView` next for `L410` — likely the next
-   highest-value target (bound via descriptor writes and render-pass
-   attachments). Same 3-commit pattern. Will need a wider `Sync.cpp` audit since
-   images are referenced indirectly through descriptor sets, not just direct
-   `RecordedCommand` fields — check whether `DescriptorSet`'s own bound
-   image/buffer views need to be walked too, or whether `Image`/`ImageView`'s
-   own fix can be scoped independently first.
-2. **(~2-4 hours each)** Then `DescriptorSet`, `Event`, `QueryPool` — one per
-   session, same pattern.
-3. **(~30 min)** Still outstanding, lower priority: `L378(a)`
-   (`max_sampler_lod_bias.shader_bias` pixel bug) and the 4
-   `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session —
-   both pixel-correctness issues, unrelated to the UAF work, use
-   `--deqp-log-images=enable` + golden-image diff for both.
-4. **(~30 min)** The 37 new `part1` Fails (api.info/copy_and_blit/binding_model)
-   are a new, low-priority, not-yet-filed finding — worth a roadmap entry if a
-   future session has spare time, but not urgent (pre-existing
-   feature-consistency/ASTC-blit-limit issues, not regressions).
-5. Drop from future handoffs — fully resolved, stop citing: `part1`'s crash
-   mystery (closed this session, see above), `L409` (closed,
-   Pipeline/RenderPass/Framebuffer fixed and verified), `L407`, the
-   "resource-table exhaustion" hypothesis, `L375`,
+1. **(~2-4 hours)** `DescriptorSet` next for `L410` — same 3-commit pattern
+   (mixin → destroy guard → retain/release). This is also the one that finally
+   closes the descriptor-indirect image/buffer gap noted above, since
+   `DescriptorSet`'s own retain sweep is the natural place to walk its bound
+   image/buffer views.
+2. **(~2-4 hours each)** Then `Event`, `QueryPool` — one per session, same
+   pattern. `L410` is then fully closed.
+3. **(~30 min)** Still outstanding, unrelated pixel-correctness bugs, lower
+   priority: `L378(a)` (`max_sampler_lod_bias.shader_bias`) and the 4
+   `b10g11r11_ufloat_pack32` dual-source-blend Fails from the `L409` session.
+   Use `--deqp-log-images=enable` + golden-image diff for both.
+4. **(~30 min)** The 37 `part1`/12 `copy_and_blit` ASTC-blit-limit Fails — still
+   a not-yet-filed, low-priority roadmap entry candidate if a future session has
+   spare time.
+5. Drop from future handoffs — fully resolved, stop citing: `L409` (closed,
+   verified), `Buffer`'s own `L410` fix (closed, verified), `part1`'s crash
+   mystery, `L407`, the "resource-table exhaustion" hypothesis, `L375`,
    `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`), roadmap strikethrough cleanup
    pass, `L402`/`L406`, `pipeline_library.stencil` verification, `part1`'s
    `use_after_copy.a8b8g8r8_srgb_pack32...` case.
