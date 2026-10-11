@@ -63,39 +63,21 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~30 min)** `L412`'s `properties.basic` Fail: same missing-case bug
-   pattern, but in `fillProperties2Chain` instead of
-   `fillFeatures2Chain` — look for `VkPhysicalDeviceSamplerFilterMinmax
-   Properties`'s own missing `case`. Should be a near-identical,
-   mechanical fix to this session's — probably the fastest remaining
-   win available.
-2. **(~1 hour)** `L412`'s `shader_subgroup_rotate_property_consistency_khr`
-   Fail: trace why `VkPhysicalDeviceSubgroupProperties.supportedOperations`
-   doesn't report `VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR`/
-   `_CLUSTERED_BIT_KHR` even though the feature bits themselves are
-   `VK_TRUE` — look at wherever `supportedOperations` gets built
-   (probably `PhysicalDeviceInfo.cpp`).
-3. **(~30 min)** `L412`'s `vulkan1p4_limits_validation.general` Fail —
-   completely untriaged, bare `Fail (fail)`. Re-run just that one case
-   with more verbose logging to get an actual error message first.
+1. **(~2-4 hours, standing, several sessions old)** `L411`'s real residual bug:
+   rasterization/subpixel-coverage precision in the 66-case
+   `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
+   comparing per-row coverage/edge-function values near x=12/x=20, not blend
+   arithmetic — ruled out as a blend-formula bug last session.
+2. **(~2-4 hours, new)** `L414`'s 23-limit "pure constant" bucket. Before
+   raising any of them: audit whether `DescriptorSet.cpp`/`Pipeline.cpp` size
+   any table off the current (low) limit value. If clean, this is a mechanical
+   batch of constant bumps in `PhysicalDeviceInfo.cpp` (lines ~251-486) — pick
+   the easy wins first (e.g. `maxPushConstantsSize`, `maxSamplerLodBias`) to
+   re-test incrementally rather than changing all 23 at once.
+3. **(~1-2 hours each, new, lower priority)** `L414`'s 4-limit "real work"
+   bucket: `timestampComputeAndGraphics`, `standardSampleLocations`,
+   `subgroupSupportedStages`, `shaderSignedZeroInfNanPreserveFloat16` — each
+   needs its own feasibility check before committing to implement.
 4. **(~1-2 hours)** `L412`'s remaining untriaged `part1` buckets: 3
    `binding_model.stages.*`, 2 `api.version_check.*`, 1 each
-   `get_device_proc_addr`/`driver_properties` — none yet looked at.
-5. **(~2-4 hours, standing item, several sessions old)** `L411`'s real
-   residual bug: subpixel rasterization/coverage precision in the
-   66-case `b10g11r11_ufloat_pack32` family. Needs a dedicated
-   rasterization-focused session — compare FeMe's and the CTS reference
-   rasterizer's per-pixel coverage/edge-function values directly near
-   the quad boundaries (x=12/x=20), not blend arithmetic.
-6. Drop from future handoffs — fully resolved: `L412`'s 12-case ASTC-blit
-   sub-bucket (it's `L265`, already deferred, don't re-investigate
-   without new diagnostic data), the `api.info.*` 18-Fail bucket (now 3,
-   different bugs — see items 1-3 above), `L378(a)`, `L409`/`L410` in
-   their entirety, the "46 SIGSEGV + 328 DeviceLost" stability baseline,
-   `part1`'s crash mystery, `L407`, the "resource-table exhaustion"
-   hypothesis, `L375`, `LLVM_EXTERNAL_PROJECTS=OffloadTest` (`L380`),
-   `L402`/`L406`, `pipeline_library.stencil` verification. **Stop citing
-   "37 part1 Fails" as one bucket — it's now 3 `api.info` + 12 `L265`
-   (deferred) + 10 untriaged (binding_model/version_check/proc_addr/
-   driver_properties); track these as separate items going forward.**
-
+   `get_device_proc_addr`/`driver_properties` — untouched this session.
