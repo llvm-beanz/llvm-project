@@ -2205,6 +2205,49 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
     - **Still open (`L410`'s remaining scope):** `Event`, `QueryPool`
       -- not yet audited or fixed.
 
+51. **`L410`: fixed `Event` and `QueryPool`, closing `L410`'s full
+    eight-type scope.**
+    - Both are standard `Allocator`-allocated/freed objects (no
+      ownership quirk like item 50's `DescriptorSet`), so the ordinary
+      `L409`/`L410` pattern applies directly: both now inherit
+      `PendingExecutionRefCounted`, and `vkDestroyEvent`/
+      `vkDestroyQueryPool` now call `requestDestroy` and only free
+      immediately if it returns true.
+    - `Sync.cpp` gained an `Events`/`QueryPools` pair in
+      `ExecutionRefs`, walking `Cmd.Events` (populated identically by
+      `vkCmdSetEvent`/`vkCmdResetEvent`/`vkCmdWaitEvents` and their
+      `synchronization2` equivalents, which all funnel into the same
+      field -- see `Event`'s own class comment, `Sync.h`) and
+      `Cmd.TargetQueryPool` (populated identically by
+      `vkCmdResetQueryPool`/`vkCmdBeginQuery`/`vkCmdEndQuery`/
+      `vkCmdWriteTimestamp`/`vkCmdCopyQueryPoolResults` and their
+      `2`-suffixed equivalents, which all populate the same single
+      field -- see `TargetQueryPool`'s own comment, `CommandBuffer.h`).
+    - New regression tests (`SyncTest.cpp`):
+      `SubmitThenImmediatelyDestroyEventWithNoWaitSucceeds` (submit a
+      `vkCmdSetEvent`, then immediately `vkDestroyEvent` with no wait)
+      and `SubmitThenImmediatelyDestroyQueryPoolWithNoWaitSucceeds`
+      (submit `vkCmdResetQueryPool`/`vkCmdBeginQuery`/`vkCmdEndQuery`,
+      then immediately `vkDestroyQueryPool` with no wait). As with
+      every prior `L409`/`L410` test, this specific race did not
+      reproduce a deterministic pre-fix crash in this non-ASan build;
+      the tests document/lock in the fix's intended behavior.
+    - `check-feme`: 3630/3633 Passed (+2 net new tests), 3 Unsupported,
+      0 Failed, 0 regressions.
+    - **Verified against CTS:** a 1,642-case
+      `dEQP-VK.synchronization.*event*` sweep (100% Pass) plus a
+      1,955-case time-boxed sample of `dEQP-VK.query_pool.*` (0 Fail
+      observed before the time box cut the run off) show **0 Fail
+      (in the completed portions), 0 `DeviceLost`/crashes**.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - **`L410` is now fully closed:** all eight types identified as
+      vulnerable to the async-`vkQueueSubmit`-vs-immediate-`vkDestroy*`
+      race (`Buffer`, `Image`, `ImageView`, `DescriptorSet`,
+      `BufferView`, `Sampler`, `Event`, `QueryPool`) are fixed and
+      CTS-verified. Struck through on `Roadmap.md`.
+
 ## Complete group accounting
 
 
