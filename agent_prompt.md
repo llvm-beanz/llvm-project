@@ -67,20 +67,19 @@ suggested the next steps:
    rasterization/subpixel-coverage precision in the 66-case
    `b10g11r11_ufloat_pack32` dual-source-blend family. Needs a dedicated session
    comparing per-row coverage/edge-function values near x=12/x=20, not blend
-   arithmetic.
-2. **(~1-2 hours)** `L414(a)`'s `standardSampleLocations` item — needs the
-   Vulkan-spec-standard multisample sample-location pattern implemented in the
-   rasterizer, not a reported-bit flip.
-3. **(~1-2 hours)** `L414(a)`'s `timestampComputeAndGraphics` item — needs real
-   compute-queue timestamp-query support (currently graphics-queue only). Check
-   `QueryPool.cpp`'s `vkCmdWriteTimestamp` queue-family gating first.
-4. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
+   arithmetic. Worth noting: this and `L414b` are both sub-pixel rasterizer
+   precision bugs found independently — a future session investigating one might
+   want to check whether they share a root cause before assuming they're
+   unrelated.
+2. **(~1-3 hours, new, same priority tier as L411)** `L414b`: root-cause FeMe's
+   rasterizer returning zero coverage for sub-pixel (~1/16-pixel) fully-inside
+   triangles. Start with a minimal `ExecutorTest.cpp` reproducer isolating just
+   the rasterizer, not the full multisample/resolve pipeline.
+3. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
    per-device `EnabledExtensions` tracking plus a command-to-owning-extension(s)
    map so `vkGetDeviceProcAddr` can correctly return null for a disabled
-   extension's functions. This is now the single remaining item blocking a clean
-   `api.version_check.entry_points`/`api.get_device_proc_addr.non_enabled` pair.
-5. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
+   extension's functions.
+4. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
    `entry_points`'s 8 genuinely-unimplemented functions (sparse residency, YCbCr
    conversion, buffer device address) — worth a feasibility check per function
-   before committing to implement any of them; none has an assigned roadmap item
-   yet.
+   before committing to implement any of them.
