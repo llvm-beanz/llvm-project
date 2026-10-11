@@ -321,9 +321,9 @@ TEST_F(EntryPointsTest, ImageFormatProperties1DReportsUnitHeightAndDepth) {
 // (Roadmap L233) The spec requires `maxResourceSize` to be at least 2^31
 // for every supported combination, regardless of what the real maximal
 // image of that shape would occupy -- a 3D image is capped at
-// `maxImageDimension3D` (256 on this device) on every axis with no array
-// layers to multiply by, so even a comparatively wide format's real
-// dimension-based byte count never reaches 2^31
+// `maxImageDimension3D` (512 on this device, roadmap L414) on every axis
+// with no array layers to multiply by, so even a comparatively wide
+// format's real dimension-based byte count never reaches 2^31
 // (`dEQP-VK.api.info.image_format_properties.3d.linear.d16_unorm`'s own
 // "maxResourceSize smaller than minimum required size").
 TEST_F(EntryPointsTest, ImageFormatPropertiesReportsMinimumResourceSizeFor3D) {

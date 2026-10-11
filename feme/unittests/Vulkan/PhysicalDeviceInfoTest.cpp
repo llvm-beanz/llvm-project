@@ -2303,4 +2303,44 @@ TEST_F(PhysicalDeviceProperties2Test,
             SamplerFilterMinmax.filterMinmaxImageComponentMapping);
 }
 
+// Roadmap L414: `dEQP-VK.api.info.vulkan1p4_limits_validation.general`
+// enforces the Vulkan-1.4-roadmap-profile minima (stricter than the bare
+// 1.0/1.1 "Required Limits" floor this ICD originally advertised for
+// these 23 fields), not just the type's own valid range -- each of these
+// was individually audited to confirm no backend table/buffer is sized
+// off the previous, lower value before being raised (see
+// PhysicalDeviceInfo.cpp's own comment immediately above the block this
+// test covers).
+TEST(PhysicalDeviceInfo, LimitsMeetVulkan14RoadmapProfileMinima) {
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  EXPECT_GE(Limits.maxImageDimension1D, 8192u);
+  EXPECT_GE(Limits.maxImageDimension2D, 8192u);
+  EXPECT_GE(Limits.maxImageDimension3D, 512u);
+  EXPECT_GE(Limits.maxImageDimensionCube, 8192u);
+  EXPECT_GE(Limits.maxImageArrayLayers, 2048u);
+  EXPECT_GE(Limits.maxUniformBufferRange, 65536u);
+  EXPECT_GE(Limits.maxPushConstantsSize, 256u);
+  EXPECT_LE(Limits.bufferImageGranularity, VkDeviceSize(4096));
+  EXPECT_GE(Limits.maxBoundDescriptorSets, 7u);
+  EXPECT_GE(Limits.maxPerStageDescriptorUniformBuffers, 15u);
+  EXPECT_GE(Limits.maxPerStageResources, 200u);
+  EXPECT_GE(Limits.maxDescriptorSetUniformBuffers, 90u);
+  EXPECT_GE(Limits.maxDescriptorSetStorageBuffers, 96u);
+  EXPECT_GE(Limits.maxDescriptorSetStorageImages, 144u);
+  EXPECT_GE(Limits.maxFragmentCombinedOutputResources, 16u);
+  EXPECT_GE(Limits.maxSamplerLodBias, 14.0f);
+  EXPECT_GE(Limits.maxViewportDimensions[0], 7680u);
+  EXPECT_GE(Limits.maxViewportDimensions[1], 7680u);
+  EXPECT_LE(Limits.viewportBoundsRange[0], -15360.0f);
+  EXPECT_GE(Limits.viewportBoundsRange[1], 15359.0f);
+  EXPECT_GE(Limits.maxFramebufferWidth, 7680u);
+  EXPECT_GE(Limits.maxFramebufferHeight, 7680u);
+  EXPECT_GE(Limits.maxColorAttachments, 8u);
+  // Vulkan-1.4-roadmap-profile minimum is actually 255.875, not 255.0.
+  EXPECT_GE(Limits.pointSizeRange[1], 255.875f);
+  EXPECT_LE(Limits.pointSizeGranularity, 0.125f);
+  EXPECT_LE(Limits.lineWidthGranularity, 0.5f);
+}
+
 } // namespace

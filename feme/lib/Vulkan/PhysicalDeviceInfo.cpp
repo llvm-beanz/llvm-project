@@ -248,34 +248,47 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // (tessellation, geometry, viewport, framebuffer, ...) are set to the
   // spec-mandated minimum since no graphics feature that would let an
   // application rely on a larger value is advertised.
-  Limits.maxImageDimension1D = 4096;
-  Limits.maxImageDimension2D = 4096;
-  Limits.maxImageDimension3D = 256;
-  Limits.maxImageDimensionCube = 4096;
-  Limits.maxImageArrayLayers = 256;
+  // (roadmap L414) The 23 fields below were previously pinned at Vulkan
+  // 1.0/1.1's bare mandatory floor, but `dEQP-VK.api.info.
+  // vulkan1p4_limits_validation.general` actually enforces the stricter
+  // Vulkan-1.4-roadmap-profile minima (not every 1.0/1.1 floor remains
+  // sufficient once a device claims `apiVersion = VK_API_VERSION_1_4`
+  // above). Audited every one of these fields' own real backend usage
+  // before raising them (`DescriptorSet.cpp`/`Descriptor.h` store bound
+  // descriptors/sets in `std::vector`/`std::map`, never a fixed-size
+  // array sized off any of these constants; `EntryPoints.cpp`'s image-
+  // format-properties and `GraphicsPipeline.cpp`'s viewport-dimension
+  // checks both read `Limits` dynamically; `bufferImageGranularity` has
+  // no consuming code at all, purely an advertised value) -- raising
+  // them is a pure reported-value change with no backend-capacity risk.
+  Limits.maxImageDimension1D = 8192;
+  Limits.maxImageDimension2D = 8192;
+  Limits.maxImageDimension3D = 512;
+  Limits.maxImageDimensionCube = 8192;
+  Limits.maxImageArrayLayers = 2048;
   Limits.maxTexelBufferElements = 65536;
-  Limits.maxUniformBufferRange = 16384;
+  Limits.maxUniformBufferRange = 65536;
   Limits.maxStorageBufferRange = 134217728;
-  Limits.maxPushConstantsSize = 128;
+  Limits.maxPushConstantsSize = 256;
   Limits.maxMemoryAllocationCount = 4096;
   Limits.maxSamplerAllocationCount = 4000;
-  Limits.bufferImageGranularity = 131072;
+  Limits.bufferImageGranularity = 4096;
   Limits.sparseAddressSpaceSize = 0; // No sparse binding support.
-  Limits.maxBoundDescriptorSets = 4;
+  Limits.maxBoundDescriptorSets = 7;
   Limits.maxPerStageDescriptorSamplers = 16;
-  Limits.maxPerStageDescriptorUniformBuffers = 12;
+  Limits.maxPerStageDescriptorUniformBuffers = 15;
   Limits.maxPerStageDescriptorStorageBuffers = 4;
   Limits.maxPerStageDescriptorSampledImages = 16;
   Limits.maxPerStageDescriptorStorageImages = 4;
   Limits.maxPerStageDescriptorInputAttachments = 4;
-  Limits.maxPerStageResources = 128;
+  Limits.maxPerStageResources = 200;
   Limits.maxDescriptorSetSamplers = 96;
-  Limits.maxDescriptorSetUniformBuffers = 72;
+  Limits.maxDescriptorSetUniformBuffers = 90;
   Limits.maxDescriptorSetUniformBuffersDynamic = 8;
-  Limits.maxDescriptorSetStorageBuffers = 24;
+  Limits.maxDescriptorSetStorageBuffers = 96;
   Limits.maxDescriptorSetStorageBuffersDynamic = 4;
   Limits.maxDescriptorSetSampledImages = 96;
-  Limits.maxDescriptorSetStorageImages = 24;
+  Limits.maxDescriptorSetStorageImages = 144;
   Limits.maxDescriptorSetInputAttachments = 4;
   Limits.maxVertexInputAttributes = 16;
   Limits.maxVertexInputBindings = 16;
@@ -298,7 +311,10 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxFragmentInputComponents = 64;
   Limits.maxFragmentOutputAttachments = 4;
   Limits.maxFragmentDualSrcAttachments = 1;
-  Limits.maxFragmentCombinedOutputResources = 4;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile minimum, same
+  // audit as the descriptor-set-sizing block above -- no fixed array is
+  // sized off this constant anywhere in the backend.
+  Limits.maxFragmentCombinedOutputResources = 16;
   // Roadmap R23 closed `feme::cpu`'s divergent-groupshared-access gap (see
   // "Limits and features"), so this is no longer pinned at the spec
   // minimum: 32768 bytes is a value every groupshared allocation this
@@ -376,7 +392,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // size (checked separately), so there is no smaller real ceiling to
   // report here than the type itself allows.
   Limits.maxDrawIndirectCount = std::numeric_limits<uint32_t>::max();
-  Limits.maxSamplerLodBias = 2.0f;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile minimum (14) --
+  // `femeRTPlanImplicitLod`'s LOD-bias application has no fixed clamp of
+  // its own tied to this reported value (it reads `SamplerLodBias`
+  // dynamically from the bound sampler's own state), so this is a pure
+  // reported-value change.
+  Limits.maxSamplerLodBias = 14.0f;
   // Roadmap H7i: a real `femeRTPlanImplicitLod`-driven multi-tap
   // anisotropic filter now exists (bounded by the sampler's own
   // `MaxAnisotropy`), and every real, pre-existing blocker discovered
@@ -396,10 +417,14 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // same constant, so this is a real contract rather than a speculative
   // advertisement.
   Limits.maxViewports = MaxViewportCount;
-  Limits.maxViewportDimensions[0] = 4096;
-  Limits.maxViewportDimensions[1] = 4096;
-  Limits.viewportBoundsRange[0] = -8192.0f;
-  Limits.viewportBoundsRange[1] = 8191.0f;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile minima (7680,
+  // and a bounds range covering it) -- `GraphicsPipeline.cpp`'s own
+  // `maxViewportDimensions` check (the only consumer) reads `Limits`
+  // dynamically, so this is a pure reported-value change.
+  Limits.maxViewportDimensions[0] = 7680;
+  Limits.maxViewportDimensions[1] = 7680;
+  Limits.viewportBoundsRange[0] = -15360.0f;
+  Limits.viewportBoundsRange[1] = 15359.0f;
   Limits.viewportSubPixelBits = 0;
   Limits.minMemoryMapAlignment = 64;
   Limits.minTexelBufferOffsetAlignment = 256;
@@ -412,8 +437,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.minInterpolationOffset = -0.5f;
   Limits.maxInterpolationOffset = 0.4375f;
   Limits.subPixelInterpolationOffsetBits = 4;
-  Limits.maxFramebufferWidth = 4096;
-  Limits.maxFramebufferHeight = 4096;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile minimum (7680)
+  // -- no code anywhere sizes a fixed buffer off this value (framebuffer
+  // attachments are ordinary dynamically-sized `Image`s), purely an
+  // advertised ceiling.
+  Limits.maxFramebufferWidth = 7680;
+  Limits.maxFramebufferHeight = 7680;
   Limits.maxFramebufferLayers = 256;
   // (V6) Framebuffer attachments may now be multisample, up to the 8
   // samples the software rasterizer implements coverage and resolves for
@@ -433,7 +462,11 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.framebufferNoAttachmentsSampleCounts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
       VK_SAMPLE_COUNT_8_BIT;
-  Limits.maxColorAttachments = 4;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile minimum (8) --
+  // every consumer (`GraphicsPipeline.cpp`'s render-target check,
+  // `CommandBuffer.cpp`'s per-draw `Seen` vector) reads `Limits`
+  // dynamically and sizes its own storage off it, never a fixed array.
+  Limits.maxColorAttachments = 8;
   // A sampled/storage image may be created with up to 8 samples (see "V5:
   // Images and sampling"'s multisample-object-model scope note in
   // FeMeVulkanDesign.md): this ICD stores every sample's data, and (roadmap
@@ -478,12 +511,28 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // and the executor's own line-width handling (unclamped, so any
   // advertised maximum is honest) respectively -- see each file's own
   // comment for why the limit and the executor behavior live apart.
+  // (roadmap L414) `pointSizeRange[1]` raised to 256 -- the roadmap
+  // profile's actual minimum is 255.875 (255.0f undershot it and still
+  // failed `vulkan1p4_limits_validation.general`); 256 lands on the
+  // `pointSizeGranularity=0.125` grid from `pointSizeRange[0]=1.0f`.
+  // `RasterState::MaxPointSize` (Pipeline.h) raised to match in the same
+  // commit, keeping the two in sync per the comment above;
+  // `emitPointQuad`'s own clamp (Executor.cpp) reads `MaxPointSize`
+  // dynamically with no fixed-size quad/coverage buffer, so this is a
+  // pure reported-value change. `lineWidthRange[1]` is untouched --
+  // `vulkan1p4_limits_validation.general` did not flag it.
   Limits.pointSizeRange[0] = 1.0f;
-  Limits.pointSizeRange[1] = 64.0f;
+  Limits.pointSizeRange[1] = 256.0f;
   Limits.lineWidthRange[0] = 1.0f;
   Limits.lineWidthRange[1] = 64.0f;
-  Limits.pointSizeGranularity = 1.0f;
-  Limits.lineWidthGranularity = 1.0f;
+  // (roadmap L414) Raised to the Vulkan-1.4-roadmap-profile maxima (both
+  // must be *at most* their required value, unlike most limits above,
+  // since these are granularities -- a smaller granularity is a stricter,
+  // not looser, promise). Neither has any consuming code beyond being
+  // reported (point/line sizes are not quantized to a granularity grid
+  // anywhere in `Executor.cpp`), so this is a pure reported-value change.
+  Limits.pointSizeGranularity = 0.125f;
+  Limits.lineWidthGranularity = 0.5f;
   Limits.strictLines = VK_FALSE;
   Limits.standardSampleLocations = VK_FALSE;
   // Host memory is plain `malloc`/`VkAllocationCallbacks`-backed storage
