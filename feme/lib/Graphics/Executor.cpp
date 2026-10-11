@@ -1547,7 +1547,7 @@ void readFragmentColorInt(const StageStorage &FSOutput,
   }
 }
 
-/// (Roadmap L125z) Returns the value range Vulkan's own blend-clamping
+/// (Roadmap L411) Returns the value range Vulkan's own blend-clamping
 /// rule requires \p Format's blend inputs (fragment/attachment colors,
 /// and blend-constant factors) be clamped to before evaluating the
 /// blend equation -- `[0, 1]` for a `_UNORM` format or `[-1, 1]` for a
@@ -1560,7 +1560,16 @@ void readFragmentColorInt(const StageStorage &FSOutput,
 /// predicate never admits `R8G8B8A8_SNORM`/`B8G8R8A8_SNORM` at all,
 /// confirmed by CTS itself reporting both `NotSupported` for
 /// blending), so this can be a short, explicit check rather than a
-/// fully enumerated per-format table.
+/// fully enumerated per-format table. `R11G11B10_FLOAT` (an *unsigned*
+/// float format, packed into `B10G11R11_UFLOAT_PACK32`) was missing
+/// from the float list below until `L411` root-caused it: every other
+/// float format was already listed, but this one fell through to the
+/// `[0, 1]` UNORM-style default, silently clamping any intermediate
+/// blend value above `1.0` (e.g. a prior draw's `Add`-blended result in
+/// this unsigned-float format, which has no upper bound at `1.0`)
+/// before a later draw's `Max`/`Min` blend op could ever see it --
+/// `dEQP-VK.pipeline.*.blend.dual_source.*b10g11r11_ufloat_pack32*`'s
+/// 66 residual "Image mismatch" Fails, see `VulkanCTSReport.md`.
 std::optional<std::pair<double, double>>
 blendClampRange(cpu::ResourceFormat Format) {
   switch (Format) {
@@ -1571,6 +1580,7 @@ blendClampRange(cpu::ResourceFormat Format) {
   case cpu::ResourceFormat::R16G16B16A16_FLOAT:
   case cpu::ResourceFormat::R16_FLOAT:
   case cpu::ResourceFormat::R16G16_FLOAT:
+  case cpu::ResourceFormat::R11G11B10_FLOAT:
     return std::nullopt;
   case cpu::ResourceFormat::R16G16B16A16_SNORM:
     return std::make_pair(-1.0, 1.0);
