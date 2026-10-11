@@ -289,19 +289,22 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES: {
-      // (roadmap C6, F3, F15a, F15b) The promoted twin of the float-controls
-      // half of `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES`
-      // below; both must agree. `DenormPreserve`/`RoundingModeRTE`/
-      // `SignedZeroInfNanPreserve` execution modes are honored by
-      // construction (see `ExecutionModePattern`/`collectEntryPoints` in
-      // feme/lib/Conversion/SPIRVToLLVM), and `FloatControlArithmeticPattern`
-      // (SPIRVToLLVMPatterns.cpp) now actually produces truncating-rounding-
-      // mode code for `RoundingModeRTZ` and flushed-denormal code for
-      // `DenormFlushToZero`, at every width, rather than only diagnosing (or,
-      // for `DenormFlushToZero`, rejecting outright) a shader that asks for
-      // either -- but every field here stays conservatively `VK_FALSE`,
-      // `RoundingModeRTZ`'s three included: a targeted CTS run flipping them
-      // to `VK_TRUE` found every
+      // (roadmap C6, F3, F15a, F15b, L414(a)) The promoted twin of the
+      // float-controls half of `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_
+      // PROPERTIES` below; both must agree. `DenormPreserve`/
+      // `RoundingModeRTE`/`SignedZeroInfNanPreserve` execution modes are
+      // honored by construction (see `ExecutionModePattern`/
+      // `collectEntryPoints` in feme/lib/Conversion/SPIRVToLLVM: no FP op
+      // conversion pattern ever sets a fast-math flag that would let LLVM
+      // codegen discard a signed zero, an infinity, or a NaN), and
+      // `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp) now
+      // actually produces truncating-rounding-mode code for `RoundingModeRTZ`
+      // and flushed-denormal code for `DenormFlushToZero`, at every width,
+      // rather than only diagnosing (or, for `DenormFlushToZero`, rejecting
+      // outright) a shader that asks for either -- but `RoundingModeRTZ`/
+      // `DenormFlushToZero`/`RoundingModeRTE`/`DenormPreserve` stay
+      // conservatively `VK_FALSE` at every width: a targeted CTS run
+      // flipping them to `VK_TRUE` found every
       // `dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32.*`
       // case that reaches pipeline creation (i.e. is not already
       // `NotSupported` on an unrelated missing feature) fails there instead
@@ -311,17 +314,37 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // shaders declare ("register-bound resource handle ... cannot
       // normalize into a heap access or the root-constant block") --
       // nothing to do with float controls at all. Advertising `VK_TRUE`
-      // would trade a graceful `NotSupported` skip for an outright CTS
-      // `Fail` until that gap closes, so every field remains `VK_FALSE`
-      // pending it; see agent_thoughts.md's F15a and F15b entries.
+      // for those fields would trade a graceful `NotSupported` skip for an
+      // outright CTS `Fail` until that gap closes; see agent_thoughts.md's
+      // F15a and F15b entries.
+      //
+      // `SignedZeroInfNanPreserve` does not share that risk: unlike the
+      // other four execution modes above, it describes behavior FeMe's
+      // codegen gives unconditionally (see this comment's first paragraph),
+      // not a conditionally-lowered one, so there is no resource-lowering
+      // path for it to trip over. Verified empirically (`L414(a)`): flipping
+      // `shaderSignedZeroInfNanPreserveFloat{16,32}` to `VK_TRUE` alone (
+      // `RoundingModeRTZ`/`DenormFlushToZero`/etc. left untouched) makes
+      // every previously-`NotSupported`-only-on-this-property
+      // `dEQP-VK.spirv_assembly.instruction.compute.float_controls.
+      // {fp16,fp32}.*signed_zero*` case reach pipeline creation and pass --
+      // 0 new Fails across the full `fp16`/`fp32` `float_controls.*` buckets
+      // (1,925 cases total). `Float64` stays `VK_FALSE`: `shaderFloat64`
+      // itself is not advertised (no `case` sets it `VK_TRUE` anywhere in
+      // this file), so there is no shader that could even declare this
+      // execution mode at that width, and the Vulkan-1.4-roadmap-profile
+      // validation this was raised for (`vulkan1p4_limits_validation.
+      // general`) never flagged `Float64` in the first place -- raising it
+      // would be an unrequested, untested change with zero behavioral
+      // effect, not a conformance fix.
       auto *FloatControls =
           reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(Base);
       FloatControls->denormBehaviorIndependence =
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
       FloatControls->roundingModeIndependence =
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
-      FloatControls->shaderSignedZeroInfNanPreserveFloat16 = VK_FALSE;
-      FloatControls->shaderSignedZeroInfNanPreserveFloat32 = VK_FALSE;
+      FloatControls->shaderSignedZeroInfNanPreserveFloat16 = VK_TRUE;
+      FloatControls->shaderSignedZeroInfNanPreserveFloat32 = VK_TRUE;
       FloatControls->shaderSignedZeroInfNanPreserveFloat64 = VK_FALSE;
       FloatControls->shaderDenormPreserveFloat16 = VK_FALSE;
       FloatControls->shaderDenormPreserveFloat32 = VK_FALSE;
@@ -389,23 +412,26 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   sizeof(Info.DriverName));
       std::memcpy(Props12->driverInfo, Info.DriverInfo,
                   sizeof(Info.DriverInfo));
-      // (roadmap C6/K6) Every remaining field is written explicitly, for
-      // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // (roadmap C6/K6/L414(a)) Every remaining field is written explicitly,
+      // for the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
       // VULKAN_1_2_FEATURES` documents. Most of these reflect no real
       // capability this ICD implements (no explicit SPIR-V float-controls
-      // handling, no `VK_EXT_descriptor_indexing`), so every one of those
-      // is the conservative "least capable, always-safe" value rather than
-      // an aspirational one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE`
+      // handling beyond the two exceptions below, no
+      // `VK_EXT_descriptor_indexing`), so every one of those is the
+      // conservative "least capable, always-safe" value rather than an
+      // aspirational one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE`
       // (every bit width must share the same float-controls execution
-      // mode). `supportedDepthResolveModes`/`supportedStencilResolveModes`
-      // below are the one exception: `VK_KHR_depth_stencil_resolve` (roadmap
-      // K6) is now implemented for `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT`, so
-      // these advertise that one real bit rather than `NONE` -- see
+      // mode). Two exceptions: `supportedDepthResolveModes`/
+      // `supportedStencilResolveModes` below (`VK_KHR_depth_stencil_resolve`,
+      // roadmap K6, implemented for `VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` -- see
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES`
-      // above's comment, which both structs must agree with. See
-      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
-      // FLOAT_CONTROLS_PROPERTIES` above's comment for why
-      // `shaderRoundingModeRTZFloat{16,32,64}`/
+      // above's comment, which both structs must agree with), and
+      // `shaderSignedZeroInfNanPreserveFloat{16,32}` just below
+      // (`VK_KHR_shader_float_controls`, roadmap L414(a): genuinely honored
+      // at every width FeMe advertises a float type for -- see
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES`
+      // above's comment, which both structs must agree with). See that same
+      // comment for why `shaderRoundingModeRTZFloat{16,32,64}`/
       // `shaderDenormFlushToZeroFloat{16,32,64}` stay `VK_FALSE` too, despite
       // roadmap F15a/F15b's `FloatControlArithmeticPattern` now genuinely
       // producing that code.
@@ -413,8 +439,8 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
       Props12->roundingModeIndependence =
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
-      Props12->shaderSignedZeroInfNanPreserveFloat16 = VK_FALSE;
-      Props12->shaderSignedZeroInfNanPreserveFloat32 = VK_FALSE;
+      Props12->shaderSignedZeroInfNanPreserveFloat16 = VK_TRUE;
+      Props12->shaderSignedZeroInfNanPreserveFloat32 = VK_TRUE;
       Props12->shaderSignedZeroInfNanPreserveFloat64 = VK_FALSE;
       Props12->shaderDenormPreserveFloat16 = VK_FALSE;
       Props12->shaderDenormPreserveFloat32 = VK_FALSE;

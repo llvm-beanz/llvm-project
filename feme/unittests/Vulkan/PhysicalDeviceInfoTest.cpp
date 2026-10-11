@@ -2303,6 +2303,51 @@ TEST_F(PhysicalDeviceProperties2Test,
             SamplerFilterMinmax.filterMinmaxImageComponentMapping);
 }
 
+TEST_F(PhysicalDeviceProperties2Test,
+       FloatControlsPropertiesSignedZeroInfNanPreserveMatchesBothWidths) {
+  // Roadmap L414(a): `vulkan1p4_limits_validation.general` flagged
+  // `vk12Properties.shaderSignedZeroInfNanPreserveFloat16`/`Float32` as
+  // below the Vulkan-1.4-roadmap-profile minimum (both previously
+  // `VK_FALSE`). Unlike `RoundingModeRTZ`/`DenormFlushToZero` (which stay
+  // `VK_FALSE` -- see `EntryPoints.cpp`'s own comment -- because flipping
+  // them trips an unrelated resource-lowering gap at pipeline creation),
+  // `SignedZeroInfNanPreserve` is honored unconditionally by every FP op
+  // conversion pattern already (no fast-math flag ever discards a signed
+  // zero/Inf/NaN), so it is safe to advertise `VK_TRUE` at both widths this
+  // ICD advertises a float type for (`Float16`/`Float32`; `Float64` stays
+  // `VK_FALSE` -- `shaderFloat64` itself is never advertised, so there is no
+  // shader that could declare this execution mode at that width, and it was
+  // never flagged by the CTS check this fixes). Checks both the dedicated
+  // `VkPhysicalDeviceFloatControlsProperties` struct and its promoted
+  // `VkPhysicalDeviceVulkan12Properties` twin agree, per `EntryPoints.cpp`'s
+  // own "both must agree" contract.
+  VkPhysicalDeviceFloatControlsProperties FloatControls{};
+  FloatControls.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
+  VkPhysicalDeviceVulkan12Properties Props12{};
+  Props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  FloatControls.pNext = &Props12;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &FloatControls;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(FloatControls.shaderSignedZeroInfNanPreserveFloat16, VK_TRUE);
+  EXPECT_EQ(FloatControls.shaderSignedZeroInfNanPreserveFloat32, VK_TRUE);
+  EXPECT_EQ(FloatControls.shaderSignedZeroInfNanPreserveFloat64, VK_FALSE);
+  EXPECT_EQ(Props12.shaderSignedZeroInfNanPreserveFloat16,
+            FloatControls.shaderSignedZeroInfNanPreserveFloat16);
+  EXPECT_EQ(Props12.shaderSignedZeroInfNanPreserveFloat32,
+            FloatControls.shaderSignedZeroInfNanPreserveFloat32);
+  EXPECT_EQ(Props12.shaderSignedZeroInfNanPreserveFloat64,
+            FloatControls.shaderSignedZeroInfNanPreserveFloat64);
+  // `RoundingModeRTZ`/`DenormFlushToZero`/etc. are untouched by this fix --
+  // still conservatively `VK_FALSE`, per `EntryPoints.cpp`'s own comment.
+  EXPECT_EQ(FloatControls.shaderRoundingModeRTZFloat32, VK_FALSE);
+  EXPECT_EQ(FloatControls.shaderDenormFlushToZeroFloat32, VK_FALSE);
+}
+
 // Roadmap L414: `dEQP-VK.api.info.vulkan1p4_limits_validation.general`
 // enforces the Vulkan-1.4-roadmap-profile minima (stricter than the bare
 // 1.0/1.1 "Required Limits" floor this ICD originally advertised for
