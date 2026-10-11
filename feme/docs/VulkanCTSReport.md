@@ -2500,6 +2500,92 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `get_device_proc_addr`/`driver_properties`); `L412` remains open
       on `Roadmap.md` (`L412(a)` itself is struck through, done).
 
+56. **`L412(b)`: fixed the missing `SamplerFilterMinmaxProperties` case in
+    `vkGetPhysicalDeviceProperties2`, cutting `api.info.*`'s Fail count
+    from 3 to 2.**
+    - Same missing-case bug class as `L412(a)`, but in
+      `fillProperties2Chain` (the `vkGetPhysicalDeviceProperties2`
+      pNext-chain switch) instead of `fillFeatures2Chain`: no `case` at
+      all existed for `VkPhysicalDeviceSamplerFilterMinmaxProperties`,
+      only the aggregate `VkPhysicalDeviceVulkan12Properties`
+      equivalent was ever filled in.
+    - **Fixed**: added the case, writing the same `VK_FALSE`/`VK_FALSE`
+      values (`filterMinmaxSingleComponentFormats`,
+      `filterMinmaxImageComponentMapping`) the aggregate struct already
+      reports -- only fixes the missing explicit write, no new
+      capability. New unit test
+      `SamplerFilterMinmaxPropertiesIsFullyOverwritten`
+      (`PhysicalDeviceInfoTest.cpp`), same adversarial `0xFF`-pre-fill
+      pattern as `L412(a)`'s own tests.
+    - `check-feme`: 3638/3638 Passed (1 new, 3 Unsupported as before), 0
+      regressions.
+    - **Verified against CTS**: re-ran `dEQP-VK.api.info.*` (10,488
+      cases). `properties.basic` now passes; Fails dropped from 3 to 2.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed, same reasoning as `L412(a)`.
+    - **Still open:** `shader_subgroup_rotate_property_consistency_khr`
+      and `vulkan1p4_limits_validation.general` -- see items 57/58
+      below.
+
+57. **`L412(c)`: added the missing `ROTATE`/`ROTATE_CLUSTERED` subgroup-
+    operation bits, cutting `api.info.*`'s Fail count from 2 to 1.**
+    - `shader_subgroup_rotate_property_consistency_khr` checks that
+      `shaderSubgroupRotate`/`shaderSubgroupRotateClustered` (both
+      genuinely advertised `VK_TRUE`, since `OpGroupNonUniformRotateKHR`
+      converts via `RotateConversionPattern`, roadmap F2) agree with
+      `VkPhysicalDeviceSubgroupProperties.supportedOperations`'s own
+      `VK_SUBGROUP_FEATURE_ROTATE_BIT_KHR`/`_CLUSTERED_BIT_KHR` flags.
+      `PhysicalDeviceInfo.cpp`'s `Info.SubgroupSupportedOperations`
+      never had these two bits added, unlike every other subgroup
+      feature bit this ICD advertises (`BASIC`/`VOTE`/`BALLOT`/
+      `SHUFFLE`/`SHUFFLE_RELATIVE`, each already paired with its own
+      `supportedOperations` bit).
+    - **Fixed**: added both bits. New unit test coverage: two new
+      `EXPECT_TRUE` assertions in the existing
+      `PhysicalDeviceInfo.SubgroupSizeIsAPowerOfTwoInRange` test,
+      following that test's own existing per-bit pattern.
+    - `check-feme`: 3638/3638 Passed, 3 Unsupported, 0 regressions.
+    - **Verified against CTS**: re-ran `dEQP-VK.api.info.*` (10,488
+      cases). `shader_subgroup_rotate_property_consistency_khr` now
+      passes; Fails dropped from 2 to 1.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- `shaderSubgroupRotate`/`Clustered` were already
+      listed as supported; this only fixes an internal consistency gap
+      between two structs both already reporting the same underlying
+      capability.
+    - **Still open:** `vulkan1p4_limits_validation.general`, triaged
+      (not fixed) this session -- see item 58 below.
+
+58. **`L414` (new item): triaged `vulkan1p4_limits_validation.general`'s
+    bare `Fail (fail)` -- a genuine 29-limit capability gap, not
+    attempted this session.**
+    - Re-ran the single case with `-n <case>` (not `--deqp-case`, which
+      duplicated the option and produced a `FATAL ERROR` the first
+      attempt) and read the qpa log's own per-limit detail text
+      directly, which the bare console summary omits entirely.
+    - Found 29 distinct `VkPhysicalDeviceLimits`/
+      `VkPhysicalDeviceVulkan1{1,2}Properties` fields reported below (or,
+      for granularity/bounds-style fields, on the wrong side of) their
+      Vulkan-1.4-roadmap-mandated value -- see `Roadmap.md`'s new `L414`
+      entry for the full per-field breakdown and fix-complexity
+      triage (most look like pure constant bumps in
+      `PhysicalDeviceInfo.cpp`; a handful --
+      `timestampComputeAndGraphics`, `standardSampleLocations`,
+      `subgroupSupportedStages`, `shaderSignedZeroInfNanPreserveFloat16`
+      -- need real functional verification/support first, not just a
+      number change).
+    - Not attempted this session: filed as its own dedicated roadmap
+      entry (`L414`) given the scope (29 limits across image/
+      descriptor/viewport/framebuffer/sampler/rasterization/subgroup/
+      float-semantics subsystems) and the real risk that some of the
+      "pure constant" bucket's values are backed by actual allocation
+      sizing elsewhere in the codebase and not safe to raise without an
+      audit first.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change this session -- investigation/documentation only.
+    - **Still open:** all 29 limits; `L414` is a new, not-yet-started
+      roadmap item.
+
 ## Complete group accounting
 
 
