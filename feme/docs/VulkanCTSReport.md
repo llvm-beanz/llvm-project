@@ -3143,14 +3143,26 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       extension-surface change.
     - With this fix, `L411` is fully resolved -- the single oldest open
       item from the last several sessions' handoff lists is now closed.
-    - **Update (this session): the regression sweep continued running in
-      the background throughout this session's unrelated `L236` work.**
-      As of this item's own update, it has processed 7,795 of the full
+    - **Update (prior session): the regression sweep continued running in
+      the background throughout that session's unrelated `L236` work.**
+      It had processed 7,795 of the full
       `dEQP-VK.pipeline.{monolithic,pipeline_library,shader_object_*}.blend.*`
       family's cases (3,862 Passed, 3,933 NotSupported, **still 0
-      Failed**), continuing to corroborate no regression; it is still
-      running and will be folded into this report's final tally once
-      complete, rather than blocking this session's own work on it.
+      Failed**), continuing to corroborate no regression; it was still
+      running and had not yet been folded into this report's final
+      tally, rather than blocking that session's own work on it.
+    - **Update (this session): the sweep's process was found dead
+      (terminated when the prior session's shell exited, since it was
+      never run detached) rather than completed.** Its log
+      (`/tmp/l411_blend_regression2.qpa`) stops mid-case with no `DONE!`
+      summary. Final tally recovered from the partial log: **8,075
+      cases processed (4,130 Passed, 3,945 NotSupported, 0 Failed)** --
+      roughly 22% of the full family, still 0 Fail throughout, still
+      strong (not total) evidence of no regression. A future session
+      wanting full certainty should either re-run to completion with
+      `detach: true` (per this repo's own background-process guidance)
+      or accept this partial sample as sufficient and close the item
+      out. The `.qpa` log has been deleted after recording this tally.
 
 70. **`L236`: implemented per-device `EnabledExtensions` tracking so
     `vkGetDeviceProcAddr` correctly gates extension-owned commands,
