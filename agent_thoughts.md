@@ -119739,3 +119739,97 @@ a future session doesn't assume it's already handled.
    recorded here but not fixed — only worth revisiting if a future
    cleanup session wants to spend real time rewriting closed historical
    rows for documentation clarity alone. Not a standing action item.
+
+# Session: L416 phase 2 landed — VkDeviceMemory now backed by a real shareable allocator
+
+## What I did, in order
+
+1. Device check first (mandatory, every session): `FeMe CPU Vulkan Device`
+   confirmed via `VK_ICD_FILENAMES=/tmp/feme_icd_14.json vulkaninfo --summary`.
+2. Picked handoff item 1 (`L416` phase 2) over the two open multi-session
+   design tracks (per-tile `pImageBinds`, left untouched) — it had a
+   concrete, scoped design already written by the prior session, so it
+   was the one actually startable in a single session.
+3. Investigated `DeviceMemory`'s only two producers
+   (`Memory.cpp`'s `vkAllocateMemory`, `Swapchain.cpp`'s internal backing
+   store) and decided to touch only `Memory.cpp` — a swapchain image can
+   never be sparse-bound per spec, so `Swapchain.cpp` has no reason to
+   change.
+4. Implemented `allocateShareableDeviceMemory`/`freeShareableDeviceMemory`
+   in `Memory.h`/`Memory.cpp`, reusing phase 1's
+   `createShareableMemoryFd`/`closeShareableMemoryFd` rather than
+   reimplementing `memfd_create` logic. Wired `vkAllocateMemory`/
+   `vkFreeMemory` onto the new functions; left `allocateDeviceMemory`/
+   `freeDeviceMemory` themselves untouched.
+5. Added 4 new unit tests to `MemoryTest.cpp`: a `vkAllocateMemory`-level
+   test confirming `shareableFd()` is valid, a second-mmap aliasing test
+   (direct proof the memory is genuinely shareable, not just a fd
+   attached to a heap pointer), and 2 standalone tests of the new
+   functions independent of any `VkDevice`.
+6. `ninja check-feme`: 3,702/3,705 Passed, 3 Unsupported, 0 Failed.
+7. Ran a CTS regression sweep scoped to this change's actual blast radius
+   (every `vkAllocateMemory` call in the driver, not just sparse-tagged
+   tests): `dEQP-VK.memory.*`, `dEQP-VK.api.object_management.*`,
+   `dEQP-VK.ssbo.*`+`dEQP-VK.ubo.*` (both full), plus a sampled
+   `dEQP-VK.robustness.*`. Zero `Fail` anywhere.
+8. Updated `FeMeVulkanDesign.md`, `Roadmap.md`'s `L416` row, and
+   `VulkanCTSReport.md` (item 80). Confirmed
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+   change — pure internal allocator swap, no new feature/extension
+   surface.
+9. Committed in 4 separate commits: code+tests, design doc, roadmap,
+   CTS report.
+
+## A real bug the sweep caught — then ruled out as pre-existing
+
+`dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+SIGSEGV'd partway through the `object_management` sweep. First instinct:
+my allocator change broke something under concurrent `vkAllocateMemory`/
+`vkFreeMemory`. Reran the *exact same binary+case* 5 times in a row:
+crashed on 2 of 5 runs — already a red flag for a timing-dependent race,
+not a deterministic bug in new code.
+
+Confirmed causation properly before writing anything down: `git stash`'d
+my change, rebuilt `libfeme_vulkan.so` with the *original*
+`posix_memalign`-only allocator, reran the same case 5 times — **crashed
+2 of 5 times there too**, identical backtrace (a race inside concurrent
+`vkCreateDevice`, well before any `vkAllocateMemory` call). `git stash
+pop`'d, rebuilt, moved on. This is pre-existing, unrelated to `DeviceMemory`'s
+backing allocator, and likely the same family as the long-standing
+untriaged "46 pipeline SIGSEGV" aggregate count from much earlier
+sessions' stability-triage backlog item (never properly started — see
+multiple earlier handoff lists). Recorded in `VulkanCTSReport.md` item 80
+and here, not fixed this session.
+
+**Lesson for next time a sweep finds a crash**: before attributing it to
+the change just made, always reproduce with the *pre-change* binary too,
+multiple times if the first repro doesn't crash — a single clean rerun on
+either side proves nothing for a race.
+
+## Next steps (ranked)
+
+1. **(~dedicated session, new finding)** Triage the confirmed
+   `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+   SIGSEGV (concurrent `vkCreateDevice`/`vkDestroyDevice` race, ~40% of
+   runs). Start with `gdb -batch -ex run -ex "bt full" --args ./deqp-vk
+   --deqp-case='dEQP-VK.api.object_management.multithreaded_per_thread_resources.device'`
+   run in a loop until it reproduces (needed ~3-5 tries this session);
+   the crash is in the loader/ICD's concurrent device-creation path, not
+   memory allocation. Likely related to, but may not be identical to, the
+   old "46 pipeline SIGSEGV" aggregate count — worth checking if that
+   count overlaps this family once isolated.
+2. **(~multi-session)** `L416` phases 3-4: wire `vkGetBufferDeviceAddress`
+   to a `VirtualAddressReservation`'s base pointer for
+   `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` buffers, then wire
+   `vkQueueBindSparse`'s buffer-bind processing to `mapRange`/`unmapRange`
+   the corresponding sub-range. Phase 2 (this session) is the
+   prerequisite both needed; both remain future sessions.
+3. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
+   (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still
+   untouched.
+4. **(blocked on 2-3)** Only once `L416` phases 3-4 and `pImageBinds` are
+   done: flip `sparseBinding`/`sparseResidency*` feature bits to
+   `VK_TRUE`.
+5. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
+   again this session (focus was 100% on `L416` phase 2 + its
+   regression sweep). Due for a real deep pass soon.
