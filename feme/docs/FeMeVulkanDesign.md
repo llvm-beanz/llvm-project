@@ -1092,7 +1092,15 @@ mapping, which this driver does not implement, so it is validated but
 otherwise a no-op here.
 
 Binding a buffer records a `(VkDeviceMemory, offset)` pair after validating
-alignment, range, and usage. A descriptor referring to a buffer resolves to:
+alignment, range, and usage. Internally (roadmap H46), both `Buffer` and
+`Image` store this via a shared `ResourceBindings` helper
+(`feme/lib/Vulkan/MemoryBinding.h`): a small list of `MemoryRangeBinding`s
+(resource offset, `VkDeviceMemory`, memory offset, size), today always
+either empty or a single range covering the whole resource -- the general
+shape a future sparse (partially-resident) resource will need, with no
+externally observable behavior change for the ordinary, non-sparse case
+this driver can currently produce. A descriptor referring to a buffer
+resolves to:
 
 ```text
 Data        = memory allocation base + buffer binding offset + descriptor offset
