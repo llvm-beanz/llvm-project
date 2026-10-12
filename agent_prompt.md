@@ -63,28 +63,28 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~multi-session)** `L416` phase 2: switch `DeviceMemory`'s backing
-   allocator to `memfd_create`+`mmap` on POSIX, preserving every existing
-   `vkMapMemory`/`vkUnmapMemory`/flush/invalidate behavior exactly. This
-   is the highest-risk remaining phase — touches every allocation in the
-   driver. Needs a full `check-feme` + broad CTS memory/buffer/image
-   regression sweep before landing, not just the targeted sanity check
-   this session ran. Recommend starting with a design note on exactly
-   which existing tests constitute "every device-memory CTS case" so the
-   regression sweep has a concrete, enumerable target rather than an
-   ad-hoc rerun.
-2. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
+1. **(~dedicated session, new finding)** Triage the confirmed
+   `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+   SIGSEGV (concurrent `vkCreateDevice`/`vkDestroyDevice` race, ~40% of
+   runs). Start with `gdb -batch -ex run -ex "bt full" --args ./deqp-vk
+   --deqp-case='dEQP-VK.api.object_management.multithreaded_per_thread_resources.device'`
+   run in a loop until it reproduces (needed ~3-5 tries this session);
+   the crash is in the loader/ICD's concurrent device-creation path, not
+   memory allocation. Likely related to, but may not be identical to, the
+   old "46 pipeline SIGSEGV" aggregate count — worth checking if that
+   count overlaps this family once isolated.
+2. **(~multi-session)** `L416` phases 3-4: wire `vkGetBufferDeviceAddress`
+   to a `VirtualAddressReservation`'s base pointer for
+   `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` buffers, then wire
+   `vkQueueBindSparse`'s buffer-bind processing to `mapRange`/`unmapRange`
+   the corresponding sub-range. Phase 2 (this session) is the
+   prerequisite both needed; both remain future sessions.
+3. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
    (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still
-   untouched, still needs its own dedicated session; this session's `L416`
-   design doesn't inform it much since buffers are linear and images are
-   not.
-3. **(blocked on 1-2)** Only once `L416` phases 2-4 and the `pImageBinds`
-   design are done: flip `sparseBinding`/`sparseResidency*` feature bits
-   to `VK_TRUE`.
-4. **(done, no longer a handoff item)** `L375` — confirmed already fixed
-   by a prior session (`af344681704c`). Stop carrying this forward.
-5. **(low-priority, cosmetic)** The two roadmap hygiene findings above
-   (`H124e(a)` nesting, `L66`/`F15`-style unsplit lettered sub-items) are
-   recorded here but not fixed — only worth revisiting if a future
-   cleanup session wants to spend real time rewriting closed historical
-   rows for documentation clarity alone. Not a standing action item.
+   untouched.
+4. **(blocked on 2-3)** Only once `L416` phases 3-4 and `pImageBinds` are
+   done: flip `sparseBinding`/`sparseResidency*` feature bits to
+   `VK_TRUE`.
+5. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
+   again this session (focus was 100% on `L416` phase 2 + its
+   regression sweep). Due for a real deep pass soon.
