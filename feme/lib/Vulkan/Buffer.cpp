@@ -165,6 +165,16 @@ vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
 // opaque-ID space). The buffer must already be bound (`vkBindBufferMemory`)
 // for either to be well-defined, matching every other `Buffer::data()`
 // caller's own precondition.
+//
+// (Roadmap H46) Deliberately still `data()`, not `dataForRange()`: unlike
+// this ICD's other buffer-range accesses (see `CommandBuffer.cpp`'s
+// `runCopyBuffer`/`runFillBuffer`/`runUpdateBuffer`), a device address
+// escapes to the *application*, which may dereference it at any later
+// point after this call returns -- not something a per-access range
+// resolution can make safe for a future genuinely sparse buffer. See
+// "Memory and Buffers"'s own H46 note in FeMeVulkanDesign.md for why this
+// needs a dedicated virtual-address-space design, not a mechanical
+// call-site migration, and is explicitly deferred.
 VKAPI_ATTR VkDeviceAddress VKAPI_CALL
 vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo *pInfo) {
   return reinterpret_cast<VkDeviceAddress>(

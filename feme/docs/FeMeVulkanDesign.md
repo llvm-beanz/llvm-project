@@ -1113,8 +1113,39 @@ Vulkan's `VK_WHOLE_SIZE`, texel-buffer formats, dynamic offsets, and robust
 out-of-bounds behavior are resolved while preparing a dispatch. Integer
 overflow is checked before every offset/range addition.
 
-Device addresses are not exposed initially. Doing so would allow shaders to
-bypass descriptor bounds and would require a separate robust-access design.
+Device addresses are exposed via `vkGetBufferDeviceAddress`/
+`vkGetBufferOpaqueCaptureAddress` (roadmap L236(a)): both return `Buffer::
+data()`, the same host pointer a shader-side load/store already dereferences
+directly, since the "device" here is just host RAM. The `bufferDeviceAddress`/
+`bufferDeviceAddressCaptureReplay` feature bits remain `VK_FALSE`, so a
+conformant application must not call either function without first enabling
+the feature -- this driver does not re-validate that precondition, matching
+its other feature-gated-but-implemented stubs.
+
+(Roadmap H46) **Open design question, deliberately deferred**: a future
+session making sparse resources real (`sparseBinding` et al. actually
+`VK_TRUE`) cannot migrate `vkGetBufferDeviceAddress` onto the same
+`dataForRange`-style per-access resolution this driver uses for
+byte-range-shaped buffer accesses (`vkCmdCopyBuffer` and friends, see
+`CommandBuffer.cpp`). A device address is handed to the *application*, not
+consumed immediately by this driver -- a shader can carry it across an
+arbitrary number of binds/unbinds and dereference it at any later point,
+including one where the buffer's residency has since changed. A single flat
+host pointer can only ever represent one bound range; it has no way to
+represent "this buffer's residency may change out from under this address
+later." Making this correct for a genuinely sparse, partially-resident buffer
+would need this driver to reserve one *virtual* address range spanning the
+buffer's entire declared size up front (e.g. via `mmap`/`mprotect`, so
+unbound sub-ranges fault rather than silently alias whatever memory
+previously lived at that host address) and remap physical backing pages as
+`vkQueueBindSparse` rebinds ranges -- a materially different (and far more
+invasive) address-space-management design than this driver's current
+"a buffer's data pointer is just its one bound allocation's host pointer"
+model. This is *not* mechanical range-iteration work like the
+`CommandBuffer.cpp` migration above; it needs its own dedicated design
+session once `H46`'s other, more tractable steps have landed, and is
+explicitly out of scope for the call-site migration tracked in `Roadmap.md`'s
+`H46` row.
 
 ## Descriptor Model
 
