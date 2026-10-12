@@ -63,16 +63,21 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 hours)** Finish the `dEQP-VK.pipeline.*.blend.*` regression sweep
-   from where this session left off (20,300 cases in, 0 Fail) — ideally after
-   first identifying why it's so slow, so the remaining run can be budgeted
-   realistically rather than open-ended.
-2. **(~3-6 hours, real architecture work, not a quick win)** `L236`: add
-   per-device `EnabledExtensions` tracking plus a command-to-owning-extension(s)
-   map so `vkGetDeviceProcAddr` can correctly return null for a disabled
-   extension's functions. This is now the single oldest standing item with no
-   progress across many sessions.
-3. **(~1-2 hours, lower priority, no CTS-visible symptom found yet)**
-   `entry_points`'s 8 genuinely-unimplemented functions (sparse residency, YCbCr
-   conversion, buffer device address) — worth a feasibility check per function
-   before committing to implement any of them.
+1. **(~30-60 minutes)** Try the cheap YCbCr stub first: add
+   `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion` as thin
+   object create/destroy entry points (no real multi-planar sampling), register
+   in `ImplementedEntrypoints.txt`, and re-run `entry_points` to confirm it
+   drops from 8 Fails to 7. This is the single cheapest of the three remaining
+   families and doesn't commit to anything else in `K7`.
+2. **(~1-2 hours)** Buffer device address stub:
+   `vkGetBufferDeviceAddress`/`vkGetBufferOpaqueCaptureAddress`/`vkGetDeviceMemoryOpaqueCaptureAddress`,
+   spec-legal to stub cheaply since `bufferDeviceAddress` stays `VK_FALSE` and
+   callers must not invoke them without the feature enabled.
+3. **(~multi-session, real architecture work)** Sparse residency: needs an
+   actual sparse-memory-binding design before any entry point work makes sense;
+   not a quick win, do this last of the three (or not at all this handoff
+   cycle).
+4. **(~5 minutes, whenever next picked up)** Check the blend-regression sweep
+   (`ps aux | grep deqp-vk`, tally `/tmp/l411_blend_regression2.qpa`); fold the
+   final tally into `VulkanCTSReport.md` item 69 once it completes, then delete
+   the `.qpa` file.
