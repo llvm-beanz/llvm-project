@@ -63,28 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~dedicated session, new finding)** Triage the confirmed
-   `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
-   SIGSEGV (concurrent `vkCreateDevice`/`vkDestroyDevice` race, ~40% of
-   runs). Start with `gdb -batch -ex run -ex "bt full" --args ./deqp-vk
-   --deqp-case='dEQP-VK.api.object_management.multithreaded_per_thread_resources.device'`
-   run in a loop until it reproduces (needed ~3-5 tries this session);
-   the crash is in the loader/ICD's concurrent device-creation path, not
-   memory allocation. Likely related to, but may not be identical to, the
-   old "46 pipeline SIGSEGV" aggregate count — worth checking if that
-   count overlaps this family once isolated.
-2. **(~multi-session)** `L416` phases 3-4: wire `vkGetBufferDeviceAddress`
-   to a `VirtualAddressReservation`'s base pointer for
-   `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` buffers, then wire
-   `vkQueueBindSparse`'s buffer-bind processing to `mapRange`/`unmapRange`
-   the corresponding sub-range. Phase 2 (this session) is the
-   prerequisite both needed; both remain future sessions.
-3. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
-   (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still
-   untouched.
-4. **(blocked on 2-3)** Only once `L416` phases 3-4 and `pImageBinds` are
-   done: flip `sparseBinding`/`sparseResidency*` feature bits to
-   `VK_TRUE`.
-5. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
-   again this session (focus was 100% on `L416` phase 2 + its
-   regression sweep). Due for a real deep pass soon.
+1. **(2 min, first thing next session)** If GitHub write access ever becomes
+   available: re-open or comment on `KhronosGroup/Vulkan-Loader#2018` with this
+   session's `trampoline.c` analysis (the maintainer's rebuttal cites a lock
+   that the crashing code path never takes) — the fix is a one-line mutex
+   addition on the upstream side, not something this project can land.
+2. **(~2-4 hours)** Item 2 from the carried-forward list: the Image-typed
+   26-list call sites (`Swapchain.cpp`, `Image.cpp`
+   `texelPointer`/`blockPointer`, `ImageOps.cpp`, `RenderPass.cpp`,
+   `CommandBuffer.cpp`'s sampled-image prep) still need the sub-range-addressing
+   migration pass `H46`'s buffer-side work already did for linear buffers.
+3. **(~multi-session)** `pImageBinds` per-tile sparse-image-bind model — still
+   untouched, still needs its own design pass before any code.
+4. **(blocked on 2-3)** Only once those land: flip
+   `sparseBinding`/`sparseResidency*` to `VK_TRUE`.
+5. **(~1-2 hours, standing, now 4+ sessions overdue)** The roadmap hygiene pass
+   keeps getting bumped. I did a 2-minute grep this session (found nothing new
+   beyond the already-known, already-not-actionable `H124e(a)` nesting) but
+   that's not the deep pass that's actually due. Next session should actually
+   block out the 1-2 hours for it rather than defer again.
+6. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
+   `DiamondFlattener` assertion) — confirmed already fixed in a much earlier
+   commit; stop carrying this forward, it's done.
