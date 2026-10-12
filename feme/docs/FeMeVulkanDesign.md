@@ -1176,13 +1176,28 @@ out in phases rather than one large change:
    -- mirroring the zero-behavior-change-first approach `MemoryBinding.h`
    (roadmap H46) took for `ResourceBindings`. Nothing in the ICD constructs
    either type yet; this phase changes no observable driver behavior.
-2. **(Future session)** Switch `DeviceMemory`'s backing allocation from
-   `posix_memalign`/`_aligned_malloc` to `createShareableMemoryFd` + an
-   initial `mmap`, exposing the fd needed for phase 3's remapping, while
-   preserving every existing `vkMapMemory`/`vkUnmapMemory`/flush/invalidate
-   behavior exactly (every device-memory CTS case must re-pass unchanged;
-   this is the highest-risk phase, since it touches every allocation in the
-   driver, not just ones that end up backing a sparse buffer).
+2. **(Done, a later session)** Switch `DeviceMemory`'s backing allocation
+   for the *application-visible* path (`Memory.cpp`'s `vkAllocateMemory`/
+   `vkFreeMemory`) from `posix_memalign`/`_aligned_malloc` to
+   `allocateShareableDeviceMemory`/`freeShareableDeviceMemory`
+   (`createShareableMemoryFd` + an initial `mmap`), exposing the fd phase 4
+   will need for remapping, while preserving every existing
+   `vkMapMemory`/`vkUnmapMemory`/flush/invalidate behavior exactly.
+   `Swapchain.cpp`'s own, separate, never-application-bound internal
+   backing-store allocation deliberately stays on the original
+   `allocateDeviceMemory`/`freeDeviceMemory` unchanged -- a swapchain image
+   can never be sparse-bound per spec, so it has no need to participate in
+   this design. On any platform where `createShareableMemoryFd`/`mmap`
+   fails or isn't implemented (e.g. Windows today), the new allocator
+   transparently falls back to the original plain-heap allocator with
+   `shareableFd() == -1`, so this phase is a zero-behavior-change no-op on
+   non-POSIX platforms. Verified via a full `check-feme` pass (0 failures)
+   plus a targeted CTS sweep (`dEQP-VK.memory.*`,
+   `dEQP-VK.api.object_management.*`, `dEQP-VK.ssbo.*`/`dEQP-VK.ubo.*`,
+   `dEQP-VK.robustness.*`): 0 regressions attributable to this change (one
+   pre-existing, unrelated flaky SIGSEGV was found and ruled out in
+   `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`,
+   see `VulkanCTSReport.md`).
 3. **(Future session)** Wire `vkGetBufferDeviceAddress` to return a
    `VirtualAddressReservation`'s base pointer, instead of `Buffer::data()`,
    only for buffers created with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` --
