@@ -119309,3 +119309,127 @@ run against `dEQP-VK.sparse_resources.*` confirms this exactly: every one of
 5. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
    `DiamondFlattener` assertion) still untouched, still needs its own
    dedicated design session.
+
+# Session: H46 step 4 landed — every Buffer-typed call site is range-aware, plus a real regression caught by CTS and fixed
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed at start and end.
+
+## Do this first if picking back up: nothing pending — all work landed and committed.
+
+## What got done, in commit order
+
+1. `f48af821dabd` — `H46` step 4a: added `ResourceBindings::dataForRange()`
+   (range-aware generalization of `data()`) + 7 unit tests.
+2. `0796050aac58` — `H46` step 4b: exposed `Buffer::dataForRange()` forwarder
+   + 1 unit test.
+3. `1e980d65c1ba` — `H46` step 4c: migrated `vkCmdCopyBuffer`/
+   `vkCmdFillBuffer`/`vkCmdUpdateBuffer`/`vkCmdCopyQueryPoolResults`
+   (`CommandBuffer.cpp`) to `dataForRange()`.
+4. `6c550f7ed021` — documented `vkGetBufferDeviceAddress` as a deliberately
+   deferred design question (device addresses escape to the application;
+   per-access range resolution can't make that safe for a future sparse
+   buffer) — `FeMeVulkanDesign.md` + a cross-referencing `Buffer.cpp` comment.
+5. `095dccfee43b` — `H46` step 4d: migrated descriptor prep (raw + texel
+   buffer), vertex-buffer binding, index-buffer binding, and
+   `VK_EXT_transform_feedback` capture-buffer binding to `dataForRange()`.
+6. `4e0a09930d83` — `H46` step 4e: migrated the four indirect-argument
+   readers (`readIndirectDraws`/`readIndirectMeshDraws`/
+   `readIndirectDrawCount`/`readIndirectByteCountVertices`),
+   `vkCmdDispatchIndirect`'s group-count read, and the transform-feedback
+   end-of-scope counter write to `dataForRange()`. **This commit shipped a
+   real double-offset bug** (see below) — caught and fixed in commit 7.
+7. `75c7e75b6433` — fixed the double-offset bug from commit 6, added a
+   regression unit test (`DrawTest.cpp`'s
+   `RendersIndirectDrawAtNonzeroBufferOffset`), verified against CTS.
+8. `5c618171358d` — `Roadmap.md`/`VulkanCTSReport.md` updated for step 4's
+   full landing (items 1-7 above folded into one roadmap update + one new
+   CTS report item, #76).
+
+## The bug, in plain terms
+
+`dataForRange(Offset, Size)` returns a pointer already positioned *at*
+`Offset` — not a pointer to the buffer's start, unlike the old `data()`. The
+indirect-draw-command readers' per-command indexing still did
+`Base + Offset + Stride * I`, double-adding `Offset` and reading past the
+intended command. A full `dEQP-VK.draw.*indirect*` sweep (run as this
+session's planned step-4c-risk CTS check) surfaced 13 new
+`complete_secondary_cmd_buff.*_multi_command` failures
+(`Fail`/`DeviceLost` — a safety-net-watchdog timeout, not a crash, since the
+stray read usually lands on other readable-but-wrong memory). Confirmed as
+a genuine regression, not pre-existing, by rebuilding the exact
+pre-migration `CommandBuffer.cpp` in a throwaway `git worktree` and
+re-running the same case there (passes). Fixed by dropping the redundant
+`Offset` add. Post-fix, the same 3,874-case family matches the
+pre-migration baseline byte-for-byte (1,177 Pass / 0 Fail / 2,697
+NotSupported).
+
+**Why unit tests didn't catch it**: the existing `RendersIndirectDraw` test
+used `Offset == 0`, so `0 + 0 == 0` made the double-add a no-op. Added
+`RendersIndirectDrawAtNonzeroBufferOffset` specifically with a nonzero
+offset; manually verified it fails with the bug reintroduced and passes
+with the fix — this closes the actual test gap, not just the bug.
+
+**Separately**, `dEQP-VK.transform_feedback.*` showed 570/133,719 Fail in
+the same sweep — checked against the same pre-migration baseline and found
+identical, confirming it's the already-documented pre-existing XFB gap
+(see `VulkanCTSReport.md`'s transform-feedback item), not something this
+session touched.
+
+## Build/test numbers (all green after the fix)
+
+- `FeMeVulkanTests`: 861/861 (up from 860 — the new regression test).
+- `check-feme`: 3676/3679 Passed, 3 Unsupported, 0 Failed.
+- CTS `dEQP-VK.api.buffer.basic.*`: 1 Pass / 0 Fail / 2 NotSupported.
+- CTS `dEQP-VK.api.copy_and_blit.core.buffer_to_buffer.*`: 8/8 Pass.
+- CTS `dEQP-VK.pipeline.monolithic.vertex_input.*`: 5,832 Pass / 0 Fail /
+  7,464 NotSupported (13,296 total).
+- CTS `dEQP-VK.draw.*indirect*`: 1,177 Pass / 0 Fail / 2,697 NotSupported
+  (3,874 total, post-fix, matches pre-migration baseline exactly).
+- CTS `dEQP-VK.compute.*indirect*`: 25 Pass / 0 Fail / 86 NotSupported.
+- CTS `dEQP-VK.mesh_shader.*indirect*`: 116 Pass / 0 Fail / 17,516
+  NotSupported.
+- CTS `dEQP-VK.transform_feedback.*`: 6,162 Pass / 570 Fail (pre-existing,
+  baseline-identical) / 126,987 NotSupported.
+
+## Roadmap hygiene pass (quick check this time)
+
+- Re-grepped for over-nested milestone IDs — found zero.
+- No new stale items surfaced; the standing items below are unchanged in
+  kind from last session's handoff.
+
+## Next steps, ranked
+
+1. **(~multi-session, still not attempted)** Design the per-tile
+   `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
+   addressing) — explicitly scoped out of this and every prior session,
+   needs its own design pass before any code.
+2. **(~multi-session, separate design track)** `vkGetBufferDeviceAddress`'s
+   virtual-address-space-reservation design (mmap/mprotect-based), per this
+   session's deferred-design writeup in `FeMeVulkanDesign.md` — needed before
+   this one remaining Buffer-typed call site can become range-aware.
+3. **(~2-4 hours, new, separate from the Buffer-side work just finished)**
+   The Image-typed call sites from the 26-list (`Swapchain.cpp`, `Image.cpp`
+   `texelPointer`/`blockPointer`, `ImageOps.cpp`'s image half,
+   `RenderPass.cpp`, `CommandBuffer.cpp`'s sampled-image prep) still need
+   their own migration pass — out of scope for this session, which covered
+   Buffer-typed sites only. Image sub-range addressing (subresource/mip/
+   layer) is more complex than a linear byte offset; expect this to need its
+   own small design note before the mechanical migration, similar in spirit
+   to the vertex/index work this session but with an extra dimension.
+4. **(not started, separate from `H46`)** Only once items 1-3 above are done:
+   flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`. Do NOT
+   do this prematurely.
+5. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
+   passes — this session's was a quick check, not a deep one; alternate a
+   deeper pass back in soon per the standing cadence.
+6. **(opportunistic, unchanged)** `L375`
+   (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) still
+   untouched, still needs its own dedicated design session.
+7. **(opportunistic, general takeaway from this session)** When a
+   mechanical-looking pointer-arithmetic migration changes what a
+   pre-existing variable *means* (here: `Base` went from "buffer start" to
+   "buffer start + Offset"), grep every use of that variable in the same
+   function, not just the one line being edited — the bug this session hit
+   was exactly this: one `Offset` subtraction was correctly dropped
+   elsewhere in the same diff, but the indexing expression wasn't updated to
+   match.
