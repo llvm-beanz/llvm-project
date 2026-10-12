@@ -70,7 +70,50 @@ TEST_F(BufferTest, CreateBindDestroy) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
-// Roadmap L236(a): vkGetBufferDeviceAddress/vkGetBufferOpaqueCaptureAddress
+// (Roadmap H46) `bindSparseRange` is the additive, per-range counterpart
+// `vkQueueBindSparse` would call for a (currently unreachable, since no
+// live buffer here can have `VK_BUFFER_CREATE_SPARSE_BINDING_BIT`) sparse
+// buffer bind; exercises it directly against a real `Buffer` object.
+TEST_F(BufferTest, BindSparseRangeAccumulatesWithoutDisturbingData) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 128;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetBufferMemoryRequirements(Device, Buf, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory FirstMemory = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &FirstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SecondMemory),
+            VK_SUCCESS);
+
+  EXPECT_EQ(vkBindBufferMemory(Device, Buf, FirstMemory, 0), VK_SUCCESS);
+  void *ExpectedData = fromHandle<Buffer>(Buf)->data();
+
+  fromHandle<Buffer>(Buf)->bindSparseRange(
+      64, fromHandle<DeviceMemory>(SecondMemory), 0, 64);
+
+  // The ordinary (bindWhole-produced) binding's own flat pointer is
+  // unaffected by a later bindSparseRange call -- only `ranges()` grows.
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->data(), ExpectedData);
+  ASSERT_EQ(fromHandle<Buffer>(Buf)->ranges().size(), 2u);
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->ranges()[1].ResourceOffset, 64u);
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->ranges()[1].Memory,
+            fromHandle<DeviceMemory>(SecondMemory));
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, FirstMemory, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+
 // must resolve via vkGetDeviceProcAddr regardless of bufferDeviceAddress's
 // (always-false) feature bit -- see vkGetBufferDeviceAddress's own comment
 // (Buffer.cpp) for why both return the bound buffer's host pointer.

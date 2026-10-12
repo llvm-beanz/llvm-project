@@ -25,6 +25,8 @@
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
+#include "llvm/ADT/ArrayRef.h"
+
 #include <vulkan/vulkan_core.h>
 
 #include <cstdint>
@@ -58,6 +60,29 @@ public:
   }
 
   bool isBound() const { return Bindings.isBound(); }
+
+  /// (Roadmap H46) Records one `VkSparseMemoryBind` from
+  /// `vkQueueBindSparse`'s `pBufferBinds`: binds resource-space
+  /// `[ResourceOffset, ResourceOffset + Size)` to `[MemoryOffset,
+  /// MemoryOffset + Size)` of `Memory` (or unbinds that range if
+  /// `Memory` is null), additively -- see `ResourceBindings::bindRange`'s
+  /// own comment. No live buffer in this ICD can require this today
+  /// (`isValidBufferCreateInfo`, Buffer.cpp, already rejects
+  /// `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` at `vkCreateBuffer` time), so
+  /// this exists for `vkQueueBindSparse` to call honestly rather than
+  /// silently drop a (currently unreachable, per spec, without
+  /// `sparseBinding`) bind array entry.
+  void bindSparseRange(VkDeviceSize ResourceOffset, DeviceMemory *Memory,
+                       VkDeviceSize MemoryOffset, VkDeviceSize Size) {
+    Bindings.bindRange(ResourceOffset, Memory, MemoryOffset, Size);
+  }
+
+  /// The buffer's full set of bound ranges -- see `ResourceBindings::
+  /// ranges()`'s own comment for why every instance today holds 0 or 1
+  /// entries, growing past 1 only via `bindSparseRange`.
+  llvm::ArrayRef<MemoryRangeBinding> ranges() const {
+    return Bindings.ranges();
+  }
 
   /// The buffer's data pointer: its bound memory's base plus the binding
   /// offset (see "Memory and Buffers": "Data = memory allocation base +

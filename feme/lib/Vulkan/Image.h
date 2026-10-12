@@ -214,6 +214,29 @@ public:
 
   bool isBound() const { return Bindings.isBound(); }
 
+  /// (Roadmap H46) Records one `VkSparseMemoryBind` from
+  /// `vkQueueBindSparse`'s `pImageOpaqueBinds` -- an opaque (not
+  /// per-tile) bind that addresses the image's backing store as one
+  /// flat resource-space range, the same shape `Buffer::bindSparseRange`
+  /// handles. See that method's own comment: no live image in this ICD
+  /// can require this today (`isValidImageShape`, Image.cpp, already
+  /// rejects `VK_IMAGE_CREATE_SPARSE_{BINDING,RESIDENCY,ALIASED}_BIT` at
+  /// `vkCreateImage` time). Per-tile `VkSparseImageMemoryBind` (subresource
+  /// + offset + extent addressing, `pImageBinds`) is not handled by this
+  /// method or by `vkQueueBindSparse` -- that needs a real sparse-image
+  /// tile model this ICD does not have, left for whichever future H46
+  /// step makes `sparseResidencyImage2D`/`3D` real.
+  void bindSparseRange(VkDeviceSize ResourceOffset, DeviceMemory *Memory,
+                       VkDeviceSize MemoryOffset, VkDeviceSize Size) {
+    Bindings.bindRange(ResourceOffset, Memory, MemoryOffset, Size);
+  }
+
+  /// The image's full set of bound ranges -- see `Buffer::ranges()`'s
+  /// identical comment.
+  llvm::ArrayRef<MemoryRangeBinding> ranges() const {
+    return Bindings.ranges();
+  }
+
   /// The image's base data pointer, or null if unbound.
   void *data() const { return Bindings.data(); }
 
