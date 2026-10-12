@@ -2763,7 +2763,18 @@ readIndirectDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
 
   std::vector<feme::graphics::DrawCommand> Draws;
   Draws.reserve(DrawCount);
-  const auto *Base = static_cast<const uint8_t *>(Buf->data());
+  // (H46) dataForRange() re-validates the same span the explicit overrun
+  // check above already computed (End), so this also fails safely should a
+  // future sparse buffer have an unbound hole within an otherwise
+  // in-range span.
+  uint64_t SpanSize =
+      DrawCount == 0 ? 0 : uint64_t(Stride) * (DrawCount - 1) + CommandSize;
+  const auto *Base =
+      static_cast<const uint8_t *>(Buf->dataForRange(Offset, SpanSize));
+  if (DrawCount != 0 && !Base)
+    return createStringError(inconvertibleErrorCode(),
+                             "the indirect draw commands are not fully "
+                             "resident");
   for (uint32_t I = 0; I != DrawCount; ++I) {
     const uint8_t *Src = Base + Offset + uint64_t(Stride) * I;
     feme::graphics::DrawCommand Draw;
@@ -2816,7 +2827,16 @@ readIndirectMeshDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
 
   std::vector<feme::graphics::MeshDrawCommand> Draws;
   Draws.reserve(DrawCount);
-  const auto *Base = static_cast<const uint8_t *>(Buf->data());
+  // (H46) See readIndirectDraws' own comment just above: dataForRange()
+  // re-validates the same span the overrun check above computed.
+  uint64_t SpanSize =
+      DrawCount == 0 ? 0 : uint64_t(Stride) * (DrawCount - 1) + CommandSize;
+  const auto *Base =
+      static_cast<const uint8_t *>(Buf->dataForRange(Offset, SpanSize));
+  if (DrawCount != 0 && !Base)
+    return createStringError(inconvertibleErrorCode(),
+                             "the indirect draw commands are not fully "
+                             "resident");
   for (uint32_t I = 0; I != DrawCount; ++I) {
     const uint8_t *Src = Base + Offset + uint64_t(Stride) * I;
     VkDrawMeshTasksIndirectCommandEXT Args{};
@@ -2851,10 +2871,14 @@ Expected<uint32_t> readIndirectDrawCount(Buffer *Buf, uint64_t Offset,
     return createStringError(inconvertibleErrorCode(),
                              "the indirect draw count offset is out of "
                              "range of its buffer");
+  // (H46) dataForRange() subsumes the size check just above.
+  void *CountData = Buf->dataForRange(Offset, sizeof(uint32_t));
+  if (!CountData)
+    return createStringError(inconvertibleErrorCode(),
+                             "the indirect draw count buffer is not fully "
+                             "resident");
   uint32_t Count = 0;
-  std::memcpy(&Count,
-             static_cast<const uint8_t *>(Buf->data()) + Offset,
-             sizeof(Count));
+  std::memcpy(&Count, CountData, sizeof(Count));
   return std::min(Count, MaxDrawCount);
 }
 
@@ -2882,9 +2906,14 @@ Expected<uint32_t> readIndirectByteCountVertices(Buffer *Buf, uint64_t Offset,
     return createStringError(inconvertibleErrorCode(),
                              "vkCmdDrawIndirectByteCountEXT's counter "
                              "buffer offset is out of range of its buffer");
+  // (H46) dataForRange() subsumes the size check just above.
+  void *ByteCountData = Buf->dataForRange(Offset, sizeof(uint32_t));
+  if (!ByteCountData)
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdDrawIndirectByteCountEXT's counter "
+                             "buffer is not fully resident");
   uint32_t ByteCount = 0;
-  std::memcpy(&ByteCount, static_cast<const uint8_t *>(Buf->data()) + Offset,
-              sizeof(ByteCount));
+  std::memcpy(&ByteCount, ByteCountData, sizeof(ByteCount));
   if (ByteCount <= CounterOffset)
     return 0u;
   return (ByteCount - CounterOffset) / VertexStride;
@@ -2975,11 +3004,15 @@ Error executeCommandsInto(
         return createStringError(inconvertibleErrorCode(),
                                  "dispatch indirect offset is out of range "
                                  "of its buffer");
+      // (H46) dataForRange() subsumes the size check just above.
+      void *IndirectData = Cmd.IndirectBuffer->dataForRange(
+          Cmd.IndirectOffset, 3 * sizeof(uint32_t));
+      if (!IndirectData)
+        return createStringError(inconvertibleErrorCode(),
+                                 "dispatch indirect buffer is not fully "
+                                 "resident");
       std::array<uint32_t, 3> Count{};
-      std::memcpy(Count.data(),
-                  static_cast<const uint8_t *>(Cmd.IndirectBuffer->data()) +
-                      Cmd.IndirectOffset,
-                  sizeof(Count));
+      std::memcpy(Count.data(), IndirectData, sizeof(Count));
       if (Error E = validateGroupCount(DeviceInfo, Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count,
@@ -3352,13 +3385,18 @@ Error executeCommandsInto(
           return createStringError(inconvertibleErrorCode(),
                                    "vkCmdEndTransformFeedbackEXT's counter "
                                    "buffer offset is out of range");
+        // (H46) dataForRange() subsumes the size check just above.
+        void *CounterData = CounterBuf->dataForRange(Offset, sizeof(uint32_t));
+        if (!CounterData)
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdEndTransformFeedbackEXT's counter "
+                                   "buffer is not fully resident");
         size_t SlotIdx = Cmd.FirstSet + I;
         uint32_t Captured =
             SlotIdx < Gfx.XfbCapturedBytes.size()
                 ? static_cast<uint32_t>(Gfx.XfbCapturedBytes[SlotIdx])
                 : 0;
-        std::memcpy(static_cast<uint8_t *>(CounterBuf->data()) + Offset,
-                    &Captured, sizeof(Captured));
+        std::memcpy(CounterData, &Captured, sizeof(Captured));
       }
       break;
     case RecordedCommand::Kind::SetViewport:
