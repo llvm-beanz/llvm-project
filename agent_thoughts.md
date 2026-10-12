@@ -119862,3 +119862,47 @@ The user's standing rule ("fix issues outside FeMe in a commit that only touches
 4. **(blocked on 2-3)** Only once those land: flip `sparseBinding`/`sparseResidency*` to `VK_TRUE`.
 5. **(~1-2 hours, standing, now 4+ sessions overdue)** The roadmap hygiene pass keeps getting bumped. I did a 2-minute grep this session (found nothing new beyond the already-known, already-not-actionable `H124e(a)` nesting) but that's not the deep pass that's actually due. Next session should actually block out the 1-2 hours for it rather than defer again.
 6. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) — confirmed already fixed in a much earlier commit; stop carrying this forward, it's done.
+
+# Session: deep roadmap hygiene pass (3 duplicate IDs fixed) + L416 phase 3 landed (vkGetBufferDeviceAddress wired to VirtualAddressReservation)
+
+**Status: both items done, committed, verified. No open blockers from this session.**
+
+## Win 1: roadmap hygiene, actually deep this time
+
+Ran a background `explore` agent to audit all of `Roadmap.md` for nesting violations, stale entries, duplicate IDs, broken cross-refs. Found and fixed 3 real duplicate milestone IDs (same bug class `H104`'s row already documents once):
+
+1. `H94` used twice — kept it on the `mesh_shared_memory_size` row (has its own `H94a`/`H94b` chain), renamed the other (`misc.payload_not_accessed` SIGSEGV) to `H175`.
+2. `H96` used twice — kept it on the `synchronization.other.barrier_across_secondary` row (part of the `H89`-`H96` chain), renamed the other (long-lived `deqp-vk` crash) to `H176`.
+3. `L125(p)` used twice — kept it on the Image-mismatch/ASTC row (the `L125(c)` a-z lettered decomposition), renamed the other (SPIR-V Gather-offsets fix) to `L391`.
+
+Updated every stray cross-reference to the renamed rows (checked via grep, not assumption). Committed as `6ecd7707a15a`.
+
+**Also found (not a code bug, a documentation-process bug):** the last 2 sessions' handoff notes both said "Image-typed call-site migration still needed" — checked git history and source directly, this was fully done in `H46` step 5, before even the `L416` session. The stale note had already been corrected once and then got resurrected. Flagging this explicitly so it doesn't happen a third time: **trust each milestone's own Roadmap.md row over carried-forward handoff prose when they disagree.**
+
+## Win 2: L416 phase 3 landed
+
+`vkGetBufferDeviceAddress` now prefers a `Buffer`'s `VirtualAddressReservation` base over `data()`, when one exists. Concretely:
+
+1. `Buffer` gained `reserveVirtualAddressSpace()`/`hasVirtualAddressReservation()`/`virtualAddressBase()`.
+2. `bind()`/`bindSparseRange()` mirror whatever memory they bind into the reservation (`mapRange`/`unmapRange`) when one exists and the memory has a shareable fd.
+3. `vkGetBufferDeviceAddress` checks the reservation first, falls back to `data()` otherwise.
+
+**Still inert by design** — `isValidBufferCreateInfo` still rejects any nonzero `VkBufferCreateInfo::flags`, so no real `VkBuffer` can ever get a reservation today. This mirrors phase 1's own "new, unused, independently-tested scaffolding" rule and `bindSparseRange`'s own existing test precedent. 3 new unit tests construct/reserve a `Buffer` directly, bypassing creation validation, to prove: content visibility tracks bound memory, device-address preference, and rebind-to-different-memory stability.
+
+Verified:
+- `check-feme`: 3,704/3,707 Passed, 3 Unsupported, 0 Failed.
+- CTS: `dEQP-VK.memory.*` + `dEQP-VK.api.object_management.*` (excluding the known loader-race case) + `dEQP-VK.ssbo.*` + `dEQP-VK.ubo.*` + `dEQP-VK.binding_model.buffer_device_address.*` — 14,371/14,371 applicable cases Pass, 0 Fail.
+
+Commits: `fad55f1cd244` (code+tests), `965083e5f785` (Roadmap.md/VulkanCTSReport.md/FeMeVulkanDesign.md updates).
+
+## Why phase 4 wasn't attempted this session
+
+Phase 4 (`vkQueueBindSparse` wiring) would also be dead code today — `vkQueueBindSparse` only legally receives sparse-binding-flagged buffers once `sparseBinding` is `VK_TRUE`, and that's explicitly blocked until phase 4 *and* the separate `pImageBinds` design both land. Writing phase 4 now means writing untestable-via-real-API code with no new unit-test leverage beyond what phase 3 already proved (the mechanism works); better spent as a dedicated session alongside the feature-bit flip itself.
+
+## Next steps
+
+1. **(~multi-session)** `L416` phase 4: wire `vkQueueBindSparse`'s buffer-bind processing to actually call `reserveVirtualAddressSpace`/`bindSparseRange` on real buffers — the real call site that would populate a reservation. Only meaningfully testable once paired with relaxing `isValidBufferCreateInfo`'s flag rejection, which itself needs the `sparseBinding` feature-bit decision.
+2. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still untouched, still needs its own dedicated session.
+3. **(blocked on 1-2)** Only once those land: flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
+4. **(~1-2 hours, standing)** Next roadmap hygiene pass — this session's was genuinely deep (3 real bugs found), so the next one can go back to a quick check unless a future session's work touches Roadmap.md heavily again.
+5. **(opportunistic, unchanged)** `L375` — already fixed, confirmed again not to need any more carry-forward (last session already said this; repeating here only to close the loop since it appeared one more time in this session's own handoff list).
