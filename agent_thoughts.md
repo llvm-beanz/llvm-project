@@ -119535,3 +119535,72 @@ report item.
    worth a dedicated investigation session; likely related to multisample
    storage-image handling rather than anything `H46` touches, since they
    fail identically with or without this session's changes.
+
+# Session: L415 landed — MS storage-image atomics fixed, both motivating CTS cases now Pass
+
+Device check: `FeMe CPU Vulkan Device` confirmed via
+`VK_ICD_FILENAMES=/tmp/feme_icd_14.json vulkaninfo --summary`.
+
+Done this session: both `dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`
+cases now Pass. That was the whole handoff for this session (a prior
+session's "opportunistic, new finding" item), and it's closed.
+
+## What was wrong
+
+`SPIRVResourceLowering.cpp` rejected atomics on MS storage images
+(`Plain2DMS`/`Array2DMS`) based on an `L244`-era comment claiming SPIR-V
+disallows this. That assumption was just wrong — `OpImageTexelPointer`'s
+`Sample` operand exists for exactly this case, and the CTS test proves
+it's legal. The non-atomic MS load/store path already handled this
+correctly; only the atomic dispatch never got the memo.
+
+## What changed (2 commits, `8659dcc52986` + `e3b9983bcfa5`)
+
+1. Code commit: widened `AtomicShapeSupported` + both atomic dispatch
+   switches in `SPIRVResourceLowering.cpp`; added 22 new `ImageCallKind`
+   entries + runtime functions (11 ops x 2 new MS shapes) in
+   `ImageCalls.{h,cpp}`/`FeMeRuntimeCPU.c`, all following `L244`'s own
+   established pattern. Also fixed a real bug found along the way:
+   `IsAtomic` in `ImageCalls.cpp` never got widened when `L244` added 4
+   new non-MS shapes, so those 44 atomic kinds have had wrong (load-only
+   instead of mod-ref) `MemoryEffects` since `L244` landed. Folded the
+   fix into this commit since it's the same enumeration this change
+   already touches — see the commit message for the reasoning on why
+   this wasn't split into its own commit.
+2. Docs commit: `Roadmap.md` `L415`, `VulkanCTSReport.md` item 78, plus
+   the `texture` group accounting row and overall Fail total.
+
+## Verification
+
+- `check-feme`: 3683/3686 Passed, 0 Failed, +4 new unit tests.
+- CTS: both motivating cases now Pass. `dEQP-VK.image.atomic_operations.*`
+  (6,209 cases) and `dEQP-VK.texture.multisample.*` sampled: 0 Fail, 0
+  regressions from either the new shapes or the `IsAtomic` fix.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed — correctness fix to an existing feature's shape coverage, not
+  a new feature bit.
+
+## Didn't touch this session
+
+Every other prior-session handoff item (per-tile `pImageBinds` design,
+`vkGetBufferDeviceAddress` virtual-address design, `L375`, roadmap
+hygiene pass, sparse-binding feature-bit flip) — this session was scoped
+entirely to the MS-atomic fix and didn't have time left for anything
+else. None of them regressed or were touched.
+
+## Next steps (ranked, same as prior handoffs — nothing new surfaced this time)
+
+1. **(~multi-session, still not attempted)** Design the per-tile
+   `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
+   addressing).
+2. **(~multi-session, separate design track, unchanged)**
+   `vkGetBufferDeviceAddress`'s virtual-address-space-reservation design
+   — the only remaining un-migrated `H46` 26-list call site.
+3. **(not started, separate from `H46`)** Only once items 1-2 are done:
+   flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
+4. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
+   again this session (focus was 100% on `L415`). Due for a real deep
+   pass soon, not just a quick check.
+5. **(opportunistic, unchanged)** `L375`
+   (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion)
+   still untouched, still needs its own dedicated design session.
