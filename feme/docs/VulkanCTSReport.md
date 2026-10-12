@@ -3411,6 +3411,68 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       bits and auditing call sites that need to become range-aware) is
       unchanged in scope and not attempted this pass.
 
+75. **`H46`: landed the second implementation step -- `vkQueueBindSparse`
+    now really processes `pBufferBinds`/`pImageOpaqueBinds`, plus a
+    completed classification audit correcting the earlier ~179
+    call-site estimate down to the real number.**
+    - New `ResourceBindings::bindRange()` (`MemoryBinding.h`) is an
+      additive (non-clearing) producer appending one
+      `MemoryRangeBinding`, with `Memory == nullptr` representing an
+      explicit spec-legal "unbind this range". `Buffer`/`Image` each
+      gained a thin `bindSparseRange()` forwarder and a `ranges()`
+      `ArrayRef` accessor.
+    - `vkQueueBindSparse` (`Sync.cpp`) now walks `pBufferBinds`/
+      `pImageOpaqueBinds` and forwards each `VkSparseMemoryBind` to the
+      target `Buffer`/`Image` via `bindSparseRange()`, instead of
+      ignoring them as before. `pImageBinds` (per-tile,
+      subresource/coordinate addressing) remains deliberately
+      unimplemented -- it does not fit the flat-range model and needs
+      its own sparse-image tile design, scoped as a separate future
+      step.
+    - Since `isValidBufferCreateInfo`/`isValidImageShape` still reject
+      any sparse creation flags and `sparseBinding` stays `VK_FALSE`,
+      this new code path is unreachable by any conformant application
+      today -- confirmed via unit tests only (`MemoryBindingTest.cpp`'s
+      3 new `bindRange` cases, `BufferTest.cpp`'s
+      `BindSparseRangeAccumulatesWithoutDisturbingData`, and
+      `SyncTest.cpp`'s new `QueueBindSparseBufferBindAppliesSparseRange`/
+      `QueueBindSparseImageOpaqueBindAppliesSparseRange`, each
+      bypassing normal creation-time validation to exercise the ICD's
+      own internal plumbing directly).
+    - `FeMeVulkanTests`: 853/853 Passed (up from 851). `check-feme`:
+      3668/3671 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+    - **Verified against CTS**: `dEQP-VK.sparse_resources.*` (19,402
+      cases) ran to completion: 0 Passed, 0 Failed, 19,402 NotSupported
+      -- exactly matches the unreachability analysis (every case is
+      rejected at `vktTestCase.cpp:1498`, "Requested core feature is
+      not supported: sparseBinding"). `dEQP-VK.synchronization.*`
+      (64,872 cases) ran to completion as a broader regression check:
+      18,420 Passed, 0 Failed, 46,452 NotSupported -- confirms this
+      change introduced no regression anywhere in the synchronization
+      family either.
+    - Separately, ran a read-only classification audit of every
+      genuine `Buffer`/`Image`-object `.data()` call site (as opposed
+      to unrelated `std::vector`/`llvm::ArrayRef`/`std::string`
+      `.data()` calls, which the earlier "~179" estimate had
+      conflated). The real count is **26** call sites, spread across
+      `Swapchain.cpp`, `Image.cpp` (`texelPointer`/`blockPointer`),
+      `ImageOps.cpp` (buffer<->image copies), `RenderPass.cpp`
+      (attachment views), `CommandBuffer.cpp` (the majority --
+      `vkCmdCopyBuffer`/`vkCmdFillBuffer`/`vkCmdUpdateBuffer`,
+      vertex/index/transform-feedback bindings, indirect-draw/dispatch
+      command reads, query-result writes), and `Buffer.cpp`
+      (`vkGetBufferDeviceAddress`). All 26 currently need to become
+      range-aware once sparse resources are real (none are provably
+      safe independent of today's always-fully-bound invariant). No
+      code change from this classification pass, per its own scoping.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- no feature bit or extension surface changed.
+      `Roadmap.md`'s `H46` row updated with both this step's landing
+      and the corrected call-site count. Remaining `H46` work
+      (promoting the feature bits, designing the per-tile `pImageBinds`
+      model, and the actual call-site migration) is unchanged in kind
+      but now has a materially smaller known scope for the last part.
+
 ## Complete group accounting
 
 
