@@ -74,6 +74,31 @@ public:
     Ranges.push_back({0, Memory, MemoryOffset, Size});
   }
 
+  /// (Roadmap H46) The sparse-style additive binding shape
+  /// `vkQueueBindSparse` needs: binds resource-space
+  /// `[ResourceOffset, ResourceOffset + Size)` to `[MemoryOffset,
+  /// MemoryOffset + Size)` of `Memory`, *without* clearing any existing
+  /// binding -- unlike `bindWhole`, this can be called any number of
+  /// times to build up a sparse resource's full set of resident ranges
+  /// one `VkSparseMemoryBind` at a time. `Memory == nullptr` represents
+  /// an explicit unbind of that resource-space range (legal per the
+  /// Vulkan spec: a sparse bind with a null memory handle "unbinds" the
+  /// described range) -- recorded as a null-memory range rather than
+  /// removed outright, so `ranges()` still reflects the resource's full
+  /// addressable extent to a caller that needs it, while `data()` (valid
+  /// only for the single-whole-range shape `bindWhole` produces) is
+  /// unaffected either way.
+  ///
+  /// Mirrors `bindWhole`'s own "no re-validation" contract: the caller
+  /// (ultimately the application, via `vkQueueBindSparse`) is responsible
+  /// for not describing overlapping or out-of-resource-bounds ranges;
+  /// this ICD does not currently re-check that, the same way it does not
+  /// re-check `bindWhole`'s single-call contract.
+  void bindRange(VkDeviceSize ResourceOffset, DeviceMemory *Memory,
+                 VkDeviceSize MemoryOffset, VkDeviceSize Size) {
+    Ranges.push_back({ResourceOffset, Memory, MemoryOffset, Size});
+  }
+
   bool isBound() const { return !Ranges.empty(); }
 
   /// The resource's flat base data pointer: valid only in the
