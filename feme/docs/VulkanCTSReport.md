@@ -3163,6 +3163,16 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `detach: true` (per this repo's own background-process guidance)
       or accept this partial sample as sufficient and close the item
       out. The `.qpa` log has been deleted after recording this tally.
+    - **Update (this session): the full-family sweep, relaunched
+      `detach: true` in an earlier session, is now confirmed complete.**
+      `/tmp/l411_blend_full_sweep.log` ends with a clean `DONE!`
+      summary: **48,833/48,833 cases processed, 18,726 Passed, 0
+      Failed, 30,107 NotSupported** -- the entire
+      `dEQP-VK.pipeline.*.blend.*` family, with zero failures
+      confirmed end to end. This closes out the `L411` regression-sweep
+      follow-up for good; no further blend-family re-run is needed
+      unless a future change touches blend logic again. The
+      `.log`/`.qpa` files have been deleted after recording this tally.
 
 70. **`L236`: implemented per-device `EnabledExtensions` tracking so
     `vkGetDeviceProcAddr` correctly gates extension-owned commands,
