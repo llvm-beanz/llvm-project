@@ -119226,3 +119226,86 @@ Checked twice this session. PID 4851, CPU time climbed 21:57 → 36:28 → 50:45
 2. **(~2-3 hours)** `H46` step 3: audit the ~179 `data()` call sites (grep in `lib/Vulkan/*.cpp`/`lib/Graphics/*.cpp`) to classify each as either "provably only runs on a fully-bound resource, safe as-is" or "needs to become range-aware." This classification pass itself doesn't need to change any code — it's the prerequisite for deciding which of the 179 sites step 4 actually touches.
 3. **(~5 minutes, whenever next picked up)** Check the blend sweep again: `ps aux | grep deqp-vk`, tally `/tmp/l411_blend_full_sweep.qpa`. Fold into `VulkanCTSReport.md` item 69 once it completes, then delete the `.qpa`/`.log` files.
 4. **(ongoing, standing)** Periodic roadmap hygiene pass — not done this session (focus was `H46` step 1 execution, not triage). Worth doing again soon per the standing cadence.
+
+# Session: H46 step 2 (vkQueueBindSparse wiring) + step 3 (call-site audit)
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed at start and end.
+
+## Do this first if picking back up: nothing pending — all work landed and committed.
+
+## What got done, in commit order
+
+1. `1801bbabc6e3` — closed out the long-standing blend sweep handoff: found it
+   finished (48,833/48,833, 0 Fail), folded into `VulkanCTSReport.md` item 69,
+   deleted temp files.
+2. `5dc19f54a616` — `H46` step 2a: added `ResourceBindings::bindRange()`
+   (additive sparse-style bind producer) + 3 unit tests.
+3. `1e92c4b49eb6` — `H46` step 2b: exposed `bindSparseRange()`/`ranges()` on
+   `Buffer`/`Image` + 1 unit test.
+4. `1e59438b17af` — `H46` step 2c: wired `vkQueueBindSparse` (`Sync.cpp`) to
+   really process `pBufferBinds`/`pImageOpaqueBinds` via `bindSparseRange()`.
+   `pImageBinds` (per-tile) stays unimplemented, documented as its own future
+   step. Added 2 new `SyncTest.cpp` cases proving the plumbing works.
+5. `93d0964a9627` — `Roadmap.md`'s `H46` row updated for step 2's landing.
+6. `222fc3cc0fa8` — `H46` step 3: ran a background classification audit of
+   every genuine `Buffer`/`Image` `.data()` call site. **Found 26, not ~179** —
+   the earlier estimate conflated unrelated `std::vector`/`ArrayRef`/`string`
+   `.data()` calls. All 26 are "needs to become range-aware"; none are
+   provably safe independent of today's always-fully-bound invariant.
+7. `6214bbf1f97d` — `VulkanCTSReport.md` item 75: recorded both CTS runs
+   (`sparse_resources.*`: 19,402/19,402 NotSupported, 0 Fail, exactly as
+   predicted by the unreachability analysis; `synchronization.*`: 18,420
+   Pass, 0 Fail, broader regression check) and the call-site audit result.
+
+## Why this was safe to do without flipping any feature bit
+
+`isValidBufferCreateInfo`/`isValidImageShape` still reject every sparse
+creation flag, and `sparseBinding` stays `VK_FALSE` — so no conformant
+application can ever reach the new `vkQueueBindSparse` code path. This is
+forward-looking groundwork, tested only via unit tests that call
+`bindSparseRange()` directly (bypassing normal creation validation). The CTS
+run against `dEQP-VK.sparse_resources.*` confirms this exactly: every one of
+19,402 cases is still rejected at feature-check time, 0 Fail.
+
+## Build/test numbers (all green, no regressions)
+
+- `FeMeVulkanTests`: 853/853 (up from 851 — the 2 new `SyncTest.cpp` cases).
+- `check-feme`: 3668/3671 Passed, 3 Unsupported, 0 Failed.
+- CTS `dEQP-VK.sparse_resources.*`: 0 Fail / 19,402 NotSupported.
+- CTS `dEQP-VK.synchronization.*`: 18,420 Pass / 0 Fail / 46,452 NotSupported.
+
+## Roadmap hygiene pass (lighter touch this time, genuinely checked)
+
+- Re-grepped for over-nested milestone IDs (the `H6`-nesting problem from
+  several sessions back) — found zero, confirming the earlier fix held.
+- Spot-checked `L375`'s own stability-tracking row — still correctly flagged
+  open, consistent with the handoff note that it's untouched.
+- No new stale items found this pass; see next steps below for what's still
+  open.
+
+## Next steps, ranked
+
+1. **(~2-3 hours)** `H46` step 4: use the corrected 26-call-site list (see
+   `VulkanCTSReport.md` item 75 or `Roadmap.md`'s `H46` row for the full table)
+   to actually make the highest-value subset range-aware. Recommended order:
+   start with `Buffer.cpp:171` (`vkGetBufferDeviceAddress` — flag as a design
+   question, a single flat address is fundamentally incompatible with a
+   partially-resident buffer, may need its own spec-compliance discussion
+   before any code), then `CommandBuffer.cpp`'s `vkCmdCopyBuffer`/
+   `vkCmdFillBuffer`/`vkCmdUpdateBuffer` (the bulk-memcpy sites, most
+   non-trivial rework), then the vertex/index/transform-feedback binding
+   sites (likely the most mechanical once a range-iteration helper exists).
+2. **(~multi-session, still not attempted)** Design the per-tile `pImageBinds`
+   model (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) —
+   explicitly scoped out of this session and the last, needs its own design
+   pass before any code.
+3. **(not started, separate from `H46`)** Only once steps 1-2 above are done
+   and the call sites are range-aware: flip `sparseBinding`/`sparseResidency*`
+   feature bits to `VK_TRUE`. Do NOT do this prematurely — the call-site audit
+   found 26 real range-unsafe sites that would misbehave immediately.
+4. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
+   passes. This session's pass was lighter than the prior session's deep pass
+   — worth alternating a deep pass back in soon.
+5. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
+   `DiamondFlattener` assertion) still untouched, still needs its own
+   dedicated design session.
