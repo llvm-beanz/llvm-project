@@ -63,27 +63,37 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-3 hours)** `H46` step 4: use the corrected 26-call-site list (see
-   `VulkanCTSReport.md` item 75 or `Roadmap.md`'s `H46` row for the full table)
-   to actually make the highest-value subset range-aware. Recommended order:
-   start with `Buffer.cpp:171` (`vkGetBufferDeviceAddress` — flag as a design
-   question, a single flat address is fundamentally incompatible with a
-   partially-resident buffer, may need its own spec-compliance discussion
-   before any code), then `CommandBuffer.cpp`'s `vkCmdCopyBuffer`/
-   `vkCmdFillBuffer`/`vkCmdUpdateBuffer` (the bulk-memcpy sites, most
-   non-trivial rework), then the vertex/index/transform-feedback binding
-   sites (likely the most mechanical once a range-iteration helper exists).
-2. **(~multi-session, still not attempted)** Design the per-tile `pImageBinds`
-   model (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) —
-   explicitly scoped out of this session and the last, needs its own design
-   pass before any code.
-3. **(not started, separate from `H46`)** Only once steps 1-2 above are done
-   and the call sites are range-aware: flip `sparseBinding`/`sparseResidency*`
-   feature bits to `VK_TRUE`. Do NOT do this prematurely — the call-site audit
-   found 26 real range-unsafe sites that would misbehave immediately.
-4. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
-   passes. This session's pass was lighter than the prior session's deep pass
-   — worth alternating a deep pass back in soon.
-5. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
-   `DiamondFlattener` assertion) still untouched, still needs its own
-   dedicated design session.
+1. **(~multi-session, still not attempted)** Design the per-tile
+   `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
+   addressing) — explicitly scoped out of this and every prior session,
+   needs its own design pass before any code.
+2. **(~multi-session, separate design track)** `vkGetBufferDeviceAddress`'s
+   virtual-address-space-reservation design (mmap/mprotect-based), per this
+   session's deferred-design writeup in `FeMeVulkanDesign.md` — needed before
+   this one remaining Buffer-typed call site can become range-aware.
+3. **(~2-4 hours, new, separate from the Buffer-side work just finished)**
+   The Image-typed call sites from the 26-list (`Swapchain.cpp`, `Image.cpp`
+   `texelPointer`/`blockPointer`, `ImageOps.cpp`'s image half,
+   `RenderPass.cpp`, `CommandBuffer.cpp`'s sampled-image prep) still need
+   their own migration pass — out of scope for this session, which covered
+   Buffer-typed sites only. Image sub-range addressing (subresource/mip/
+   layer) is more complex than a linear byte offset; expect this to need its
+   own small design note before the mechanical migration, similar in spirit
+   to the vertex/index work this session but with an extra dimension.
+4. **(not started, separate from `H46`)** Only once items 1-3 above are done:
+   flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`. Do NOT
+   do this prematurely.
+5. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
+   passes — this session's was a quick check, not a deep one; alternate a
+   deeper pass back in soon per the standing cadence.
+6. **(opportunistic, unchanged)** `L375`
+   (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) still
+   untouched, still needs its own dedicated design session.
+7. **(opportunistic, general takeaway from this session)** When a
+   mechanical-looking pointer-arithmetic migration changes what a
+   pre-existing variable *means* (here: `Base` went from "buffer start" to
+   "buffer start + Offset"), grep every use of that variable in the same
+   function, not just the one line being edited — the bug this session hit
+   was exactly this: one `Offset` subtraction was correctly dropped
+   elsewhere in the same diff, but the indexing expression wasn't updated to
+   match.
