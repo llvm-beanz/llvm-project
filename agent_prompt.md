@@ -63,24 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~multi-session, real architecture work, not a quick win)** Sparse
-   residency design + stub: decide what
-   `sparseBinding`/`sparseResidencyBuffer`/`sparseResidencyImage*` mean for this
-   CPU/host-RAM-backed allocator (likely: report the properties truthfully as
-   minimal/non-residency-preserving, or keep the feature bits false and just add
-   thin `vkGetImageSparseMemoryRequirements{,2}` returning zero sparse
-   requirements plus a `vkQueueBindSparse` that validates and no-ops). Start
-   with a feasibility read of the three functions' exact Vulkan-spec
-   preconditions when the corresponding feature bits are false — there may be a
-   legal all-zero/no-op answer that doesn't require a real sparse-binding model
-   at all, which would make this much cheaper than previously assumed. Worth 30
-   minutes of spec-reading before committing to the "multi-session" estimate.
-2. **(~1-2 hours, standing since several sessions, no CTS-visible symptom found
-   yet)** Re-triage whether any other roadmap item has gone stale or needs
-   breakdown, per the standing instruction to keep milestone breakdowns current
-   — no specific item flagged this session, just a general hygiene pass worth
-   doing periodically.
-3. **(ongoing)** Resume the broader `dEQP-VK.pipeline.*.blend.*` regression
-   sweep if a future session wants full 66-case-family coverage for `L411` —
-   start fresh with `detach: true` this time, don't rely on the partial tally
-   already recorded.
+1. **(no deadline, opportunistic)** If a future session happens to be in
+   `Sync.cpp`/`Image.cpp` for unrelated reasons, it's worth double-checking
+   whether `vkQueueBindSparse`'s current "ignore the buffer/image bind arrays
+   entirely" behavior needs revisiting once/if `H46` (real sparse resources)
+   ever lands — right now that's correct by construction (no sparse resource can
+   exist), but a future session enabling real sparse binding would need to go
+   back and actually process `pBufferBinds`/`pImageOpaqueBinds`/`pImageBinds`
+   instead of ignoring them.
+2. **(~multi-session, real architecture work, separate from anything `L236(a)`
+   touched)** `H46`: real sparse-resources feature work
+   (`sparseBinding`/`sparseResidencyBuffer`/`sparseResidencyImage*` actually
+   `VK_TRUE`), needing a genuine sparse-memory-binding allocator design. Not
+   attempted this session, not expected to be a quick pickup.
+3. **(ongoing, low priority, unchanged from last handoff)** Resume the broader
+   `dEQP-VK.pipeline.*.blend.*` regression sweep for full 66-case-family `L411`
+   coverage, if a future session wants it — start fresh with `detach: true`.
+4. **(~1-2 hours, standing, no CTS-visible symptom found yet, unchanged from
+   last handoff)** Keep doing periodic roadmap hygiene passes — this session's
+   quick check found nothing, but it's worth repeating rather than assuming it
+   stays clean forever.
