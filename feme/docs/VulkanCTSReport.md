@@ -3780,6 +3780,91 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       change needed -- this is a purely internal allocator swap behind
       the existing `VkDeviceMemory` handle, no new feature or extension
       surface. `Roadmap.md`'s `L416` row documents phase 2's completion.
+81. **Root-caused item 80's deferred
+    `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+    SIGSEGV -- no code change, confirmed upstream Vulkan-Loader bug, not
+    actionable from FeMe.** Reproduced reliably (3/15 attempts against
+    the stock Ubuntu `libvulkan1` 1.4.341.0-1 package; 1st and 4th
+    attempts of two separate 20-run loops against a self-built,
+    symbol-matched `v1.4.341` debug (`-g -O0`) loader, which widens the
+    race window enough to reproduce far more readily). The debug build's
+    backtrace fully symbolicates the crash, which is **entirely inside
+    the loader**, no FeMe or CTS frame anywhere at the fault point:
+    `vk::DeviceDriver::DeviceDriver` (CTS, resolving
+    `vkCmdBindIndexBuffer3KHR`) -> `vkGetDeviceProcAddr`
+    (`trampoline.c:162`) -> `loader_gpa_device_terminator`
+    (`loader.c:4615`) -> `loader_get_icd_and_device` (`loader.c:1641`) ->
+    `loader_get_dispatch` (`loader.h:53`, the fault: `disp->magic`
+    dereferenced where `disp = *(VkLayerDispatchTable **)obj`). A raw
+    memory dump at the crash (`x/4xg obj`) showed `obj`'s first 8 bytes
+    held `0x1cdc0de` -- **this driver's own `ICD_LOADER_MAGIC`
+    sentinel**, not a valid loader dispatch-table pointer, meaning the
+    loader is walking its process-global `logical_device_list` (inside
+    `loader_get_icd_and_device`, reached from one thread's unrelated,
+    already-valid device) and dereferencing *another* thread's `VkDevice`
+    whose own loader-side dispatch table the loader has not yet written.
+    Cross-referencing the exact `v1.4.341` tag's own `loader.c`
+    (`terminator_CreateDevice`) confirms why: `loader_add_logical_device`
+    (publishing the new device onto that shared, lock-protected list) is
+    called *before* `loader_init_dispatch` (which overwrites this
+    driver's `ICD_LOADER_MAGIC` with the loader's own dispatch pointer) --
+    a classic publish-before-init ordering bug, independent of anything
+    this ICD does. This is an exact match for a since-filed upstream
+    report, `KhronosGroup/Vulkan-Loader#2018` ("Concurrent vkCreateDevice
+    / vkDestroyDevice is a use-after-free: logical_device_list has a
+    locked reader and unlocked writers"), filed and closed the same day
+    against this same loader version/tag -- the reporter withdrew it
+    ("bad checkout... doesn't reproduce against main") after a maintainer
+    objected that `vkCreateDevice`/`vkDestroyDevice`'s trampolines already
+    hold `loader_lock`. That rebuttal does not hold up against this
+    session's own read of `trampoline.c`: `vkGetDeviceProcAddr`'s
+    uncommon-entrypoint path (the one this crash goes through) never
+    takes `loader_lock` at all before calling into
+    `loader_get_icd_and_device` -- it is excluded only by the much
+    narrower `loader_global_instance_list_lock`, which
+    `loader_add_logical_device`/`loader_remove_logical_device` do not
+    take -- so the maintainer's "necessary locks" do not actually cover
+    this reader/writer pair. This looks like the upstream issue was
+    closed on a false negative, not a genuine non-reproduction, but this
+    session has no write access to GitHub's issue tracker to post that
+    rebuttal upstream -- flagged here for whoever picks this up next to
+    consider re-filing with this session's evidence.
+    - **Confirmed FeMe-independent**: the identical CTS case run against
+      the system's `lvp_icd.json` (Mesa lavapipe) instead of FeMe's ICD
+      did not crash in 15 attempts (stock loader) nor 15 more (the same
+      debug loader that reproduces readily against FeMe) -- this driver's
+      own `vkCreateDevice` latency (far higher than a native GPU-backed
+      ICD's, being CPU/JIT-based) appears to widen the race window enough
+      to make an otherwise rare upstream race land reliably, rather than
+      this driver causing the race itself.
+    - **Attempted, did not reproduce**: a minimal, FeMe/CTS-independent
+      standalone C reproducer (`loader_race_repro.c`, not checked into
+      this repo since the bug it targets lives entirely in the
+      Vulkan-Loader, not here) modeling
+      `CreateThread<Device>::runThread`'s own shape -- one `VkInstance`
+      per thread, a `pthread_barrier_t` sync every 4th iteration (matching
+      `itersBetweenSyncs = numIters / 5`), immediately resolving an
+      uncommon device entry point after each `vkCreateDevice` before
+      `vkDestroyDevice` -- did not crash in 30 combined attempts (10
+      against lavapipe + stock loader, 10 against FeMe + stock loader, 10
+      against FeMe + barrier-synced per-thread-instance variant). The
+      real CTS binary's specific allocator/thread-scheduling
+      characteristics (not reproduced by this minimal harness) appear
+      necessary to hit the race in a reasonable number of attempts; CTS
+      itself, via the debug loader, remains the reliable reproduction
+      path.
+    - **Not a FeMe bug, no FeMe code touched this item.** Nothing
+      actionable on this driver's side: the loader publishes a device
+      before it is dispatchable regardless of what any ICD's
+      `vkCreateDevice` does or how long it takes.
+      `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change (no feature/extension surface touched). `Roadmap.md`'s `D2`
+      row, which previously marked this symptom family as fully resolved
+      by upgrading past a different, already-fixed loader regression
+      (`KhronosGroup/Vulkan-Loader#1436`/`#1438`), has a new row noting
+      that resolution no longer holds against the currently-installed
+      Ubuntu `libvulkan1` 1.4.341.0 -- a second, distinct, still-open
+      upstream defect reproduces the identical user-visible symptom.
 
 ## Complete group accounting
 
