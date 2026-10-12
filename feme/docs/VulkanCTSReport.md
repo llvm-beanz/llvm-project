@@ -3664,6 +3664,58 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       (widening an existing feature's shape coverage), not a new
       feature/extension. `Roadmap.md`'s `L415` row documents this fix.
 
+79. **`L416`: a periodic roadmap hygiene pass confirmed one handoff item
+    (`L375`, the `DiamondFlattener` assertion) was already fixed and
+    struck through by a prior session, carried forward as "still open" in
+    error for several subsequent sessions' handoff notes -- no further
+    action needed there. Spent the rest of this session designing and
+    starting the `vkGetBufferDeviceAddress` virtual-address-space-
+    reservation track (a remaining `H46` design item).**
+    - Roadmap hygiene: confirmed exactly one milestone-nesting-depth
+      violation exists in the whole document (`H124e(a)`, historical and
+      already closed/struck-through) and one recurring documentation-only
+      pattern (a parent row's own prose enumerates lettered sub-items,
+      e.g. `L66(a)`-`L66(e)`/`F15a`, as if individually citable, without
+      ever giving them their own table row) -- both are cosmetic,
+      historical, and not worth a destructive rewrite; not fixed this
+      session, documented in `agent_thoughts.md` instead.
+    - Wrote the concrete phased design for `vkGetBufferDeviceAddress`'s
+      sparse-safe virtual-address-space reservation in
+      `FeMeVulkanDesign.md`'s "Memory and Buffers" section, replacing the
+      prior "deliberately deferred" placeholder: reserve a `PROT_NONE`
+      `mmap` window spanning a sparse buffer's full declared size up
+      front, and remap `memfd_create`-backed physical pages into
+      sub-ranges of it as `vkQueueBindSparse` rebinds ranges, so a device
+      address stays valid (and faults safely on an unbound range) across
+      any later rebind -- unlike today's flat `Buffer::data()`-based
+      answer. 4 phases identified; phase 1 landed this session, phases
+      2-4 (switching `DeviceMemory`'s own allocator, wiring
+      `vkGetBufferDeviceAddress`, wiring `vkQueueBindSparse`'s bind
+      processing) remain future sessions.
+    - Implemented phase 1: new, currently-unused scaffolding --
+      `VirtualAddressReservation` (`reserve`/`mapRange`/`unmapRange`/
+      `release`) and `createShareableMemoryFd` in
+      `feme/lib/Vulkan/VirtualAddressReservation.{h,cpp}`, following
+      `MemoryBinding.h`'s (roadmap H46) own "new data structure, unit
+      tested, zero behavior change" precedent. 15 new unit tests in
+      `VirtualAddressReservationTest.cpp`: reservation
+      construction/release/move semantics, `mapRange`'s cross-mapping
+      page aliasing (two independent reservations mapping the same
+      `memfd` observe each other's writes), and out-of-bounds/
+      unreserved-precondition failure paths. Nothing in the ICD
+      constructs either type yet.
+    - `check-feme`: 3,698/3,701 Passed, 3 Unsupported, 0 Failed (+15 new
+      unit tests), 0 regressions.
+    - **Verified against CTS**: a `dEQP-VK.api.*memory*` sanity sweep
+      (2,877 cases) shows 0 Fail -- unchanged from baseline, as expected
+      for infrastructure nothing yet calls.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- new-but-unused internal scaffolding, no feature or
+      extension surface touched. `Roadmap.md`'s new `L416` row documents
+      this work; `H46`'s own row is unaffected (this is a separate,
+      explicitly-deferred design track it already classified as
+      out of scope for its own call-site migration).
+
 ## Complete group accounting
 
 
