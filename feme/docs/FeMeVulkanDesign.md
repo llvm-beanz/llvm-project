@@ -1122,10 +1122,9 @@ conformant application must not call either function without first enabling
 the feature -- this driver does not re-validate that precondition, matching
 its other feature-gated-but-implemented stubs.
 
-(Roadmap H46) **Open design question, deliberately deferred**: a future
-session making sparse resources real (`sparseBinding` et al. actually
-`VK_TRUE`) cannot migrate `vkGetBufferDeviceAddress` onto the same
-`dataForRange`-style per-access resolution this driver uses for
+(Roadmap L416) A future session making sparse resources real (`sparseBinding`
+et al. actually `VK_TRUE`) cannot migrate `vkGetBufferDeviceAddress` onto the
+same `dataForRange`-style per-access resolution this driver uses for
 byte-range-shaped buffer accesses (`vkCmdCopyBuffer` and friends, see
 `CommandBuffer.cpp`). A device address is handed to the *application*, not
 consumed immediately by this driver -- a shader can carry it across an
@@ -1133,19 +1132,71 @@ arbitrary number of binds/unbinds and dereference it at any later point,
 including one where the buffer's residency has since changed. A single flat
 host pointer can only ever represent one bound range; it has no way to
 represent "this buffer's residency may change out from under this address
-later." Making this correct for a genuinely sparse, partially-resident buffer
-would need this driver to reserve one *virtual* address range spanning the
-buffer's entire declared size up front (e.g. via `mmap`/`mprotect`, so
+later."
+
+**Design**: reserve one *virtual* address range spanning the buffer's entire
+declared size up front, with no physical backing (`mmap(PROT_NONE)`, so
 unbound sub-ranges fault rather than silently alias whatever memory
-previously lived at that host address) and remap physical backing pages as
-`vkQueueBindSparse` rebinds ranges -- a materially different (and far more
-invasive) address-space-management design than this driver's current
-"a buffer's data pointer is just its one bound allocation's host pointer"
-model. This is *not* mechanical range-iteration work like the
-`CommandBuffer.cpp` migration above; it needs its own dedicated design
-session once `H46`'s other, more tractable steps have landed, and is
-explicitly out of scope for the call-site migration tracked in `Roadmap.md`'s
-`H46` row.
+previously lived at that host address), and remap physical backing pages
+into sub-ranges of it as `vkQueueBindSparse` rebinds ranges, without ever
+relocating the reservation's own base address -- the address handed back by
+`vkGetBufferDeviceAddress` and dereferenced by a shader stays valid across
+any later rebind.
+
+Remapping physical pages at an arbitrary fixed virtual address requires the
+*source* memory (the `VkDeviceMemory` being bound) to itself be a distinct,
+re-mappable OS object, not a plain heap allocation (`DeviceMemory`'s current
+`posix_memalign`/`_aligned_malloc`-backed storage, see Memory.cpp): a
+`malloc`'d allocation is not a VMA that can be mapped a second time at a
+different address. On Linux this means backing every `VkDeviceMemory`
+allocation with `memfd_create()` + `ftruncate()` instead of `posix_memalign`,
+`mmap`ing it once for `vkMapMemory`'s own existing host pointer, and `mmap`ing
+the *same* fd again (`MAP_SHARED | MAP_FIXED`) at the buffer's reserved
+address window's appropriate sub-range when `vkQueueBindSparse` binds it --
+two independent mappings of the same shareable pages, rather than one
+allocation physically moved. Unbinding restores that sub-range to a
+`PROT_NONE` gap the same way the initial reservation left it. A Windows
+equivalent exists (`CreateFileMapping`/`MapViewOfFile3`, an analogous
+"one shareable object, multiple views" design) but is not implemented
+pending access to a Windows build/test environment.
+
+This is a materially different (and far more invasive) address-space-
+management design than this driver's current "a buffer's data pointer is
+just its one bound allocation's host pointer" model, so it is being rolled
+out in phases rather than one large change:
+
+1. **(Done, this session)** Standalone, currently-unused scaffolding:
+   `feme/lib/Vulkan/VirtualAddressReservation.{h,cpp}` provides
+   `VirtualAddressReservation` (the `mmap`/`mprotect`-based reservation
+   described above: `reserve`/`mapRange`/`unmapRange`/`release`) and
+   `createShareableMemoryFd` (the `memfd_create` helper), each with its own
+   unit tests (`VirtualAddressReservationTest.cpp`) exercising reservation,
+   mapping, cross-mapping aliasing, and out-of-bounds/unreserved failure
+   paths directly, independent of any `VkDeviceMemory`/`VkBuffer` machinery
+   -- mirroring the zero-behavior-change-first approach `MemoryBinding.h`
+   (roadmap H46) took for `ResourceBindings`. Nothing in the ICD constructs
+   either type yet; this phase changes no observable driver behavior.
+2. **(Future session)** Switch `DeviceMemory`'s backing allocation from
+   `posix_memalign`/`_aligned_malloc` to `createShareableMemoryFd` + an
+   initial `mmap`, exposing the fd needed for phase 3's remapping, while
+   preserving every existing `vkMapMemory`/`vkUnmapMemory`/flush/invalidate
+   behavior exactly (every device-memory CTS case must re-pass unchanged;
+   this is the highest-risk phase, since it touches every allocation in the
+   driver, not just ones that end up backing a sparse buffer).
+3. **(Future session)** Wire `vkGetBufferDeviceAddress` to return a
+   `VirtualAddressReservation`'s base pointer, instead of `Buffer::data()`,
+   only for buffers created with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` --
+   ordinary buffers keep today's direct `data()`-based address unchanged.
+4. **(Future session)** Wire `vkQueueBindSparse`'s buffer-bind processing
+   (see `H46`'s own `bindRange`) to `mapRange`/`unmapRange` the
+   corresponding sub-range of the reservation as each bind/unbind is
+   processed.
+
+Phases 2-4 remain out of scope for the call-site migration tracked in
+`Roadmap.md`'s `H46` row, and are not required before `H46` itself completes
+(`H46` only needs `vkGetBufferDeviceAddress`'s call site *classified*, which
+this design satisfies: it is the one call site that cannot become
+range-aware via `dataForRange` and instead needs this dedicated mechanism).
 
 ## Descriptor Model
 
