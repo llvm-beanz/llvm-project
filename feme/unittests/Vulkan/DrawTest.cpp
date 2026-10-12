@@ -3152,6 +3152,52 @@ TEST_F(DrawTest, RendersIndirectDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap H46) Regression test for a once-shipped bug in
+/// `readIndirectDraws`'s `dataForRange()` migration: the resolved base
+/// pointer already points *at* `Offset` (unlike the old `data()`, which
+/// pointed at the buffer's start), so re-adding `Offset` when indexing into
+/// it read far past the intended command -- caught by a full
+/// `dEQP-VK.draw.*indirect*` CTS sweep (a hang/`DeviceLost`, not a crash,
+/// since the garbage read usually lands on readable-but-wrong memory) but
+/// not by this file's existing `RendersIndirectDraw`, whose `Offset == 0`
+/// made the bug a no-op. This places the command at a deliberately nonzero
+/// offset into a larger buffer, so a reintroduced double-add would read
+/// `2 * ArgsOffset` bytes in and get back zeroed/garbage command data
+/// instead of `Args`.
+TEST_F(DrawTest, RendersIndirectDrawAtNonzeroBufferOffset) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  constexpr VkDeviceSize ArgsOffset = 64;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Indirect = createBuffer(ArgsOffset + sizeof(VkDrawIndirectCommand),
+                                   Memory, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawIndirectCommand Args{};
+  Args.vertexCount = 3;
+  Args.instanceCount = 1;
+  std::memcpy(static_cast<uint8_t *>(fromHandle<Buffer>(Indirect)->data()) +
+                  ArgsOffset,
+              &Args, sizeof(Args));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndirect(Cmd, Indirect, ArgsOffset, 1,
+                    sizeof(VkDrawIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(1, 2)[0], 0xFF);
+  EXPECT_EQ(texel(1, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H21b) `vkCmdDrawIndirectByteCountEXT` computes its vertex count
 /// from a counter buffer's own byte count (`(byteCount - counterOffset) /
 /// vertexStride`) rather than taking it directly -- 12 bytes at

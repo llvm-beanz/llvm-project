@@ -2776,7 +2776,7 @@ readIndirectDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
                              "the indirect draw commands are not fully "
                              "resident");
   for (uint32_t I = 0; I != DrawCount; ++I) {
-    const uint8_t *Src = Base + Offset + uint64_t(Stride) * I;
+    const uint8_t *Src = Base + uint64_t(Stride) * I;
     feme::graphics::DrawCommand Draw;
     if (Indexed) {
       VkDrawIndexedIndirectCommand Args{};
@@ -2838,7 +2838,7 @@ readIndirectMeshDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
                              "the indirect draw commands are not fully "
                              "resident");
   for (uint32_t I = 0; I != DrawCount; ++I) {
-    const uint8_t *Src = Base + Offset + uint64_t(Stride) * I;
+    const uint8_t *Src = Base + uint64_t(Stride) * I;
     VkDrawMeshTasksIndirectCommandEXT Args{};
     std::memcpy(&Args, Src, sizeof(Args));
     feme::graphics::MeshDrawCommand Draw;
