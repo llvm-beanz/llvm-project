@@ -394,6 +394,35 @@ private:
   feme::cpu::FemeSamplerDescriptor Descriptor;
 };
 
+/// A `VkSamplerYcbcrConversion` (roadmap L236(a), core 1.1): a pure
+/// metadata stub, not a dispatchable or reference-counted object.
+///
+/// `K7` (roadmap) already decided `samplerYcbcrConversion` stays a
+/// truthful `VK_FALSE` -- no multi-planar format, `femeRT*FetchTexel*`
+/// conversion step, or `vkCreateSampler`/`vkCreateImageView`
+/// `VkSamplerYcbcrConversionInfo` consumer exists anywhere in this ICD.
+/// Per spec an application must not chain a `VkSamplerYcbcrConversionInfo`
+/// (or otherwise rely on multi-planar sampling) without that feature
+/// enabled, so this class exists solely so `vkCreateSamplerYcbcrConversion`/
+/// `vkDestroySamplerYcbcrConversion` -- core 1.1 commands any device must
+/// expose via `vkGetDeviceProcAddr` regardless of which features it
+/// advertises -- have a real object to hand back, not so any later stage
+/// can consult the fields it stores. It is therefore intentionally inert:
+/// nothing else in this ICD ever reads a `SamplerYcbcrConversion`, and it
+/// needs no `PendingExecutionRefCounted` lifetime tracking, since nothing
+/// can bind one to in-flight GPU work.
+class SamplerYcbcrConversion {
+public:
+  explicit SamplerYcbcrConversion(
+      const VkSamplerYcbcrConversionCreateInfo &CreateInfo)
+      : Format(CreateInfo.format) {}
+
+  VkFormat format() const { return Format; }
+
+private:
+  VkFormat Format;
+};
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_IMAGE_H

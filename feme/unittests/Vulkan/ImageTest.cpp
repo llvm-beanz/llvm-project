@@ -588,6 +588,35 @@ TEST_F(ImageTest, CreateViewAndSampler) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap L236(a): vkCreateSamplerYcbcrConversion/vkDestroySamplerYcbcrConversion
+// are core 1.1 commands that must resolve via vkGetDeviceProcAddr regardless
+// of samplerYcbcrConversion's (always-false) feature bit -- see
+// SamplerYcbcrConversion's own comment (Image.h) for why this is a pure
+// metadata stub rather than real multi-planar sampling support.
+TEST_F(ImageTest, CreateAndDestroySamplerYcbcrConversion) {
+  VkSamplerYcbcrConversionCreateInfo ConvInfo{};
+  ConvInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
+  ConvInfo.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+  ConvInfo.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+  ConvInfo.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+  ConvInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY,
+                          VK_COMPONENT_SWIZZLE_IDENTITY,
+                          VK_COMPONENT_SWIZZLE_IDENTITY,
+                          VK_COMPONENT_SWIZZLE_IDENTITY};
+  ConvInfo.chromaFilter = VK_FILTER_LINEAR;
+
+  VkSamplerYcbcrConversion Conv = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSamplerYcbcrConversion(Device, &ConvInfo, nullptr, &Conv),
+            VK_SUCCESS);
+  ASSERT_NE(Conv, static_cast<VkSamplerYcbcrConversion>(VK_NULL_HANDLE));
+  EXPECT_EQ(fromHandle<SamplerYcbcrConversion>(Conv)->format(),
+            VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
+
+  vkDestroySamplerYcbcrConversion(Device, Conv, nullptr);
+  // VK_NULL_HANDLE is a legal, explicitly no-op argument per spec.
+  vkDestroySamplerYcbcrConversion(Device, VK_NULL_HANDLE, nullptr);
+}
+
 TEST_F(ImageTest, LayoutTrackingViaPipelineBarrier) {
   VkDeviceMemory Memory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_STORAGE_BIT, Memory);

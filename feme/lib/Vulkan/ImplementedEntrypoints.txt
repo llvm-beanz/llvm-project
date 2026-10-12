@@ -87,6 +87,13 @@ vkDestroyImageView
 vkCreateSampler
 vkDestroySampler
 
+# Roadmap L236(a): core 1.1, a pure metadata stub -- see
+# SamplerYcbcrConversion's own comment (Image.h). samplerYcbcrConversion
+# stays VK_FALSE (K7); these commands must still resolve via
+# vkGetDeviceProcAddr regardless.
+vkCreateSamplerYcbcrConversion
+vkDestroySamplerYcbcrConversion
+
 # Roadmap E4: VK_KHR_maintenance4's image-side memory-requirements-without-
 # an-object commands (see the note above vkGetDeviceBufferMemoryRequirements).
 vkGetDeviceImageMemoryRequirements

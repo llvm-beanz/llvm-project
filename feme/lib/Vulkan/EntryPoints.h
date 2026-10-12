@@ -269,6 +269,18 @@ vkCreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySampler(VkDevice device, VkSampler sampler,
                  const VkAllocationCallbacks *pAllocator);
+// Roadmap L236(a): core 1.1 commands, reachable regardless of whether any
+// application actually enables multi-planar/YCbCr sampling
+// (`samplerYcbcrConversion` stays a truthful `VK_FALSE` -- see K7). See
+// `SamplerYcbcrConversion`'s own comment (Image.h) for why these are a
+// pure metadata stub.
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSamplerYcbcrConversion(
+    VkDevice device, const VkSamplerYcbcrConversionCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkSamplerYcbcrConversion *pYcbcrConversion);
+VKAPI_ATTR void VKAPI_CALL vkDestroySamplerYcbcrConversion(
+    VkDevice device, VkSamplerYcbcrConversion ycbcrConversion,
+    const VkAllocationCallbacks *pAllocator);
 
 // V6: render passes and framebuffers (see "Render passes and dynamic
 // rendering").

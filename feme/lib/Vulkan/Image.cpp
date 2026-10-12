@@ -951,4 +951,29 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySampler(
   Alloc.destroy(Obj);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSamplerYcbcrConversion(
+    VkDevice, const VkSamplerYcbcrConversionCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkSamplerYcbcrConversion *pYcbcrConversion) {
+  Allocator Alloc(pAllocator);
+  SamplerYcbcrConversion *Obj = Alloc.create<SamplerYcbcrConversion>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, *pCreateInfo);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pYcbcrConversion = toHandle<VkSamplerYcbcrConversion>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroySamplerYcbcrConversion(
+    VkDevice, VkSamplerYcbcrConversion ycbcrConversion,
+    const VkAllocationCallbacks *pAllocator) {
+  if (!ycbcrConversion)
+    return;
+  // No deferred-destroy guard needed (unlike `Sampler`'s own, just above):
+  // see `SamplerYcbcrConversion`'s own comment (Image.h) -- nothing in
+  // this ICD ever binds one to in-flight GPU work.
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<SamplerYcbcrConversion>(ycbcrConversion));
+}
+
 } // namespace feme::vulkan
