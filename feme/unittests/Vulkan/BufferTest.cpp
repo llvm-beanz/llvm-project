@@ -70,7 +70,40 @@ TEST_F(BufferTest, CreateBindDestroy) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
-// (Roadmap H46) `bindSparseRange` is the additive, per-range counterpart
+// (Roadmap H46) `dataForRange` is the range-aware generalization of
+// `data()`: for an ordinarily (fully) bound buffer, any in-bounds
+// sub-range resolves to the expected offset into the same bound memory.
+TEST_F(BufferTest, DataForRangeResolvesSubRangeOfOrdinaryBinding) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 128;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetBufferMemoryRequirements(Device, Buf, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  EXPECT_EQ(vkBindBufferMemory(Device, Buf, Memory, 0), VK_SUCCESS);
+
+  Buffer *B = fromHandle<Buffer>(Buf);
+  EXPECT_EQ(B->dataForRange(0, 128), B->data());
+  EXPECT_EQ(B->dataForRange(32, 16),
+           static_cast<uint8_t *>(B->data()) + 32);
+  // Past the buffer's own declared size is still out of range even
+  // though the underlying allocation (`Reqs.size`) may be larger.
+  EXPECT_EQ(B->dataForRange(120, 16), nullptr);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+
 // `vkQueueBindSparse` would call for a (currently unreachable, since no
 // live buffer here can have `VK_BUFFER_CREATE_SPARSE_BINDING_BIT`) sparse
 // buffer bind; exercises it directly against a real `Buffer` object.

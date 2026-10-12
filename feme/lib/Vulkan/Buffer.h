@@ -89,6 +89,16 @@ public:
   /// buffer binding offset + descriptor offset"). Null if unbound.
   void *data() const { return Bindings.data(); }
 
+  /// (Roadmap H46) The range-aware generalization of `data()`: resolves a
+  /// flat pointer for buffer-space sub-range `[Offset, Offset + Size)`,
+  /// or `nullptr` if that sub-range is not fully covered by one bound
+  /// range -- see `ResourceBindings::dataForRange`'s own comment. Prefer
+  /// this over `data() + Offset` for any byte-range-shaped buffer access
+  /// (a copy/fill/update region, a query-result write, etc.).
+  void *dataForRange(VkDeviceSize Offset, VkDeviceSize Size) const {
+    return Bindings.dataForRange(Offset, Size);
+  }
+
 private:
   VkDeviceSize Size;
   VkBufferUsageFlags Usage;
