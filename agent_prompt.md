@@ -63,24 +63,27 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** `H46` step 2: the real second producer. Add
-   `ResourceBindings::bindRange()` (a sparse-style partial bind, additive rather
-   than replacing), then make `vkQueueBindSparse` (`Sync.cpp`) actually process
-   `pBufferBinds`/`pImageOpaqueBinds`/`pImageBinds` instead of ignoring them —
-   currently correct by construction (no sparse resource can exist) but that
-   forward-pointer comment in `Sync.cpp` says exactly what's needed once this
-   lands. Do NOT flip feature bits to `VK_TRUE` yet — that's a separate, later
-   step needing the ~179 call-site audit.
-2. **(~2-3 hours)** `H46` step 3: audit the ~179 `data()` call sites (grep in
-   `lib/Vulkan/*.cpp`/`lib/Graphics/*.cpp`) to classify each as either "provably
-   only runs on a fully-bound resource, safe as-is" or "needs to become
-   range-aware." This classification pass itself doesn't need to change any code
-   — it's the prerequisite for deciding which of the 179 sites step 4 actually
-   touches.
-3. **(~5 minutes, whenever next picked up)** Check the blend sweep again: `ps
-   aux | grep deqp-vk`, tally `/tmp/l411_blend_full_sweep.qpa`. Fold into
-   `VulkanCTSReport.md` item 69 once it completes, then delete the `.qpa`/`.log`
-   files.
-4. **(ongoing, standing)** Periodic roadmap hygiene pass — not done this session
-   (focus was `H46` step 1 execution, not triage). Worth doing again soon per
-   the standing cadence.
+1. **(~2-3 hours)** `H46` step 4: use the corrected 26-call-site list (see
+   `VulkanCTSReport.md` item 75 or `Roadmap.md`'s `H46` row for the full table)
+   to actually make the highest-value subset range-aware. Recommended order:
+   start with `Buffer.cpp:171` (`vkGetBufferDeviceAddress` — flag as a design
+   question, a single flat address is fundamentally incompatible with a
+   partially-resident buffer, may need its own spec-compliance discussion
+   before any code), then `CommandBuffer.cpp`'s `vkCmdCopyBuffer`/
+   `vkCmdFillBuffer`/`vkCmdUpdateBuffer` (the bulk-memcpy sites, most
+   non-trivial rework), then the vertex/index/transform-feedback binding
+   sites (likely the most mechanical once a range-iteration helper exists).
+2. **(~multi-session, still not attempted)** Design the per-tile `pImageBinds`
+   model (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) —
+   explicitly scoped out of this session and the last, needs its own design
+   pass before any code.
+3. **(not started, separate from `H46`)** Only once steps 1-2 above are done
+   and the call sites are range-aware: flip `sparseBinding`/`sparseResidency*`
+   feature bits to `VK_TRUE`. Do NOT do this prematurely — the call-site audit
+   found 26 real range-unsafe sites that would misbehave immediately.
+4. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
+   passes. This session's pass was lighter than the prior session's deep pass
+   — worth alternating a deep pass back in soon.
+5. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
+   `DiamondFlattener` assertion) still untouched, still needs its own
+   dedicated design session.
