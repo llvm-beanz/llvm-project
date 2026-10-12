@@ -21,6 +21,7 @@ add_feme_unittest(FeMeVulkanTests
   HostImageCopyTest.cpp
   ImageOpsTest.cpp
   ImageTest.cpp
+  MemoryBindingTest.cpp
   MemoryTest.cpp
   ObjectModelTest.cpp
   PhysicalDeviceInfoTest.cpp
