@@ -3556,6 +3556,61 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `vkGetBufferDeviceAddress` virtual-address-space design, and only
       after all of that, promoting the feature bits to `VK_TRUE`.
 
+77. **`H46`: landed call-site migration step 5 -- every remaining
+    Image-typed site from the 26-site audit now resolves through
+    `ResourceBindings::dataForRange()`.**
+    - New `Image::dataForRange(Offset, Size)` (`Image.h`) mirrors
+      `Buffer::dataForRange()`, both forwarding to the shared
+      `ResourceBindings::dataForRange()`.
+    - Migrated `Image.cpp`'s `texelPointer`/`blockPointer` (also
+      covering `ImageOps.cpp`'s image half, which routes through
+      them) from `data() + ByteOffset` to `dataForRange(ByteOffset,
+      Size)`, returning `nullptr` on an unbound-gap read instead of a
+      stale/garbage pointer. Added `ImageTest.cpp`'s
+      `TexelPointerReturnsNullForUnboundSparseGap`/
+      `BlockPointerReturnsNullForUnboundSparseGap`.
+    - Migrated `RenderPass.cpp`'s `resolveAttachmentView` to compute
+      `ByteOffset`/`Size` explicitly and call `Img.dataForRange(...)`,
+      surfacing a real `llvm::Error` on failure (the function already
+      returns `llvm::Expected`, and every call site already consumes
+      errors). Added `RenderPassTest.cpp`'s
+      `ResolveAttachmentViewFailsOnUnboundSparseGap`. A live
+      `dEQP-VK.pipeline.*.render_to_image.*` sweep (9,275 cases) found
+      0 Failed/3,735 Passed/5,540 NotSupported, matching baseline.
+    - Migrated `Swapchain.cpp`'s `vkQueuePresentKHR` from `Img->data()`
+      to `Img->dataForRange(0, Img->sizeInBytes())`, folding a null
+      result into the existing `VK_ERROR_SURFACE_LOST_KHR` path. No
+      new unit test: swapchain images cannot currently become
+      partially-bound (always internally allocated, fully bound at
+      creation), so there is no reachable path to exercise the null
+      branch yet.
+    - Migrated `CommandBuffer.cpp`'s `materializeImageDescriptor`
+      (the sampled-image descriptor prep, and the last of the 26-list
+      sites) from `Dst.Data = Img->data();` to
+      `Img->dataForRange(0, Img->sizeInBytes())` with an early
+      `return;` on null, matching the function's existing idiom of
+      silently producing no descriptor on any other invalid state.
+    - All 26 call sites from the classification pass (item 75) are
+      now migrated except `vkGetBufferDeviceAddress`, which remains
+      deliberately deferred to its own virtual-address-space design
+      (unchanged from item 76).
+    - `FeMeVulkanTests`: 864/864 Passed (up from 861). `check-feme`:
+      3679/3682 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+    - **Verified against CTS**: `dEQP-VK.texture.*` (25,669 cases,
+      9,808 Passed/2 Failed/15,859 NotSupported). The 2 failures
+      (`dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`)
+      were confirmed **pre-existing**, not a regression: rebuilt
+      `libfeme_vulkan.so` from the pre-step-5c/5d commit and re-ran
+      just those 2 cases in isolation -- both fail identically on the
+      pre-migration build (2/2 Failed there too).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- no feature bit or extension surface changed.
+      `Roadmap.md`'s `H46` row updated with this step's landing.
+      Remaining `H46` work: the per-tile `pImageBinds` model, the
+      `vkGetBufferDeviceAddress` virtual-address-space design, and
+      only after both of those, promoting the feature bits to
+      `VK_TRUE`.
+
 ## Complete group accounting
 
 
