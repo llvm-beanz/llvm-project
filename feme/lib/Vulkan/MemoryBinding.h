@@ -116,6 +116,40 @@ public:
 
   llvm::ArrayRef<MemoryRangeBinding> ranges() const { return Ranges; }
 
+  /// (Roadmap H46) Resolves a flat data pointer for resource-space
+  /// sub-range `[Offset, Offset + Size)` -- the range-aware
+  /// generalization of `data()` above. Succeeds only when a single bound
+  /// range in `Ranges` fully contains `[Offset, Offset + Size)` (today's
+  /// only reachable shape, since `bindWhole` always produces exactly one
+  /// range spanning the resource's entire size, and any in-bounds
+  /// sub-range of that is trivially contained within it). Returns
+  /// `nullptr` if no single bound range covers the whole sub-range --
+  /// e.g. it straddles two ranges, falls partly or fully in an unbound
+  /// (or null-memory, i.e. explicitly-unbound-per-spec) gap, or the
+  /// resource is unbound outright.
+  ///
+  /// This is the entry point every byte-range-shaped access (a buffer
+  /// copy/fill/update, a query-result write, etc.) should use in place of
+  /// `data() + Offset`, so a future genuinely-sparse resource fails
+  /// safely (a caller-visible error) rather than silently reading or
+  /// writing through the wrong base pointer once more than one range
+  /// exists. `Size == 0` always succeeds against the resource's current
+  /// single-range-or-unbound shape as long as `Offset` itself falls
+  /// within a bound range (or at its end), matching a zero-length
+  /// copy/fill/update being a legal no-op.
+  void *dataForRange(VkDeviceSize Offset, VkDeviceSize Size) const {
+    for (const MemoryRangeBinding &R : Ranges) {
+      if (!R.Memory)
+        continue;
+      if (Offset >= R.ResourceOffset &&
+          Offset + Size <= R.ResourceOffset + R.Size) {
+        return static_cast<uint8_t *>(R.Memory->data()) + R.MemoryOffset +
+               (Offset - R.ResourceOffset);
+      }
+    }
+    return nullptr;
+  }
+
 private:
   /// `SmallVector<..., 1>`: every instance today holds exactly 0 or 1
   /// ranges, so the common case needs no heap allocation at all; a real
