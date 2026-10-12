@@ -119194,3 +119194,35 @@ Done: 3 docs-only commits (2 roadmap-hygiene fixes, 1 H46 scoping-pass update) +
 2. **(~multi-session, real architecture work, now with a corrected scoping writeup to start from)** `H46`: implement the sparse-resources binding-range data model per this session's scoping findings (`Buffer.h`/`Image.h`/`Memory.h`, ~179 call sites to audit). Start with the new data structure and a zero-behavior-change migration of the always-fully-bound case, proven via unit tests, before touching feature bits or any of the 179 call sites' actual logic.
 3. **(~1-2 hours, standing, recommend doing a *real* pass not just a quick grep)** Keep doing roadmap hygiene passes periodically — this session's deeper read (checking each open row's own dependency chain, not just milestone-ID nesting) found real issues a shallower pass missed. Worth repeating with the same depth, not reverting to the lighter check.
 4. **(opportunistic, unchanged)** If a future session is in `Buffer.cpp`/`Image.cpp`/`Sync.cpp` for `H46` or any other reason, the new forward-pointer comment in `Sync.cpp`'s `vkQueueBindSparse` flags exactly what needs to change there once sparse resources become real.
+
+# Session: H46 step 1 landed — Buffer/Image now share a real ResourceBindings data model, zero behavior change
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed via `vulkaninfo --summary`, done twice (start, before CTS run).
+
+## What shipped (4 commits, in order)
+
+1. `MemoryBinding.h` + `MemoryBindingTest.cpp` — new standalone `MemoryRangeBinding`/`ResourceBindings` types, not wired into anything yet. 4/4 new tests pass.
+2. `Buffer.h` migrated onto `ResourceBindings` internally. `bind()`/`isBound()`/`data()` unchanged public API, now one-line forwarders.
+3. `Image.h` migrated the same way.
+4. Docs: `Roadmap.md` H46 row + `FeMeVulkanDesign.md` "Memory and Buffers" section updated. Separate commit for `VulkanCTSReport.md` item 74.
+
+## Why this was safe (verified, not assumed)
+
+- Grepped every `bind()`/`BoundMemory`/`BoundOffset` site across `Buffer.cpp`/`Image.cpp`/`Swapchain.cpp` first: exactly 3 call sites, all through the unchanged two-arg `bind()`, none touching the private fields directly. Confirms the migration is fully encapsulated.
+- `check-feme` run 3x this session (after each of the two migrations, plus once more for the final state): 3662/3665 Passed, 3 Unsupported, **0 Failed** each time. `FeMeVulkanTests` standalone: 847/847 pass.
+- Targeted CTS: `dEQP-VK.memory.*` ran to completion (6,364 cases, 0 Fail). `dEQP-VK.binding_model.*` partially run (64,898 cases before a 600s time budget, 0 Fail) — large family, didn't finish, but no regression signal in what did run.
+
+## What this is NOT
+
+Feature bits (`sparseBinding`/`sparseResidency*`) are still `VK_FALSE`. None of the ~179 `data()` call sites were touched — they don't need to be yet, since `bindWhole()` is still the only producer and only ever makes the same always-fully-bound-or-unbound shape the old raw pair made. This is scaffolding for the real sparse-binding logic, not sparse support itself.
+
+## Blend sweep (ranked item 1, carried over): still running, still healthy
+
+Checked twice this session. PID 4851, CPU time climbed 21:57 → 36:28 → 50:45 across checks. Progress: 8056 → 8075 → 8095 cases processed (of ~48,833 expected), **0 Fail** throughout. It's slow (confirmed again: ~20 cases per 15 CPU-minutes at this point), not stalled. Left running, not folded into `VulkanCTSReport.md` yet since it hasn't finished.
+
+## Next steps (ranked)
+
+1. **(~2-4 hours)** `H46` step 2: the real second producer. Add `ResourceBindings::bindRange()` (a sparse-style partial bind, additive rather than replacing), then make `vkQueueBindSparse` (`Sync.cpp`) actually process `pBufferBinds`/`pImageOpaqueBinds`/`pImageBinds` instead of ignoring them — currently correct by construction (no sparse resource can exist) but that forward-pointer comment in `Sync.cpp` says exactly what's needed once this lands. Do NOT flip feature bits to `VK_TRUE` yet — that's a separate, later step needing the ~179 call-site audit.
+2. **(~2-3 hours)** `H46` step 3: audit the ~179 `data()` call sites (grep in `lib/Vulkan/*.cpp`/`lib/Graphics/*.cpp`) to classify each as either "provably only runs on a fully-bound resource, safe as-is" or "needs to become range-aware." This classification pass itself doesn't need to change any code — it's the prerequisite for deciding which of the 179 sites step 4 actually touches.
+3. **(~5 minutes, whenever next picked up)** Check the blend sweep again: `ps aux | grep deqp-vk`, tally `/tmp/l411_blend_full_sweep.qpa`. Fold into `VulkanCTSReport.md` item 69 once it completes, then delete the `.qpa`/`.log` files.
+4. **(ongoing, standing)** Periodic roadmap hygiene pass — not done this session (focus was `H46` step 1 execution, not triage). Worth doing again soon per the standing cadence.
