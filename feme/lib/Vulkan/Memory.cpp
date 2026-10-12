@@ -10,11 +10,14 @@
 #include "Memory.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "VirtualAddressReservation.h"
 
 #include <cstdlib>
 
 #ifdef _WIN32
 #include <malloc.h>
+#else
+#include <sys/mman.h>
 #endif
 
 using namespace feme::vulkan;
@@ -41,6 +44,48 @@ void freeDeviceMemory(void *Ptr) {
 #endif
 }
 
+void *allocateShareableDeviceMemory(size_t Size, size_t Alignment,
+                                    intptr_t *OutFd) {
+  *OutFd = -1;
+#ifndef _WIN32
+  intptr_t Fd = createShareableMemoryFd(Size);
+  if (Fd >= 0) {
+    // `mmap`'s own return is always page-aligned, satisfying any
+    // `Alignment` this driver currently reports (see this function's own
+    // doc comment) without threading `Alignment` into the mapping call
+    // itself.
+    (void)Alignment;
+    void *Data = mmap(nullptr, Size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      static_cast<int>(Fd), 0);
+    if (Data != MAP_FAILED) {
+      *OutFd = Fd;
+      return Data;
+    }
+    closeShareableMemoryFd(Fd);
+  }
+  // Fall through to the plain-heap allocator on failure, same as the
+  // not-implemented-on-this-platform fallback below.
+#endif
+  return allocateDeviceMemory(Size, Alignment);
+}
+
+void freeShareableDeviceMemory(void *Data, size_t Size, intptr_t Fd) {
+  if (Fd < 0) {
+    freeDeviceMemory(Data);
+    return;
+  }
+#ifndef _WIN32
+  munmap(Data, Size);
+  closeShareableMemoryFd(Fd);
+#else
+  // Unreachable: `allocateShareableDeviceMemory` never returns a
+  // non-negative `Fd` on a platform where `createShareableMemoryFd` is
+  // not implemented.
+  (void)Data;
+  (void)Size;
+#endif
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
     const VkAllocationCallbacks *pAllocator, VkDeviceMemory *pMemory) {
@@ -53,16 +98,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     return VK_ERROR_INITIALIZATION_FAILED;
 
   size_t Alignment = Info.Properties.limits.minMemoryMapAlignment;
-  void *Data = allocateDeviceMemory(
-      static_cast<size_t>(pAllocateInfo->allocationSize), Alignment);
+  intptr_t Fd = -1;
+  void *Data = allocateShareableDeviceMemory(
+      static_cast<size_t>(pAllocateInfo->allocationSize), Alignment, &Fd);
   if (!Data)
     return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
   Allocator Alloc(pAllocator);
-  DeviceMemory *Obj = Alloc.create<DeviceMemory>(
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, Data, pAllocateInfo->allocationSize);
+  DeviceMemory *Obj =
+      Alloc.create<DeviceMemory>(VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, Data,
+                                 pAllocateInfo->allocationSize, Fd);
   if (!Obj) {
-    freeDeviceMemory(Data);
+    freeShareableDeviceMemory(
+        Data, static_cast<size_t>(pAllocateInfo->allocationSize), Fd);
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   }
   *pMemory = toHandle<VkDeviceMemory>(Obj);
@@ -74,7 +122,8 @@ VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
   if (!memory)
     return;
   DeviceMemory *Obj = fromHandle<DeviceMemory>(memory);
-  freeDeviceMemory(Obj->data());
+  freeShareableDeviceMemory(Obj->data(), static_cast<size_t>(Obj->size()),
+                            Obj->shareableFd());
   Allocator Alloc(pAllocator);
   Alloc.destroy(Obj);
 }
@@ -106,8 +155,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory2(
   // `vkBindBufferMemory2`'s (Buffer.cpp) "unwrap the info struct, call the
   // plain form" precedent.
   return feme::vulkan::vkMapMemory(device, pMemoryMapInfo->memory,
-                                   pMemoryMapInfo->offset,
-                                   pMemoryMapInfo->size,
+                                   pMemoryMapInfo->offset, pMemoryMapInfo->size,
                                    pMemoryMapInfo->flags, ppData);
 }
 
