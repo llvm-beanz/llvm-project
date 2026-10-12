@@ -882,15 +882,20 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
               !Src.View->buffer()->isBound())
             continue; // Kind::None (never written).
           Buffer *Buf = Src.View->buffer();
-          VkDeviceSize BufSize = Buf->size();
           VkDeviceSize Base = Src.View->offset();
-          if (Base > BufSize || Src.View->range() > BufSize - Base)
-            continue; // Overrun (should not happen: validated at view
-                      // creation), treated as never-written for safety.
+          VkDeviceSize ViewRange = Src.View->range();
+          // (H46) dataForRange() subsumes the old size/overrun check: it
+          // already fails (returns nullptr) for a sub-range the bound
+          // buffer doesn't fully cover, so an unexpectedly-partial future
+          // sparse binding is handled the same safe "never-written" way as
+          // today's (not-expected-in-practice) view-creation-time overrun.
+          void *Data = Buf->dataForRange(Base, ViewRange);
+          if (!Data)
+            continue; // Overrun, or not fully resident; never-written.
 
           feme::cpu::FemeDescriptor &Dst = Descriptors[J];
-          Dst.Data = static_cast<uint8_t *>(Buf->data()) + Base;
-          Dst.SizeInBytes = Src.View->range();
+          Dst.Data = Data;
+          Dst.SizeInBytes = ViewRange;
           Dst.Stride = formatElementSize(Src.View->format());
           Dst.Format = static_cast<uint32_t>(Src.View->format());
           Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Typed);
@@ -909,11 +914,15 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
           continue; // Overflow, or the dynamic offset alone overruns it.
         VkDeviceSize Range =
             Src.Range == VK_WHOLE_SIZE ? BufSize - Base : Src.Range;
-        if (Range > BufSize - Base)
-          continue; // Declared range overruns the buffer.
+        // (H46) dataForRange() re-checks Range <= BufSize - Base itself (and
+        // will additionally catch a not-fully-resident sub-range once
+        // sparse binding is real), so the old explicit check is subsumed.
+        void *Data = Src.Buf->dataForRange(Base, Range);
+        if (!Data)
+          continue; // Declared range overruns the buffer, or not resident.
 
         feme::cpu::FemeDescriptor &Dst = Descriptors[J];
-        Dst.Data = static_cast<uint8_t *>(Src.Buf->data()) + Base;
+        Dst.Data = Data;
         Dst.SizeInBytes = Range;
         Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Raw);
         // A uniform buffer's descriptor never carries the UAV flag (see
@@ -2461,6 +2470,16 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
                                "vertex binding %u's offset is out of range "
                                "of its buffer",
                                BindingDecl.Binding);
+    VkDeviceSize BoundLen = Buf.size() - Offset;
+    // (H46) dataForRange() covers the same "is this whole span resident"
+    // question as the old data()+Offset pointer math, but will also
+    // correctly fail a genuinely sparse, partially-resident future binding
+    // instead of silently reading past an unbound hole.
+    void *VBData = Buf.dataForRange(Offset, BoundLen);
+    if (!VBData)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex binding %u is not fully resident",
+                               BindingDecl.Binding);
 
     std::vector<feme::graphics::VertexAttribute> Attributes;
     for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes())
@@ -2472,9 +2491,8 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
     feme::graphics::VertexBufferBinding VB;
     VB.Binding = BindingDecl.Binding;
     VB.Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
-    VB.Data = llvm::ArrayRef<uint8_t>(static_cast<const uint8_t *>(Buf.data()) +
-                                          Offset,
-                                      static_cast<size_t>(Buf.size() - Offset));
+    VB.Data = llvm::ArrayRef<uint8_t>(static_cast<const uint8_t *>(VBData),
+                                      static_cast<size_t>(BoundLen));
     VB.Attributes = AttributeStorage.back();
     VB.PerInstance = BindingDecl.PerInstance;
     VB.Divisor = BindingDecl.Divisor;
@@ -2529,9 +2547,17 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
         return createStringError(inconvertibleErrorCode(),
                                  "the index buffer's bound offset/size range "
                                  "is out of range of its buffer");
+      // (H46) See the vertex-buffer-binding comment above: dataForRange()
+      // subsumes the explicit offset/size bounds check just above and will
+      // additionally reject a not-fully-resident future sparse binding.
+      void *IdxData = Gfx.IndexBuffer->dataForRange(Gfx.IndexBufferOffset,
+                                                     BoundSize);
+      if (!IdxData)
+        return createStringError(inconvertibleErrorCode(),
+                                 "the index buffer's bound range is not "
+                                 "fully resident");
       IndexBinding.Data = llvm::ArrayRef<uint8_t>(
-          static_cast<const uint8_t *>(Gfx.IndexBuffer->data()) +
-              Gfx.IndexBufferOffset,
+          static_cast<const uint8_t *>(IdxData),
           static_cast<size_t>(BoundSize));
     }
   }
@@ -2558,9 +2584,15 @@ Error runDraw(const GraphicsPipeline &Pipeline, GraphicsState &Gfx,
                               : Gfx.XfbBufferSizes[I];
       if (Offset + Size > Buf->size())
         Size = Buf->size() - Offset;
+      // (H46) dataForRange() replaces data()+Offset so a not-fully-resident
+      // future sparse binding is skipped (capture becomes a no-op for that
+      // buffer) the same safe way an out-of-range Offset/Size already is
+      // above, rather than reading/writing past an unbound hole.
+      void *XfbData = Buf->dataForRange(Offset, Size);
+      if (!XfbData)
+        continue;
       XfbCaptures[I].Data = llvm::MutableArrayRef<uint8_t>(
-          static_cast<uint8_t *>(Buf->data()) + Offset,
-          static_cast<size_t>(Size));
+          static_cast<uint8_t *>(XfbData), static_cast<size_t>(Size));
       XfbCaptures[I].CapturedBytes = &Gfx.XfbCapturedBytes[I];
     }
   }
