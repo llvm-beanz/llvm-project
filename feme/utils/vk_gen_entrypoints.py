@@ -7,8 +7,24 @@
 # itself rather than a checked-in list. It emits one X-macro invocation per
 # core Vulkan 1.0/1.1 command:
 #
-#   FEME_VK_COMMAND(name, dispatch_level)       -- not implemented
-#   FEME_VK_COMMAND_IMPL(name, dispatch_level)  -- implemented
+#   FEME_VK_COMMAND(name, dispatch_level, owning_extension)       -- not implemented
+#   FEME_VK_COMMAND_IMPL(name, dispatch_level, owning_extension)  -- implemented
+#
+# `owning_extension` is either `nullptr` (a core command, resolvable
+# regardless of which extensions a `VkDevice` enabled at `vkCreateDevice`
+# time) or a string literal naming the one `SUPPORTED_EXTENSIONS` entry that
+# is the *only* reason this command name exists at all (roadmap L236): a
+# name that `parse_commands` only ever reaches through the extension pass
+# below, never also through its own exact spelling in a core feature's
+# `<require>` block (e.g. `vkCmdPushDescriptorSetKHR` is alias-only and
+# reached only via `VK_KHR_push_descriptor`'s own `<require>`, while its
+# alias target `vkCmdPushDescriptorSet` is separately promoted to core in
+# 1.4 and so is never gated). `ProcAddr.cpp`'s `getDeviceProcAddr` uses this
+# to return null for a disabled extension's own command name even though
+# the underlying C++ symbol exists and is otherwise reachable, matching
+# `dEQP-VK.api.get_device_proc_addr.non_enabled`'s expectation that a
+# `VkDevice` created with zero enabled extensions resolves every
+# extension-owned command to null.
 #
 # `dispatch_level` is one of GLOBAL, INSTANCE, DEVICE, matching how the
 # Vulkan loader itself classifies a command (by its first parameter's
@@ -190,8 +206,15 @@ def resolve_dependent_features(name, features_by_name, resolved=None):
 
 
 def parse_commands(vk_xml_path, extra_extensions=()):
-    """Returns {command_name: dispatch_level} for every core 1.0/1.1 command,
-    resolving `alias` commands to their target's dispatch level.
+    """Returns (commands, owning_extension): `commands` maps
+    {command_name: dispatch_level} for every core 1.0-1.4 command plus every
+    `SUPPORTED_EXTENSIONS`/`extra_extensions` command, resolving `alias`
+    commands to their target's dispatch level; `owning_extension` maps
+    {command_name: extension_name} for exactly the subset of `commands`
+    whose only source is an extension's own `<require>` block (never also
+    the command's own exact name in a core feature's), i.e. a name that
+    would not exist in `commands` at all if every extension were disabled
+    (see this file's own header comment on `owning_extension`'s meaning).
 
     \\p extra_extensions names additional extensions to read commands from,
     beyond `SUPPORTED_EXTENSIONS` itself -- used for an extension this ICD
@@ -246,6 +269,7 @@ def parse_commands(vk_xml_path, extra_extensions=()):
     }
 
     commands = {}
+    owning_extension = {}
     for extension_name in SUPPORTED_EXTENSIONS + tuple(extra_extensions):
         extension = extensions_by_name.get(extension_name)
         if extension is None:
@@ -254,6 +278,8 @@ def parse_commands(vk_xml_path, extra_extensions=()):
             for command_ref in require.findall("command"):
                 name = command_ref.get("name")
                 commands[name] = dispatch_level(name)
+                owning_extension[name] = extension_name
+    core_names = set()
     for feature_name in core_feature_names:
         feature = features_by_name[feature_name]
         api = feature.get("api", "")
@@ -270,7 +296,16 @@ def parse_commands(vk_xml_path, extra_extensions=()):
             for command_ref in require.findall("command"):
                 name = command_ref.get("name")
                 commands[name] = dispatch_level(name)
-    return commands
+                core_names.add(name)
+    # A name reached through both passes is core (always resolvable): the
+    # extension pass above ran first only so a command exclusive to an
+    # `--extra-extension`/`SUPPORTED_EXTENSIONS` entry (never promoted to
+    # core at all) still ends up in `commands`; now that both passes are
+    # done, drop any such name from `owning_extension` so it is never
+    # gated.
+    for name in core_names:
+        owning_extension.pop(name, None)
+    return commands, owning_extension
 
 
 def read_implemented(paths):
@@ -313,7 +348,7 @@ def main():
     )
     args = parser.parse_args()
 
-    commands = parse_commands(args.vk_xml, args.extra_extensions)
+    commands, owning_extension = parse_commands(args.vk_xml, args.extra_extensions)
     implemented = read_implemented(args.implemented)
     unknown_implemented = implemented - set(commands)
     if unknown_implemented:
@@ -333,14 +368,16 @@ def main():
             'file"\n'
             "#endif\n"
             "#ifndef FEME_VK_COMMAND_IMPL\n"
-            "#define FEME_VK_COMMAND_IMPL(name, level) FEME_VK_COMMAND(name, "
-            "level)\n"
+            "#define FEME_VK_COMMAND_IMPL(name, level, owning_extension) "
+            "FEME_VK_COMMAND(name, level, owning_extension)\n"
             "#define FEME_VK_GEN_UNDEF_COMMAND_IMPL\n"
             "#endif\n"
         )
         for name in sorted(commands):
             macro = "FEME_VK_COMMAND_IMPL" if name in implemented else "FEME_VK_COMMAND"
-            out.write(f"{macro}({name}, {commands[name]})\n")
+            extension = owning_extension.get(name)
+            extension_arg = f'"{extension}"' if extension else "nullptr"
+            out.write(f"{macro}({name}, {commands[name]}, {extension_arg})\n")
         out.write(
             "#undef FEME_VK_COMMAND\n"
             "#ifdef FEME_VK_GEN_UNDEF_COMMAND_IMPL\n"

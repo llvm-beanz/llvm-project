@@ -5,6 +5,15 @@
 // features linked this way, and a `VK_VERSION_1_x` feature itself ends up
 // requiring no commands directly.
 //
+// (Roadmap L236) Every CHECK line's third argument is the command's
+// `owning_extension`: `nullptr` for a core command (including
+// `vkCmdPushDescriptorSet`, required directly by this fixture's
+// `VK_VERSION_1_1`), or the one `SUPPORTED_EXTENSIONS` entry that is the
+// only reason an extension-exclusive command/alias exists at all (e.g.
+// `vkCmdPushDescriptorSetKHR`, `vkCmdPushDescriptorSet`'s own alias,
+// required only by `VK_KHR_push_descriptor` here) -- see this file's own
+// doc comment on what distinguishes the two.
+//
 // RUN: %python %S/../../utils/vk_gen_entrypoints.py \
 // RUN:   %S/Inputs/vk-split-features.xml %t.inc \
 // RUN:   --implemented %S/Inputs/vk-split-features-implemented.txt
@@ -13,15 +22,15 @@
 // Global and instance commands come from `VK_BASE_VERSION_1_0`, reached only
 // by walking VK_VERSION_1_0 -> VK_GRAPHICS_VERSION_1_0 ->
 // VK_COMPUTE_VERSION_1_0 -> VK_BASE_VERSION_1_0.
-// CHECK-DAG: FEME_VK_COMMAND_IMPL(vkGlobalCmd, GLOBAL)
-// CHECK-DAG: FEME_VK_COMMAND(vkInstanceCmd, INSTANCE)
+// CHECK-DAG: FEME_VK_COMMAND_IMPL(vkGlobalCmd, GLOBAL, nullptr)
+// CHECK-DAG: FEME_VK_COMMAND(vkInstanceCmd, INSTANCE, nullptr)
 
 // vkDeviceCmd comes from VK_COMPUTE_VERSION_1_0.
-// CHECK-DAG: FEME_VK_COMMAND(vkDeviceCmd, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkDeviceCmd, DEVICE, nullptr)
 
 // vkAliasCmd, from VK_GRAPHICS_VERSION_1_0, aliases vkDeviceCmd and so must
 // resolve to the same (DEVICE) dispatch level.
-// CHECK-DAG: FEME_VK_COMMAND(vkAliasCmd, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkAliasCmd, DEVICE, nullptr)
 
 // A command of an extension `SUPPORTED_EXTENSIONS` lists is read out of
 // `<extensions>` even though no core feature requires it (V6's
@@ -31,19 +40,20 @@
 // H6f's `VK_EXT_mesh_shader`, roadmap H7u's `VK_KHR_push_descriptor`,
 // roadmap H10's `VK_KHR_surface`/`VK_EXT_headless_surface`/
 // `VK_KHR_swapchain`, roadmap H21b's `VK_EXT_transform_feedback`).
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdBeginRenderingKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdEndRenderingKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdSetCullModeEXT, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkGetRenderingAreaGranularityKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdSetLineStippleKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkMapMemory2KHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkUnmapMemory2KHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdDrawMeshTasksEXT, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdPushDescriptorSetKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkGetPhysicalDeviceSurfaceSupportKHR, INSTANCE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCreateHeadlessSurfaceEXT, INSTANCE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCreateSwapchainKHR, DEVICE)
-// CHECK-DAG: FEME_VK_COMMAND(vkCmdBindTransformFeedbackBuffersEXT, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdBeginRenderingKHR, DEVICE, "VK_KHR_dynamic_rendering")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdEndRenderingKHR, DEVICE, "VK_KHR_dynamic_rendering")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdSetCullModeEXT, DEVICE, "VK_EXT_extended_dynamic_state")
+// CHECK-DAG: FEME_VK_COMMAND(vkGetRenderingAreaGranularityKHR, DEVICE, "VK_KHR_maintenance5")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdSetLineStippleKHR, DEVICE, "VK_KHR_line_rasterization")
+// CHECK-DAG: FEME_VK_COMMAND(vkMapMemory2KHR, DEVICE, "VK_KHR_map_memory2")
+// CHECK-DAG: FEME_VK_COMMAND(vkUnmapMemory2KHR, DEVICE, "VK_KHR_map_memory2")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdDrawMeshTasksEXT, DEVICE, "VK_EXT_mesh_shader")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdPushDescriptorSet, DEVICE, nullptr)
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdPushDescriptorSetKHR, DEVICE, "VK_KHR_push_descriptor")
+// CHECK-DAG: FEME_VK_COMMAND(vkGetPhysicalDeviceSurfaceSupportKHR, INSTANCE, "VK_KHR_surface")
+// CHECK-DAG: FEME_VK_COMMAND(vkCreateHeadlessSurfaceEXT, INSTANCE, "VK_EXT_headless_surface")
+// CHECK-DAG: FEME_VK_COMMAND(vkCreateSwapchainKHR, DEVICE, "VK_KHR_swapchain")
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdBindTransformFeedbackBuffersEXT, DEVICE, "VK_EXT_transform_feedback")
 
 // vkExtCmd sits in a `<require depends="...">` block gated on an optional
 // extension `SUPPORTED_EXTENSIONS` does not list, so it must not appear at

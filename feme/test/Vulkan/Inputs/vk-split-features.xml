@@ -15,7 +15,13 @@
      `VK_EXT_headless_surface`, and `VK_KHR_swapchain`, plus roadmap H21b's
      `VK_EXT_transform_feedback`: the twelve extensions
      `SUPPORTED_EXTENSIONS` lists, whose commands must be read out of
-     `<extensions>` rather than out of any core feature. -->
+     `<extensions>` rather than out of any core feature. `vkCmdPushDescriptorSet`
+     is additionally required directly by `VK_VERSION_1_1` here (unlike real
+     vk.xml, where it is only 1.4-promoted, to keep this fixture's feature
+     list short) so `vkCmdPushDescriptorSetKHR`, its alias and required
+     only by `VK_KHR_push_descriptor`, covers roadmap L236's "core-promoted
+     name vs. extension-exclusive alias" distinction exactly like the real
+     pair does. -->
 <registry>
   <commands>
     <command>
@@ -76,9 +82,10 @@
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
     </command>
     <command>
-      <proto><type>void</type><name>vkCmdPushDescriptorSetKHR</name></proto>
+      <proto><type>void</type><name>vkCmdPushDescriptorSet</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
     </command>
+    <command name="vkCmdPushDescriptorSetKHR" alias="vkCmdPushDescriptorSet"/>
     <command>
       <proto><type>void</type><name>vkGetPhysicalDeviceSurfaceSupportKHR</name></proto>
       <param><type>VkPhysicalDevice</type><name>physicalDevice</name></param>
@@ -122,6 +129,9 @@
   </feature>
   <feature api="vulkan" name="VK_VERSION_1_1" number="1.1"
             depends="VK_VERSION_1_0">
+    <require>
+      <command name="vkCmdPushDescriptorSet"/>
+    </require>
   </feature>
   <extensions>
     <extension name="VK_KHR_dynamic_rendering" number="45" type="device"
