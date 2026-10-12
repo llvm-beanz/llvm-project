@@ -3363,6 +3363,44 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       `entry_points`-genuinely-unimplemented-functions saga `L412(e)`
       first filed.
 
+74. **`H46`: landed the first implementation step of the
+    sparse-resources binding-range data model -- a pure data-model
+    migration, not a feature-bit change.**
+    - New `feme/lib/Vulkan/MemoryBinding.h` defines
+      `MemoryRangeBinding` (one bound range: resource offset,
+      `DeviceMemory*`, memory offset, size) and `ResourceBindings` (a
+      `SmallVector<MemoryRangeBinding, 1>` wrapper exposing
+      `bindWhole()`/`isBound()`/`data()`/`ranges()`), replacing
+      `Buffer`/`Image`'s old raw `(DeviceMemory*, VkDeviceSize)` pair.
+      `bind()`/`isBound()`/`data()` keep their exact pre-existing
+      public signatures and behavior (one-line forwarders), so this is
+      zero-behavior-change scaffolding: feature bits
+      (`sparseBinding`/`sparseResidency*`) remain `VK_FALSE`, and none
+      of the ~179 `data()`-consuming call sites were touched, since
+      every one still only ever observes a fully-bound-or-unbound
+      resource (`bindWhole` is the model's only producer today).
+    - New `MemoryBindingTest.cpp` exercises `ResourceBindings` directly
+      against plain stack buffers wrapped in `DeviceMemory`, independent
+      of any `VkDevice`/`VkBuffer`/`VkImage` machinery.
+    - `check-feme`: 3662/3665 Passed, 3 Unsupported, 0 Failed, 0
+      regressions (unit-test count up by 4 for the new
+      `ResourceBindingsTest` cases; everything else unchanged).
+    - **Verified against CTS**: `dEQP-VK.memory.*` (6,364 cases) ran to
+      completion: 4,986 Pass, 1,378 NotSupported, 0 Fail -- unchanged
+      from before this migration. `dEQP-VK.binding_model.*` (a larger
+      family, 64,898 of its cases processed before a 600s sweep budget
+      was hit) also shows 0 Fail so far, consistent with no regression;
+      not run to full completion this pass since this is scaffolding
+      only, not a behavior change.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- no feature bit or extension surface changed.
+      `Roadmap.md`'s `H46` row and `FeMeVulkanDesign.md`'s "Memory and
+      Buffers" section updated to describe the new `ResourceBindings`
+      abstraction. Remaining `H46` work (a `vkQueueBindSparse`-driven
+      second producer, e.g. `bindRange`, plus promoting the feature
+      bits and auditing call sites that need to become range-aware) is
+      unchanged in scope and not attempted this pass.
+
 ## Complete group accounting
 
 
