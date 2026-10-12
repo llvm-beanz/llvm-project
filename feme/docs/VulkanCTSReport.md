@@ -3143,6 +3143,77 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       extension-surface change.
     - With this fix, `L411` is fully resolved -- the single oldest open
       item from the last several sessions' handoff lists is now closed.
+    - **Update (this session): the regression sweep continued running in
+      the background throughout this session's unrelated `L236` work.**
+      As of this item's own update, it has processed 7,795 of the full
+      `dEQP-VK.pipeline.{monolithic,pipeline_library,shader_object_*}.blend.*`
+      family's cases (3,862 Passed, 3,933 NotSupported, **still 0
+      Failed**), continuing to corroborate no regression; it is still
+      running and will be folded into this report's final tally once
+      complete, rather than blocking this session's own work on it.
+
+70. **`L236`: implemented per-device `EnabledExtensions` tracking so
+    `vkGetDeviceProcAddr` correctly gates extension-owned commands,
+    fixing `dEQP-VK.api.get_device_proc_addr.non_enabled` and closing
+    out `dEQP-VK.api.version_check.entry_points`'s remaining Fail.**
+    - This row's prior update (the `L412` continuation session) had
+      already fixed `entry_points`' missing-1.4-core-functions half;
+      this session closed the other half -- `vkGetDeviceProcAddr`
+      resolving an extension-specific command's function pointer
+      regardless of whether the device that actually enabled it (e.g.
+      `vkCmdPushDescriptorSetKHR` without `VK_KHR_push_descriptor`
+      enabled).
+    - `vk_gen_entrypoints.py`'s `parse_commands()` now tracks each
+      command's "owning extension" (`None` for a command reachable via
+      a core `<require>` block, even if it is *also* reachable via an
+      extension's `<require>` block as an alias -- e.g.
+      `vkCmdPushDescriptorSet` itself is core-promoted and therefore
+      never gated, while its `vkCmdPushDescriptorSetKHR` alias is
+      extension-exclusive and is gated). The generated `.inc`'s
+      `FEME_VK_COMMAND`/`FEME_VK_COMMAND_IMPL` macros gained a third
+      argument carrying this (`nullptr` or a quoted extension name).
+    - `Device` (`Objects.h`) gained a real `llvm::StringSet<>
+      EnabledExtensions` member and an `enableExtension(StringRef)`
+      mutator; `vkCreateDevice` (`EntryPoints.cpp`) now populates it
+      from `pCreateInfo->ppEnabledExtensionNames` (already validated
+      there against the physical device's supported-extension list,
+      just never previously recorded anywhere).
+    - `getDeviceProcAddr` (`ProcAddr.cpp`/`ProcAddr.h`) gained a new
+      optional `const llvm::StringSet<> *EnabledExtensions` parameter:
+      null (the default) applies no gating at all, preserving every
+      existing call site's and unit test's behavior unchanged; non-null
+      returns `nullptr` for an extension-owned command whose owning
+      extension is absent from the set, and always resolves a core
+      command regardless. `vkGetDeviceProcAddr` (`EntryPoints.cpp`) --
+      whose `device` parameter was previously completely unused --
+      now resolves it and passes its `EnabledExtensions` through,
+      falling back to the old ungated lookup only for a (spec-illegal)
+      null `device` handle.
+    - New unit tests: `ProcAddrTest.cpp`'s
+      `DeviceProcAddrGatesExtensionOwnedCommandOnEnabledSet`,
+      `DeviceProcAddrNeverGatesCoreCommands`,
+      `DeviceProcAddrNullEnabledExtensionsAppliesNoGating`; and an
+      end-to-end `EntryPointsTest.cpp` test,
+      `GetDeviceProcAddrGatesOnActuallyEnabledExtensions`, going through
+      a real `vkCreateDevice`/`vkGetDeviceProcAddr` pair both with and
+      without the extension enabled.
+    - `check-feme`: 3652/3655 Passed, 3 Unsupported, 0 Failed, 0
+      regressions.
+    - **Verified against CTS**: both
+      `dEQP-VK.api.get_device_proc_addr.non_enabled` and
+      `dEQP-VK.api.version_check.entry_points` now **Pass** (both were
+      Fail before this change). A broader `dEQP-VK.api.*` regression
+      sweep (all 141 `Fail` results mapped back to their exact
+      `CasePath` via a byte-offset/`bisect` script rather than rerun
+      individually) found every one is a pre-existing, unrelated
+      `copy_and_blit` blit-image case -- zero regressions from this
+      change.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- this is an internal dispatch-table correctness
+      fix (which commands a given device's `vkGetDeviceProcAddr`
+      exposes), not a change to which features/extensions FeMe reports
+      supporting.
+    - With this fix, `L236` is fully resolved.
 
 ## Complete group accounting
 
