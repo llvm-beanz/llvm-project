@@ -3227,6 +3227,54 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       supporting.
     - With this fix, `L236` is fully resolved.
 
+71. **`L236(a)`: implemented a `VkSamplerYcbcrConversion` create/destroy
+    stub, dropping `dEQP-VK.api.version_check.entry_points`'s Fail count
+    from 8 to 6.**
+    - This is the first of the three genuinely-unimplemented-function
+      families a prior handoff flagged under `L412(e)`'s "9 genuinely-
+      unimplemented functions" residual (which itself had already
+      dropped to 8 by the time this session started, after `L236`'s own
+      fix absorbed one of the original nine). The remaining 6
+      (sparse-residency queries, buffer-device-address queries) still
+      have no assigned roadmap item.
+    - `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion`
+      are core Vulkan 1.1 commands (their `KHR`-suffixed spellings are
+      aliases resolving to the same generated dispatch entry, per the
+      usual `vk_gen_entrypoints.py` alias mechanism) that must resolve
+      to a non-null function pointer via `vkGetDeviceProcAddr`
+      regardless of the `samplerYcbcrConversion` feature bit's value --
+      `entry_points` only checks that `vkGetDeviceProcAddr` resolves the
+      name, it never calls either function.
+    - New `SamplerYcbcrConversion` class (`Image.h`/`.cpp`), modeled on
+      `Sampler`'s own `Allocator`/`toHandle`/`fromHandle` pattern but
+      intentionally not `PendingExecutionRefCounted`: it stores only the
+      requested `VkFormat` and is never consulted by any sampling or
+      image-view code path (no multi-planar sampling exists anywhere in
+      this ICD, matching `K7`'s still-open roadmap decision to keep
+      `samplerYcbcrConversion` a truthful `VK_FALSE`), so it cannot be
+      bound to any in-flight GPU work and needs no deferred-destroy
+      guard. Both commands added to `ImplementedEntrypoints.txt`.
+    - New unit test: `ImageTest.cpp`'s
+      `CreateAndDestroySamplerYcbcrConversion` (create/destroy
+      round-trip, plus confirming `vkDestroySamplerYcbcrConversion`
+      accepts `VK_NULL_HANDLE` as a legal no-op per spec).
+    - `check-feme`: 3653/3656 Passed, 3 Unsupported, 0 Failed, 0
+      regressions (+1 net new test).
+    - **Verified against CTS**: `dEQP-VK.api.version_check.entry_points`
+      Fail count drops from 8 to 6; the `TestResults.qpa` failure-detail
+      list no longer mentions `vkCreateSamplerYcbcrConversion`/
+      `vkDestroySamplerYcbcrConversion` at all. The case itself remains
+      `Fail` overall (6 other genuinely-missing functions remain), which
+      is expected and not a regression.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- `samplerYcbcrConversion`'s feature bit is
+      unchanged (`VK_FALSE`); this is purely a `vkGetDeviceProcAddr`
+      dispatch-table completeness fix for two already-core-1.1 command
+      names, not a new capability.
+    - See `Roadmap.md`'s new `L236(a)` entry for the remaining
+      buffer-device-address/sparse-residency work this item does not
+      attempt.
+
 ## Complete group accounting
 
 
