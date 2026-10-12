@@ -746,7 +746,18 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
     return;
   }
 
-  Dst.Data = Img->data();
+  // (Roadmap H46) Resolved through the range-aware accessor, not
+  // `data()`, for the same "fail safe, not silently wrong" reason every
+  // other migrated site has: `isBound()` only guarantees the image has
+  // *some* bound range today (always the whole image, per `bindWhole`),
+  // not that `[0, sizeInBytes())` is a single contiguous one -- the same
+  // early-return-on-invalid-state idiom this function already uses for
+  // every other unsupported shape above applies here too, producing no
+  // descriptor rather than one pointing at an unbound gap.
+  void *Data = Img->dataForRange(0, Img->sizeInBytes());
+  if (!Data)
+    return;
+  Dst.Data = Data;
   Dst.SizeInBytes = Img->sizeInBytes();
   Dst.Format = static_cast<uint32_t>(View->format());
   if (Range.baseArrayLayer == 0) {
