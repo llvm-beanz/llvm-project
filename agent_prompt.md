@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: db99d377-bdef-4dd8-a2b5-787bcf66bc23
+model: gpt-5.6-sol
 ---
 # Initial Guidelines
 
@@ -60,28 +59,6 @@ file.
 
 # Request
 
-Can you please continue the work on the Vulkan FeMe ICD? A previous session
-suggested the next steps:
-
-1. **(2 min, first thing next session)** If GitHub write access ever becomes
-   available: re-open or comment on `KhronosGroup/Vulkan-Loader#2018` with this
-   session's `trampoline.c` analysis (the maintainer's rebuttal cites a lock
-   that the crashing code path never takes) — the fix is a one-line mutex
-   addition on the upstream side, not something this project can land.
-2. **(~2-4 hours)** Item 2 from the carried-forward list: the Image-typed
-   26-list call sites (`Swapchain.cpp`, `Image.cpp`
-   `texelPointer`/`blockPointer`, `ImageOps.cpp`, `RenderPass.cpp`,
-   `CommandBuffer.cpp`'s sampled-image prep) still need the sub-range-addressing
-   migration pass `H46`'s buffer-side work already did for linear buffers.
-3. **(~multi-session)** `pImageBinds` per-tile sparse-image-bind model — still
-   untouched, still needs its own design pass before any code.
-4. **(blocked on 2-3)** Only once those land: flip
-   `sparseBinding`/`sparseResidency*` to `VK_TRUE`.
-5. **(~1-2 hours, standing, now 4+ sessions overdue)** The roadmap hygiene pass
-   keeps getting bumped. I did a 2-minute grep this session (found nothing new
-   beyond the already-known, already-not-actionable `H124e(a)` nesting) but
-   that's not the deep pass that's actually due. Next session should actually
-   block out the 1-2 hours for it rather than defer again.
-6. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}`
-   `DiamondFlattener` assertion) — confirmed already fixed in a much earlier
-   commit; stop carrying this forward, it's done.
+This is a clean image. Can you please configure this volume for development work
+on FeMe, then update and build the Vulkan CTS, and perform a full re-triage of
+all the outstanding issues and update the roadmap accordingly.
