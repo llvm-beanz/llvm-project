@@ -3716,6 +3716,71 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       explicitly-deferred design track it already classified as
       out of scope for its own call-site migration).
 
+80. **`L416` phase 2: switched `Memory.cpp`'s `vkAllocateMemory`/
+    `vkFreeMemory` path onto a real `memfd_create`+`mmap`-backed
+    shareable allocator, in place of plain `posix_memalign`/
+    `_aligned_malloc`.**
+    - Added `allocateShareableDeviceMemory`/`freeShareableDeviceMemory`
+      to `Memory.h`/`Memory.cpp`, reusing phase 1's
+      `createShareableMemoryFd`/`closeShareableMemoryFd`
+      (`VirtualAddressReservation.h`) rather than re-implementing
+      `memfd_create` logic a second time. `DeviceMemory` gained a
+      `ShareableFd`/`shareableFd()` field, currently unread by anything
+      except this session's own new tests (future phases 3-4 will read
+      it).
+    - Scoped to `Memory.cpp`'s two application-visible entry points only
+      -- `Swapchain.cpp`'s own internal, never-application-bound backing
+      allocation deliberately stays on the original
+      `allocateDeviceMemory`/`freeDeviceMemory`, since a swapchain image
+      can never be sparse-bound per spec.
+    - Gracefully falls back to the original plain-heap allocator
+      (`shareableFd() == -1`) on any platform/failure where the shareable
+      path isn't available -- `_WIN32` is unaffected, matching phase 1's
+      own stub precedent.
+    - 4 new unit tests in `MemoryTest.cpp`: `vkAllocateMemory` produces a
+      valid `shareableFd()` on POSIX; a second, independent `mmap` of
+      that same fd observes writes made through `vkMapMemory`'s own
+      mapping (direct proof the backing memory is genuinely shareable,
+      not just a plain heap allocation with a fd attached); plus two
+      standalone tests of `allocateShareableDeviceMemory`/
+      `freeShareableDeviceMemory` exercised directly, independent of any
+      `VkDevice` machinery.
+    - `check-feme`: 3,702/3,705 Passed, 3 Unsupported, 0 Failed (+4 new
+      unit tests), 0 regressions vs. item 79's baseline.
+    - **Verified against CTS** (this phase touches every `vkAllocateMemory`
+      call in the driver, so the regression-sweep scope was deliberately
+      broad, not just memory-tagged tests): `dEQP-VK.memory.*` (4,986
+      Pass / 0 Fail / 1,378 NotSupported -- the `NotSupported` cases are
+      all `VK_EXT_zero_initialize_device_memory`, an unrelated,
+      unsupported extension); `dEQP-VK.api.object_management.*` (410
+      Pass / 0 Fail, excluding the `multithreaded_per_thread_resources.*`
+      family -- see below); `dEQP-VK.ssbo.*`+`dEQP-VK.ubo.*` full sweep
+      (8,929 Pass / 0 Fail / 16,536 NotSupported); `dEQP-VK.robustness.
+      buffer_access.*` (396 Pass / 0 Fail / 816 NotSupported) and
+      `dEQP-VK.robustness.robustness2.*` (0 Pass / 0 Fail / 82,600
+      NotSupported -- the `robustness2` extension itself is unsupported,
+      so this family is a no-op check, included anyway for completeness).
+      Zero `Fail` anywhere in this sweep.
+    - **Found and ruled out, not a regression**:
+      `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+      (`.device`, then `.device_group` when `.device` was excluded) SIGSEGVs
+      intermittently -- roughly 2 of 5 runs crashed in direct repeated
+      reruns. Reproduced the *identical* crash (same backtrace, a race
+      inside the Vulkan loader's/this driver's concurrent `vkCreateDevice`
+      path, well before any `vkAllocateMemory` call) after reverting this
+      session's change back to the original `allocateDeviceMemory`-only
+      allocator, confirming it is pre-existing and unrelated to
+      `DeviceMemory`'s backing allocator. Not fixed this session --
+      recorded here as a confirmed, reproducible stability finding for a
+      future dedicated triage session (likely related to, but a distinct
+      symptom from, the long-standing untriaged "46 pipeline SIGSEGV"
+      aggregate count from earlier sessions' stability-triage backlog
+      item).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- this is a purely internal allocator swap behind
+      the existing `VkDeviceMemory` handle, no new feature or extension
+      surface. `Roadmap.md`'s `L416` row documents phase 2's completion.
+
 ## Complete group accounting
 
 
