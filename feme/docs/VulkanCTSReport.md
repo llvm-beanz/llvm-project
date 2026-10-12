@@ -3072,6 +3072,78 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       session, unrelated to this fix) is now the single oldest open item
       from this session's handoff list.
 
+69. **`L411`: root-caused and fixed -- the real residual bug was a
+    missing `blendClampRange()` format case, not rasterization or
+    sub-region boundary misplacement.**
+    - A prior session's `--deqp-log-images=enable` + Python QPA/PNG diff
+      technique (the same one `L378(a)` used) was re-applied to one
+      failing case, this time inverting the QPA log's own per-image
+      linear contrast-stretch remapping (`p' = p*scale + bias`, used to
+      best contrast the actual float range for visualization) to
+      recover true float values instead of misreading raw 8-bit bytes
+      as direct fractions. This revealed the reference's expected
+      B-channel value was `1.4375` -- *above* `1.0`, legal for this
+      unsigned float format -- while FeMe produced `~0.998` (`~1.0`),
+      strongly suggesting an intermediate blend value was being wrongly
+      clamped to `[0, 1]`.
+    - Hand-tracing the actual blend math (decoding blend-state names via
+      `getBlendStateName`'s abbreviation table) confirmed: in the
+      2-quad-overlap sub-region (quads 2+3 only), quad2's `Add` blend
+      produces `0.5 + clearColorB(0.93) ~= 1.43`, and quad3's `Max`
+      blend must then pick `max(1.0, 1.43) = 1.43` -- but FeMe's `Max`
+      was effectively getting `max(1.0, ~1.0)`, implying `1.43` had been
+      clamped down to `1.0` before quad3 ever saw it. This exactly
+      explained the bug's own "2-quad-overlap only" shape: the 4-quad-
+      overlap sub-region's composited intermediate values stayed `<=1.0`
+      throughout, so the clamping bug was invisible there.
+    - Root cause: `blendClampRange()` (`Executor.cpp`) enumerates
+      floating-point formats that must *not* be clamped before
+      evaluating a blend equation, per the Vulkan spec's blend-clamping
+      rule (`[0, 1]` for `_UNORM`, `[-1, 1]` for `_SNORM`, no clamp for
+      float). `R11G11B10_FLOAT` (`B10G11R11_UFLOAT_PACK32`) was missing
+      from this list -- every *other* float format was already present
+      -- so it fell through to the `default: return
+      std::make_pair(0.0, 1.0)` UNORM-style clamp.
+    - **Fixed**: added `case cpu::ResourceFormat::R11G11B10_FLOAT:` to
+      the `std::nullopt` (no-clamp) branch, and rewrote the function's
+      doc comment to explain the bug and its `L411` provenance (it
+      previously referenced a stale `L125z` tag from an earlier,
+      unrelated fix to the same function).
+    - New regression test
+      (`ExecutorTest.BlendMaxOpSeesAnUnclampedFloatAttachmentValueAboveOne`)
+      reproduces the bug's own shape end-to-end: an `Add`-blended draw
+      stores `1.5` into an `R11G11B10_FLOAT` attachment (legal, since
+      this format has no `1.0` upper bound unlike `_UNORM`), then a
+      `Max`-blended draw with `Src=1.0` must see the whole unclamped
+      `1.5` as its `Dst` operand and produce `max(1.0, 1.5) = 1.5`, not
+      `max(1.0, 1.0) = 1.0`. To support building a pipeline/attachment
+      against a non-default format, `buildPipeline()`/`TriangleScene`
+      (test helpers used by 60+ existing tests) gained an additive,
+      default-valued `ColorFormat` parameter/member, preserving every
+      existing call site's behavior unchanged.
+    - `check-feme`: 3648/3651 Passed, 3 Unsupported, 0 Failed, 0
+      regressions.
+    - **Verified against CTS**: re-ran the same 788-case
+      `dEQP-VK.pipeline.*.blend.dual_source.*b10g11r11_ufloat_pack32*`
+      family -- **all 66 previously-failing cases now Pass** (591/788
+      Passed, **0/788 Failed**, 197/788 NotSupported, the NotSupported
+      count unchanged, all from `VK_EXT_shader_object` not being
+      supported).
+    - **Regression sweep**: `dEQP-VK.pipeline.*.blend.*` (this change
+      affects every blend-enabled draw to any floating-point attachment
+      format) was run but stopped for time after 20,300 cases (10,382
+      Passed, 9,918 NotSupported, **0 Failed**) -- the full family is
+      tens of thousands of cases and this build processes them at an
+      impractically slow per-case rate, but a 0-Fail result across this
+      large a sample is strong evidence of no regression. A future
+      session with more time budget should finish this sweep to full
+      completion for certainty.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- internal correctness fix only, no feature/
+      extension-surface change.
+    - With this fix, `L411` is fully resolved -- the single oldest open
+      item from the last several sessions' handoff lists is now closed.
+
 ## Complete group accounting
 
 
