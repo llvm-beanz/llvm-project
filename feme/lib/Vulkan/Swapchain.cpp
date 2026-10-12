@@ -276,8 +276,16 @@ vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR *pPresentInfo) {
       // with `VK_ERROR_INITIALIZATION_FAILED`.
       bool SwapRedBlue = Img->format() == feme::cpu::ResourceFormat::
                              R8G8B8A8_UNORM;
-      if (!presentToSurface(SC->surface(), Img->data(), Img->width(),
-                            Img->height(), SwapRedBlue))
+      // (Roadmap H46) Resolved through the range-aware accessor, not
+      // `data()`, for the same "fail safe rather than read through an
+      // unbound gap" reason every other migrated site has: a swapchain
+      // image is always this ICD's own single whole allocation today, but
+      // treating a not-fully-resident image the same way surface loss is
+      // already handled below costs nothing and keeps this site consistent
+      // with the rest of the 26-list once sparse images become real.
+      void *Pixels = Img->dataForRange(0, Img->sizeInBytes());
+      if (!Pixels || !presentToSurface(SC->surface(), Pixels, Img->width(),
+                                       Img->height(), SwapRedBlue))
         ThisResult = VK_ERROR_SURFACE_LOST_KHR;
     }
 
