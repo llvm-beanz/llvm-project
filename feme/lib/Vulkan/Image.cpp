@@ -159,7 +159,11 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
                         uint64_t(Y) * L.RowPitch + uint64_t(X) * TexelStride +
                         uint64_t(Sample) * formatElementSize(Format);
-  return static_cast<uint8_t *>(data()) + ByteOffset;
+  // (Roadmap H46) Resolve through the range-aware accessor, not
+  // `data() + ByteOffset`, so a future genuinely-sparse image's not-yet-
+  // resident texel reads/writes safely as null rather than through a
+  // wild/unbound pointer.
+  return dataForRange(ByteOffset, formatElementSize(Format));
 }
 
 void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
@@ -179,7 +183,9 @@ void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
                         uint64_t(BlockY) * L.RowPitch +
                         uint64_t(BlockX) * bytesPerBlock(Format);
-  return static_cast<uint8_t *>(data()) + ByteOffset;
+  // (Roadmap H46) See texelPointer's identical note: resolved through
+  // dataForRange, not data() + ByteOffset.
+  return dataForRange(ByteOffset, bytesPerBlock(Format));
 }
 
 VkImageLayout Image::layout(uint32_t MipLevel, uint32_t ArrayLayer) const {

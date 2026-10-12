@@ -240,6 +240,18 @@ public:
   /// The image's base data pointer, or null if unbound.
   void *data() const { return Bindings.data(); }
 
+  /// (Roadmap H46) The range-aware generalization of `data()`: resolves a
+  /// flat pointer for resource-space sub-range `[Offset, Offset + Size)`,
+  /// or `nullptr` if that sub-range is not fully covered by one bound
+  /// range -- see `ResourceBindings::dataForRange`'s own comment and
+  /// `Buffer::dataForRange`'s identical sibling. `texelPointer`/
+  /// `blockPointer` below are this accessor's only callers today, each
+  /// resolving one texel's/block's own already-computed byte range
+  /// through it in place of `data() + ByteOffset`.
+  void *dataForRange(VkDeviceSize Offset, VkDeviceSize Size) const {
+    return Bindings.dataForRange(Offset, Size);
+  }
+
   /// A pointer to sample \p Sample (0 for a single-sample image) of texel
   /// `(X, Y, Z)` of mip level \p MipLevel, array layer \p ArrayLayer (0 for
   /// a non-array, non-3D image). `Z` and `ArrayLayer` are never both
@@ -252,7 +264,10 @@ public:
   /// roadmap E16: an out-of-bounds coordinate must not fault, so this
   /// returns null instead of computing a wild pointer -- every caller here
   /// treats null as "read zero" or "discard the write" rather than
-  /// dereferencing it).
+  /// dereferencing it). (Roadmap H46) Also null if the one texel's own
+  /// byte range is not fully covered by a single bound range -- resolved
+  /// through `dataForRange`, not `data() + ByteOffset` (see that method's
+  /// own comment).
   void *texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                      uint32_t Y, uint32_t Z, uint32_t Sample = 0) const;
 
@@ -267,7 +282,9 @@ public:
   /// supports a block-compressed image at all). Null if the image is
   /// unbound, or (see `texelPointer`'s comment, roadmap E16) if \p MipLevel
   /// or `(BlockX, BlockY)`/`ArrayLayer`/`Z` falls outside the mip level's
-  /// own block grid.
+  /// own block grid. (Roadmap H46) Also null if the one block's own byte
+  /// range is not fully covered by a single bound range -- see
+  /// `texelPointer`'s identical `dataForRange` note.
   void *blockPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t BlockX,
                      uint32_t BlockY, uint32_t Z) const;
 

@@ -274,6 +274,83 @@ TEST_F(ImageTest, BlockPointerReturnsNullOutOfBounds) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+/// (Roadmap H46) `texelPointer` resolves through `dataForRange`, not
+/// `data() + ByteOffset` -- exercised directly against `bindSparseRange`
+/// (what `vkQueueBindSparse` would call for a currently-unreachable sparse
+/// image, same precedent as `BufferTest`'s
+/// `BindSparseRangeAccumulatesWithoutDisturbingData`) since no live image
+/// here can actually have more than one bound range otherwise. A 4x4
+/// `R8G8B8A8_UNORM` image is 64 bytes (16 texels x 4 bytes); binding only
+/// its first row (16 bytes) leaves the rest of the image in an unbound
+/// gap -- texel (0, 0)'s own 4 bytes are fully covered, but a texel in
+/// row 1 falls entirely in that unbound remainder and must return null,
+/// the same "not fully resident" rule `TexelPointerReturnsNullOutOfBounds`
+/// above already exercises for an out-of-declared-extent coordinate.
+TEST_F(ImageTest, TexelPointerReturnsNullForUnboundSparseGap) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  auto *Obj = fromHandle<Image>(Img);
+  ASSERT_EQ(Obj->sizeInBytes(), 64u);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+           VK_SUCCESS);
+
+  // Bind only the first row (16 bytes) directly via `bindSparseRange`,
+  // bypassing `vkBindImageMemory`'s whole-image `bindWhole` -- texel (0,
+  // 0) (bytes [0, 4)) is fully covered, but a texel in row 1 (byte 16
+  // onward) falls in the still-unbound remainder of the image.
+  Obj->bindSparseRange(0, fromHandle<DeviceMemory>(Memory), 0, 16);
+  EXPECT_TRUE(Obj->isBound());
+
+  EXPECT_NE(Obj->texelPointer(0, 0, 0, 0, 0), nullptr);
+  EXPECT_NE(Obj->texelPointer(0, 0, 3, 0, 0), nullptr);
+  EXPECT_EQ(Obj->texelPointer(0, 0, 0, 1, 0), nullptr);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// The block-grid peer of `TexelPointerReturnsNullForUnboundSparseGap`:
+/// `blockPointer` resolves through `dataForRange` too. A 4x4 ASTC_4x4
+/// image is exactly one 16-byte block; `bindSparseRange` with
+/// `Memory == nullptr` (the spec-legal "unbind this range" shape --
+/// `MemoryBinding.h`'s own `bindRange` comment) leaves the image's one
+/// block with no real backing memory at all, exercising the same
+/// null-on-gap path `blockPointer`'s own `dataForRange` call now takes.
+TEST_F(ImageTest, BlockPointerReturnsNullForUnboundSparseGap) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  auto *Obj = fromHandle<Image>(Img);
+  ASSERT_EQ(Obj->sizeInBytes(), 16u);
+
+  Obj->bindSparseRange(0, nullptr, 0, 16);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 0, 0, 0), nullptr);
+
+  vkDestroyImage(Device, Img, nullptr);
+}
+
 /// Roadmap E20: `computeSubresourceLayouts`' block-based rework, exercised
 /// both through the info-only `vkGetDeviceImageMemoryRequirements` path
 /// (matching `GetDeviceImageMemoryRequirementsMatchesLiveImage`'s own
