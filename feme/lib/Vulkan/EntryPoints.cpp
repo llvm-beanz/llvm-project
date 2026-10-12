@@ -3076,6 +3076,14 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
 
+  // (Roadmap L236) Recorded only after the per-name support check above
+  // already passed, so this set never contains a name this driver does
+  // not genuinely implement; `vkGetDeviceProcAddr` consults it to gate an
+  // extension-owned command on its one owning extension actually being
+  // enabled here.
+  for (uint32_t I = 0; I != pCreateInfo->enabledExtensionCount; ++I)
+    Obj->enableExtension(pCreateInfo->ppEnabledExtensionNames[I]);
+
   for (uint32_t I = 0; I < pCreateInfo->queueCreateInfoCount; ++I) {
     const VkDeviceQueueCreateInfo &QueueInfo =
         pCreateInfo->pQueueCreateInfos[I];
@@ -3139,8 +3147,15 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkDeviceWaitIdle(VkDevice device) {
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-feme::vulkan::vkGetDeviceProcAddr(VkDevice, const char *pName) {
-  return getDeviceProcAddr(pName);
+feme::vulkan::vkGetDeviceProcAddr(VkDevice device, const char *pName) {
+  // (Roadmap L236) A null `device` (not expected from a real loader/app,
+  // but this parameter was previously entirely unused, so nothing here may
+  // assume non-null) falls back to the original, ungated lookup rather than
+  // crashing.
+  if (!device)
+    return getDeviceProcAddr(pName);
+  return getDeviceProcAddr(pName,
+                           &fromHandle<Device>(device)->getEnabledExtensions());
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL

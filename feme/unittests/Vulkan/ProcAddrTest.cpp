@@ -10,6 +10,8 @@
 #include "ProcAddr.h"
 #include "EntryPoints.h"
 
+#include "llvm/ADT/StringSet.h"
+
 #include "gtest/gtest.h"
 
 using namespace feme::vulkan;
@@ -119,6 +121,46 @@ TEST(ProcAddr, PhysicalDeviceProcAddrHasNoUnknownExtensionCommand) {
   EXPECT_EQ(getPhysicalDeviceProcAddr(dummyInstance(),
                                       "vkGetPhysicalDeviceProperties"),
             nullptr);
+}
+
+// Roadmap L236: `getDeviceProcAddr`'s optional `EnabledExtensions` gating.
+TEST(ProcAddr, DeviceProcAddrGatesExtensionOwnedCommandOnEnabledSet) {
+  llvm::StringSet<> Empty;
+  // `vkCmdPushDescriptorSetKHR` exists only because `VK_KHR_push_descriptor`
+  // does (its alias target `vkCmdPushDescriptorSet` is the core-promoted
+  // name) -- with that extension not in the enabled set, it must not
+  // resolve, matching `dEQP-VK.api.get_device_proc_addr.non_enabled`'s
+  // expectation for a device created with zero enabled extensions.
+  EXPECT_EQ(getDeviceProcAddr("vkCmdPushDescriptorSetKHR", &Empty), nullptr);
+
+  llvm::StringSet<> WithPushDescriptor;
+  WithPushDescriptor.insert("VK_KHR_push_descriptor");
+  EXPECT_NE(getDeviceProcAddr("vkCmdPushDescriptorSetKHR", &WithPushDescriptor),
+            nullptr);
+
+  // Unaffected by a disjoint enabled set: still gated on its own owning
+  // extension only.
+  EXPECT_EQ(getDeviceProcAddr("vkCmdPushDescriptorSetKHR", &WithPushDescriptor),
+            getDeviceProcAddr("vkCmdPushDescriptorSetKHR", &WithPushDescriptor));
+}
+
+TEST(ProcAddr, DeviceProcAddrNeverGatesCoreCommands) {
+  llvm::StringSet<> Empty;
+  // A core command (no owning extension) must resolve regardless of the
+  // enabled set, including when the set is empty.
+  EXPECT_NE(getDeviceProcAddr("vkGetDeviceQueue", &Empty), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkDestroyDevice", &Empty), nullptr);
+  // `vkCmdPushDescriptorSet` (the core-promoted name, as opposed to its
+  // `KHR`-suffixed alias above) must also stay ungated.
+  EXPECT_NE(getDeviceProcAddr("vkCmdPushDescriptorSet", &Empty), nullptr);
+}
+
+TEST(ProcAddr, DeviceProcAddrNullEnabledExtensionsAppliesNoGating) {
+  // A null `EnabledExtensions` (the default, and every other test's own
+  // single-argument calls above) must preserve this function's original,
+  // ungated behavior even for an extension-owned command.
+  EXPECT_NE(getDeviceProcAddr("vkCmdPushDescriptorSetKHR"), nullptr);
+  EXPECT_NE(getDeviceProcAddr("vkCmdPushDescriptorSetKHR", nullptr), nullptr);
 }
 
 } // namespace

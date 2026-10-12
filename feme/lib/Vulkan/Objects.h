@@ -23,6 +23,8 @@
 #include "PipelineCache.h"
 #include "Sync.h"
 
+#include "llvm/ADT/StringSet.h"
+
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -140,6 +142,23 @@ public:
   /// `vkQueueWaitIdle`/`vkDeviceWaitIdle`/`vkWaitForFences`).
   bool isLost() const { return Lost.load(std::memory_order_relaxed); }
 
+  /// (Roadmap L236) Records \p Name (e.g. `"VK_KHR_push_descriptor"`) as
+  /// enabled for this device, called once per
+  /// `pCreateInfo->ppEnabledExtensionNames` entry by `vkCreateDevice` after
+  /// it has already validated the name against
+  /// `getSupportedDeviceExtensions()`.
+  void enableExtension(llvm::StringRef Name) { EnabledExtensions.insert(Name); }
+
+  /// The set of extension names this device actually enabled at
+  /// `vkCreateDevice` time -- consulted by `vkGetDeviceProcAddr`
+  /// (`EntryPoints.cpp`) so an extension-owned command (see
+  /// `ProcAddr.h`'s `getDeviceProcAddr`) resolves to null for a device that
+  /// never enabled its one owning extension, matching
+  /// `dEQP-VK.api.get_device_proc_addr.non_enabled`'s expectation.
+  const llvm::StringSet<> &getEnabledExtensions() const {
+    return EnabledExtensions;
+  }
+
 private:
   /// How many artifacts the implicit cache retains per table before
   /// evicting; see `PipelineCache`'s constructor. Sized far above any
@@ -153,6 +172,8 @@ private:
   PipelineCache ImplicitCache{/*InitialKeys=*/{},
                               /*ExternallySynchronized=*/false,
                               ImplicitPipelineCacheMaxEntries};
+  // (Roadmap L236) See `enableExtension`/`getEnabledExtensions` above.
+  llvm::StringSet<> EnabledExtensions;
   // Declared last: destroyed first, so every `QueueExecutor`'s worker
   // thread (which may still be running a task that touches `Lost`/
   // `ImplicitCache` above) is always stopped and joined before those

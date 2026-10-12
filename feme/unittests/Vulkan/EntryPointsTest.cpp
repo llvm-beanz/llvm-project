@@ -803,4 +803,46 @@ TEST_F(EntryPointsTest, CreateDeviceAcceptsOnlySupportedVulkan11Features) {
   vkDestroyDevice(Device, nullptr);
 }
 
+/// Roadmap L236: a device created with zero enabled extensions must
+/// resolve an extension-owned command (one whose only reason for
+/// existing is a single `SUPPORTED_EXTENSIONS` entry -- see
+/// `vk_gen_entrypoints.py`'s `owning_extension`) to null through
+/// `vkGetDeviceProcAddr`, matching
+/// `dEQP-VK.api.get_device_proc_addr.non_enabled`'s expectation; a core
+/// command must still resolve regardless. This is the end-to-end
+/// `vkCreateDevice`-through-`vkGetDeviceProcAddr` path `ProcAddrTest.cpp`'s
+/// own `getDeviceProcAddr`-level tests cannot exercise, since they call
+/// the lower-level helper directly rather than through a real `VkDevice`.
+TEST_F(EntryPointsTest, GetDeviceProcAddrGatesOnActuallyEnabledExtensions) {
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 0;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.queueCreateInfoCount = 1;
+  DevInfo.pQueueCreateInfos = &QueueInfo;
+  VkDevice Device = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+  EXPECT_EQ(vkGetDeviceProcAddr(Device, "vkCmdPushDescriptorSetKHR"), nullptr);
+  EXPECT_NE(vkGetDeviceProcAddr(Device, "vkCmdPushDescriptorSet"), nullptr);
+  EXPECT_NE(vkGetDeviceProcAddr(Device, "vkGetDeviceQueue"), nullptr);
+
+  vkDestroyDevice(Device, nullptr);
+
+  const char *ExtensionName = "VK_KHR_push_descriptor";
+  VkDeviceCreateInfo DevInfoWithExt{};
+  DevInfoWithExt.queueCreateInfoCount = 1;
+  DevInfoWithExt.pQueueCreateInfos = &QueueInfo;
+  DevInfoWithExt.enabledExtensionCount = 1;
+  DevInfoWithExt.ppEnabledExtensionNames = &ExtensionName;
+  VkDevice DeviceWithExt = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &DevInfoWithExt, nullptr, &DeviceWithExt),
+            VK_SUCCESS);
+  EXPECT_NE(vkGetDeviceProcAddr(DeviceWithExt, "vkCmdPushDescriptorSetKHR"),
+            nullptr);
+  vkDestroyDevice(DeviceWithExt, nullptr);
+}
+
 } // namespace

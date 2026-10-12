@@ -16,6 +16,8 @@
 #ifndef FEME_LIB_VULKAN_PROCADDR_H
 #define FEME_LIB_VULKAN_PROCADDR_H
 
+#include "llvm/ADT/StringSet.h"
+
 #include <vulkan/vulkan_core.h>
 
 namespace feme::vulkan {
@@ -39,7 +41,22 @@ PFN_vkVoidFunction getPhysicalDeviceProcAddr(VkInstance instance,
 /// Resolves \p pName for `vkGetDeviceProcAddr`: only device-dispatched
 /// commands resolve, matching the Vulkan specification's requirement that
 /// `vkGetDeviceProcAddr` not be used to query instance-level functions.
-PFN_vkVoidFunction getDeviceProcAddr(const char *pName);
+///
+/// (Roadmap L236) \p EnabledExtensions, when non-null, additionally gates a
+/// command whose only reason for existing is a single extension (per
+/// `vk_gen_entrypoints.py`'s own `owning_extension` -- e.g.
+/// `vkCmdPushDescriptorSetKHR`, which exists only because
+/// `VK_KHR_push_descriptor` does) on that extension's name being present in
+/// the set: a `VkDevice` that never enabled the extension must not resolve
+/// its command, matching `dEQP-VK.api.get_device_proc_addr.non_enabled`'s
+/// expectation. A core command (no owning extension) always resolves
+/// regardless of \p EnabledExtensions. A null \p EnabledExtensions applies
+/// no such gating at all, preserving this function's original, ungated
+/// behavior for callers (chiefly unit tests) that only care whether the
+/// dispatch table carries a real symbol for a name at all, independent of
+/// any particular device's enabled-extension set.
+PFN_vkVoidFunction getDeviceProcAddr(
+    const char *pName, const llvm::StringSet<> *EnabledExtensions = nullptr);
 
 } // namespace feme::vulkan
 
