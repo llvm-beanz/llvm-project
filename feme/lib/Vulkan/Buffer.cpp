@@ -175,10 +175,21 @@ vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
 // "Memory and Buffers"'s own H46 note in FeMeVulkanDesign.md for why this
 // needs a dedicated virtual-address-space design, not a mechanical
 // call-site migration, and is explicitly deferred.
+//
+// (Roadmap L416, phase 3) Prefers `virtualAddressBase()` over `data()`
+// whenever the buffer has a `VirtualAddressReservation` -- its base stays
+// valid (and faults safely on an unbound sub-range) across any later
+// `vkQueueBindSparse` rebind, which `data()`'s single flat pointer cannot
+// represent. No live buffer has one today (`reserveVirtualAddressSpace`'s
+// own comment, Buffer.h), so this is unreachable via the real API and
+// `data()` remains the answer for every buffer that exists now -- see
+// "Memory and Buffers" in `FeMeVulkanDesign.md` for the full phased plan.
 VKAPI_ATTR VkDeviceAddress VKAPI_CALL
 vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo *pInfo) {
-  return reinterpret_cast<VkDeviceAddress>(
-      fromHandle<Buffer>(pInfo->buffer)->data());
+  Buffer *Buf = fromHandle<Buffer>(pInfo->buffer);
+  if (Buf->hasVirtualAddressReservation())
+    return reinterpret_cast<VkDeviceAddress>(Buf->virtualAddressBase());
+  return reinterpret_cast<VkDeviceAddress>(Buf->data());
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL

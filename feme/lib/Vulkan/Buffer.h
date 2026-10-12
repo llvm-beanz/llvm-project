@@ -22,6 +22,7 @@
 #include "Format.h"
 #include "Memory.h"
 #include "MemoryBinding.h"
+#include "VirtualAddressReservation.h"
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -57,9 +58,34 @@ public:
   /// avoid; this ICD does not re-validate it).
   void bind(DeviceMemory *Memory, VkDeviceSize Offset) {
     Bindings.bindWhole(Memory, Offset, Size);
+    if (VAReservation.isReserved() && Memory && Memory->shareableFd() >= 0)
+      VAReservation.mapRange(0, Size, Memory->shareableFd(), Offset);
   }
 
   bool isBound() const { return Bindings.isBound(); }
+
+  /// (Roadmap L416, phase 3) Reserves `size()` bytes of virtual address
+  /// space for this buffer -- see "Memory and Buffers" in
+  /// `FeMeVulkanDesign.md` for the full design. No live `VkBuffer` calls
+  /// this today (`isValidBufferCreateInfo`, Buffer.cpp, still rejects any
+  /// nonzero `VkBufferCreateInfo::flags`, so `VK_BUFFER_CREATE_SPARSE_
+  /// BINDING_BIT` can never reach a real `Buffer`), matching
+  /// `bindSparseRange`'s own "exists for internals/tests to call
+  /// honestly" precedent. Returns false on failure (e.g. platform support,
+  /// `VirtualAddressReservation::reserve`'s own doc comment).
+  bool reserveVirtualAddressSpace() { return VAReservation.reserve(Size); }
+
+  /// True once `reserveVirtualAddressSpace` has succeeded.
+  bool hasVirtualAddressReservation() const {
+    return VAReservation.isReserved();
+  }
+
+  /// The reservation's base address, stable across any later `bind`/
+  /// `bindSparseRange` call -- see `vkGetBufferDeviceAddress`'s own
+  /// comment (Buffer.cpp) for why this, not `data()`, is the address a
+  /// future genuinely-sparse buffer must hand to the application.
+  /// Null if `hasVirtualAddressReservation()` is false.
+  void *virtualAddressBase() const { return VAReservation.base(); }
 
   /// (Roadmap H46) Records one `VkSparseMemoryBind` from
   /// `vkQueueBindSparse`'s `pBufferBinds`: binds resource-space
@@ -75,6 +101,23 @@ public:
   void bindSparseRange(VkDeviceSize ResourceOffset, DeviceMemory *Memory,
                        VkDeviceSize MemoryOffset, VkDeviceSize Size) {
     Bindings.bindRange(ResourceOffset, Memory, MemoryOffset, Size);
+    // (Roadmap L416, phase 3) Mirror the same range into the virtual
+    // address reservation, if one exists, so a device address obtained
+    // via `virtualAddressBase()` stays valid (and faults safely on an
+    // unbound gap) across a later rebind -- see this header's own
+    // `reserveVirtualAddressSpace` comment for why no live buffer can
+    // reach this yet. A `Memory == nullptr` bind is spec's own explicit
+    // "unbind this range" (`ResourceBindings::bindRange`'s own comment);
+    // a real bind with no shareable fd (e.g. a non-`memfd`-backed
+    // fallback allocation) cannot be remapped into the reservation at
+    // all, so it is left unmapped rather than silently misrepresented.
+    if (VAReservation.isReserved()) {
+      if (!Memory)
+        VAReservation.unmapRange(ResourceOffset, Size);
+      else if (Memory->shareableFd() >= 0)
+        VAReservation.mapRange(ResourceOffset, Size, Memory->shareableFd(),
+                               MemoryOffset);
+    }
   }
 
   /// The buffer's full set of bound ranges -- see `ResourceBindings::
@@ -106,6 +149,10 @@ private:
   /// see MemoryBinding.h's file comment for why this is only ever empty
   /// or a single whole-buffer range today.
   ResourceBindings Bindings;
+  /// (Roadmap L416, phase 3) Unreserved (`isReserved() == false`) for
+  /// every live buffer today -- see `reserveVirtualAddressSpace`'s own
+  /// comment above.
+  VirtualAddressReservation VAReservation;
 };
 
 /// A `VkBufferView`: a typed window into a `VkBuffer`, consumed only by a

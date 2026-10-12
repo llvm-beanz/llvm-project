@@ -146,6 +146,104 @@ TEST_F(BufferTest, BindSparseRangeAccumulatesWithoutDisturbingData) {
   vkFreeMemory(Device, SecondMemory, nullptr);
 }
 
+// (Roadmap L416, phase 3) `reserveVirtualAddressSpace`/`virtualAddressBase`
+// are only reachable by calling directly on the `Buffer` object (bypassing
+// `vkCreateBuffer`'s own `isValidBufferCreateInfo` rejection of any
+// `VkBufferCreateInfo::flags`), exactly like `BindSparseRangeAccumulates
+// WithoutDisturbingData` above already does for `bindSparseRange` -- see
+// `reserveVirtualAddressSpace`'s own comment (Buffer.h) for why no live
+// buffer can reach this yet.
+TEST_F(BufferTest, VirtualAddressReservationTracksBoundMemoryContent) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 64;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  Buffer *BufObj = fromHandle<Buffer>(Buf);
+  ASSERT_TRUE(BufObj->reserveVirtualAddressSpace());
+  ASSERT_TRUE(BufObj->hasVirtualAddressReservation());
+  ASSERT_NE(BufObj->virtualAddressBase(), nullptr);
+
+  VkMemoryRequirements Reqs{};
+  vkGetBufferMemoryRequirements(Device, Buf, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Buf, Memory, 0), VK_SUCCESS);
+
+  if (fromHandle<DeviceMemory>(Memory)->shareableFd() >= 0) {
+    // A write through the ordinary bound-memory pointer must be visible
+    // through the reservation's own base too: both are mappings of the
+    // same underlying shareable pages (`VirtualAddressReservation::
+    // mapRange`'s own doc comment).
+    static_cast<uint8_t *>(BufObj->data())[0] = 0x42;
+    EXPECT_EQ(static_cast<uint8_t *>(BufObj->virtualAddressBase())[0], 0x42);
+
+    // `vkGetBufferDeviceAddress` must prefer the reservation's base over
+    // `data()` once one exists (`vkGetBufferDeviceAddress`'s own comment,
+    // Buffer.cpp).
+    VkBufferDeviceAddressInfo AddrInfo{};
+    AddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    AddrInfo.buffer = Buf;
+    VkDeviceAddress Addr = vkGetBufferDeviceAddress(Device, &AddrInfo);
+    EXPECT_EQ(reinterpret_cast<void *>(Addr), BufObj->virtualAddressBase());
+    EXPECT_NE(reinterpret_cast<void *>(Addr), BufObj->data());
+  }
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+TEST_F(BufferTest, VirtualAddressReservationTracksSparseRangeRebind) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 128;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  Buffer *BufObj = fromHandle<Buffer>(Buf);
+  ASSERT_TRUE(BufObj->reserveVirtualAddressSpace());
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory FirstMemory = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &FirstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SecondMemory),
+            VK_SUCCESS);
+
+  if (fromHandle<DeviceMemory>(FirstMemory)->shareableFd() >= 0 &&
+      fromHandle<DeviceMemory>(SecondMemory)->shareableFd() >= 0) {
+    static_cast<uint8_t *>(fromHandle<DeviceMemory>(FirstMemory)->data())[0] =
+        0x11;
+    static_cast<uint8_t *>(fromHandle<DeviceMemory>(SecondMemory)->data())[0] =
+        0x22;
+
+    BufObj->bindSparseRange(0, fromHandle<DeviceMemory>(FirstMemory), 0, 64);
+    EXPECT_EQ(static_cast<uint8_t *>(BufObj->virtualAddressBase())[0], 0x11);
+
+    // Rebinding the same resource-space range to different backing memory
+    // must be reflected at the *same* reservation address -- the whole
+    // point of a stable virtual-address reservation (this header's own
+    // file comment, `VirtualAddressReservation.h`).
+    BufObj->bindSparseRange(0, fromHandle<DeviceMemory>(SecondMemory), 0, 64);
+    EXPECT_EQ(static_cast<uint8_t *>(BufObj->virtualAddressBase())[0], 0x22);
+
+    // An explicit unbind (`Memory == nullptr`) must restore the no-access
+    // gap, not leave the prior mapping's content silently reachable.
+    BufObj->bindSparseRange(0, nullptr, 0, 64);
+  }
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, FirstMemory, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
 
 // must resolve via vkGetDeviceProcAddr regardless of bufferDeviceAddress's
 // (always-false) feature bit -- see vkGetBufferDeviceAddress's own comment
