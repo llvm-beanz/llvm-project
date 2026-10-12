@@ -3473,6 +3473,89 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       model, and the actual call-site migration) is unchanged in kind
       but now has a materially smaller known scope for the last part.
 
+76. **`H46`: landed call-site migration step 4 -- every Buffer-typed
+    site from the 26-site audit now resolves through
+    `ResourceBindings::dataForRange()`, and a real double-offset
+    regression this introduced was caught by CTS and fixed in the same
+    session.**
+    - New `ResourceBindings::dataForRange(Offset, Size)`
+      (`MemoryBinding.h`) generalizes `data()` to an arbitrary
+      sub-range: returns a flat pointer only if exactly one bound
+      range fully contains it, `nullptr` otherwise (straddles ranges,
+      falls in an unbound gap, or the resource is unbound).
+      `Buffer::dataForRange()` forwards to it.
+    - Migrated every Buffer-typed 26-list site in `CommandBuffer.cpp`:
+      `vkCmdCopyBuffer`/`vkCmdFillBuffer`/`vkCmdUpdateBuffer`/
+      `vkCmdCopyQueryPoolResults`, raw/texel-buffer descriptor
+      preparation, vertex-buffer binding, index-buffer binding,
+      `VK_EXT_transform_feedback` capture-buffer binding and its
+      end-of-scope counter write, the four indirect-argument readers
+      (`readIndirectDraws`/`readIndirectMeshDraws`/
+      `readIndirectDrawCount`/`readIndirectByteCountVertices`), and
+      `vkCmdDispatchIndirect`'s group-count read. Each site's existing
+      explicit offset/size overrun check is left in place;
+      `dataForRange()` layers a real "not fully resident" error
+      (matching each site's own existing not-fully-valid handling --
+      `Error` or a safe `continue`/no-op) on top.
+    - `vkGetBufferDeviceAddress` (`Buffer.cpp`) is the one deliberately
+      un-migrated Buffer-typed site: a device address escapes to the
+      application and may be dereferenced at any later point, so
+      per-access range resolution cannot make it safe for a future
+      genuinely sparse buffer -- documented in `FeMeVulkanDesign.md`'s
+      "Memory and Buffers" section as needing its own
+      virtual-address-space-reservation design, a separate future
+      session, not a mechanical migration. The one remaining
+      un-migrated 26-list site is Image-typed (`CommandBuffer.cpp`'s
+      sampled-image prep) -- out of scope for this Buffer-focused pass.
+    - **A CTS sweep caught a real regression the unit tests missed.**
+      `readIndirectDraws`/`readIndirectMeshDraws`'s initial migration
+      kept indexing as `Base + Offset + Stride * I`, but `Base` is now
+      `dataForRange(Offset, ...)` -- already positioned at `Offset`,
+      unlike the old `data()` -- so this double-added `Offset`, reading
+      past the intended command. `dEQP-VK.draw.*indirect*` (3,874
+      cases) surfaced 13 new `complete_secondary_cmd_buff`
+      `*_multi_command` regressions (`Fail`/`DeviceLost`, a
+      safety-net-watchdog timeout rather than a crash, since the
+      out-of-bounds read usually lands on other readable memory).
+      Confirmed as a genuine regression (not pre-existing) by
+      rebuilding the pre-migration `CommandBuffer.cpp` and re-running
+      the same case (passes there). Fixed by dropping the redundant
+      `Offset` add; a from-scratch `dEQP-VK.draw.*indirect*` re-run
+      post-fix matches the pre-migration baseline exactly (1,177
+      Passed / 0 Failed / 2,697 NotSupported). Added
+      `DrawTest.cpp`'s `RendersIndirectDrawAtNonzeroBufferOffset`
+      (the existing `RendersIndirectDraw` test's `Offset == 0` made
+      the bug a no-op) -- manually confirmed it fails with the bug
+      reintroduced and passes with the fix, closing the unit-test gap
+      that let this ship in the first place.
+    - `dEQP-VK.transform_feedback.*`'s separately-elevated failure
+      count (570/133,719) was checked against the same pre-migration
+      baseline and found byte-for-byte identical -- a confirmed
+      pre-existing gap (see item 4's "Transform feedback and SPIR-V
+      long tails"), not introduced by this step.
+    - `FeMeVulkanTests`: 861/861 Passed (up from 860). `check-feme`:
+      3676/3679 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+    - **Verified against CTS** (all post-fix, matching pre-migration
+      baselines where re-checked): `dEQP-VK.api.buffer.basic.*` (3
+      cases, 1 Passed/2 NotSupported/0 Failed),
+      `dEQP-VK.api.copy_and_blit.core.buffer_to_buffer.*` (8 cases, 8
+      Passed/0 Failed), `dEQP-VK.pipeline.monolithic.vertex_input.*`
+      (13,296 cases, 5,832 Passed/0 Failed/7,464 NotSupported),
+      `dEQP-VK.draw.*indirect*` (3,874 cases, 1,177 Passed/0
+      Failed/2,697 NotSupported), `dEQP-VK.compute.*indirect*` (111
+      cases, 25 Passed/0 Failed/86 NotSupported),
+      `dEQP-VK.mesh_shader.*indirect*` (17,632 cases, 116 Passed/0
+      Failed/17,516 NotSupported), and `dEQP-VK.transform_feedback.*`
+      (133,719 cases, 6,162 Passed/570 Failed [pre-existing,
+      baseline-identical]/126,987 NotSupported).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change -- no feature bit or extension surface changed.
+      `Roadmap.md`'s `H46` row updated with this step's landing.
+      Remaining `H46` work: the Image-side call-site migration (its
+      own design pass), the per-tile `pImageBinds` model, the
+      `vkGetBufferDeviceAddress` virtual-address-space design, and only
+      after all of that, promoting the feature bits to `VK_TRUE`.
+
 ## Complete group accounting
 
 
