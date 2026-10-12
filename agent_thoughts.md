@@ -119433,3 +119433,105 @@ session touched.
    was exactly this: one `Offset` subtraction was correctly dropped
    elsewhere in the same diff, but the indexing expression wasn't updated to
    match.
+
+# Session: H46 step 5 landed — all remaining Image-typed call sites are range-aware, all 26 sites done except vkGetBufferDeviceAddress
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed at start and end.
+
+## Do this first if picking back up: nothing pending — all work landed and committed.
+
+## What got done, in commit order
+
+1. `da5e70f69346` (prior session, already landed before this one resumed) —
+   `H46` step 5a: migrated `Image::texelPointer`/`blockPointer` to
+   `dataForRange()`.
+2. `e4c854216395` (prior session) — `H46` step 5b: migrated
+   `RenderPass.cpp`'s `resolveAttachmentView` to `dataForRange()`.
+3. `ebd03d82056f` — `H46` step 5c: migrated `Swapchain.cpp`'s
+   `vkQueuePresentKHR` from `Img->data()` to
+   `Img->dataForRange(0, Img->sizeInBytes())`, folding a null result into
+   the existing `VK_ERROR_SURFACE_LOST_KHR` path. No new unit test:
+   swapchain images can't currently become partially-bound, so there's no
+   reachable path to the null branch yet.
+4. `644bf203b7ce` — `H46` step 5d: migrated `CommandBuffer.cpp`'s
+   `materializeImageDescriptor` (sampled-image descriptor prep, the last
+   26-list site) to `dataForRange(0, Img->sizeInBytes())` with an early
+   `return;` on null, matching the function's existing silent-early-return
+   idiom for every other invalid state.
+5. `865f0aa7d945` — `Roadmap.md`'s `H46` row updated with this step's
+   landing.
+6. `582e0c59b881` — `VulkanCTSReport.md` item 77 added documenting this
+   step's full landing, CTS verification, and the pre-existing-failure
+   check below.
+
+## All 26 call sites from the classification pass (item 75) are now done
+
+Only `vkGetBufferDeviceAddress` remains unmigrated — deliberately, per its
+own deferred virtual-address-space design (unchanged since step 4).
+
+## CTS verification, and a scare that turned out to be pre-existing
+
+Ran `dEQP-VK.texture.*` (25,669 cases, the live sampled-image path
+`materializeImageDescriptor` serves) as a background sweep: **9,808 Pass /
+2 Fail / 15,859 NotSupported**. The 2 failures
+(`dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`) looked like
+candidate regressions at first glance. Checked by rebuilding
+`libfeme_vulkan.so` from the pre-step-5c/5d commit (`e4c854216395`) in
+place, re-running just those 2 cases there — **both fail identically on
+the pre-migration build too**. Confirmed pre-existing, not introduced by
+this session; restored the migrated files and rebuilt before moving on.
+
+Also ran `dEQP-VK.pipeline.*.render_to_image.*` (9,275 cases) earlier this
+session for the `resolveAttachmentView` migration (step 5b): 0 Fail / 3,735
+Pass / 5,540 NotSupported, no regressions.
+
+## Build/test numbers (all green)
+
+- `FeMeVulkanTests`: 864/864 (up from 861 — two new `ImageTest.cpp` cases
+  landed in step 5a, already counted before this resumed session).
+- `check-feme`: 3679/3682 Passed, 3 Unsupported, 0 Failed.
+- CTS `dEQP-VK.texture.*`: 9,808 Pass / 2 Fail (pre-existing, confirmed via
+  pre-migration rebuild) / 15,859 NotSupported (25,669 total).
+- CTS `dEQP-VK.pipeline.*.render_to_image.*`: 3,735 Pass / 0 Fail / 5,540
+  NotSupported (9,275 total).
+
+## Roadmap hygiene pass (quick check this time)
+
+- Re-grepped for over-nested milestone IDs — found zero.
+- Alternating with last session's deeper pass; next session should do a
+  real deep pass again per the standing cadence (checking each open row's
+  own dependency chain, not just milestone-ID nesting).
+
+## `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+
+No change needed — pure internal refactor, no feature bit or extension
+surface changed by this session's work. Confirmed and noted in the CTS
+report item.
+
+## Next steps, ranked
+
+1. **(~multi-session, still not attempted)** Design the per-tile
+   `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
+   addressing) — explicitly scoped out of every session so far, needs its
+   own design pass before any code.
+2. **(~multi-session, separate design track, unchanged)**
+   `vkGetBufferDeviceAddress`'s virtual-address-space-reservation design
+   (mmap/mprotect-based), per `FeMeVulkanDesign.md`'s "Memory and Buffers"
+   section — the only remaining un-migrated 26-list call site.
+3. **(not started, separate from `H46`)** Only once items 1-2 above are
+   done: flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
+   Do NOT do this prematurely — there is no longer a known-unsafe call site
+   blocking this besides items 1-2, but neither of those is close to done.
+4. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap
+   hygiene passes — alternate a deep pass back in next time, this one was
+   a quick check.
+5. **(opportunistic, unchanged)** `L375`
+   (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) still
+   untouched, still needs its own dedicated design session.
+6. **(opportunistic, new finding this session)** Both multisample
+   storage-image atomic failures found this session
+   (`dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`) are
+   confirmed pre-existing and currently untriaged/undocumented anywhere —
+   worth a dedicated investigation session; likely related to multisample
+   storage-image handling rather than anything `H46` touches, since they
+   fail identically with or without this session's changes.
