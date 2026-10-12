@@ -63,23 +63,24 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(no deadline, opportunistic)** If a future session happens to be in
-   `Sync.cpp`/`Image.cpp` for unrelated reasons, it's worth double-checking
-   whether `vkQueueBindSparse`'s current "ignore the buffer/image bind arrays
-   entirely" behavior needs revisiting once/if `H46` (real sparse resources)
-   ever lands — right now that's correct by construction (no sparse resource can
-   exist), but a future session enabling real sparse binding would need to go
-   back and actually process `pBufferBinds`/`pImageOpaqueBinds`/`pImageBinds`
-   instead of ignoring them.
-2. **(~multi-session, real architecture work, separate from anything `L236(a)`
-   touched)** `H46`: real sparse-resources feature work
-   (`sparseBinding`/`sparseResidencyBuffer`/`sparseResidencyImage*` actually
-   `VK_TRUE`), needing a genuine sparse-memory-binding allocator design. Not
-   attempted this session, not expected to be a quick pickup.
-3. **(ongoing, low priority, unchanged from last handoff)** Resume the broader
-   `dEQP-VK.pipeline.*.blend.*` regression sweep for full 66-case-family `L411`
-   coverage, if a future session wants it — start fresh with `detach: true`.
-4. **(~1-2 hours, standing, no CTS-visible symptom found yet, unchanged from
-   last handoff)** Keep doing periodic roadmap hygiene passes — this session's
-   quick check found nothing, but it's worth repeating rather than assuming it
-   stays clean forever.
+1. **(ongoing, whenever it finishes or a future session wants to check in)**
+   Check the detached `dEQP-VK.pipeline.*.blend.*` sweep (`ps aux | grep
+   deqp-vk`, tally `/tmp/l411_blend_full_sweep.{log,qpa}`); fold into
+   `VulkanCTSReport.md`, clean up the temp files once done.
+2. **(~multi-session, real architecture work, now with a corrected scoping
+   writeup to start from)** `H46`: implement the sparse-resources binding-range
+   data model per this session's scoping findings
+   (`Buffer.h`/`Image.h`/`Memory.h`, ~179 call sites to audit). Start with the
+   new data structure and a zero-behavior-change migration of the
+   always-fully-bound case, proven via unit tests, before touching feature bits
+   or any of the 179 call sites' actual logic.
+3. **(~1-2 hours, standing, recommend doing a *real* pass not just a quick
+   grep)** Keep doing roadmap hygiene passes periodically — this session's
+   deeper read (checking each open row's own dependency chain, not just
+   milestone-ID nesting) found real issues a shallower pass missed. Worth
+   repeating with the same depth, not reverting to the lighter check.
+4. **(opportunistic, unchanged)** If a future session is in
+   `Buffer.cpp`/`Image.cpp`/`Sync.cpp` for `H46` or any other reason, the new
+   forward-pointer comment in `Sync.cpp`'s `vkQueueBindSparse` flags exactly
+   what needs to change there once sparse resources become real.
+
