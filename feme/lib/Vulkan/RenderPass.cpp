@@ -224,10 +224,19 @@ resolveAttachmentView(ImageView *View) {
   Result.Width = std::max(1u, Img.width() >> Level);
   Result.Height = std::max(1u, Img.height() >> Level);
   Result.ArrayLayers = LayerCount;
-  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset +
-               (uint64_t)Range.baseArrayLayer * Layout.SlicePitch;
-  Result.Data = llvm::MutableArrayRef<uint8_t>(
-      Base, static_cast<size_t>(Layout.SlicePitch) * LayerCount);
+  uint64_t ByteOffset =
+      Layout.Offset + (uint64_t)Range.baseArrayLayer * Layout.SlicePitch;
+  uint64_t Size = (uint64_t)Layout.SlicePitch * LayerCount;
+  // (Roadmap H46) Resolved through the range-aware accessor, not
+  // `data() + ByteOffset`, so a future genuinely-sparse image whose
+  // attachment subresource is not fully resident fails safely here
+  // rather than rendering through a wild/unbound pointer.
+  auto *Base = static_cast<uint8_t *>(Img.dataForRange(ByteOffset, Size));
+  if (!Base)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "a render target attachment's subresource "
+                                   "is not fully bound to memory");
+  Result.Data = llvm::MutableArrayRef<uint8_t>(Base, Size);
   return Result;
 }
 

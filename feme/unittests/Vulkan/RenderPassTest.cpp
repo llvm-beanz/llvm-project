@@ -879,6 +879,63 @@ TEST_F(RenderPassTest, ResolveAttachmentViewAcceptsSliceOf3DImage) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+/// (Roadmap H46) `resolveAttachmentView` now resolves its data pointer
+/// through `Image::dataForRange`, not `data() + ByteOffset` -- exercised
+/// directly against `bindSparseRange` (what `vkQueueBindSparse` would call
+/// for a currently-unreachable sparse image, the same precedent
+/// `ImageTest`'s `TexelPointerReturnsNullForUnboundSparseGap` uses) since
+/// no live image here can actually have more than one bound range
+/// otherwise. Binding only the first of two array layers leaves the
+/// second layer's own byte range in an unbound gap -- a view covering
+/// both layers must now fail with a real error instead of returning a
+/// pointer into unbound memory.
+TEST_F(RenderPassTest, ResolveAttachmentViewFailsOnUnboundSparseGap) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 2;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  Image *Obj = fromHandle<Image>(Img);
+  ASSERT_EQ(Obj->sizeInBytes(), 128u); // 2 layers x 4x4 RGBA8 (64B/layer).
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+
+  // Bind only the first layer (64 bytes) directly via `bindSparseRange`,
+  // bypassing `vkBindImageMemory`'s whole-image `bindWhole` -- the second
+  // layer is left entirely unbound.
+  Obj->bindSparseRange(0, fromHandle<DeviceMemory>(Memory), 0, 64);
+  ASSERT_TRUE(Obj->isBound());
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  ViewInfo.subresourceRange.levelCount = 1;
+  ViewInfo.subresourceRange.layerCount = 2;
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  llvm::Expected<feme::graphics::AttachmentView> Resolved =
+      resolveAttachmentView(fromHandle<ImageView>(View));
+  EXPECT_FALSE(static_cast<bool>(Resolved));
+  llvm::consumeError(Resolved.takeError());
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 /// Roadmap H2: a framebuffer declaring more layers than a bound view's own
 /// `layerCount` (from its base array layer) is rejected -- the view cannot
 /// supply every layer the framebuffer promises.
