@@ -48,13 +48,17 @@ TEST(ProcAddr, NonNullInstanceResolvesEveryImplementedLevel) {
 }
 
 TEST(ProcAddr, UnimplementedCommandNeverResolves) {
-  // `vkQueueBindSparse` is a real core Vulkan 1.0 command this driver does
-  // not implement (sparse resources are an "Initial Non-Goal"); the
-  // generated table still carries an entry for it (mapped to null),
-  // matching "Loader Integration"'s requirement that the table cover
-  // every known command name.
-  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkQueueBindSparse"), nullptr);
-  EXPECT_EQ(getDeviceProcAddr("vkQueueBindSparse"), nullptr);
+  // `vkCmdDrawIndexedIndirectCount` is a real core Vulkan 1.2 command this
+  // driver does not implement; the generated table still carries an entry
+  // for it (mapped to null), matching "Loader Integration"'s requirement
+  // that the table cover every known command name. (Roadmap L236(a):
+  // `vkQueueBindSparse`, this test's previous example, is now implemented
+  // -- see Sync.cpp's own comment -- so this test now exercises a
+  // still-genuinely-unimplemented command instead.)
+  EXPECT_EQ(
+      getInstanceProcAddr(dummyInstance(), "vkCmdDrawIndexedIndirectCount"),
+      nullptr);
+  EXPECT_EQ(getDeviceProcAddr("vkCmdDrawIndexedIndirectCount"), nullptr);
 }
 
 TEST(ProcAddr, UnknownNameNeverResolves) {

@@ -897,6 +897,52 @@ TEST_F(SyncTest, QueueSubmit2TimelineSemaphoreSignalThenWait) {
   vkDestroySemaphore(Device, Sem, nullptr);
 }
 
+// Roadmap L236(a): `bindInfoCount == 0` is explicitly spec-legal
+// regardless of `sparseBinding`'s state (this ICD's own feature bit stays
+// `VK_FALSE`), and the fence must still be signaled -- the same "empty
+// batch of work" contract `vkQueueSubmit`/`vkQueueSubmit2` already honor
+// with `submitCount == 0`.
+TEST_F(SyncTest, QueueBindSparseZeroBindInfoCountSignalsFence) {
+  VkFenceCreateInfo FenceInfo{};
+  VkFence Fence = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFence(Device, &FenceInfo, nullptr, &Fence), VK_SUCCESS);
+  EXPECT_EQ(vkGetFenceStatus(Device, Fence), VK_NOT_READY);
+
+  EXPECT_EQ(vkQueueBindSparse(Queue, 0, nullptr, Fence), VK_SUCCESS);
+  EXPECT_EQ(vkWaitForFences(Device, 1, &Fence, VK_TRUE, UINT64_MAX),
+            VK_SUCCESS);
+  EXPECT_EQ(vkGetFenceStatus(Device, Fence), VK_SUCCESS);
+
+  vkDestroyFence(Device, Fence, nullptr);
+}
+
+// Mirrors `QueueSubmit2BinarySemaphoreSignalThenWaitSucceeds` above, but
+// through `vkQueueBindSparse`'s own (empty-bind-array) wait/signal
+// semaphores -- this ICD threads a `VkBindSparseInfo`'s synchronization
+// through the identical `QueueExecutor`/`makeSubmissionTask` machinery
+// (Sync.cpp), so ordinary semaphore signal-then-wait must still work
+// exactly the same even though no actual memory bind ever occurs.
+TEST_F(SyncTest, QueueBindSparseBinarySemaphoreSignalThenWaitSucceeds) {
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  VkBindSparseInfo Signal{};
+  Signal.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO;
+  Signal.signalSemaphoreCount = 1;
+  Signal.pSignalSemaphores = &Sem;
+  ASSERT_EQ(vkQueueBindSparse(Queue, 1, &Signal, VK_NULL_HANDLE), VK_SUCCESS);
+
+  VkBindSparseInfo Wait{};
+  Wait.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO;
+  Wait.waitSemaphoreCount = 1;
+  Wait.pWaitSemaphores = &Sem;
+  EXPECT_EQ(vkQueueBindSparse(Queue, 1, &Wait, VK_NULL_HANDLE), VK_SUCCESS);
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
 TEST_F(SyncTest, HostEventSetResetStatus) {
   VkEventCreateInfo EventInfo{};
   VkEvent Ev = VK_NULL_HANDLE;

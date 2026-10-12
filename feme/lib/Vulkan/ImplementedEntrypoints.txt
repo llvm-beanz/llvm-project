@@ -88,6 +88,10 @@ vkCreateImage
 vkDestroyImage
 vkGetImageMemoryRequirements
 vkGetImageMemoryRequirements2
+# Roadmap L236(a): always-zero stubs, spec-legal since no image here can
+# ever be created with a sparse-residency creation flag (Image.cpp).
+vkGetImageSparseMemoryRequirements
+vkGetImageSparseMemoryRequirements2
 vkBindImageMemory
 vkBindImageMemory2
 vkCreateImageView
@@ -367,6 +371,11 @@ vkGetFenceStatus
 vkWaitForFences
 vkQueueSubmit
 vkQueueWaitIdle
+# Roadmap L236(a): queue submission-order/semaphore/fence synchronization
+# only, no real sparse-memory-binding (Sync.cpp's own comment) -- correct
+# since a conformant application can never populate a non-empty bind array
+# on a device with sparseBinding == VK_FALSE.
+vkQueueBindSparse
 
 # V3: binary and timeline semaphores (see "Queues, Scheduling, and
 # Synchronization").

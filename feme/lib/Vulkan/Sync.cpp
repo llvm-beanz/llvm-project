@@ -684,6 +684,82 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
   return VK_SUCCESS;
 }
 
+// (Roadmap L236(a)) `vkQueueBindSparse`: this ICD has no sparse-residency
+// support at all (`sparseBinding`/`sparseResidency*` are all unconditional
+// `VK_FALSE`, "Initial Non-Goals"), and `isValidImageShape` (Image.cpp)
+// already rejects `VK_IMAGE_CREATE_SPARSE_*_BIT` at `vkCreateImage` time --
+// so no live `VkImage`/`VkBuffer` in this ICD can ever actually need a
+// sparse memory bind, and a conformant application must not populate any
+// `VkBindSparseInfo::p{Buffer,ImageOpaque,ImageBind}` array without
+// `sparseBinding` enabled first (`VUID-vkQueueBindSparse-queue-04611` and
+// its neighbors) -- so this ICD does not need to implement any actual
+// sparse-memory-binding logic to be spec-compliant, mirroring
+// `vkGetImageSparseMemoryRequirements(2)`'s own "always zero" stub below.
+//
+// What *is* required regardless is `vkQueueBindSparse`'s ordinary queue
+// submission-order and semaphore/fence synchronization contract (per
+// spec, `bindInfoCount == 0` is explicitly legal and must still honor any
+// `fence`) -- so each `VkBindSparseInfo`'s wait/signal semaphores (plus an
+// optional chained `VkTimelineSemaphoreSubmitInfo`, mirroring
+// `vkQueueSubmit`'s own identical pattern above) are threaded through the
+// same `QueueExecutor`/`makeSubmissionTask` machinery with an empty
+// command-buffer list, so this call still correctly orders against, and
+// is waited on by, any other submission on the same queue.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount,
+                  const VkBindSparseInfo *pBindInfo, VkFence fence) {
+  Queue *Q = fromHandle<Queue>(queue);
+  Device &Dev = Q->getDevice();
+  if (Dev.isLost())
+    return VK_ERROR_DEVICE_LOST;
+
+  for (uint32_t I = 0; I != bindInfoCount; ++I) {
+    const VkBindSparseInfo &Bind = pBindInfo[I];
+
+    const VkTimelineSemaphoreSubmitInfo *TimelineInfo = nullptr;
+    for (const auto *Base = static_cast<const VkBaseInStructure *>(Bind.pNext);
+         Base; Base = Base->pNext)
+      if (Base->sType == VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO) {
+        TimelineInfo =
+            reinterpret_cast<const VkTimelineSemaphoreSubmitInfo *>(Base);
+        break;
+      }
+
+    std::vector<SemaphoreOp> Waits;
+    Waits.reserve(Bind.waitSemaphoreCount);
+    for (uint32_t J = 0; J != Bind.waitSemaphoreCount; ++J) {
+      auto *Sem = fromHandle<Semaphore>(Bind.pWaitSemaphores[J]);
+      uint64_t Target =
+          (TimelineInfo && J < TimelineInfo->waitSemaphoreValueCount)
+              ? TimelineInfo->pWaitSemaphoreValues[J]
+              : 0;
+      Waits.push_back({Sem, Target});
+    }
+
+    std::vector<SemaphoreOp> Signals;
+    Signals.reserve(Bind.signalSemaphoreCount);
+    for (uint32_t J = 0; J != Bind.signalSemaphoreCount; ++J) {
+      auto *Sem = fromHandle<Semaphore>(Bind.pSignalSemaphores[J]);
+      uint64_t NewValue =
+          Sem->isTimeline()
+              ? ((TimelineInfo && J < TimelineInfo->signalSemaphoreValueCount)
+                     ? TimelineInfo->pSignalSemaphoreValues[J]
+                     : Sem->timelineValue())
+              : 0;
+      Signals.push_back({Sem, NewValue});
+    }
+
+    Q->getExecutor().enqueue(makeSubmissionTask(
+        Dev, std::move(Waits), std::vector<vulkan::CommandBuffer *>(),
+        std::move(Signals)));
+  }
+  if (fence) {
+    fromHandle<Fence>(fence)->retainForPendingSignal();
+    Q->getExecutor().enqueue(makeFenceSignalTask(Dev, fence));
+  }
+  return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
   Queue *Q = fromHandle<Queue>(queue);
   if (Q->getDevice().isLost())

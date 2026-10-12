@@ -670,6 +670,26 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
   fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 
+// (Roadmap L236(a)) `vkGetImageSparseMemoryRequirements(2)`: per spec, "If
+// the image was not created with `VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT`
+// then `pSparseMemoryRequirementCount` will be zero" -- `isValidImageShape`
+// above already rejects that bit (and `_SPARSE_ALIASED_BIT`/
+// `_SPARSE_BINDING_BIT`) for every image this ICD can ever create, so
+// zero is not merely an expedient stub here, it is the only value the
+// spec permits any live `VkImage` of this ICD's to ever report.
+VKAPI_ATTR void VKAPI_CALL vkGetImageSparseMemoryRequirements(
+    VkDevice, VkImage, uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements *) {
+  *pSparseMemoryRequirementCount = 0;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageSparseMemoryRequirements2(
+    VkDevice, const VkImageSparseMemoryRequirementsInfo2 *,
+    uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2 *) {
+  *pSparseMemoryRequirementCount = 0;
+}
+
 /// (roadmap E4) `VK_KHR_maintenance4`: computes a `VkImage`'s memory
 /// requirements from its `VkImageCreateInfo` alone, without ever creating
 /// the image -- shares `isValidImageShape`/`computeImageCreateInfoSize`

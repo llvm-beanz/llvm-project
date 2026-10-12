@@ -2024,4 +2024,27 @@ TEST_F(ImageTest, GetDeviceImageSubresourceLayoutKHRFillsHostMemcpySize) {
   EXPECT_EQ(HostMemcpySize.size, 64u); // 4x4 texels * 4 bytes (RGBA8).
 }
 
+// Roadmap L236(a): neither sparse-memory-requirements query ever reports a
+// nonzero count for an ordinary image, since no image this ICD creates can
+// ever carry a sparse-residency creation flag (isValidImageShape,
+// Image.cpp).
+TEST_F(ImageTest, GetImageSparseMemoryRequirementsIsAlwaysZero) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
+
+  uint32_t Count = 1234;
+  vkGetImageSparseMemoryRequirements(Device, Img, &Count, nullptr);
+  EXPECT_EQ(Count, 0u);
+
+  VkImageSparseMemoryRequirementsInfo2 Info2{};
+  Info2.sType = VK_STRUCTURE_TYPE_IMAGE_SPARSE_MEMORY_REQUIREMENTS_INFO_2;
+  Info2.image = Img;
+  Count = 5678;
+  vkGetImageSparseMemoryRequirements2(Device, &Info2, &Count, nullptr);
+  EXPECT_EQ(Count, 0u);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 } // namespace

@@ -223,6 +223,16 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
     VkDevice device, const VkImageMemoryRequirementsInfo2 *pInfo,
     VkMemoryRequirements2 *pMemoryRequirements);
+// (Roadmap L236(a)) Sparse-residency stubs: always zero, see Image.cpp's
+// own comment for why that is the only spec-legal answer this ICD can
+// ever give.
+VKAPI_ATTR void VKAPI_CALL vkGetImageSparseMemoryRequirements(
+    VkDevice device, VkImage image, uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements *pSparseMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL vkGetImageSparseMemoryRequirements2(
+    VkDevice device, const VkImageSparseMemoryRequirementsInfo2 *pInfo,
+    uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements);
 VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice device, VkImage image,
                                                  VkDeviceMemory memory,
                                                  VkDeviceSize memoryOffset);
@@ -972,6 +982,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
                                               uint32_t submitCount,
                                               const VkSubmitInfo2 *pSubmits,
                                               VkFence fence);
+// (Roadmap L236(a)) `vkQueueBindSparse`: no real sparse-memory-binding
+// support, see Sync.cpp's own comment -- still correctly honors ordinary
+// queue submission-order and semaphore/fence synchronization.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount,
+                  const VkBindSparseInfo *pBindInfo, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
 
 // V3: binary and timeline semaphores (see "Queues, Scheduling, and
