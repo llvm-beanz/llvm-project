@@ -119833,3 +119833,32 @@ either side proves nothing for a race.
 5. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
    again this session (focus was 100% on `L416` phase 2 + its
    regression sweep). Due for a real deep pass soon.
+
+# Session: triaged multithreaded device-creation SIGSEGV (upstream loader bug, no FeMe fix needed)
+
+**Status: closed, not actionable from FeMe. No code changed this session — docs only.**
+
+## What happened
+
+Handoff item 1 from the prior session was "triage the `multithreaded_per_thread_resources.*` SIGSEGV." Root-caused it fully:
+
+1. Built a symbol-matched `v1.4.341` Vulkan-Loader debug build (`-g -O0`) from source to get real symbols (system package has no `-dbgsym`).
+2. Reproduced the crash with a full backtrace: `loader_get_dispatch` (`loader.h:53`) dereferences `disp->magic` where `disp` is actually this driver's own `ICD_LOADER_MAGIC` constant (`0x1cdc0de`), confirmed via `x/4xg obj` at the crash.
+3. Cross-referenced `terminator_CreateDevice` in the real `v1.4.341` source: `loader_add_logical_device` (publishes device to a global list other threads walk) runs **before** `loader_init_dispatch` (writes the real dispatch pointer over the magic). Textbook publish-before-init race.
+4. Found the exact upstream report: `KhronosGroup/Vulkan-Loader#2018`, filed and closed the same day against this same tag. Closed on a maintainer's objection that doesn't hold up against my own read of `trampoline.c` — the crashing path never takes the lock the maintainer cited.
+5. Confirmed FeMe-independence: Mesa lavapipe didn't crash in 30 attempts (stock + debug loader); a minimal standalone C harness modeling the CTS test's exact shape (per-thread `VkInstance`, barrier-synced bursts) didn't crash in 30 more attempts against either ICD. FeMe's own `vkCreateDevice` latency widens the race window; it doesn't cause the race.
+
+Full writeup: `feme/docs/VulkanCTSReport.md` item 81. Roadmap: new `D5` row (struck through, done) superseding `D2`'s now-stale resolution.
+
+## Why no commit touches Vulkan-Loader
+
+The user's standing rule ("fix issues outside FeMe in a commit that only touches files outside FeMe") assumes a sibling in-monorepo project. The Vulkan-Loader isn't checked out here at all — it's a system package. There's nothing to "commit a fix" to. I also have no GitHub write access (no create-comment/create-issue tool), so I couldn't even post the rebuttal to the closed upstream issue myself.
+
+## Next steps
+
+1. **(2 min, first thing next session)** If GitHub write access ever becomes available: re-open or comment on `KhronosGroup/Vulkan-Loader#2018` with this session's `trampoline.c` analysis (the maintainer's rebuttal cites a lock that the crashing code path never takes) — the fix is a one-line mutex addition on the upstream side, not something this project can land.
+2. **(~2-4 hours)** Item 2 from the carried-forward list: the Image-typed 26-list call sites (`Swapchain.cpp`, `Image.cpp` `texelPointer`/`blockPointer`, `ImageOps.cpp`, `RenderPass.cpp`, `CommandBuffer.cpp`'s sampled-image prep) still need the sub-range-addressing migration pass `H46`'s buffer-side work already did for linear buffers.
+3. **(~multi-session)** `pImageBinds` per-tile sparse-image-bind model — still untouched, still needs its own design pass before any code.
+4. **(blocked on 2-3)** Only once those land: flip `sparseBinding`/`sparseResidency*` to `VK_TRUE`.
+5. **(~1-2 hours, standing, now 4+ sessions overdue)** The roadmap hygiene pass keeps getting bumped. I did a 2-minute grep this session (found nothing new beyond the already-known, already-not-actionable `H124e(a)` nesting) but that's not the deep pass that's actually due. Next session should actually block out the 1-2 hours for it rather than defer again.
+6. **(opportunistic, unchanged)** `L375` (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) — confirmed already fixed in a much earlier commit; stop carrying this forward, it's done.
