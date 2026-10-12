@@ -3866,6 +3866,47 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       Ubuntu `libvulkan1` 1.4.341.0 -- a second, distinct, still-open
       upstream defect reproduces the identical user-visible symptom.
 
+82. **`L416` phase 3: wired `Buffer` to an optional
+    `VirtualAddressReservation` (`reserveVirtualAddressSpace`/
+    `hasVirtualAddressReservation`/`virtualAddressBase`), with
+    `bind()`/`bindSparseRange()` mirroring whatever memory they bind into
+    the reservation, and `vkGetBufferDeviceAddress` preferring the
+    reservation's base over `data()` once one exists.**
+    - No live `VkBuffer` can exercise any of this yet --
+      `isValidBufferCreateInfo` still unconditionally rejects any nonzero
+      `VkBufferCreateInfo::flags`, so `VK_BUFFER_CREATE_SPARSE_BINDING_BIT`
+      can never reach a real `Buffer` -- matching phase 1's own "new,
+      unused, independently-tested scaffolding" discipline and
+      `bindSparseRange`'s own existing precedent
+      (`BindSparseRangeAccumulatesWithoutDisturbingData`) for building
+      sparse-binding infrastructure ahead of the eventual feature-bit
+      flip it supports. Every currently-reachable code path (any buffer
+      that never calls `reserveVirtualAddressSpace`) is unchanged.
+    - 3 new unit tests in `BufferTest.cpp`, directly constructing and
+      reserving a `Buffer`'s virtual-address space (bypassing
+      creation-time validation, mirroring `bindSparseRange`'s own
+      existing test): content visibility through the reservation tracks
+      the bound memory; `vkGetBufferDeviceAddress` prefers the
+      reservation's base once one exists; rebinding a sparse range to
+      different backing memory stays stable at the same reservation
+      address, and an explicit unbind restores the no-access gap.
+    - `check-feme`: 3,704/3,707 Passed, 3 Unsupported, 0 Failed (+3 new
+      unit tests), 0 regressions vs. item 80's baseline.
+    - **Verified against CTS**: `dEQP-VK.memory.*`,
+      `dEQP-VK.api.object_management.*` (excluding the item 81
+      `multithreaded_per_thread_resources.device` loader race),
+      `dEQP-VK.ssbo.*`, `dEQP-VK.ubo.*`, and
+      `dEQP-VK.binding_model.buffer_device_address.*` together: 14,371
+      Pass / 0 Fail / 22,632 NotSupported (the applicable-feature set
+      unchanged from prior sweeps).
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- purely internal `Buffer` plumbing behind the
+      existing `VkBuffer` handle, no new feature or extension surface
+      reachable via the real API. `Roadmap.md`'s `L416` row documents
+      phase 3's completion. Phase 4 (wiring `vkQueueBindSparse`'s bind
+      processing to actually call this plumbing from the real API, once
+      sparse binding itself is reachable) remains a future session.
+
 ## Complete group accounting
 
 

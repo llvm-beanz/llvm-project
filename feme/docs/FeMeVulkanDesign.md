@@ -1198,14 +1198,34 @@ out in phases rather than one large change:
    pre-existing, unrelated flaky SIGSEGV was found and ruled out in
    `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`,
    see `VulkanCTSReport.md`).
-3. **(Future session)** Wire `vkGetBufferDeviceAddress` to return a
+3. **(Done, this session)** Wire `vkGetBufferDeviceAddress` to return a
    `VirtualAddressReservation`'s base pointer, instead of `Buffer::data()`,
-   only for buffers created with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` --
-   ordinary buffers keep today's direct `data()`-based address unchanged.
+   whenever `Buffer` holds one. Gave `Buffer` an optional
+   `VirtualAddressReservation` member
+   (`reserveVirtualAddressSpace`/`hasVirtualAddressReservation`/
+   `virtualAddressBase`), with `bind()`/`bindSparseRange()` mirroring
+   whatever memory they bind into it (`mapRange`/`unmapRange`) whenever
+   one exists and the bound `DeviceMemory` has a shareable fd. No live
+   `VkBuffer` can reach any of this today -- `isValidBufferCreateInfo`
+   (`Buffer.cpp`) still unconditionally rejects any nonzero
+   `VkBufferCreateInfo::flags`, so `VK_BUFFER_CREATE_SPARSE_BINDING_BIT`
+   can never construct a real `Buffer` -- so, like phase 1, this phase
+   changes no observable driver behavior; it is exercised only by 3 new
+   unit tests (`BufferTest.cpp`) that construct and reserve a `Buffer`
+   directly, bypassing creation-time validation (mirroring `H46`'s own
+   `bindSparseRange` test precedent). Verified via a full `check-feme`
+   pass (0 failures) plus a targeted CTS sweep (`dEQP-VK.memory.*`,
+   `dEQP-VK.api.object_management.*`, `dEQP-VK.ssbo.*`/`dEQP-VK.ubo.*`,
+   `dEQP-VK.binding_model.buffer_device_address.*`): 0 regressions (see
+   `VulkanCTSReport.md`).
 4. **(Future session)** Wire `vkQueueBindSparse`'s buffer-bind processing
    (see `H46`'s own `bindRange`) to `mapRange`/`unmapRange` the
    corresponding sub-range of the reservation as each bind/unbind is
-   processed.
+   processed -- this remains future work because it is the real-API call
+   site that would actually *create* a `Buffer`'s reservation once
+   `sparseBinding` support exists; phase 3's `reserveVirtualAddressSpace`
+   plumbing exists ahead of that, consistent with how phases 1-2 were
+   also built as infrastructure ahead of their own real call sites.
 
 Phases 2-4 remain out of scope for the call-site migration tracked in
 `Roadmap.md`'s `H46` row, and are not required before `H46` itself completes
