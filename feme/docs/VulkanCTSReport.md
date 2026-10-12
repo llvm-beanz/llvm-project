@@ -3314,6 +3314,55 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       makes sense (not a quick win, per the prior handoff's own
       ranking) -- see `Roadmap.md`'s updated `L236(a)` entry.
 
+73. **`L236(a)` fully resolved: implemented the sparse-residency stub
+    entry points, dropping `entry_points`'s Fail count from 3 to 0.**
+    - A 30-minute spec-reading pass (per the prior handoff's own
+      suggestion) found the earlier "multi-session, real architecture
+      work" estimate was overly pessimistic. `isValidImageShape`
+      (`Image.cpp`) already rejects every
+      `VK_IMAGE_CREATE_SPARSE_{RESIDENCY,ALIASED,BINDING}_BIT` at
+      `vkCreateImage` time, so no live `VkImage` can ever require a
+      sparse memory bind, and the spec itself mandates
+      `pSparseMemoryRequirementCount == 0` whenever the
+      sparse-residency creation bit is absent from an image -- making
+      an always-zero `vkGetImageSparseMemoryRequirements(2)` stub the
+      only spec-legal answer for this ICD, not merely an expedient one.
+    - `vkQueueBindSparse` (`Sync.cpp`) threads each `VkBindSparseInfo`'s
+      wait/signal semaphores (plus an optional chained
+      `VkTimelineSemaphoreSubmitInfo`) through the same
+      `QueueExecutor`/`makeSubmissionTask` machinery
+      `vkQueueSubmit`/`vkQueueSubmit2` already use, with an empty
+      command-buffer list -- so ordinary queue submission-order and
+      semaphore/fence synchronization still work correctly, with no
+      real memory-bind logic needed: a conformant application can never
+      populate a non-empty buffer/image bind array on a device with
+      `sparseBinding == VK_FALSE`.
+    - New unit tests: `ImageTest.cpp`'s
+      `GetImageSparseMemoryRequirementsIsAlwaysZero`, `SyncTest.cpp`'s
+      `QueueBindSparseZeroBindInfoCountSignalsFence`/
+      `QueueBindSparseBinarySemaphoreSignalThenWaitSucceeds`.
+      `ProcAddrTest.cpp`'s `UnimplementedCommandNeverResolves` updated
+      to use `vkCmdDrawIndexedIndirectCount` instead of
+      `vkQueueBindSparse`, which is now implemented.
+    - `check-feme`: 3658/3658 Passed, 3 Unsupported, 0 Failed, 0
+      regressions.
+    - **Verified against CTS**: `dEQP-VK.api.version_check.entry_points`
+      now fully Passes (0 Fail, down from 3); `dEQP-VK.api.
+      get_device_proc_addr.non_enabled` still Passes. A full
+      19402-case `dEQP-VK.sparse_resources.*` sweep confirms zero
+      regressions: every case remains `NotSupported`, correctly gated
+      by the still-false `sparseBinding`/`sparseResidency*` feature
+      bits.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- the sparse-residency feature bits stay
+      `VK_FALSE`; this is purely a `vkGetDeviceProcAddr` dispatch-table
+      completeness fix, not a new capability surface. `Roadmap.md`'s
+      `L236(a)` is now fully resolved (all three functions it tracked --
+      sparse residency, YCbCr conversion, buffer device address -- are
+      done), closing out the entire multi-session
+      `entry_points`-genuinely-unimplemented-functions saga `L412(e)`
+      first filed.
+
 ## Complete group accounting
 
 
