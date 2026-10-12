@@ -687,14 +687,28 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
 // (Roadmap L236(a)) `vkQueueBindSparse`: this ICD has no sparse-residency
 // support at all (`sparseBinding`/`sparseResidency*` are all unconditional
 // `VK_FALSE`, "Initial Non-Goals"), and `isValidImageShape` (Image.cpp)
-// already rejects `VK_IMAGE_CREATE_SPARSE_*_BIT` at `vkCreateImage` time --
-// so no live `VkImage`/`VkBuffer` in this ICD can ever actually need a
-// sparse memory bind, and a conformant application must not populate any
+// already rejects `VK_IMAGE_CREATE_SPARSE_*_BIT` at `vkCreateImage` time
+// (and `isValidBufferCreateInfo`, Buffer.cpp, rejects any nonzero
+// `VkBufferCreateInfo::flags`, so no live buffer can carry
+// `VK_BUFFER_CREATE_SPARSE_BINDING_BIT` either) -- so no live
+// `VkImage`/`VkBuffer` in this ICD can ever actually need a sparse memory
+// bind, and a conformant application must not populate any
 // `VkBindSparseInfo::p{Buffer,ImageOpaque,ImageBind}` array without
 // `sparseBinding` enabled first (`VUID-vkQueueBindSparse-queue-04611` and
-// its neighbors) -- so this ICD does not need to implement any actual
-// sparse-memory-binding logic to be spec-compliant, mirroring
-// `vkGetImageSparseMemoryRequirements(2)`'s own "always zero" stub below.
+// its neighbors).
+//
+// (Roadmap H46) Even so, `pBufferBinds`/`pImageOpaqueBinds` are processed
+// for real below via `Buffer`/`Image::bindSparseRange` rather than
+// silently ignored, since both describe ordinary flat resource-space
+// ranges `ResourceBindings::bindRange` already models exactly -- this is
+// forward-looking groundwork for whichever future H46 step makes
+// `sparseBinding` real, exercised today only by a caller that bypasses
+// the (currently unreachable, per the VUIDs above) normal validation
+// path. `pImageBinds` (`VkSparseImageMemoryBind`'s subresource + offset +
+// extent, per-tile addressing) is deliberately still not processed: that
+// needs a real sparse-image tile model this ICD does not have, a larger
+// piece of work left for whichever future H46 step makes
+// `sparseResidencyImage2D`/`3D` real.
 //
 // What *is* required regardless is `vkQueueBindSparse`'s ordinary queue
 // submission-order and semaphore/fence synchronization contract (per
@@ -705,14 +719,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
 // same `QueueExecutor`/`makeSubmissionTask` machinery with an empty
 // command-buffer list, so this call still correctly orders against, and
 // is waited on by, any other submission on the same queue.
-//
-// NOTE for a future `H46` (real sparse-resources feature) implementer:
-// the "ignore every bind array" simplification above is only correct
-// because no sparse-residency-flagged resource can exist yet. Once H46
-// makes `sparseBinding`/`sparseResidency*` real, this function must
-// actually walk `pBindInfo[i].{pBufferBinds,pImageOpaqueBinds,pImageBinds}`
-// and perform the real memory binds they describe before the existing
-// synchronization logic below runs.
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount,
@@ -724,6 +730,31 @@ vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount,
 
   for (uint32_t I = 0; I != bindInfoCount; ++I) {
     const VkBindSparseInfo &Bind = pBindInfo[I];
+
+    for (uint32_t J = 0; J != Bind.bufferBindCount; ++J) {
+      const VkSparseBufferMemoryBindInfo &BufBind = Bind.pBufferBinds[J];
+      Buffer *Buf = fromHandle<Buffer>(BufBind.buffer);
+      for (uint32_t K = 0; K != BufBind.bindCount; ++K) {
+        const VkSparseMemoryBind &SMB = BufBind.pBinds[K];
+        Buf->bindSparseRange(
+            SMB.resourceOffset,
+            SMB.memory ? fromHandle<DeviceMemory>(SMB.memory) : nullptr,
+            SMB.memoryOffset, SMB.size);
+      }
+    }
+
+    for (uint32_t J = 0; J != Bind.imageOpaqueBindCount; ++J) {
+      const VkSparseImageOpaqueMemoryBindInfo &ImgBind =
+          Bind.pImageOpaqueBinds[J];
+      Image *Img = fromHandle<Image>(ImgBind.image);
+      for (uint32_t K = 0; K != ImgBind.bindCount; ++K) {
+        const VkSparseMemoryBind &SMB = ImgBind.pBinds[K];
+        Img->bindSparseRange(
+            SMB.resourceOffset,
+            SMB.memory ? fromHandle<DeviceMemory>(SMB.memory) : nullptr,
+            SMB.memoryOffset, SMB.size);
+      }
+    }
 
     const VkTimelineSemaphoreSubmitInfo *TimelineInfo = nullptr;
     for (const auto *Base = static_cast<const VkBaseInStructure *>(Bind.pNext);

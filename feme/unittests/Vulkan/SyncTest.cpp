@@ -8,10 +8,12 @@
 
 #define VK_NO_PROTOTYPES
 #include "Sync.h"
+#include "Buffer.h"
 #include "CommandBuffer.h"
 #include "EntryPoints.h"
 #include "ExecutionLifetime.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 #include "Pipeline.h"
 
@@ -941,6 +943,108 @@ TEST_F(SyncTest, QueueBindSparseBinarySemaphoreSignalThenWaitSucceeds) {
   EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
 
   vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+// (Roadmap H46) `vkQueueBindSparse`'s `pBufferBinds` is now processed for
+// real (see that function's own comment, Sync.cpp) rather than ignored --
+// confirms a `VkSparseMemoryBind` reaches the target `Buffer` via
+// `bindSparseRange`. No real application can construct this (`buffer` was
+// never created with `VK_BUFFER_CREATE_SPARSE_BINDING_BIT`, which
+// `isValidBufferCreateInfo` already rejects), so this exercises the ICD's
+// internal plumbing directly rather than a spec-legal CTS-reachable path.
+TEST_F(SyncTest, QueueBindSparseBufferBindAppliesSparseRange) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 128;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 128;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+
+  VkSparseMemoryBind SMB{};
+  SMB.resourceOffset = 0;
+  SMB.size = 128;
+  SMB.memory = Memory;
+  SMB.memoryOffset = 0;
+
+  VkSparseBufferMemoryBindInfo BufBindInfo{};
+  BufBindInfo.buffer = Buf;
+  BufBindInfo.bindCount = 1;
+  BufBindInfo.pBinds = &SMB;
+
+  VkBindSparseInfo BindInfo{};
+  BindInfo.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO;
+  BindInfo.bufferBindCount = 1;
+  BindInfo.pBufferBinds = &BufBindInfo;
+  ASSERT_EQ(vkQueueBindSparse(Queue, 1, &BindInfo, VK_NULL_HANDLE),
+            VK_SUCCESS);
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  ASSERT_EQ(fromHandle<Buffer>(Buf)->ranges().size(), 1u);
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->ranges()[0].Memory,
+            fromHandle<DeviceMemory>(Memory));
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->ranges()[0].ResourceOffset, 0u);
+  EXPECT_EQ(fromHandle<Buffer>(Buf)->ranges()[0].Size, 128u);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// Mirrors the buffer-bind test above for `pImageOpaqueBinds`, confirming
+// a `VkSparseMemoryBind` reaches the target `Image` via the same
+// `bindSparseRange` method.
+TEST_F(SyncTest, QueueBindSparseImageOpaqueBindAppliesSparseRange) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo2{};
+  AllocInfo2.allocationSize = Reqs.size;
+  AllocInfo2.memoryTypeIndex = 0;
+  VkDeviceMemory Memory2 = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo2, nullptr, &Memory2),
+            VK_SUCCESS);
+
+  VkSparseMemoryBind SMB2{};
+  SMB2.resourceOffset = 0;
+  SMB2.size = Reqs.size;
+  SMB2.memory = Memory2;
+  SMB2.memoryOffset = 0;
+
+  VkSparseImageOpaqueMemoryBindInfo ImgBindInfo{};
+  ImgBindInfo.image = Img;
+  ImgBindInfo.bindCount = 1;
+  ImgBindInfo.pBinds = &SMB2;
+
+  VkBindSparseInfo BindInfo2{};
+  BindInfo2.sType = VK_STRUCTURE_TYPE_BIND_SPARSE_INFO;
+  BindInfo2.imageOpaqueBindCount = 1;
+  BindInfo2.pImageOpaqueBinds = &ImgBindInfo;
+  ASSERT_EQ(vkQueueBindSparse(Queue, 1, &BindInfo2, VK_NULL_HANDLE),
+            VK_SUCCESS);
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  ASSERT_EQ(fromHandle<Image>(Img)->ranges().size(), 1u);
+  EXPECT_EQ(fromHandle<Image>(Img)->ranges()[0].Memory,
+            fromHandle<DeviceMemory>(Memory2));
+  EXPECT_EQ(fromHandle<Image>(Img)->ranges()[0].Size, Reqs.size);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory2, nullptr);
 }
 
 TEST_F(SyncTest, HostEventSetResetStatus) {
