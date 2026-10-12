@@ -4796,6 +4796,69 @@ femeRTAtomicTexelAddress3D(const FemeRTImageDescriptor *Img, int32_t X,
   return (int32_t *)((unsigned char *)Img->Data + Offset);
 }
 
+// The multisampled-2D counterpart of `femeRTAtomicTexelAddress2D` above, for
+// `feme.cpu.image.atomic.*.2dms.i32` (roadmap L415): shares
+// `femeRTStoreTexel2DMS`'s own per-sample addressing (`Sample *
+// Layout->SampleStride`), but returns a raw `int32_t *` rather than
+// packing a texel value through it, exactly like
+// `femeRTAtomicTexelAddress2D`'s own relationship to `femeRTStoreTexel2D`.
+// `Sample >= Img->SampleCount` returns `NULL`, mirroring
+// `femeRTStoreTexel2DMS`'s own out-of-bounds handling.
+__attribute__((always_inline)) static int32_t *
+femeRTAtomicTexelAddress2DMS(const FemeRTImageDescriptor *Img, int32_t X,
+                             int32_t Y, uint32_t Sample) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Img->ArrayLayers == 0 ||
+      Sample >= Img->SampleCount)
+    return (int32_t *)0;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return (int32_t *)0;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize != sizeof(int32_t))
+    return (int32_t *)0;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
+  uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride + SampleOffset;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return (int32_t *)0;
+  return (int32_t *)((unsigned char *)Img->Data + Offset);
+}
+
+// The arrayed-*and*-multisampled counterpart of `femeRTAtomicTexelAddress2D`
+// above, for `feme.cpu.image.atomic.*.2darrayms.i32` (roadmap L415):
+// shares `femeRTStoreTexel2DArrayMS`'s own combined per-layer
+// (`Layer * Layout->SlicePitch`) and per-sample
+// (`Sample * Layout->SampleStride`) addressing, but returns a raw
+// `int32_t *` rather than packing a texel value through it. `Layer >=
+// Img->ArrayLayers` or `Sample >= Img->SampleCount` returns `NULL`,
+// mirroring `femeRTStoreTexel2DArrayMS`'s own out-of-bounds handling.
+__attribute__((always_inline)) static int32_t *
+femeRTAtomicTexelAddress2DArrayMS(const FemeRTImageDescriptor *Img, int32_t X,
+                                  int32_t Y, uint32_t Layer, uint32_t Sample) {
+  if (!Img->Data || Img->MipLayoutCount == 0 || Layer >= Img->ArrayLayers ||
+      Sample >= Img->SampleCount)
+    return (int32_t *)0;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img->Width || (uint32_t)Y >= Img->Height)
+    return (int32_t *)0;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize != sizeof(int32_t))
+    return (int32_t *)0;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[0];
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
+  uint64_t Offset = Layout->Offset + (uint64_t)Layer * Layout->SlicePitch +
+                    (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride + SampleOffset;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return (int32_t *)0;
+  return (int32_t *)((unsigned char *)Img->Data + Offset);
+}
+
 // The arrayed counterpart of `femeRTStoreTexel2D` above, for
 // `feme.cpu.image.store.2darray.v4f32` (roadmap H19b): writes \p Texel to
 // the texel at integer coordinates `(X, Y)`, array layer \p Layer, mip
@@ -8590,6 +8653,598 @@ __attribute__((always_inline)) int32_t femeCpuImageAtomicCompareExchange3D(
   FemeRTImageDescriptor Img =
       femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
   int32_t *Addr = femeRTAtomicTexelAddress3D(&Img, X, Y, Z);
+  if (!Addr)
+    return 0;
+  int32_t Expected = Comparator;
+  __atomic_compare_exchange_n(Addr, &Expected, Value, /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return Expected;
+}
+
+// `feme.cpu.image.atomic.add.2dms.i32` (roadmap L415): `OpAtomicAdd`'s counterpart to
+// `femeCpuImageAtomicAdd2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicAdd2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.add.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAdd2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_add(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.sub.2dms.i32` (roadmap L415): `OpAtomicSub`'s counterpart to
+// `femeCpuImageAtomicSub2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicSub2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.sub.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSub2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_sub(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.and.2dms.i32` (roadmap L415): `OpAtomicAnd`'s counterpart to
+// `femeCpuImageAtomicAnd2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicAnd2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.and.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAnd2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_and(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.or.2dms.i32` (roadmap L415): `OpAtomicOr`'s counterpart to
+// `femeCpuImageAtomicOr2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicOr2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.or.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicOr2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_or(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.xor.2dms.i32` (roadmap L415): `OpAtomicXor`'s counterpart to
+// `femeCpuImageAtomicXor2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicXor2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.xor.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicXor2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_xor(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smax.2dms.i32` (roadmap L415): `OpAtomicSMax`'s counterpart to
+// `femeCpuImageAtomicSMax2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicSMax2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.smax.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMax2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_max(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smin.2dms.i32` (roadmap L415): `OpAtomicSMin`'s counterpart to
+// `femeCpuImageAtomicSMin2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicSMin2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.smin.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMin2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_min(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umax.2dms.i32` (roadmap L415): `OpAtomicUMax`'s counterpart to
+// `femeCpuImageAtomicUMax2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicUMax2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.umax.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMax2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_max((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umin.2dms.i32` (roadmap L415): `OpAtomicUMin`'s counterpart to
+// `femeCpuImageAtomicUMin2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicUMin2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.umin.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMin2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_min((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.exchange.2dms.i32` (roadmap L415): `OpAtomicExchange`'s counterpart to
+// `femeCpuImageAtomicExchange2D` above, applied instead to a plain, non-arrayed
+// multisampled 2D storage image -- \p Sample selects which of the image's
+// per-texel samples this atomic addresses, via
+// `femeRTAtomicTexelAddress2DMS`'s own per-sample addressing (mirroring
+// `femeRTStoreTexel2DMS`'s own `Sample` operand on the ordinary-store
+// side).
+int32_t femeCpuImageAtomicExchange2DMS(const FemeRTImageDescriptor *ImageHeap,
+                          uint32_t ImageHeapCount, uint32_t ImageIndex,
+                          int32_t X, int32_t Y, uint32_t Sample,
+                          int32_t Value, _Bool Mask) asm("feme.cpu.image.atomic.exchange.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicExchange2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_exchange_n(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.compare_exchange.2dms.i32` (roadmap L415): `OpAtomicCompareExchange`'s counterpart to
+// `femeCpuImageAtomicCompareExchange2D` above, applied instead to a plain,
+// non-arrayed multisampled 2D storage image, mirroring
+// `femeCpuImageAtomicAdd2DMS`'s own `Sample` operand.
+int32_t femeCpuImageAtomicCompareExchange2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Comparator, int32_t Value,
+    _Bool Mask) asm("feme.cpu.image.atomic.compare_exchange.2dms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicCompareExchange2DMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Sample,
+    int32_t Comparator, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DMS(&Img, X, Y, Sample);
+  if (!Addr)
+    return 0;
+  int32_t Expected = Comparator;
+  __atomic_compare_exchange_n(Addr, &Expected, Value, /*weak=*/0,
+                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return Expected;
+}
+
+// `feme.cpu.image.atomic.add.2darrayms.i32` (roadmap L415): `OpAtomicAdd`'s counterpart to
+// `femeCpuImageAtomicAdd2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicAdd2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicAdd2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicAdd2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.add.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAdd2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_add(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.sub.2darrayms.i32` (roadmap L415): `OpAtomicSub`'s counterpart to
+// `femeCpuImageAtomicSub2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicSub2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicSub2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicSub2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.sub.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSub2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_sub(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.and.2darrayms.i32` (roadmap L415): `OpAtomicAnd`'s counterpart to
+// `femeCpuImageAtomicAnd2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicAnd2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicAnd2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicAnd2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.and.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicAnd2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_and(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.or.2darrayms.i32` (roadmap L415): `OpAtomicOr`'s counterpart to
+// `femeCpuImageAtomicOr2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicOr2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicOr2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicOr2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.or.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicOr2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_or(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.xor.2darrayms.i32` (roadmap L415): `OpAtomicXor`'s counterpart to
+// `femeCpuImageAtomicXor2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicXor2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicXor2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicXor2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.xor.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicXor2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_xor(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smax.2darrayms.i32` (roadmap L415): `OpAtomicSMax`'s counterpart to
+// `femeCpuImageAtomicSMax2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicSMax2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicSMax2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicSMax2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.smax.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMax2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_max(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.smin.2darrayms.i32` (roadmap L415): `OpAtomicSMin`'s counterpart to
+// `femeCpuImageAtomicSMin2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicSMin2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicSMin2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicSMin2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.smin.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicSMin2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_fetch_min(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umax.2darrayms.i32` (roadmap L415): `OpAtomicUMax`'s counterpart to
+// `femeCpuImageAtomicUMax2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicUMax2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicUMax2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicUMax2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.umax.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMax2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_max((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.umin.2darrayms.i32` (roadmap L415): `OpAtomicUMin`'s counterpart to
+// `femeCpuImageAtomicUMin2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicUMin2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicUMin2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicUMin2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.umin.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicUMin2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  uint32_t UValue = (uint32_t)Value;
+  return (int32_t)__atomic_fetch_min((uint32_t *)Addr, UValue,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.exchange.2darrayms.i32` (roadmap L415): `OpAtomicExchange`'s counterpart to
+// `femeCpuImageAtomicExchange2D` above, applied instead to an arrayed *and*
+// multisampled 2D storage image -- combines `femeCpuImageAtomicExchange2DArray`'s
+// own integer \p Layer operand and `femeCpuImageAtomicExchange2DMS`'s own
+// integer \p Sample operand, via `femeRTAtomicTexelAddress2DArrayMS`'s own
+// combined addressing (mirroring `femeRTStoreTexel2DArrayMS`'s own
+// combined `Layer`/`Sample` operands on the ordinary-store side).
+int32_t femeCpuImageAtomicExchange2DArrayMS(const FemeRTImageDescriptor *ImageHeap,
+                               uint32_t ImageHeapCount, uint32_t ImageIndex,
+                               int32_t X, int32_t Y, uint32_t Layer,
+                               uint32_t Sample, int32_t Value,
+                               _Bool Mask) asm("feme.cpu.image.atomic.exchange.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicExchange2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
+  if (!Addr)
+    return 0;
+  return __atomic_exchange_n(Addr, Value, __ATOMIC_SEQ_CST);
+}
+
+// `feme.cpu.image.atomic.compare_exchange.2darrayms.i32` (roadmap L415): `OpAtomicCompareExchange`'s counterpart to
+// `femeCpuImageAtomicCompareExchange2D` above, applied instead to an
+// arrayed *and* multisampled 2D storage image, mirroring
+// `femeCpuImageAtomicAdd2DArrayMS`'s own `Layer`/`Sample` operands.
+int32_t femeCpuImageAtomicCompareExchange2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Comparator, int32_t Value,
+    _Bool Mask) asm("feme.cpu.image.atomic.compare_exchange.2darrayms.i32");
+
+__attribute__((always_inline)) int32_t femeCpuImageAtomicCompareExchange2DArrayMS(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Layer,
+    uint32_t Sample, int32_t Comparator, int32_t Value, _Bool Mask) {
+  if (!Mask)
+    return 0;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  int32_t *Addr = femeRTAtomicTexelAddress2DArrayMS(&Img, X, Y, Layer, Sample);
   if (!Addr)
     return 0;
   int32_t Expected = Comparator;

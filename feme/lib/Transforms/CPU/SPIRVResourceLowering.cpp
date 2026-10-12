@@ -2443,17 +2443,26 @@ bool hasOnlySupportedStorageImageUses(const CallInst &Handle, bool IsInteger,
       // `Plain2D` alone to also accept `Plain1D`, `Array1D`, `Array2D`
       // (also covers a plain storage `Cube`, folded into `Array2D` by
       // `classifyStorageImage2DHandle` above), `StorageCubeArray`
-      // (roadmap L232's genuine cube array), and `Plain3D` -- every shape
-      // `hasOnlySupportedStorageImageUses` classifies today except the
-      // two multisampled ones (`Plain2DMS`/`Array2DMS`), which SPIR-V
-      // itself disallows atomics against entirely (an atomic image
-      // operand must not be multisampled per the spec) and so are never
-      // exercised.
+      // (roadmap L232's genuine cube array), and `Plain3D`. Roadmap L415
+      // corrects L244's own assumption here: SPIR-V does *not* disallow
+      // an atomic against a multisampled image -- `OpImageTexelPointer`'s
+      // `Sample` operand exists precisely to address a specific sample of
+      // an MS image for this use case (confirmed by a real, mandatory
+      // Vulkan CTS test, `dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`,
+      // which directly exercises atomics against an MS storage image).
+      // `ImageTexelPointerPattern` (`SPIRVToLLVMPatterns.cpp`) already
+      // appends the `Sample` operand as an extra coordinate lane for an MS
+      // image, exactly like the already-working `ImageRead`/`ImageWrite`
+      // MS handling -- so `Plain2DMS`/`Array2DMS` are now accepted here
+      // too, dispatched below using the same `(X, Y, C2=Sample)`/
+      // `(X, Y, C2=Layer, C3=Sample)` addressing the `StoreInst` branch's
+      // own `Plain2DMS`/`Array2DMS` cases already use.
       bool AtomicShapeSupported =
           Shape == ImageShape::Plain2D || Shape == ImageShape::Plain1D ||
           Shape == ImageShape::Array1D || Shape == ImageShape::Array2D ||
           Shape == ImageShape::StorageCubeArray ||
-          Shape == ImageShape::Plain3D;
+          Shape == ImageShape::Plain3D || Shape == ImageShape::Plain2DMS ||
+          Shape == ImageShape::Array2DMS;
       if (const auto *RMW = dyn_cast<AtomicRMWInst>(PU)) {
         if (!IsInteger || !AtomicShapeSupported)
           return false;
@@ -5933,6 +5942,106 @@ void lowerImageAccesses(
                                "accepts the RMW kinds handled above");
             }
             break;
+          case ImageShape::Plain2DMS:
+            // Roadmap L415: `C2` is the multisample index here, not an
+            // array layer/depth slice -- mirroring the `StoreInst`
+            // branch's own `Plain2DMS` case above.
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange2DMS(AtomicBuilder, Env, ImageIndex, X, Y,
+                                       C2, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
+            break;
+          case ImageShape::Array2DMS:
+            // Roadmap L415: `C2` is the array layer and `C3` is the
+            // multisample index -- mirroring the `StoreInst` branch's own
+            // `Array2DMS` case above.
+            switch (Op) {
+            case AtomicRMWInst::Add:
+              Old = createAtomicAdd2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Sub:
+              Old = createAtomicSub2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::And:
+              Old = createAtomicAnd2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Or:
+              Old = createAtomicOr2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xor:
+              Old = createAtomicXor2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Max:
+              Old = createAtomicSMax2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Min:
+              Old = createAtomicSMin2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMax:
+              Old = createAtomicUMax2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::UMin:
+              Old = createAtomicUMin2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            case AtomicRMWInst::Xchg:
+              Old = createAtomicExchange2DArrayMS(AtomicBuilder, Env, ImageIndex,
+                                            X, Y, C2, C3, Val, Mask, RMWName);
+              break;
+            default:
+              llvm_unreachable("hasOnlySupportedStorageImageUses only "
+                               "accepts the RMW kinds handled above");
+            }
+            break;
           default:
             llvm_unreachable("hasOnlySupportedStorageImageUses only accepts "
                              "the atomic shapes handled above");
@@ -5975,6 +6084,22 @@ void lowerImageAccesses(
             Old = createAtomicCompareExchange3D(AtomicBuilder, Env, ImageIndex,
                                                 X, Y, C2, Comparator, NewVal,
                                                 Mask, CmpXchg->getName());
+            break;
+          case ImageShape::Plain2DMS:
+            // Roadmap L415: `C2` is the multisample index, mirroring
+            // the `AtomicRMWInst` branch's own `Plain2DMS` case above.
+            Old = createAtomicCompareExchange2DMS(AtomicBuilder, Env,
+                                                  ImageIndex, X, Y, C2,
+                                                  Comparator, NewVal, Mask,
+                                                  CmpXchg->getName());
+            break;
+          case ImageShape::Array2DMS:
+            // Roadmap L415: `C2` is the array layer and `C3` is the
+            // multisample index, mirroring the `AtomicRMWInst` branch's own
+            // `Array2DMS` case above.
+            Old = createAtomicCompareExchange2DArrayMS(
+                AtomicBuilder, Env, ImageIndex, X, Y, C2, C3, Comparator,
+                NewVal, Mask, CmpXchg->getName());
             break;
           default:
             llvm_unreachable("hasOnlySupportedStorageImageUses only accepts "

@@ -190,6 +190,50 @@ StringRef feme::cpu::getImageCallName(ImageCallKind Kind) {
     return "feme.cpu.image.atomic.exchange.3d.i32";
   case ImageCallKind::AtomicCompareExchange3D:
     return "feme.cpu.image.atomic.compare_exchange.3d.i32";
+  case ImageCallKind::AtomicAdd2DMS:
+    return "feme.cpu.image.atomic.add.2dms.i32";
+  case ImageCallKind::AtomicSub2DMS:
+    return "feme.cpu.image.atomic.sub.2dms.i32";
+  case ImageCallKind::AtomicAnd2DMS:
+    return "feme.cpu.image.atomic.and.2dms.i32";
+  case ImageCallKind::AtomicOr2DMS:
+    return "feme.cpu.image.atomic.or.2dms.i32";
+  case ImageCallKind::AtomicXor2DMS:
+    return "feme.cpu.image.atomic.xor.2dms.i32";
+  case ImageCallKind::AtomicSMax2DMS:
+    return "feme.cpu.image.atomic.smax.2dms.i32";
+  case ImageCallKind::AtomicSMin2DMS:
+    return "feme.cpu.image.atomic.smin.2dms.i32";
+  case ImageCallKind::AtomicUMax2DMS:
+    return "feme.cpu.image.atomic.umax.2dms.i32";
+  case ImageCallKind::AtomicUMin2DMS:
+    return "feme.cpu.image.atomic.umin.2dms.i32";
+  case ImageCallKind::AtomicExchange2DMS:
+    return "feme.cpu.image.atomic.exchange.2dms.i32";
+  case ImageCallKind::AtomicCompareExchange2DMS:
+    return "feme.cpu.image.atomic.compare_exchange.2dms.i32";
+  case ImageCallKind::AtomicAdd2DArrayMS:
+    return "feme.cpu.image.atomic.add.2darrayms.i32";
+  case ImageCallKind::AtomicSub2DArrayMS:
+    return "feme.cpu.image.atomic.sub.2darrayms.i32";
+  case ImageCallKind::AtomicAnd2DArrayMS:
+    return "feme.cpu.image.atomic.and.2darrayms.i32";
+  case ImageCallKind::AtomicOr2DArrayMS:
+    return "feme.cpu.image.atomic.or.2darrayms.i32";
+  case ImageCallKind::AtomicXor2DArrayMS:
+    return "feme.cpu.image.atomic.xor.2darrayms.i32";
+  case ImageCallKind::AtomicSMax2DArrayMS:
+    return "feme.cpu.image.atomic.smax.2darrayms.i32";
+  case ImageCallKind::AtomicSMin2DArrayMS:
+    return "feme.cpu.image.atomic.smin.2darrayms.i32";
+  case ImageCallKind::AtomicUMax2DArrayMS:
+    return "feme.cpu.image.atomic.umax.2darrayms.i32";
+  case ImageCallKind::AtomicUMin2DArrayMS:
+    return "feme.cpu.image.atomic.umin.2darrayms.i32";
+  case ImageCallKind::AtomicExchange2DArrayMS:
+    return "feme.cpu.image.atomic.exchange.2darrayms.i32";
+  case ImageCallKind::AtomicCompareExchange2DArrayMS:
+    return "feme.cpu.image.atomic.compare_exchange.2darrayms.i32";
   case ImageCallKind::SampleCmpArray2D:
     return "feme.cpu.image.samplecmp.2darray.f32";
   case ImageCallKind::SampleCmpCube:
@@ -721,7 +765,64 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
         {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
         /*isVarArg=*/false);
     break;
-  case ImageCallKind::SampleCmpArray2D:
+  case ImageCallKind::AtomicAdd2DMS:
+  case ImageCallKind::AtomicSub2DMS:
+  case ImageCallKind::AtomicAnd2DMS:
+  case ImageCallKind::AtomicOr2DMS:
+  case ImageCallKind::AtomicXor2DMS:
+  case ImageCallKind::AtomicSMax2DMS:
+  case ImageCallKind::AtomicSMin2DMS:
+  case ImageCallKind::AtomicUMax2DMS:
+  case ImageCallKind::AtomicUMin2DMS:
+  case ImageCallKind::AtomicExchange2DMS:
+    // (image_heap, image_heap_count, image_index, x, y, sample, value,
+    //  mask) -> i32 (roadmap L415): AtomicAdd2D's own shape, plus an
+    // integer sample operand before value -- mirroring Store2DMS's own
+    // extension of Store2D.
+    FTy = FunctionType::get(
+        I32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::AtomicCompareExchange2DMS:
+    // (image_heap, image_heap_count, image_index, x, y, sample, comparator,
+    //  value, mask) -> i32 (roadmap L415): AtomicAdd2DMS's own shape,
+    // plus a leading comparator operand before value.
+    FTy = FunctionType::get(
+        I32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::AtomicAdd2DArrayMS:
+  case ImageCallKind::AtomicSub2DArrayMS:
+  case ImageCallKind::AtomicAnd2DArrayMS:
+  case ImageCallKind::AtomicOr2DArrayMS:
+  case ImageCallKind::AtomicXor2DArrayMS:
+  case ImageCallKind::AtomicSMax2DArrayMS:
+  case ImageCallKind::AtomicSMin2DArrayMS:
+  case ImageCallKind::AtomicUMax2DArrayMS:
+  case ImageCallKind::AtomicUMin2DArrayMS:
+  case ImageCallKind::AtomicExchange2DArrayMS:
+    // (image_heap, image_heap_count, image_index, x, y, layer, sample,
+    //  value, mask) -> i32 (roadmap L415): AtomicAdd2DArray's own
+    // shape, plus a trailing integer sample operand before value --
+    // mirroring Store2DArrayMS's own combined layer+sample extension of
+    // Store2D.
+    FTy = FunctionType::get(
+        I32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
+    break;
+  case ImageCallKind::AtomicCompareExchange2DArrayMS:
+    // (image_heap, image_heap_count, image_index, x, y, layer, sample,
+    //  comparator, value, mask) -> i32 (roadmap L415):
+    // AtomicAdd2DArrayMS's own shape, plus a leading comparator operand
+    // before value.
+    FTy = FunctionType::get(
+        I32Ty,
+        {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty,
+         I1Ty},
+        /*isVarArg=*/false);
+    break;  case ImageCallKind::SampleCmpArray2D:
     // Same as SampleCmp2D, plus a float array_layer operand before
     // `dudx`/`dudy`/`dvdx`/`dvdy` (roadmap L48, mirroring Sample2DArray's
     // own relationship to Sample2D); `dudx`/`dudy`/`dvdx`/`dvdy` (roadmap
@@ -1308,18 +1409,91 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
     // pointer, unlike every ordinary Load*/Store* kind above (each of
     // which only ever does one or the other) -- so it needs its own,
     // third `MemoryEffects` shape rather than reusing `IsStore`'s
-    // Store-only or the default Load-only case.
-    bool IsAtomic = Kind == ImageCallKind::AtomicAdd2D ||
-                    Kind == ImageCallKind::AtomicSub2D ||
-                    Kind == ImageCallKind::AtomicAnd2D ||
-                    Kind == ImageCallKind::AtomicOr2D ||
-                    Kind == ImageCallKind::AtomicXor2D ||
-                    Kind == ImageCallKind::AtomicSMax2D ||
-                    Kind == ImageCallKind::AtomicSMin2D ||
-                    Kind == ImageCallKind::AtomicUMax2D ||
-                    Kind == ImageCallKind::AtomicUMin2D ||
-                    Kind == ImageCallKind::AtomicExchange2D ||
-                    Kind == ImageCallKind::AtomicCompareExchange2D;
+    // Store-only or the default Load-only case. Roadmap L415: this list
+    // previously only named the original Plain2D atomic kinds (roadmap
+    // H8v), silently leaving every shape roadmap L244 and L415 later
+    // added (1D/1DArray/2DArray/3D/2DMS/2DArrayMS) with the default
+    // Load-only `MemoryEffects` -- a latent correctness bug (an optimizer
+    // could treat the atomic's write as not happening) now fixed by
+    // enumerating every `Atomic*`/`AtomicCompareExchange*` kind.
+    bool IsAtomic =
+        Kind == ImageCallKind::AtomicAdd2D ||
+        Kind == ImageCallKind::AtomicSub2D ||
+        Kind == ImageCallKind::AtomicAnd2D ||
+        Kind == ImageCallKind::AtomicOr2D ||
+        Kind == ImageCallKind::AtomicXor2D ||
+        Kind == ImageCallKind::AtomicSMax2D ||
+        Kind == ImageCallKind::AtomicSMin2D ||
+        Kind == ImageCallKind::AtomicUMax2D ||
+        Kind == ImageCallKind::AtomicUMin2D ||
+        Kind == ImageCallKind::AtomicExchange2D ||
+        Kind == ImageCallKind::AtomicCompareExchange2D ||
+        Kind == ImageCallKind::AtomicAdd1D ||
+        Kind == ImageCallKind::AtomicSub1D ||
+        Kind == ImageCallKind::AtomicAnd1D ||
+        Kind == ImageCallKind::AtomicOr1D ||
+        Kind == ImageCallKind::AtomicXor1D ||
+        Kind == ImageCallKind::AtomicSMax1D ||
+        Kind == ImageCallKind::AtomicSMin1D ||
+        Kind == ImageCallKind::AtomicUMax1D ||
+        Kind == ImageCallKind::AtomicUMin1D ||
+        Kind == ImageCallKind::AtomicExchange1D ||
+        Kind == ImageCallKind::AtomicCompareExchange1D ||
+        Kind == ImageCallKind::AtomicAdd1DArray ||
+        Kind == ImageCallKind::AtomicSub1DArray ||
+        Kind == ImageCallKind::AtomicAnd1DArray ||
+        Kind == ImageCallKind::AtomicOr1DArray ||
+        Kind == ImageCallKind::AtomicXor1DArray ||
+        Kind == ImageCallKind::AtomicSMax1DArray ||
+        Kind == ImageCallKind::AtomicSMin1DArray ||
+        Kind == ImageCallKind::AtomicUMax1DArray ||
+        Kind == ImageCallKind::AtomicUMin1DArray ||
+        Kind == ImageCallKind::AtomicExchange1DArray ||
+        Kind == ImageCallKind::AtomicCompareExchange1DArray ||
+        Kind == ImageCallKind::AtomicAdd2DArray ||
+        Kind == ImageCallKind::AtomicSub2DArray ||
+        Kind == ImageCallKind::AtomicAnd2DArray ||
+        Kind == ImageCallKind::AtomicOr2DArray ||
+        Kind == ImageCallKind::AtomicXor2DArray ||
+        Kind == ImageCallKind::AtomicSMax2DArray ||
+        Kind == ImageCallKind::AtomicSMin2DArray ||
+        Kind == ImageCallKind::AtomicUMax2DArray ||
+        Kind == ImageCallKind::AtomicUMin2DArray ||
+        Kind == ImageCallKind::AtomicExchange2DArray ||
+        Kind == ImageCallKind::AtomicCompareExchange2DArray ||
+        Kind == ImageCallKind::AtomicAdd3D ||
+        Kind == ImageCallKind::AtomicSub3D ||
+        Kind == ImageCallKind::AtomicAnd3D ||
+        Kind == ImageCallKind::AtomicOr3D ||
+        Kind == ImageCallKind::AtomicXor3D ||
+        Kind == ImageCallKind::AtomicSMax3D ||
+        Kind == ImageCallKind::AtomicSMin3D ||
+        Kind == ImageCallKind::AtomicUMax3D ||
+        Kind == ImageCallKind::AtomicUMin3D ||
+        Kind == ImageCallKind::AtomicExchange3D ||
+        Kind == ImageCallKind::AtomicCompareExchange3D ||
+        Kind == ImageCallKind::AtomicAdd2DMS ||
+        Kind == ImageCallKind::AtomicSub2DMS ||
+        Kind == ImageCallKind::AtomicAnd2DMS ||
+        Kind == ImageCallKind::AtomicOr2DMS ||
+        Kind == ImageCallKind::AtomicXor2DMS ||
+        Kind == ImageCallKind::AtomicSMax2DMS ||
+        Kind == ImageCallKind::AtomicSMin2DMS ||
+        Kind == ImageCallKind::AtomicUMax2DMS ||
+        Kind == ImageCallKind::AtomicUMin2DMS ||
+        Kind == ImageCallKind::AtomicExchange2DMS ||
+        Kind == ImageCallKind::AtomicCompareExchange2DMS ||
+        Kind == ImageCallKind::AtomicAdd2DArrayMS ||
+        Kind == ImageCallKind::AtomicSub2DArrayMS ||
+        Kind == ImageCallKind::AtomicAnd2DArrayMS ||
+        Kind == ImageCallKind::AtomicOr2DArrayMS ||
+        Kind == ImageCallKind::AtomicXor2DArrayMS ||
+        Kind == ImageCallKind::AtomicSMax2DArrayMS ||
+        Kind == ImageCallKind::AtomicSMin2DArrayMS ||
+        Kind == ImageCallKind::AtomicUMax2DArrayMS ||
+        Kind == ImageCallKind::AtomicUMin2DArrayMS ||
+        Kind == ImageCallKind::AtomicExchange2DArrayMS ||
+        Kind == ImageCallKind::AtomicCompareExchange2DArrayMS;
     F->setMemoryEffects(
         IsAtomic ? MemoryEffects::argMemOnly(ModRefInfo::ModRef)
                  : MemoryEffects::argMemOnly(IsStore ? ModRefInfo::Mod
@@ -2570,6 +2744,260 @@ CallInst *feme::cpu::createAtomicCompareExchange2D(
                             Name);
 }
 
+// Shared by every createAtomic*2DMS wrapper below (roadmap L415): builds
+// the common (image_heap, image_heap_count, image_index, x, y, sample,
+// value, mask) call for whichever RMW \p Kind names -- the multisampled-2D
+// counterpart of createAtomicRMW2D above.
+static CallInst *createAtomicRMW2DMS(IRBuilderBase &Builder,
+                                     ImageCallKind Kind,
+                                     const ImageCallEnv &Env,
+                                     Value *ImageIndex, Value *X, Value *Y,
+                                     Value *Sample, Value *Value_,
+                                     Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, Kind);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Sample, Value_,
+          Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createAtomicAdd2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicAdd2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSub2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicSub2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicAnd2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicAnd2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicOr2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicOr2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicXor2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicXor2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMax2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicSMax2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMin2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicSMin2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMax2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicUMax2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMin2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicUMin2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicExchange2DMS(IRBuilderBase &Builder,
+                                              const ImageCallEnv &Env,
+                                              Value *ImageIndex, Value *X,
+                                              Value *Y, Value *Sample,
+                                              Value *Value_, Value *Mask,
+                                              const Twine &Name) {
+  return createAtomicRMW2DMS(Builder, ImageCallKind::AtomicExchange2DMS, Env,
+                             ImageIndex, X, Y, Sample, Value_, Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicCompareExchange2DMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Sample, Value *Comparator, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F =
+      getOrInsertImageCall(*M, ImageCallKind::AtomicCompareExchange2DMS);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Sample, Comparator, Value_, Mask},
+                            Name);
+}
+
+// Shared by every createAtomic*2DArrayMS wrapper below (roadmap L415):
+// builds the common (image_heap, image_heap_count, image_index, x, y,
+// layer, sample, value, mask) call for whichever RMW \p Kind names -- the
+// arrayed-*and*-multisampled counterpart of createAtomicRMW2D above.
+static CallInst *createAtomicRMW2DArrayMS(IRBuilderBase &Builder,
+                                          ImageCallKind Kind,
+                                          const ImageCallEnv &Env,
+                                          Value *ImageIndex, Value *X,
+                                          Value *Y, Value *Layer,
+                                          Value *Sample, Value *Value_,
+                                          Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F = getOrInsertImageCall(*M, Kind);
+  return Builder.CreateCall(
+      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Layer, Sample,
+          Value_, Mask},
+      Name);
+}
+
+CallInst *feme::cpu::createAtomicAdd2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicAdd2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSub2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicSub2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicAnd2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicAnd2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicOr2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicOr2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicXor2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicXor2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMax2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicSMax2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicSMin2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicSMin2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMax2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicUMax2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicUMin2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicUMin2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicExchange2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Value_,
+    Value *Mask, const Twine &Name) {
+  return createAtomicRMW2DArrayMS(Builder, ImageCallKind::AtomicExchange2DArrayMS,
+                                  Env, ImageIndex, X, Y, Layer, Sample, Value_,
+                                  Mask, Name);
+}
+
+CallInst *feme::cpu::createAtomicCompareExchange2DArrayMS(
+    IRBuilderBase &Builder, const ImageCallEnv &Env, Value *ImageIndex,
+    Value *X, Value *Y, Value *Layer, Value *Sample, Value *Comparator,
+    Value *Value_, Value *Mask, const Twine &Name) {
+  Module *M = Builder.GetInsertBlock()->getModule();
+  Function *F =
+      getOrInsertImageCall(*M, ImageCallKind::AtomicCompareExchange2DArrayMS);
+  return Builder.CreateCall(
+      F,
+      {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Layer, Sample,
+       Comparator, Value_, Mask},
+      Name);
+}
+
 // Shared by every createAtomic*1D wrapper below (roadmap L244): builds
 // the common (image_heap, image_heap_count, image_index, x, value,
 // mask) call for whichever RMW \p Kind names -- the 1D counterpart of
@@ -3149,6 +3577,28 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
       ImageCallKind::AtomicUMin3D,
       ImageCallKind::AtomicExchange3D,
       ImageCallKind::AtomicCompareExchange3D,
+      ImageCallKind::AtomicAdd2DMS,
+      ImageCallKind::AtomicSub2DMS,
+      ImageCallKind::AtomicAnd2DMS,
+      ImageCallKind::AtomicOr2DMS,
+      ImageCallKind::AtomicXor2DMS,
+      ImageCallKind::AtomicSMax2DMS,
+      ImageCallKind::AtomicSMin2DMS,
+      ImageCallKind::AtomicUMax2DMS,
+      ImageCallKind::AtomicUMin2DMS,
+      ImageCallKind::AtomicExchange2DMS,
+      ImageCallKind::AtomicCompareExchange2DMS,
+      ImageCallKind::AtomicAdd2DArrayMS,
+      ImageCallKind::AtomicSub2DArrayMS,
+      ImageCallKind::AtomicAnd2DArrayMS,
+      ImageCallKind::AtomicOr2DArrayMS,
+      ImageCallKind::AtomicXor2DArrayMS,
+      ImageCallKind::AtomicSMax2DArrayMS,
+      ImageCallKind::AtomicSMin2DArrayMS,
+      ImageCallKind::AtomicUMax2DArrayMS,
+      ImageCallKind::AtomicUMin2DArrayMS,
+      ImageCallKind::AtomicExchange2DArrayMS,
+      ImageCallKind::AtomicCompareExchange2DArrayMS,
       ImageCallKind::SampleCmpArray2D,
       ImageCallKind::SampleCmpCube,
       ImageCallKind::SampleCmpCubeArray,
@@ -3698,6 +4148,76 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Comparator = CI.getArgOperand(6);
     Result.AtomicValue = CI.getArgOperand(7);
     Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::AtomicAdd2DMS:
+  case ImageCallKind::AtomicSub2DMS:
+  case ImageCallKind::AtomicAnd2DMS:
+  case ImageCallKind::AtomicOr2DMS:
+  case ImageCallKind::AtomicXor2DMS:
+  case ImageCallKind::AtomicSMax2DMS:
+  case ImageCallKind::AtomicSMin2DMS:
+  case ImageCallKind::AtomicUMax2DMS:
+  case ImageCallKind::AtomicUMin2DMS:
+  case ImageCallKind::AtomicExchange2DMS:
+    if (CI.arg_size() != 8)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Sample = CI.getArgOperand(5);
+    Result.AtomicValue = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
+    break;
+  case ImageCallKind::AtomicCompareExchange2DMS:
+    if (CI.arg_size() != 9)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Sample = CI.getArgOperand(5);
+    Result.Comparator = CI.getArgOperand(6);
+    Result.AtomicValue = CI.getArgOperand(7);
+    Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::AtomicAdd2DArrayMS:
+  case ImageCallKind::AtomicSub2DArrayMS:
+  case ImageCallKind::AtomicAnd2DArrayMS:
+  case ImageCallKind::AtomicOr2DArrayMS:
+  case ImageCallKind::AtomicXor2DArrayMS:
+  case ImageCallKind::AtomicSMax2DArrayMS:
+  case ImageCallKind::AtomicSMin2DArrayMS:
+  case ImageCallKind::AtomicUMax2DArrayMS:
+  case ImageCallKind::AtomicUMin2DArrayMS:
+  case ImageCallKind::AtomicExchange2DArrayMS:
+    if (CI.arg_size() != 9)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Layer = CI.getArgOperand(5);
+    Result.Sample = CI.getArgOperand(6);
+    Result.AtomicValue = CI.getArgOperand(7);
+    Result.Mask = CI.getArgOperand(8);
+    break;
+  case ImageCallKind::AtomicCompareExchange2DArrayMS:
+    if (CI.arg_size() != 10)
+      return std::nullopt;
+    Result.Env.ImageHeap = CI.getArgOperand(0);
+    Result.Env.ImageHeapCount = CI.getArgOperand(1);
+    Result.ImageIndex = CI.getArgOperand(2);
+    Result.U = CI.getArgOperand(3);
+    Result.V = CI.getArgOperand(4);
+    Result.Layer = CI.getArgOperand(5);
+    Result.Sample = CI.getArgOperand(6);
+    Result.Comparator = CI.getArgOperand(7);
+    Result.AtomicValue = CI.getArgOperand(8);
+    Result.Mask = CI.getArgOperand(9);
     break;
   case ImageCallKind::SampleCmpArray2D:
     if (CI.arg_size() != 21)

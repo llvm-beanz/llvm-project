@@ -488,6 +488,136 @@ enum class ImageCallKind : uint8_t {
   /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
   /// applied instead to a plain 3D storage image (roadmap L244).
   AtomicCompareExchange3D,
+  /// `feme.cpu.image.atomic.add.2dms.i32` (roadmap L415): `OpAtomicAdd`'s
+  /// counterpart to `AtomicAdd2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicAdd2DMS,
+  /// `feme.cpu.image.atomic.sub.2dms.i32` (roadmap L415): `OpAtomicSub`'s
+  /// counterpart to `AtomicSub2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicSub2DMS,
+  /// `feme.cpu.image.atomic.and.2dms.i32` (roadmap L415): `OpAtomicAnd`'s
+  /// counterpart to `AtomicAnd2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicAnd2DMS,
+  /// `feme.cpu.image.atomic.or.2dms.i32` (roadmap L415): `OpAtomicOr`'s
+  /// counterpart to `AtomicOr2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicOr2DMS,
+  /// `feme.cpu.image.atomic.xor.2dms.i32` (roadmap L415): `OpAtomicXor`'s
+  /// counterpart to `AtomicXor2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicXor2DMS,
+  /// `feme.cpu.image.atomic.smax.2dms.i32` (roadmap L415): `OpAtomicSMax`'s
+  /// counterpart to `AtomicSMax2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicSMax2DMS,
+  /// `feme.cpu.image.atomic.smin.2dms.i32` (roadmap L415): `OpAtomicSMin`'s
+  /// counterpart to `AtomicSMin2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicSMin2DMS,
+  /// `feme.cpu.image.atomic.umax.2dms.i32` (roadmap L415): `OpAtomicUMax`'s
+  /// counterpart to `AtomicUMax2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicUMax2DMS,
+  /// `feme.cpu.image.atomic.umin.2dms.i32` (roadmap L415): `OpAtomicUMin`'s
+  /// counterpart to `AtomicUMin2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicUMin2DMS,
+  /// `feme.cpu.image.atomic.exchange.2dms.i32` (roadmap L415): `OpAtomicExchange`'s
+  /// counterpart to `AtomicExchange2D`, applied instead to a plain, non-arrayed
+  /// multisampled 2D storage image -- `C2` below carries the integer
+  /// sample index, mirroring `Store2DMS`'s own `Sample` operand (roadmap L415).
+  AtomicExchange2DMS,
+  /// `feme.cpu.image.atomic.compare_exchange.2dms.i32` (roadmap L415):
+  /// `OpAtomicCompareExchange`'s counterpart to `AtomicCompareExchange2D`,
+  /// applied instead to a plain, non-arrayed multisampled 2D storage image
+  /// (roadmap L415).
+  AtomicCompareExchange2DMS,
+  /// `feme.cpu.image.atomic.add.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicAdd`'s counterpart to `AtomicAdd2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicAdd2DArray`'s own integer layer operand and `AtomicAdd2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicAdd2DArrayMS,
+  /// `feme.cpu.image.atomic.sub.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicSub`'s counterpart to `AtomicSub2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicSub2DArray`'s own integer layer operand and `AtomicSub2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicSub2DArrayMS,
+  /// `feme.cpu.image.atomic.and.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicAnd`'s counterpart to `AtomicAnd2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicAnd2DArray`'s own integer layer operand and `AtomicAnd2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicAnd2DArrayMS,
+  /// `feme.cpu.image.atomic.or.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicOr`'s counterpart to `AtomicOr2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicOr2DArray`'s own integer layer operand and `AtomicOr2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicOr2DArrayMS,
+  /// `feme.cpu.image.atomic.xor.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicXor`'s counterpart to `AtomicXor2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicXor2DArray`'s own integer layer operand and `AtomicXor2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicXor2DArrayMS,
+  /// `feme.cpu.image.atomic.smax.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicSMax`'s counterpart to `AtomicSMax2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicSMax2DArray`'s own integer layer operand and `AtomicSMax2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicSMax2DArrayMS,
+  /// `feme.cpu.image.atomic.smin.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicSMin`'s counterpart to `AtomicSMin2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicSMin2DArray`'s own integer layer operand and `AtomicSMin2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicSMin2DArrayMS,
+  /// `feme.cpu.image.atomic.umax.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicUMax`'s counterpart to `AtomicUMax2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicUMax2DArray`'s own integer layer operand and `AtomicUMax2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicUMax2DArrayMS,
+  /// `feme.cpu.image.atomic.umin.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicUMin`'s counterpart to `AtomicUMin2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicUMin2DArray`'s own integer layer operand and `AtomicUMin2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicUMin2DArrayMS,
+  /// `feme.cpu.image.atomic.exchange.2darrayms.i32` (roadmap L415):
+  /// `OpAtomicExchange`'s counterpart to `AtomicExchange2D`, applied instead to an
+  /// arrayed *and* multisampled 2D storage image -- combines
+  /// `AtomicExchange2DArray`'s own integer layer operand and `AtomicExchange2DMS`'s
+  /// own integer sample operand, mirroring `Store2DArrayMS`'s own combined
+  /// addressing (roadmap L415).
+  AtomicExchange2DArrayMS,
+  /// `feme.cpu.image.atomic.compare_exchange.2darrayms.i32` (roadmap
+  /// L415): `OpAtomicCompareExchange`'s counterpart to
+  /// `AtomicCompareExchange2DArray`, applied instead to an arrayed *and*
+  /// multisampled 2D storage image (roadmap L415).
+  AtomicCompareExchange2DArrayMS,
   /// `feme.cpu.image.samplecmp.2darray.f32` (roadmap L48): the
   /// `Texture2DArray` counterpart of `SampleCmp2D`, adding the same float
   /// array-layer coordinate `Sample2DArray` adds to `Sample2D`.
@@ -2410,6 +2540,72 @@ llvm::CallInst *createAtomicExchange3D(llvm::IRBuilderBase &Builder, const Image
 
 /// Builds a `feme.cpu.image.atomic.compare_exchange.3d.i32` call (roadmap L244): like `createAtomicAdd3D`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
 llvm::CallInst *createAtomicCompareExchange3D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Z, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicAdd2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicAdd2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicSub2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSub2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicAnd2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicAnd2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicOr2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicOr2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicXor2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicXor2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicSMax2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSMax2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicSMin2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSMin2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicUMax2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicUMax2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicUMin2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicUMin2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.2dms.i32` call (roadmap L415): the multisampled-2D counterpart of `createAtomicExchange2D`, see its own doc. \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicExchange2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.2dms.i32` call (roadmap L415): like `createAtomicAdd2DMS`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange2DMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Sample, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.add.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicAdd2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicAdd2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.sub.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicSub2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSub2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.and.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicAnd2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicAnd2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.or.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicOr2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicOr2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.xor.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicXor2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicXor2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smax.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicSMax2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSMax2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.smin.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicSMin2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicSMin2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umax.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicUMax2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicUMax2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.umin.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicUMin2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicUMin2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.exchange.2darrayms.i32` call (roadmap L415): the arrayed-*and*-multisampled counterpart of `createAtomicExchange2D`, see its own doc. \p Layer is the integer array layer, \p Sample is the integer multisample index.
+llvm::CallInst *createAtomicExchange2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.atomic.compare_exchange.2darrayms.i32` call (roadmap L415): like `createAtomicAdd2DArrayMS`, but only replaces `*texel` with \p Value when it currently equals \p Comparator -- either way, returns the pre-op value.
+llvm::CallInst *createAtomicCompareExchange2DArrayMS(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env, llvm::Value *ImageIndex, llvm::Value *X, llvm::Value *Y, llvm::Value *Layer, llvm::Value *Sample, llvm::Value *Comparator, llvm::Value *Value, llvm::Value *Mask, const llvm::Twine &Name = "");
 
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,

@@ -423,6 +423,102 @@ TEST_F(ImageCallsTest, MatchesAtomicCompareExchange3DCall) {
   EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
 }
 
+// Roadmap L415: `createAtomicXor2DMS`/`matchImageCall` round-trip the
+// plain, non-arrayed multisampled 2D atomic shape -- a `(U, V, Sample)`
+// coordinate triple, mirroring `MatchesAtomicExchange3DCall`'s own
+// `(U, V, Z)` shape above but with `Sample` carrying the multisample index
+// instead of a depth slice. `Xor` is one of the two RMW ops the
+// `dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}` CTS cases
+// that motivated this roadmap item actually exercise.
+TEST_F(ImageCallsTest, MatchesAtomicXor2DMSCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicXor2DMS(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(9),
+      Builder.getInt1(false));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicXor2DMS);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(3));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(false));
+}
+
+// Roadmap L415: `createAtomicCompareExchange2DMS`/`matchImageCall`
+// round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DMSCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange2DMS(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(0),
+      Builder.getInt32(42), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange2DMS);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
+// Roadmap L415: `createAtomicAnd2DArrayMS`/`matchImageCall` round-trip the
+// arrayed-*and*-multisampled 2D atomic shape -- a `(U, V, Layer, Sample)`
+// coordinate quadruple, combining `MatchesAtomicCompareExchange2DArrayCall`'s
+// own `Layer` operand and `MatchesAtomicXor2DMSCall`'s own `Sample`
+// operand. `And` is the other RMW op the motivating CTS cases exercise.
+TEST_F(ImageCallsTest, MatchesAtomicAnd2DArrayMSCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicAnd2DArrayMS(
+      Builder, Env, Builder.getInt32(0), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(4),
+      Builder.getInt32(9), Builder.getInt1(false));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicAnd2DArrayMS);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(4));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(9));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(false));
+}
+
+// Roadmap L415: `createAtomicCompareExchange2DArrayMS`/`matchImageCall`
+// round-trip.
+TEST_F(ImageCallsTest, MatchesAtomicCompareExchange2DArrayMSCall) {
+  IRBuilder<> Builder(BB);
+  ImageCallEnv Env = makeEnv(Builder);
+  CallInst *CI = createAtomicCompareExchange2DArrayMS(
+      Builder, Env, Builder.getInt32(2), Builder.getInt32(1),
+      Builder.getInt32(2), Builder.getInt32(3), Builder.getInt32(4),
+      Builder.getInt32(0), Builder.getInt32(42), Builder.getInt1(true));
+  Builder.CreateRetVoid();
+
+  std::optional<MatchedImageCall> Matched = matchImageCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, ImageCallKind::AtomicCompareExchange2DArrayMS);
+  EXPECT_EQ(Matched->U, Builder.getInt32(1));
+  EXPECT_EQ(Matched->V, Builder.getInt32(2));
+  EXPECT_EQ(Matched->Layer, Builder.getInt32(3));
+  EXPECT_EQ(Matched->Sample, Builder.getInt32(4));
+  EXPECT_EQ(Matched->Comparator, Builder.getInt32(0));
+  EXPECT_EQ(Matched->AtomicValue, Builder.getInt32(42));
+  EXPECT_EQ(Matched->Mask, Builder.getInt1(true));
+}
+
 // Roadmap L61(c): `matchImageCall`'s own `Sample1D`/`Sample1DArray` cases
 // hardcoded the pre-fix `arg_size()` (10/11) `createSample1D`/
 // `createSample1DArray` had before this row added a real `Bias`/
