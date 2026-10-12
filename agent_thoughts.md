@@ -119604,3 +119604,138 @@ else. None of them regressed or were touched.
 5. **(opportunistic, unchanged)** `L375`
    (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion)
    still untouched, still needs its own dedicated design session.
+
+# Session: roadmap hygiene pass + L416 — vkGetBufferDeviceAddress VA-reservation design, phase 1 landed
+
+## What I did, in order
+
+1. Device check first (every session, mandatory): `FeMe CPU Vulkan Device`
+   confirmed via `VK_ICD_FILENAMES=/tmp/feme_icd_14.json vulkaninfo --summary`.
+2. Picked the roadmap hygiene pass first (handoff item 4) over the two
+   open multi-session design tracks — it was flagged overdue across
+   several prior sessions and is independently time-boxable.
+3. Hygiene pass found two things, neither worth a destructive rewrite:
+   - `H124e(a)` nests a letter suffix *and* a parenthetical (two levels) —
+     the one real violation of the "one level deep" rule in the whole
+     document. Already closed/struck-through, historical, and its own
+     text already acknowledges the naming tension. Not renaming it: the
+     user's rule says "avoid... going forward," not "fix every past
+     instance."
+   - A recurring pattern where a parent row's own prose enumerates
+     lettered sub-items (`L66(a)`-`L66(e)`, `F15a`) and even cross-
+     references them elsewhere as if they're real, independently-citable
+     roadmap rows — but they never got their own `| L66(x) | ... |` row,
+     unlike siblings like `L66(f)`-`L66(k)` which did. Cosmetic only (all
+     content is present, just not splittable-by-grep); both instances are
+     closed, historical work. Not rewriting these either — same reasoning.
+4. **Bigger finding**: verifying `L375` (handoff item 5, "still open" per
+   every prior session's carried-forward notes) against the roadmap
+   directly showed it's **already fixed and struck through** —
+   `af344681704c` ("fix DiamondFlattener cross-instance merge-block
+   collision"), confirmed via its own 6th-investigation writeup landing a
+   `MergeVisited` uniqueness check, full regression-clean, committed. The
+   "still open" framing in the handoff list had gone stale several
+   sessions ago and nobody caught it since each session just re-pasted the
+   same ranked list forward. No code action needed; flagging this so it
+   stops recurring.
+5. With `L375` turning out to be a non-issue and the hygiene pass
+   concluded, moved to handoff item 2 (`vkGetBufferDeviceAddress`'s
+   virtual-address-space design) — the other multi-session design track,
+   per-tile `pImageBinds`, is strictly scoped larger (image subresource/
+   coordinate addressing vs. a linear buffer range) so I picked the
+   narrower one to make real progress on in one session.
+
+## The VA-reservation design (full writeup in `FeMeVulkanDesign.md`)
+
+Problem: a device address outlives any single bind — a shader can hold it
+across any number of `vkQueueBindSparse` rebinds and dereference it later,
+so a flat host pointer (today's `Buffer::data()`-based answer) can't
+represent "this buffer's residency may change out from under this address."
+
+Design: reserve one `mmap(PROT_NONE)` virtual address window spanning the
+buffer's whole declared size up front (unbound sub-ranges fault instead of
+aliasing stale memory), then remap real pages into sub-ranges of it via
+`mmap(MAP_FIXED)` as binds/unbinds happen, never moving the base address.
+Remapping requires the *source* memory to be a distinct, re-mappable OS
+object (not a `posix_memalign`'d heap block) — so `DeviceMemory`'s backing
+allocator itself needs to switch to `memfd_create` + `mmap`, a bigger and
+riskier change than the reservation mechanism alone (it touches every
+allocation in the driver, not just sparse ones, since Vulkan doesn't let
+you know in advance which memory will back a sparse bind).
+
+Broke it into 4 phases; only phase 1 landed this session:
+
+1. **(done)** `VirtualAddressReservation` + `createShareableMemoryFd`,
+   new standalone scaffolding, 15 unit tests, zero behavior change —
+   nothing constructs either type yet. Mirrors `MemoryBinding.h`'s
+   (H46) own precedent exactly.
+2. Switch `DeviceMemory`'s allocator to `memfd_create`-backed storage.
+   Highest-risk phase — touches every allocation, needs a full
+   regression pass, not attempted this session.
+3. Wire `vkGetBufferDeviceAddress` to the reservation for
+   `SPARSE_BINDING`-flagged buffers only.
+4. Wire `vkQueueBindSparse`'s bind processing to `mapRange`/`unmapRange`.
+
+## What changed (4 commits)
+
+1. `b7c98b362a33` — `VirtualAddressReservation.{h,cpp}` +
+   `VirtualAddressReservationTest.cpp` (15 tests) + CMakeLists
+   registration in both `feme/lib/Vulkan` and `feme/unittests/Vulkan`.
+2. `93eef9af7672` — `FeMeVulkanDesign.md` design writeup (replaces the
+   old "deliberately deferred" placeholder).
+3. `120360dda76e` — `Roadmap.md` new `L416` row.
+4. `a6d13f78b4db` — `VulkanCTSReport.md` item 79.
+
+## Verification
+
+- `check-feme`: 3,698/3,701 Passed, 3 Unsupported, 0 Failed (+15 unit
+  tests), 0 regressions. Built with ccache (`CMAKE_CXX_COMPILER_LAUNCHER=
+  ccache`), assertions on, no PCH (confirmed `CMAKE_DISABLE_PRECOMPILE_
+  HEADERS=ON` in the cache, unchanged this session).
+- CTS: `dEQP-VK.api.*memory*` sanity sweep (2,877 cases), 0 Fail —
+  expected, since this phase is unused infrastructure nothing calls yet.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed, confirmed — new internal scaffolding only, no feature/extension
+  surface touched.
+- No issues found outside `feme/` this session, so the "isolated
+  reproducer + separate commit" rule for non-FeMe bugs didn't apply.
+
+## A design wrinkle worth flagging explicitly
+
+`memfd_create` is Linux-specific. `DeviceMemory`'s current allocator is
+already cross-platform (`posix_memalign` / `_aligned_malloc`, with a real
+`_WIN32` branch in `Memory.cpp`), so phase 2+ needs an equivalent Windows
+mechanism (`CreateFileMapping`/`MapViewOfFile3`, same "one shareable
+object, multiple views" idea) before it can land without regressing
+Windows support. `VirtualAddressReservation.cpp`'s own `_WIN32` branch
+today just reports clean failure rather than attempting an untested
+implementation — flagged in both the header comment and the design doc so
+a future session doesn't assume it's already handled.
+
+## Next steps (ranked)
+
+1. **(~multi-session)** `L416` phase 2: switch `DeviceMemory`'s backing
+   allocator to `memfd_create`+`mmap` on POSIX, preserving every existing
+   `vkMapMemory`/`vkUnmapMemory`/flush/invalidate behavior exactly. This
+   is the highest-risk remaining phase — touches every allocation in the
+   driver. Needs a full `check-feme` + broad CTS memory/buffer/image
+   regression sweep before landing, not just the targeted sanity check
+   this session ran. Recommend starting with a design note on exactly
+   which existing tests constitute "every device-memory CTS case" so the
+   regression sweep has a concrete, enumerable target rather than an
+   ad-hoc rerun.
+2. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
+   (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still
+   untouched, still needs its own dedicated session; this session's `L416`
+   design doesn't inform it much since buffers are linear and images are
+   not.
+3. **(blocked on 1-2)** Only once `L416` phases 2-4 and the `pImageBinds`
+   design are done: flip `sparseBinding`/`sparseResidency*` feature bits
+   to `VK_TRUE`.
+4. **(done, no longer a handoff item)** `L375` — confirmed already fixed
+   by a prior session (`af344681704c`). Stop carrying this forward.
+5. **(low-priority, cosmetic)** The two roadmap hygiene findings above
+   (`H124e(a)` nesting, `L66`/`F15`-style unsplit lettered sub-items) are
+   recorded here but not fixed — only worth revisiting if a future
+   cleanup session wants to spend real time rewriting closed historical
+   rows for documentation clarity alone. Not a standing action item.
