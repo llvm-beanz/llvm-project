@@ -21,6 +21,7 @@
 #include "ExecutionLifetime.h"
 #include "Format.h"
 #include "Memory.h"
+#include "MemoryBinding.h"
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -53,26 +54,23 @@ public:
   /// rules (rebinding a bound buffer is invalid usage the application must
   /// avoid; this ICD does not re-validate it).
   void bind(DeviceMemory *Memory, VkDeviceSize Offset) {
-    BoundMemory = Memory;
-    BoundOffset = Offset;
+    Bindings.bindWhole(Memory, Offset, Size);
   }
 
-  bool isBound() const { return BoundMemory != nullptr; }
+  bool isBound() const { return Bindings.isBound(); }
 
   /// The buffer's data pointer: its bound memory's base plus the binding
   /// offset (see "Memory and Buffers": "Data = memory allocation base +
   /// buffer binding offset + descriptor offset"). Null if unbound.
-  void *data() const {
-    if (!BoundMemory)
-      return nullptr;
-    return static_cast<uint8_t *>(BoundMemory->data()) + BoundOffset;
-  }
+  void *data() const { return Bindings.data(); }
 
 private:
   VkDeviceSize Size;
   VkBufferUsageFlags Usage;
-  DeviceMemory *BoundMemory = nullptr;
-  VkDeviceSize BoundOffset = 0;
+  /// (Roadmap H46) Backed by the general sparse-capable binding model;
+  /// see MemoryBinding.h's file comment for why this is only ever empty
+  /// or a single whole-buffer range today.
+  ResourceBindings Bindings;
 };
 
 /// A `VkBufferView`: a typed window into a `VkBuffer`, consumed only by a
