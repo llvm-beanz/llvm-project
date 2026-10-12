@@ -172,6 +172,21 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(
   *pCommittedMemoryInBytes = fromHandle<DeviceMemory>(memory)->size();
 }
 
+// Roadmap L236(a): `vkGetDeviceMemoryOpaqueCaptureAddress` is core since
+// Vulkan 1.2 and must resolve via `vkGetDeviceProcAddr` regardless of the
+// (always-false) `bufferDeviceAddressCaptureReplay` feature bit -- per spec,
+// an application must not call it without that feature enabled, so this
+// value is never actually consumed by a conformant caller. This ICD's host
+// allocation itself is already a stable, unique address for the lifetime of
+// the allocation, so returning it directly (rather than a fabricated
+// opaque ID) is both the simplest and a genuinely meaningful choice should
+// that ever change.
+VKAPI_ATTR uint64_t VKAPI_CALL vkGetDeviceMemoryOpaqueCaptureAddress(
+    VkDevice, const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo) {
+  return reinterpret_cast<uint64_t>(
+      fromHandle<DeviceMemory>(pInfo->memory)->data());
+}
+
 void fillMemoryRequirements2PNextChain(void *PNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(PNext); Base;
        Base = Base->pNext) {

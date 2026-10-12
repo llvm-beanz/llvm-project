@@ -72,6 +72,32 @@ TEST_F(MemoryTest, AllocateMapWriteFree) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap L236(a): vkGetDeviceMemoryOpaqueCaptureAddress must resolve via
+// vkGetDeviceProcAddr regardless of bufferDeviceAddressCaptureReplay's
+// (always-false) feature bit -- see its own comment (Memory.cpp) for why it
+// returns the allocation's host pointer.
+TEST_F(MemoryTest, GetDeviceMemoryOpaqueCaptureAddressMatchesHostPointer) {
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+
+  void *Data = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, Memory, 0, VK_WHOLE_SIZE, 0, &Data),
+            VK_SUCCESS);
+
+  VkDeviceMemoryOpaqueCaptureAddressInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_OPAQUE_CAPTURE_ADDRESS_INFO;
+  Info.memory = Memory;
+  EXPECT_EQ(reinterpret_cast<void *>(
+                vkGetDeviceMemoryOpaqueCaptureAddress(Device, &Info)),
+            Data);
+
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(MemoryTest, RejectsUnknownMemoryType) {
   VkMemoryAllocateInfo AllocInfo{};
   AllocInfo.allocationSize = 256;

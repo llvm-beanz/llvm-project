@@ -151,6 +151,32 @@ vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
   return VK_SUCCESS;
 }
 
+// Roadmap L236(a): `vkGetBufferDeviceAddress`/`vkGetBufferOpaqueCaptureAddress`
+// are core since Vulkan 1.2 and must resolve via `vkGetDeviceProcAddr`
+// regardless of the (always-false) `bufferDeviceAddress`/
+// `bufferDeviceAddressCaptureReplay` feature bits -- per spec, a conformant
+// application must not call either without the corresponding feature
+// enabled. Unlike most of this ICD's other feature-gated stubs, this one is
+// not an arbitrary placeholder: `Buffer::data()` (see its own comment,
+// Buffer.h) is already this backend's one true device address for a bound
+// buffer -- a host pointer a shader-side load/store can dereference
+// directly, since the "device" here is just host RAM -- so both functions
+// return it (identical values, since this ICD has no separate capture/replay
+// opaque-ID space). The buffer must already be bound (`vkBindBufferMemory`)
+// for either to be well-defined, matching every other `Buffer::data()`
+// caller's own precondition.
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL
+vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo *pInfo) {
+  return reinterpret_cast<VkDeviceAddress>(
+      fromHandle<Buffer>(pInfo->buffer)->data());
+}
+
+VKAPI_ATTR uint64_t VKAPI_CALL
+vkGetBufferOpaqueCaptureAddress(VkDevice device,
+                                const VkBufferDeviceAddressInfo *pInfo) {
+  return feme::vulkan::vkGetBufferDeviceAddress(device, pInfo);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBufferView(
     VkDevice, const VkBufferViewCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkBufferView *pView) {

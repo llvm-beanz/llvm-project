@@ -153,6 +153,11 @@ vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
 VKAPI_ATTR void VKAPI_CALL
 vkGetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
                             VkDeviceSize *pCommittedMemoryInBytes);
+// (roadmap L236(a)) VK_KHR_buffer_device_address, core since 1.2: see
+// Buffer.cpp's own comment on vkGetBufferDeviceAddress for why this ICD
+// treats a bound buffer's host pointer as its one true device address.
+VKAPI_ATTR uint64_t VKAPI_CALL vkGetDeviceMemoryOpaqueCaptureAddress(
+    VkDevice device, const VkDeviceMemoryOpaqueCaptureAddressInfo *pInfo);
 // (roadmap F14) VK_KHR_map_memory2: pNext-extensible map/unmap wrappers.
 VKAPI_ATTR VkResult VKAPI_CALL
 vkMapMemory2(VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo,
@@ -186,6 +191,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                     const VkBindBufferMemoryInfo *pBindInfos);
+// (roadmap L236(a)) VK_KHR_buffer_device_address, core since 1.2: see
+// Buffer.cpp's own comment on vkGetBufferDeviceAddress.
+VKAPI_ATTR VkDeviceAddress VKAPI_CALL vkGetBufferDeviceAddress(
+    VkDevice device, const VkBufferDeviceAddressInfo *pInfo);
+VKAPI_ATTR uint64_t VKAPI_CALL vkGetBufferOpaqueCaptureAddress(
+    VkDevice device, const VkBufferDeviceAddressInfo *pInfo);
 // (roadmap E4) VK_KHR_maintenance4: buffer memory requirements from a
 // VkBufferCreateInfo alone, no VkBuffer needed.
 VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(

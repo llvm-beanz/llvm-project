@@ -70,6 +70,38 @@ TEST_F(BufferTest, CreateBindDestroy) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap L236(a): vkGetBufferDeviceAddress/vkGetBufferOpaqueCaptureAddress
+// must resolve via vkGetDeviceProcAddr regardless of bufferDeviceAddress's
+// (always-false) feature bit -- see vkGetBufferDeviceAddress's own comment
+// (Buffer.cpp) for why both return the bound buffer's host pointer.
+TEST_F(BufferTest, GetBufferDeviceAddressMatchesBoundHostPointer) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 64;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetBufferMemoryRequirements(Device, Buf, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Buf, Memory, 0), VK_SUCCESS);
+
+  VkBufferDeviceAddressInfo AddrInfo{};
+  AddrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+  AddrInfo.buffer = Buf;
+  VkDeviceAddress Addr = vkGetBufferDeviceAddress(Device, &AddrInfo);
+  EXPECT_EQ(reinterpret_cast<void *>(Addr), fromHandle<Buffer>(Buf)->data());
+  EXPECT_EQ(vkGetBufferOpaqueCaptureAddress(Device, &AddrInfo), Addr);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(BufferTest, BindBufferMemory2) {
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = 64;
