@@ -3275,6 +3275,45 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       buffer-device-address/sparse-residency work this item does not
       attempt.
 
+72. **`L236(a)` continued: implemented real buffer-device-address entry
+    points, dropping `entry_points`'s Fail count from 6 to 3.**
+    - `vkGetBufferDeviceAddress`/`vkGetBufferOpaqueCaptureAddress`
+      (`Buffer.cpp`) and `vkGetDeviceMemoryOpaqueCaptureAddress`
+      (`Memory.cpp`) are core since Vulkan 1.2 and must resolve via
+      `vkGetDeviceProcAddr` regardless of the (always-false)
+      `bufferDeviceAddress`/`bufferDeviceAddressCaptureReplay` feature
+      bits.
+    - Unlike most of this ICD's other feature-gated stubs, this is not
+      an arbitrary placeholder: since this backend's "device" is host
+      RAM, a bound `VkBuffer`'s own host pointer (`Buffer::data()`)
+      already is this ICD's one true device address, so both buffer
+      functions return it directly (identical values -- there is no
+      separate capture/replay opaque-ID space here);
+      `vkGetDeviceMemoryOpaqueCaptureAddress` returns the backing
+      allocation's host pointer the same way.
+    - New unit tests: `BufferTest.cpp`'s
+      `GetBufferDeviceAddressMatchesBoundHostPointer`, `MemoryTest.cpp`'s
+      `GetDeviceMemoryOpaqueCaptureAddressMatchesHostPointer`.
+    - `check-feme`: 3655/3658 Passed, 3 Unsupported, 0 Failed, 0
+      regressions.
+    - **Verified against CTS**: `dEQP-VK.api.version_check.entry_points`
+      Fail count drops from 6 to 3 (only the 3 sparse-residency
+      functions -- `vkGetImageSparseMemoryRequirements`/
+      `vkGetImageSparseMemoryRequirements2`/`vkQueueBindSparse` --
+      remain). A 4718-case
+      `dEQP-VK.binding_model.buffer_device_address.*` sweep confirms
+      zero regressions: every case remains `NotSupported`, correctly
+      gated by the still-false `bufferDeviceAddress` feature bit.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- `bufferDeviceAddress`/
+      `bufferDeviceAddressCaptureReplay` stay `VK_FALSE`; this is purely
+      a `vkGetDeviceProcAddr` dispatch-table completeness fix, not a new
+      capability surface.
+    - Only sparse residency remains open under `L236(a)`, and needs a
+      real sparse-memory-binding design before any entry-point work
+      makes sense (not a quick win, per the prior handoff's own
+      ranking) -- see `Roadmap.md`'s updated `L236(a)` entry.
+
 ## Complete group accounting
 
 
