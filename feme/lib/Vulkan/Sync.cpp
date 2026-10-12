@@ -705,6 +705,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
 // same `QueueExecutor`/`makeSubmissionTask` machinery with an empty
 // command-buffer list, so this call still correctly orders against, and
 // is waited on by, any other submission on the same queue.
+//
+// NOTE for a future `H46` (real sparse-resources feature) implementer:
+// the "ignore every bind array" simplification above is only correct
+// because no sparse-residency-flagged resource can exist yet. Once H46
+// makes `sparseBinding`/`sparseResidency*` real, this function must
+// actually walk `pBindInfo[i].{pBufferBinds,pImageOpaqueBinds,pImageBinds}`
+// and perform the real memory binds they describe before the existing
+// synchronization logic below runs.
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueueBindSparse(VkQueue queue, uint32_t bindInfoCount,
                   const VkBindSparseInfo *pBindInfo, VkFence fence) {
