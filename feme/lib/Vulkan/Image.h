@@ -73,6 +73,7 @@
 
 #include "ExecutionLifetime.h"
 #include "Memory.h"
+#include "MemoryBinding.h"
 #include "PhysicalDeviceInfo.h"
 
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -208,18 +209,13 @@ public:
   /// Records the `(VkDeviceMemory, offset)` pair `vkBindImageMemory` binds
   /// this image to. Must be called exactly once, mirroring `Buffer::bind`.
   void bind(DeviceMemory *Memory, VkDeviceSize Offset) {
-    BoundMemory = Memory;
-    BoundOffset = Offset;
+    Bindings.bindWhole(Memory, Offset, TotalSize);
   }
 
-  bool isBound() const { return BoundMemory != nullptr; }
+  bool isBound() const { return Bindings.isBound(); }
 
   /// The image's base data pointer, or null if unbound.
-  void *data() const {
-    if (!BoundMemory)
-      return nullptr;
-    return static_cast<uint8_t *>(BoundMemory->data()) + BoundOffset;
-  }
+  void *data() const { return Bindings.data(); }
 
   /// A pointer to sample \p Sample (0 for a single-sample image) of texel
   /// `(X, Y, Z)` of mip level \p MipLevel, array layer \p ArrayLayer (0 for
@@ -289,8 +285,10 @@ private:
   std::vector<feme::cpu::FemeImageSubresourceLayout> MipLayouts;
   VkDeviceSize TotalSize = 0;
 
-  DeviceMemory *BoundMemory = nullptr;
-  VkDeviceSize BoundOffset = 0;
+  /// (Roadmap H46) Backed by the general sparse-capable binding model;
+  /// see MemoryBinding.h's file comment for why this is only ever empty
+  /// or a single whole-image range today.
+  ResourceBindings Bindings;
 
   /// Flat `[MipLevel * SlicesPerLevel + Slice]` tracked layout, where
   /// `SlicesPerLevel` is `max(ArrayLayers, Depth)` -- see `texelPointer`'s
