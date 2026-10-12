@@ -65,35 +65,26 @@ suggested the next steps:
 
 1. **(~multi-session, still not attempted)** Design the per-tile
    `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
-   addressing) — explicitly scoped out of this and every prior session,
-   needs its own design pass before any code.
-2. **(~multi-session, separate design track)** `vkGetBufferDeviceAddress`'s
-   virtual-address-space-reservation design (mmap/mprotect-based), per this
-   session's deferred-design writeup in `FeMeVulkanDesign.md` — needed before
-   this one remaining Buffer-typed call site can become range-aware.
-3. **(~2-4 hours, new, separate from the Buffer-side work just finished)**
-   The Image-typed call sites from the 26-list (`Swapchain.cpp`, `Image.cpp`
-   `texelPointer`/`blockPointer`, `ImageOps.cpp`'s image half,
-   `RenderPass.cpp`, `CommandBuffer.cpp`'s sampled-image prep) still need
-   their own migration pass — out of scope for this session, which covered
-   Buffer-typed sites only. Image sub-range addressing (subresource/mip/
-   layer) is more complex than a linear byte offset; expect this to need its
-   own small design note before the mechanical migration, similar in spirit
-   to the vertex/index work this session but with an extra dimension.
-4. **(not started, separate from `H46`)** Only once items 1-3 above are done:
-   flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`. Do NOT
-   do this prematurely.
-5. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap hygiene
-   passes — this session's was a quick check, not a deep one; alternate a
-   deeper pass back in soon per the standing cadence.
-6. **(opportunistic, unchanged)** `L375`
+   addressing) — explicitly scoped out of every session so far, needs its
+   own design pass before any code.
+2. **(~multi-session, separate design track, unchanged)**
+   `vkGetBufferDeviceAddress`'s virtual-address-space-reservation design
+   (mmap/mprotect-based), per `FeMeVulkanDesign.md`'s "Memory and Buffers"
+   section — the only remaining un-migrated 26-list call site.
+3. **(not started, separate from `H46`)** Only once items 1-2 above are
+   done: flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
+   Do NOT do this prematurely — there is no longer a known-unsafe call site
+   blocking this besides items 1-2, but neither of those is close to done.
+4. **(~1-2 hours, standing, unchanged)** Keep doing periodic roadmap
+   hygiene passes — alternate a deep pass back in next time, this one was
+   a quick check.
+5. **(opportunistic, unchanged)** `L375`
    (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion) still
    untouched, still needs its own dedicated design session.
-7. **(opportunistic, general takeaway from this session)** When a
-   mechanical-looking pointer-arithmetic migration changes what a
-   pre-existing variable *means* (here: `Base` went from "buffer start" to
-   "buffer start + Offset"), grep every use of that variable in the same
-   function, not just the one line being edited — the bug this session hit
-   was exactly this: one `Offset` subtraction was correctly dropped
-   elsewhere in the same diff, but the indexing expression wasn't updated to
-   match.
+6. **(opportunistic, new finding this session)** Both multisample
+   storage-image atomic failures found this session
+   (`dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`) are
+   confirmed pre-existing and currently untriaged/undocumented anywhere —
+   worth a dedicated investigation session; likely related to multisample
+   storage-image handling rather than anything `H46` touches, since they
+   fail identically with or without this session's changes.
