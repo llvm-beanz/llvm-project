@@ -1108,9 +1108,17 @@ Error runCopyBuffer(Buffer *Src, Buffer *Dst,
         Region.dstOffset + Region.size > Dst->size())
       return createStringError(inconvertibleErrorCode(),
                                "buffer copy region is out of range");
-    std::memcpy(static_cast<uint8_t *>(Dst->data()) + Region.dstOffset,
-                static_cast<const uint8_t *>(Src->data()) + Region.srcOffset,
-                Region.size);
+    // (Roadmap H46) dataForRange, not data()+Offset: today always
+    // succeeds (every bound buffer is a single whole-buffer range), but
+    // fails safely with a real error instead of a silently-wrong
+    // pointer once a genuinely sparse buffer can have more than one
+    // range.
+    void *DstPtr = Dst->dataForRange(Region.dstOffset, Region.size);
+    const void *SrcPtr = Src->dataForRange(Region.srcOffset, Region.size);
+    if (!DstPtr || !SrcPtr)
+      return createStringError(inconvertibleErrorCode(),
+                               "buffer copy region is not fully resident");
+    std::memcpy(DstPtr, SrcPtr, Region.size);
   }
   return Error::success();
 }
@@ -1127,8 +1135,11 @@ Error runFillBuffer(Buffer *Dst, VkDeviceSize Offset, VkDeviceSize Size,
   if (Offset + ResolvedSize > Dst->size())
     return createStringError(inconvertibleErrorCode(),
                              "fill buffer region is out of range");
-  auto *Words = static_cast<uint32_t *>(
-      static_cast<void *>(static_cast<uint8_t *>(Dst->data()) + Offset));
+  void *Ptr = Dst->dataForRange(Offset, ResolvedSize);
+  if (!Ptr)
+    return createStringError(inconvertibleErrorCode(),
+                             "fill buffer region is not fully resident");
+  auto *Words = static_cast<uint32_t *>(Ptr);
   std::fill_n(Words, ResolvedSize / sizeof(uint32_t), Data);
   return Error::success();
 }
@@ -1143,8 +1154,11 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
   if (Offset + Data.size() > Dst->size())
     return createStringError(inconvertibleErrorCode(),
                              "update buffer region is out of range");
-  std::memcpy(static_cast<uint8_t *>(Dst->data()) + Offset, Data.data(),
-              Data.size());
+  void *Ptr = Dst->dataForRange(Offset, Data.size());
+  if (!Ptr)
+    return createStringError(inconvertibleErrorCode(),
+                             "update buffer region is not fully resident");
+  std::memcpy(Ptr, Data.data(), Data.size());
   return Error::success();
 }
 
@@ -1185,7 +1199,12 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
       return createStringError(inconvertibleErrorCode(),
                                "copy query pool results region is out of "
                                "range");
-    auto *Out = static_cast<uint8_t *>(Dst->data()) + Offset;
+    void *OutPtr = Dst->dataForRange(Offset, EntrySize);
+    if (!OutPtr)
+      return createStringError(inconvertibleErrorCode(),
+                               "copy query pool results region is not "
+                               "fully resident");
+    auto *Out = static_cast<uint8_t *>(OutPtr);
     writeQueryResult(*Pool, FirstQuery + I, Is64Bit, WithAvailability, Out);
   }
   return Error::success();
