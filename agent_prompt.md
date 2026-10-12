@@ -63,21 +63,24 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~30-60 minutes)** Try the cheap YCbCr stub first: add
-   `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion` as thin
-   object create/destroy entry points (no real multi-planar sampling), register
-   in `ImplementedEntrypoints.txt`, and re-run `entry_points` to confirm it
-   drops from 8 Fails to 7. This is the single cheapest of the three remaining
-   families and doesn't commit to anything else in `K7`.
-2. **(~1-2 hours)** Buffer device address stub:
-   `vkGetBufferDeviceAddress`/`vkGetBufferOpaqueCaptureAddress`/`vkGetDeviceMemoryOpaqueCaptureAddress`,
-   spec-legal to stub cheaply since `bufferDeviceAddress` stays `VK_FALSE` and
-   callers must not invoke them without the feature enabled.
-3. **(~multi-session, real architecture work)** Sparse residency: needs an
-   actual sparse-memory-binding design before any entry point work makes sense;
-   not a quick win, do this last of the three (or not at all this handoff
-   cycle).
-4. **(~5 minutes, whenever next picked up)** Check the blend-regression sweep
-   (`ps aux | grep deqp-vk`, tally `/tmp/l411_blend_regression2.qpa`); fold the
-   final tally into `VulkanCTSReport.md` item 69 once it completes, then delete
-   the `.qpa` file.
+1. **(~multi-session, real architecture work, not a quick win)** Sparse
+   residency design + stub: decide what
+   `sparseBinding`/`sparseResidencyBuffer`/`sparseResidencyImage*` mean for this
+   CPU/host-RAM-backed allocator (likely: report the properties truthfully as
+   minimal/non-residency-preserving, or keep the feature bits false and just add
+   thin `vkGetImageSparseMemoryRequirements{,2}` returning zero sparse
+   requirements plus a `vkQueueBindSparse` that validates and no-ops). Start
+   with a feasibility read of the three functions' exact Vulkan-spec
+   preconditions when the corresponding feature bits are false — there may be a
+   legal all-zero/no-op answer that doesn't require a real sparse-binding model
+   at all, which would make this much cheaper than previously assumed. Worth 30
+   minutes of spec-reading before committing to the "multi-session" estimate.
+2. **(~1-2 hours, standing since several sessions, no CTS-visible symptom found
+   yet)** Re-triage whether any other roadmap item has gone stale or needs
+   breakdown, per the standing instruction to keep milestone breakdowns current
+   — no specific item flagged this session, just a general hygiene pass worth
+   doing periodically.
+3. **(ongoing)** Resume the broader `dEQP-VK.pipeline.*.blend.*` regression
+   sweep if a future session wants full 66-case-family coverage for `L411` —
+   start fresh with `detach: true` this time, don't rely on the partial tally
+   already recorded.
