@@ -63,17 +63,28 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~multi-session, still not attempted)** Design the per-tile
-   `pImageBinds` model (`VkSparseImageMemoryBind`'s subresource/coordinate
-   addressing).
-2. **(~multi-session, separate design track, unchanged)**
-   `vkGetBufferDeviceAddress`'s virtual-address-space-reservation design
-   — the only remaining un-migrated `H46` 26-list call site.
-3. **(not started, separate from `H46`)** Only once items 1-2 are done:
-   flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
-4. **(~1-2 hours, standing)** Periodic roadmap hygiene pass — skipped
-   again this session (focus was 100% on `L415`). Due for a real deep
-   pass soon, not just a quick check.
-5. **(opportunistic, unchanged)** `L375`
-   (`switch_continue_{geom,tessc,tesse}` `DiamondFlattener` assertion)
-   still untouched, still needs its own dedicated design session.
+1. **(~multi-session)** `L416` phase 2: switch `DeviceMemory`'s backing
+   allocator to `memfd_create`+`mmap` on POSIX, preserving every existing
+   `vkMapMemory`/`vkUnmapMemory`/flush/invalidate behavior exactly. This
+   is the highest-risk remaining phase — touches every allocation in the
+   driver. Needs a full `check-feme` + broad CTS memory/buffer/image
+   regression sweep before landing, not just the targeted sanity check
+   this session ran. Recommend starting with a design note on exactly
+   which existing tests constitute "every device-memory CTS case" so the
+   regression sweep has a concrete, enumerable target rather than an
+   ad-hoc rerun.
+2. **(~multi-session, unchanged)** Design the per-tile `pImageBinds` model
+   (`VkSparseImageMemoryBind`'s subresource/coordinate addressing) — still
+   untouched, still needs its own dedicated session; this session's `L416`
+   design doesn't inform it much since buffers are linear and images are
+   not.
+3. **(blocked on 1-2)** Only once `L416` phases 2-4 and the `pImageBinds`
+   design are done: flip `sparseBinding`/`sparseResidency*` feature bits
+   to `VK_TRUE`.
+4. **(done, no longer a handoff item)** `L375` — confirmed already fixed
+   by a prior session (`af344681704c`). Stop carrying this forward.
+5. **(low-priority, cosmetic)** The two roadmap hygiene findings above
+   (`H124e(a)` nesting, `L66`/`F15`-style unsplit lettered sub-items) are
+   recorded here but not fixed — only worth revisiting if a future
+   cleanup session wants to spend real time rewriting closed historical
+   rows for documentation clarity alone. Not a standing action item.
