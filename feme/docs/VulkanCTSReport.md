@@ -3611,6 +3611,59 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
       only after both of those, promoting the feature bits to
       `VK_TRUE`.
 
+78. **`L415`: fixed `dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`,
+    the 2 pre-existing failures item 77 confirmed unrelated to `H46`.**
+    - Root cause: `SPIRVResourceLowering.cpp`'s
+      `hasOnlySupportedStorageImageUses` rejected `Plain2DMS`/
+      `Array2DMS` outright for any image atomic, based on an `L244`-era
+      comment incorrectly assuming SPIR-V disallows an atomic against a
+      multisampled image. False: `OpImageTexelPointer`'s own `Sample`
+      operand exists precisely to address a specific sample of an MS
+      image, and this CTS test (a mandatory conformance case) proves
+      it is spec-legal. The already-working `ImageRead`/`ImageWrite`
+      MS handling (`StoreInst` branch's own `Plain2DMS`/`Array2DMS`
+      cases) already computes the right addressing; only the atomic
+      dispatch had never been widened to match.
+    - Widened `AtomicShapeSupported` and both the `AtomicRMWInst`/
+      `AtomicCmpXchgInst` dispatch switches in `lowerImageAccesses` to
+      accept the two MS shapes, following `L244`'s own per-shape-case
+      precedent exactly (`(X, Y, C2=Sample)` for `Plain2DMS`,
+      `(X, Y, C2=Layer, C3=Sample)` for `Array2DMS`).
+    - Added the corresponding `ImageCalls.h`/`.cpp` boilerplate: 22 new
+      `ImageCallKind`/`create*` entries (11 ops x 2 new MS shape
+      families), plus 22 new `FeMeRuntimeCPU.c` runtime entry points
+      (2 new MS-aware atomic address helpers mirroring the existing
+      `femeRTStoreTexel2DMS`/`2DArrayMS` addressing math, and the 22
+      builtin-based op bodies).
+    - Also fixed a latent pre-existing bug found while touching this
+      code: `ImageCalls.cpp`'s `IsAtomic` (used to set `MemoryEffects`
+      for atomic calls) only ever listed the original 11 `Atomic*2D`
+      kinds -- never widened when `L244` itself added the
+      `Atomic*1D`/`1DArray`/`2DArray`/`3D` kinds, so those 44 existing
+      atomic kinds have had incorrect load-only (rather than mod-ref)
+      `MemoryEffects` since `L244` landed. Replaced the narrow 11-term
+      check with a full 7-shape x 11-op (77-term) enumeration.
+    - New unit tests: 4 round-trip tests in `ImageCallsTest.cpp`
+      covering both new shapes' RMW and compare-exchange dispatch
+      (`MatchesAtomicXor2DMSCall`, `MatchesAtomicCompareExchange2DMSCall`,
+      `MatchesAtomicAnd2DArrayMSCall`,
+      `MatchesAtomicCompareExchange2DArrayMSCall`).
+    - `check-feme`: 3683/3686 Passed, 3 Unsupported, 0 Failed (+4 net
+      new unit tests), 0 regressions.
+    - **Verified against CTS**:
+      `dEQP-VK.texture.multisample.atomic.storage_image_r32{i,ui}`
+      both now Pass (the other 2 of the 4-case group, `r64i`/`r64ui`,
+      remain `NotSupported` for the unrelated, pre-existing
+      `shaderInt64` reason -- unchanged).
+      `dEQP-VK.image.atomic_operations.*` (6,209 cases): 1,320
+      Passed, 0 Failed, 4,889 NotSupported -- 0 regressions from
+      either the new MS shapes or the `IsAtomic` fix.
+      `dEQP-VK.texture.multisample.*` (10 cases) sampled: 0 Fail.
+    - `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+      change needed -- this is a core-1.0 image-atomic correctness fix
+      (widening an existing feature's shape coverage), not a new
+      feature/extension. `Roadmap.md`'s `L415` row documents this fix.
+
 ## Complete group accounting
 
 
@@ -3664,7 +3717,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 | `synchronization2` | 81,617 | 24,631 | 0 | 56,986 | 0 | 0 | 0 | 0 | 0 | -3,407 |
 | `tensor` | 2,811 | 0 | 0 | 2,811 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `tessellation` | 1,114 | 646 | 30 | 438 | 0 | 0 | 0 | 0 | 0 | -366 |
-| `texture` | 25,669 | 9,808 | 2 | 15,859 | 0 | 0 | 0 | 0 | 0 | -451 |
+| `texture` | 25,669 | 9,810 | 0 | 15,859 | 0 | 0 | 0 | 0 | 0 | -453 |
 | `transform_feedback` | 133,719 | 6,122 | 610 | 126,987 | 0 | 0 | 0 | 0 | 0 | -1,443 |
 | `ubo` | 13,240 | 5,687 | 0 | 7,553 | 0 | 0 | 0 | 0 | 0 | +0 |
 | `video` | 9,471 | 0 | 0 | 9,471 | 0 | 0 | 0 | 0 | 0 | +0 |
@@ -3673,7 +3726,7 @@ across all 48,705 `subgroups` cases; `api` falling to 34 failures; `image` to
 
 ## Conformance assessment
 
-This is not a conformant result. There are 47,172 ordinary failures, 340
+This is not a conformant result. There are 47,170 ordinary failures, 340
 `DeviceLost` results, and 2,546,724 `NotSupported` outcomes. The latter
 include mandatory core capability gaps as well as optional extensions, so
 eliminating ordinary failures alone would not establish conformance.
