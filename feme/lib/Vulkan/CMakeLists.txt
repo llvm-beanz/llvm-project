@@ -125,6 +125,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Surface.cpp
   Swapchain.cpp
   Sync.cpp
+  VirtualAddressReservation.cpp
   XcbSurface.cpp
 
   DISABLE_INSTALL

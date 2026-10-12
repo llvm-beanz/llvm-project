@@ -35,6 +35,7 @@ add_feme_unittest(FeMeVulkanTests
   SurfaceTest.cpp
   SwapchainTest.cpp
   SyncTest.cpp
+  VirtualAddressReservationTest.cpp
   )
 target_link_libraries(FeMeVulkanTests
   PRIVATE
