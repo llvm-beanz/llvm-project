@@ -207,12 +207,21 @@ V6–V8 — and nothing below is permanently excluded except where it says so.
   `dEQP-VK.wsi.xcb.*` CTS re-run hit exactly the crash this bullet warns
   about -- a null loader dispatch-table entry -- directly, inside CTS's
   own `query_devgroup_present_capabilities`/`query_devgroup_present_modes`
-  cases. Still true for the rest of this list:
+  cases. ~~`vkGetImageSparseMemoryRequirements2` or
+  `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion`~~
+  (closed, roadmap L236(a): `vkGetImageSparseMemoryRequirements(2)` now
+  always reports zero sparse requirements -- spec-legal and correct since
+  no image this ICD creates can ever carry a sparse-residency creation
+  flag, Image.cpp's `isValidImageShape` -- and `vkQueueBindSparse`
+  (core 1.0, not 1.1, but the same "null dispatch entry" failure mode)
+  honors its ordinary queue submission-order/semaphore/fence contract
+  with no real memory-bind logic behind it, for the identical reason;
+  `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion`
+  landed in an earlier session as a pure metadata-holding stub object.
+  Still true for the rest of this list:
   `vkGetPhysicalDeviceExternal{Buffer,Fence,Semaphore}Properties`,
   `vkGetPhysicalDeviceImageFormatProperties2`,
-  `vkGetPhysicalDeviceSparseImageFormatProperties2`,
-  `vkGetImageSparseMemoryRequirements2` or
-  `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion` is
+  `vkGetPhysicalDeviceSparseImageFormatProperties2` is
   implemented — each is a core 1.1 command, and an unimplemented one is a
   null loader dispatch-table entry, i.e. a crash rather than the truthful
   degenerate answer this bullet promises. [Roadmap.md](Roadmap.md)
