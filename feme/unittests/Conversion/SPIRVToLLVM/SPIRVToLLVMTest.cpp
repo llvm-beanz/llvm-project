@@ -1962,4 +1962,61 @@ TEST(SPIRVToLLVMTest,
       << Result;
 }
 
+// (Roadmap L419(a)) Regression guard for the deeper bug the above
+// `matrix_3xN`/`vec_3` fix's own column-0-only readback pattern left
+// dormant: a `Function`-storage struct member's whole-matrix
+// `spirv.Load`/`spirv.Store` (reached via `spirv.InBoundsAccessChain`,
+// exactly like every `opinboundsaccesschain.*` CTS case) used to skip
+// `TightMatrixLoadPattern`/`TightMatrixStorePattern` entirely via a
+// `StorageClass::Function` bail-out inherited, unremoved, from L211's
+// original (and still-valid) *bare*-matrix exemption -- even though
+// L242's own later commit message claimed to already subsume it with a
+// precise `!AccessChain` check. A `Function`-storage struct member *is*
+// tight-vector-substituted the same as any other storage class (unlike
+// a bare `Function`-local matrix, which never is), so skipping
+// tightening here left the load/store using the "natural" (ABI-rounded)
+// type while the struct's own alloca used the tight one -- reading back
+// whichever column's byte offset happened to differ between the two
+// layouts as corrupted data (reduced from
+// `dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.
+// float.matrix_3x3`, whose generated shader happens to read back
+// column 2 rather than column 0, exposing the mismatch). Fixed by
+// deleting the dormant `StorageClass::Function` check from both
+// patterns, relying solely on the `!AccessChain` one, and widening both
+// (and the `getMatrixWholeAccess`/`walkStructMembersToMatrix` helpers
+// they call) to match `spirv.InBoundsAccessChain` in addition to
+// `spirv.AccessChain`, exactly like BlockAccessChainPattern's own two
+// instantiations above.
+TEST(SPIRVToLLVMTest,
+     FunctionStorageStructMemberWholeMatrixStoreLoadUsesTightColumnType) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.Variable : "
+      "!spirv.ptr<!spirv.struct<(f32, !spirv.matrix<3 x vector<3xf32>>)>, "
+      "Function> "
+      "%1 = spirv.Constant 1 : i32 "
+      "%2 = spirv.InBoundsAccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.struct<(f32, !spirv.matrix<3 x vector<3xf32>>)>, "
+      "Function>, i32 -> "
+      "!spirv.ptr<!spirv.matrix<3 x vector<3xf32>>, Function> "
+      "%3 = spirv.Load \"Function\" %2 : !spirv.matrix<3 x vector<3xf32>> "
+      "spirv.Store \"Function\" %2, %3 : !spirv.matrix<3 x vector<3xf32>> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // Both the load and the store go through the tight column type (a
+  // `feme.tight_vector`-wrapped array), not the natural, wider
+  // `!llvm.array<3 x vector<3xf32>>` shape a `Function`-storage bail-out
+  // would have wrongly kept using.
+  EXPECT_NE(Result.find("llvm.load %4 : !llvm.ptr -> "
+                        "!llvm.array<3 x struct<\"feme.tight_vector"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.store %"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.InBoundsAccessChain"), std::string::npos)
+      << Result;
+}
+
 } // namespace
