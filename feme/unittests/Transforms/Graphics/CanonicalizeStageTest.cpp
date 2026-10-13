@@ -477,7 +477,7 @@ TEST(CanonicalizeStageTest, MapsXfbDecorationsToTransformFeedbackCapture) {
   const SignatureElement &Position = Sig->Elements[0];
   EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
   EXPECT_FALSE(Position.XfbBuffer.has_value());
-  EXPECT_EQ(Position.XfbOffset, 0u);
+  EXPECT_FALSE(Position.XfbOffset.has_value());
   EXPECT_EQ(Position.XfbStride, 0u);
 
   const SignatureElement &Varying = Sig->Elements[1];
@@ -1717,7 +1717,7 @@ TEST(CanonicalizeStageTest,
   for (const SignatureElement &Elt : Sig->Elements) {
     EXPECT_FALSE(Elt.XfbBuffer.has_value())
         << "SystemValue=" << static_cast<int>(Elt.SystemValue);
-    EXPECT_EQ(Elt.XfbOffset, 0u);
+    EXPECT_FALSE(Elt.XfbOffset.has_value());
     EXPECT_EQ(Elt.XfbStride, 0u);
   }
 }

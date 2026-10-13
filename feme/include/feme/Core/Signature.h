@@ -401,9 +401,25 @@ struct SignatureElement {
   /// The byte offset, within one captured vertex's record in `*XfbBuffer`,
   /// this element's own captured bytes start at (SPIR-V's plain `Offset`
   /// decoration, reused here for its transform-feedback meaning rather
-  /// than a struct member's memory layout). Only meaningful when
-  /// `XfbBuffer` has a value.
-  uint32_t XfbOffset = 0;
+  /// than a struct member's memory layout), or `std::nullopt` if `XfbBuffer`
+  /// has a value but this element carries no `Offset` decoration of its
+  /// own.
+  ///
+  /// (Roadmap L419(p)) That "`XfbBuffer` present, `Offset` absent" case is a
+  /// deliberate SPIR-V shape, not a malformed module: when several scalar
+  /// `Output` variables share one `Location` via distinct `Component`
+  /// indices (GLSL's component-packed varyings) and only some of them
+  /// declare an explicit `xfb_offset`, every variable in the group still
+  /// gets the group's `XfbBuffer`/`XfbStride` decorations (so the buffer's
+  /// layout -- in particular its stride -- is fully described), but a
+  /// variable with no `Offset` decoration of its own is, per the
+  /// `VK_EXT_transform_feedback` capture model, simply not written to the
+  /// buffer at all -- it leaves a "hole" at its component's byte position
+  /// that every other captured element's own writes must not disturb.
+  /// Folding this case to a plain `0` (as if it were actually captured at
+  /// that offset) would silently alias it with whatever *is* genuinely
+  /// captured at byte offset 0 of the same buffer.
+  std::optional<uint32_t> XfbOffset;
   /// The byte stride between consecutive captured vertices' records in
   /// `*XfbBuffer` (SPIR-V's `XfbStride` decoration) -- the same value for
   /// every element captured to the same buffer, in a real shader, but
@@ -433,10 +449,14 @@ struct EntrySignature {
 ///    with no accompanying name is not meaningful;
 ///  - `Direction` and `Frequency` agree: `PatchInput`/`PatchOutput`
 ///    elements are `PerPatch`, and `Input`/`Output` elements are not; and
-///  - (Roadmap H21a) `XfbOffset`/`XfbStride` are 0 when `XfbBuffer` is
-///    `std::nullopt`, since neither is meaningful without it, and
-///    `XfbBuffer` is only ever set on an `Output`-direction element (the
-///    only direction `VK_EXT_transform_feedback` ever captures from).
+///  - (Roadmap H21a) `XfbOffset` is `std::nullopt` and `XfbStride` is 0
+///    when `XfbBuffer` is `std::nullopt`, since neither is meaningful
+///    without it, and `XfbBuffer` is only ever set on an `Output`-direction
+///    element (the only direction `VK_EXT_transform_feedback` ever
+///    captures from). (Roadmap L419(p)) `XfbOffset` may still be
+///    `std::nullopt` when `XfbBuffer` *does* have a value -- that
+///    combination means this element shares its buffer's layout (and
+///    `XfbStride`) with others but is not itself captured (a "hole").
 ///
 /// Every violation found is reported to \p ErrOS (if non-null); returns
 /// whether \p Sig satisfied every one of them.
@@ -453,8 +473,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// `SignatureElement::XfbBuffer`/`XfbOffset`/`XfbStride` (roadmap H21a).
 /// Version 6 appends `SignatureElement::CapturedSelfIndex` (roadmap L82).
 /// Version 7 appends `SignatureElement::XfbBufferArrayStride` (roadmap
-/// H101g).
-constexpr uint32_t SignatureAbiVersion = 7;
+/// H101g). Version 8 changes `SignatureElement::XfbOffset` from a plain
+/// `uint32_t` to `std::optional<uint32_t>` (roadmap L419(p)).
+constexpr uint32_t SignatureAbiVersion = 8;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each

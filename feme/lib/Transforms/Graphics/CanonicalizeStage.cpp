@@ -5458,14 +5458,22 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       if (D.BuiltIn)
         Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
 
-      // (Roadmap H21a) `XfbBuffer`'s presence is what makes `XfbOffset`/
-      // `XfbStride` meaningful (see `verifySignature`'s own
-      // `checkXfbCapture`); a real SPIR-V module always decorates all
-      // three together for a captured variable (the Vulkan spec requires
-      // it), so defaulting the latter two to 0 when `XfbBuffer` is absent
-      // matches every element that captures nothing.
+      // (Roadmap H21a) `XfbBuffer`'s presence is what makes `XfbStride`
+      // meaningful (see `verifySignature`'s own `checkXfbCapture`); a
+      // captured variable's `XfbBuffer`/`XfbStride` are always decorated
+      // together (the Vulkan spec requires it), so defaulting `XfbStride`
+      // to 0 when `XfbBuffer` is absent matches every element that
+      // captures nothing. (Roadmap L419(p)) `XfbOffset`, unlike
+      // `XfbStride`, is *not* folded to a default when absent: glslang
+      // emits `XfbBuffer`/`XfbStride` (establishing the buffer's layout)
+      // on every scalar sharing a `Component`-packed `Location`, even one
+      // with no explicit `xfb_offset` of its own -- that element is a
+      // deliberate "hole", not captured at offset 0, so `D.XfbOffset`'s
+      // own absence must propagate through rather than default to 0 (see
+      // `SignatureElement::XfbOffset`'s own comment and
+      // `captureTransformFeedback`'s matching skip).
       Elt.XfbBuffer = D.XfbBuffer;
-      Elt.XfbOffset = D.XfbOffset.value_or(0);
+      Elt.XfbOffset = D.XfbBuffer ? D.XfbOffset : std::nullopt;
       Elt.XfbStride = D.XfbStride.value_or(0);
       // (Roadmap H173) A geometry entry point's own `Stream` decoration
       // (absent -- and every non-geometry stage's own element -- means

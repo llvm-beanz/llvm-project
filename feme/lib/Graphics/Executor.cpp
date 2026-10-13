@@ -1853,7 +1853,17 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
     }
   }
   for (const SignatureElement *Elt : Elements) {
-    if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer)
+    // (Roadmap L419(p)) `Elt->XfbBuffer` being set but `Elt->XfbOffset`
+    // absent is a deliberate "hole": glslang stamps every scalar sharing a
+    // `Component`-packed `Location` with the whole group's `XfbBuffer`/
+    // `XfbStride` even when this particular one carries no explicit
+    // `xfb_offset` of its own, meaning it is not actually written to the
+    // buffer at all (see `SignatureElement::XfbOffset`'s own comment).
+    // Skipping it here, rather than defaulting its offset to 0, is what
+    // keeps it from silently overwriting whatever another, genuinely
+    // captured element at byte offset 0 of the same buffer/record wrote.
+    if (Elt->Direction != SignatureDirection::Output || !Elt->XfbBuffer ||
+        !Elt->XfbOffset)
       continue;
     uint32_t BaseBufIdx = *Elt->XfbBuffer;
     if (Elt->XfbStride == 0)
@@ -1902,7 +1912,7 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
       for (uint32_t Pos = 0; Pos != Count; ++Pos) {
         uint32_t Flat = FlatIndices[Pos];
         uint64_t RecordStart =
-            (BaseVertex + Pos) * Elt->XfbStride + Elt->XfbOffset;
+            (BaseVertex + Pos) * Elt->XfbStride + *Elt->XfbOffset;
         uint64_t RowStart = RecordStart + RowByteOffset;
         for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
           uint64_t Dst = RowStart + uint64_t(C) * sizeof(uint32_t);
