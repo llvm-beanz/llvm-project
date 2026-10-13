@@ -120490,3 +120490,56 @@ Fixed by: `sed`-renaming every `L146` reference in the new/changed files to `L42
 5. **(standing, new this session)** Grep `Roadmap.md` for a candidate roadmap ID *before* using it anywhere (code comments, test files, commit messages) — see "Mistake caught and fixed" above.
 
 Next: pick up item 1 (L418 MSAA profiling) — it's the oldest unstarted item, now four sessions carried forward, and the only item on every recent session's list that has never been started at all.
+
+# Session: L419(m) resume-from-counter-buffer fix (resume_* 27 Fail -> 0; L418 confirmed already done)
+
+## Next action right now
+
+Pick up `L419(n)`: reduce one `winding_*` case (`dEQP-VK.transform_feedback.simple.winding_triangle_strip_with_adjacency_8` is a good first pick — fails with "Vertex data verification failed" at `vktTransformFeedbackSimpleTests.cpp:1749`, a different symptom from the fix below). Start by reading how FeMe decomposes `TRIANGLE_STRIP_WITH_ADJACENCY` into per-primitive vertex order in the rasterizer, since the CTS check tolerates any rotation of a primitive's own vertices but not a wrong vertex *set*.
+
+## State in one paragraph
+
+Carried-forward item 1 (profile L418 MSAA) turned out to already be fully done by an untracked prior session — confirmed via `git log`/`Roadmap.md` directly, not the stale handoff notes. Pivoted all remaining time to item 2: reduced and fixed the `resume_*` transform-feedback cluster (27/43 cases), which also incidentally fixed `draw_indirect_counter_resubmit` and `maintenance5` (same root cause). `winding_*` (43/slice) and two smaller clusters remain, now tracked as `L419(n)`. One code commit, one docs commit, this thoughts commit — three total.
+
+## What shipped
+
+**1. Correcting a stale carried-forward belief: L418 profiling was already done**
+
+The user's carried-forward next-steps list said "L418 MSAA profiling: unstarted for the fourth session running." This was wrong. `git log --oneline --all | grep -i L418` found three commits (`f1ac9250587c`, `777ced73cafb`, `e60b553cff9c`) from a session not covered by any summary in this context — the handoff notes drifted across a compaction boundary and never got corrected. `Roadmap.md`'s own `L418` row already documents the full result: of ~4.55s total for the `1024x1024x2_color_att_flag_img2img_msaa` case, `Draw` commands dominate at ~91% (~4.16s); `ImageCopyExec` is only 7.5ms; the original fence-wait hypothesis was a red herring (`FenceWait` just reflects blocking on slow `Draw` work). Two already-open follow-ups exist: `L418(a)` (optimize the CPU rasterizer's hot `Draw` loop) and `L418(b)` (reconcile the ~5s standalone time with 60s/600s full-suite timeout reports, likely `QueueExecutor` thread contention).
+
+**Lesson for future sessions:** when a carried-forward item claims to be "still unstarted" across many sessions, check `git log`/the roadmap doc directly before trusting that claim — cross-session handoff notes can silently go stale exactly the same way the `L146`→`L420` roadmap-ID collision did two sessions ago. This is the second instance of this exact failure mode; it's worth a standing check, not just a one-off fix.
+
+**2. `L419(m)` — resume-from-counter-buffer transform-feedback bug (commit `e20bf9ef9065`)**
+
+Root cause, found by reading `feme/lib/Vulkan/CommandBuffer.cpp`'s playback handlers: `vkCmdBeginTransformFeedbackEXT` unconditionally reset every bound buffer's running `XfbCapturedBytes` counter to 0 — a multi-year-old comment at the call site literally said "no resume-from-counter-buffer support yet," confirming this was a known, not accidental, gap. Per spec, a non-null `pCounterBuffers[I]` entry means "load this slot's starting byte offset from that counter buffer" (written there by a matching prior `vkCmdEndTransformFeedbackEXT`) — i.e. actually resume. `feme/lib/Graphics/Executor.cpp`'s own capture-position math (`SeedProgress`, `BaseVertex = *CapturedBytes / Stride`) already handled a nonzero seed correctly; it just never got one.
+
+Fix: in `BeginTransformFeedback`'s handler, for every slot with a non-null counter buffer, read its stored `uint32_t` and seed `XfbCapturedBytes` with that instead of 0 (validating bound/in-range/resident, mirroring `EndTransformFeedback`'s existing checks). New unit test `CommandBufferTest.TransformFeedbackBeginResumesFromCounterBuffer`: seeds a counter buffer with a sentinel 128, begins/ends with zero draws in between, checks the value round-trips unchanged — proving `Begin` loaded it instead of clobbering it with 0.
+
+Impact:
+- `resume_*` (43 cases): 27 Fail / 15 Pass / 1 NotSupported → 42 Pass / 1 NotSupported (0 Fail).
+- Full `L419(m)` residual re-run across all three `simple`/`simple_fast_gpl`/`simple_optimized_gpl` slices: 77-per-slice residual → 48-per-slice (net -29 each, -87 total) — same perfect construction-mode symmetry `L419(b)` established. Two of the seven singleton names (`draw_indirect_counter_resubmit`, `maintenance5`) turned out to share this exact root cause and are now also fixed.
+- Residual (144, 48/slice): `winding_*` (43/slice, different symptom — "Vertex data verification failed," not an offset mismatch, so likely a separate bug), `holes_*` (4/slice), `multi_stream_single_raster_non_zero` (1/slice) — split into new roadmap row `L419(n)`.
+
+`ninja check-feme`: 3,710 Passed, 3 Unsupported, 0 Failed, 0 regressions (net +1 test).
+
+Docs: `VulkanCTSReport.md` new `## L419(m)` section; `Roadmap.md`'s `L419(m)` row struck through with the fix summary, `H34` row counts updated (188→93→48 per slice), new `L419(n)` row added for the residual. Committed separately from the code fix (`ec067d809519`). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no change needed — `VK_EXT_transform_feedback` was already listed "Advertised"; this fix implements already-declared resume semantics, it doesn't add a new feature/extension-surface bit.
+
+## Also ran as part of standing checks
+
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed at the start and again at the end.
+- Grepped `Roadmap.md` for `L419(n)` before using it (new standing check from last session) — confirmed unused.
+- No new `.spvasm` lit test added, so the `spirv_tools_tests` check didn't apply.
+- No `check-hlsl-feme-vk`/offload-test-suite work touched this session, so the `VkBool32`/`WaveActiveMax` pattern check didn't come up.
+
+## Not reached this session (carried forward)
+
+1. **(~half day)** Reduce one `winding_*` case (new `L419(n)`, 43/slice, the largest remaining sub-cluster) — "Vertex data verification failed" at `vktTransformFeedbackSimpleTests.cpp:1749`, a per-primitive vertex-rotation/winding-order check, not yet investigated at all. Likely a FeMe rasterizer primitive-decomposition bug, distinct from the counter-buffer bug just fixed.
+2. **(~half day)** Triage `holes_*` (4/slice) and `multi_stream_single_raster_non_zero` (1/slice) — much smaller, not yet looked at; could plausibly share `winding_*`'s root cause or be separate again.
+3. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path for large MSAA targets (91% of the profiled 4.55s case) — use `gdb` to find the hot loop, no sampling profiler available in this environment.
+4. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing with 60s/600s full-suite timeout reports — likely `QueueExecutor` thread contention, needs a `run_vulkan_cts.py`-driven contention test to confirm.
+5. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS rerun.
+6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite pattern before calling anything a new regression — not exercised this session, still applies whenever `check-hlsl-feme-vk` work resumes.
+7. **(standing)** Grep `Roadmap.md` for a candidate roadmap ID before using it anywhere.
+8. **(standing, new this session)** Before trusting a carried-forward "still unstarted" claim across multiple sessions, check `git log --oneline --all | grep -i <ID>` and the roadmap row itself directly — this is the second time handoff notes have silently gone stale across a compaction boundary (first was the `L146` ID-collision near-miss).
+
+Next: pick up `L419(n)`'s `winding_*` reduction — it's the single largest remaining transform-feedback sub-cluster (129 of 144 residual cases) and the natural continuation of this session's own work.
