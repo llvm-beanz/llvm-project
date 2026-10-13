@@ -4515,6 +4515,9 @@ def SPIRV_OC_OpArrayLength                    : I32EnumAttrCase<"OpArrayLength",
 def SPIRV_OC_OpInBoundsPtrAccessChain         : I32EnumAttrCase<"OpInBoundsPtrAccessChain", 70>;
 def SPIRV_OC_OpDecorate                       : I32EnumAttrCase<"OpDecorate", 71>;
 def SPIRV_OC_OpMemberDecorate                 : I32EnumAttrCase<"OpMemberDecorate", 72>;
+def SPIRV_OC_OpDecorationGroup                : I32EnumAttrCase<"OpDecorationGroup", 73>;
+def SPIRV_OC_OpGroupDecorate                  : I32EnumAttrCase<"OpGroupDecorate", 74>;
+def SPIRV_OC_OpGroupMemberDecorate            : I32EnumAttrCase<"OpGroupMemberDecorate", 75>;
 def SPIRV_OC_OpVectorExtractDynamic           : I32EnumAttrCase<"OpVectorExtractDynamic", 77>;
 def SPIRV_OC_OpVectorInsertDynamic            : I32EnumAttrCase<"OpVectorInsertDynamic", 78>;
 def SPIRV_OC_OpVectorShuffle                  : I32EnumAttrCase<"OpVectorShuffle", 79>;
@@ -4789,7 +4792,9 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpAccessChain, SPIRV_OC_OpInBoundsAccessChain, SPIRV_OC_OpPtrAccessChain,
       SPIRV_OC_OpArrayLength,
       SPIRV_OC_OpInBoundsPtrAccessChain, SPIRV_OC_OpDecorate,
-      SPIRV_OC_OpMemberDecorate, SPIRV_OC_OpVectorExtractDynamic,
+      SPIRV_OC_OpMemberDecorate, SPIRV_OC_OpDecorationGroup,
+      SPIRV_OC_OpGroupDecorate, SPIRV_OC_OpGroupMemberDecorate,
+      SPIRV_OC_OpVectorExtractDynamic,
       SPIRV_OC_OpVectorInsertDynamic, SPIRV_OC_OpVectorShuffle,
       SPIRV_OC_OpCompositeConstruct, SPIRV_OC_OpCompositeExtract,
       SPIRV_OC_OpCompositeInsert, SPIRV_OC_OpCopyObject, SPIRV_OC_OpTranspose,

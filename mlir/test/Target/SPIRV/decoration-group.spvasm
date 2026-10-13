@@ -1,0 +1,63 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpDecorationGroup`/`OpGroupDecorate`/`OpGroupMemberDecorate` are a
+; COM: SPIR-V binary-only convenience for applying the same set of
+; COM: decorations to several <id>s at once -- MLIR's own textual IR has no
+; COM: "group" concept, so the deserializer must expand each group's
+; COM: decorations directly onto every target (and, for
+; COM: `OpGroupMemberDecorate`, onto every (target, member) pair) exactly as
+; COM: if `OpDecorate`/`OpMemberDecorate` had targeted them individually.
+; COM: These three opcodes were entirely unhandled before this test was
+; COM: added (`error: unhandled opcode 73/74/75`), found by a real
+; COM: `dEQP-VK.spirv_assembly.instruction.*.decoration_group.*` CTS
+; COM: cluster (31 graphics cases + 1 compute case).
+
+; A single group's decorations applied to two of three otherwise-identical
+; variables -- `c` must *not* pick up `relaxed_precision`.
+; CHECK-DAG: spirv.GlobalVariable @a {relaxed_precision} : !spirv.ptr<f32, Private>
+; CHECK-DAG: spirv.GlobalVariable @b {relaxed_precision} : !spirv.ptr<f32, Private>
+; CHECK-DAG: spirv.GlobalVariable @c : !spirv.ptr<f32, Private>
+; A group's decoration re-applied as a *member* decoration to member 0 of
+; two distinct struct types -- the exact
+; `same_decoration_group_on_multiple_types` CTS shape.
+; CHECK-DAG: spirv.GlobalVariable @s1 : !spirv.ptr<!spirv.struct<(f32 [0])>, Private>
+; CHECK-DAG: spirv.GlobalVariable @s2 : !spirv.ptr<!spirv.struct<(f32 [0])>, Private>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+
+               OpName %a "a"
+               OpName %b "b"
+               OpName %c "c"
+               OpName %s1 "s1"
+               OpName %s2 "s2"
+
+               OpDecorate %group_rp RelaxedPrecision
+  %group_rp  = OpDecorationGroup
+               OpGroupDecorate %group_rp %a %b
+
+               OpDecorate %group_off Offset 0
+  %group_off = OpDecorationGroup
+               OpGroupMemberDecorate %group_off %struct1 0 %struct2 0
+
+       %void = OpTypeVoid
+     %voidfn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %pp = OpTypePointer Private %float
+          %a = OpVariable %pp Private
+          %b = OpVariable %pp Private
+          %c = OpVariable %pp Private
+   %struct1 = OpTypeStruct %float
+   %struct2 = OpTypeStruct %float
+%pp_struct1 = OpTypePointer Private %struct1
+%pp_struct2 = OpTypePointer Private %struct2
+         %s1 = OpVariable %pp_struct1 Private
+         %s2 = OpVariable %pp_struct2 Private
+
+       %main = OpFunction %void None %voidfn
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

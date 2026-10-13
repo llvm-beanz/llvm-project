@@ -187,6 +187,26 @@ private:
   // Processes an OpMemberDecorate instruction.
   LogicalResult processMemberDecoration(ArrayRef<uint32_t> words);
 
+  /// Processes an OpDecorationGroup instruction. A decoration group is
+  /// purely a decoration-storage <id> -- it never becomes an SSA value or
+  /// type, and its decorations (captured by `processDecoration` using the
+  /// group's own <id> as the target, same as for any other <id>) are
+  /// replayed onto other <id>s by a later `OpGroupDecorate`/
+  /// `OpGroupMemberDecorate`. This only validates operand shape.
+  LogicalResult processDecorationGroup(ArrayRef<uint32_t> words);
+
+  /// Processes an OpGroupDecorate instruction: applies every decoration
+  /// previously recorded on the referenced decoration group to each target
+  /// <id>, exactly as if each decoration had been applied to the target
+  /// directly via `OpDecorate`.
+  LogicalResult processGroupDecorate(ArrayRef<uint32_t> words);
+
+  /// Processes an OpGroupMemberDecorate instruction: applies every
+  /// decoration previously recorded on the referenced decoration group to
+  /// each (target, member index) pair, exactly as if each decoration had
+  /// been applied via `OpMemberDecorate`.
+  LogicalResult processGroupMemberDecorate(ArrayRef<uint32_t> words);
+
   /// Processes an OpMemberName instruction.
   LogicalResult processMemberName(ArrayRef<uint32_t> words);
 
@@ -743,6 +763,20 @@ private:
 
   // Result <id> to decorations mapping.
   DenseMap<uint32_t, NamedAttrList> decorations;
+
+  // Result <id> to the raw (decoration, operand words) pairs `OpDecorate`
+  // recorded against it, in encounter order. Populated for every <id>
+  // `OpDecorate` targets (not just decoration groups), because the
+  // `OpDecorate` that decorates a group always precedes the
+  // `OpDecorationGroup` instruction that defines that group's <id> --
+  // there is no reliable point at which to learn a target is a group
+  // before recording this. Needed (in addition to the already-processed
+  // `decorations` map above) because `OpGroupMemberDecorate` re-applies a
+  // group's decorations as *member* decorations (`memberDecorationMap`,
+  // below), which are keyed by the decoration's own raw operand words, not
+  // by the `Attribute` that `processDecoration` already built from them.
+  DenseMap<uint32_t, SmallVector<std::pair<spirv::Decoration, ArrayRef<uint32_t>>>>
+      groupDecorationOperands;
 
   // Decoration entries from OpDecorateId whose operand <id>s must be resolved
   // to MLIR symbols after all module ops have been deserialized.

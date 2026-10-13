@@ -275,6 +275,12 @@ LogicalResult spirv::Deserializer::processInstruction(
     return processDecoration(operands);
   case spirv::Opcode::OpMemberDecorate:
     return processMemberDecoration(operands);
+  case spirv::Opcode::OpDecorationGroup:
+    return processDecorationGroup(operands);
+  case spirv::Opcode::OpGroupDecorate:
+    return processGroupDecorate(operands);
+  case spirv::Opcode::OpGroupMemberDecorate:
+    return processGroupMemberDecorate(operands);
   case spirv::Opcode::OpFunction:
     return processFunction(operands);
   case spirv::Opcode::OpGraphEntryPointARM:

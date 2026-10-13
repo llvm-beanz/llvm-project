@@ -273,6 +273,18 @@ LogicalResult spirv::Deserializer::processDecoration(ArrayRef<uint32_t> words) {
     return emitError(unknownLoc, "invalid Decoration code : ") << words[1];
   }
   auto symbol = getSymbolDecoration(decorationName);
+  // Unconditionally record this decoration's raw opcode/operand words,
+  // keyed by its target <id> -- `OpGroupMemberDecorate`
+  // (processGroupMemberDecorate, below) needs these to reconstruct the
+  // equivalent `OpMemberDecorate` entries, which `memberDecorationMap` keys
+  // by raw operand words, not by the `Attribute` the switch below builds.
+  // This cannot be gated on `words[0]` already being known to be a
+  // decoration group: per SPIR-V binary layout rules, the `OpDecorate`
+  // that decorates a group always precedes the `OpDecorationGroup`
+  // instruction that defines that group's <id>, so there is no reliable
+  // way to recognize `words[0]` as a group at this point.
+  groupDecorationOperands[words[0]].push_back(
+      {static_cast<spirv::Decoration>(words[1]), words.drop_front(2)});
   switch (static_cast<spirv::Decoration>(words[1])) {
   case spirv::Decoration::FPFastMathMode:
     if (words.size() != 3) {
@@ -475,6 +487,50 @@ spirv::Deserializer::processMemberDecoration(ArrayRef<uint32_t> words) {
     decorationOperands = words.slice(3);
   }
   memberDecorationMap[words[0]][words[1]][decoration] = decorationOperands;
+  return success();
+}
+
+LogicalResult
+spirv::Deserializer::processDecorationGroup(ArrayRef<uint32_t> words) {
+  // `OpDecorationGroup` itself never creates an MLIR value, type, or
+  // symbol: it is a pure decoration-storage <id> whose decorations (already
+  // captured by `processDecoration` above, keyed by this <id>) get replayed
+  // onto other <id>s by a later `OpGroupDecorate`/`OpGroupMemberDecorate`.
+  if (words.size() != 1) {
+    return emitError(unknownLoc,
+                     "OpDecorationGroup must have exactly one result <id>");
+  }
+  return success();
+}
+
+LogicalResult
+spirv::Deserializer::processGroupDecorate(ArrayRef<uint32_t> words) {
+  if (words.empty()) {
+    return emitError(unknownLoc, "OpGroupDecorate must have a group <id>");
+  }
+  uint32_t group = words[0];
+  for (uint32_t target : words.drop_front()) {
+    for (const NamedAttribute &decAttr : decorations[group])
+      decorations[target].set(decAttr.getName(), decAttr.getValue());
+  }
+  return success();
+}
+
+LogicalResult
+spirv::Deserializer::processGroupMemberDecorate(ArrayRef<uint32_t> words) {
+  if (words.empty() || (words.size() - 1) % 2 != 0) {
+    return emitError(unknownLoc,
+                     "OpGroupMemberDecorate must have a group <id> followed "
+                     "by (target <id>, member index) pairs");
+  }
+  uint32_t group = words[0];
+  for (size_t i = 1; i < words.size(); i += 2) {
+    uint32_t target = words[i];
+    uint32_t member = words[i + 1];
+    for (const auto &decorationAndOperands : groupDecorationOperands[group])
+      memberDecorationMap[target][member][decorationAndOperands.first] =
+          decorationAndOperands.second;
+  }
   return success();
 }
 
