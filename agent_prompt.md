@@ -63,34 +63,12 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
-   Split time among shader/pipeline compilation, image copy execution, and
-   fence wait; use the same case for a before/after performance bound.
-   (Carried forward unstarted — not reached this session either.)
-2. **(~half day)** Investigate the `opquantize.flush_to_zero` residual
-   (`DenormFlushToZero` execution mode for f16 results) — 2 cases, isolated
-   root cause already known (see Residuals above), just needs the
-   execution-mode plumbing.
-3. **(~half day)** Investigate the `opinboundsaccesschain.{vec_3,
-   matrix_3xN}` residual (`'llvm.insertvalue' op position out of bounds`)
-   — 6 cases, likely a vec3/matrix-3-row struct-layout bug distinct from
-   the pattern-templating fix just landed; reduce one case first.
-4. **(~1 day)** Reduce one `opmemoryaccess` (35) and one `decoration_group`
-   (30) representative — the other two signatures `L419(a)` names but this
-   session didn't touch.
-5. **(~1 day)** Compare one identical transform-feedback case across
-   monolithic, fast GPL, and optimized GPL construction. The exact
-   188/188/188 symmetry is still unexplained and still the strongest single
-   lead for a large (570-case) cluster.
-6. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
-   isolated verification and timed-out cases are persisted as a first-class
-   outcome. (Carried forward, unstarted.)
-7. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
-   the L418-L419 roadmap counts synchronized after every fix and isolated
-   CTS rerun.
-8. **(standing)** Before concluding any `check-hlsl-feme-vk` discrepancy is
-   a new FeMe regression, check whether it matches the
-   `VkBool32`/`WaveActiveMax` pattern first — confirmed again this session
-   that the `VkBool32` fix gets silently dropped by the auxiliary-repo reset
-   every single time; re-applying it should be step 2 of every future
-   session, not a surprise.
+1. Reduce `matrix_3x3.float`
+   (`dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.
+   matrix_3x3.float`) — the one case still failing, now a *data
+   mismatch*, not a crash. `matrix_3x2`/`matrix_3x4` pass with the exact
+   same code path; something specific to 3 columns. ~half day.
+2. Profile the L418 1024x1024x2 MSAA image-to-image case — carried over
+   two sessions now, still unstarted. ~2-4 hours.
+3. Reduce one `opmemoryaccess` (35 cases) and one `decoration_group` (30
+   cases) representative — still untouched. ~1 day.
