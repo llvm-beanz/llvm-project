@@ -18,6 +18,7 @@
 #include "Image.h"
 #include "ImageOps.h"
 #include "Objects.h"
+#include "PhaseTiming.h"
 #include "Pipeline.h"
 #include "QueryPool.h"
 #include "RenderPass.h"
@@ -36,10 +37,13 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/bit.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 
@@ -47,6 +51,88 @@ using namespace feme::vulkan;
 using namespace llvm;
 
 namespace {
+
+/// Human-readable name for a `RecordedCommand::Kind`, used only by the
+/// `FEME_VULKAN_DEBUG_CMD_TIMING` diagnostic (see `executeCommandsInto`)
+/// so its per-command timing output names the offending command instead
+/// of printing an opaque enum index.
+const char *recordedCommandKindName(RecordedCommand::Kind K) {
+  switch (K) {
+#define FEME_RECORDED_COMMAND_KIND(Name)                                      \
+  case RecordedCommand::Kind::Name:                                          \
+    return #Name;
+  FEME_RECORDED_COMMAND_KIND(BindPipeline)
+  FEME_RECORDED_COMMAND_KIND(BindDescriptorSets)
+  FEME_RECORDED_COMMAND_KIND(Dispatch)
+  FEME_RECORDED_COMMAND_KIND(DispatchBase)
+  FEME_RECORDED_COMMAND_KIND(DispatchIndirect)
+  FEME_RECORDED_COMMAND_KIND(CopyBuffer)
+  FEME_RECORDED_COMMAND_KIND(FillBuffer)
+  FEME_RECORDED_COMMAND_KIND(UpdateBuffer)
+  FEME_RECORDED_COMMAND_KIND(PipelineBarrier)
+  FEME_RECORDED_COMMAND_KIND(PushConstants)
+  FEME_RECORDED_COMMAND_KIND(SetEvent)
+  FEME_RECORDED_COMMAND_KIND(ResetEvent)
+  FEME_RECORDED_COMMAND_KIND(WaitEvents)
+  FEME_RECORDED_COMMAND_KIND(ResetQueryPool)
+  FEME_RECORDED_COMMAND_KIND(BeginQuery)
+  FEME_RECORDED_COMMAND_KIND(EndQuery)
+  FEME_RECORDED_COMMAND_KIND(WriteTimestamp)
+  FEME_RECORDED_COMMAND_KIND(CopyQueryPoolResults)
+  FEME_RECORDED_COMMAND_KIND(ExecuteCommands)
+  FEME_RECORDED_COMMAND_KIND(CopyBufferToImage)
+  FEME_RECORDED_COMMAND_KIND(CopyImageToBuffer)
+  FEME_RECORDED_COMMAND_KIND(CopyImage)
+  FEME_RECORDED_COMMAND_KIND(BeginRenderPass)
+  FEME_RECORDED_COMMAND_KIND(BeginRendering)
+  FEME_RECORDED_COMMAND_KIND(NextSubpass)
+  FEME_RECORDED_COMMAND_KIND(EndRenderPass)
+  FEME_RECORDED_COMMAND_KIND(BindVertexBuffers)
+  FEME_RECORDED_COMMAND_KIND(BindIndexBuffer)
+  FEME_RECORDED_COMMAND_KIND(SetViewport)
+  FEME_RECORDED_COMMAND_KIND(SetScissor)
+  FEME_RECORDED_COMMAND_KIND(SetBlendConstants)
+  FEME_RECORDED_COMMAND_KIND(SetStencilReference)
+  FEME_RECORDED_COMMAND_KIND(SetStencilCompareMask)
+  FEME_RECORDED_COMMAND_KIND(SetStencilWriteMask)
+  FEME_RECORDED_COMMAND_KIND(SetCullMode)
+  FEME_RECORDED_COMMAND_KIND(SetFrontFace)
+  FEME_RECORDED_COMMAND_KIND(SetDepthTestEnable)
+  FEME_RECORDED_COMMAND_KIND(SetDepthWriteEnable)
+  FEME_RECORDED_COMMAND_KIND(SetDepthCompareOp)
+  FEME_RECORDED_COMMAND_KIND(SetDepthBoundsTestEnable)
+  FEME_RECORDED_COMMAND_KIND(SetDepthBiasEnable)
+  FEME_RECORDED_COMMAND_KIND(SetRasterizerDiscardEnable)
+  FEME_RECORDED_COMMAND_KIND(SetPrimitiveRestartEnable)
+  FEME_RECORDED_COMMAND_KIND(SetStencilTestEnable)
+  FEME_RECORDED_COMMAND_KIND(SetStencilOp)
+  FEME_RECORDED_COMMAND_KIND(SetPrimitiveTopology)
+  FEME_RECORDED_COMMAND_KIND(SetLineWidth)
+  FEME_RECORDED_COMMAND_KIND(SetLineStipple)
+  FEME_RECORDED_COMMAND_KIND(SetDepthBias)
+  FEME_RECORDED_COMMAND_KIND(SetDepthBounds)
+  FEME_RECORDED_COMMAND_KIND(SetRenderingAttachmentLocations)
+  FEME_RECORDED_COMMAND_KIND(SetRenderingInputAttachmentIndices)
+  FEME_RECORDED_COMMAND_KIND(Draw)
+  FEME_RECORDED_COMMAND_KIND(DrawIndexed)
+  FEME_RECORDED_COMMAND_KIND(DrawIndirect)
+  FEME_RECORDED_COMMAND_KIND(DrawIndexedIndirect)
+  FEME_RECORDED_COMMAND_KIND(ClearColorImage)
+  FEME_RECORDED_COMMAND_KIND(ClearDepthStencilImage)
+  FEME_RECORDED_COMMAND_KIND(ClearAttachments)
+  FEME_RECORDED_COMMAND_KIND(BlitImage)
+  FEME_RECORDED_COMMAND_KIND(ResolveImage)
+  FEME_RECORDED_COMMAND_KIND(DrawMeshTasks)
+  FEME_RECORDED_COMMAND_KIND(DrawMeshTasksIndirect)
+  FEME_RECORDED_COMMAND_KIND(DrawMeshTasksIndirectCount)
+  FEME_RECORDED_COMMAND_KIND(BindTransformFeedbackBuffers)
+  FEME_RECORDED_COMMAND_KIND(BeginTransformFeedback)
+  FEME_RECORDED_COMMAND_KIND(EndTransformFeedback)
+  FEME_RECORDED_COMMAND_KIND(DrawIndirectByteCount)
+#undef FEME_RECORDED_COMMAND_KIND
+  }
+  return "<unknown RecordedCommand::Kind>";
+}
 
 /// Validates \p Count against `maxComputeWorkGroupCount`, per "Limits and
 /// features": "must be checked both at pipeline creation and dispatch".
@@ -2965,7 +3051,26 @@ Error executeCommandsInto(
     std::vector<uint8_t> &PushConstantsCompute,
     std::vector<ActiveOcclusionQuery> &ActiveOcclusionQueries,
     std::vector<ActivePipelineStatsQuery> &ActivePipelineStatsQueries) {
+  // (Roadmap L418) Opt-in, per-command wall-clock diagnostic: set
+  // `FEME_VULKAN_DEBUG_CMD_TIMING=1` to have any single recorded command
+  // that takes longer than 1ms to execute reported to stderr by name --
+  // this is how the `Draw`/`DrawIndexed` rasterizer path (not queue
+  // scheduling or fence waiting) was found to dominate the cost of large
+  // MSAA image-to-image CTS cases. Zero-cost (one cached bool check) when
+  // disabled, matching `PhaseTiming.h`'s own opt-in pattern.
+  static const bool DebugCmdTimingEnabled =
+      ::getenv("FEME_VULKAN_DEBUG_CMD_TIMING") != nullptr;
   for (const RecordedCommand &Cmd : Commands) {
+    auto DebugCmdStart = std::chrono::steady_clock::now();
+    auto ReportDebugCmdTiming = llvm::scope_exit([&] {
+      if (!DebugCmdTimingEnabled)
+        return;
+      auto Elapsed = std::chrono::steady_clock::now() - DebugCmdStart;
+      double Ms = std::chrono::duration<double, std::milli>(Elapsed).count();
+      if (Ms > 1.0)
+        std::fprintf(stderr, "[DEBUG_CMD_TIMING] %s %.3f ms\n",
+                     recordedCommandKindName(Cmd.Op), Ms);
+    });
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
       if (Cmd.Pipeline && Cmd.Pipeline->kind() == Pipeline::Kind::Graphics)
@@ -3188,21 +3293,30 @@ Error executeCommandsInto(
                                           ActivePipelineStatsQueries))
           return E;
       break;
-    case RecordedCommand::Kind::CopyBufferToImage:
+    case RecordedCommand::Kind::CopyBufferToImage: {
+      feme::vulkan::ScopedPhaseTimer PhaseTimer(
+          feme::vulkan::Phase::ImageCopyExec);
       if (Error E = runCopyBufferToImage(Cmd.SrcBuffer, Cmd.DstImage,
                                          Cmd.BufferImageCopyRegions))
         return E;
       break;
-    case RecordedCommand::Kind::CopyImageToBuffer:
+    }
+    case RecordedCommand::Kind::CopyImageToBuffer: {
+      feme::vulkan::ScopedPhaseTimer PhaseTimer(
+          feme::vulkan::Phase::ImageCopyExec);
       if (Error E = runCopyImageToBuffer(Cmd.SrcImage, Cmd.DstBuffer,
                                          Cmd.BufferImageCopyRegions))
         return E;
       break;
-    case RecordedCommand::Kind::CopyImage:
+    }
+    case RecordedCommand::Kind::CopyImage: {
+      feme::vulkan::ScopedPhaseTimer PhaseTimer(
+          feme::vulkan::Phase::ImageCopyExec);
       if (Error E =
               runCopyImage(Cmd.SrcImage, Cmd.DstImage, Cmd.ImageCopyRegions))
         return E;
       break;
+    }
     case RecordedCommand::Kind::BeginRenderPass: {
       if (!Cmd.BeginPass || !Cmd.BeginFramebuffer)
         return createStringError(inconvertibleErrorCode(),

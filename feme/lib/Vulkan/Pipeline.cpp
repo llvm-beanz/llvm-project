@@ -13,6 +13,7 @@
 #include "SpecializationPatch.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "PhaseTiming.h"
 #include "PipelineCache.h"
 
 #include "feme/Core/Context.h"
@@ -748,6 +749,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkComputePipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
+  // (Roadmap L418) See `vkCreateGraphicsPipelines`'s own identical timer
+  // (GraphicsPipeline.cpp); shares the same `Phase::PipelineCompile`
+  // bucket since both answer the same "how much of a slow case's time
+  // is shader/pipeline compilation" question.
+  feme::vulkan::ScopedPhaseTimer PhaseTimer(
+      feme::vulkan::Phase::PipelineCompile);
   Device &Dev = *fromHandle<Device>(device);
   const PhysicalDeviceInfo &DeviceInfo = Dev.getPhysicalDevice().getInfo();
   auto *Cache =

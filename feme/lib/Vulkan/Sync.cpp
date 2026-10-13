@@ -14,6 +14,7 @@
 #include "Icd.h"
 #include "Image.h"
 #include "Objects.h"
+#include "PhaseTiming.h"
 #include "Pipeline.h"
 #include "QueryPool.h"
 #include "RenderPass.h"
@@ -408,8 +409,21 @@ std::function<void()> makeSubmissionTask(Device &Dev,
     auto ReleaseGuard = llvm::scope_exit([&Refs] { releaseExecutionRefs(Refs); });
     if (Dev.isLost())
       return;
-    if (consumeWaits(Waits) != VK_SUCCESS ||
-        executeCommandBuffers(CmdBufs) != VK_SUCCESS) {
+    if (consumeWaits(Waits) != VK_SUCCESS) {
+      Dev.markLost();
+      return;
+    }
+    VkResult ExecResult;
+    {
+      // (Roadmap L418) Times the *entire* command buffer replay, not
+      // just the copy/blit commands `ImageCopyExec` already covers, to
+      // bisect whether a slow case's real cost is inside command
+      // execution at all.
+      feme::vulkan::ScopedPhaseTimer PhaseTimer(
+          feme::vulkan::Phase::CommandBufferExec);
+      ExecResult = executeCommandBuffers(CmdBufs);
+    }
+    if (ExecResult != VK_SUCCESS) {
       Dev.markLost();
       return;
     }
@@ -494,6 +508,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice device,
   // `Sync.h`'s file comment). `applyWaitSafetyNet` clamps even a literal
   // `UINT64_MAX` ("wait forever") \p timeout, for the same reason
   // `vkWaitSemaphores` below does.
+  // (Roadmap L418) Timed as its own phase: separates genuine blocked-on-
+  // another-thread wait time from this same call's own, much cheaper
+  // bookkeeping (the `isLost()`/deadline arithmetic below), for a slow
+  // CTS case's own profiling breakdown.
+  feme::vulkan::ScopedPhaseTimer PhaseTimer(feme::vulkan::Phase::FenceWait);
   timeout = applyWaitSafetyNet(timeout);
   Device *Dev = fromHandle<Device>(device);
 

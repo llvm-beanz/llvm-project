@@ -13,6 +13,7 @@
 #include "GroupSize.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "PhaseTiming.h"
 #include "PhysicalDeviceInfo.h"
 #include "Pipeline.h"
 #include "PipelineCache.h"
@@ -3957,6 +3958,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkGraphicsPipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
+  // (Roadmap L418) Times this whole call -- shader translation/
+  // compilation plus every cache lookup/insert -- as one phase for a
+  // slow CTS case's own profiling breakdown; see PhaseTiming.h.
+  feme::vulkan::ScopedPhaseTimer PhaseTimer(
+      feme::vulkan::Phase::PipelineCompile);
   const PhysicalDeviceInfo &DeviceInfo =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   auto *Cache =
