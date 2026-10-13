@@ -120602,3 +120602,115 @@ Expected buffer: `[10 (goku), 0 (hole), 30 (vegeta)]`. Found: `[20, 0, 30]` — 
 9. **(standing)** Before trusting a carried-forward "still unstarted" claim across multiple sessions, check `git log --oneline --all | grep -i <ID>` and the roadmap row itself directly — followed this session (see "Standing check" above), confirmed genuinely unstarted this time.
 
 Next: `holes_*`'s signature/canonicalization-layer XfbOffset-defaulting bug (item 1 above) is the natural next step — same test file, same general subsystem, smaller cluster, and the root-cause direction is already identified from this session's triage.
+
+# Session: L419(p) holes_* fix, L419(q) streams_* discovery
+
+Start here: `L419(q)`'s `streams_1` -- geometry-shader multi-stream
+rasterization, `rasterizationStream` is implemented (`Executor.cpp`,
+`GraphicsPipeline.cpp`) but produces a wrong image. Not yet root-caused.
+About half a day to triage from scratch.
+
+## What's done, concretely
+
+1. Mandatory device check: `FeMe CPU Vulkan Device`, confirmed via
+   `build/tools/feme/tools/feme-vulkan/feme_icd.json`.
+2. Verified all 5 carried-forward "still unstarted" claims via
+   `git log --oneline --all | grep -i` and direct `Roadmap.md` greps --
+   all genuinely untouched, no stale handoff this time.
+3. **Fixed `holes_*` (12 cases, `L419(p)`).** Root cause confirmed via
+   `--deqp-log-decompiled-spirv=enable`: an `Output` sharing a `Location`
+   via `Component` but lacking its own `Offset` decoration still gets
+   `XfbBuffer`/`XfbStride` from glslang (establishing the buffer's
+   layout) -- `CanonicalizeStage.cpp` was folding the absent `Offset` to
+   a plain `0`, colliding this "hole" element with whatever real element
+   legitimately captured at that byte offset. Changed
+   `SignatureElement::XfbOffset` from `uint32_t` to
+   `std::optional<uint32_t>` (mirroring `XfbBuffer`'s own shape), bumped
+   the signature binary format to version 8, migrated the 7 checked-in
+   pre-baked signature blobs mechanically (see `/tmp/migrate_sig_all.py`
+   if this pattern recurs -- not checked in, it was a one-off).
+   `ninja check-feme`: 3,714/3,714, 0 regressions. All 12 `holes_*`
+   cases: Fail -> Pass.
+4. Committed in 2 small commits: the fix itself, then the docs sync
+   (`Roadmap.md` `L419(p)`/`L419(q)` rows + `H34` update,
+   `VulkanCTSReport.md` new dated section).
+5. Ran the **first-ever full, un-narrowed sweep** of
+   `simple`/`simple_fast_gpl`/`simple_optimized_gpl` (23,681 cases, not
+   a hand-picked subset like every prior session's tally) -- found the
+   real residual is 51 (17/slice), not the 27 (9/slice) this project had
+   been tracking. The 24-case difference: `streams_*`/
+   `streams_clipdistance_*`/`streams_culldistance_*` (12/slice x 3),
+   never previously counted anywhere. Confirmed pre-existing, not a
+   regression from this session's fix, by reverting the fix and
+   re-running `streams_1` standalone against the unmodified baseline
+   (still failed).
+
+## Mistake caught and fixed this session
+
+None -- the standing checks (git log verification, Roadmap grep before
+using `L419(p)`/`L419(q)`) all passed clean this time, first time in
+several sessions this hasn't surfaced something stale.
+
+## What's still wrong (prioritized)
+
+1. **(~half day)** `streams_1`/`streams_clipdistance_1`/
+   `streams_culldistance_1` (`L419(q)`, 12/slice, largest untriaged
+   cluster): geometry-shader multi-stream test, all verts emitted to a
+   non-zero stream `s`, pipeline's `rasterizationStream` set to `s` via
+   `VkPipelineRasterizationStateStreamCreateInfoEXT`. `Executor.cpp`/
+   `GraphicsPipeline.cpp` do implement `rasterizationStream` (grep
+   confirms), but the rendered image is wrong (`Image comparison failed:
+   max difference = (255, 0, 255, 0)`, i.e. a whole-channel magenta/black
+   mismatch, not a subtle off-by-one). Not yet root-caused past this
+   point -- did not have time to read `Executor.cpp`'s
+   `rasterizationStream`-handling code this session.
+2. **(~half day)** `L419(o)`: `winding_patch_list_*` (4/slice) --
+   tessellated XFB capture unimplemented, carried forward unstarted for
+   two sessions now (identified last session, no code changes attempted
+   yet).
+3. **(~1 case triage)** `multi_stream_single_raster_non_zero` (1/slice,
+   still no roadmap row of its own) -- "Unexpected results found in
+   color buffer" at `vktTransformFeedbackSimpleTests.cpp:6370`, not
+   examined at all; name suggests it may share `streams_*`'s
+   rasterization-stream-selection root cause (same subsystem, "non_zero"
+   in the name) -- check this before assuming a fourth distinct bug.
+4. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
+   for large MSAA targets -- carried forward unstarted for several
+   sessions now (profiling from `L418` already isolated the hot path,
+   just needs a `gdb`-driven reduction since no sampling profiler exists
+   here).
+5. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
+   with 60s/600s full-suite timeout reports -- also carried forward
+   unstarted.
+
+## Standing reminders (apply every session)
+
+1. Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   `L418`-`L419` roadmap counts synchronized after every fix and
+   isolated CTS rerun -- done this session (inventories needed no
+   change: this was an internal XFB-capture-eligibility fix, no new
+   feature/extension surface).
+2. Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite
+   pattern before calling anything a new regression -- not exercised
+   this session, no `check-hlsl-feme-vk` work was done.
+3. Grep `Roadmap.md` for a candidate roadmap ID before using it anywhere
+   -- followed this session (`L419(p)`/`L419(q)` both confirmed unused
+   before use).
+4. Before trusting a carried-forward "still unstarted" claim across
+   multiple sessions, check `git log --oneline --all | grep -i <ID>` and
+   the roadmap row itself directly -- followed this session, confirmed
+   genuinely unstarted (first clean pass in several sessions).
+5. **(new this session)** When a serialized/pre-baked binary blob is
+   checked into a `.ll`/`.test` file (grep for `x i8\] c"` plus the
+   module's `SignatureAbiVersion` constant) and a struct layout change
+   bumps that version, those files break at *parse* time with an
+   unrelated-looking downstream error ("requires attached
+   feme.signature metadata" / "refers to unknown element N"), not a
+   version-mismatch message -- do not assume these are pre-existing
+   failures or unrelated flakiness; `git stash` and re-run `check-feme`
+   on the unmodified baseline to confirm before chasing a false lead.
+
+Next: `streams_1`'s `rasterizationStream` path in `Executor.cpp` -- read
+`GraphicsPipeline.cpp`'s `rasterizationStream` plumbing end to end before
+touching anything, since the earlier "it's implemented" grep hit does not
+mean it's implemented *correctly*.
