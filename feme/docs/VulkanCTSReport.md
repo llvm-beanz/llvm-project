@@ -1043,3 +1043,30 @@ part, by this crash family manifesting under load, not merely by
 `L418(a)`). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
 no change needed for either `L421` or `L422` -- internal correctness
 fixes/findings only, no feature/extension-surface change.
+
+## `L423` found: pre-existing loader-level crash, not FeMe, not fixed
+
+While sanity-sweeping `dEQP-VK.api.object_management.*` after `L421`'s
+fix (a multithreaded resource-creation/destruction stress group, a
+natural candidate for exercising the same class of lifetime bug),
+`dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`
+crashed with SIGSEGV on its own, no artificial CPU-saturation stress
+needed (~1/3 of solo runs). A `gdb` backtrace placed the crash inside
+`libvulkan.so.1` itself (the Khronos loader) -- `0x... in ?? () from
+/usr/lib/aarch64-linux-gnu/libvulkan.so.1` -- not in any FeMe code.
+
+Checked whether this was introduced by `L421`'s fix: reverted `Memory.h`/
+`Memory.cpp`/`Sync.cpp`/`ExecutionLifetime.h` to their pre-`L421` state
+(`git checkout 80ddd348a27d --`), rebuilt, and reran -- the crash still
+reproduced at the same rate (1/3) with the unmodified binary, confirming
+it predates `L421` and is unrelated to it.
+
+Not yet root-caused past confirming the crash site is in the loader, not
+FeMe's own code. Filed as `L423` for a future session: needs
+determining whether this is a genuine bug in how FeMe's
+`vkCreateDevice`/`vkDestroyDevice` interact with the loader's per-thread
+dispatch tables (which would make it a FeMe bug, even though the crash
+*address* is in the loader) or a loader-side bug independent of any ICD
+(which would make it an "issue outside FeMe" needing an isolated
+reproducer and a self-contained fix per the standing instruction) --
+ownership not yet determined either way.
