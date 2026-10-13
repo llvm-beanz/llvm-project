@@ -63,26 +63,29 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
-   for large MSAA targets -- carried forward unstarted for many sessions
-   now (profiling already isolated the hot path, just needs a
-   `gdb`-driven reduction since no sampling profiler exists here).
-2. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
-   with 60s/600s full-suite timeout reports -- also carried forward
-   unstarted.
-3. **(~half day, new this session)** The 4 pre-existing
-   `transform-feedback.fuzz.{2_level_struct_array,single_struct_array}.
-   std_{vertex,geometry}` failures found during this session's full-sweep
-   regression check: `error: failed to legalize operation
-   'spirv.GlobalVariable'` for a nested (`array<array<struct<...>>>`)
-   XFB-decorated global -- an MLIR SPIR-V-to-LLVM legalization gap, not
-   a `Graphics/Executor.cpp` runtime bug like every `L419(*)` fix so far.
-   Not yet triaged past confirming it pre-exists (via `git stash`); needs
-   its own roadmap row (candidate `L419(t)`, not yet claimed -- grep
-   `Roadmap.md` before use, per standing reminder) if picked up.
-4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
-   the `L418`-`L419` roadmap counts synchronized after every fix and
-   isolated CTS rerun -- done this session.
-5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
-   offload-test-suite pattern before calling anything a new regression
-   -- not exercised this session, no `check-hlsl-feme-vk` work was done.
+1. **(~half day) `L422`**: root-cause the `Image::setLayout` /
+   `DescriptorSetLayout::dynamicOffsetCount` crash family. Start by checking
+   whether `DescriptorSetLayout` was ever added to `L410`'s
+   `PendingExecutionRefCounted` list -- grep suggests no, only `DescriptorSet`
+   was. If so, this is `DeviceMemory`'s own bug pattern (`L421`) repeating for a
+   type `L410` missed. Use the same CPU-saturation + `gdb` "every thread"
+   backtrace technique; the assertion-build evidence (out-of-bounds
+   `Image::Layouts` access) already points at *something* freeing the `Image`
+   early -- find what.
+2. **(~2-4 hours) `L423`**: determine ownership. Minimal repro is already in
+   hand
+   (`dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`,
+   ~1/3 solo-run crash rate, no stress needed). Get a `gdb` backtrace of every
+   thread (not just the crashing one) to see what FeMe-side call the loader was
+   in the middle of when it crashed -- that'll tell you whether this is "FeMe's
+   fault" (fix in-tree) or "loader's fault" (isolated reproducer + fix outside
+   FeMe per the standing instruction).
+3. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   `L418`-`L423` roadmap counts synchronized after every fix and isolated CTS
+   rerun -- done this session (`L421`/`L422`/`L423` all cross-referenced;
+   inventories needed no change for any of them, confirmed and noted explicitly
+   -- pure internal-correctness fixes/findings, no feature/extension-surface
+   change).
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression -- not
+   exercised this session, no `check-hlsl-feme-vk` work was done.
