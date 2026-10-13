@@ -119906,3 +119906,98 @@ Phase 4 (`vkQueueBindSparse` wiring) would also be dead code today — `vkQueueB
 3. **(blocked on 1-2)** Only once those land: flip `sparseBinding`/`sparseResidency*` feature bits to `VK_TRUE`.
 4. **(~1-2 hours, standing)** Next roadmap hygiene pass — this session's was genuinely deep (3 real bugs found), so the next one can go back to a quick check unless a future session's work touches Roadmap.md heavily again.
 5. **(opportunistic, unchanged)** `L375` — already fixed, confirmed again not to need any more carry-forward (last session already said this; repeating here only to close the loop since it appeared one more time in this session's own handoff list).
+
+# Session: clean-volume setup and complete Vulkan CTS re-triage
+
+**Status: done. The development volume is configured, every CTS case has a
+bounded outcome, the auxiliary-suite regressions are fixed, and the roadmap
+now describes the current failures instead of the old baseline.**
+
+## Visible wins
+
+1. **The clean build is usable.** The FeMe build is Release with assertions,
+   `ccache`, and precompiled headers disabled. Explicit ICD selection reports
+   `FeMe CPU Vulkan Device`.
+2. **The core suite is clean.** `check-feme` is 3,704 Pass / 3 Unsupported /
+   0 Fail.
+3. **The HLSL offload suite is clean.** `check-hlsl-feme-vk` is 491 Pass /
+   28 expected failures / 273 Unsupported / 0 unexpected results.
+4. **The updated CTS is completely accounted for.** All 3,253,584 cases have
+   a result: 704,272 Pass, 1,549 Fail, 2,547,677 NotSupported, 46
+   QualityWarning, 24 DeviceLost, and 16 TimedOut. There are zero Crash,
+   InternalError, or Unrun outcomes.
+5. **Parallel artifacts were separated from real bugs.** Rerunning all 466
+   initial DeviceLost cases alone converted 442 to Pass; only 24 reproduced.
+   The 20 unfinished heavy cases were given ten minutes each: four passed and
+   16 reproduced the timeout.
+6. **The old failure mountain is much smaller.** Relative to the previous
+   full-run baseline, Pass is up 54,245 and ordinary Fail is down 45,625,
+   despite the new CTS adding 9,215 cases.
+
+## Decisions that mattered
+
+1. **Use separate ICD exports.** Setting `VK_ICD_FILENAMES` and then
+   `VK_DRIVER_FILES` avoids accidentally expanding the old system value and
+   selecting lavapipe. This was the difference between a valid FeMe run and a
+   misleading Mesa run.
+2. **Do not trust parallel `DeviceLost` as final evidence.** The 442/466
+   conversion to Pass proves most were contention artifacts. Device-loss
+   status needs the same isolated verification that ordinary Fail already
+   gets.
+3. **Call a timeout a timeout, not "unrun."** The 16 large
+   `use_after_copy` cases exceeded both 60-second and 600-second isolated
+   limits. They are measured performance failures and now have their own
+   roadmap owner, L418.
+4. **Keep external defects external.** The offload suite's boolean
+   specialization constant used one-byte C++ `bool` instead of four-byte
+   `VkBool32`; that fix is committed only in `offload-test-suite`. The CTS
+   mesh-shader host mirror used a 12-byte C++ `vec3` array stride against a
+   16-byte std430 shader stride; that fix is committed only in VK-GL-CTS and
+   turns all 58 affected cases into Pass.
+5. **Replace stale aggregate buckets with current owners.** L417 owns the 24
+   persistent device losses, L418 owns the 16 long timeouts, and L419(a-k)
+   partitions all 1,549 ordinary failures without introducing deeper
+   milestone nesting.
+6. **Preserve manually verified inventory notes.** The registry generators
+   correctly refreshed structure and counts, but their manifests lag several
+   documented implementations. I updated registry provenance and
+   table-derived totals without replacing stronger hand-audited notes.
+
+## Pitfalls worth remembering
+
+- Updated CTS case-list mode writes `dEQP-VK-cases.txt`; stdout is not the
+  flat list. Extract names from `TEST:` lines.
+- Run `deqp-vk` from its Vulkan module build directory so Amber and resource
+  paths resolve.
+- `run_vulkan_cts.py` isolates ordinary Fail but not DeviceLost. Until that
+  changes, DeviceLost needs a separate one-worker/one-case pass.
+- A clean auxiliary checkout can silently lose a previously local external
+  fix. The bool-specialization and std430-vec3 defects both resurfaced this
+  way; verify the checkout's actual content, not an old roadmap claim.
+- Do not classify the ARM64 `WaveActiveMax` result as a FeMe defect. The test
+  expectation assumes a wave size of at least eight, while this host legally
+  uses four; the external suite now records that host-specific expectation.
+
+## Next steps
+
+1. **(~2-4 hours, highest signal)** Reduce one L417 primary-command-buffer
+   case and its matching graphics-pipeline-library case under a debug worker
+   with creation logging. Find the exact transition to `DeviceLost` before
+   touching depth/stencil aspect handling.
+2. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
+   Split time among shader/pipeline compilation, image copy execution, and
+   fence wait; use the same case for a before/after performance bound.
+3. **(~1 day)** Start L419(a) with one `opquantize` and one compute
+   `opinboundsaccesschain` reduction. Together they cover 232 of the 528
+   SPIR-V assembly failures and are the largest compact compiler clusters.
+4. **(~1 day)** Compare one identical transform-feedback case across
+   monolithic, fast GPL, and optimized GPL construction. The exact
+   188/188/188 symmetry is unusually strong evidence for one shared runtime
+   bug rather than three pipeline-library bugs.
+5. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
+   isolated verification and timed-out cases are persisted as a first-class
+   outcome. This removes the largest manual reconciliation step from the next
+   full run.
+6. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   L417-L419 roadmap counts synchronized after every fix and isolated CTS
+   rerun.
