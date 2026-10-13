@@ -4101,6 +4101,97 @@ TEST(ExecutorTest, CapturesVertexShaderOutputToBoundTransformFeedbackBuffer) {
   EXPECT_EQ(CapturedBytes, 12u);
 }
 
+// (Roadmap L419(n)) `VK_EXT_transform_feedback` captures one record per
+// *assembled input-assembly primitive's* vertex, not one per raw vertex-
+// shader invocation: a 4-vertex `TriangleStrip` draw (no geometry/
+// tessellation stage) assembles two triangles -- `{v0, v1, v2}` and
+// `{v1, v3, v2}` (the strip's own alternating-winding rule, see
+// `emitStripSegment` in `Executor.cpp`) -- sharing `v1`/`v2` between
+// them, so a correct capture duplicates those two vertices' own XFB
+// records rather than writing each raw invocation's record exactly once
+// in sequence. Before this fix, `captureTransformFeedback`'s VS-only
+// caller always captured in raw sequential invocation order regardless
+// of topology, which coincidentally matched `TriangleList`/`LineList`
+// (and so those topologies' own dEQP-VK transform-feedback cases always
+// passed) but produced the wrong vertex count/order here, exactly
+// `dEQP-VK.transform_feedback.simple.winding_triangle_strip_*`'s own
+// "Vertex data verification failed" failure mode.
+TEST(ExecutorTest,
+    CapturesTriangleStripXfbInAssembledPrimitiveOrderWithDuplicatedVertices) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(2, SignatureDirection::Output, 1, /*Location=*/0)};
+  VSSig.Elements[2].XfbBuffer = 0;
+  VSSig.Elements[2].XfbOffset = 0;
+  VSSig.Elements[2].XfbStride = 4;
+  constexpr char XfbVertexShaderIR[] = R"(
+    define void @vs_main() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, XfbVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), /*FragmentStage=*/nullptr,
+      PrimitiveTopology::TriangleStrip,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, /*Attachments=*/{}, StencilState{},
+      /*ColorBlends=*/{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/false);
+  ASSERT_FALSE(Pipeline.hasTessellationStages());
+  ASSERT_FALSE(Pipeline.hasGeometryStages());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v0: px = 1.0
+      2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v1: px = 2.0
+      3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v2: px = 3.0
+      4.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, // v3: px = 4.0
+  };
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = {}; // No color attachment at all.
+
+  // Two assembled triangles (6 records), 4 bytes each.
+  std::array<uint8_t, 24> XfbStorage{};
+  uint64_t CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 1> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(XfbStorage),
+                                    &CapturedBytes}};
+  Draw.XfbBuffers = XfbBuffers;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  float Captured[6];
+  std::memcpy(Captured, XfbStorage.data(), sizeof(Captured));
+  // {v0, v1, v2}, then {v1, v3, v2} -- not the raw {v0, v1, v2, v3}.
+  EXPECT_FLOAT_EQ(Captured[0], 1.0f);
+  EXPECT_FLOAT_EQ(Captured[1], 2.0f);
+  EXPECT_FLOAT_EQ(Captured[2], 3.0f);
+  EXPECT_FLOAT_EQ(Captured[3], 2.0f);
+  EXPECT_FLOAT_EQ(Captured[4], 4.0f);
+  EXPECT_FLOAT_EQ(Captured[5], 3.0f);
+  EXPECT_EQ(CapturedBytes, 24u);
+}
+
 // (Roadmap H21c) A second draw within the same transform-feedback scope
 // (modeled here as a second `executeDraws` call sharing the same
 // `CapturedBytes` accumulator, the same way `CommandBuffer.cpp`'s

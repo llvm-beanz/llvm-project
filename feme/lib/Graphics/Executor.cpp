@@ -1762,19 +1762,50 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 
 } // namespace
 
-/// (Roadmap H21c/H21e) Captures every `Output`-direction element of \p
-/// Elements with its own `XfbBuffer`/`XfbOffset`/`XfbStride` into \p
-/// Draw's own bound transform-feedback buffers, reading each element's
-/// scalar values from \p Output's row `Flat` for every `Flat` in
-/// `[0, Count)` -- the shared logic roadmap H21c's original vertex-shader-
-/// only capture used, factored out so H21e's geometry-shader-sourced
-/// capture (a different `Elements`/`Output`/`Count` triple, the same
-/// buffer-write shape) can reuse it verbatim rather than duplicating it.
+/// (Roadmap H21c/H21e/L419(n)) Captures every `Output`-direction element of
+/// \p Elements with its own `XfbBuffer`/`XfbOffset`/`XfbStride` into \p
+/// Draw's own bound transform-feedback buffers, emitting one XFB record
+/// per entry of \p FlatIndices (in order) and reading each element's
+/// scalar values from \p Output's row `FlatIndices[Pos]` for the record at
+/// output position `Pos` -- the shared logic roadmap H21c's original
+/// vertex-shader-only capture used, factored out so H21e's geometry-
+/// shader-sourced capture (a different `Elements`/`Output`/`FlatIndices`
+/// triple, the same buffer-write shape) can reuse it verbatim rather than
+/// duplicating it.
+///
+/// (Roadmap L419(n)) `FlatIndices` decouples the *write* position (`Pos`,
+/// always sequential, one per captured XFB record) from the *read*
+/// position (`FlatIndices[Pos]`, the source vertex-shader invocation):
+/// for `List`-style topologies and the geometry-shader-sourced path, every
+/// invocation is already its own output record in order, so `FlatIndices`
+/// is simply `{0, 1, ..., Count-1}`; for `Strip`/`Fan`/`*WithAdjacency`
+/// topologies (no geometry shader), the Vulkan spec requires XFB to
+/// capture one record per *assembled primitive's* vertex, which duplicates
+/// shared vertices (strips/fans) or drops adjacency-only vertices
+/// (adjacency topologies) relative to the raw per-invocation count --
+/// exactly what a non-trivial `FlatIndices` sequence (built from the same
+/// `TriIndices`/`LineIndices` primitive assembly consumed for rasterizing)
+/// supplies.
+/// (Roadmap L419(n)) Builds the trivial `{0, 1, ..., Count-1}` source-index
+/// sequence `captureTransformFeedback`'s geometry-shader-sourced callers
+/// want: that path's own `Output` (`GeomStreamOutput`/a `flattenStream`
+/// result) is already merged into one in-order record per captured
+/// vertex, so every output position's source row is itself.
+static llvm::SmallVector<uint32_t, 16>
+makeSequentialXfbIndices(uint32_t Count) {
+  llvm::SmallVector<uint32_t, 16> Indices;
+  Indices.reserve(Count);
+  for (uint32_t Flat = 0; Flat != Count; ++Flat)
+    Indices.push_back(Flat);
+  return Indices;
+}
+
 static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
                                          Elements,
                                      const StageStorage &Output,
-                                     uint32_t Count,
+                                     llvm::ArrayRef<uint32_t> FlatIndices,
                                      const PreparedDraw &Draw) {
+  uint32_t Count = static_cast<uint32_t>(FlatIndices.size());
   // Every element captured to the same `XfbBuffer` shares that buffer's
   // own per-vertex record stride (a real shader repeats SPIR-V's
   // `XfbStride` decoration on every one of that buffer's captured
@@ -1868,9 +1899,10 @@ static void captureTransformFeedback(llvm::ArrayRef<const SignatureElement *>
       if (!CB.CapturedBytes)
         continue;
       uint64_t BaseVertex = Progress[BufIdx].BaseVertex;
-      for (uint32_t Flat = 0; Flat != Count; ++Flat) {
+      for (uint32_t Pos = 0; Pos != Count; ++Pos) {
+        uint32_t Flat = FlatIndices[Pos];
         uint64_t RecordStart =
-            (BaseVertex + Flat) * Elt->XfbStride + Elt->XfbOffset;
+            (BaseVertex + Pos) * Elt->XfbStride + Elt->XfbOffset;
         uint64_t RowStart = RecordStart + RowByteOffset;
         for (uint32_t C = 0; C != Elt->ComponentCount; ++C) {
           uint64_t Dst = RowStart + uint64_t(C) * sizeof(uint32_t);
@@ -5315,6 +5347,211 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       }
     }
 
+    // --- Assemble primitives (moved ahead of vertex-attribute fetch so
+    // the transform-feedback capture below, which needs the same
+    // per-instance primitive assembly, can reuse it). ---
+
+    // Assembles one strip segment [Start, End)'s triangles, alternating
+    // winding order starting fresh at each segment -- exactly what a
+    // restart does to an unindexed strip, and what a strip with no restart
+    // markers does over its one whole segment. (Roadmap L334) Per the spec's
+    // own equation ("Triangle Strips": `p_i = {v_i, v_{i+(1+i%2)},
+    // v_{i+(2-i%2)}}`), the *first* emitted vertex is always `v_i` --
+    // *only* the second/third positions swap on odd `i`, so `TriIndices[0]`
+    // (and thus `Tri.Varyings[0]`, this project's flat-shading/default-
+    // provoking-vertex source, see the `Flat`-interpolation consumer below)
+    // is always `T` regardless of parity; swapping `T+1` and `T+2` (not `T`
+    // and `T+1`) still flips the triangle's orientation every other
+    // triangle (an odd permutation either way), so the winding-alternation
+    // this project relies on for consistent front-facing is unaffected.
+    auto emitStripSegment = [](uint32_t Start, uint32_t End,
+                               SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      uint32_t Local = 0;
+      for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
+        Out.push_back(Local % 2 == 0
+                          ? std::array<uint32_t, 3>{T, T + 1, T + 2}
+                          : std::array<uint32_t, 3>{T, T + 2, T + 1});
+    };
+
+    // Assembles one fan segment [Start, End)'s triangles: `Start` (the
+    // segment's first vertex) is every triangle's shared pivot, exactly
+    // as an unindexed fan pivots on its first vertex and a restart begins
+    // a fresh fan (with a fresh pivot) at the next segment. (Roadmap L334)
+    // Per the spec's own equation ("Triangle Fans": `p_i = {v_{i+1}, v_{i+2},
+    // v_0}`), the pivot is the *last* emitted vertex, not the first -- the
+    // provoking vertex for `p_i` is `v_{i+1}` (`T` below), so `TriIndices[0]`
+    // must be `T`, not the pivot, for this project's flat-shading/default-
+    // provoking-vertex source (`Tri.Varyings[0]`) to match the spec. This is
+    // a cyclic rotation of the prior `{Start, T, T+1}` ordering (an even
+    // permutation), so the triangle's actual geometry/orientation is
+    // unchanged -- only which vertex lands in position 0 changes.
+    auto emitFanSegment = [](uint32_t Start, uint32_t End,
+                             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      for (uint32_t T = Start + 1; T + 2 <= End; ++T)
+        Out.push_back({T, T + 1, Start});
+    };
+
+    SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
+    if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
+      for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
+        TriIndices.push_back({T, T + 1, T + 2});
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleFan) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitFanSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitFanSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitFanSegment(0, PerInstance, TriIndices);
+      }
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleStrip) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitStripSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitStripSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitStripSegment(0, PerInstance, TriIndices);
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::TriangleListWithAdjacency &&
+              !GSSig) {
+      // (roadmap H7l) No geometry stage is bound to consume the adjacency
+      // vertices, so only each primitive's own 3 core vertices --
+      // `SplitPrimitiveAdjacency::Primitive`, the same ones a bound
+      // geometry stage's own `Primitives` assembly below reorders
+      // adjacency around -- are rasterized, exactly as
+      // `TriangleList`/`stripAdjacency(Topology)` would be.
+      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
+          PrimitiveTopology::TriangleListWithAdjacency);
+      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+           P += VertsPerPrim) {
+        SmallVector<uint32_t, 6> Window;
+        for (uint32_t K = 0; K != VertsPerPrim; ++K)
+          Window.push_back(P + K);
+        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+            PrimitiveTopology::TriangleListWithAdjacency, Window);
+        TriIndices.push_back(
+            {Split.Primitive[0], Split.Primitive[1], Split.Primitive[2]});
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::TriangleStripWithAdjacency &&
+              !GSSig) {
+      // As above, but windowed like every other strip topology
+      // (`splitStripPrimitiveAdjacency`), honoring restart exactly as
+      // `TriangleStrip` does.
+      auto emitCoreStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+            SmallVector<uint32_t, 16> Window;
+            for (uint32_t T = Start; T != End; ++T)
+              Window.push_back(T);
+            uint32_t Count = getStripPrimitiveCount(
+                PrimitiveTopology::TriangleStripWithAdjacency,
+                static_cast<uint32_t>(Window.size()));
+            for (uint32_t P = 0; P != Count; ++P) {
+              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
+                  PrimitiveTopology::TriangleStripWithAdjacency, Window, P);
+              Out.push_back({Split.Primitive[0], Split.Primitive[1],
+                             Split.Primitive[2]});
+            }
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitCoreStripSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitCoreStripSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitCoreStripSegment(0, PerInstance, TriIndices);
+      }
+    }
+
+    // Assembles a line-list/line-strip topology's line segments (as
+    // vertex-index pairs), honoring restart on a strip exactly as the
+    // triangle assembly above does.
+    SmallVector<std::array<uint32_t, 2>, 8> LineIndices;
+    if (Pipeline.getTopology() == PrimitiveTopology::LineList) {
+      for (uint32_t T = 0; T + 2 <= PerInstance; T += 2)
+        LineIndices.push_back({T, T + 1});
+    } else if (Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+      auto emitLineStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
+            for (uint32_t T = Start; T + 2 <= End; ++T)
+              Out.push_back({T, T + 1});
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitLineStripSegment(SegStart, J, LineIndices);
+          SegStart = J + 1;
+        }
+        emitLineStripSegment(SegStart, PerInstance, LineIndices);
+      } else {
+        emitLineStripSegment(0, PerInstance, LineIndices);
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::LineListWithAdjacency &&
+              !GSSig) {
+      // (roadmap H7l) As the triangle-list-with-adjacency case above, but
+      // for `LineList`'s own 2 core vertices out of each 4-vertex window.
+      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
+          PrimitiveTopology::LineListWithAdjacency);
+      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
+           P += VertsPerPrim) {
+        SmallVector<uint32_t, 4> Window;
+        for (uint32_t K = 0; K != VertsPerPrim; ++K)
+          Window.push_back(P + K);
+        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+            PrimitiveTopology::LineListWithAdjacency, Window);
+        LineIndices.push_back({Split.Primitive[0], Split.Primitive[1]});
+      }
+    } else if (Pipeline.getTopology() ==
+                   PrimitiveTopology::LineStripWithAdjacency &&
+              !GSSig) {
+      auto emitCoreLineStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
+            SmallVector<uint32_t, 16> Window;
+            for (uint32_t T = Start; T != End; ++T)
+              Window.push_back(T);
+            uint32_t Count = getStripPrimitiveCount(
+                PrimitiveTopology::LineStripWithAdjacency,
+                static_cast<uint32_t>(Window.size()));
+            for (uint32_t P = 0; P != Count; ++P) {
+              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
+                  PrimitiveTopology::LineStripWithAdjacency, Window, P);
+              Out.push_back({Split.Primitive[0], Split.Primitive[1]});
+            }
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitCoreLineStripSegment(SegStart, J, LineIndices);
+          SegStart = J + 1;
+        }
+        emitCoreLineStripSegment(SegStart, PerInstance, LineIndices);
+      } else {
+        emitCoreLineStripSegment(0, PerInstance, LineIndices);
+      }
+    }
+
     // --- Fetch/convert vertex attributes into the vertex-input block. ---
     Expected<StageStorage> VSInput =
         buildStageStorage(VSSigValue, SignatureDirection::Input, Total);
@@ -5549,7 +5786,44 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       llvm::SmallVector<const SignatureElement *, 8> VSOutputElements;
       for (const SignatureElement &Elt : VSSigValue.Elements)
         VSOutputElements.push_back(&Elt);
-      captureTransformFeedback(VSOutputElements, *VSOutput, Total, Draw);
+      // (Roadmap L419(n)) `VK_EXT_transform_feedback` captures one record
+      // per *assembled input-assembly primitive's* vertex, not one per
+      // raw vertex-shader invocation: for `PointList` (every invocation
+      // is its own primitive) and every `List`-style topology (raw
+      // invocation order already matches primitive-vertex order, 1:1,
+      // with no duplication or filtering), the plain sequential range
+      // below is already correct and identical to the prior behavior.
+      // For `Strip`/`Fan` topologies, a shared vertex is duplicated once
+      // per primitive it belongs to, and for a `*WithAdjacency` topology
+      // with no bound geometry stage to consume them, the adjacency-only
+      // vertices are dropped entirely -- both exactly what flattening
+      // this same draw's own `TriIndices`/`LineIndices` primitive
+      // assembly (built above, before this draw's vertex-attribute
+      // fetch, for exactly this reuse) produces, biased the same way
+      // `AbsTriIndices`/`AbsLineIndices` below bias them per instance.
+      llvm::SmallVector<uint32_t, 16> XfbFlatIndices;
+      if (TriIndices.empty() && LineIndices.empty()) {
+        XfbFlatIndices.reserve(Total);
+        for (uint32_t Flat = 0; Flat != Total; ++Flat)
+          XfbFlatIndices.push_back(Flat);
+      } else {
+        XfbFlatIndices.reserve((TriIndices.size() * 3 + LineIndices.size() * 2) *
+                               Cmd.InstanceCount);
+        for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+          uint32_t Base = Inst * PerInstance;
+          for (std::array<uint32_t, 3> T : TriIndices) {
+            XfbFlatIndices.push_back(Base + T[0]);
+            XfbFlatIndices.push_back(Base + T[1]);
+            XfbFlatIndices.push_back(Base + T[2]);
+          }
+          for (std::array<uint32_t, 2> L : LineIndices) {
+            XfbFlatIndices.push_back(Base + L[0]);
+            XfbFlatIndices.push_back(Base + L[1]);
+          }
+        }
+      }
+      captureTransformFeedback(VSOutputElements, *VSOutput, XfbFlatIndices,
+                               Draw);
     }
 
     // --- Tessellation (roadmap H4). ---
@@ -5659,209 +5933,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       RasterOut = &TessOutput;
     }
 
-    // --- Assemble primitives, clip, viewport-transform, cull. ---
-
-    // Assembles one strip segment [Start, End)'s triangles, alternating
-    // winding order starting fresh at each segment -- exactly what a
-    // restart does to an unindexed strip, and what a strip with no restart
-    // markers does over its one whole segment. (Roadmap L334) Per the spec's
-    // own equation ("Triangle Strips": `p_i = {v_i, v_{i+(1+i%2)},
-    // v_{i+(2-i%2)}}`), the *first* emitted vertex is always `v_i` --
-    // *only* the second/third positions swap on odd `i`, so `TriIndices[0]`
-    // (and thus `Tri.Varyings[0]`, this project's flat-shading/default-
-    // provoking-vertex source, see the `Flat`-interpolation consumer below)
-    // is always `T` regardless of parity; swapping `T+1` and `T+2` (not `T`
-    // and `T+1`) still flips the triangle's orientation every other
-    // triangle (an odd permutation either way), so the winding-alternation
-    // this project relies on for consistent front-facing is unaffected.
-    auto emitStripSegment = [](uint32_t Start, uint32_t End,
-                               SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
-      uint32_t Local = 0;
-      for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
-        Out.push_back(Local % 2 == 0
-                          ? std::array<uint32_t, 3>{T, T + 1, T + 2}
-                          : std::array<uint32_t, 3>{T, T + 2, T + 1});
-    };
-
-    // Assembles one fan segment [Start, End)'s triangles: `Start` (the
-    // segment's first vertex) is every triangle's shared pivot, exactly
-    // as an unindexed fan pivots on its first vertex and a restart begins
-    // a fresh fan (with a fresh pivot) at the next segment. (Roadmap L334)
-    // Per the spec's own equation ("Triangle Fans": `p_i = {v_{i+1}, v_{i+2},
-    // v_0}`), the pivot is the *last* emitted vertex, not the first -- the
-    // provoking vertex for `p_i` is `v_{i+1}` (`T` below), so `TriIndices[0]`
-    // must be `T`, not the pivot, for this project's flat-shading/default-
-    // provoking-vertex source (`Tri.Varyings[0]`) to match the spec. This is
-    // a cyclic rotation of the prior `{Start, T, T+1}` ordering (an even
-    // permutation), so the triangle's actual geometry/orientation is
-    // unchanged -- only which vertex lands in position 0 changes.
-    auto emitFanSegment = [](uint32_t Start, uint32_t End,
-                             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
-      for (uint32_t T = Start + 1; T + 2 <= End; ++T)
-        Out.push_back({T, T + 1, Start});
-    };
-
-    SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
-    if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
-      for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
-        TriIndices.push_back({T, T + 1, T + 2});
-    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleFan) {
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitFanSegment(SegStart, J, TriIndices);
-          SegStart = J + 1;
-        }
-        emitFanSegment(SegStart, PerInstance, TriIndices);
-      } else {
-        emitFanSegment(0, PerInstance, TriIndices);
-      }
-    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleStrip) {
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitStripSegment(SegStart, J, TriIndices);
-          SegStart = J + 1;
-        }
-        emitStripSegment(SegStart, PerInstance, TriIndices);
-      } else {
-        emitStripSegment(0, PerInstance, TriIndices);
-      }
-    } else if (Pipeline.getTopology() ==
-                   PrimitiveTopology::TriangleListWithAdjacency &&
-              !GSSig) {
-      // (roadmap H7l) No geometry stage is bound to consume the adjacency
-      // vertices, so only each primitive's own 3 core vertices --
-      // `SplitPrimitiveAdjacency::Primitive`, the same ones a bound
-      // geometry stage's own `Primitives` assembly below reorders
-      // adjacency around -- are rasterized, exactly as
-      // `TriangleList`/`stripAdjacency(Topology)` would be.
-      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
-          PrimitiveTopology::TriangleListWithAdjacency);
-      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
-           P += VertsPerPrim) {
-        SmallVector<uint32_t, 6> Window;
-        for (uint32_t K = 0; K != VertsPerPrim; ++K)
-          Window.push_back(P + K);
-        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
-            PrimitiveTopology::TriangleListWithAdjacency, Window);
-        TriIndices.push_back(
-            {Split.Primitive[0], Split.Primitive[1], Split.Primitive[2]});
-      }
-    } else if (Pipeline.getTopology() ==
-                   PrimitiveTopology::TriangleStripWithAdjacency &&
-              !GSSig) {
-      // As above, but windowed like every other strip topology
-      // (`splitStripPrimitiveAdjacency`), honoring restart exactly as
-      // `TriangleStrip` does.
-      auto emitCoreStripSegment =
-          [](uint32_t Start, uint32_t End,
-             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
-            SmallVector<uint32_t, 16> Window;
-            for (uint32_t T = Start; T != End; ++T)
-              Window.push_back(T);
-            uint32_t Count = getStripPrimitiveCount(
-                PrimitiveTopology::TriangleStripWithAdjacency,
-                static_cast<uint32_t>(Window.size()));
-            for (uint32_t P = 0; P != Count; ++P) {
-              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
-                  PrimitiveTopology::TriangleStripWithAdjacency, Window, P);
-              Out.push_back({Split.Primitive[0], Split.Primitive[1],
-                             Split.Primitive[2]});
-            }
-          };
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitCoreStripSegment(SegStart, J, TriIndices);
-          SegStart = J + 1;
-        }
-        emitCoreStripSegment(SegStart, PerInstance, TriIndices);
-      } else {
-        emitCoreStripSegment(0, PerInstance, TriIndices);
-      }
-    }
-
-    // Assembles a line-list/line-strip topology's line segments (as
-    // vertex-index pairs), honoring restart on a strip exactly as the
-    // triangle assembly above does.
-    SmallVector<std::array<uint32_t, 2>, 8> LineIndices;
-    if (Pipeline.getTopology() == PrimitiveTopology::LineList) {
-      for (uint32_t T = 0; T + 2 <= PerInstance; T += 2)
-        LineIndices.push_back({T, T + 1});
-    } else if (Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
-      auto emitLineStripSegment =
-          [](uint32_t Start, uint32_t End,
-             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
-            for (uint32_t T = Start; T + 2 <= End; ++T)
-              Out.push_back({T, T + 1});
-          };
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitLineStripSegment(SegStart, J, LineIndices);
-          SegStart = J + 1;
-        }
-        emitLineStripSegment(SegStart, PerInstance, LineIndices);
-      } else {
-        emitLineStripSegment(0, PerInstance, LineIndices);
-      }
-    } else if (Pipeline.getTopology() ==
-                   PrimitiveTopology::LineListWithAdjacency &&
-              !GSSig) {
-      // (roadmap H7l) As the triangle-list-with-adjacency case above, but
-      // for `LineList`'s own 2 core vertices out of each 4-vertex window.
-      uint32_t VertsPerPrim = getListPrimitiveVertexCount(
-          PrimitiveTopology::LineListWithAdjacency);
-      for (uint32_t P = 0; P + VertsPerPrim <= PerInstance;
-           P += VertsPerPrim) {
-        SmallVector<uint32_t, 4> Window;
-        for (uint32_t K = 0; K != VertsPerPrim; ++K)
-          Window.push_back(P + K);
-        SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
-            PrimitiveTopology::LineListWithAdjacency, Window);
-        LineIndices.push_back({Split.Primitive[0], Split.Primitive[1]});
-      }
-    } else if (Pipeline.getTopology() ==
-                   PrimitiveTopology::LineStripWithAdjacency &&
-              !GSSig) {
-      auto emitCoreLineStripSegment =
-          [](uint32_t Start, uint32_t End,
-             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
-            SmallVector<uint32_t, 16> Window;
-            for (uint32_t T = Start; T != End; ++T)
-              Window.push_back(T);
-            uint32_t Count = getStripPrimitiveCount(
-                PrimitiveTopology::LineStripWithAdjacency,
-                static_cast<uint32_t>(Window.size()));
-            for (uint32_t P = 0; P != Count; ++P) {
-              SplitPrimitiveAdjacency Split = splitStripPrimitiveAdjacency(
-                  PrimitiveTopology::LineStripWithAdjacency, Window, P);
-              Out.push_back({Split.Primitive[0], Split.Primitive[1]});
-            }
-          };
-      if (RestartEnabled) {
-        uint32_t SegStart = 0;
-        for (uint32_t J = 0; J != PerInstance; ++J) {
-          if (!IsRestart[J])
-            continue;
-          emitCoreLineStripSegment(SegStart, J, LineIndices);
-          SegStart = J + 1;
-        }
-        emitCoreLineStripSegment(SegStart, PerInstance, LineIndices);
-      } else {
-        emitCoreLineStripSegment(0, PerInstance, LineIndices);
-      }
-    }
-
+    // --- Clip, viewport-transform, cull. --- (TriIndices/LineIndices were
+    // assembled earlier, before vertex-attribute fetch, so the
+    // transform-feedback capture above could reuse them.)
     // (roadmap H4) The primitive index lists everything below actually
     // rasterizes, in absolute (already instance-offset) invocation
     // indices: the topology-assembled per-instance lists above biased by
@@ -6279,7 +6353,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           if (Stream == RasterizationStream) {
             captureTransformFeedback(
                 RasterOutputElements, GeomStreamOutput,
-                static_cast<uint32_t>(MergedVerts.size()), Draw);
+                makeSequentialXfbIndices(
+                    static_cast<uint32_t>(MergedVerts.size())),
+                Draw);
             continue;
           }
           Expected<StageStorage> StreamOutput = flattenStream(Stream);
@@ -6287,7 +6363,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             return StreamOutput.takeError();
           captureTransformFeedback(
               StreamElements, *StreamOutput,
-              static_cast<uint32_t>(Combined.getVertices(Stream).size()),
+              makeSequentialXfbIndices(
+                  static_cast<uint32_t>(Combined.getVertices(Stream).size())),
               Draw);
         }
     }
