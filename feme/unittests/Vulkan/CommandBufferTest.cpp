@@ -3915,6 +3915,56 @@ TEST_F(CommandBufferTest, TransformFeedbackEndWritesZeroToCounterBuffer) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+/// (Roadmap L419(m)) `vkCmdBeginTransformFeedbackEXT` with a non-null
+/// `pCounterBuffers[0]` must *resume* from that counter buffer's own
+/// stored byte offset instead of unconditionally starting at 0: with no
+/// draw in between to add any newly-captured bytes, a matching
+/// `vkCmdEndTransformFeedbackEXT` against the same counter buffer must
+/// read back exactly the value it started with, proving the begin call
+/// loaded it rather than resetting to 0 (which `dEQP-VK.transform_
+/// feedback.simple.resume_*`'s own 27 failing cases exposed: every
+/// multi-pass resume silently restarted its capture at byte 0, so the
+/// first already-captured record was overwritten instead of preserved).
+TEST_F(CommandBufferTest, TransformFeedbackBeginResumesFromCounterBuffer) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 4;
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_COUNTER_BUFFER_BIT_EXT;
+  VkBuffer CounterBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &CounterBuf),
+            VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 4;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, CounterBuf, Memory, 0), VK_SUCCESS);
+
+  void *Data = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, Memory, 0, 4, 0, &Data), VK_SUCCESS);
+  // A prior (simulated) `vkCmdEndTransformFeedbackEXT` already stored this
+  // "128 bytes already captured" count; resuming must preserve it.
+  *static_cast<uint32_t *>(Data) = 128u;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  VkDeviceSize Offset = 0;
+  vkCmdBindTransformFeedbackBuffersEXT(CmdBuf, 0, 1, &CounterBuf, &Offset,
+                                       nullptr);
+  vkCmdBeginTransformFeedbackEXT(CmdBuf, 0, 1, &CounterBuf, &Offset);
+  vkCmdEndTransformFeedbackEXT(CmdBuf, 0, 1, &CounterBuf, &Offset);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+  EXPECT_EQ(*static_cast<uint32_t *>(Data), 128u);
+
+  vkUnmapMemory(Device, Memory);
+  vkDestroyBuffer(Device, CounterBuf, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 /// (Roadmap H21b) A second `vkCmdBeginTransformFeedbackEXT` with no
 /// matching `vkCmdEndTransformFeedbackEXT` in between must fail, the same
 /// nested-scope rule `vkCmdBeginQuery` already enforces for itself.

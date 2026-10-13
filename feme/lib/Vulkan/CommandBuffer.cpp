@@ -1420,10 +1420,11 @@ struct GraphicsState {
   std::vector<VkDeviceSize> XfbBufferSizes;
   /// (roadmap H21c) Running captured-byte count per `XfbBuffers` slot,
   /// reset to 0 for every currently-bound slot when a
-  /// `vkCmdBeginTransformFeedbackEXT` scope opens (no resume-from-counter-
-  /// buffer semantics yet, matching H21b's own "not yet consumed" design
-  /// for `vkCmdBeginTransformFeedbackEXT`'s own counter-buffer
-  /// arguments), accumulated by every draw in that scope
+  /// `vkCmdBeginTransformFeedbackEXT` scope opens, *except* a slot whose
+  /// own counter buffer argument is non-null, which instead loads its
+  /// starting value from that counter buffer (roadmap L419(m); see the
+  /// `BeginTransformFeedback` handler for the resume-from-counter-buffer
+  /// logic itself), accumulated by every draw in that scope
   /// (`feme::graphics::executeDraws`'s own transform-feedback capture),
   /// and read back out by `vkCmdEndTransformFeedbackEXT` to report to its
   /// own counter buffer.
@@ -3478,19 +3479,55 @@ Error executeCommandsInto(
       // (Roadmap H21b) The Vulkan spec forbids a nested
       // `vkCmdBeginTransformFeedbackEXT` with no matching end in between,
       // the same rule `vkCmdBeginQuery`'s own pool already enforces for
-      // itself; `Cmd.XfbBuffers`/`XfbBufferOffsets` (the resume-from
-      // counter buffers) are not consumed by anything yet, since no real
-      // capture exists to resume (roadmap H21c).
+      // itself.
       if (Gfx.XfbActive)
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdBeginTransformFeedbackEXT called "
                                  "with another transform feedback scope "
                                  "already active");
       Gfx.XfbActive = true;
-      // (Roadmap H21c) Every currently-bound buffer starts a fresh
-      // capture at 0 bytes -- no resume-from-counter-buffer support yet,
-      // matching the comment above.
+      // (Roadmap L419(m)) Every currently-bound buffer starts a fresh
+      // capture at 0 bytes, unless this scope resumes from a prior
+      // `vkCmdEndTransformFeedbackEXT`'s counter buffer: per the spec, a
+      // non-null `pCounterBuffers[I]` entry means "load the starting byte
+      // offset for counter buffer I from that buffer at the matching
+      // `pCounterBufferOffsets[I]`, to resume transform feedback from
+      // the previous `vkCmdEndTransformFeedbackEXT` call that set it" --
+      // a null entry (or no `pCounterBuffers` at all) means "start this
+      // slot at offset zero", which is what the plain reset below still
+      // does for every slot `Cmd.XfbBuffers` doesn't name. This was
+      // previously unconditional -- every `resume_*` CTS case re-began a
+      // genuinely paused capture at byte 0 instead of where its own
+      // prior `vkCmdEndTransformFeedbackEXT` had left off, clobbering
+      // the already-captured prefix with the resumed pass's own data
+      // (`dEQP-VK.transform_feedback.simple.resume_*`, 27 cases).
       Gfx.XfbCapturedBytes.assign(Gfx.XfbBuffers.size(), 0);
+      for (size_t I = 0; I != Cmd.XfbBuffers.size(); ++I) {
+        Buffer *CounterBuf = Cmd.XfbBuffers[I];
+        if (!CounterBuf)
+          continue;
+        size_t SlotIdx = Cmd.FirstSet + I;
+        if (SlotIdx >= Gfx.XfbCapturedBytes.size())
+          continue;
+        if (!CounterBuf->isBound())
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdBeginTransformFeedbackEXT's "
+                                   "counter buffer is not bound");
+        VkDeviceSize Offset = Cmd.XfbBufferOffsets[I];
+        if (Offset + sizeof(uint32_t) > CounterBuf->size())
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdBeginTransformFeedbackEXT's "
+                                   "counter buffer offset is out of range");
+        // (H46) dataForRange() subsumes the size check just above.
+        void *CounterData = CounterBuf->dataForRange(Offset, sizeof(uint32_t));
+        if (!CounterData)
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdBeginTransformFeedbackEXT's "
+                                   "counter buffer is not fully resident");
+        uint32_t Resumed = 0;
+        std::memcpy(&Resumed, CounterData, sizeof(Resumed));
+        Gfx.XfbCapturedBytes[SlotIdx] = Resumed;
+      }
       break;
     case RecordedCommand::Kind::EndTransformFeedback:
       if (!Gfx.XfbActive)
