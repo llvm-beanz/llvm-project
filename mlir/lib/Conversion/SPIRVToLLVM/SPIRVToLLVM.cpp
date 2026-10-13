@@ -1671,6 +1671,86 @@ public:
   }
 };
 
+/// Converts `spirv.CopyMemory` into LLVM dialect as a load from `source`
+/// followed by a store to `target` -- `spirv.CopyMemory` has no single LLVM
+/// dialect equivalent, but the SPIR-V spec itself defines it as copying "the
+/// memory pointed to by Source to the memory pointed to by Target", i.e.
+/// exactly `*target = *source` for the (required to be fixed-size) pointee
+/// type, which a load-then-store pair reproduces precisely. Unlike
+/// `spirv.Load`/`spirv.Store` (`LoadStorePattern`, above), `spirv.CopyMemory`
+/// can carry two independent `MemoryAccess` masks -- one for `target`, one
+/// for `source` (present only from SPIR-V 1.4 on; absent entirely, or with
+/// only one mask present, applies that one mask, or `None`, to both sides,
+/// per the op's own spec text) -- so `target`'s and `source`'s alignment/
+/// volatile/non-temporal bits are read and applied independently.
+class CopyMemoryPattern : public SPIRVToLLVMConversion<spirv::CopyMemoryOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::CopyMemoryOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::CopyMemoryOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // Matches `LoadStorePattern`'s own supported-bits set: alignment,
+    // volatility, and non-temporal hinting all have direct LLVM dialect
+    // equivalents; every other bit (the Vulkan-memory-model-only
+    // `MakePointerAvailable`/`MakePointerVisible`/`NonPrivatePointer`, or
+    // the INTEL alias-scope bits) is still unsupported and still reported
+    // as a conversion failure, exactly as `spirv.Load`/`spirv.Store` do.
+    constexpr spirv::MemoryAccess supported = spirv::MemoryAccess::Aligned |
+                                              spirv::MemoryAccess::Volatile |
+                                              spirv::MemoryAccess::Nontemporal;
+
+    // Decodes one side's `(memory_access, alignment)` pair into
+    // `(alignment, isVolatile, isNonTemporal)`, or `nullopt` if an
+    // unsupported bit is present.
+    auto decodeAccess = [&](std::optional<spirv::MemoryAccess> access,
+                            std::optional<uint32_t> alignment)
+        -> std::optional<std::tuple<unsigned, bool, bool>> {
+      if (!access)
+        return std::make_tuple(0u, false, false);
+      if (spirv::bitEnumContainsAny(*access, ~supported))
+        return std::nullopt;
+      unsigned alignVal =
+          spirv::bitEnumContainsAll(*access, spirv::MemoryAccess::Aligned)
+              ? *alignment
+              : 0;
+      bool isVolatile =
+          spirv::bitEnumContainsAll(*access, spirv::MemoryAccess::Volatile);
+      bool isNonTemporal =
+          spirv::bitEnumContainsAll(*access, spirv::MemoryAccess::Nontemporal);
+      return std::make_tuple(alignVal, isVolatile, isNonTemporal);
+    };
+
+    // A single mask (or none) applies to both `target` and `source`; two
+    // masks apply independently -- see the op's own spec text quoted
+    // above.
+    std::optional<spirv::MemoryAccess> targetAccess = op.getMemoryAccess();
+    std::optional<spirv::MemoryAccess> sourceAccess =
+        op.getSourceMemoryAccess() ? op.getSourceMemoryAccess() : targetAccess;
+    auto target = decodeAccess(targetAccess, op.getAlignment());
+    auto source = decodeAccess(sourceAccess, op.getSourceAlignment()
+                                                 ? op.getSourceAlignment()
+                                                 : op.getAlignment());
+    if (!target || !source)
+      return failure();
+
+    auto pointeeType =
+        cast<spirv::PointerType>(op.getSource().getType()).getPointeeType();
+    Type dstType = getTypeConverter()->convertType(pointeeType);
+    if (!dstType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    auto [srcAlign, srcVolatile, srcNonTemporal] = *source;
+    auto [dstAlign, dstVolatile, dstNonTemporal] = *target;
+    Value loaded = LLVM::LoadOp::create(rewriter, op.getLoc(), dstType,
+                                        adaptor.getSource(), srcAlign,
+                                        srcVolatile, srcNonTemporal);
+    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
+        op, loaded, adaptor.getTarget(), dstAlign, dstVolatile, dstNonTemporal);
+    return success();
+  }
+};
+
 /// Converts `spirv.Not` and `spirv.LogicalNot` into LLVM dialect.
 template <typename SPIRVOp>
 class NotPattern : public SPIRVToLLVMConversion<SPIRVOp> {
@@ -2873,7 +2953,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       // Memory ops
       AccessChainPattern, InBoundsAccessChainPattern, AddressOfPattern,
       LoadStorePattern<spirv::LoadOp>, LoadStorePattern<spirv::StoreOp>,
-      VariablePattern,
+      CopyMemoryPattern, VariablePattern,
 
       // Miscellaneous ops
       CompositeExtractPattern, CompositeInsertPattern,

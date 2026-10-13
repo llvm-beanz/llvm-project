@@ -286,6 +286,70 @@ spirv.func @store_volatile_nontemporal_aligned(%arg0 : f32) "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.CopyMemory
+//===----------------------------------------------------------------------===//
+
+// `spirv.CopyMemory` has no single LLVM dialect equivalent; it lowers to a
+// load from `source` followed by a store to `target` (`CopyMemoryPattern`),
+// matching the SPIR-V spec's own "copy the memory pointed to by Source to
+// the memory pointed to by Target" semantics. Found missing entirely (no
+// upstream lowering pattern existed at all) by a real
+// `dEQP-VK.spirv_assembly.instruction.graphics.opmemoryaccess.*` CTS
+// cluster (35 cases), all of which failed to legalize.
+
+// CHECK-LABEL: @copy_memory
+spirv.func @copy_memory() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  %1 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: %[[LOADED:.*]] = llvm.load %{{.*}} : !llvm.ptr -> f32
+  // CHECK: llvm.store %[[LOADED]], %{{.*}} : f32, !llvm.ptr
+  spirv.CopyMemory "Function" %0, "Function" %1 : f32
+  spirv.Return
+}
+
+// CHECK-LABEL: @copy_memory_aligned
+spirv.func @copy_memory_aligned() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  %1 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.load %{{.*}} <alignment = 4> : !llvm.ptr -> f32
+  // CHECK: llvm.store %{{.*}} <alignment = 4> : f32, !llvm.ptr
+  spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned", 4] : f32
+  spirv.Return
+}
+
+// A single memory operand mask combining `Aligned` with another bit
+// (`Nontemporal`) applies to *both* `target` and `source` (per the op's own
+// spec text) -- this is the exact shape every
+// `dEQP-VK.spirv_assembly.instruction.graphics.opmemoryaccess.
+// nontemporal_aligned_*` case uses, and the one the SPIR-V deserializer's
+// own `isAlignedAttr = (attrValue == 2)` equality check (rather than a
+// bitwise `Aligned`-bit test) silently miscounted, desynchronizing every
+// word parsed after it.
+
+// CHECK-LABEL: @copy_memory_aligned_nontemporal
+spirv.func @copy_memory_aligned_nontemporal() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  %1 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.load %{{.*}} <alignment = 4, nontemporal> : !llvm.ptr -> f32
+  // CHECK: llvm.store %{{.*}} <alignment = 4, nontemporal> : f32, !llvm.ptr
+  spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned|Nontemporal", 4] : f32
+  spirv.Return
+}
+
+// Two independent masks -- one for `target`, one for `source` -- apply
+// independently, each with its own alignment literal.
+
+// CHECK-LABEL: @copy_memory_independent_target_source_access
+spirv.func @copy_memory_independent_target_source_access() "None" {
+  %0 = spirv.Variable : !spirv.ptr<f32, Function>
+  %1 = spirv.Variable : !spirv.ptr<f32, Function>
+  // CHECK: llvm.load %{{.*}} <alignment = 8, nontemporal> : !llvm.ptr -> f32
+  // CHECK: llvm.store volatile %{{.*}} <alignment = 4> : f32, !llvm.ptr
+  spirv.CopyMemory "Function" %0, "Function" %1 ["Volatile|Aligned", 4], ["Aligned|Nontemporal", 8] : f32
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.Variable
 //===----------------------------------------------------------------------===//
 
