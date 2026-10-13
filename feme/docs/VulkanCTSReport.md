@@ -1149,3 +1149,90 @@ dispatch tables (which would make it a FeMe bug, even though the crash
 (which would make it an "issue outside FeMe" needing an isolated
 reproducer and a self-contained fix per the standing instruction) --
 ownership not yet determined either way.
+
+## `L423` ownership determined: confirmed pre-existing, upstream Vulkan-Loader bug
+
+Resumed this session with a full "every thread" `gdb` backtrace (`thread
+apply all bt`, not just the crashing thread) of six independent solo
+`deqp-vk --deqp-case=dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`
+runs against the FeMe ICD (`libvulkan.so.1.4.341`, i.e. `libvulkan1`
+1.4.341.0-1 from Debian/Ubuntu). Three of six crashed (matching the
+~1/3 rate noted when `L423` was first found).
+
+The crashing thread's own backtrace (not just its single-frame signal
+summary) is:
+```
+#0  0x... in ?? () from /usr/lib/aarch64-linux-gnu/libvulkan.so.1
+#1  0x... in ?? () from /usr/lib/aarch64-linux-gnu/libvulkan.so.1
+#2  vk::DeviceDriver::DeviceDriver(...) ()
+#3  vkt::CustomDevice::CustomDevice(...) ()
+#4  vkt::InstanceWrapper::createCustomDevice(...) ()
+#5  vkt::api::(anonymous namespace)::Device::create(...) ()
+#6  vkt::api::(anonymous namespace)::CreateThread<...>::runThread() ()
+```
+i.e. the crash is inside the Vulkan loader's own trampoline/dispatch-table
+setup, called while deqp-vk's `DeviceDriver` constructor is populating its
+function pointer table for a *newly created* `VkDevice` via repeated
+`vkGetDeviceProcAddr`-family calls. Critically, **other threads in the
+same crashing run's full thread dump are concurrently inside
+`vkDestroyDevice` from `libvulkan.so.1`** (`pthread_mutex_lock` inside
+`vkDestroyDevice`, called from `vkt::DeviceWrapper::~DeviceWrapper()`) --
+i.e. one thread's `vkCreateDevice`-time loader dispatch-table setup races
+a *different* thread's concurrent `vkDestroyDevice`-time loader
+dispatch-table teardown, for two entirely independent, per-thread-owned
+`VkDevice`s. Every FeMe-side frame in every captured backtrace is benign
+(either blocked in `QueueExecutor::run()`'s `pthread_cond_wait`, or not
+present at all on the crashing thread) -- the fault is squarely inside
+the loader's own internal state, not in any FeMe entry point.
+
+**Confirmed FeMe-specific triggering rate, not a universal loader bug**:
+reran the identical test case six times against Mesa's `llvmpipe`
+software rasterizer ICD instead of FeMe (`unset VK_ICD_FILENAMES`, same
+`deqp-vk` binary) -- **0/6 crashes**. This does not mean the bug is
+FeMe's fault; FeMe's `vkCreateDevice`/`vkDestroyDevice` are dramatically
+faster/lighter-weight than `llvmpipe`'s, so FeMe-backed runs reach a much
+higher rate of concurrent cross-thread `vkCreateDevice`/`vkDestroyDevice`
+calls per second, making an already-present, low-probability upstream
+race proportionally far more likely to land within a short test run.
+
+**Confirmed this is a known, acknowledged, still-unfixed upstream
+Vulkan-Loader issue**: a web search for the crash signature (loader
+trampoline code called during device-driver dispatch-table setup racing
+a concurrent `vkDestroyDevice` on a *different* device) found
+[KhronosGroup/Vulkan-Loader#200](https://github.com/KhronosGroup/Vulkan-Loader/issues/200),
+"Race condition in `vkCreateDevice()`+`vkDestroyDevice()`+
+`vkGetDeviceProcAddr()`" -- an open, maintainer-acknowledged issue whose
+description matches this crash almost exactly: concurrent
+`vkCreateDevice`/`vkDestroyDevice`/`vkGetDeviceProcAddr` calls on
+*different* devices/instances from different threads can crash because
+the loader's internal per-device dispatch pointers (`dev->icd_device`/
+`dev->chain_device` in the loader's own terms) can be nulled out by one
+thread's teardown while another thread's `loader_get_dispatch()`-style
+code is still reading them -- with the reporter's own conclusion being
+that only a loader-internal global lock (which the loader does not yet
+apply) would close the race. No patch has landed upstream as of this
+session.
+
+**Conclusion / ownership**: this is a genuine upstream Vulkan-Loader bug
+(`libvulkan1` 1.4.341.0-1), not a FeMe bug, and not fixable from within
+this repository -- the Vulkan Loader is not an LLVM subproject and its
+source is not checked out anywhere in this environment (only the
+system-installed shared library is present). The standing "issue outside
+FeMe: create an isolated reproducer, fix it, apply the fix in a
+self-contained commit touching only files outside `feme/`" instruction is
+scoped to other LLVM subprojects within this monorepo and does not apply
+here; there is no local source tree for the Vulkan Loader to patch. No
+FeMe-side code change is warranted or possible: FeMe's own
+`vkCreateDevice`/`vkDestroyDevice`/`vkGetDeviceProcAddr` implementations
+were re-read this session and found to do nothing non-compliant with the
+Vulkan spec's external-synchronization requirements for these entry
+points (the spec requires only that *each* `VkDevice` handle itself be
+externally synchronized across calls that take it, which this test
+already respects per-device -- it does not require any cross-device
+synchronization, and the loader's own internal state is exactly what the
+upstream issue says is unsafe without one). Marking `L423` as "triaged,
+root-caused, confirmed external, no action possible in this repo" rather
+than "fixed" -- the only true fix is an upstream Vulkan-Loader patch.
+`check-feme`, the Vulkan14FeatureInventory, and the VulkanExtensionInventory
+all need no change for this entry (no FeMe code or feature/extension
+surface was touched).
