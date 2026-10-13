@@ -613,6 +613,72 @@ no change needed -- an internal rendering/capture-ordering correctness
 fix for already-declared `VK_EXT_transform_feedback` topology support, no
 new feature/extension-surface change.
 
+## `L419(p)`: `holes_*` transform-feedback "no explicit `xfb_offset`" bug
+
+`dEQP-VK.transform_feedback.simple.holes_vert` (and its `holes_geom`/
+`holes_extra_draw_{vert,geom}` siblings, 4 cases/slice x 3 slices = 12)
+failed with a *data* mismatch, not a crash: "Invalid data found for vertex
+0: expected (10, 0, 30) and found (20, 0, 30)". The test declares three
+scalar outputs (`goku`/`trunks`/`vegeta`) sharing `Location=0` via distinct
+`Component` indices 0/1/2; only `goku` (component 0, `xfb_offset=0`) and
+`vegeta` (component 2, `xfb_offset=8`) have an explicit `xfb_offset` --
+`trunks` (component 1) deliberately has none, leaving a 4-byte "hole" at
+byte offset 4 of the 12-byte stride-3 record that must stay zero (the
+test's own comment: "note Y is not saved").
+
+**Root cause**, confirmed via `--deqp-log-decompiled-spirv=enable` against
+the real compiled SPIR-V: glslang decorates `trunks`' own `OpVariable`
+with `XfbBuffer 0`/`XfbStride 12` (establishing the shared buffer's
+layout) but, correctly, *no* `Offset` decoration at all -- the deliberate
+signal that this particular element, despite sharing the buffer's layout,
+is not itself captured. `CanonicalizeStage.cpp`'s `addElement` previously
+folded this to `Elt.XfbOffset = D.XfbOffset.value_or(0)` unconditionally,
+defaulting `trunks` to offset 0 -- the exact same slot `goku` legitimately
+owns -- so `trunks`' own value (`20.0`) landed in `goku`'s slot instead of
+being excluded from capture, matching the observed symptom exactly.
+
+**Fix**: changed `SignatureElement::XfbOffset` from a plain `uint32_t`
+(defaulting to 0) to `std::optional<uint32_t>` (mirroring `XfbBuffer`'s
+own existing optional-ness), so "no `Offset` decoration at all" survives
+as its own distinct state through canonicalization instead of collapsing
+to a plain 0. `addElement` now only inherits `D.XfbOffset` when `D.XfbBuffer`
+is itself present; `Executor.cpp`'s `captureTransformFeedback` skips any
+element whose `XfbOffset` is absent, mirroring its existing `XfbBuffer`
+guard exactly. `EntrySignature`'s binary serialization format bumped to
+version 8 (new has-transform-feedback-offset flag word, same pattern as
+`XfbBuffer`'s own has-value flag); the seven checked-in pre-baked
+serialized-signature blobs in `feme/test/` (`feme-render`'s five
+`.test` files, the two CPU stage-IO-wrapper `.ll` tests) were mechanically
+migrated to the new layout.
+
+**Measured impact**: all 12 `holes_*`/`holes_extra_draw_*` cases
+(`simple`/`simple_fast_gpl`/`simple_optimized_gpl`) Fail -> Pass.
+`ninja check-feme`: 3,714 Passed, 3 Unsupported, 0 Failed, 0 regressions
+(one existing test's two assertions updated from
+`EXPECT_EQ(Elt.XfbOffset, 0u)` to `EXPECT_FALSE(Elt.XfbOffset.has_value())`
+-- a legitimately more precise result this fix now produces for that
+already-covered "no own `Offset`" case, not a weakened test).
+
+**New finding, not part of this fix**: this was the first *full*,
+un-narrowed sweep of the `simple`/`simple_fast_gpl`/`simple_optimized_gpl`
+groups (23,681 cases total) this multi-session project has run -- every
+earlier residual count was a hand-picked subset. It surfaced 36 further
+pre-existing failures (12/slice x 3) not previously tracked anywhere:
+`streams_{1,3,6,14}`, `streams_clipdistance_{1,3,6,14}`, and
+`streams_culldistance_{1,3,6,14}`, each a generic `Fail` with no detail
+message yet triaged. Confirmed pre-existing (not a regression from this
+fix) by reverting this change and re-running `streams_1`/
+`streams_clipdistance_1`/`streams_culldistance_1` standalone against the
+unmodified baseline -- all three still failed. New roadmap row `L419(q)`
+tracks this cluster plus the two already-tracked ones (`L419(o)`'s
+`winding_patch_list_*`, still-unowned `multi_stream_single_raster_non_zero`)
+for the combined 51-case (17/slice) `simple`/`simple_fast_gpl`/
+`simple_optimized_gpl` residual going forward.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal XFB-capture-eligibility correctness fix for
+already-declared `VK_EXT_transform_feedback`, no new feature/extension-
+surface change.
+
 ## Validation outside CTS
 
 - `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
