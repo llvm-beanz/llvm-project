@@ -274,6 +274,26 @@ spirv.func @fneg_vector(%arg: vector<2xf32>) "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.QuantizeToF16
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @quantize_scalar
+spirv.func @quantize_scalar(%arg: f32) "None" {
+  // CHECK: %[[T:.*]] = llvm.fptrunc %{{.*}} : f32 to f16
+  // CHECK: llvm.fpext %[[T]] : f16 to f32
+  %0 = spirv.QuantizeToF16 %arg : f32
+  spirv.Return
+}
+
+// CHECK-LABEL: @quantize_vector
+spirv.func @quantize_vector(%arg: vector<4xf32>) "None" {
+  // CHECK: %[[T:.*]] = llvm.fptrunc %{{.*}} : vector<4xf32> to vector<4xf16>
+  // CHECK: llvm.fpext %[[T]] : vector<4xf16> to vector<4xf32>
+  %0 = spirv.QuantizeToF16 %arg : vector<4xf32>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.UDiv
 //===----------------------------------------------------------------------===//
 

@@ -1412,6 +1412,38 @@ public:
   }
 };
 
+/// Converts `spirv.QuantizeToF16`, which has no single-instruction LLVM
+/// equivalent, into a round trip through `f16`: `fptrunc` to `f16` followed
+/// by `fpext` back to the original (always `f32`) type. This matches the op's
+/// semantics exactly, since `fptrunc`/`fpext` already implement IEEE-754
+/// round-to-nearest-even and preserve infinities/NaNs the same way the SPIR-V
+/// spec requires.
+class QuantizeToF16Pattern
+    : public SPIRVToLLVMConversion<spirv::QuantizeToF16Op> {
+public:
+  using SPIRVToLLVMConversion<
+      spirv::QuantizeToF16Op>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::QuantizeToF16Op op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type srcType = op.getType();
+    Type dstType = getTypeConverter()->convertType(srcType);
+    if (!dstType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    Location loc = op.getLoc();
+    Type f16Type = rewriter.getF16Type();
+    if (auto vecType = dyn_cast<VectorType>(dstType))
+      f16Type = VectorType::get(vecType.getShape(), f16Type);
+
+    Value truncated = LLVM::FPTruncOp::create(rewriter, loc, f16Type,
+                                               adaptor.getOperand());
+    rewriter.replaceOpWithNewOp<LLVM::FPExtOp>(op, dstType, truncated);
+    return success();
+  }
+};
+
 /// Converts the GLSL clamp ops (FClamp, SClamp, UClamp) into a nested
 /// min/max sequence, following the op semantics `min(max(x, minVal), maxVal)`.
 template <typename SPIRVOp, typename LLVMMinOp, typename LLVMMaxOp>
@@ -2592,6 +2624,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::FNegateOp, LLVM::FNegOp>,
       DirectConversionPattern<spirv::FRemOp, LLVM::FRemOp>,
       DirectConversionPattern<spirv::FSubOp, LLVM::FSubOp>,
+      QuantizeToF16Pattern,
       DirectConversionPattern<spirv::SDivOp, LLVM::SDivOp>,
       DirectConversionPattern<spirv::SRemOp, LLVM::SRemOp>,
       DirectConversionPattern<spirv::UDivOp, LLVM::UDivOp>,
