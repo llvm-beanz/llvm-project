@@ -688,6 +688,21 @@ struct GraphicsPipelineLibraryState {
   /// library` pre-rasterization-shaders part requesting `LOWER_LEFT` was
   /// silently treated as the default `UPPER_LEFT` once linked).
   std::optional<VkTessellationDomainOrigin> TessellationDomainOrigin;
+  /// (roadmap L419(s)) `RasterizationState` above is likewise captured
+  /// with its own `pNext` unconditionally nulled out -- but a chained
+  /// `VkPipelineRasterizationStateStreamCreateInfoEXT`
+  /// (`VK_EXT_transform_feedback`'s `geometryStreams` feature) is also
+  /// pipeline-meaningful (`translateRasterState` reads it to pick which
+  /// geometry-shader stream rasterization consumes), so, mirroring
+  /// `TessellationDomainOrigin`'s own precedent immediately above, it is
+  /// re-captured here independently and re-chained back onto
+  /// `RasterizationState.pNext` when a linked pipeline is reconstructed.
+  /// Without this, every `VK_EXT_graphics_pipeline_library`-constructed
+  /// pipeline naming a non-zero rasterization stream silently rasterized
+  /// stream 0 instead (`RasterState::RasterizationStream`'s own default)
+  /// -- `dEQP-VK.transform_feedback.simple_{fast,optimized}_gpl.streams_*`
+  /// (`H173(c)`'s own tracked cluster).
+  std::optional<uint32_t> RasterizationStream;
 
   /// Populated only for `FRAGMENT_SHADER_BIT`.
   std::optional<VkPipelineDepthStencilStateCreateInfo> DepthStencilState;

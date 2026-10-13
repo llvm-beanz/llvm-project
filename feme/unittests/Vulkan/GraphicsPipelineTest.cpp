@@ -6017,6 +6017,78 @@ TEST_F(GraphicsPipelineTest,
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap L419(s)) A `PRE_RASTERIZATION_SHADERS_BIT` library part whose
+/// `pRasterizationState` chains a
+/// `VkPipelineRasterizationStateStreamCreateInfoEXT` requesting a
+/// non-zero `rasterizationStream` must still resolve to that same
+/// `RasterState::RasterizationStream` once linked, exactly as
+/// `TranslatesRasterizationStateStream` (above) confirms for a monolithic
+/// pipeline. Before this fix, `captureGraphicsPipelineLibraryState`
+/// stripped `pRasterizationState`'s entire `pNext` chain when
+/// deep-copying it for later relinking -- including this very struct --
+/// so the requested stream was silently dropped and the linked pipeline
+/// fell back to the spec default (stream 0), reproducing the real CTS
+/// failure in `dEQP-VK.transform_feedback.simple_{fast,optimized}_gpl.
+/// streams_*` (roadmap `H173(c)`).
+TEST_F(GraphicsPipelineTest, LinksLibraryWithNonZeroRasterizationStream) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+
+  VkPipelineRasterizationStateStreamCreateInfoEXT StreamState{};
+  StreamState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT;
+  StreamState.rasterizationStream = 2;
+  Raster.pNext = &StreamState;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  // Mirrors an application freeing its own pCreateInfos[I] (and
+  // everything it points to, including StreamState) before linking --
+  // the library part's own capture must have already deep-copied
+  // whatever it needs from this struct.
+  Raster.pNext = nullptr;
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = Pass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  feme::graphics::RasterState Resolved =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{}).getRasterState();
+  EXPECT_EQ(Resolved.RasterizationStream, 2u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H29c) `VkPipelineLibraryCreateInfoKHR::pLibraries` must each
 /// name a real `GraphicsPipelineLibrary` -- naming an already-complete,
 /// non-library `VkPipeline` is a creation-time error, not something the

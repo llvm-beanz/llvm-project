@@ -2298,6 +2298,27 @@ std::optional<VkTessellationDomainOrigin> findTessellationDomainOrigin(
   return std::nullopt;
 }
 
+/// Finds a `VkPipelineRasterizationStateStreamCreateInfoEXT` chained off
+/// \p Rasterization's own `pNext`, if any -- mirrors
+/// `findTessellationDomainOrigin` just above, for the same reason: a
+/// graphics-pipeline-library part needs this value independently of
+/// `RasterizationState`'s own `pNext`-stripped copy (see
+/// `GraphicsPipelineLibraryState::RasterizationStream`'s own comment).
+std::optional<uint32_t> findRasterizationStream(
+    const VkPipelineRasterizationStateCreateInfo &Rasterization) {
+  for (const VkBaseInStructure *Next =
+           reinterpret_cast<const VkBaseInStructure *>(Rasterization.pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT)
+      continue;
+    const auto *StreamState = reinterpret_cast<
+        const VkPipelineRasterizationStateStreamCreateInfoEXT *>(Next);
+    return StreamState->rasterizationStream;
+  }
+  return std::nullopt;
+}
+
 /// Whether \p Tessellation's own `pNext` chains a
 /// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
 /// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` -- the only domain origin
@@ -3141,6 +3162,7 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
     Out.Scissors = Child.Scissors;
     Out.ViewportState = Child.ViewportState;
     Out.RasterizationState = Child.RasterizationState;
+    Out.RasterizationStream = Child.RasterizationStream;
     Out.TessellationState = Child.TessellationState;
     Out.TessellationDomainOrigin = Child.TessellationDomainOrigin;
   }
@@ -3232,6 +3254,7 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
       Out.ViewportState = Copy;
     }
     if (const auto *RS = CreateInfo.pRasterizationState) {
+      Out.RasterizationStream = findRasterizationStream(*RS);
       VkPipelineRasterizationStateCreateInfo Copy = *RS;
       Copy.pNext = nullptr;
       Out.RasterizationState = Copy;
@@ -3412,6 +3435,11 @@ struct LinkedPipelineStorage {
   /// see that field's own comment.
   VkPipelineTessellationDomainOriginStateCreateInfo
       TessellationDomainOriginState{};
+  /// (roadmap L419(s)) Re-chained onto `RasterizationState.pNext` when the
+  /// captured part's own `GraphicsPipelineLibraryState::RasterizationStream`
+  /// is set; mirrors `TessellationDomainOriginState` immediately above.
+  VkPipelineRasterizationStateStreamCreateInfoEXT
+      RasterizationStateStreamState{};
   VkPipelineDepthStencilStateCreateInfo DepthStencilState{};
   VkPipelineColorBlendStateCreateInfo ColorBlendState{};
   VkPipelineMultisampleStateCreateInfo MultisampleState{};
@@ -3698,6 +3726,25 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
     }
     if (S.RasterizationState) {
       Storage.RasterizationState = *S.RasterizationState;
+      // (roadmap L419(s)) Re-chain this part's own captured rasterization
+      // stream, same reasoning and shape as `TessellationDomainOrigin`'s
+      // own re-chain just below: `captureGraphicsPipelineLibraryState`
+      // nulled out `RasterizationState.pNext` when it deep-copied this
+      // part's `VkPipelineRasterizationStateCreateInfo`, so a chained
+      // `VkPipelineRasterizationStateStreamCreateInfoEXT` naming a
+      // non-zero stream would otherwise be silently lost once linked,
+      // leaving `translateRasterState`'s own `pNext` walk with nothing to
+      // find and `RasterState::RasterizationStream` stuck at its default
+      // (stream 0) for every `VK_EXT_graphics_pipeline_library`-
+      // constructed pipeline.
+      if (S.RasterizationStream) {
+        Storage.RasterizationStateStreamState.sType =
+            VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT;
+        Storage.RasterizationStateStreamState.rasterizationStream =
+            *S.RasterizationStream;
+        Storage.RasterizationState.pNext =
+            &Storage.RasterizationStateStreamState;
+      }
       Result.pRasterizationState = &Storage.RasterizationState;
     }
     if (S.TessellationState) {
