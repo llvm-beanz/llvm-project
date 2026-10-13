@@ -786,6 +786,86 @@ needed -- both fixes are internal correctness fixes for already-declared
 `VK_EXT_graphics_pipeline_library` behavior, no new feature/extension-
 surface change.
 
+## `L419(o)`: tessellated domain-stage transform-feedback capture (12 -> 0)
+
+**Root cause**: `captureTransformFeedback`'s only call site (`Executor.cpp`)
+was gated on `!Pipeline.hasTessellationStages() && !Pipeline.hasGeometryStages()`,
+so a tessellating pipeline's domain-stage output -- its own final
+pre-rasterization-stage output, exactly analogous to the non-tessellated
+vertex shader's own output the existing call already captured -- was
+never captured to any bound XFB buffer at all, regardless of whether the
+domain stage's own signature requested it via `xfb_buffer`/`xfb_offset`/
+`xfb_stride`. This was the `dEQP-VK.transform_feedback.simple*.
+winding_patch_list_*` residual `L419(n)` broke out as this row: all four
+remaining `winding_*` failures (per slice) were `patch_list` (tessellated)
+cases, a structurally distinct code path from the non-tessellated
+`TriIndices`/`LineIndices` primitive assembly `L419(n)` fixed.
+
+**Fix**: added a second `captureTransformFeedback` call site, inside the
+existing `if (TessLink) {...}` tessellation block in `executeDraws`,
+immediately after `TessOutput`/`TessTris`/`TessLines` are built and
+before they are moved into `AbsTriIndices`/`AbsLineIndices` for
+rasterization (a later `std::move` would otherwise leave them in an
+unspecified state). The new call builds its element list from
+`TessLink->DomainSig.Elements` (the domain stage's own signature) and
+its `FlatIndices` from `TessTris`/`TessLines` directly:
+
+- No per-instance bias is needed, unlike the non-tessellated capture's
+  `TriIndices`/`LineIndices` (per-instance templates biased by
+  `Inst * PerInstance`): `TessTris`/`TessLines` are built with indices
+  already offset by each patch's own `PatchBases[I]`, itself accumulated
+  across every patch of every instance, so they are already globally
+  absolute.
+- No strip/fan de-duplication is needed, unlike `L419(n)`'s own
+  `TriIndices`/`LineIndices` flattening (which must handle IA-level
+  `Strip`/`Fan` topologies' vertex-sharing semantics): the tessellator's
+  own output connectivity is always already a flat triangle/line list,
+  with no implied shared-vertex primitive assembly.
+- A `Point`-output-primitive domain stage leaves both `TessTris` and
+  `TessLines` empty (no index-based primitive assembly happens for point
+  output); this case falls back to the same `makeSequentialXfbIndices`
+  helper the non-tessellated capture already uses for the analogous
+  `PointList`-topology case.
+
+New unit test: `ExecutorTest.CapturesTessellatedDomainStageOutputToXfbBuffer`.
+It tags the domain stage's `SV_Position` output (not its color output --
+the shared `TessDomainShaderIR` test fixture's own color output always
+forwards control point 0's color unchanged by design, rather than
+barycentrically interpolating, so it cannot distinguish invocations) and
+uses the smallest possible undivided patch (`TessPartitioning::Integer`,
+tessellation factor 1.0) so the domain stage runs exactly three times --
+once per input control point -- making the captured bytes fully
+deterministic. Confirmed via a debug instrumentation pass during
+development that the captured vertex order is `(0, 2, 1)`, not the
+patch's original `(0, 1, 2)` control-point order: `TriangleCcw`'s
+`appendTriangle` swaps the last two operands relative to `TriangleCw`,
+the same winding convention the tessellator's "fully unsubdivided" fast
+path (`Tessellator.cpp`) already documents.
+
+**Measured impact**: ran the full `winding_patch_list_*` caselist (24
+cases: 4 base cases x 2 `_ptsz` variants x 3 slices) standalone via
+`deqp-vk`: the 12 testable (non-`_ptsz`) cases now **12/12 Pass** across
+all three slices (`simple`/`simple_fast_gpl`/`simple_optimized_gpl`); the
+other 12 (`_ptsz` variants) remain `NotSupported`
+(`shaderTessellationAndGeometryPointSize` not supported), unchanged by
+this fix and unrelated to it. Also ran the full `transform-feedback`
+mustpass group (133,719 cases) to check for regressions: only 4 failures
+remain, all pre-existing and unrelated (`fuzz.{2_level_struct_array,
+single_struct_array}.std_{vertex,geometry}`, confirmed present both
+before and after this change via `git stash` -- a SPIR-V-to-MLIR
+legalization gap for nested struct-array XFB globals, out of this fix's
+scope; not yet tracked under its own roadmap row). `ninja check-feme`:
+3,714/3,717 Passed (net +1 new test), 0 regressions.
+
+This closes `L419(o)` and, since `Executor.cpp`'s tessellation block is
+shared by every pipeline-construction style (not a GPL-specific code
+path), also closes `H34`'s own GPL-transform-feedback-residual row: all
+three slices now have 0 residual in their tracked scope.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal correctness fix for already-declared
+`VK_EXT_transform_feedback`/tessellation feature surface, no new
+feature/extension-surface change.
+
 ## Validation outside CTS
 
 - `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
