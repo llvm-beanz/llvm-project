@@ -1044,6 +1044,85 @@ part, by this crash family manifesting under load, not merely by
 no change needed for either `L421` or `L422` -- internal correctness
 fixes/findings only, no feature/extension-surface change.
 
+## `L422`: `CommandBuffer` use-after-free race under contention, root-caused and fixed
+
+Picked back up `L422` from the entry above. Reproduced the crash on
+demand with a refined stress technique: 20-24 concurrent `deqp-vk`
+processes (not `gdb`-wrapped busy-loops -- plain CPU/scheduling
+contention between many real `deqp-vk` instances of the same test case
+turned out to be necessary; background busy-loops alone never
+reproduced it), all running
+`dEQP-VK.api.copy_and_blit.core.use_after_copy.a1r5g5b5_unorm_pack16.transfer_dst_optimal.1024x1024x2_color_att_flag_img2img_msaa`,
+achieving a ~20-30% per-process crash rate.
+
+Added temporary `FEME_DEBUG_L422`-gated `llvm::errs()` diagnostics (no
+usable DWARF info in this Release+assertions build, so `gdb`'s
+`print`/`info locals` are not usable even at a named-symbol breakpoint --
+see `feme/.instructions.md`'s own guidance) to `Image::setLayout`,
+`vkCreateImage`/`vkDestroyImage`, `Sync.cpp`'s `retainExecutionRefs`/
+`releaseExecutionRefs`, and both `vkCmdPipelineBarrier`'s record-time and
+`executeCommandsInto`'s execute-time reads of each
+`ImageLayoutTransition`.
+
+**First disproved the leading inherited hypothesis**: `DescriptorSetLayout`
+is *not* the root cause. `DescriptorSet` stores a deep *copy* of its
+`DescriptorSetLayout` (not a pointer) specifically to avoid exactly this
+class of dangling-layout bug -- an already-landed, pre-existing fix
+(`Descriptor.h`'s own class comment references it as "roadmap L305").
+The `DescriptorSetLayout::dynamicOffsetCount` crash signature from the
+prior session's logs is a symptom of the same underlying bug surfacing at
+a different call site, not evidence `DescriptorSetLayout` itself needs
+`PendingExecutionRefCounted`.
+
+**Root cause**: in at least one reproduced crash, the `Image` itself was
+fully valid, internally consistent, and correctly deferred-destroy
+pending (`ArrayLayers=2`, matching its own creation log) -- ruling out a
+simple freed/corrupted `Image`. But the `setLayout` call against it used
+a wildly wrong `LayerCount` (`80`/`112`). Diagnostics at both record time
+(`vkCmdPipelineBarrier`) and execute time (`executeCommandsInto`'s
+`PipelineBarrier` case) caught an execute-time `Barrier.Img` pointer with
+no matching record-time print at all -- i.e. the memory `Cmd.ImageBarriers`
+itself lived in had been freed and reused between record and execute
+time. Unlike every type `L409`/`L410`/`L421` cover (a resource a command
+only *references*), `executeCommandBuffer` (`CommandBuffer.cpp`) takes a
+`const CommandBuffer &` and reads `CmdBuf.commands()` *live* on the
+`QueueExecutor` worker thread, well after `vkQueueSubmit` enqueued the
+submission task and returned -- and `CommandBuffer` itself had never been
+made `PendingExecutionRefCounted`. `CommandPool::free`/`reset`/
+`~CommandPool()` freed the `CommandBuffer` object immediately and
+unconditionally, so a fully legal `vkFreeCommandBuffers`/pool-teardown
+call (the exact CTS pattern: tearing a test's objects down together right
+after a *different* submission's own `vkWaitForFences` reported a
+timeout, with no further wait) raced this same worker thread's
+still-pending read of the now-freed `CommandBuffer`'s own `Commands`/
+`ImageBarriers` storage -- explaining both the "freed-looking garbage"
+and "valid-but-wrong-Range" signatures as the same race viewed from
+different reused-memory contents.
+
+**Fix**: made `CommandBuffer` itself inherit `PendingExecutionRefCounted`,
+mirroring `L409`/`L410`/`L421`'s pattern. `Sync.cpp`'s
+`collectExecutionRefs` now also retains every primary/secondary
+`CommandBuffer` a submission reaches (`ExecutionRefs::CommandBuffers`);
+`CommandPool::free`/`~CommandPool()` route through a new
+`destroyOrDeferCommandBuffer` helper mirroring `Descriptor.cpp`'s
+`destroyOrDeferSet` exactly (both types are heap-owned via `unique_ptr`/
+plain `new`, not the generic `Allocator`, so `Callbacks` is unused);
+`releaseExecutionRefs` plain-`delete`s a deferred `CommandBuffer`,
+matching `DescriptorSet`'s identical path. Removed every temporary
+`FEME_DEBUG_L422` diagnostic before landing the fix. New unit test
+`SyncTest.SubmitThenImmediatelyFreeCommandBufferWithNoWaitSucceeds`,
+confirmed (by temporarily reverting just the fix, keeping the new test)
+to reliably crash the pre-fix code with the exact same signature
+(SIGSEGV inside `QueueExecutor::run()`'s submission task) and pass
+cleanly post-fix, 15/15 repeated runs.
+
+**Verification**: `check-feme`: 3717/3717 Passed (3720 total, 3
+Unsupported), 0 regressions. Re-ran the 20-24-concurrent-process isolated
+repro twice more post-fix (30 and 40 concurrent processes, 70 total
+runs): **0/70** crashes, vs. the pre-fix ~20-30% per-process rate.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+internal correctness fix only, no feature/extension-surface change.
+
 ## `L423` found: pre-existing loader-level crash, not FeMe, not fixed
 
 While sanity-sweeping `dEQP-VK.api.object_management.*` after `L421`'s
