@@ -118,7 +118,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Cluster | Cases | Roadmap ownership |
 |---|---:|---|
 | Transform feedback: `simple*` (188 each for monolithic, fast GPL, and optimized GPL), fuzz, and primitive restart | 570 | H34, H36, H37, H173(c), L419(b) |
-| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 0 -- fully fixed by a `BlockAccessChainPattern` templating fix, a struct-of-vec3 CompositeInsert/Extract fix, and a final `matrix_3x3.float`-specific Function-storage/InBoundsAccessChain tight-matrix fix), `opmemoryaccess` (35, now 0 -- fully fixed by a new upstream `CopyMemoryPattern` SPIRVToLLVM lowering plus an upstream SPIR-V deserializer `Aligned`-bit-detection fix), and `decoration_group` (30) | 274 | L419(a), L419(l) |
+| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 0 -- fully fixed by a `BlockAccessChainPattern` templating fix, a struct-of-vec3 CompositeInsert/Extract fix, and a final `matrix_3x3.float`-specific Function-storage/InBoundsAccessChain tight-matrix fix), `opmemoryaccess` (35, now 0 -- fully fixed by a new upstream `CopyMemoryPattern` SPIRVToLLVM lowering plus an upstream SPIR-V deserializer `Aligned`-bit-detection fix), and `decoration_group` (31, now 0 -- fully fixed by adding the entirely-missing upstream `OpDecorationGroup`/`OpGroupDecorate`/`OpGroupMemberDecorate` opcodes and deserializer support) | 243 | L419(a), L419(l) |
 | Pipeline multisample, extended dynamic state, graphics-library, and interpolation cases | 203 | L419(c) |
 | GraphicsFuzz correctness cases; no crashes or timeouts remain | 83 | L116 |
 | Coherent Vulkan memory-model `fence_fence` message-passing and write-after-read cases | 52 | K9, L419(d) |
@@ -354,8 +354,60 @@ suites (145 tests, 0 Fail) and `ninja check-feme` (3707/3710 Passed, 3
 Unsupported, 0 Failed, 0 regressions).
 
 Combined net reduction across all four `L419(a)` fixing sessions:
-1,549 -> 1,295. `decoration_group` (30) remains untouched -- tracked as
-new roadmap row `L419(l)`.
+1,549 -> 1,295. `decoration_group` (31) was tracked as new roadmap row
+`L419(l)` and is fixed below, in this same session.
+
+### `decoration_group` fix, closing L419(a)/L419(l)
+
+All 31 `dEQP-VK.spirv_assembly.instruction.graphics.decoration_group.*`
+cases (plus a separate compute `decoration_group.all` case) failed
+identically with `error: unhandled opcode 73` ->
+`VK_ERROR_INITIALIZATION_FAILED`. Root cause: `OpDecorationGroup`
+(73)/`OpGroupDecorate`(74)/`OpGroupMemberDecorate`(75) were entirely
+missing from upstream MLIR's SPIR-V dialect -- no opcode enum case, no
+deserializer handling whatsoever -- a clean upstream gap structurally
+identical to the earlier `opquantize`/`opmemoryaccess` discoveries, but
+one level deeper (a missing decoration-grouping *feature*, not just a
+missing lowering pattern). A decoration group is a pure
+decoration-storage `<id>` (never an SSA value or type) that collects
+decorations via ordinary `OpDecorate`/`OpMemberDecorate`, which
+`OpGroupDecorate`/`OpGroupMemberDecorate` then "replay" onto one or more
+target `<id>`s as if each decoration had been applied directly.
+
+Fixed upstream (outside `feme/`, one isolated/self-tested commit):
+added the three opcode enum cases
+(`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`) and three new
+deserializer functions
+(`mlir/lib/Target/SPIRV/Deserialization/{Deserializer.h,Deserializer.cpp,DeserializeOps.cpp}`)
+reusing the existing `decorations`/`memberDecorationMap` storage so no
+downstream code needs to know a decoration arrived via a group.
+`OpGroupMemberDecorate` required a parallel `groupDecorationOperands`
+side-channel (raw decoration + operand words, keyed by target `<id>`)
+because `memberDecorationMap` is keyed by raw operand words, not by the
+`Attribute` the ordinary decoration path builds; this side-channel must
+be populated unconditionally for *every* `OpDecorate` rather than being
+gated on already knowing the target is a group, since per SPIR-V binary
+layout rules the `OpDecorate` that decorates a group always precedes the
+`OpDecorationGroup` instruction that defines that group's `<id>` -- a
+real ordering bug caught by a new `decoration-group.spvasm`
+deserialize-only lit test. That test initially reported a vacuous pass
+(this build's `lit.site.cfg.py` has `config.spirv_tools_tests = 0`, so
+every `.spvasm` test's sole `%if spirv-tools %{ ... %}`-gated `RUN` line
+is a no-op here even though `spirv-as`/`spirv-val` are installed on
+`PATH`); the fix was validated for real by manually piping
+`spirv-as | mlir-translate --deserialize-spirv | FileCheck` outside of
+`llvm-lit`.
+
+Result: full `decoration_group` cluster 31/31 Pass, 0 Fail (net -31,
+plus the separate compute `decoration_group.all` case also 1/1 Pass).
+Re-verified: the full
+`mlir/test/{Conversion/SPIRVToLLVM,Target/SPIRV,Dialect/SPIRV}` lit
+suites (146 tests, 0 Fail) and `ninja check-feme` (3707/3710 Passed, 3
+Unsupported, 0 Failed, 0 regressions).
+
+Combined net reduction across all five `L419(a)` fixing sessions:
+1,549 -> 1,264 (pending a full re-triage to confirm). `L419(a)` and
+`L419(l)` are both fully resolved for the clusters investigated so far.
 
 ## Validation outside CTS
 
