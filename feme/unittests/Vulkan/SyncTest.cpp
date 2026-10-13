@@ -1539,6 +1539,99 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds) {
   vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
 
+// (Roadmap L422) `CommandBuffer`'s own analog of
+// `SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds` above, but one
+// level up: unlike every resource a command buffer merely *references*
+// (`L409`/`L410`), `executeCommandBuffer` (`CommandBuffer.cpp`) takes a
+// `const CommandBuffer &` and reads `CmdBuf.commands()` live, on the
+// `QueueExecutor` worker thread, well after `vkQueueSubmit` enqueued the
+// task and returned. The Vulkan spec lets an app free a command buffer
+// (`vkFreeCommandBuffers`) the moment *its own* submission is known
+// complete -- but a real CTS pattern (tearing a test's command buffers
+// down together, right after a different submission's own
+// `vkWaitForFences` call reports a timeout, with no further wait at all)
+// raced this exact read before this roadmap entry's fix, reliably
+// crashing (freed/reused `CommandBuffer` storage read as a wildly wrong
+// `ImageLayoutTransition`). This test exercises the minimal version of
+// that race directly: free the just-submitted `VkCommandBuffer` with no
+// wait at all, then only afterward wait for the submission to finish.
+TEST_F(SyncTest, SubmitThenImmediatelyFreeCommandBufferWithNoWaitSucceeds) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {2, 2, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  VkImage SrcImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &SrcImg), VK_SUCCESS);
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &DstImg), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE, DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, SrcImg, SrcMemory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  // A pipeline barrier's image-layout transition specifically: this is
+  // the exact command kind the real-world `L422` crash reproduced through
+  // (`CommandBuffer.cpp`'s `PipelineBarrier` execution case dereferencing
+  // `Cmd.ImageBarriers`, itself part of the freed `CommandBuffer`'s own
+  // storage).
+  VkImageMemoryBarrier Barrier{};
+  Barrier.image = DstImg;
+  Barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  Barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  Barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vkCmdPipelineBarrier(TestCmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &Barrier);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(TestCmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                DstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering: free the `VkCommandBuffer` the just-enqueued
+  // submission itself still needs to execute, with no wait at all.
+  // Pre-fix, this reliably freed the `CommandBuffer` object (and its
+  // `Commands`/`ImageBarriers` storage) out from under the worker
+  // thread's still-pending read of it.
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+
+  // Only now wait for the submission to actually finish.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
 // (Roadmap L421) `DeviceMemory`'s own analog of
 // `SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds` above, but for the
 // one hazard those tests deliberately left out of scope: freeing the
