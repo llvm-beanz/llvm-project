@@ -120822,3 +120822,126 @@ Next: `L419(o)`'s `winding_patch_list_*` -- read `Executor.cpp`'s
 tessellation domain-stage output path end to end (the `hasTessellationStages()`
 gate around the existing VS-only capture call) before writing any code,
 since this needs a new capture path, not a tweak to an existing one.
+
+# Session: L419(o) tessellated domain-stage XFB capture fixed (12/12 Pass), closes H34
+
+Start here: `L419(o)`'s `winding_patch_list_*` -- carried forward
+unstarted for three straight sessions. Fully fixed this session, plus
+closes the long-open `H34` GPL-transform-feedback-residual row as a
+side effect (same code path, not GPL-specific).
+
+## What's done, concretely
+
+1. Mandatory device check: `FeMe CPU Vulkan Device`, confirmed via
+   explicit `VK_ICD_FILENAMES=.../feme_icd.json` (both at session start
+   and again at the end, per standing instruction).
+2. Verified carried-forward claim via `git log --oneline --all | grep
+   -iE "L419(o)|winding_patch_list|tessellat.*xfb|domain.*capture"` --
+   genuinely unstarted, no stale handoff.
+3. **Root cause**: `captureTransformFeedback`'s only call site was gated
+   on `!Pipeline.hasTessellationStages()`, so a tessellating pipeline's
+   domain-stage output -- its own final pre-rasterization-stage output --
+   was never captured to XFB at all, regardless of whether the domain
+   stage's signature requested it.
+4. **Fix** (`Executor.cpp`): added a second `captureTransformFeedback`
+   call site inside the existing `if (TessLink) {...}` tessellation
+   block, right after `TessTris`/`TessLines` are built and *before* they
+   get `std::move`'d into `AbsTriIndices`/`AbsLineIndices` for
+   rasterization (ordering matters -- a move first would leave them
+   empty for the capture code to read). Reuses `TessTris`/`TessLines`
+   directly: no per-instance bias needed (already globally absolute
+   across every patch/instance, unlike the non-tessellated
+   `TriIndices`/`LineIndices` per-instance templates), no strip/fan
+   de-duplication needed (the tessellator's own connectivity is always
+   already a flat triangle/line list). `Point`-output-primitive patches
+   fall back to the existing `makeSequentialXfbIndices` helper, same as
+   the non-tessellated capture does for `PointList`.
+5. **Unit test debugging detour (the real time sink this session)**:
+   first test draft tagged the domain stage's *color* output and
+   asserted per-vertex-distinct colors -- failed with all three XFB
+   records identical. Spent ~45 min adding temporary `fprintf` debug
+   prints (removed before commit) before realizing the shared
+   `TessDomainShaderIR` test fixture's color output was *never*
+   barycentrically interpolated by design (it just forwards control
+   point 0's own color unconditionally) -- a property of the existing
+   shared fixture, not a bug in this fix. Position, by contrast,
+   genuinely varies per invocation (confirmed via the same debug
+   prints), so the test now tags `SV_Position` instead. Also had to
+   correct the test's assumed output vertex order: `TriangleCcw`'s
+   `appendTriangle` swaps the last two operands relative to `TriangleCw`
+   (documented in `Tessellator.cpp`), so an unsubdivided patch's
+   assembled order is `(0, 2, 1)`, not the control points' own `(0, 1,
+   2)` order -- easy to get backwards without checking.
+6. **Measured impact**: `winding_patch_list_*` caselist (24 cases, 3
+   slices): **12/12 testable (non-`_ptsz`) cases now Pass**; the other 12
+   `_ptsz` variants remain `NotSupported`
+   (`shaderTessellationAndGeometryPointSize`), unchanged and unrelated.
+   Full `transform-feedback` mustpass sweep (133,719 cases): only 4
+   failures remain, confirmed pre-existing via `git stash` (a SPIR-V-to-
+   MLIR legalization gap for nested struct-array XFB globals, unrelated,
+   not yet tracked under its own roadmap row -- flagging as a possible
+   future `L419(t)` candidate). `ninja check-feme`: 3,714/3,717 Passed
+   (net +1 test), 0 regressions.
+7. Committed in 3 small commits: fix, unit test, `Roadmap.md`/
+   `VulkanCTSReport.md` doc sync. `Vulkan14FeatureInventory.md`/
+   `VulkanExtensionInventory.md`: confirmed via grep, no change needed
+   (internal correctness fix only).
+8. `L418(a)`/`L418(b)` (rasterizer perf / timing reconciliation):
+   deferred again this session -- `L419(o)`'s debugging detour consumed
+   the time budget that would have gone to them.
+
+## What's still wrong (prioritized)
+
+1. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
+   for large MSAA targets -- carried forward unstarted for many sessions
+   now (profiling already isolated the hot path, just needs a
+   `gdb`-driven reduction since no sampling profiler exists here).
+2. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
+   with 60s/600s full-suite timeout reports -- also carried forward
+   unstarted.
+3. **(~half day, new this session)** The 4 pre-existing
+   `transform-feedback.fuzz.{2_level_struct_array,single_struct_array}.
+   std_{vertex,geometry}` failures found during this session's full-sweep
+   regression check: `error: failed to legalize operation
+   'spirv.GlobalVariable'` for a nested (`array<array<struct<...>>>`)
+   XFB-decorated global -- an MLIR SPIR-V-to-LLVM legalization gap, not
+   a `Graphics/Executor.cpp` runtime bug like every `L419(*)` fix so far.
+   Not yet triaged past confirming it pre-exists (via `git stash`); needs
+   its own roadmap row (candidate `L419(t)`, not yet claimed -- grep
+   `Roadmap.md` before use, per standing reminder) if picked up.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
+   the `L418`-`L419` roadmap counts synchronized after every fix and
+   isolated CTS rerun -- done this session.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression
+   -- not exercised this session, no `check-hlsl-feme-vk` work was done.
+
+## Standing reminders (apply every session)
+
+1. Grep `Roadmap.md` for a candidate roadmap ID before using it anywhere
+   -- not needed this session (`L419(o)` already existed as a row from
+   a prior session's triage).
+2. Also grep `Roadmap.md` for the failing test-name substring itself
+   before treating any cluster as newly discovered (not just candidate
+   IDs) -- applied for the new `fuzz.*struct_array*` failures above; no
+   existing row found, flagged as a future candidate rather than
+   silently assumed-new.
+3. Before trusting a carried-forward "still unstarted" claim across
+   multiple sessions, check `git log --oneline --all | grep -i <ID>` and
+   the roadmap row itself directly -- followed this session, confirmed
+   genuinely unstarted for `L419(o)`.
+4. Remember the shell's ambient `VK_ICD_FILENAMES` defaults to llvmpipe,
+   not FeMe -- always set it explicitly for every `vulkaninfo`/`deqp-vk`
+   invocation, every session.
+5. **(new this session)** When a shared test fixture (e.g.
+   `TessDomainShaderIR`) is reused for a new test, don't assume every one
+   of its outputs behaves generically (e.g. "barycentrically
+   interpolates") just because the comment above it says so loosely --
+   verify with a quick debug print *before* writing assertions against
+   it, especially for any output not already exercised by an existing
+   passing test in the same way.
+
+Next: `L418(a)`'s CPU rasterizer `Draw`-path optimization for large MSAA
+targets -- the hot loop is already isolated from prior profiling, this
+just needs a `gdb`-driven reduction session, no further investigation
+needed first.
