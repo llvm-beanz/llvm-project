@@ -219,6 +219,45 @@ def SPIRV_FNegateOp : SPIRV_ArithmeticUnaryOp<"FNegate", SPIRV_Float, []> {
 
 // -----
 
+def SPIRV_QuantizeToF16Op : SPIRV_ArithmeticUnaryOp<"QuantizeToF16",
+                                                     SPIRV_Float32, []> {
+  let summary = [{
+    Quantize a floating-point value to what would be representable by a
+    16-bit floating-point value.
+  }];
+
+  let description = [{
+    Value must be a floating-point scalar or vector of 32-bit precision.
+
+    Result Type must be the same as the type of Value.
+
+    Round Value to a floating-point value with 16-bit precision, then back
+    up to 32-bit precision. The rounding mode and the behavior for exceeding
+    the representable range of 16-bit precision are all identical to a
+    floating-point-to-16-bit conversion in Vulkan.
+
+    If Value is an infinity, the result is the same infinity. If Value is
+    a NaN, the result is a NaN, but not necessarily the same NaN. If Value
+    is positive with a magnitude too large to represent as a 16-bit floating-
+    point value, the result is positive infinity. If Value is negative with
+    a magnitude too large to represent as a 16-bit floating-point value, the
+    result is negative infinity. If the magnitude of Value is too small to
+    represent as a normalized 16-bit floating-point value, the result may be
+    either +0 or -0.
+
+    Results are computed per component.
+
+    #### Example:
+
+    ```mlir
+    %1 = spirv.QuantizeToF16 %0 : f32
+    %3 = spirv.QuantizeToF16 %2 : vector<3xf32>
+    ```
+  }];
+}
+
+// -----
+
 def SPIRV_FRemOp : SPIRV_ArithmeticBinaryOp<"FRem", SPIRV_Float, []> {
   let summary = [{
     The floating-point remainder whose sign matches the sign of Operand 1.

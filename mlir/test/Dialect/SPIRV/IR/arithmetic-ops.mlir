@@ -131,6 +131,34 @@ func.func @fnegate_bf16_scalar(%arg: bf16) -> bf16 {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.QuantizeToF16
+//===----------------------------------------------------------------------===//
+
+func.func @quantize_scalar(%arg: f32) -> f32 {
+  // CHECK: spirv.QuantizeToF16
+  %0 = spirv.QuantizeToF16 %arg : f32
+  return %0 : f32
+}
+
+// -----
+
+func.func @quantize_vector(%arg: vector<4xf32>) -> vector<4xf32> {
+  // CHECK: spirv.QuantizeToF16
+  %0 = spirv.QuantizeToF16 %arg : vector<4xf32>
+  return %0 : vector<4xf32>
+}
+
+// -----
+
+func.func @quantize_f64(%arg: f64) -> f64 {
+  // expected-error @+1 {{operand #0 must be Float32 or fixed-length vector of Float32 values}}
+  %0 = spirv.QuantizeToF16 %arg : f64
+  return %0 : f64
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.FRem
 //===----------------------------------------------------------------------===//
 

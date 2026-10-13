@@ -36,6 +36,11 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, BFloat1
     %0 = spirv.FSub %arg0, %arg1 : vector<4xf32>
     spirv.Return
   }
+  spirv.func @quantize(%arg0 : vector<4xf32>) "None" {
+    // CHECK: {{%.*}} = spirv.QuantizeToF16 {{%.*}} : vector<4xf32>
+    %0 = spirv.QuantizeToF16 %arg0 : vector<4xf32>
+    spirv.Return
+  }
   spirv.func @frem(%arg0 : vector<4xf32>, %arg1 : vector<4xf32>) "None" {
     // CHECK: {{%.*}} = spirv.FRem {{%.*}}, {{%.*}} : vector<4xf32>
     %0 = spirv.FRem %arg0, %arg1 : vector<4xf32>
