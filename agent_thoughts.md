@@ -120424,3 +120424,69 @@ cross-checked by manually running the pipeline at least once.
 
 Next: pick up item 1 (L418 MSAA profiling) — it's the oldest unstarted
 item, now 3 sessions carried forward.
+
+# Session: L419(b) transform-feedback fix (570 -> 285) + L420 CTS-runner DeviceLost/TimedOut automation
+
+Device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (twice this session — once at start, once again before concluding, per the standing "every time" instruction).
+
+## State: both carried-forward priority items done
+
+1. Transform-feedback `L419(b)` (570-case cluster): root-caused, fixed, tested, documented. 285 of 570 cases now closed.
+2. CTS-runner `DeviceLost`/`TimedOut` automation (the "standing, new this session" item from a prior session's list): done, tested, documented.
+
+`check-feme`: 3,709/3,712 Passed, 3 Unsupported, 0 Failed, 0 regressions (confirmed after each of the two changes above).
+
+## What shipped
+
+**1. `L419(b)` — `gl_PerVertex` Xfb-capture bug (commit `31c5283accf6`)**
+
+Root cause: glslang stamps the *whole* `gl_PerVertex` interface-block variable with `XfbBuffer`/`XfbStride` decorations whenever *any* shader output is XFB-captured — even when none of `gl_PerVertex`'s own members (`Position`/`PointSize`/`ClipDistance`/`CullDistance`) are themselves written or captured. Only a member with its own explicit `OpMemberDecorate ... Offset` is actually captured. FeMe's `CanonicalizeStage.cpp` collapsed "whole variable has XfbBuffer" into "this member is captured" via an unconditional `.value_or(0)`, synthesizing a bogus `XfbOffset=0` for every uncaptured member — which clobbers the real capture at offset 0 with zeros.
+
+Fix: gate the whole-variable-to-member Xfb inheritance on the member already having its own explicit `XfbOffset`. One-line conditional + a new unit test (`CanonicalizeStageTest.cpp`).
+
+Impact — confirmed symmetric across all three construction modes, exactly matching the prior session's hypothesis:
+- `simple`: 188 Fail → 93 Fail
+- `simple_fast_gpl`: 188 Fail → 93 Fail
+- `simple_optimized_gpl`: 188 Fail → 93 Fail
+- Total: 570 → 285 (net -285)
+- `fuzz.*`/`primitive_restart.*`: unchanged (confirmed distinct bugs, not touched by this fix)
+
+Residual 93-per-slice breakdown: 16 already owned (`H37`'s 4 `backward_dependency*`, `H173(c)`'s 12 `streams*`), 77 newly unowned (`resume_*` 27, `winding_*` 43, plus 7 singletons) — split into new roadmap row `L419(m)`.
+
+Docs: `VulkanCTSReport.md` new `## L419(b)` section, `Roadmap.md` `L419(b)`/`H34`/`L419` rows updated, new `L419(m)` row added. Committed separately from the code fix (`3aabd8a98717`).
+
+**2. `L420` — CTS runner DeviceLost/TimedOut automation (commits `f9cff6565874`, `5581debef813`, `6925045bcb84`)**
+
+`run_vulkan_cts.py`'s existing `L145` solo-verification round only ever covered `Fail`. The 2026-10-12 full re-triage needed two manual steps this didn't automate: 466 `DeviceLost` outcomes rerun by hand, one at a time (442 turned out to be contention); 20 unfinished cases rerun with a longer ad hoc timeout to tell "genuinely stuck" apart from "just needs more time."
+
+Fix:
+- Verification round now covers `Fail` **and** `DeviceLost` together (same flaky/verified-real logic, generalized).
+- Any case killed for exceeding `--final-timeout` while running *completely alone* (the only granularity where a process timeout is attributable to one specific case) is now recorded directly as a first-class `TimedOut` outcome, not reverted to indistinguishable `Unrun`.
+- `vk_cts_reconcile.py` needed zero changes — `format_report` already counts/reports whatever status each completed case carries, generically.
+
+New test double `Inputs/run-vulkan-cts-fake-deqp.py` (behavior driven by case name: `plain_pass`/`devicelost_flaky`/`devicelost_persistent`/`hangs`) + new lit test `run-vulkan-cts-devicelost-timedout.test` exercising both new behaviors end-to-end. Updated the pre-existing `run-vulkan-cts.test` for the verification round's generalized report wording (it still passes, confirming no regression to the already-tested `Fail`-only path).
+
+## Mistake caught and fixed mid-session: roadmap ID collision
+
+First draft of this work used "roadmap L146" in code comments, the lit test, and the first commit message — not realizing `L146` was already a used ID (a historical, unrelated "run the new harness against the real 54-group case list" entry from a much earlier session). Caught it only by grepping `Roadmap.md` for `L146` *after* the first commit had already landed.
+
+Fixed by: `sed`-renaming every `L146` reference in the new/changed files to `L420` (the next actually-unused ID, confirmed by grepping for the highest existing `L4NN`), re-running the lit tests to confirm nothing broke, then `git commit --amend` on the still-local, not-yet-pushed commit to fix both the code comments and the commit message itself, rather than leaving a wrong ID in history.
+
+**Lesson for future sessions:** before using a new roadmap ID in code comments or commit messages, grep `Roadmap.md` for that exact ID first — don't just pick "the next round number after the last one I remember," since the lettered sub-row series (`L419(a)` through `L419(m)` this session) can make the true next plain numeric ID easy to miscount. This is a sharper version of the existing "small separate commits" discipline: an ID collision is much cheaper to fix via `--amend` before any doc commit referencing it lands, than after.
+
+## Also ran as part of standing checks
+
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed twice.
+- No new `.spvasm` lit test added this session, so the `spirv_tools_tests` check from the prior session's lesson didn't apply.
+- No `check-hlsl-feme-vk`/offload-test-suite work touched this session, so the `VkBool32`/`WaveActiveMax` pattern check didn't come up — nothing to reconcile.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, confirmed no update needed — neither change touches feature/extension advertisement surface (one is an internal XFB-capture correctness fix, the other is CTS-tooling-only).
+
+## Not reached this session (still carried forward)
+
+1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image case — split time across shader/pipeline compilation, image copy, and fence wait. Unstarted for the **fourth** session running now.
+2. **(~1 day)** Reduce one `resume_*` and one `winding_*` transform-feedback representative (new `L419(m)`, 231 cases, the two largest sub-clusters of this session's own residual) — the natural next step on the same bug family, not yet started.
+3. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS rerun.
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite pattern before calling anything a new regression — not exercised this session, still applies whenever `check-hlsl-feme-vk` work resumes.
+5. **(standing, new this session)** Grep `Roadmap.md` for a candidate roadmap ID *before* using it anywhere (code comments, test files, commit messages) — see "Mistake caught and fixed" above.
+
+Next: pick up item 1 (L418 MSAA profiling) — it's the oldest unstarted item, now four sessions carried forward, and the only item on every recent session's list that has never been started at all.
