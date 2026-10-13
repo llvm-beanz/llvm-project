@@ -1539,6 +1539,86 @@ TEST_F(SyncTest, SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds) {
   vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
 }
 
+// (Roadmap L421) `DeviceMemory`'s own analog of
+// `SubmitThenImmediatelyDestroyImageWithNoWaitSucceeds` above, but for the
+// one hazard those tests deliberately left out of scope: freeing the
+// *backing memory* itself (`vkFreeMemory`), not just the `Image`/`Buffer`
+// wrapper object bound to it. `Image`/`Buffer` only hold a raw,
+// non-owning `DeviceMemory *` (`MemoryRangeBinding`), so even though
+// `L409`/`L410` keep the wrapper objects themselves alive until a
+// submission referencing them completes, that alone does not stop a
+// `QueueExecutor` worker thread from reading/writing through a
+// `DeviceMemory` the application frees out from under it -- fully legal
+// Vulkan usage per spec (only the command buffer itself, not every
+// resource it references, must outlive submission). This test exercises
+// exactly that: free `VkDeviceMemory` immediately after submit, with no
+// wait, while an in-flight command still touches it via a bound `Image`.
+TEST_F(SyncTest, SubmitThenImmediatelyFreeMemoryWithNoWaitSucceeds) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {2, 2, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  VkImage SrcImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &SrcImg), VK_SUCCESS);
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &DstImg), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 64;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE, DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, SrcImg, SrcMemory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer TestCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &TestCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(TestCmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(TestCmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                DstImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(TestCmdBuf), VK_SUCCESS);
+
+  VkSubmitInfo Submit{};
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &TestCmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // The hazardous ordering this test is about: free the backing
+  // `VkDeviceMemory` objects (not just the `Image` wrappers) with no
+  // wait at all, immediately after submit returns. Pre-fix, this raced
+  // a `QueueExecutor` worker thread still reading/writing through
+  // `SrcImg`/`DstImg`'s bound memory.
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+
+  // Only now wait for the submission to actually finish -- by this
+  // point, pre-fix, the worker thread may already have run past (or
+  // crashed on) its read of the freed `DeviceMemory` objects.
+  EXPECT_EQ(vkQueueWaitIdle(Queue), VK_SUCCESS);
+
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeCommandBuffers(Device, Pool, 1, &TestCmdBuf);
+}
+
 // (Roadmap L410) `DescriptorSet`'s analog of
 // `SubmitThenImmediatelyDestroyBufferWithNoWaitSucceeds`/
 // `...ImageWithNoWaitSucceeds` above, and the one that actually closes the

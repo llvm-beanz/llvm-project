@@ -13,6 +13,7 @@
 #include "Diagnostics.h"
 #include "Icd.h"
 #include "Image.h"
+#include "Memory.h"
 #include "Objects.h"
 #include "PhaseTiming.h"
 #include "Pipeline.h"
@@ -145,6 +146,7 @@ struct ExecutionRefs {
   std::vector<Sampler *> Samplers;
   std::vector<Event *> Events;
   std::vector<QueryPool *> QueryPools;
+  std::vector<DeviceMemory *> DeviceMemories;
 };
 
 /// Records \p View (if non-null) into \p Refs, plus the `Image` it wraps
@@ -303,10 +305,32 @@ void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
   }
 }
 
+/// (Roadmap L421) Every `Image`/`Buffer` already collected above is
+/// retained for as long as a `QueueExecutor` task might still read it, but
+/// that does not keep the `DeviceMemory` it is bound to alive: both hold
+/// only a raw, non-owning `DeviceMemory *` (`MemoryRangeBinding`,
+/// `MemoryBinding.h`), and `vkFreeMemory` is fully legal immediately after
+/// `vkQueueSubmit` returns, with no wait -- the same spec rule `L409`'s
+/// own file comment explains for every other type. Called once, after
+/// `Refs.Images`/`Refs.Buffers` are fully populated (including every
+/// image/buffer reached indirectly through an `ImageView`/`DescriptorSet`),
+/// so it needs no special-casing for how each one was reached.
+void collectDeviceMemoryRefs(ExecutionRefs &Refs) {
+  for (Image *Img : Refs.Images)
+    for (const MemoryRangeBinding &Range : Img->ranges())
+      if (Range.Memory)
+        Refs.DeviceMemories.push_back(Range.Memory);
+  for (Buffer *B : Refs.Buffers)
+    for (const MemoryRangeBinding &Range : B->ranges())
+      if (Range.Memory)
+        Refs.DeviceMemories.push_back(Range.Memory);
+}
+
 ExecutionRefs collectExecutionRefs(ArrayRef<CommandBuffer *> CmdBufs) {
   ExecutionRefs Refs;
   for (const CommandBuffer *CmdBuf : CmdBufs)
     collectExecutionRefs(*CmdBuf, Refs);
+  collectDeviceMemoryRefs(Refs);
   return Refs;
 }
 
@@ -333,6 +357,8 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     Ev->retainForExecution();
   for (QueryPool *QP : Refs.QueryPools)
     QP->retainForExecution();
+  for (DeviceMemory *Mem : Refs.DeviceMemories)
+    Mem->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -382,6 +408,18 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
   for (DescriptorSet *Set : Refs.DescriptorSets)
     if (Set->releaseAndTakeDeferredDestroy(Callbacks))
       delete Set;
+  // (Roadmap L421) `DeviceMemory`'s own deferred free must also release
+  // its backing storage (`freeShareableDeviceMemory`), mirroring
+  // `vkFreeMemory`'s own immediate-free path (`Memory.cpp`) -- unlike
+  // every other type above, simply `Allocator(Callbacks).destroy(Mem)`
+  // would leak the shareable-memory-object/mmap this object owns.
+  for (DeviceMemory *Mem : Refs.DeviceMemories)
+    if (Mem->releaseAndTakeDeferredDestroy(Callbacks)) {
+      freeShareableDeviceMemory(Mem->data(),
+                               static_cast<size_t>(Mem->size()),
+                               Mem->shareableFd());
+      Allocator(Callbacks).destroy(Mem);
+    }
 }
 
 /// (Roadmap L228(h)/(i)) Builds the closure a `QueueExecutor` task runs

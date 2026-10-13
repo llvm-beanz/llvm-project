@@ -33,6 +33,7 @@
 #ifndef FEME_LIB_VULKAN_MEMORY_H
 #define FEME_LIB_VULKAN_MEMORY_H
 
+#include "ExecutionLifetime.h"
 #include "Icd.h"
 
 #include <cstddef>
@@ -43,7 +44,20 @@ namespace feme::vulkan {
 /// A `VkDeviceMemory`: one host allocation and its current map state. Not
 /// dispatchable (Vulkan non-dispatchable handles need no loader dispatch
 /// header), so this does not derive from `DispatchableBase`.
-class DeviceMemory {
+///
+/// (Roadmap L421) Inherits `PendingExecutionRefCounted` (`ExecutionLifetime.h`):
+/// every `Image`/`Buffer` bound to a `DeviceMemory` holds only a raw,
+/// non-owning `DeviceMemory *` (`MemoryBinding.h`'s `MemoryRangeBinding`),
+/// so even though `Image`/`Buffer` objects are themselves retained for as
+/// long as a `QueueExecutor` task might still read them (`L409`/`L410`),
+/// freeing the *memory* they are bound to from underneath them -- fully
+/// legal immediately after `vkQueueSubmit` returns, with no wait, per the
+/// same spec rule `L409`'s own file comment explains -- left their data
+/// pointer dangling. `collectExecutionRefs` (`Sync.cpp`) now also retains
+/// every bound-to `DeviceMemory` for as long as it retains the `Image`/
+/// `Buffer` itself; `vkFreeMemory` calls `requestDestroy` instead of
+/// freeing unconditionally.
+class DeviceMemory : public PendingExecutionRefCounted {
 public:
   /// \p ShareableFd is the handle backing `Data` if it came from
   /// `allocateShareableDeviceMemory` below (-1 otherwise, e.g. for

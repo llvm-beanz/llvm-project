@@ -42,6 +42,13 @@
 // This closes `L410`'s full six-type follow-up list; see `Roadmap.md`'s
 // `L410` entry.
 //
+// Also applied to `DeviceMemory` (`L421`): `Image`/`Buffer` only hold a
+// raw, non-owning `DeviceMemory *` (`MemoryRangeBinding`), so being
+// themselves `PendingExecutionRefCounted` does not stop `vkFreeMemory`
+// from freeing their *bound memory* out from under an in-flight
+// `QueueExecutor` task -- the identical race, one level deeper. See
+// `Roadmap.md`'s `L421` entry.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_EXECUTIONLIFETIME_H

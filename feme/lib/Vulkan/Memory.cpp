@@ -122,6 +122,13 @@ VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
   if (!memory)
     return;
   DeviceMemory *Obj = fromHandle<DeviceMemory>(memory);
+  // (Roadmap L421) Deferred, same as every other `PendingExecutionRefCounted`
+  // `vkDestroy*` entry point: only free this memory's backing storage (and
+  // the object itself) immediately if no `QueueExecutor` task that read an
+  // `Image`/`Buffer` bound to it is still pending -- see `DeviceMemory`'s
+  // own class comment (`Memory.h`).
+  if (!Obj->requestDestroy(pAllocator))
+    return;
   freeShareableDeviceMemory(Obj->data(), static_cast<size_t>(Obj->size()),
                             Obj->shareableFd());
   Allocator Alloc(pAllocator);
