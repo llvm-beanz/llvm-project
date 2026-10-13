@@ -409,9 +409,71 @@ Combined net reduction across all five `L419(a)` fixing sessions:
 1,549 -> 1,264 (pending a full re-triage to confirm). `L419(a)` and
 `L419(l)` are both fully resolved for the clusters investigated so far.
 
+## `L419(b)`: transform-feedback residuals (570 -> 285)
+
+Reduced one representative from the 188-case monolithic `simple` slice,
+`dEQP-VK.transform_feedback.simple.basic_1_256`: a data mismatch (`Failed
+at item 1 received:0 expected:1`), not a crash/hang -- item 0 captured
+correctly but every later item read back as 0.
+
+Root cause, confirmed via `--deqp-log-decompiled-spirv=enable` and a
+temporary debug print in `captureTransformFeedback`
+(`feme/lib/Graphics/Executor.cpp`): glslang unconditionally stamps the
+whole `gl_PerVertex` variable with `XfbBuffer`/`XfbStride` decorations
+whenever *any* other output in the same entry point is genuinely
+XFB-captured, even when none of `gl_PerVertex`'s own four members
+(`gl_Position`/`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance`) are
+written or meant to be captured -- `basic_1_256`'s vertex-shader-only
+shader writes only a single, separately-declared `idx_out` variable with
+its own genuine `Offset 0`/`XfbBuffer 0`/`XfbStride 4` decorations, but
+`gl_PerVertex` still carries `XfbBuffer 0`/`XfbStride 4` with no
+per-member `Offset` at all. `CanonicalizeStage.cpp`'s `addElements`
+inherited the whole variable's `XfbBuffer`/`XfbStride` onto every member
+regardless of whether that member had its own `Offset`, synthesizing
+`XfbOffset=0` via `.value_or(0)` for all four -- so `captureTransformFeedback`,
+processing `SignatureElement`s in `ElementID` order, let these four
+spurious all-zero writes to `(XfbBuffer=0, XfbOffset=0)` clobber
+`idx_out`'s own already-correct per-vertex capture at the exact same
+slot.
+
+**Fix** (FeMe-local, `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp`):
+only inherit the whole variable's `XfbBuffer`/`XfbStride`, and only
+resolve the member's own `XfbOffset` optional into a concrete value, once
+that member already carries its own explicit `Offset` decoration --
+matching `xfb_pointsize_*`/`xfb_clipdistance_*`'s own real
+captured-builtin shape, where the member always carries this decoration
+itself. New unit test:
+`CanonicalizeStageTest.DoesNotCaptureBuiltInBlockMembersWithNoOwnXfbOffset`.
+
+**Measured impact**: `dEQP-VK.transform_feedback.simple.*` went from 188
+Fail to 93 Fail (net -95) out of 7,899 cases. Since the bug lived in
+signature canonicalization, not pipeline-construction-mode-specific code,
+the exact same fix closes the matched `simple_fast_gpl`/
+`simple_optimized_gpl` slices too -- re-run confirms perfect symmetry: both
+also went 188 Fail -> 93 Fail (net -95 each), exactly matching the
+monolithic slice's own delta and confirming the roadmap's own long-standing
+"one shared runtime bug, not three pipeline-library bugs" hypothesis.
+Combined: 564 Fail -> 279 Fail across the three `simple*` slices (net
+-285). The `fuzz.*` (4 Fail) and `primitive_restart.*` (2 Fail) residuals
+are unaffected (distinct, already-known bugs) -- `L419(b)`'s full 570-case
+scope is now 285 remaining. The remaining 93-per-slice residuals partition
+cleanly into already-owned clusters (`H37`'s 4 `backward_dependency*`
+names and `H173(c)`'s 12 `streams*` names, each still exactly 12/36 across
+the three slices) plus seven new, as-yet-unowned single/few-case names
+(`draw_indirect_counter_resubmit`, `holes_{vert,geom}`,
+`holes_extra_draw_{vert,geom}`, `maintenance5`,
+`multi_stream_single_raster_non_zero`) and two larger new unowned
+clusters, `resume_*` (27 per slice) and `winding_*` (43 per slice) --
+tracked as new roadmap row `L419(m)`.
+
+`ninja check-feme`: 3,708 Passed, 3 Unsupported, 0 Failed, 0 regressions
+(net +1 test from the new unit test). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- an internal signature-
+canonicalization correctness fix, no feature/extension-surface change.
+
 ## Validation outside CTS
 
-- `check-feme`: 3,706 passed, 3 unsupported, 0 failed.
+- `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
 - `check-hlsl-feme-vk`: 489 passed, 27 expected failures, 273 unsupported,
   2 failed (known: `Mandelbrot.test` full-suite flake, `WaveActiveMax.test`
   H169 triaged-closed issue), 1 unexpected pass (`array_of_matrices.test`,
@@ -421,3 +483,4 @@ The offload suite required two isolated external corrections: boolean
 specialization constants now use the four-byte `VkBool32` representation,
 and the ARM64 host-wave-size artifact plus the stale DXC-only XFAIL now have
 driver-specific expectations.
+
