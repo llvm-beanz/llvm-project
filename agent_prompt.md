@@ -63,32 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `streams_1`/`streams_clipdistance_1`/
-   `streams_culldistance_1` (`L419(q)`, 12/slice, largest untriaged
-   cluster): geometry-shader multi-stream test, all verts emitted to a
-   non-zero stream `s`, pipeline's `rasterizationStream` set to `s` via
-   `VkPipelineRasterizationStateStreamCreateInfoEXT`. `Executor.cpp`/
-   `GraphicsPipeline.cpp` do implement `rasterizationStream` (grep
-   confirms), but the rendered image is wrong (`Image comparison failed:
-   max difference = (255, 0, 255, 0)`, i.e. a whole-channel magenta/black
-   mismatch, not a subtle off-by-one). Not yet root-caused past this
-   point -- did not have time to read `Executor.cpp`'s
-   `rasterizationStream`-handling code this session.
-2. **(~half day)** `L419(o)`: `winding_patch_list_*` (4/slice) --
-   tessellated XFB capture unimplemented, carried forward unstarted for
-   two sessions now (identified last session, no code changes attempted
-   yet).
-3. **(~1 case triage)** `multi_stream_single_raster_non_zero` (1/slice,
-   still no roadmap row of its own) -- "Unexpected results found in
-   color buffer" at `vktTransformFeedbackSimpleTests.cpp:6370`, not
-   examined at all; name suggests it may share `streams_*`'s
-   rasterization-stream-selection root cause (same subsystem, "non_zero"
-   in the name) -- check this before assuming a fourth distinct bug.
-4. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
-   for large MSAA targets -- carried forward unstarted for several
-   sessions now (profiling from `L418` already isolated the hot path,
-   just needs a `gdb`-driven reduction since no sampling profiler exists
-   here).
-5. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
+1. **(~half day)** `L419(o)`: `winding_patch_list_*` (4/slice) --
+   tessellated XFB capture unimplemented (the VS-only capture call is
+   gated on `!Pipeline.hasTessellationStages()`), carried forward
+   unstarted for three sessions now. Needs its own domain-stage-output
+   capture path, structurally distinct from every fix landed so far.
+2. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
+   for large MSAA targets -- carried forward unstarted for many sessions
+   now (profiling already isolated the hot path, just needs a
+   `gdb`-driven reduction since no sampling profiler exists here).
+3. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
    with 60s/600s full-suite timeout reports -- also carried forward
    unstarted.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
+   the `L418`-`L419` roadmap counts synchronized after every fix and
+   isolated CTS rerun -- done this session (inventories needed no
+   change, confirmed by grep: both internal correctness fixes for
+   already-declared feature/extension surface).
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression
+   -- not exercised this session, no `check-hlsl-feme-vk` work was done.
