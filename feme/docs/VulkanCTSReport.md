@@ -480,6 +480,71 @@ tracked as new roadmap row `L419(m)`.
 `VulkanExtensionInventory.md`: no change needed -- an internal signature-
 canonicalization correctness fix, no feature/extension-surface change.
 
+## `L419(m)`: resume-from-counter-buffer transform-feedback bug (231 -> 144)
+
+Reduced the `resume_*` sub-cluster of `L419(m)`'s own 231-case residual by
+running all 43 `dEQP-VK.transform_feedback.simple.resume_*` cases directly
+(`--deqp-caselist-file=`): 27 Fail / 15 Pass / 1 NotSupported, every
+failure the identical `Failed at item 0 received:<N> expected:0` pattern
+at `vktTransformFeedbackSimpleTests.cpp:1131` -- the *first* captured
+value already wrong, not a later one. The 27 failing names decompose
+into exactly 9 unique (pass-count, buffer-size) pairs x 3 naming variants
+(`resume_N_SIZE`, `resume_beginqueryindexed_streamid_0_N_SIZE`,
+`resume_endqueryindexed_streamid_0_N_SIZE`, `N` in `{2,4,8}`, `SIZE` in
+`{256,512,131072}`); `resume_1_*` (single-pass, no real resume) passes,
+isolating the bug to the genuine multi-pass resume path.
+
+Root cause, found by reading `feme/lib/Vulkan/CommandBuffer.cpp`'s
+`BeginTransformFeedback`/`EndTransformFeedback` playback handlers: the
+Vulkan spec requires `vkCmdBeginTransformFeedbackEXT`'s `pCounterBuffers`
+argument, when non-null, to load each slot's *starting* byte offset from
+that counter buffer (the value a matching prior
+`vkCmdEndTransformFeedbackEXT` wrote there), i.e. "resume where the last
+pass left off"; a null entry (or no `pCounterBuffers` at all) means
+"start this slot at offset zero" instead. FeMe's handler ignored this
+distinction entirely and always reset every bound slot's running
+`XfbCapturedBytes` counter to 0, regardless of what `pCounterBuffers`
+named -- a years-old "no resume-from-counter-buffer support yet" comment
+at the call site confirms this was a known, not accidental, gap.
+`feme/lib/Graphics/Executor.cpp`'s own capture-position math
+(`captureTransformFeedback`'s `SeedProgress`, computing
+`BaseVertex = *CapturedBytes / Stride`) already correctly resumes writes
+from a nonzero `CapturedBytes` seed -- it was never consulted with one,
+since `Begin` always handed it 0.
+
+**Fix** (`feme/lib/Vulkan/CommandBuffer.cpp`'s `BeginTransformFeedback`
+handler): for every slot whose `pCounterBuffers[I]` is non-null, read the
+stored `uint32_t` byte count from that buffer (validating it is bound,
+in-range, and resident, mirroring `EndTransformFeedback`'s own existing
+checks) and seed `XfbCapturedBytes` with it instead of 0; slots with no
+named counter buffer still reset to 0 as before. New unit test:
+`CommandBufferTest.TransformFeedbackBeginResumesFromCounterBuffer` (seeds
+a counter buffer with a sentinel "128 bytes already captured" value,
+begins/ends with no draw in between, and checks the value round-trips
+unchanged -- proving `Begin` loaded it rather than clobbering it with 0).
+
+**Measured impact**: `resume_*` went from 27 Fail / 15 Pass / 1
+NotSupported to 42 Pass / 1 NotSupported (0 Fail). Re-running the full
+`L419(m)` residual set (`resume_*`, `winding_*`, and all seven singleton
+names) across all three `simple`/`simple_fast_gpl`/`simple_optimized_gpl`
+slices confirms the same perfect construction-mode symmetry established
+by `L419(b)`: each slice's 77-case residual dropped to 48 (net -29 each,
+-87 combined) -- `draw_indirect_counter_resubmit` and `maintenance5`
+(2 of the 7 singleton names) turned out to share this same root cause and
+are also now fixed, alongside the 27-per-slice `resume_*` cluster itself.
+**Residual (144, 48 per slice)**: `winding_*` (43/slice) -- a distinct
+"Vertex data verification failed" symptom at
+`vktTransformFeedbackSimpleTests.cpp:1749`, not the `item 0` offset
+mismatch this fix targeted, so likely an unrelated bug -- plus `holes_*`
+(4/slice) and `multi_stream_single_raster_non_zero` (1/slice), none yet
+triaged. Tracked as new roadmap row `L419(n)`.
+
+`ninja check-feme`: 3,710 Passed, 3 Unsupported, 0 Failed, 0 regressions
+(net +1 test). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed -- an internal command-playback correctness fix
+implementing already-declared `VK_EXT_transform_feedback` resume
+semantics, no new feature/extension-surface change.
+
 ## Validation outside CTS
 
 - `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
