@@ -120276,3 +120276,64 @@ now describes the current failures instead of the old baseline.**
    that the `VkBool32` fix gets silently dropped by the auxiliary-repo reset
    every single time; re-applying it should be step 2 of every future
    session, not a surprise.
+
+# Session: opinboundsaccesschain vec3/matrix residual (L419(a), 6 -> 1)
+
+Device check: `FeMe CPU Vulkan Device` confirmed via
+`VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary`, start and end
+of session.
+
+## Start here next session
+
+1. Reduce `matrix_3x3.float`
+   (`dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.
+   matrix_3x3.float`) — the one case still failing, now a *data
+   mismatch*, not a crash. `matrix_3x2`/`matrix_3x4` pass with the exact
+   same code path; something specific to 3 columns. ~half day.
+2. Profile the L418 1024x1024x2 MSAA image-to-image case — carried over
+   two sessions now, still unstarted. ~2-4 hours.
+3. Reduce one `opmemoryaccess` (35 cases) and one `decoration_group` (30
+   cases) representative — still untouched. ~1 day.
+
+## What shipped this session
+
+Fixed 5 of 6 `opinboundsaccesschain` vec3/matrix residual cases. Two
+stacked bugs, three commits:
+
+- `7fe0271961c0` — upstream MLIR fix (`mlir/lib/Conversion/SPIRVToLLVM/
+  SPIRVToLLVM.cpp`): `CompositeInsert`/`CompositeExtract` crashed on a
+  struct-then-vector-lane index shape (`OpCompositeInsert %s %v
+  %struct 3 2`). Isolated, self-tested, zero FeMe involvement in the
+  repro.
+- `159410c7e973` — FeMe fix (`SPIRVToLLVMPatterns.cpp`): once the
+  upstream crash stopped, a second bug surfaced — FeMe's own
+  reorder patterns didn't track a tight-vector unwrap that didn't also
+  need a vector-lane split, so they wrongly deferred to upstream's
+  pattern on a marker struct it can't handle.
+- `fba1739e4d4f` — doc sync (`Roadmap.md`, `VulkanCTSReport.md`):
+  1,336 -> 1,331 failures; `check-feme` 3,705 -> 3,706 passed.
+
+**Try it**: `ninja check-feme` — 3,706/3,709 passed, 0 failed, 0
+regressions. New unit test:
+`SPIRVToLLVMTest.CompositeInsertExtractThroughStructMemberVec3LaneLegalizes`.
+
+## Dead end / verified non-issue
+
+Spent ~20 minutes chasing whether `composite_insert.nested_struct`/
+`undef_nested_struct` were a regression from the upstream fix (not in
+`VulkanCTSReport.md`'s named residual list). Verified via a stashed-fix
+baseline rebuild: both already fail identically before this session's
+changes (`'llvm.store' op operand #1 must be LLVM pointer type` — an
+unrelated bug). Not a regression, not actioned further.
+
+## Pattern for next session: deqp-vk multi-case runs
+
+`-n case1 -n case2` (repeated flag) fails command-line parsing.
+Use `--deqp-caselist-file=<path>` with one case per line instead.
+
+## Standing reminder carried forward
+
+Before concluding any `check-hlsl-feme-vk` discrepancy is a new FeMe
+regression, check it against the `VkBool32`/`WaveActiveMax` pattern
+first — the `VkBool32` fix is known to get silently dropped by the
+offload-test-suite's own repo reset every session.
