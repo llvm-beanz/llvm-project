@@ -118,7 +118,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Cluster | Cases | Roadmap ownership |
 |---|---:|---|
 | Transform feedback: `simple*` (188 each for monolithic, fast GPL, and optimized GPL), fuzz, and primitive restart | 570 | H34, H36, H37, H173(c), L419(b) |
-| SPIR-V assembly instructions, led by `opquantize` (160), compute `opinboundsaccesschain` (72), `opmemoryaccess` (35), and `decoration_group` (30) | 528 | L419(a) |
+| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after this session's upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 6 after this session's `BlockAccessChainPattern` templating fix), `opmemoryaccess` (35), and `decoration_group` (30) | 315 | L419(a) |
 | Pipeline multisample, extended dynamic state, graphics-library, and interpolation cases | 203 | L419(c) |
 | GraphicsFuzz correctness cases; no crashes or timeouts remain | 83 | L116 |
 | Coherent Vulkan memory-model `fence_fence` message-passing and write-after-read cases | 52 | K9, L419(d) |
@@ -129,7 +129,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,549** | |
+| **Total** | **1,336** | |
 
 ## Persistent abnormal outcomes
 
@@ -172,11 +172,51 @@ The 16 persistent timeouts are
 separate 600-second isolated limit. They are performance failures with a
 bounded result, not unrun cases, and are tracked by L418.
 
+### SPIR-V assembly `opquantize`/`opinboundsaccesschain` partial fix (L419(a))
+
+`OpQuantizeToF16` (SPIR-V opcode 116) was never defined anywhere in upstream
+MLIR's SPIR-V dialect -- not a FeMe gap. Fixed upstream (outside `feme/`,
+isolated/self-tested commits): added `SPIRV_QuantizeToF16Op` plus its
+missing `SPIRV_OC_OpQuantizeToF16` opcode enum case (a genuine clean gap
+between `OpFConvert`(115) and `OpConvertPtrToU`(117)), and a lowering
+pattern (fptrunc-to-f16-then-fpext-back) in `SPIRVToLLVM.cpp`. The full
+`opquantize*`/`opspecconstantop_opquantize` family (compute and every
+graphics stage, 175 cases total) went from 160 Fail to 13 Fail. The
+residual 13 are `flush_to_zero` (2, needs `DenormFlushToZero` execution-mode
+support for f16) and 11 graphics `too_small`/`spec_const_too_small_*`
+cases (a distinct, unrelated validation-size check), neither pursued
+further this session.
+
+Separately, FeMe's own `BlockAccessChainPattern` (and the
+`rewriteBlockAccess`/`remapNestedStructMemberIndices` helpers it shares
+with `ArrayedBlockAccessChainPattern`) was templated only on
+`spirv.AccessChain`, never `spirv.InBoundsAccessChain`, even though
+upstream MLIR's own generic pattern handles both and glslang only ever
+emits `OpInBoundsAccessChain` (never plain `OpAccessChain`) when indexing
+into SSBO array elements. All 72
+`dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.*`
+cases share the exact same single-member `BufferBlock`-wrapped-`rtarray`
+shape this pattern handles. Fixed (FeMe-local) by templating
+`BlockAccessChainPattern`/`rewriteBlockAccess`/
+`remapNestedStructMemberIndices` over the SPIR-V op type and registering
+both `AccessChainOp` and `InBoundsAccessChainOp` instantiations: 72 Fail
+-> 6 Fail. The residual 6 (`vec_3` and `matrix_3x{2,3,4}` variants) fail
+with an unrelated `'llvm.insertvalue' op position out of bounds: 2`, a
+distinct vec3/matrix-3-row layout bug. The sibling
+`indexing.input.struct.opinboundsaccesschain_*` cases (a different,
+already-passing access shape) were re-verified unaffected.
+
+Combined net reduction: 213 cases (1,549 -> 1,336 against the full-run
+baseline above). See `Roadmap.md`'s `L419(a)` entry for the full
+root-cause writeups.
+
 ## Validation outside CTS
 
-- `check-feme`: 3,704 passed, 3 unsupported, 0 failed.
-- `check-hlsl-feme-vk`: 491 passed, 28 expected failures, 273 unsupported,
-  and 0 unexpected results.
+- `check-feme`: 3,705 passed, 3 unsupported, 0 failed.
+- `check-hlsl-feme-vk`: 489 passed, 27 expected failures, 273 unsupported,
+  2 failed (known: `Mandelbrot.test` full-suite flake, `WaveActiveMax.test`
+  H169 triaged-closed issue), 1 unexpected pass (`array_of_matrices.test`,
+  known flaky, XFAIL retained).
 
 The offload suite required two isolated external corrections: boolean
 specialization constants now use the four-byte `VkBool32` representation,
