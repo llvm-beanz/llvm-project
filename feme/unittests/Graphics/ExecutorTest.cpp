@@ -7678,6 +7678,182 @@ std::vector<uint8_t> renderTessellatedPatch(const GraphicsPipeline &Pipeline,
   return Storage;
 }
 
+// (Roadmap L419(o)) Before this fix, `captureTransformFeedback`'s only
+// call site was gated on `!Pipeline.hasTessellationStages()`, so a
+// tessellating pipeline's domain-stage output -- its own final
+// pre-rasterization stage, exactly analogous to the non-tessellated
+// vertex shader's own output -- was never captured to any bound XFB
+// buffer at all, regardless of whether the domain stage's own signature
+// requested it (`dEQP-VK.transform_feedback.simple*.winding_patch_list_*`'s
+// own "Vertex data verification failed" failure mode). This test tags
+// `buildTessellatedPipeline`'s own domain-stage `SV_Position` output
+// (element 3) with `XfbBuffer`/`XfbOffset`/`XfbStride` (the one output
+// this shared fixture's `TessDomainShaderIR` genuinely barycentrically
+// evaluates per invocation -- its own color output, element 4, instead
+// always forwards control point 0's color unchanged, by that shared
+// fixture's own design, so it cannot distinguish invocations here), then
+// uses the smallest possible undivided patch (`TessPartitioning::
+// Integer`, factor 1.0) so the domain stage runs exactly three times --
+// once per input control point, in `TessOutputPrimitive::TriangleCcw`'s
+// own single-triangle connectivity order -- making the captured XFB
+// bytes fully deterministic and directly comparable to each control
+// point's own known position, without needing to reason about real
+// subdivision.
+TEST(ExecutorTest, CapturesTessellatedDomainStageOutputToXfbBuffer) {
+  Context Ctx;
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    makeElement(1, SignatureDirection::Input, 4,
+                                /*Location=*/0),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 3,
+                                /*Location=*/1),
+                    makeElement(4, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> HS =
+      compileStage(Ctx, TessHullShaderIR, "hs_main", HSSig, ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(HS, Succeeded());
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR("1.0");
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  ASSERT_THAT_EXPECTED(PCS, Succeeded());
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0)};
+  DSSig.Elements[3].XfbBuffer = 0;
+  DSSig.Elements[3].XfbOffset = 0;
+  DSSig.Elements[3].XfbStride = 16;
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessDomainShaderIR, "ds_main", DSSig, ShaderStage::Domain);
+  ASSERT_THAT_EXPECTED(DS, Succeeded());
+
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, /*Width=*/4, /*Height=*/4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  ASSERT_TRUE(Pipeline.hasTessellationStages());
+
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // control point 0
+      3.0f,  -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // control point 1
+      -1.0f, 3.0f,  0.0f, 0.0f, 0.0f, 1.0f, 1.0f, // control point 2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  std::vector<uint8_t> Storage(4u * 4u * 4u, 0);
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 3;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  // One undivided triangle's worth of domain-stage invocations: 3
+  // vertices * 4 floats (`SV_Position`'s own `xyzw`) each.
+  std::array<uint8_t, 48> XfbStorage{};
+  uint64_t CapturedBytes = 0;
+  std::array<PreparedDraw::XfbCaptureBuffer, 1> XfbBuffers = {
+      PreparedDraw::XfbCaptureBuffer{MutableArrayRef(XfbStorage),
+                                    &CapturedBytes}};
+  Draw.XfbBuffers = XfbBuffers;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  EXPECT_EQ(CapturedBytes, 48u);
+  std::array<float, 12> Captured;
+  std::memcpy(Captured.data(), XfbStorage.data(), sizeof(Captured));
+  // `tessellateTriangle`'s fully-unsubdivided fast path
+  // (`Tessellator.cpp`) emits this single triangle as
+  // `appendTriangle(Patch, 0, 1, 2, Cw)`; for `TriangleCcw`
+  // (`Cw == false`), `appendTriangle`'s own documented convention swaps
+  // the last two operands, so the assembled primitive's own vertex
+  // order is control points (0, 2, 1) -- not the patch's original
+  // (0, 1, 2) order.
+  EXPECT_FLOAT_EQ(Captured[0], -1.0f); // v0.x
+  EXPECT_FLOAT_EQ(Captured[1], -1.0f); // v0.y
+  EXPECT_FLOAT_EQ(Captured[2], 0.0f);  // v0.z
+  EXPECT_FLOAT_EQ(Captured[3], 1.0f);  // v0.w
+  EXPECT_FLOAT_EQ(Captured[4], -1.0f); // v2.x
+  EXPECT_FLOAT_EQ(Captured[5], 3.0f);  // v2.y
+  EXPECT_FLOAT_EQ(Captured[6], 0.0f);  // v2.z
+  EXPECT_FLOAT_EQ(Captured[7], 1.0f);  // v2.w
+  EXPECT_FLOAT_EQ(Captured[8], 3.0f);  // v1.x
+  EXPECT_FLOAT_EQ(Captured[9], -1.0f); // v1.y
+  EXPECT_FLOAT_EQ(Captured[10], 0.0f); // v1.z
+  EXPECT_FLOAT_EQ(Captured[11], 1.0f); // v1.w
+}
+
+
 // (Roadmap H112) A tessellation-path counterpart to
 // `ClipCullDistanceVertexShaderIR`/`ClipsATriangleAgainstAWrittenClip
 // Distance` above: each control point's own `gl_ClipDistance[0]` (location
