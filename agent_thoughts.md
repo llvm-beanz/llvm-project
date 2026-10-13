@@ -120945,3 +120945,40 @@ Next: `L418(a)`'s CPU rasterizer `Draw`-path optimization for large MSAA
 targets -- the hot loop is already isolated from prior profiling, this
 just needs a `gdb`-driven reduction session, no further investigation
 needed first.
+
+# Session: L418(b) investigation found and fixed a real crash bug (L421), filed two more (L422, L423)
+
+**Start here**: run `check-feme` (3716/3716 Passed, 0 regressions, already verified) then look at `L422` in `feme/docs/Roadmap.md` -- it's the single most actionable next step, has a precise repro, and corroborating evidence already in hand (see below).
+
+## What's done
+
+1. `L418(a)` doc sync (rasterizer perf fix from a prior session) -- `Roadmap.md`/`VulkanCTSReport.md` updated, committed as `80ddd348a27d`.
+2. `L418(b)` investigation (reconcile ~5s standalone timing vs 60s/600s full-suite timeouts) -- closed. It wasn't slowness, it was a real crash (SIGSEGV) under scheduling contention.
+3. **`L421` fixed and committed** (`ec35d31aee9a`, docs in `4d64d69666dd`): `VkDeviceMemory` use-after-free. `Image`/`Buffer` were already `PendingExecutionRefCounted` (from `L409`/`L410`), but they only hold a raw `DeviceMemory *`, so `vkFreeMemory` could still yank memory out from under an in-flight `QueueExecutor` task. Fixed by making `DeviceMemory` itself `PendingExecutionRefCounted`, same pattern as everything else.
+4. **Verified the fix actually works**: at matched 8-process CPU-saturation stress, pre-fix build crashed with this exact signature 8/8 times; post-fix build 0/8. New unit test `SyncTest.SubmitThenImmediatelyFreeMemoryWithNoWaitSucceeds` passes. `check-feme`: 3716/3716 Passed, 0 regressions.
+5. **Found two more bugs while verifying `L421`, did not fix them** (filed as roadmap items, not code changes):
+   - `L422`: a second, lower-rate crash (3/8 at the same stress level) in `Image::setLayout` / `DescriptorSetLayout::dynamicOffsetCount`. Corroborated independently: the original 17-case contention caselist went from 6/17 crashing pre-`L421`-fix to only 2/17 post-fix, and those 2 now show a `std::vector<VkImageLayout>::operator[]` assertion (out-of-bounds), not a raw SIGSEGV -- same bug, caught earlier by a debug assertion.
+   - `L423`: an unrelated, pre-existing crash in `dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`, crash site is inside `libvulkan.so.1` itself (the loader), not FeMe code. Confirmed via A/B revert that it predates `L421` and isn't caused by it. **Ownership not yet determined** -- could be a genuine loader-interaction bug in FeMe's `vkCreateDevice`/`vkDestroyDevice`, or a loader bug outside FeMe's scope entirely (if the latter, needs the "isolated reproducer, fix outside FeMe, self-contained commit" treatment per the standing instruction).
+
+## Why this took the whole session (if you're wondering)
+
+Three small-sounding commits (`L421`'s code, `L421`'s docs, `L422`/`L423` filing) took this long because finding `L421` in the first place required inventing a new repro technique: CPU-saturation-only busy-loops reproduce an internal FeMe race with *zero* other FeMe processes running. That's a genuinely useful tool, not just incidental detail -- see "Reusable technique" below.
+
+## Reusable technique: CPU-saturation-only crash repro
+
+```bash
+for i in $(seq 1 12); do timeout 150 bash -c 'while :; do :; done' & done
+disown -a
+# ...then run ONE deqp-vk process (or gdb --args ./deqp-vk ...) normally
+```
+
+No other FeMe/`deqp-vk` processes needed. Saturating all cores with unrelated busy-loops increases scheduler preemption/context-switch frequency between a single process's own threads, which is enough to expose internal races that never show up in solo sequential runs. Much more reliable than the old repeated-gdb-attach sampling approach, and doesn't require launching a whole CTS batch to get a crash. Worth reaching for first whenever a "flaky under full-suite load" report shows up.
+
+Also worth remembering: `run_vulkan_cts.py`'s recovery/retry logic **ignores real process exit codes** -- it just sees a missing/truncated log and reruns. If you suspect crashes (not just slowness) are behind a reported timeout, bypass the script and launch `deqp-vk` directly with `&`/`wait` to see real exit codes, or wrap in `gdb -batch -ex "handle SIGSEGV stop print nopass" -ex run -ex "thread apply all bt"` to catch it live.
+
+## Next steps, ranked
+
+1. **(~half day) `L422`**: root-cause the `Image::setLayout` / `DescriptorSetLayout::dynamicOffsetCount` crash family. Start by checking whether `DescriptorSetLayout` was ever added to `L410`'s `PendingExecutionRefCounted` list -- grep suggests no, only `DescriptorSet` was. If so, this is `DeviceMemory`'s own bug pattern (`L421`) repeating for a type `L410` missed. Use the same CPU-saturation + `gdb` "every thread" backtrace technique; the assertion-build evidence (out-of-bounds `Image::Layouts` access) already points at *something* freeing the `Image` early -- find what.
+2. **(~2-4 hours) `L423`**: determine ownership. Minimal repro is already in hand (`dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`, ~1/3 solo-run crash rate, no stress needed). Get a `gdb` backtrace of every thread (not just the crashing one) to see what FeMe-side call the loader was in the middle of when it crashed -- that'll tell you whether this is "FeMe's fault" (fix in-tree) or "loader's fault" (isolated reproducer + fix outside FeMe per the standing instruction).
+3. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the `L418`-`L423` roadmap counts synchronized after every fix and isolated CTS rerun -- done this session (`L421`/`L422`/`L423` all cross-referenced; inventories needed no change for any of them, confirmed and noted explicitly -- pure internal-correctness fixes/findings, no feature/extension-surface change).
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite pattern before calling anything a new regression -- not exercised this session, no `check-hlsl-feme-vk` work was done.
