@@ -1,0 +1,4 @@
+dEQP-VK.plain_pass
+dEQP-VK.devicelost_flaky
+dEQP-VK.devicelost_persistent
+dEQP-VK.hangs

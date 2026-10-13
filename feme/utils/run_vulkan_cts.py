@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # run_vulkan_cts.py - Crash-tolerant Vulkan-CTS batch/worker driver, with a
 # mandatory solo re-verification pass for every case a parallel run reports
-# as `Fail` (roadmap L145; see also D4/G2(b) in feme/docs/Roadmap.md).
+# as `Fail` or `DeviceLost` (roadmap L145/L420; see also D4/G2(b) in
+# feme/docs/Roadmap.md), and a first-class `TimedOut` outcome for any case
+# that still will not complete even when run alone.
 #
 # Part of the LLVM Project, under the Apache License v2.0 with LLVM
 # Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -22,10 +24,26 @@
 # alone, before being trusted. A case that flips to anything else on that
 # solo re-run is reported separately as "flaky" (contention-only, not a real
 # regression) rather than folded into the final failure list at all.
+#
+# Roadmap L420: the 2026-10-12 full re-triage (`VulkanCTSReport.md`'s
+# "Method" section) needed two more manual reconciliation passes this
+# original design did not automate: every `DeviceLost` outcome had to be
+# rerun alone by hand (442 of 466 turned out to be contention, not a real
+# device loss), and the cases that still would not complete even alone had
+# to be bumped to a much longer ad hoc timeout and re-run again, by hand, to
+# tell a genuinely stuck case apart from one that just needed more time.
+# Both are now automated: `DeviceLost` gets exactly the same solo
+# re-verification `Fail` already got, and any case that is killed for
+# exceeding `--final-timeout` while running completely alone (the finest
+# recovery round, or the verification round) is recorded directly as a
+# first-class `TimedOut` outcome instead of silently falling back to
+# `Unrun` (which the final report cannot otherwise tell apart from a case
+# that was never attempted at all).
 
 """Runs a Vulkan-CTS case list against `deqp-vk` in bounded, crash-tolerant
-batches, then re-verifies every resulting `Fail` case in complete isolation
-before trusting it.
+batches, then re-verifies every resulting `Fail`/`DeviceLost` case in
+complete isolation before trusting it, recording any case that still will
+not complete alone as a first-class `TimedOut` outcome.
 
 Usage:
   run_vulkan_cts.py --deqp-vk /path/to/deqp-vk --case-list cases.txt \
@@ -54,14 +72,19 @@ The run proceeds in rounds:
    in turn (200, then 20, then 1 case per process, by default) and re-run,
    until either every case completes or the finest configured size is
    exhausted. The finest round uses `--final-timeout` as a hard per-process
-   ceiling (a single case that still will not complete alone is genuinely
-   stuck, not merely contending for a shared resource).
-3. **Verification round** (roadmap L145, the reason this script exists):
-   every case whose merged result after rounds 1-2 is `Fail` is re-run
-   again, alone, under the same `--final-timeout` ceiling. A case whose
-   solo result differs is reported as *flaky* and that solo result --
-   not the contended one -- is what is trusted in the final report. A
-   case still `Fail` when run alone is a verified, real failure.
+   ceiling; because that round runs exactly one case per process, a
+   process killed for exceeding it unambiguously timed out on that one
+   case, which is recorded directly as a `TimedOut` outcome (roadmap L420)
+   rather than retried further or left `Unrun`.
+3. **Verification round** (roadmap L145/L420, the reason this script
+   exists): every case whose merged result after rounds 1-2 is `Fail` or
+   `DeviceLost` is re-run again, alone, under the same `--final-timeout`
+   ceiling. A case whose solo result differs is reported as *flaky* and
+   that solo result -- not the contended one -- is what is trusted in the
+   final report. A case still `Fail`/`DeviceLost` when run alone is a
+   verified, real outcome; a case killed for exceeding the timeout while
+   being verified alone is likewise recorded as `TimedOut`, not reverted to
+   the untrusted contended result.
 
 Every round's case lists, QPA results, and process logs are retained under
 `--output-dir` (`lists/`, `qpa/`, `logs/`) for later inspection, the same
@@ -70,12 +93,14 @@ directory layout the prior ad hoc harness used.
 The final report is produced by `vk_cts_reconcile.py`'s own
 `format_report`/`write_failures`, reusing its already-tested reconciliation
 logic rather than a second, parallel implementation -- `--baseline-qpa` and
-`--expected-failures` behave exactly as they do for that script.
-`--write-verified-failures` writes the solo-verified `Fail` case list (the
-trustworthy G2(a)-style baseline this script's own verification round makes
-possible), distinct from a plain `--write-failures` of the *contended*
-result, which is exactly the number roadmap L141-L144 showed cannot be
-trusted on its own.
+`--expected-failures` behave exactly as they do for that script; `TimedOut`
+and verified `DeviceLost` outcomes need no special handling there, since
+`format_report` already counts and reports whatever status each completed
+case carries, generically. `--write-verified-failures` writes the
+solo-verified `Fail` case list (the trustworthy G2(a)-style baseline this
+script's own verification round makes possible), distinct from a plain
+`--write-failures` of the *contended* result, which is exactly the number
+roadmap L141-L144 showed cannot be trusted on its own.
 """
 
 import argparse
@@ -103,7 +128,9 @@ def run_one_batch(deqp_vk, case_list_path, qpa_path, log_path, extra_args,
     exceeds `timeout` (only ever passed for the finest, single-case
     recovery/verification rounds -- see the module docstring) is killed;
     either way, whatever the process managed to write to `qpa_path` before
-    stopping is left for the caller to reconcile."""
+    stopping is left for the caller to reconcile. Returns `True` if the
+    process was killed for exceeding `timeout`, `False` otherwise (including
+    when no `timeout` was given at all)."""
     args = [deqp_vk,
            "--deqp-caselist-file=" + case_list_path,
            "--deqp-shadercache=disable",
@@ -113,21 +140,27 @@ def run_one_batch(deqp_vk, case_list_path, qpa_path, log_path, extra_args,
             subprocess.run(args, cwd=cwd, stdout=log_file,
                            stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired:
-            pass
+            return True
         except OSError as error:
             log_file.write("\nrun_vulkan_cts: failed to start %s: %s\n"
                            % (deqp_vk, error))
+    return False
 
 
 def run_round(deqp_vk, batches, output_dir, tag, workers, extra_args, cwd,
               timeout=None):
     """Runs every case list in `batches` (each its own list of case names)
     as its own `deqp-vk` process, up to `workers` concurrently, tagging
-    every artifact `tag-<index>`. Returns `(results, unrun)`: `results` is
-    the `{case_name: status}` map of every case across every batch that got
-    a *completed* QPA record (`vk_cts_reconcile.read_qpa`'s own definition);
-    `unrun` is every requested case that did not, in the same relative
-    order it was requested."""
+    every artifact `tag-<index>`. Returns `(results, unrun, timed_out)`:
+    `results` is the `{case_name: status}` map of every case across every
+    batch that got a *completed* QPA record (`vk_cts_reconcile.read_qpa`'s
+    own definition); `unrun` is every requested case that did not, in the
+    same relative order it was requested; `timed_out` is the subset of
+    `unrun` that is *known* to have timed out rather than merely not having
+    run yet or having crashed for some other reason -- only a single-case
+    batch (`len(batch) == 1`) unambiguously attributes a process timeout to
+    the one case that was running when it was killed, so `timed_out` is
+    always empty for any batch of more than one case."""
     lists_dir = os.path.join(output_dir, "lists")
     qpa_dir = os.path.join(output_dir, "qpa")
     logs_dir = os.path.join(output_dir, "logs")
@@ -154,13 +187,15 @@ def run_round(deqp_vk, batches, output_dir, tag, workers, extra_args, cwd,
             futures.append(pool.submit(run_one_batch, deqp_vk,
                                        case_list_path, qpa_path, log_path,
                                        extra_args, cwd, timeout))
-        for future in futures:
-            future.result()
+        batch_timed_out = [future.result() for future in futures]
 
     results = reconcile.merge_results(qpa_paths, "round %s" % tag)
     requested = [case_name for batch in batches for case_name in batch]
     unrun = [case_name for case_name in requested if case_name not in results]
-    return results, unrun
+    timed_out = [
+        batch[0] for batch, did_time_out in zip(batches, batch_timed_out)
+        if did_time_out and len(batch) == 1 and batch[0] not in results]
+    return results, unrun, timed_out
 
 
 def parse_recovery_sizes(raw):
@@ -231,44 +266,70 @@ def main(argv):
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    merged, unrun = run_round(args.deqp_vk, chunk(cases, args.batch_size),
-                              args.output_dir, "initial", args.workers,
-                              args.deqp_vk_arg, args.cwd)
+    # Roadmap L420: a case that times out even when run completely alone,
+    # at the finest configured granularity, is genuinely stuck -- not
+    # merely unlucky to still be `Unrun` -- so it is recorded directly as
+    # a first-class `TimedOut` outcome rather than bouncing through every
+    # later recovery/verification round only to still end up `Unrun`
+    # (which is indistinguishable, in the final report, from a case that
+    # was never attempted at all).
+    timed_out = {}
+
+    merged, unrun, round_timed_out = run_round(
+        args.deqp_vk, chunk(cases, args.batch_size), args.output_dir,
+        "initial", args.workers, args.deqp_vk_arg, args.cwd)
+    for case_name in round_timed_out:
+        timed_out[case_name] = "TimedOut"
 
     for round_index, size in enumerate(recovery_sizes, start=1):
         if not unrun:
             break
         timeout = args.final_timeout if size == 1 else None
-        round_results, unrun = run_round(
+        round_results, unrun, round_timed_out = run_round(
             args.deqp_vk, chunk(unrun, size), args.output_dir,
             "recovery-%d" % round_index, args.workers, args.deqp_vk_arg,
             args.cwd, timeout=timeout)
         merged.update(round_results)
+        for case_name in round_timed_out:
+            timed_out[case_name] = "TimedOut"
+        unrun = [case_name for case_name in unrun
+                if case_name not in timed_out]
 
-    # Roadmap L145: every case reporting `Fail` after the batch/recovery
-    # rounds above is re-run once more, entirely alone, before being
-    # trusted. See the module docstring for why -- roadmap L141-L144 were
-    # exactly this failure mode.
-    fail_cases = sorted(case for case, status in merged.items()
-                        if status == "Fail")
-    flaky = {}
-    if fail_cases:
-        verify_results, verify_unrun = run_round(
-            args.deqp_vk, chunk(fail_cases, 1), args.output_dir, "verify",
+    # Roadmap L145/L420: every case reporting `Fail` or `DeviceLost` after
+    # the batch/recovery rounds above is re-run once more, entirely alone,
+    # before being trusted. See the module docstring for why -- roadmap
+    # L141-L144 were exactly this failure mode for `Fail`; `DeviceLost` is
+    # just as susceptible to shared-GPU/shared-host contention and had
+    # previously only ever received this treatment by hand (see
+    # `VulkanCTSReport.md`'s "Method" section on the 2026-10-12 full run).
+    verify_cases = sorted(case for case, status in merged.items()
+                          if status in ("Fail", "DeviceLost"))
+    reconciled = {}
+    if verify_cases:
+        verify_results, verify_unrun, verify_timed_out = run_round(
+            args.deqp_vk, chunk(verify_cases, 1), args.output_dir, "verify",
             args.workers, args.deqp_vk_arg, args.cwd,
             timeout=args.final_timeout)
-        for case_name in fail_cases:
+        for case_name in verify_cases:
+            original_status = merged[case_name]
+            if case_name in verify_timed_out:
+                timed_out[case_name] = "TimedOut"
+                del merged[case_name]
+                continue
             if case_name in verify_unrun:
-                # Did not even complete alone -- not a confirmed Fail
-                # either; drop back to Unrun rather than silently keeping
-                # the untrusted contended result.
+                # Did not even complete alone, and did not time out either
+                # (an outright crash) -- not a confirmed Fail/DeviceLost;
+                # drop back to Unrun rather than silently keeping the
+                # untrusted contended result.
                 del merged[case_name]
                 unrun.append(case_name)
                 continue
             solo_status = verify_results[case_name]
-            if solo_status != "Fail":
-                flaky[case_name] = solo_status
+            if solo_status != original_status:
+                reconciled[case_name] = (original_status, solo_status)
                 merged[case_name] = solo_status
+
+    merged.update(timed_out)
 
     baseline = reconcile.merge_results(args.baseline_qpa, "baseline QPA input")
     expected_failures = set(
@@ -281,11 +342,13 @@ def main(argv):
         sys.stderr.write("run_vulkan_cts: %s\n" % error)
         return 1
 
-    if flaky:
-        report += "Flaky (Fail under contention, different result alone):\n"
+    if reconciled:
+        report += ("Flaky (Fail/DeviceLost under contention, different "
+                   "result alone):\n")
         report += "".join(
-            "  %s: Fail -> %s\n" % (case_name, flaky[case_name])
-            for case_name in sorted(flaky))
+            "  %s: %s -> %s\n" % (
+                case_name, reconciled[case_name][0], reconciled[case_name][1])
+            for case_name in sorted(reconciled))
 
     report_path = args.report or os.path.join(args.output_dir, "report.txt")
     with open(report_path, "w", encoding="utf-8") as file:

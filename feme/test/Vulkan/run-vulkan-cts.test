@@ -31,7 +31,7 @@
 // CHECK-DAG:   Pass: 3
 // CHECK: Unexpected failure names:
 // CHECK-NEXT:   dEQP-VK.x.fail
-// CHECK: Flaky (Fail under contention, different result alone):
+// CHECK: Flaky (Fail/DeviceLost under contention, different result alone):
 // CHECK-NEXT:   dEQP-VK.x.flaky: Fail -> Pass
 //
 // VERIFIED: dEQP-VK.x.fail

@@ -1,0 +1,35 @@
+// run_vulkan_cts.py (roadmap L420) must automatically solo-verify every
+// `DeviceLost` outcome exactly like it already does for `Fail`, and must
+// record any case that is killed for exceeding --final-timeout while
+// running completely alone as a first-class `TimedOut` outcome rather than
+// silently reverting to `Unrun`. A prior session's full re-triage had to
+// do both of these by hand (see VulkanCTSReport.md's "Method" section);
+// this test exercises the automated replacement end-to-end against a fake
+// `deqp-vk` whose behavior is driven entirely by the requested case name
+// (Inputs/run-vulkan-cts-fake-deqp.py).
+//
+// RUN: rm -rf %t.state %t.out %t.cwd
+// RUN: mkdir -p %t.cwd
+// RUN: env FAKE_DEQP_STATE_DIR=%t.state %python \
+// RUN:   %S/../../utils/run_vulkan_cts.py \
+// RUN:   --deqp-vk %S/Inputs/run-vulkan-cts-fake-deqp.py \
+// RUN:   --case-list %S/Inputs/run-vulkan-cts-devicelost-timedout-cases.txt \
+// RUN:   --cwd %t.cwd --output-dir %t.out --batch-size 1 --workers 2 \
+// RUN:   --recovery-batch-sizes 1 --final-timeout 0.5 \
+// RUN:   --report %t.report
+// RUN: FileCheck %s < %t.report
+//
+// `Inputs/run-vulkan-cts-fake-deqp.py` is its own executable `deqp-vk`
+// stand-in (`#!/usr/bin/env python3` shebang); `run_one_batch` invokes
+// `--deqp-vk` positionally as argv[0], so no separate Python interpreter
+// wrapper is needed here.
+//
+// CHECK: Total cases: 4
+// CHECK: Completed cases: 4
+// CHECK: Unrun cases: 0
+// CHECK: Result counts:
+// CHECK-DAG:   DeviceLost: 1
+// CHECK-DAG:   Pass: 2
+// CHECK-DAG:   TimedOut: 1
+// CHECK: Flaky (Fail/DeviceLost under contention, different result alone):
+// CHECK-NEXT:   dEQP-VK.devicelost_flaky: DeviceLost -> Pass
