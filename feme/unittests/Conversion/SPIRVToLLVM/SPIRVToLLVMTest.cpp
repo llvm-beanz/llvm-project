@@ -1905,4 +1905,61 @@ TEST(SPIRVToLLVMTest, InBoundsAccessChainIntoStorageBufferWrapperConverts) {
       << Result;
 }
 
+// (Roadmap L419(a)) Regression guard for the
+// `dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.
+// {vec_3,matrix_3xN}` residual cluster. The CTS generator for these
+// cases builds a `Function`-storage scratch composite
+// (`%struct_v = spirv.CompositeInsert %inval, %undef[3 : i32, 2 : i32]`)
+// whose index list walks *through* a struct member and *then* into a
+// nested vector lane -- upstream MLIR's own `CompositeInsertPattern`/
+// `CompositeExtractPattern` only ever special-cased a vector reached at
+// the very top level, asserting/crashing on this mixed struct-then-
+// vector shape (fixed upstream in
+// `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`, see the new
+// `getCompositeIndicesAggregatePrefixLength` split). Because the
+// struct's `vector<3xf32>` member also substitutes a
+// `feme.tight_vector` marker whose own inner data is a flat
+// `array<3xf32>` (`resolvePhysicalCompositeAccess`), the whole mixed
+// index list (struct member, then vector lane) is actually fully
+// `extractvalue`/`insertvalue`-navigable once the marker is unwrapped --
+// no `insertelement`/`extractelement` is needed at all here. This
+// exercises FeMe's own `CompositeInsertMemberReorderPattern`/
+// `CompositeExtractMemberReorderPattern` tight-vector-unwrap tracking
+// fix (`NeededTightVectorUnwrap`): both patterns must recognize this
+// case still needs *their* handling (so the unwrap's extra index gets
+// spliced in), not bail out thinking no unwrap happened (because no
+// vector-lane split was needed) and let upstream's pattern run on a
+// `feme.tight_vector` marker struct it cannot treat as a vector.
+TEST(SPIRVToLLVMTest,
+     CompositeInsertExtractThroughStructMemberVec3LaneLegalizes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.func @entry(%inval : f32) -> f32 \"None\" { "
+      "%undef = spirv.Undef : "
+      "!spirv.struct<(f32, f32, f32, vector<3xf32>)> "
+      "%ins = spirv.CompositeInsert %inval, %undef[3 : i32, 2 : i32] : "
+      "f32 into !spirv.struct<(f32, f32, f32, vector<3xf32>)> "
+      "%ext = spirv.CompositeExtract %ins[3 : i32, 2 : i32] : "
+      "!spirv.struct<(f32, f32, f32, vector<3xf32>)> "
+      "spirv.ReturnValue %ext : f32 } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // No leftover unresolved cast from either the insert or the extract's
+  // own tight-vector unwrap.
+  EXPECT_EQ(Result.find("unrealized_conversion_cast"), std::string::npos)
+      << Result;
+  // The insert must splice the extra tight-vector-unwrap index (the
+  // inner array's own `0`) in alongside the struct member index and the
+  // vector-lane index, producing a 3-deep `insertvalue` into the
+  // tight-vector-substituted struct type.
+  EXPECT_NE(Result.find("llvm.insertvalue %arg0, %0[3, 0, 2]"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("feme.tight_vector"), std::string::npos) << Result;
+  // The whole insert-then-extract-of-the-same-index round-trips to the
+  // original scalar: the extract canonicalizes away entirely, directly
+  // returning the inserted value.
+  EXPECT_NE(Result.find("llvm.return %arg0 : f32"), std::string::npos)
+      << Result;
+}
+
 } // namespace

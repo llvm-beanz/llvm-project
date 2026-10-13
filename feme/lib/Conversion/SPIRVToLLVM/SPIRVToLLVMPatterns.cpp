@@ -7743,6 +7743,18 @@ struct PhysicalCompositeAccess {
   llvm::SmallVector<int64_t, 4> ExtractValueIndices;
   int64_t VectorLaneIndex = -1;
   mlir::Type LeafType;
+  // Set whenever at least one `feme.tight_vector` marker was transparently
+  // crossed while resolving `ExtractValueIndices` -- this inserts an extra
+  // `0` index not present in the caller's own `PhysicalIndices`, so
+  // `ExtractValueIndices` can disagree with `PhysicalIndices` even when
+  // `VectorLaneIndex` stays unset (e.g. a tight_vector's own inner data
+  // member is a flat `array<N x T>`, itself extractvalue-navigable, so a
+  // trailing index straight into it needs no `llvm.extractelement` at
+  // all -- just one extra `llvm.extractvalue` level the caller's own
+  // declared index list never accounted for). Callers must treat this the
+  // same as `VectorLaneIndex >= 0`/a remap: still needing this pattern's
+  // own handling, not upstream's identity-index-list fallback.
+  bool NeededTightVectorUnwrap = false;
 };
 
 /// Resolves \p PhysicalIndices (as `remapCompositeMemberIndices` computed
@@ -7784,6 +7796,7 @@ std::optional<PhysicalCompositeAccess> resolvePhysicalCompositeAccess(
     // SPIR-V nesting level of its own.
     while (mlir::Type Inner = getTightVectorMarkerInnerType(CurrentType)) {
       Result.ExtractValueIndices.push_back(0);
+      Result.NeededTightVectorUnwrap = true;
       CurrentType = Inner;
     }
     int64_t Index = PhysicalIndices[I];
@@ -7867,7 +7880,7 @@ public:
           Op, "composite's physical type disagrees with its own index list");
     bool NeedsVectorLaneSplit = Access->VectorLaneIndex >= 0;
     if (!NeedsIndexRemap && !NeedsVectorLaneSplit &&
-        Access->LeafType == DstType)
+        !Access->NeededTightVectorUnwrap && Access->LeafType == DstType)
       return Rewriter.notifyMatchFailure(
           Op, "no physical index remap, tight-vector unwrap, or "
               "vector-lane split needed");
@@ -7928,6 +7941,7 @@ public:
           Op, "composite's physical type disagrees with its own index list");
     bool NeedsVectorLaneSplit = Access->VectorLaneIndex >= 0;
     if (!NeedsIndexRemap && !NeedsVectorLaneSplit &&
+        !Access->NeededTightVectorUnwrap &&
         Access->LeafType == Adaptor.getObject().getType())
       return Rewriter.notifyMatchFailure(
           Op, "no physical index remap, tight-vector wrap, or vector-lane "
@@ -7959,8 +7973,19 @@ public:
           Op, "inserted object's shape disagrees with the composite's "
               "physical member slot in a way tight-vector wrapping cannot "
               "reconcile");
+    // Use Access->ExtractValueIndices (not the caller's own PhysicalIndices)
+    // here: whenever resolvePhysicalCompositeAccess had to cross a
+    // tight_vector marker *and* keep consuming indices past it (this
+    // pattern's `NeedsVectorLaneSplit` branch above handles the case where
+    // that crossing is immediately followed by a genuine vector-lane
+    // select), it inserts an extra `0` index -- the marker's own single
+    // data member -- that PhysicalIndices never accounts for. The two
+    // index lists agree whenever indices stop exactly at a marker's own
+    // boundary (the common "replace the whole tight_vector-shaped field"
+    // case), so this is a strict generalization, not a behavior change
+    // for that case.
     Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
-        Op, Adaptor.getComposite(), Wrapped, PhysicalIndices);
+        Op, Adaptor.getComposite(), Wrapped, Access->ExtractValueIndices);
     return mlir::success();
   }
 };
