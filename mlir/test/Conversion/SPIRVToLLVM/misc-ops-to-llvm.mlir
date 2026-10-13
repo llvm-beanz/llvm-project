@@ -19,6 +19,19 @@ spirv.func @composite_extract_vector(%arg: vector<3xf32>) "None" {
   spirv.Return
 }
 
+// Indices that walk through an aggregate (here a struct) down into a nested
+// vector cannot be expressed as a single `llvm.extractvalue` (vectors are not
+// aggregates in LLVM IR); the aggregate-only prefix must be extracted first,
+// followed by an `llvm.extractelement` for the final vector lane.
+// CHECK-LABEL: @composite_extract_struct_of_vector
+spirv.func @composite_extract_struct_of_vector(%arg: !spirv.struct<(vector<3xf32>)>) "None" {
+  // CHECK: %[[STRUCT_MEMBER:.*]] = llvm.extractvalue %{{.*}}[0] : !llvm.struct<packed (vector<3xf32>)>
+  // CHECK: %[[TWO:.*]] = llvm.mlir.constant(2 : i32) : i32
+  // CHECK: llvm.extractelement %[[STRUCT_MEMBER]][%[[TWO]] : i32] : vector<3xf32>
+  %0 = spirv.CompositeExtract %arg[0 : i32, 2 : i32] : !spirv.struct<(vector<3xf32>)>
+  spirv.Return
+}
+
 //===----------------------------------------------------------------------===//
 // spirv.CompositeInsert
 //===----------------------------------------------------------------------===//
@@ -35,6 +48,20 @@ spirv.func @composite_insert_vector(%arg0: vector<3xf32>, %arg1: f32) "None" {
   // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i32) : i32
   // CHECK: llvm.insertelement %{{.*}}, %{{.*}}[%[[ONE]] : i32] : vector<3xf32>
   %0 = spirv.CompositeInsert %arg1, %arg0[1 : i32] : f32 into vector<3xf32>
+  spirv.Return
+}
+
+// Mirrors @composite_extract_struct_of_vector: indices walking through an
+// aggregate into a nested vector must extract the vector member, splice in
+// the new lane with `llvm.insertelement`, then insert the updated vector
+// back into its original aggregate position.
+// CHECK-LABEL: @composite_insert_struct_of_vector
+spirv.func @composite_insert_struct_of_vector(%arg0: f32, %arg1: !spirv.struct<(vector<3xf32>)>) "None" {
+  // CHECK: %[[STRUCT_MEMBER:.*]] = llvm.extractvalue %{{.*}}[0] : !llvm.struct<packed (vector<3xf32>)>
+  // CHECK: %[[TWO:.*]] = llvm.mlir.constant(2 : i32) : i32
+  // CHECK: %[[NEW_VECTOR:.*]] = llvm.insertelement %{{.*}}, %[[STRUCT_MEMBER]][%[[TWO]] : i32] : vector<3xf32>
+  // CHECK: llvm.insertvalue %[[NEW_VECTOR]], %{{.*}}[0] : !llvm.struct<packed (vector<3xf32>)>
+  %0 = spirv.CompositeInsert %arg0, %arg1[0 : i32, 2 : i32] : f32 into !spirv.struct<(vector<3xf32>)>
   spirv.Return
 }
 

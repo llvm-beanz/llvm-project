@@ -49,6 +49,36 @@ static bool isUnsignedIntegerOrVector(Type type) {
   return false;
 }
 
+/// Walks \p indices through \p containerType (a `spirv::CompositeType`, as
+/// used by `spirv.CompositeExtract`/`spirv.CompositeInsert`), stopping at the
+/// first index whose *current* type is a `VectorType`. Composite indices
+/// before that point walk purely through aggregates (struct/array/matrix),
+/// which map one-to-one onto `llvm.insertvalue`/`llvm.extractvalue`
+/// positions; `llvm.{insert,extract}value` cannot walk any further once a
+/// vector is reached, since LLVM only allows multi-level indexing into
+/// aggregates. The final vector component (if any) must instead be handled
+/// via `llvm.{insert,extract}element`.
+///
+/// Returns the number of leading indices that form the aggregate-only
+/// prefix. If this equals `indices.size()`, no vector was encountered and
+/// the whole index list can be passed to `llvm.{insert,extract}value`
+/// directly. Otherwise, per the SPIR-V spec a vector component is always
+/// terminal (vector elements are scalars), so exactly one index remains
+/// after the returned prefix length.
+static unsigned
+getCompositeIndicesAggregatePrefixLength(Type containerType,
+                                         ArrayRef<Attribute> indices) {
+  Type currentType = containerType;
+  for (unsigned i = 0, e = indices.size(); i != e; ++i) {
+    if (isa<VectorType>(currentType))
+      return i;
+    auto compositeType = cast<spirv::CompositeType>(currentType);
+    currentType = compositeType.getElementType(
+        cast<IntegerAttr>(indices[i]).getInt());
+  }
+  return indices.size();
+}
+
 /// Returns the width of an integer or of the element type of an integer vector,
 /// if applicable.
 static std::optional<uint64_t> getIntegerOrVectorElementWidth(Type type) {
@@ -764,18 +794,37 @@ public:
       return rewriter.notifyMatchFailure(op, "type conversion failed");
 
     Type containerType = op.getComposite().getType();
-    if (isa<VectorType>(containerType)) {
-      Location loc = op.getLoc();
-      IntegerAttr value = cast<IntegerAttr>(op.getIndices()[0]);
-      Value index = createI32ConstantOf(loc, rewriter, value.getInt());
-      rewriter.replaceOpWithNewOp<LLVM::ExtractElementOp>(
-          op, dstType, adaptor.getComposite(), index);
+    ArrayRef<Attribute> indices = op.getIndices().getValue();
+    unsigned prefixLen =
+        getCompositeIndicesAggregatePrefixLength(containerType, indices);
+    if (prefixLen == indices.size()) {
+      // The indices never walk through a vector: every index maps onto an
+      // `llvm.extractvalue` position.
+      rewriter.replaceOpWithNewOp<LLVM::ExtractValueOp>(
+          op, adaptor.getComposite(), LLVM::convertArrayToIndices(indices));
       return success();
     }
 
-    rewriter.replaceOpWithNewOp<LLVM::ExtractValueOp>(
-        op, adaptor.getComposite(),
-        LLVM::convertArrayToIndices(op.getIndices()));
+    // Indices walk through zero or more aggregates (struct/array/matrix)
+    // down to a vector, then select one vector lane (necessarily the last
+    // index -- vector elements are scalar, so there is no further nesting).
+    Location loc = op.getLoc();
+    Value vectorValue = adaptor.getComposite();
+    if (prefixLen != 0)
+      vectorValue = LLVM::ExtractValueOp::create(
+          rewriter, loc, vectorValue,
+          LLVM::convertArrayToIndices(indices.take_front(prefixLen)));
+    if (!isa<VectorType>(vectorValue.getType()))
+      // A target-specific type converter substituted something other than
+      // an LLVM vector for this leaf (e.g. an array-backed wrapper for a
+      // non-power-of-two vector width); let a more specific pattern handle
+      // this shape rather than guessing at its own layout here.
+      return rewriter.notifyMatchFailure(
+          op, "composite's physical leaf type is not an LLVM vector");
+    IntegerAttr laneAttr = cast<IntegerAttr>(indices[prefixLen]);
+    Value laneIndex = createI32ConstantOf(loc, rewriter, laneAttr.getInt());
+    rewriter.replaceOpWithNewOp<LLVM::ExtractElementOp>(op, dstType,
+                                                        vectorValue, laneIndex);
     return success();
   }
 };
@@ -796,18 +845,48 @@ public:
       return rewriter.notifyMatchFailure(op, "type conversion failed");
 
     Type containerType = op.getComposite().getType();
-    if (isa<VectorType>(containerType)) {
-      Location loc = op.getLoc();
-      IntegerAttr value = cast<IntegerAttr>(op.getIndices()[0]);
-      Value index = createI32ConstantOf(loc, rewriter, value.getInt());
-      rewriter.replaceOpWithNewOp<LLVM::InsertElementOp>(
-          op, dstType, adaptor.getComposite(), adaptor.getObject(), index);
+    ArrayRef<Attribute> indices = op.getIndices().getValue();
+    unsigned prefixLen =
+        getCompositeIndicesAggregatePrefixLength(containerType, indices);
+    if (prefixLen == indices.size()) {
+      // The indices never walk through a vector: every index maps onto an
+      // `llvm.insertvalue` position.
+      rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(
+          op, adaptor.getComposite(), adaptor.getObject(),
+          LLVM::convertArrayToIndices(indices));
       return success();
     }
 
+    // Indices walk through zero or more aggregates (struct/array/matrix)
+    // down to a vector, then select one vector lane to replace (necessarily
+    // the last index -- vector elements are scalar, so there is no further
+    // nesting). Extract that vector out (if nested), splice in the new
+    // lane, then insert the updated vector back into its original position.
+    Location loc = op.getLoc();
+    Value composite = adaptor.getComposite();
+    Value vectorValue = composite;
+    if (prefixLen != 0)
+      vectorValue = LLVM::ExtractValueOp::create(
+          rewriter, loc, vectorValue,
+          LLVM::convertArrayToIndices(indices.take_front(prefixLen)));
+    if (!isa<VectorType>(vectorValue.getType()))
+      // See the matching check in CompositeExtractPattern above: a
+      // target-specific type converter substituted something other than
+      // an LLVM vector for this leaf, so defer to a more specific pattern.
+      return rewriter.notifyMatchFailure(
+          op, "composite's physical leaf type is not an LLVM vector");
+    IntegerAttr laneAttr = cast<IntegerAttr>(indices[prefixLen]);
+    Value laneIndex = createI32ConstantOf(loc, rewriter, laneAttr.getInt());
+    Value newVectorValue = LLVM::InsertElementOp::create(
+        rewriter, loc, vectorValue.getType(), vectorValue,
+        adaptor.getObject(), laneIndex);
+    if (prefixLen == 0) {
+      rewriter.replaceOp(op, newVectorValue);
+      return success();
+    }
     rewriter.replaceOpWithNewOp<LLVM::InsertValueOp>(
-        op, adaptor.getComposite(), adaptor.getObject(),
-        LLVM::convertArrayToIndices(op.getIndices()));
+        op, composite, newVectorValue,
+        LLVM::convertArrayToIndices(indices.take_front(prefixLen)));
     return success();
   }
 };
