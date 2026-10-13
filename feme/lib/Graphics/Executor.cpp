@@ -5941,6 +5941,52 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         }
       }
       RasterOut = &TessOutput;
+
+      // (Roadmap L419(o)) A tessellating pipeline's own last pre-
+      // rasterization-stage output -- the domain stage's `TessOutput`
+      // just built above -- is also eligible for XFB capture, exactly
+      // like `VSOutput` is for a non-tessellating, non-geometry
+      // pipeline's own capture call above this whole tessellation block
+      // (gated off via `!Pipeline.hasTessellationStages()` specifically
+      // to defer to here instead). `TessTris`/`TessLines` already give
+      // the tessellator's own assembled-primitive source-row sequence,
+      // already absolute across every instance/patch (unlike the
+      // non-tessellated `TriIndices`/`LineIndices` above, which are
+      // per-instance templates `AbsTriIndices`/`AbsLineIndices` below
+      // bias by `Inst * PerInstance`), so this capture reads them
+      // directly instead of re-deriving `AbsTriIndices`/`AbsLineIndices`
+      // itself. Unlike the IA-level `Strip`/`Fan` topologies the
+      // non-tessellated capture above must de-duplicate, the
+      // tessellator's own connectivity is always already a flat
+      // triangle/line list (no shared-vertex primitive assembly), so
+      // each `TessTris`/`TessLines` entry's indices are used directly,
+      // with no per-instance bias needed. A `Point`-output-primitive
+      // domain stage populates neither list at all (mirroring a
+      // `PointList`-topology draw's own `TriIndices`/`LineIndices`),
+      // so that case falls back to the same trivial sequential range
+      // the non-tessellated capture above uses for the same reason.
+      if (!Draw.XfbBuffers.empty() && !Pipeline.hasGeometryStages()) {
+        llvm::SmallVector<const SignatureElement *, 8> DomainOutputElements;
+        for (const SignatureElement &Elt : TessLink->DomainSig.Elements)
+          DomainOutputElements.push_back(&Elt);
+        llvm::SmallVector<uint32_t, 16> XfbFlatIndices;
+        if (TessTris.empty() && TessLines.empty()) {
+          XfbFlatIndices = makeSequentialXfbIndices(TotalPoints);
+        } else {
+          XfbFlatIndices.reserve(TessTris.size() * 3 + TessLines.size() * 2);
+          for (std::array<uint32_t, 3> T : TessTris) {
+            XfbFlatIndices.push_back(T[0]);
+            XfbFlatIndices.push_back(T[1]);
+            XfbFlatIndices.push_back(T[2]);
+          }
+          for (std::array<uint32_t, 2> L : TessLines) {
+            XfbFlatIndices.push_back(L[0]);
+            XfbFlatIndices.push_back(L[1]);
+          }
+        }
+        captureTransformFeedback(DomainOutputElements, TessOutput,
+                                 XfbFlatIndices, Draw);
+      }
     }
 
     // --- Clip, viewport-transform, cull. --- (TriIndices/LineIndices were
