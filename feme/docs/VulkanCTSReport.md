@@ -118,7 +118,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Cluster | Cases | Roadmap ownership |
 |---|---:|---|
 | Transform feedback: `simple*` (188 each for monolithic, fast GPL, and optimized GPL), fuzz, and primitive restart | 570 | H34, H36, H37, H173(c), L419(b) |
-| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after this session's upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 6 after this session's `BlockAccessChainPattern` templating fix), `opmemoryaccess` (35), and `decoration_group` (30) | 315 | L419(a) |
+| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 1 after a `BlockAccessChainPattern` templating fix plus this session's struct-of-vec3 CompositeInsert/Extract fix), `opmemoryaccess` (35), and `decoration_group` (30) | 310 | L419(a) |
 | Pipeline multisample, extended dynamic state, graphics-library, and interpolation cases | 203 | L419(c) |
 | GraphicsFuzz correctness cases; no crashes or timeouts remain | 83 | L116 |
 | Coherent Vulkan memory-model `fence_fence` message-passing and write-after-read cases | 52 | K9, L419(d) |
@@ -129,7 +129,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,336** | |
+| **Total** | **1,331** | |
 
 ## Persistent abnormal outcomes
 
@@ -200,19 +200,55 @@ shape this pattern handles. Fixed (FeMe-local) by templating
 `BlockAccessChainPattern`/`rewriteBlockAccess`/
 `remapNestedStructMemberIndices` over the SPIR-V op type and registering
 both `AccessChainOp` and `InBoundsAccessChainOp` instantiations: 72 Fail
--> 6 Fail. The residual 6 (`vec_3` and `matrix_3x{2,3,4}` variants) fail
+-> 6 Fail. The residual 6 (`vec_3` and `matrix_3x{2,3,4}` variants) failed
 with an unrelated `'llvm.insertvalue' op position out of bounds: 2`, a
 distinct vec3/matrix-3-row layout bug. The sibling
 `indexing.input.struct.opinboundsaccesschain_*` cases (a different,
 already-passing access shape) were re-verified unaffected.
 
-Combined net reduction: 213 cases (1,549 -> 1,336 against the full-run
+This residual 6 was root-caused this session to two stacked bugs. **Bug 1
+(upstream, outside `feme/`):** upstream MLIR's `CompositeExtractPattern`/
+`CompositeInsertPattern` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+only special-cased a vector reached at the *top level* of a SPIR-V index
+list, crashing whenever an index list walks through a struct/array and
+*then* into a nested vector lane -- the exact shape the CTS generator's
+`Function`-storage scratch composite uses
+(`OpCompositeInsert %struct_t %inval %struct 3 2`). Fixed with a new
+`getCompositeIndicesAggregatePrefixLength` helper that splits the index
+list at the point a nested vector is reached, emitting
+`extractvalue`/`insertvalue` for the aggregate-only prefix and
+`extractelement`/`insertelement` for the final vector lane, plus
+defensive `isa<VectorType>` guards. New upstream lit coverage in
+`misc-ops-to-llvm.mlir`. **Bug 2 (FeMe-local), exposed only once Bug 1
+stopped crashing first:** `resolvePhysicalCompositeAccess` unwraps a
+`feme.tight_vector` marker struct (substituted for every struct's own
+`vector<3xT>` member) without recording that it did so;
+`CompositeExtractMemberReorderPattern`/`CompositeInsertMemberReorderPattern`'s
+bail-out logic missed the case where an unwrap happens *without* a
+following vector-lane split (true for 5 of these 6 cases, since the
+marker's own inner data is a flat, fully `extractvalue`-navigable
+`array<3xT>`). Added `NeededTightVectorUnwrap` tracking to
+`PhysicalCompositeAccess` and both patterns' bail-out conditions; also
+fixed `CompositeInsertMemberReorderPattern`'s final `InsertValueOp` to use
+the unwrap-aware `Access->ExtractValueIndices` instead of the original
+`PhysicalIndices`. New FeMe unit test:
+`SPIRVToLLVMTest.CompositeInsertExtractThroughStructMemberVec3LaneLegalizes`.
+Result: `vec_3` and `matrix_3x2`/`matrix_3x4` now pass, 6 Fail -> 1 Fail.
+**Residual (1):** `matrix_3x3.float` still fails, now with a data
+mismatch (not a crash) -- a distinct, narrower, not-yet-diagnosed bug left
+for a future session. Also verified (via a stashed-fix baseline re-run)
+that `composite_insert.nested_struct`/`undef_nested_struct`, found during
+a broader regression sweep, are pre-existing failures unrelated to this
+fix (an unrelated `'llvm.store' op operand #1 must be LLVM pointer type`
+error, present identically before and after).
+
+Combined net reduction: 218 cases (1,549 -> 1,331 against the full-run
 baseline above). See `Roadmap.md`'s `L419(a)` entry for the full
 root-cause writeups.
 
 ## Validation outside CTS
 
-- `check-feme`: 3,705 passed, 3 unsupported, 0 failed.
+- `check-feme`: 3,706 passed, 3 unsupported, 0 failed.
 - `check-hlsl-feme-vk`: 489 passed, 27 expected failures, 273 unsupported,
   2 failed (known: `Mandelbrot.test` full-suite flake, `WaveActiveMax.test`
   H169 triaged-closed issue), 1 unexpected pass (`array_of_matrices.test`,
