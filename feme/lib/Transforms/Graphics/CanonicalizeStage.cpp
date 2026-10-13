@@ -5978,23 +5978,45 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
             // the Vulkan spec places no restriction against XFB-capturing
             // a `BuiltIn` output. Thread `XfbBuffer`/`XfbOffset`/
             // `XfbStride` down to *every* member regardless of
-            // `BuiltIn`-ness -- harmless when the whole variable never
-            // declared any (`WholeVarD.XfbBuffer` stays unset, so
-            // `Elt.XfbBuffer` stays unset too, matching `verifySignature`'s
-            // own "absent `XfbBuffer` means nothing is captured"
-            // convention), but required for this real captured-builtin
+            // `BuiltIn`-ness -- required for this real captured-builtin
             // case, where previously every one of `Elt.XfbBuffer`/
             // `XfbOffset`/`XfbStride` was silently left unset despite the
             // SPIR-V genuinely declaring all three, so the executor's XFB
             // capture loop (keyed on `XfbBuffer.has_value()`) skipped this
             // element outright and the capture buffer kept its original,
-            // uninitialized contents.
-            if (!MemberD.XfbBuffer)
-              MemberD.XfbBuffer = WholeVarD.XfbBuffer;
-            MemberD.XfbOffset = WholeVarD.XfbOffset.value_or(0) +
-                                MemberD.XfbOffset.value_or(0);
-            if (!MemberD.XfbStride)
-              MemberD.XfbStride = WholeVarD.XfbStride;
+            // uninitialized contents. (Roadmap L419(b) tightens this:
+            // see the next comment below for why this inheritance must
+            // additionally be gated on the member's *own* `Offset`
+            // decoration already being present, not merely on the whole
+            // variable's `XfbBuffer`/`XfbStride`.)
+            // (Roadmap L419(b)) Only a member that is *itself* explicitly
+            // `Offset`-decorated is actually XFB-captured: glslang also
+            // unconditionally stamps the whole `gl_PerVertex` variable
+            // with `XfbBuffer`/`XfbStride` (but no per-member `Offset`
+            // at all) whenever *any* output in the entry point is
+            // XFB-captured, even when gl_PerVertex's own members
+            // (`gl_Position`/`gl_PointSize`/`gl_ClipDistance`/
+            // `gl_CullDistance`) are never written and never meant to be
+            // captured (`dEQP-VK.transform_feedback.simple.basic_*`'s
+            // own vertex-shader-only shape, reduced from the 188-case
+            // `L419(b)` cluster: every one of its captured buffers was
+            // silently zeroed by this fallback incorrectly treating all
+            // four uncaptured builtin members as captured-at-offset-0,
+            // each writing 0 straight over the one real `idx_out`
+            // element's own correctly-captured value). Only inherit
+            // `WholeVarD`'s `XfbBuffer`/`XfbStride` -- and only then
+            // resolve `MemberD.XfbOffset`'s optional into its final
+            // `uint32_t` -- once `MemberD.XfbOffset` is already known to
+            // be present (a genuine per-member `Offset`, as
+            // `xfb_pointsize_*`/`xfb_clipdistance_*` always carry).
+            if (MemberD.XfbOffset) {
+              if (!MemberD.XfbBuffer)
+                MemberD.XfbBuffer = WholeVarD.XfbBuffer;
+              MemberD.XfbOffset =
+                  WholeVarD.XfbOffset.value_or(0) + *MemberD.XfbOffset;
+              if (!MemberD.XfbStride)
+                MemberD.XfbStride = WholeVarD.XfbStride;
+            }
             Pending.push_back({MemberD, MemberTy, PhysicalIndex});
             NextMemberLocation += RowCount;
           }

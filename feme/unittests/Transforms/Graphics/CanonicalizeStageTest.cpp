@@ -1652,6 +1652,76 @@ TEST(CanonicalizeStageTest, ThreadsXfbCaptureDecorationsThroughBuiltInBlockMembe
   EXPECT_EQ(PointSize.XfbStride, 4u);
 }
 
+/// (Roadmap L419(b)) The mirror image of
+/// `ThreadsXfbCaptureDecorationsThroughBuiltInBlockMember` above: glslang
+/// also stamps a `gl_PerVertex` variable with whole-variable `XfbBuffer`/
+/// `XfbStride` decorations whenever *any* other output in the same entry
+/// point is genuinely XFB-captured, even when `gl_PerVertex`'s own members
+/// (`gl_Position`/`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance`) are
+/// never themselves captured and carry no per-member `Offset`/`XfbOffset`
+/// decoration at all -- the exact shape `dEQP-VK.transform_feedback.
+/// simple.basic_*`'s own vertex-shader-only shader takes (confirmed by
+/// `--deqp-log-decompiled-spirv=enable`: `OpDecorate %gl_PerVertex
+/// XfbBuffer 0` / `OpDecorate %gl_PerVertex XfbStride 4`, but no
+/// `OpMemberDecorate %gl_PerVertex_t <i> Offset <n>` for any of its four
+/// members). Before this fix, `addElements`'s per-member decomposition
+/// loop inherited the whole variable's `XfbBuffer`/`XfbStride` onto every
+/// member regardless of whether that member had its own `Offset`,
+/// synthesizing `XfbOffset=0` for all four via `.value_or(0)` -- so every
+/// one of `gl_Position`/`gl_PointSize`/`gl_ClipDistance`/`gl_CullDistance`
+/// was (wrongly) captured at `(XfbBuffer=0, XfbOffset=0)`, the exact same
+/// slot as the real captured `idx_out` output, and `Executor.cpp`'s
+/// `captureTransformFeedback` -- processing elements in `ElementID`
+/// order -- let these later, spurious all-zero writes clobber `idx_out`'s
+/// own already-correct per-vertex capture.
+TEST(CanonicalizeStageTest,
+    DoesNotCaptureBuiltInBlockMembersWithNoOwnXfbOffset) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }, !spirv.Decorations !0, !feme.spirv.MemberDecorations !10
+    define void @main() #0 {
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_PerVertex
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!1, !2}
+    !1 = !{i32 36, i32 0}
+    !2 = !{i32 37, i32 4}
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+
+  // None of `gl_PerVertex`'s own four members has its own `Offset`
+  // decoration, so none of them is actually XFB-captured -- every one of
+  // `SignatureElement::XfbBuffer` must stay unset (`std::nullopt`),
+  // matching `verifySignature`'s own "absent `XfbBuffer` means nothing is
+  // captured" convention, regardless of the whole variable's own
+  // `XfbBuffer`/`XfbStride` decorations.
+  for (const SignatureElement &Elt : Sig->Elements) {
+    EXPECT_FALSE(Elt.XfbBuffer.has_value())
+        << "SystemValue=" << static_cast<int>(Elt.SystemValue);
+    EXPECT_EQ(Elt.XfbOffset, 0u);
+    EXPECT_EQ(Elt.XfbStride, 0u);
+  }
+}
+
 /// (Roadmap L373) `addElements`'s per-member decomposition loop also
 /// remaps a member's `PhysicalIndex` to whichever LLVM struct field its
 /// own `Offset`/`XfbOffset` decoration says it actually occupies --
