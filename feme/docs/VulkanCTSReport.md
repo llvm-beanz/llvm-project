@@ -679,6 +679,113 @@ needed -- an internal XFB-capture-eligibility correctness fix for
 already-declared `VK_EXT_transform_feedback`, no new feature/extension-
 surface change.
 
+## `L419(r)`/`L419(s)`: `streams_*` cluster, two root causes, closing `H173(c)`
+
+`L419(p)`'s own first full sweep (above) surfaced 36 previously-untracked
+`streams_{1,3,6,14}`/`streams_clipdistance_{1,3,6,14}`/
+`streams_culldistance_{1,3,6,14}` failures (12/slice x 3), all a generic
+`Fail` with `Image comparison failed: max difference = (255, 0, 255, 0)`
+-- a whole-channel magenta/black mismatch, not a subtle off-by-one.
+Standalone re-run also found the bonus `multi_stream_single_raster_non_zero`
+(1/slice x 3) failing identically, sharing the same root causes (confirmed
+below).
+
+While reducing this, a pre-existing roadmap row, `H173(c)` ("Fix nonzero
+rasterization-stream selection for point-input geometry shaders... 36
+`streams*` failures... Hand-trace one matched triplet"), turned out to
+already name this exact cluster (12/slice x 3 = 36, matching exactly).
+The session that first found this 36-case residual (tracked as `L419(q)`)
+never found `H173(c)`'s own pre-existing row -- a process gap now flagged
+in `agent_thoughts.md`, since the standing "grep `Roadmap.md` for a
+candidate ID before using it" check only prevents *collisions*, not
+*missed existing ownership* under a differently-worded row.
+
+**Root cause #1 (`L419(r)`, `CanonicalizeStage.cpp`)**: the real CTS
+geometry shader for this group emits every vertex to a non-zero stream
+`s` via `layout(stream=s) out gl_PerVertex {...};`, with the pipeline's
+`VkPipelineRasterizationStateStreamCreateInfoEXT::rasterizationStream`
+also set to `s`. SPIR-V's `Stream` decoration is a *whole-variable*
+decoration -- it applies to the `gl_PerVertex` block-instance variable
+itself, never to individual members -- exactly like `XfbBuffer`/
+`XfbStride`/`XfbOffset`, which already have an established whole-variable-
+to-`BuiltIn`-member inheritance path in `CanonicalizeStage.cpp` (from the
+`L419(b)`/`L419(p)` sessions). `Stream` had never been given the same
+treatment: every `BuiltIn` member (`gl_Position` included) silently
+defaulted to `Elt.Stream = 0` via `addElement`'s own
+`D.Stream.value_or(0)`, regardless of the block's real declared stream.
+This broke `Executor.cpp`'s per-stream `GSOutputElementsByStream`
+bucketing: `gl_Position` landed in stream 0's bucket while rasterization
+(selecting the real non-zero `RasterizationStream`) read a position-less
+bucket -- exactly the whole-image `(255, 0, 255, 0)` mismatch.
+
+**Fix**: added `if (!MemberD.Stream) MemberD.Stream = WholeVarD.Stream;`
+to the existing `TakeBlockPath` member-decoration-inheritance loop,
+mirroring the `XfbBuffer`/`XfbStride` pattern immediately above it. New
+unit test: `CanonicalizeStageTest.
+InheritsStreamOntoBuiltInBlockMembersWithNoOwnStream`.
+
+**Measured impact of fix #1 alone**: built a 39-case targeted caselist
+(`streams_{1,3,6,14}`, `streams_clipdistance_{1,3,6,14}`,
+`streams_culldistance_{1,3,6,14}`, `multi_stream_single_raster_non_zero`,
+across `simple`/`simple_fast_gpl`/`simple_optimized_gpl`). Monolithic
+`simple` slice: 13/13 Fail -> 13/13 Pass. `simple_fast_gpl`/
+`simple_optimized_gpl`: still 13/13 Fail each, uniformly, with the
+identical mismatch signature -- a second, distinct, GPL-construction-
+specific bug.
+
+**Root cause #2 (`L419(s)`, `GraphicsPipeline.cpp`/`.h`)**:
+`VK_EXT_graphics_pipeline_library` splits pipeline creation into
+independently-created "library" objects linked together later.
+`captureGraphicsPipelineLibraryState`'s `PRE_RASTERIZATION_SHADERS_BIT_EXT`
+capture block deep-copies `VkPipelineRasterizationStateCreateInfo` but
+unconditionally nulls its `pNext` (correct in general, since the source
+chain is not safe to retain past the call) -- but never independently
+re-captured the one pipeline-meaningful chained struct,
+`VkPipelineRasterizationStateStreamCreateInfoEXT`'s `rasterizationStream`,
+by value. At link time the merged `VkGraphicsPipelineCreateInfo`'s
+`pRasterizationState` therefore pointed at a `pNext`-stripped copy, so
+`translateRasterState`'s own `pNext` walk found nothing and
+`RasterState::RasterizationStream` silently stayed at its spec default
+(stream 0) for every GPL-constructed pipeline -- explaining the uniform
+13/13 fail in both GPL slices (monolithic `simple` never goes through
+this capture/link path, so fix #1 alone fixed it).
+
+This is the identical shape of a problem `TessellationDomainOrigin`
+(roadmap `L340`) already solved for
+`VkPipelineTessellationDomainOriginStateCreateInfo`: capture the value
+independently (not just the containing struct), fold it across linked
+children, and re-chain a stable backing struct onto the link-time
+reconstruction.
+
+**Fix**: added `std::optional<uint32_t> RasterizationStream` to
+`GraphicsPipelineLibraryState` and a `findRasterizationStream` helper
+(mirrors `findTessellationDomainOrigin`); wired it through
+`captureGraphicsPipelineLibraryState`'s existing `RS` capture,
+`foldLinkedLibraryState`'s `PRE_RASTERIZATION_SHADERS_BIT_EXT` fold
+branch, a new `RasterizationStateStreamState` backing field on
+`LinkedPipelineStorage`, and the link-time reconstruction site (re-chains
+onto `Storage.RasterizationState.pNext` whenever `S.RasterizationStream`
+is set). New unit test: `GraphicsPipelineTest.
+LinksLibraryWithNonZeroRasterizationStream` (GPL 4-part link round-trip,
+mirrors `LinksLibraryWithLowerLeftTessellationDomainOrigin`).
+
+**Measured impact (combined)**: re-ran the same 39-case caselist after
+both fixes: **39/39 Pass** across all three slices (`simple`/
+`simple_fast_gpl`/`simple_optimized_gpl`), including the bonus
+`multi_stream_single_raster_non_zero`. `ninja check-feme`:
+3,713/3,716 Passed (net +2 new tests), 0 regressions.
+
+This closes the pre-existing `H173(c)` roadmap row and `L419(q)`'s own
+tracking of this cluster; `H34`'s GPL-residual row is updated to reflect
+`L419(s)` as the first genuinely GPL-linkage-specific fix this project
+has needed. Remaining `simple`/`simple_fast_gpl`/`simple_optimized_gpl`
+residual: `L419(o)`'s `winding_patch_list_*` only (4/slice).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- both fixes are internal correctness fixes for already-declared
+`VK_EXT_transform_feedback`/`VK_EXT_geometry_shader`/
+`VK_EXT_graphics_pipeline_library` behavior, no new feature/extension-
+surface change.
+
 ## Validation outside CTS
 
 - `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
