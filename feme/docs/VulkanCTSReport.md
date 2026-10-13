@@ -879,3 +879,82 @@ specialization constants now use the four-byte `VkBool32` representation,
 and the ARM64 host-wave-size artifact plus the stale DXC-only XFAIL now have
 driver-specific expectations.
 
+
+## `L418(a)`: CPU rasterizer `Draw`-path optimization for large MSAA targets
+
+gdb-sampled the standalone `L418` profiling case (`dEQP-VK.api.copy_and_blit.
+core.use_after_copy.a1r5g5b5_unorm_pack16.transfer_dst_optimal.
+1024x1024x2_color_att_flag_img2img_msaa`) with a poor-man's sampling
+profiler, since no sampling profiler (`perf`/`strace`/`ltrace`/`valgrind`)
+is available in this environment: ran the case standalone in the
+background, then repeatedly `gdb -p $PID -batch -ex "thread apply all bt"
+-ex detach -ex quit` every ~0.3s across the ~4.6s run. Of 10 samples, 8
+had their actively-running thread's leaf frame directly inside
+`Executor.cpp`'s per-quad tile-processing lambda (`processTile`'s inner
+`{lambda(int,int)#2}`) or `fixedPointEdgeFn`, called from it -- confirming
+the per-sample coverage test as the specific hot loop within `Draw`
+(matching the ~91%-of-total-time `Draw` cost `L418`'s own phase-timing
+diagnostics had already isolated).
+
+**Root cause**: `fixedPointEdgeFn(A, B, P, Bits)` quantizes all three of
+`A`, `B`, and `P` to fixed-point on every call -- but the per-sample
+coverage test calls it three times (once per triangle edge) for every
+lane of every sample of every covered 2x2 quad, always against the same
+triangle (so the same `A`/`B` per edge), testing many different `P`.
+Re-quantizing each edge's own two (lane/sample-invariant) endpoints on
+every one of those calls was pure redundant work -- for a 2-sample MSAA
+quad (4 lanes x 2 samples = 8 coverage tests), the old code performed 8 x
+3 edges x (4 endpoint + 2 `P`) = 144 `toSubpixelCoord` conversions where
+only 12 (the 3 edges' 4 endpoints, once) + 16 (`P`, once per lane/sample,
+shared across all 3 edges instead of re-converted per edge) = 28 are
+actually necessary.
+
+**Fix**: added `FixedPointEdge`/`makeFixedPointEdge`/
+`evaluateFixedPointEdge` (`TriangleRasterization.h`/`.cpp`).
+`makeFixedPointEdge` quantizes one edge's `A`/`B` once, in the existing
+per-triangle scope (alongside the pre-existing `Area`/`FixedArea`
+per-triangle precomputation); `evaluateFixedPointEdge` then only needs a
+separately-quantized `P` (also now computed once per lane/sample, not
+three times, since it does not depend on which edge is being tested) and
+performs the same `(Px - Ax) * (By - Ay) - (Py - Ay) * (Bx - Ax)`
+arithmetic the original function already did -- bit-for-bit identical
+results, since `toSubpixelCoord` is a pure function of its own argument
+regardless of how many times or where it is called. New unit test
+`TriangleRasterizationTest.
+PrecomputedEdgeMatchesFixedPointEdgeFnBitForBit` confirms this
+equivalence directly, across both the existing axis-aligned-triangle
+fixture and the `L402` near-tie regression case.
+
+**Measured impact**: re-profiled the identical standalone case with the
+same `FEME_VULKAN_TIME_PHASES=1`/`FEME_VULKAN_DEBUG_CMD_TIMING=1`
+diagnostics `L418` used:
+
+| Phase | Before | After | Change |
+|---|---:|---:|---:|
+| `CommandBufferExec`/`FenceWait` | 4552.7 ms | 3514.8 ms | -22.8% |
+| three `Draw` calls (sum) | ~4160 ms | ~3117 ms | -25% |
+| standalone process wall time | 4.65 s | 3.91 s | -16% |
+
+(The standalone wall-time improvement is smaller in percentage terms than
+the in-process phase improvements because it also includes fixed
+per-process costs -- CTS/driver startup, device creation -- that this fix
+does not touch.)
+
+`check-feme`: 3715/3718 Passed (net +1 new test), 3 Unsupported, 0
+Failed, 0 regressions. Real CTS regression sweep covering the rasterizer's
+own three most relevant mustpass groups (`rasterization.txt` +
+`clipping.txt` + `draw.txt`, 44,802 cases total, run via
+`run_vulkan_cts.py` with 10 workers): 4046 Pass, 40752 NotSupported, 4
+Fail -- all 4 confirmed pre-existing and unrelated to this fix via a
+`git stash` A/B rerun (identical failures with and without the fix): 2 are
+an unrelated `feme-cpu-wrap-entry` "barrier inside non-linear control
+flow" compile error in `dEQP-VK.rasterization.line_continuity.*`
+(line-strip/polygon-mode-lines), 2 are an unrelated
+`b10g11r11-ufloat-pack32` format-conversion `Fail` in
+`dEQP-VK.draw.renderpass.output_location.array.*`. Also re-ran the
+original `L418` case standalone: still **Pass**, as expected (this is a
+pure performance optimization, not a correctness fix).
+
+This closes `L418(a)`. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed -- an internal
+performance optimization only, no feature/extension-surface change.
