@@ -47,20 +47,22 @@ those outcomes.
 
 | Outcome | Cases | Percent |
 |---|---:|---:|
-| Pass | 704,272 | 21.646% |
+| Pass | 704,296 | 21.647% |
 | Fail | 1,549 | 0.048% |
 | NotSupported | 2,547,677 | 78.304% |
 | QualityWarning | 46 | 0.001% |
-| DeviceLost | 24 | <0.001% |
+| DeviceLost | 0 | 0% |
 | TimedOut | 16 | <0.001% |
 | InternalError | 0 | 0% |
 | Crashed | 0 | 0% |
 | Unrun | 0 | 0% |
 | **Total** | **3,253,584** | **100%** |
 
-Every generated case has a classified outcome. The 24 `DeviceLost` and 16
-`TimedOut` cases are independently reproducible one case at a time; none are
-parallel-run artifacts or missing measurements.
+Every generated case has a classified outcome. The 16 `TimedOut` cases are
+independently reproducible one case at a time; none are parallel-run
+artifacts or missing measurements. The 24 `DeviceLost` cases this run
+originally recorded are fixed as of L417 (see "Persistent abnormal
+outcomes" below) and now reclassify as Pass.
 
 Compared with the 2026-10-05 baseline, Pass increases by 54,245, ordinary
 Fail decreases by 45,625, persistent DeviceLost decreases by 324, and
@@ -87,7 +89,7 @@ outcome. All omitted groups have only Pass and NotSupported results.
 | mesh_shader | 28,061 | 530 | 11 | 27,520 | 0 | 0 | 0 |
 | pipeline | 1,172,932 | 303,820 | 203 | 868,866 | 43 | 0 | 0 |
 | rasterization | 15,019 | 484 | 2 | 14,533 | 0 | 0 | 0 |
-| renderpasses | 81,687 | 36,112 | 13 | 45,538 | 0 | 24 | 0 |
+| renderpasses | 81,687 | 36,136 | 13 | 45,538 | 0 | 0 | 0 |
 | spirv_assembly | 70,337 | 10,988 | 528 | 58,821 | 0 | 0 | 0 |
 | tessellation | 1,114 | 646 | 30 | 438 | 0 | 0 | 0 |
 | transform_feedback | 133,719 | 6,162 | 570 | 126,987 | 0 | 0 | 0 |
@@ -131,9 +133,9 @@ Roadmap IDs point to the bounded follow-up work.
 
 ## Persistent abnormal outcomes
 
-### Dynamic-rendering device loss
+### Dynamic-rendering device loss (fixed by L417)
 
-The 24 persistent `DeviceLost` cases are exactly:
+The run above originally recorded 24 persistent `DeviceLost` cases, exactly:
 
 - 12
   `renderpasses.dynamic_rendering.graphics_pipeline_library.suballocation.ignore_ds_aspect`
@@ -142,10 +144,25 @@ The 24 persistent `DeviceLost` cases are exactly:
   `renderpasses.dynamic_rendering.primary_cmd_buff.suballocation.ignore_ds_aspect`
   cases.
 
-Each half contains six `D24_UNORM_S8_UINT` and six
-`D32_SFLOAT_S8_UINT` stencil-attachment/depth-aspect combinations. They are
-tracked by L417. The other 442 initial `DeviceLost` outcomes passed in
-single-case, single-worker reruns and are classified as Pass.
+Each half contained six `D24_UNORM_S8_UINT` and six `D32_SFLOAT_S8_UINT`
+stencil-attachment/depth-aspect combinations. Root-caused and **fixed**:
+both `CommandBuffer.cpp`'s draw-time `resolveDrawAttachments` and
+`Executor.cpp`'s `executeDraws` hard-errored when a pipeline had depth
+test/write enabled but the draw's render target bound no depth
+attachment, rather than treating it as a spec-legal no-op (the same bug
+class L394 already fixed for the analogous stencil case). A reduced
+primary/GPL pair
+(`...ignore_ds_aspect.d24_unorm_s8_uint.stencil_attachment_depth_aspect.
+clear.clear_draw`) confirmed the exact failure via
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`: "the bound pipeline tests/writes
+depth but the render target has no depth attachment" at `vkQueueSubmit`.
+All 144 `dEQP-VK.renderpasses.*.suballocation.ignore_ds_aspect.*` cases
+(covering all four render-pass construction styles, not just the two that
+reproduced `DeviceLost`) now Pass; a 39,686-case
+`dEQP-VK.pipeline.*.depth.*` regression sweep shows zero new Fail or
+DeviceLost. The other 442 initial `DeviceLost` outcomes from the original
+full run had already passed in single-case, single-worker reruns and were
+classified as Pass before this fix.
 
 ### Large copy/blit timeouts
 
