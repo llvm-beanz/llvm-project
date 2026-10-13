@@ -120337,3 +120337,90 @@ Before concluding any `check-hlsl-feme-vk` discrepancy is a new FeMe
 regression, check it against the `VkBool32`/`WaveActiveMax` pattern
 first — the `VkBool32` fix is known to get silently dropped by the
 offload-test-suite's own repo reset every session.
+
+# Session: `opmemoryaccess`/`decoration_group` both fully closed (L419(a)/L419(l)); decoration-group fix caught its own ordering bug via a manually-verified lit test
+
+Device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## State: item 3 from the carried-forward list is done
+
+1. `opmemoryaccess` (35 cases): already fixed and committed before this
+   segment started (two upstream MLIR fixes — `CopyMemoryPattern` lowering
+   + deserializer `Aligned`-bit fix).
+2. `decoration_group` (31 cases, not 30 as estimated): fixed, tested,
+   documented, and committed this session.
+
+Both clusters are now 0 Fail. `check-feme`: 3707/3710 Passed, 3
+Unsupported, 0 Failed, 0 regressions (confirmed 3 separate times this
+session).
+
+## What shipped
+
+1. `OpDecorationGroup`(73)/`OpGroupDecorate`(74)/`OpGroupMemberDecorate`(75)
+   were entirely missing from upstream MLIR's SPIR-V dialect — no opcode
+   enum case, no deserializer handling at all. Added all three
+   (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td` +
+   `mlir/lib/Target/SPIRV/Deserialization/{Deserializer.h,Deserializer.cpp,DeserializeOps.cpp}`).
+2. New lit test: `mlir/test/Target/SPIRV/decoration-group.spvasm`.
+3. `decoration_group` CTS cluster: 31/31 Pass (was 31/31 Fail with
+   `error: unhandled opcode 73`).
+4. Docs synced: `Roadmap.md` (`L419(a)` updated, `L419(l)` struck through
+   as done), `VulkanCTSReport.md` (failure table + running total + new
+   narrative section).
+
+Commits (in order):
+- `bde6c94a514c` — opcode + deserializer fix + lit test (outside `feme/`,
+  isolated, self-tested).
+- `28f83a8875a2` — doc sync.
+
+## The bug I almost shipped: a vacuous test
+
+First version of `decoration-group.spvasm` reported `PASS` in `llvm-lit`
+on the very first try. That was a lie. This build's
+`tools/mlir/test/lit.site.cfg.py` has `config.spirv_tools_tests = 0`, so
+**every** `.spvasm` test's sole `RUN` line (`%if spirv-tools %{ ... %}`)
+is a no-op here — `spirv-as`/`spirv-val` are on `PATH`, but the lit
+feature gate checks a CMake-time flag, not tool availability. Every other
+`.spvasm` test in this tree (`selection.spvasm`, etc.) has the same
+vacuous-pass problem in this specific build.
+
+Caught it by manually running the pipeline
+(`spirv-as ... | mlir-translate --deserialize-spirv ... | FileCheck ...`)
+outside `llvm-lit`. That's when I found the real bug:
+
+**Real bug:** `OpGroupMemberDecorate`'s `Offset` decoration never made it
+onto the struct — `groupDecorationOperands` was only populated when
+`words[0]` (the decoration target) was already a known decoration-group
+`<id>`. But per SPIR-V binary layout rules, `OpDecorate %group Offset 0`
+always comes *before* `%group = OpDecorationGroup` in the instruction
+stream — so at the moment the decoration is processed, the group isn't
+registered yet. Classic chicken-and-egg ordering bug. Fix: record every
+`OpDecorate`'s raw words unconditionally, not gated on group membership
+(this also let me delete the now-pointless `decorationGroupIds` field
+entirely).
+
+**Lesson for future sessions:** if a new `.spvasm` test passes on the
+*first* try with zero iteration, be suspicious — check
+`lit.site.cfg.py`'s `spirv_tools_tests` flag before trusting the result.
+This build has it disabled; every future `.spvasm`-based lit test must be
+cross-checked by manually running the pipeline at least once.
+
+## Not reached this session (still carried forward)
+
+1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image
+   case — split time across shader/pipeline compilation, image copy, and
+   fence wait. Unstarted for the third session running.
+2. **(~1 day)** Compare one identical transform-feedback case across
+   monolithic/fast-GPL/optimized-GPL construction — the 188/188/188
+   symmetry (570 cases, `L419(b)`) is still unexplained.
+3. **(~half day)** Extend the CTS runner so DeviceLost gets automatic
+   isolated re-verification and timed-out cases are a first-class
+   outcome, not a manual reconciliation step.
+4. **(standing)** Before trusting any new `.spvasm` lit test's `PASS`,
+   check `spirv_tools_tests` in `lit.site.cfg.py` first — see lesson
+   above. Add this to whatever checklist future sessions use.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression.
+
+Next: pick up item 1 (L418 MSAA profiling) — it's the oldest unstarted
+item, now 3 sessions carried forward.
