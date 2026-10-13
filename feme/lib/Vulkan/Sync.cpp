@@ -24,6 +24,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -118,11 +119,12 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
   return VK_SUCCESS;
 }
 
-/// (Roadmap L409/L410) Every `Pipeline`/`RenderPass`/`Framebuffer`/`Buffer`/
-/// `Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/`Event`/
-/// `QueryPool` a submission's command buffers (including, recursively, any
-/// secondary command buffers `vkCmdExecuteCommands` interprets into them)
-/// reference -- gathered by `collectExecutionRefs` synchronously on the
+/// (Roadmap L409/L410/L422) Every `Pipeline`/`RenderPass`/`Framebuffer`/
+/// `Buffer`/`Image`/`ImageView`/`DescriptorSet`/`BufferView`/`Sampler`/
+/// `Event`/`QueryPool` a submission's command buffers (including,
+/// recursively, any secondary command buffers `vkCmdExecuteCommands`
+/// interprets into them) reference, plus (`L422`) those command buffers
+/// themselves -- gathered by `collectExecutionRefs` synchronously on the
 /// submitting host thread, before a submission's own `QueueExecutor` task
 /// is enqueued, so each one can be retained (`retainExecutionRefs`) before
 /// that task might start running on another thread, and released again
@@ -131,9 +133,10 @@ VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
 /// (`ExecutionLifetime.h`) for why this is necessary: without it, a
 /// `vkDestroyPipeline`/`vkDestroyRenderPass`/`vkDestroyFramebuffer`/
 /// `vkDestroyBuffer`/`vkDestroyImage`/`vkDestroyImageView`/
-/// `vkDestroyEvent`/`vkDestroyQueryPool` call made (fully legally) right
-/// after `vkQueueSubmit` returns, with no wait at all, races this same
-/// task's own still-pending read of that object.
+/// `vkDestroyEvent`/`vkDestroyQueryPool`/`vkFreeCommandBuffers`/
+/// `vkDestroyCommandPool` call made (fully legally) right after
+/// `vkQueueSubmit` returns, with no wait at all, races this same task's
+/// own still-pending read of that object.
 struct ExecutionRefs {
   std::vector<Pipeline *> Pipelines;
   std::vector<const RenderPass *> RenderPasses;
@@ -147,6 +150,19 @@ struct ExecutionRefs {
   std::vector<Event *> Events;
   std::vector<QueryPool *> QueryPools;
   std::vector<DeviceMemory *> DeviceMemories;
+  // (Roadmap L422) Every primary/secondary `CommandBuffer` a submission
+  // references, including recursively through `vkCmdExecuteCommands` --
+  // unlike every type above, this is not a resource a command *references*
+  // but the command stream itself: `executeCommandBuffer` takes a
+  // `const CommandBuffer &` and reads `CmdBuf.commands()` live, on the
+  // `QueueExecutor` worker thread, well after `vkQueueSubmit` enqueued the
+  // task and returned. The Vulkan spec lets an app free a command buffer
+  // with `vkFreeCommandBuffers`/`vkDestroyCommandPool` the moment *its
+  // own* submission is known complete, which (unlike every resource it
+  // references) is an object `collectExecutionRefs` must walk directly
+  // from \p CmdBufs itself, not discover transitively through a
+  // `RecordedCommand` field.
+  std::vector<CommandBuffer *> CommandBuffers;
 };
 
 /// Records \p View (if non-null) into \p Refs, plus the `Image` it wraps
@@ -207,6 +223,14 @@ void collectDescriptorSetRefs(DescriptorSet *Set, ExecutionRefs &Refs) {
 }
 
 void collectExecutionRefs(const CommandBuffer &CmdBuf, ExecutionRefs &Refs) {
+  // (Roadmap L422) See `ExecutionRefs::CommandBuffers`'s own comment:
+  // `CmdBuf` itself must be retained, not just the resources it
+  // references, including when reached recursively as a secondary buffer
+  // below (`const_cast` mirrors every other `const T *` field this
+  // function already pushes, e.g. `Cmd.BeginPass`/`Cmd.BeginFramebuffer`
+  // -- `retainForExecution`/`releaseAndTakeDeferredDestroy` are themselves
+  // `const`, so only the vector's element type need not be `const` here).
+  Refs.CommandBuffers.push_back(const_cast<CommandBuffer *>(&CmdBuf));
   for (const RecordedCommand &Cmd : CmdBuf.commands()) {
     if (Cmd.Pipeline)
       Refs.Pipelines.push_back(Cmd.Pipeline);
@@ -359,6 +383,8 @@ void retainExecutionRefs(const ExecutionRefs &Refs) {
     QP->retainForExecution();
   for (DeviceMemory *Mem : Refs.DeviceMemories)
     Mem->retainForExecution();
+  for (CommandBuffer *CmdBuf : Refs.CommandBuffers)
+    CmdBuf->retainForExecution();
 }
 
 /// The release half of `retainExecutionRefs`: for each retained object,
@@ -420,6 +446,14 @@ void releaseExecutionRefs(const ExecutionRefs &Refs) {
                                Mem->shareableFd());
       Allocator(Callbacks).destroy(Mem);
     }
+  // (Roadmap L422) `CommandBuffer` is owned by its `CommandPool`'s own
+  // `std::unique_ptr` storage, never the generic `Allocator` (see
+  // `CommandPool::free`/`destroyOrDeferCommandBuffer`,
+  // `CommandBuffer.cpp`) -- `Callbacks` is unused here, matching
+  // `DescriptorSet`'s identical plain-`delete` path just above.
+  for (CommandBuffer *CmdBuf : Refs.CommandBuffers)
+    if (CmdBuf->releaseAndTakeDeferredDestroy(Callbacks))
+      delete CmdBuf;
 }
 
 /// (Roadmap L228(h)/(i)) Builds the closure a `QueueExecutor` task runs

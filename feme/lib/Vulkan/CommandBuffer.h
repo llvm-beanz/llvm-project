@@ -24,6 +24,7 @@
 #ifndef FEME_LIB_VULKAN_COMMANDBUFFER_H
 #define FEME_LIB_VULKAN_COMMANDBUFFER_H
 
+#include "ExecutionLifetime.h"
 #include "Icd.h"
 #include "PhysicalDeviceInfo.h"
 #include "RenderPass.h"
@@ -393,7 +394,8 @@ struct RecordedCommand {
 /// recording (see "Command Buffers"). Dispatchable, since the loader
 /// intercepts every `vkCmd*`/`vkBeginCommandBuffer` call through its own
 /// per-command-buffer dispatch table.
-class CommandBuffer : public DispatchableBase {
+class CommandBuffer : public DispatchableBase,
+                      public PendingExecutionRefCounted {
 public:
   // (roadmap F12) Both declared here but defined out of line
   // (CommandBuffer.cpp, which includes Descriptor.h) rather than left
@@ -1161,6 +1163,7 @@ private:
 class CommandPool {
 public:
   explicit CommandPool(const PhysicalDeviceInfo &Info) : Info(&Info) {}
+  ~CommandPool();
 
   CommandBuffer *allocate(VkCommandBufferLevel Level) {
     auto Buf = std::make_unique<CommandBuffer>(Level);
@@ -1170,11 +1173,11 @@ public:
     return Result;
   }
 
-  void free(CommandBuffer *Buf) {
-    llvm::erase_if(Buffers, [&](const std::unique_ptr<CommandBuffer> &Owned) {
-      return Owned.get() == Buf;
-    });
-  }
+  /// (Roadmap L422) Out of line (`CommandBuffer.cpp`): must route through
+  /// `destroyOrDeferCommandBuffer`, which needs `CommandBuffer`'s own
+  /// `PendingExecutionRefCounted` half (see its own comment) just like
+  /// `DescriptorPool::free`'s identical `L410` precedent.
+  void free(CommandBuffer *Buf);
 
   /// `vkResetCommandPool`: resets every command buffer allocated from this
   /// pool to the initial state, without freeing them (see "Object Model":

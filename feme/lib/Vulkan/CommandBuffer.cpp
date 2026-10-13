@@ -44,6 +44,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 
@@ -3164,11 +3165,12 @@ Error executeCommandsInto(
       // See `pipelineBarrier`'s own comment: the join itself is a no-op
       // under this milestone's strictly-sequential execution model, but
       // (V5) an image memory barrier's layout transition is real state.
-      for (const ImageLayoutTransition &Barrier : Cmd.ImageBarriers)
+      for (const ImageLayoutTransition &Barrier : Cmd.ImageBarriers) {
         Barrier.Img->setLayout(Barrier.Range.baseMipLevel,
                                Barrier.Range.levelCount,
                                Barrier.Range.baseArrayLayer,
                                Barrier.Range.layerCount, Barrier.NewLayout);
+      }
       break;
     case RecordedCommand::Kind::PushConstants: {
       // A push's `StageFlags` mask selects which bind point(s)' own
@@ -3942,6 +3944,46 @@ namespace feme::vulkan {
 // (roadmap F12) See the declarations' own comment in CommandBuffer.h.
 CommandBuffer::CommandBuffer(VkCommandBufferLevel Level) : Level(Level) {}
 CommandBuffer::~CommandBuffer() = default;
+
+} // namespace feme::vulkan
+
+namespace {
+using feme::vulkan::CommandBuffer;
+
+/// (Roadmap L422) `CommandPool::free`/`reset`/`~CommandPool`'s shared
+/// deferred-destroy helper, mirroring `Descriptor.cpp`'s own
+/// `destroyOrDeferSet` precedent exactly: if \p Owned is still referenced
+/// by a `QueueExecutor` task (`requestDestroy` returns false), releases it
+/// from \p Owned without destroying it -- the task's own
+/// `releaseExecutionRefs` (`Sync.cpp`) will `delete` it once that task
+/// finishes, matching `DescriptorSet`'s identical plain-`delete` deferred
+/// path (neither type is allocated through the generic `Allocator`, so
+/// `Callbacks` is passed as `nullptr` and never consulted). Otherwise lets
+/// \p Owned destroy it normally when this function returns.
+void destroyOrDeferCommandBuffer(std::unique_ptr<CommandBuffer> Owned) {
+  if (Owned->requestDestroy(/*Callbacks=*/nullptr))
+    return; // Destroyed when `Owned` goes out of scope below.
+  Owned.release();
+}
+} // namespace
+
+namespace feme::vulkan {
+
+void CommandPool::free(CommandBuffer *Buf) {
+  auto It = llvm::find_if(Buffers, [&](const std::unique_ptr<CommandBuffer> &Owned) {
+    return Owned.get() == Buf;
+  });
+  if (It == Buffers.end())
+    return;
+  std::unique_ptr<CommandBuffer> Owned = std::move(*It);
+  Buffers.erase(It);
+  destroyOrDeferCommandBuffer(std::move(Owned));
+}
+
+CommandPool::~CommandPool() {
+  for (std::unique_ptr<CommandBuffer> &Owned : Buffers)
+    destroyOrDeferCommandBuffer(std::move(Owned));
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
     VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,

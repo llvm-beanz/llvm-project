@@ -49,6 +49,20 @@
 // `QueueExecutor` task -- the identical race, one level deeper. See
 // `Roadmap.md`'s `L421` entry.
 //
+// Also applied to `CommandBuffer` itself (`L422`): every type above is a
+// resource a recorded command merely *references*, kept alive opposite a
+// `vkDestroy*` call on *that* resource -- but `executeCommandBuffer`
+// (`CommandBuffer.cpp`) takes a `const CommandBuffer &` and reads
+// `CmdBuf.commands()` live on the `QueueExecutor` worker thread, well
+// after `vkQueueSubmit` enqueued the task and returned. The spec lets an
+// app free a command buffer (`vkFreeCommandBuffers`/
+// `vkDestroyCommandPool`) the moment *its own* submission is known
+// complete; a (fully legal) CTS pattern of tearing every per-test object
+// down together right after a `vkWaitForFences` timeout, with no further
+// wait, raced this same read -- the identical mechanism, one level up
+// from every resource a command buffer records. See `Roadmap.md`'s `L422`
+// entry.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_EXECUTIONLIFETIME_H
