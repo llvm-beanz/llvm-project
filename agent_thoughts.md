@@ -120001,3 +120001,137 @@ now describes the current failures instead of the old baseline.**
 6. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
    L417-L419 roadmap counts synchronized after every fix and isolated CTS
    rerun.
+
+# Session: L417 fixed (depth-attachment DeviceLost) + 3 pre-existing check-hlsl-feme-vk regressions root-caused and closed
+
+**Action taken, in order:**
+
+1. **Verified the FeMe device first, as required.** `vulkaninfo --summary`
+   with explicit `VK_ICD_FILENAMES` showed `FeMe CPU Vulkan Device`. The
+   system default (no env override) is still Mesa llvmpipe -- expected, not
+   a regression.
+2. **Re-did the standing environment ritual.** Cherry-picked
+   `llvm-beanz/offload-test-suite`'s `feme` branch commit (`854cc3f`) into
+   the local, root-script-wiped `offload-test-suite` checkout, re-ran
+   `cmake .` in the build dir, rebuilt `libfeme_vulkan.so`. Baseline
+   `check-feme`: 3,708 discovered / 3,705 Passed / 3 Unsupported / 0 Failed.
+3. **Fixed L417** (highest-signal item from last session's list). Reduced to
+   one primary/GPL pair
+   (`...ignore_ds_aspect.d24_unorm_s8_uint.stencil_attachment_depth_aspect.clear.clear_draw`),
+   confirmed solo `DeviceLost`. `FEME_VULKAN_LOG_CREATION_ERRORS=1` gave the
+   exact swallowed error on the first try: "the bound pipeline tests/writes
+   depth but the render target has no depth attachment." Root cause: two
+   redundant hard-error checks (`CommandBuffer.cpp::resolveDrawAttachments`,
+   `Executor.cpp::executeDraws`) rejected a spec-legal case the stencil path
+   already handled correctly under `L394`. Fixed by mirroring `L394` exactly:
+   removed the record-time hard error, forced
+   `TestEnable`/`WriteEnable`/`BoundsTestEnable` off in a local mutable
+   `DepthState` copy when no depth attachment is bound, removed the now-dead
+   `needsDepthAttachment` helper and its tests, added
+   `DepthTestEnabledToleratesNoBoundDepthAttachment`. Committed as
+   `4f854c19d437`.
+4. **Verified the fix.** Unit: 22/22 `*Depth*` tests pass. `check-feme`:
+   3,704/3,707 Passed, 3 Unsupported, 0 Failed (one net test removed, as
+   expected). CTS: all 144
+   `dEQP-VK.renderpasses.*.suballocation.ignore_ds_aspect.*` cases now Pass
+   (was 24 `DeviceLost`); a 39,686-case `dEQP-VK.pipeline.*.depth.*`
+   regression sweep shows 0 Fail/`DeviceLost`.
+5. **Found 4 discrepancies in `check-hlsl-feme-vk`** that didn't match the
+   last clean baseline (491/28/273/0): 3 unexpected Fail
+   (`Mandelbrot.test`, `spec_const_32_bits.test`, `WaveActiveMax.test`), 1
+   unexpected Pass (`array_of_matrices.test`). Used a fast A/B check
+   (`git checkout <parent-sha> -- <5 changed files>`, rebuild just
+   `libfeme_vulkan.so`, rerun, restore) to confirm **all 4 are unrelated to
+   the L417 fix** -- byte-identical result with the fix reverted.
+6. **Root-caused and closed all 4, one at a time:**
+   - `spec_const_32_bits.test`: genuine bug, but **outside FeMe**. This is
+     exactly the "clean auxiliary checkout silently loses a previously
+     local external fix" pitfall this file already warned about --
+     `offload-test-suite`'s `parseSpecializationConstants` used C++ `bool`
+     (1 byte) instead of `VkBool32` (4 bytes) for `DataFormat::Bool`,
+     under-filling `SpecData` and leaking uninitialized bytes into the
+     4-byte read FeMe performs. Fixed (`VkBool32`/`sizeof(VkBool32)`),
+     verified: test now Pass. Committed in `offload-test-suite` only
+     (`23bc027`), zero FeMe files touched.
+   - `WaveActiveMax.test`: same pitfall, different flavor -- this host is
+     genuinely `aarch64`, and FeMe genuinely reports wave size 4 (both
+     spec-legal), but neither existing `XFAIL` condition
+     (`arm64 && DirectX && WARP`, `Lavapipe && host-arm64`) covers "FeMe on
+     arm64." Added `XFAIL: FeMe && host-arm64` with an explanatory comment.
+     Committed in `offload-test-suite` only (`9cd3943`).
+   - `array_of_matrices.test`: confirmed via raw `offloader` output that the
+     installed `dxc` (rebuilt from its own auto-reset `DirectXShaderCompiler`
+     checkout) no longer reproduces the historical mis-ordering bug
+     (microsoft/DirectXShaderCompiler#8080) -- output is the correct
+     `[1,2,3,4,5,6,7,8]`, not the buggy `[1,3,2,4,5,7,6,8]`. The `XFAIL: DXC`
+     directive is stale; removed it, kept the history as a comment.
+     Committed in `offload-test-suite` only (`33c8b3f`). (Watch for the word
+     "XFAIL" appearing anywhere in a `#`-comment line in these `.test`
+     files -- lit's directive scanner matches it mid-sentence, not just at
+     line start; learned this the hard way mid-edit, see the Unresolved
+     result it produced.)
+   - `Mandelbrot.test`: **not a new bug, not fixed, nothing to do.** This
+     file has flagged `Mandelbrot.test` as "needs confirming" across at
+     least 5 prior sessions; it passes cleanly alone and under `-j1`
+     (491/28/273/0, the exact historical clean baseline) and only flakes
+     under default full-suite parallelism with the same previously-
+     documented `VK_TIMEOUT` semaphore-wait contention. Confirmed again,
+     not re-litigated further.
+7. **Docs updated and committed, each separately:** `VulkanCTSReport.md`
+   (Pass/DeviceLost counts, `renderpasses` row, rewrote the "Dynamic-
+   rendering device loss" section as fixed -- `5e695d6c12bd`);
+   `Roadmap.md` (struck through L417 with the full root-cause/fix/
+   verification writeup, inventories explicitly confirmed as needing no
+   change -- `5ff23a93132c`).
+
+## Lessons worth keeping
+
+1. **The "clean auxiliary checkout loses a local fix" pitfall is not
+   hypothetical -- it cost real session time twice in one sitting.** Two of
+   the four `check-hlsl-feme-vk` discrepancies this session (the
+   `VkBool32` spec-constant fix, the `WaveActiveMax` ARM64 XFAIL) are
+   *exact repeats* of fixes this same file already documented as
+   previously applied and lost. If a future session hits the same two
+   failures again, check this file's own history before re-diagnosing from
+   scratch -- the fix is already written above, just re-apply it to
+   `offload-test-suite` and commit again.
+2. **An A/B revert-and-rebuild of just the changed files (not a full build
+   dir switch) is the fast way to rule your own change in or out of an
+   unrelated-looking regression.** `git checkout <parent-sha> -- <files>` +
+   `ninja libfeme_vulkan.so` + rerun + `git checkout HEAD -- <files>` +
+   rebuild took under 5 minutes total and gave a definitive answer.
+3. **Watch literal "XFAIL"/"UNSUPPORTED" substrings inside explanatory
+   comments in `.test` files** -- lit's directive scanner is not anchored
+   to line start, so prose mentioning the word turns into an accidental,
+   malformed directive (`Unresolved`, not a clean parse error pointing at
+   the real cause).
+4. **A stale `XFAIL: <Compiler>` can flip to Unexpectedly Passed when an
+   external, auto-updated toolchain checkout (here `DirectXShaderCompiler`)
+   picks up an upstream fix.** Don't assume an XPASS is a FeMe-side benefit
+   without checking whether the compiler itself changed underneath you;
+   verify via the actual tool output before touching the directive.
+
+## Next steps
+
+1. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
+   Split time among shader/pipeline compilation, image copy execution, and
+   fence wait; use the same case for a before/after performance bound.
+2. **(~1 day)** Start L419(a) with one `opquantize` and one compute
+   `opinboundsaccesschain` reduction. Together they cover 232 of the 528
+   SPIR-V assembly failures and are the largest compact compiler clusters.
+3. **(~1 day)** Compare one identical transform-feedback case across
+   monolithic, fast GPL, and optimized GPL construction. The exact
+   188/188/188 symmetry is unusually strong evidence for one shared runtime
+   bug rather than three pipeline-library bugs.
+4. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
+   isolated verification and timed-out cases are persisted as a first-class
+   outcome. This removes the largest manual reconciliation step from the next
+   full run.
+5. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   L418-L419 roadmap counts synchronized after every fix and isolated CTS
+   rerun.
+6. **(standing, new this session)** Before concluding any
+   `check-hlsl-feme-vk` discrepancy is a new FeMe regression, check whether
+   it matches the `VkBool32`/`WaveActiveMax` pattern above first -- a
+   previously-applied, `offload-test-suite`-local fix that a fresh
+   cherry-pick silently dropped.
