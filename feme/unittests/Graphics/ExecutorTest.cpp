@@ -3720,10 +3720,22 @@ TEST(ExecutorTest, DepthTestDisabledSuppressesDepthWriteEvenWhenEnabled) {
   }
 }
 
-TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
+// (Roadmap L417) Enabling the depth test/write (or bounds test) against a
+// draw with no bound depth attachment is legal per the Vulkan spec -- the
+// depth test is simply never performed, exactly as if `depthTestEnable`
+// were false -- not an error (`dEQP-VK.renderpasses.dynamic_rendering.*.
+// suballocation.ignore_ds_aspect.*.stencil_attachment_depth_aspect.*`'s
+// own shape, a real `DeviceLost` this used to hard-error into). `Compare`
+// is configured to always fail, so if the no-attachment case were ever
+// treated as "test enabled" rather than skipped, this would either crash
+// dereferencing the empty depth data or spuriously suppress the color
+// write below.
+TEST(ExecutorTest, DepthTestEnabledToleratesNoBoundDepthAttachment) {
   Context Ctx;
   DepthState Depth;
   Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Never;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
       PrimitiveTopology::TriangleList, Depth);
@@ -3734,7 +3746,9 @@ TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
                       3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
                       -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
   PreparedDraw Draw = Scene.prepare(); // BindDepth left false.
-  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I)
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
 }
 
 // Roadmap L353: a `D16_UNORM` depth attachment already holding the

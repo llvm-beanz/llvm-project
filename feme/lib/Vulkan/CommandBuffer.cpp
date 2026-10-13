@@ -2069,15 +2069,22 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
                              "but the render target has %zu",
                              Pipeline.colorAttachmentCount(),
                              Gfx.Binding.Colors.size());
-  if (Pipeline.needsDepthAttachment(Gfx.Dynamic) && !Gfx.Binding.Depth)
-    return createStringError(inconvertibleErrorCode(),
-                             "the bound pipeline tests/writes depth but the "
-                             "render target has no depth attachment");
-  // (Roadmap L394) Unlike depth above, stencil testing with no bound
-  // stencil attachment is legal (`dEQP-VK.pipeline.*.stencil.
-  // no_stencil_att.*`'s own shape): the spec treats it as a no-op, not an
-  // error, so `Executor.cpp`'s `executeDraws` is the one place that
-  // forces the effective `TestEnable` off in that case -- nothing to
+  // (Roadmap L417) Enabling depth test/write/bounds-test with no bound
+  // depth attachment is legal too, exactly like the stencil case
+  // immediately below (`dEQP-VK.renderpasses.dynamic_rendering.*.
+  // suballocation.ignore_ds_aspect.*.stencil_attachment_depth_aspect.*`,
+  // which binds only a combined depth/stencil image's stencil aspect):
+  // the spec treats it as a no-op, not an error, so `Executor.cpp`'s
+  // `executeDraws` is the one place that forces the effective
+  // `TestEnable`/`WriteEnable`/`BoundsTestEnable` off in that case --
+  // nothing to reject here. This used to hard-error, latching the device
+  // lost, for every pipeline whose static depth state enabled
+  // testing/writes against such a render target.
+  // (Roadmap L394) Stencil testing with no bound stencil attachment is
+  // legal (`dEQP-VK.pipeline.*.stencil.no_stencil_att.*`'s own shape): the
+  // spec treats it as a no-op, not an error, so `Executor.cpp`'s
+  // `executeDraws` is the one place that forces the effective
+  // `TestEnable` off in that case -- nothing to
   // reject here.
 
   ResolvedDrawAttachments Resolved;

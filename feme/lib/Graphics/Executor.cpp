@@ -1915,13 +1915,29 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                              "empty",
                              Draw.ResolveAttachments.size(),
                              Draw.Attachments.size());
-  const DepthState &PipelineDepth = Pipeline.getDepthState();
-  if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable ||
-       PipelineDepth.BoundsTestEnable) &&
-      Draw.DepthStencil.Depth.Data.empty())
-    return createStringError(inconvertibleErrorCode(),
-                             "depth testing/writes are enabled but the draw "
-                             "has no bound depth attachment");
+  // (Roadmap L417) Per the Vulkan spec, enabling the depth test, depth
+  // write, or depth bounds test against a render target with no bound
+  // depth attachment is legal, exactly like the analogous stencil case
+  // directly below: there is nothing to test or write, so every
+  // depth-attachment-consulting check must behave as if all three were
+  // disabled, not hard-error. This used to hard-error here, latching the
+  // device lost, for any pipeline whose static depth state enabled
+  // testing/writes even though the render target legitimately bound no
+  // depth attachment (`dEQP-VK.renderpasses.dynamic_rendering.*.
+  // suballocation.ignore_ds_aspect.*.stencil_attachment_depth_aspect.*`,
+  // which binds only the stencil aspect of a combined depth/stencil
+  // image) -- a copy of `getDepthState()` with all three forced off in
+  // this no-attachment case is handed to every depth-consulting check
+  // below instead (`testDepthStencil`'s own precondition that
+  // `DepthAttachment` is only dereferenced when `Depth.TestEnable` is
+  // true still holds, since this copy's `TestEnable` is false exactly
+  // when the attachment is unbound).
+  DepthState PipelineDepth = Pipeline.getDepthState();
+  if (Draw.DepthStencil.Depth.Data.empty()) {
+    PipelineDepth.TestEnable = false;
+    PipelineDepth.WriteEnable = false;
+    PipelineDepth.BoundsTestEnable = false;
+  }
   // (Roadmap L394) Per the Vulkan spec, enabling the stencil test (static
   // or dynamic, `dEQP-VK.pipeline.*.stencil.no_stencil_att.*`'s own shape)
   // against a render target with no stencil attachment is legal: the

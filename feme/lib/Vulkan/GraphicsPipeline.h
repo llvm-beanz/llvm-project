@@ -530,33 +530,6 @@ public:
     return static_cast<uint32_t>(State.ColorBlends.size());
   }
   uint32_t sampleCount() const { return State.SampleCount; }
-  /// Whether a draw through this pipeline needs a bound depth attachment
-  /// (`CommandBuffer.cpp`'s own draw-time check): true if depth test or
-  /// write is actually enabled at draw time -- \p Dynamic's own current
-  /// value when either state is dynamic (`vkCmdSetDepthTestEnable`/
-  /// `vkCmdSetDepthWriteEnable`'s real, last-set-before-this-draw payload),
-  /// the pipeline's own static value otherwise.
-  ///
-  /// (Roadmap L250) This used to conservatively assume a dynamic
-  /// depth-test/write-enable state always needs a depth attachment,
-  /// regardless of what it was actually set to before the draw --
-  /// rejecting `dEQP-VK.pipeline.*.multisample.compatible_render_pass.
-  /// dynamic`, which marks both dynamic specifically so it can disable
-  /// them (`vkCmdSetDepthTestEnable(..., VK_FALSE)`) against a render
-  /// target with no depth attachment at all, exactly as the spec allows.
-  /// A conformant app records the real `vkCmdSet*` payload before every
-  /// draw using a dynamic state (the spec leaves behavior undefined
-  /// otherwise), so consulting \p Dynamic's actual value here rather than
-  /// the mere fact of dynamism is both more permissive and just as safe.
-  bool needsDepthAttachment(const DynamicGraphicsState &Dynamic) const {
-    bool TestEnable = isDynamic(DynamicStateDepthTestEnable)
-                          ? Dynamic.DepthTestEnable
-                          : State.Depth.TestEnable;
-    bool WriteEnable = isDynamic(DynamicStateDepthWriteEnable)
-                            ? Dynamic.DepthWriteEnable
-                            : State.Depth.WriteEnable;
-    return TestEnable || WriteEnable;
-  }
   const feme::cpu::CompiledStage &vertexStage() const {
     return *State.Artifact->VertexStage;
   }
