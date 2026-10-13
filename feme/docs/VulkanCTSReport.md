@@ -118,7 +118,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Cluster | Cases | Roadmap ownership |
 |---|---:|---|
 | Transform feedback: `simple*` (188 each for monolithic, fast GPL, and optimized GPL), fuzz, and primitive restart | 570 | H34, H36, H37, H173(c), L419(b) |
-| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 1 after a `BlockAccessChainPattern` templating fix plus this session's struct-of-vec3 CompositeInsert/Extract fix), `opmemoryaccess` (35), and `decoration_group` (30) | 310 | L419(a) |
+| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 0 -- fully fixed by a `BlockAccessChainPattern` templating fix, a struct-of-vec3 CompositeInsert/Extract fix, and a final `matrix_3x3.float`-specific Function-storage/InBoundsAccessChain tight-matrix fix), `opmemoryaccess` (35), and `decoration_group` (30) | 309 | L419(a) |
 | Pipeline multisample, extended dynamic state, graphics-library, and interpolation cases | 203 | L419(c) |
 | GraphicsFuzz correctness cases; no crashes or timeouts remain | 83 | L116 |
 | Coherent Vulkan memory-model `fence_fence` message-passing and write-after-read cases | 52 | K9, L419(d) |
@@ -129,7 +129,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,331** | |
+| **Total** | **1,330** | |
 
 ## Persistent abnormal outcomes
 
@@ -245,6 +245,72 @@ error, present identically before and after).
 Combined net reduction: 218 cases (1,549 -> 1,331 against the full-run
 baseline above). See `Roadmap.md`'s `L419(a)` entry for the full
 root-cause writeups.
+
+### `matrix_3x3.float` fix, closing L419(a)'s `opinboundsaccesschain` cluster
+
+The remaining `matrix_3x3.float` data mismatch was root-caused to two
+compounding bugs in `TightMatrixStorePattern`/`TightMatrixLoadPattern`
+(`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`), distinct from
+the `BlockAccessChainPattern`/`CompositeInsert`/`CompositeExtract` bugs
+fixed above. **Bug 1:** `TightMatrixLoadPattern` retained a dormant
+`StorageClass::Function` bail-out predating roadmap L242, which added a
+newer, more precise `!AccessChain`-keyed check and claimed (incorrectly)
+to subsume the old one; `TightMatrixStorePattern` had already had this
+same dead code removed in a prior fix, but the sibling Load pattern was
+missed. **Bug 2:** both Tight patterns (and the `getMatrixWholeAccess`/
+`walkStructMembersToMatrix` helpers they share) matched only
+`spirv.AccessChain`, never `spirv.InBoundsAccessChain` -- but glslang's
+generated shader for this exact case uses `InBoundsAccessChain`, mirroring
+the same `BlockAccessChainPattern` gap fixed above. Fixed by removing the
+dormant bail-out and templating `getMatrixWholeAccess`/
+`walkStructMembersToMatrix` over the SPIR-V op type (plus two small
+dispatcher helpers, `getMatrixWholeAccessFromPtr`/
+`hasAccessChainDefiningOp`, so each pattern's own call site stays
+op-type-agnostic). New FeMe unit test:
+`SPIRVToLLVMTest.FunctionStorageStructMemberWholeMatrixStoreLoadUsesTightColumnType`.
+Result: `matrix_3x3.float` now passes; the full `opinboundsaccesschain.*`
+cluster is 72/72 Pass, 0 Fail -- L419(a)'s `opinboundsaccesschain`
+sub-cluster is fully closed. Verified no regression in the L242
+`spec_constant.*.composite.matrix.*` cluster (54/108 Pass, 54
+NotSupported, 0 Fail, matching the prior baseline) and the offload-test-
+suite's `matrix_splat_cast` L211 case (1/1 Pass). `check-feme`:
+3707/3710 Passed (one new unit test), 3 Unsupported, 0 Failed, 0
+regressions.
+
+Combined net reduction across all three `opinboundsaccesschain` fixing
+sessions: 1,549 -> 1,330 (one further case beyond the 1,331 figure
+above).
+
+### L418 MSAA image-to-image profiling
+
+No profiler (`perf`/`strace`/`ltrace`/`valgrind`) is available in this
+environment, so a lightweight, opt-in wall-clock diagnostic
+(`PhaseTiming.h`/`.cpp`, `FEME_VULKAN_TIME_PHASES=1`) plus a finer-grained
+per-command timing diagnostic (`FEME_VULKAN_DEBUG_CMD_TIMING=1`) were
+added to `feme/lib/Vulkan/` to profile one representative case,
+`dEQP-VK.api.copy_and_blit.core.use_after_copy.a1r5g5b5_unorm_pack16.
+transfer_dst_optimal.1024x1024x2_color_att_flag_img2img_msaa`, standalone:
+
+| Phase | Calls | Total | Notes |
+|---|---:|---:|---|
+| `ImageCopyExec` | 2 | 7.5 ms | the copy itself |
+| `PipelineCompile` | 2 | 84.5 ms | |
+| `CommandBufferExec` | 3 | 4552.7 ms | entire submitted command buffer replay |
+| `FenceWait` | 1 | 4552.7 ms | blocked on the above |
+
+The per-command breakdown shows this is **not** a synchronization/
+fence-wait bug: three `Draw` commands account for ~4.16s of the ~4.55s
+total (~91%), with `EndRenderPass` (the MSAA resolve-on-subpass-end) a
+distant second at ~0.28s. The CPU software rasterizer's `Draw` path, not
+queue scheduling or fence waiting, is this case's actual bottleneck --
+the original hypothesis (that fence waiting itself was slow) was a red
+herring caused by `FenceWait` simply reflecting time blocked on that slow
+`Draw` work. This standalone run completes in ~5s, well under the
+60s/600s timeout thresholds `L418` cites for this cluster; those numbers
+likely reflect full-suite contention (many concurrent `QueueExecutor`
+worker threads competing for CPU) rather than this case's isolated cost.
+Optimizing the rasterizer itself is out of scope for this session; see
+`Roadmap.md`'s `L418` entry for the follow-up breakdown.
 
 ## Validation outside CTS
 
