@@ -17,6 +17,9 @@
 
 #include "VirtualAddressReservation.h"
 
+#include "llvm/ADT/ScopeExit.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/Process.h"
 #include "gtest/gtest.h"
 
 #include <cstdint>
@@ -26,16 +29,26 @@ using namespace feme::vulkan;
 
 namespace {
 
-constexpr size_t PageSize = 4096;
+class VirtualAddressReservationTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    auto HostPageSize = llvm::sys::Process::getPageSize();
+    if (!HostPageSize)
+      FAIL() << llvm::toString(HostPageSize.takeError());
+    PageSize = *HostPageSize;
+  }
 
-TEST(VirtualAddressReservationTest, DefaultConstructedIsUnreserved) {
+  size_t PageSize = 0;
+};
+
+TEST_F(VirtualAddressReservationTest, DefaultConstructedIsUnreserved) {
   VirtualAddressReservation Reservation;
   EXPECT_FALSE(Reservation.isReserved());
   EXPECT_EQ(Reservation.base(), nullptr);
   EXPECT_EQ(Reservation.size(), 0u);
 }
 
-TEST(VirtualAddressReservationTest, ReserveSucceedsAndReportsStableBase) {
+TEST_F(VirtualAddressReservationTest, ReserveSucceedsAndReportsStableBase) {
   VirtualAddressReservation Reservation;
   ASSERT_TRUE(Reservation.reserve(16 * PageSize));
   EXPECT_TRUE(Reservation.isReserved());
@@ -43,13 +56,14 @@ TEST(VirtualAddressReservationTest, ReserveSucceedsAndReportsStableBase) {
   EXPECT_EQ(Reservation.size(), 16 * PageSize);
 }
 
-TEST(VirtualAddressReservationTest, ReserveZeroSizeFails) {
+TEST_F(VirtualAddressReservationTest, ReserveZeroSizeFails) {
   VirtualAddressReservation Reservation;
   EXPECT_FALSE(Reservation.reserve(0));
   EXPECT_FALSE(Reservation.isReserved());
 }
 
-TEST(VirtualAddressReservationTest, ReleaseIsIdempotentAndSafeWithoutReserve) {
+TEST_F(VirtualAddressReservationTest,
+       ReleaseIsIdempotentAndSafeWithoutReserve) {
   VirtualAddressReservation Reservation;
   Reservation.release();
   EXPECT_FALSE(Reservation.isReserved());
@@ -61,7 +75,7 @@ TEST(VirtualAddressReservationTest, ReleaseIsIdempotentAndSafeWithoutReserve) {
   EXPECT_FALSE(Reservation.isReserved());
 }
 
-TEST(VirtualAddressReservationTest, ReserveAgainReplacesPriorReservation) {
+TEST_F(VirtualAddressReservationTest, ReserveAgainReplacesPriorReservation) {
   VirtualAddressReservation Reservation;
   ASSERT_TRUE(Reservation.reserve(PageSize));
   void *FirstBase = Reservation.base();
@@ -73,7 +87,7 @@ TEST(VirtualAddressReservationTest, ReserveAgainReplacesPriorReservation) {
   (void)FirstBase;
 }
 
-TEST(VirtualAddressReservationTest, MoveConstructTransfersReservation) {
+TEST_F(VirtualAddressReservationTest, MoveConstructTransfersReservation) {
   VirtualAddressReservation Reservation;
   ASSERT_TRUE(Reservation.reserve(PageSize));
   void *Base = Reservation.base();
@@ -84,7 +98,7 @@ TEST(VirtualAddressReservationTest, MoveConstructTransfersReservation) {
   EXPECT_FALSE(Reservation.isReserved()); // NOLINT(bugprone-use-after-move)
 }
 
-TEST(VirtualAddressReservationTest, MoveAssignReleasesPriorReservation) {
+TEST_F(VirtualAddressReservationTest, MoveAssignReleasesPriorReservation) {
   VirtualAddressReservation A;
   VirtualAddressReservation B;
   ASSERT_TRUE(A.reserve(PageSize));
@@ -97,18 +111,18 @@ TEST(VirtualAddressReservationTest, MoveAssignReleasesPriorReservation) {
   EXPECT_FALSE(A.isReserved()); // NOLINT(bugprone-use-after-move)
 }
 
-TEST(VirtualAddressReservationTest, CreateShareableMemoryFdSucceeds) {
+TEST_F(VirtualAddressReservationTest, CreateShareableMemoryFdSucceeds) {
   intptr_t Fd = createShareableMemoryFd(PageSize);
   EXPECT_GE(Fd, 0);
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, CloseShareableMemoryFdToleratesNegative) {
+TEST_F(VirtualAddressReservationTest, CloseShareableMemoryFdToleratesNegative) {
   // Should not crash.
   closeShareableMemoryFd(-1);
 }
 
-TEST(VirtualAddressReservationTest, MapRangeBacksWindowWithRealPages) {
+TEST_F(VirtualAddressReservationTest, MapRangeBacksWindowWithRealPages) {
   intptr_t Fd = createShareableMemoryFd(PageSize);
   ASSERT_GE(Fd, 0);
 
@@ -125,7 +139,7 @@ TEST(VirtualAddressReservationTest, MapRangeBacksWindowWithRealPages) {
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, MapRangeAliasesSameUnderlyingPages) {
+TEST_F(VirtualAddressReservationTest, MapRangeAliasesSameUnderlyingPages) {
   // The whole point of a shareable (not merely anonymous) backing object:
   // two independent mappings of it observe each other's writes, unlike
   // two separate `MAP_PRIVATE` mappings of the same file would after a
@@ -145,7 +159,28 @@ TEST(VirtualAddressReservationTest, MapRangeAliasesSameUnderlyingPages) {
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, MapRangeAtOffsetUsesCorrectFdWindow) {
+TEST_F(VirtualAddressReservationTest,
+       SeparateMemoryObjectsHaveIndependentPages) {
+  intptr_t FirstFd = createShareableMemoryFd(PageSize);
+  ASSERT_GE(FirstFd, 0);
+  llvm::scope_exit CloseFirst([&] { closeShareableMemoryFd(FirstFd); });
+  intptr_t SecondFd = createShareableMemoryFd(PageSize);
+  ASSERT_GE(SecondFd, 0);
+  llvm::scope_exit CloseSecond([&] { closeShareableMemoryFd(SecondFd); });
+
+  VirtualAddressReservation A, B;
+  ASSERT_TRUE(A.reserve(PageSize));
+  ASSERT_TRUE(B.reserve(PageSize));
+  ASSERT_TRUE(A.mapRange(0, PageSize, FirstFd, 0));
+  ASSERT_TRUE(B.mapRange(0, PageSize, SecondFd, 0));
+
+  static_cast<uint8_t *>(A.base())[0] = 0x7A;
+  EXPECT_EQ(static_cast<uint8_t *>(B.base())[0], 0);
+  static_cast<uint8_t *>(B.base())[0] = 0x42;
+  EXPECT_EQ(static_cast<uint8_t *>(A.base())[0], 0x7A);
+}
+
+TEST_F(VirtualAddressReservationTest, MapRangeAtOffsetUsesCorrectFdWindow) {
   intptr_t Fd = createShareableMemoryFd(2 * PageSize);
   ASSERT_GE(Fd, 0);
 
@@ -170,7 +205,7 @@ TEST(VirtualAddressReservationTest, MapRangeAtOffsetUsesCorrectFdWindow) {
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, UnmapRangeRestoresNoAccessGap) {
+TEST_F(VirtualAddressReservationTest, UnmapRangeRestoresNoAccessGap) {
   intptr_t Fd = createShareableMemoryFd(PageSize);
   ASSERT_GE(Fd, 0);
 
@@ -188,7 +223,7 @@ TEST(VirtualAddressReservationTest, UnmapRangeRestoresNoAccessGap) {
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, MapRangeFailsWhenUnreserved) {
+TEST_F(VirtualAddressReservationTest, MapRangeFailsWhenUnreserved) {
   intptr_t Fd = createShareableMemoryFd(PageSize);
   ASSERT_GE(Fd, 0);
 
@@ -198,7 +233,7 @@ TEST(VirtualAddressReservationTest, MapRangeFailsWhenUnreserved) {
   closeShareableMemoryFd(Fd);
 }
 
-TEST(VirtualAddressReservationTest, MapRangeFailsWhenOutOfBounds) {
+TEST_F(VirtualAddressReservationTest, MapRangeFailsWhenOutOfBounds) {
   intptr_t Fd = createShareableMemoryFd(PageSize);
   ASSERT_GE(Fd, 0);
 

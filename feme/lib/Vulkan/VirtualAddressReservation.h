@@ -27,7 +27,8 @@
 // zero-behavior-change-first approach `MemoryBinding.h` (roadmap H46) took
 // for `ResourceBindings`.
 //
-// POSIX only for now: implemented via `mmap`/`mprotect`/`memfd_create`.
+// POSIX only for now: implemented via `mmap` with `memfd_create` on Linux
+// and unlinked `shm_open` objects on other POSIX platforms.
 // Windows support (an equivalent two-view design via
 // `CreateFileMapping`/`MapViewOfFile3`) is a future increment --
 // `createShareableMemoryFd`/`VirtualAddressReservation::reserve` simply

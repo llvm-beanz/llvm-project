@@ -12,6 +12,13 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#if !defined(__linux__)
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/FileSystem.h"
+
+#include <cerrno>
+#include <fcntl.h>
+#endif
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -38,7 +45,26 @@ void VirtualAddressReservation::release() {}
 #else // POSIX
 
 intptr_t createShareableMemoryFd(size_t Size) {
+#if defined(__linux__)
   int Fd = memfd_create("feme-vulkan-sparse", 0);
+#else
+  int Fd;
+  llvm::SmallString<32> Name;
+  do {
+    // Keep the name below macOS's 31-character limit. O_EXCL ensures that
+    // concurrent allocations never share an existing object's pages.
+    llvm::sys::fs::createUniquePath("/feme-%%%%%%%%%%%%%%%%", Name,
+                                    /*MakeAbsolute=*/false);
+    Fd = shm_open(Name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+  } while (Fd < 0 && errno == EEXIST);
+  if (Fd < 0)
+    return -1;
+  // The descriptor keeps the object alive without leaving a persistent name.
+  if (shm_unlink(Name.c_str()) != 0) {
+    close(Fd);
+    return -1;
+  }
+#endif
   if (Fd < 0)
     return -1;
   if (ftruncate(Fd, static_cast<off_t>(Size)) != 0) {
