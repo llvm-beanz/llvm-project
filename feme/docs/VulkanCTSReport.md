@@ -545,6 +545,74 @@ no change needed -- an internal command-playback correctness fix
 implementing already-declared `VK_EXT_transform_feedback` resume
 semantics, no new feature/extension-surface change.
 
+## `L419(n)`: `winding_*` primitive-assembly transform-feedback bug (144 -> 27)
+
+Reduced the `winding_*` sub-cluster of `L419(n)`'s own 144-case residual.
+Reproduced `dEQP-VK.transform_feedback.simple.winding_triangle_strip_with_adjacency_8`
+standalone: "Vertex data verification failed" at
+`vktTransformFeedbackSimpleTests.cpp:1749`, with the embedded per-primitive
+detail "expected rotation of [...] but found [...]". Categorizing all 80
+`winding_*` cases by pass/fail showed an exhaustive split: every `*_list`
+topology (`triangle_list`, `line_list`) passes; every `*_strip`, `*_fan`,
+`*_with_adjacency`, and `patch_list` case fails.
+
+Root cause, found by reading `feme/lib/Graphics/Executor.cpp`: the
+vertex-shader-only (no geometry/tessellation stage) transform-feedback
+capture call always captured XFB output in raw sequential vertex-shader-
+invocation order. That is correct only for `List`-style topologies, where
+each invocation is already its own output record in order by coincidence.
+`VK_EXT_transform_feedback` actually requires capturing one record per
+*assembled input-assembly primitive's* vertex: a `Strip`/`Fan` topology
+duplicates a shared vertex once per primitive it belongs to, and a
+`*WithAdjacency` topology with no bound geometry shader drops its
+adjacency-only vertices entirely -- neither of which raw sequential order
+produces. The already-correct primitive-assembly logic for this
+(`TriIndices`/`LineIndices`, the same lists the rasterizer consumes) already
+existed in `Executor.cpp`, just computed *after* the XFB-capture call, for
+rasterization only.
+
+**Fix**: hoisted that primitive-assembly computation to run before the
+XFB-capture call instead of after it (a pure move, not a logic change —
+the rasterizer further down now simply reuses the earlier result), and
+changed `captureTransformFeedback` to take an explicit
+`llvm::ArrayRef<uint32_t> FlatIndices` source-row sequence instead of an
+implicit `{0,...,Count-1}` range, decoupling the capture's sequential
+*write* position from its (now possibly duplicated/filtered) *read* row.
+The vertex-shader-only call site builds `FlatIndices` for `Strip`/`Fan`/
+`*WithAdjacency` topologies by flattening `TriIndices`/`LineIndices` per
+instance (biased exactly the way the rasterizer's own `AbsTriIndices`/
+`AbsLineIndices` already were); `PointList` and `List`-style topologies
+keep the plain sequential range, unchanged. The two geometry-shader-
+sourced call sites (already correctly merged/ordered) now pass a trivial
+sequential sequence via a new `makeSequentialXfbIndices` helper and are
+otherwise unaffected. New unit test:
+`ExecutorTest.CapturesTriangleStripXfbInAssembledPrimitiveOrderWithDuplicatedVertices`
+(a 4-vertex `TriangleStrip` draw, checking the captured XFB buffer holds
+the two assembled triangles' own 6 vertex values in duplicated order,
+not the 4 raw invocation values).
+
+**Measured impact**: the standalone repro case now passes. Re-running the
+full `L419(n)` residual set (`winding_*`, `holes_*`,
+`multi_stream_single_raster_non_zero`) across all three
+`simple`/`simple_fast_gpl`/`simple_optimized_gpl` slices confirms the same
+construction-mode symmetry established by `L419(b)`/`L419(m)`: each
+slice's 48-case residual dropped to 9 (net -39 each, -117 combined) --
+every non-tessellated `winding_*` case (39 of 43 per slice) now passes.
+**Residual (27, 9 per slice)**: `winding_patch_list_*` (4/slice) --
+tessellated XFB capture is a structurally separate, not-yet-examined code
+path (the vertex-shader-only capture call is gated on
+`!Pipeline.hasTessellationStages()`, so a tessellated draw's domain-stage
+output is never captured to XFB at all today), tracked as new roadmap row
+`L419(o)` -- plus `holes_*` (4/slice) and
+`multi_stream_single_raster_non_zero` (1/slice), both untouched by this
+fix, confirming they are a separate root cause from `winding_*`.
+
+`ninja check-feme`: 3,711 Passed, 3 Unsupported, 0 Failed, 0 regressions
+(net +1 test). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed -- an internal rendering/capture-ordering correctness
+fix for already-declared `VK_EXT_transform_feedback` topology support, no
+new feature/extension-surface change.
+
 ## Validation outside CTS
 
 - `check-feme`: 3,708 passed, 3 unsupported, 0 failed.
