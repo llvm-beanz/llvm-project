@@ -114,6 +114,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Image.cpp
   ImageOps.cpp
   Memory.cpp
+  PhaseTiming.cpp
   PhysicalDeviceInfo.cpp
   Pipeline.cpp
   PipelineCache.cpp
