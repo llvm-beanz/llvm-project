@@ -63,17 +63,20 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image
-   case — split time across shader/pipeline compilation, image copy, and
-   fence wait. Unstarted for the third session running.
-2. **(~1 day)** Compare one identical transform-feedback case across
-   monolithic/fast-GPL/optimized-GPL construction — the 188/188/188
-   symmetry (570 cases, `L419(b)`) is still unexplained.
-3. **(~half day)** Extend the CTS runner so DeviceLost gets automatic
-   isolated re-verification and timed-out cases are a first-class
-   outcome, not a manual reconciliation step.
-4. **(standing)** Before trusting any new `.spvasm` lit test's `PASS`,
-   check `spirv_tools_tests` in `lit.site.cfg.py` first — see lesson
-   above. Add this to whatever checklist future sessions use.
-5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
-   offload-test-suite pattern before calling anything a new regression.
+1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image case —
+   split time across shader/pipeline compilation, image copy, and fence wait.
+   Unstarted for the **fourth** session running now.
+2. **(~1 day)** Reduce one `resume_*` and one `winding_*` transform-feedback
+   representative (new `L419(m)`, 231 cases, the two largest sub-clusters of
+   this session's own residual) — the natural next step on the same bug family,
+   not yet started.
+3. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS
+   rerun.
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression — not
+   exercised this session, still applies whenever `check-hlsl-feme-vk` work
+   resumes.
+5. **(standing, new this session)** Grep `Roadmap.md` for a candidate roadmap ID
+   *before* using it anywhere (code comments, test files, commit messages) — see
+   "Mistake caught and fixed" above.
