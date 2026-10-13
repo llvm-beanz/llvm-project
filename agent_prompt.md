@@ -62,24 +62,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours, highest signal)** Reduce one L417 primary-command-buffer
-   case and its matching graphics-pipeline-library case under a debug worker
-   with creation logging. Find the exact transition to `DeviceLost` before
-   touching depth/stencil aspect handling.
-2. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
+1. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
    Split time among shader/pipeline compilation, image copy execution, and
    fence wait; use the same case for a before/after performance bound.
-3. **(~1 day)** Start L419(a) with one `opquantize` and one compute
+2. **(~1 day)** Start L419(a) with one `opquantize` and one compute
    `opinboundsaccesschain` reduction. Together they cover 232 of the 528
    SPIR-V assembly failures and are the largest compact compiler clusters.
-4. **(~1 day)** Compare one identical transform-feedback case across
+3. **(~1 day)** Compare one identical transform-feedback case across
    monolithic, fast GPL, and optimized GPL construction. The exact
    188/188/188 symmetry is unusually strong evidence for one shared runtime
    bug rather than three pipeline-library bugs.
-5. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
+4. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
    isolated verification and timed-out cases are persisted as a first-class
    outcome. This removes the largest manual reconciliation step from the next
    full run.
-6. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
-   L417-L419 roadmap counts synchronized after every fix and isolated CTS
+5. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   L418-L419 roadmap counts synchronized after every fix and isolated CTS
    rerun.
+6. **(standing, new this session)** Before concluding any
+   `check-hlsl-feme-vk` discrepancy is a new FeMe regression, check whether
+   it matches the `VkBool32`/`WaveActiveMax` pattern above first -- a
+   previously-applied, `offload-test-suite`-local fix that a fresh
+   cherry-pick silently dropped.
