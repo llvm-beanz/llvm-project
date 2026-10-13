@@ -1722,6 +1722,66 @@ TEST(CanonicalizeStageTest,
   }
 }
 
+/// (Roadmap L419(r)) SPIR-V's `Stream` decoration (24 of
+/// `SPV_KHR_geometry_shader_passthrough`'s own geometry-streams family,
+/// numeric code 29) is, like `XfbBuffer`/`XfbStride` above, a
+/// *whole-variable* decoration -- `layout(stream=s) out gl_PerVertex
+/// {...};` decorates the block-instance variable itself, never any one
+/// of its individual members. glslang's real output for `dEQP-VK.
+/// transform_feedback.*.streams_*` stamps `%gl_PerVertex` with `OpDecorate
+/// %gl_PerVertex Stream 1` (confirmed via
+/// `--deqp-log-decompiled-spirv=enable`) but never emits a matching
+/// `OpMemberDecorate ... Stream <n>` for `gl_Position` itself. Before this
+/// fix, the per-member decomposition loop had no `Stream` inheritance at
+/// all (unlike the already-established `XfbBuffer`/`XfbStride` inheritance
+/// immediately above), so every `BuiltIn` member silently defaulted to
+/// `Elt.Stream = 0` via `addElement`'s own `D.Stream.value_or(0)`
+/// regardless of the block's real declared stream -- `gl_Position` landed
+/// in `Executor.cpp`'s `GSOutputElementsByStream[0]` bucket instead of the
+/// real non-zero stream, so rasterization (selecting that same non-zero
+/// stream) read a position-less bucket, producing CTS's whole-image
+/// `(255, 0, 255, 0)` magenta/black mismatch.
+TEST(CanonicalizeStageTest, InheritsStreamOntoBuiltInBlockMembersWithNoOwnStream) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_PerVertex = external addrspace(8) global { <4 x float>, float, [1 x float], [1 x float] }, !spirv.Decorations !0, !feme.spirv.MemberDecorations !10
+    define void @main() #0 {
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_PerVertex
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !0 = !{!1}
+    !1 = !{i32 29, i32 1}
+    !10 = !{!11, !12, !13, !14}
+    !11 = !{i32 0, !15}
+    !12 = !{i32 1, !16}
+    !13 = !{i32 2, !17}
+    !14 = !{i32 3, !18}
+    !15 = !{!19}
+    !19 = !{i32 11, i32 0}
+    !16 = !{!20}
+    !20 = !{i32 11, i32 1}
+    !17 = !{!21}
+    !21 = !{i32 11, i32 3}
+    !18 = !{!22}
+    !22 = !{i32 11, i32 4}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 4u);
+
+  // None of `gl_PerVertex`'s own four members has its own `Stream`
+  // decoration, so each must inherit the whole variable's `Stream = 1`
+  // rather than silently defaulting to stream 0.
+  for (const SignatureElement &Elt : Sig->Elements) {
+    EXPECT_EQ(Elt.Stream, 1u)
+        << "SystemValue=" << static_cast<int>(Elt.SystemValue);
+  }
+}
+
 /// (Roadmap L373) `addElements`'s per-member decomposition loop also
 /// remaps a member's `PhysicalIndex` to whichever LLVM struct field its
 /// own `Offset`/`XfbOffset` decoration says it actually occupies --

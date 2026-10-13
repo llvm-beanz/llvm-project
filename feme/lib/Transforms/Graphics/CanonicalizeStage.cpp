@@ -6025,6 +6025,33 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
               if (!MemberD.XfbStride)
                 MemberD.XfbStride = WholeVarD.XfbStride;
             }
+            // (Roadmap L419(r)) `Stream` (`VK_EXT_transform_feedback`'s
+            // `geometryStreams` feature) is, like `XfbBuffer`/`XfbStride`
+            // just above, a whole-*variable* decoration in SPIR-V: a
+            // geometry shader's `layout(stream = s) out gl_PerVertex
+            // {...};` block only ever carries `OpDecorate
+            // %gl_PerVertex_var Stream s` once, on the block instance
+            // itself, never repeated per member -- so `MemberD.Stream`
+            // (parsed from *this* member's own decoration list) is
+            // always absent for every `gl_PerVertex` member in a
+            // multi-stream geometry shader, unlike a plain top-level
+            // output variable (e.g. `layout(location=0) out vec4
+            // color;`), which the same `layout(stream=s) out;` default
+            // qualifier decorates directly and so reaches `addElement`
+            // with its own correct `D.Stream` already set. Without this
+            // inheritance, every `BuiltIn` block member (`gl_Position`,
+            // `gl_PointSize`, ...) silently defaulted to stream 0
+            // (`addElement`'s own `D.Stream.value_or(0)`) regardless of
+            // the block's real declared stream, so `Executor.cpp`'s
+            // per-stream `GSOutputElementsByStream` split
+            // `gl_Position` into stream 0's bucket while the
+            // rasterization-selected non-zero stream's own flattened
+            // output silently carried no position data at all --
+            // `dEQP-VK.transform_feedback.simple.streams_*`'s "max
+            // difference = (255, 0, 255, 0)" whole-image mismatch (a
+            // degenerate/garbage position, not a subtle rounding error).
+            if (!MemberD.Stream)
+              MemberD.Stream = WholeVarD.Stream;
             Pending.push_back({MemberD, MemberTy, PhysicalIndex});
             NextMemberLocation += RowCount;
           }
