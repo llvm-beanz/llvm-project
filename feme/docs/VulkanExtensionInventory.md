@@ -11,8 +11,8 @@ derived from the FeMe Vulkan ICD manifests:
   assigned to a roadmap milestone.
 - **Not implemented**: outside the currently declared implementation plan.
 
-Current registry: VK-GL-CTS `880f31a2bd9c`
-(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 358).
+Current registry: VK-GL-CTS `c28b36293093`
+(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 365).
 
 | Status | Count |
 |---|---:|

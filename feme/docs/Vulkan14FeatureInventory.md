@@ -6,17 +6,17 @@ manifests maintained beside the FeMe Vulkan ICD. It covers every core feature
 from Vulkan 1.0 through 1.4, every 1.3/1.4 limit, and every extension promoted
 into those core versions.
 
-Current registry: VK-GL-CTS `880f31a2bd9c`
-(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 358).
+Current registry: VK-GL-CTS `c28b36293093`
+(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 365).
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
-| 1.0 | 33 of 55 | n/a | n/a |
-| 1.1 | 2 of 12 | n/a | 7 of 23 |
-| 1.2 | 20 of 47 | n/a | 8 of 24 |
+| 1.0 | 34 of 55 | n/a | n/a |
+| 1.1 | 3 of 12 | n/a | 7 of 23 |
+| 1.2 | 21 of 47 | n/a | 10 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **Total** | **87 of 150** | **70** | **49 of 86** |
+| **Total** | **90 of 150** | **70** | **51 of 86** |
 
 Regenerate after changing feature or promoted-extension support:
 
