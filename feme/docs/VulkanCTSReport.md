@@ -97,6 +97,17 @@ Notable clean groups include `binding_model` (87,703 Pass), `compute` (701),
 `texture` (9,810), `ubo` (5,687), and `query_pool` (16,587), each with zero
 Fail, DeviceLost, TimedOut, or process-abnormal outcomes.
 
+The conformance-target groups that remain honestly unsupported also have a
+complete baseline:
+
+| Group | Total | Pass | NotSupported |
+|---|---:|---:|---:|
+| ray_query | 49,359 | 0 | 49,359 |
+| ray_tracing_pipeline | 22,707 | 0 | 22,707 |
+
+These measurements satisfy roadmap J9's baseline requirement without
+changing the open J1-J8 implementation prerequisites.
+
 ## Current failure ownership
 
 The 1,549 isolated ordinary failures are completely partitioned below.
