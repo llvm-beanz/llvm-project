@@ -63,33 +63,38 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** Reduce one `winding_*` case (new `L419(n)`, 43/slice, the
-   largest remaining sub-cluster) — "Vertex data verification failed" at
-   `vktTransformFeedbackSimpleTests.cpp:1749`, a per-primitive
-   vertex-rotation/winding-order check, not yet investigated at all. Likely a
-   FeMe rasterizer primitive-decomposition bug, distinct from the counter-buffer
-   bug just fixed.
-2. **(~half day)** Triage `holes_*` (4/slice) and
-   `multi_stream_single_raster_non_zero` (1/slice) — much smaller, not yet
-   looked at; could plausibly share `winding_*`'s root cause or be separate
-   again.
+1. **(~half day)** Fix `holes_*` (4/slice): an Output element sharing a location
+   via `component` but lacking an explicit `xfb_offset`/`xfb_buffer` is
+   incorrectly getting captured (apparently at offset 0, overwriting a real
+   captured element) instead of being excluded from XFB capture entirely.
+   Triaged this session (see above) — root cause direction identified
+   (signature/canonicalization layer, not `Executor.cpp`), not yet fixed.
+2. **(~half day)** `L419(o)`: reduce one `winding_patch_list_*` case —
+   tessellated XFB capture is entirely unimplemented today (the VS-only capture
+   call is gated on `!Pipeline.hasTessellationStages()`); needs its own
+   domain-stage-output capture path, structurally distinct from the fix in this
+   session.
 3. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path for
    large MSAA targets (91% of the profiled 4.55s case) — use `gdb` to find the
-   hot loop, no sampling profiler available in this environment.
+   hot loop, no sampling profiler available in this environment. Carried forward
+   unstarted for several sessions now.
 4. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing with
    60s/600s full-suite timeout reports — likely `QueueExecutor` thread
    contention, needs a `run_vulkan_cts.py`-driven contention test to confirm.
-5. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+   Also carried forward unstarted.
+5. **(~1 case triage)** `multi_stream_single_raster_non_zero` (1/slice) —
+   smallest remaining residual case, not yet looked at at all; could share
+   `holes_*`'s root cause (same file, same test group) or be distinct.
+6. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
    `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS
    rerun.
-6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+7. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
    offload-test-suite pattern before calling anything a new regression — not
    exercised this session, still applies whenever `check-hlsl-feme-vk` work
    resumes.
-7. **(standing)** Grep `Roadmap.md` for a candidate roadmap ID before using it
-   anywhere.
-8. **(standing, new this session)** Before trusting a carried-forward "still
-   unstarted" claim across multiple sessions, check `git log --oneline --all |
-   grep -i <ID>` and the roadmap row itself directly — this is the second time
-   handoff notes have silently gone stale across a compaction boundary (first
-   was the `L146` ID-collision near-miss).
+8. **(standing)** Grep `Roadmap.md` for a candidate roadmap ID before using it
+   anywhere — followed this session (`L419(o)` confirmed unused before use).
+9. **(standing)** Before trusting a carried-forward "still unstarted" claim
+   across multiple sessions, check `git log --oneline --all | grep -i <ID>` and
+   the roadmap row itself directly — followed this session (see "Standing check"
+   above), confirmed genuinely unstarted this time.
