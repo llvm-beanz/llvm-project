@@ -120543,3 +120543,62 @@ Docs: `VulkanCTSReport.md` new `## L419(m)` section; `Roadmap.md`'s `L419(m)` ro
 8. **(standing, new this session)** Before trusting a carried-forward "still unstarted" claim across multiple sessions, check `git log --oneline --all | grep -i <ID>` and the roadmap row itself directly — this is the second time handoff notes have silently gone stale across a compaction boundary (first was the `L146` ID-collision near-miss).
 
 Next: pick up `L419(n)`'s `winding_*` reduction — it's the single largest remaining transform-feedback sub-cluster (129 of 144 residual cases) and the natural continuation of this session's own work.
+
+# Session: L419(n) `winding_*` transform-feedback fix
+
+Fixed the largest remaining transform-feedback sub-cluster: non-tessellated `winding_*` (39 of 43 cases/slice, 117 of 144 residual cases). `ninja check-feme`: 3,711 Passed, 0 regressions. Try it: `VK_ICD_FILENAMES=build/tools/feme/tools/feme-vulkan/feme_icd.json deqp-vk --deqp-caselist-file=<winding_cases.txt>`.
+
+## Mandatory device check
+
+`VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed at start and again at the end (standing rule).
+
+## Standing check: carried-forward claims verified before starting
+
+Per the new standing rule from last session, ran `git log --oneline --all | grep -iE "L418\(a\)|L418\(b\)|L419\(n\)|winding"` and grepped `Roadmap.md`'s own rows directly before trusting the "still unstarted" claim. Confirmed genuinely unstarted this time — no stale handoff.
+
+## Root cause
+
+`captureTransformFeedback`'s vertex-shader-only caller (`Executor.cpp`, no geometry/tessellation stage) always captured XFB output in raw sequential vertex-shader-invocation order. That's only correct for `List`-style topologies, where each invocation happens to already be its own output record in order. `VK_EXT_transform_feedback` actually requires one record per *assembled primitive's* vertex: `Strip`/`Fan` topologies duplicate a shared vertex once per primitive, and `*WithAdjacency` topologies without a bound geometry shader drop their adjacency-only vertices — neither of which raw sequential order produces.
+
+Confirmed exhaustively: categorized all 80 `winding_*` cases from a prior run's QPA log — every `*_list` case passes, every `*_strip`/`*_fan`/`*_with_adjacency`/`patch_list` case fails. Exactly the topology split the hypothesis predicts.
+
+The fix ingredient already existed in the file: `TriIndices`/`LineIndices`, the correct per-primitive vertex-assembly lists the rasterizer consumes, just computed *after* the XFB-capture call, for rasterization only.
+
+## Fix
+
+1. Hoisted the `TriIndices`/`LineIndices` assembly (and its lambdas) to run before the XFB-capture call instead of after it — a pure move, not a logic change. The rasterizer further down reuses the same, now-earlier, result.
+2. Changed `captureTransformFeedback`'s signature from `uint32_t Count` to `llvm::ArrayRef<uint32_t> FlatIndices` — decoupling the capture's sequential *write* position (`Pos`) from its *read* row (`FlatIndices[Pos]`), which can now be duplicated/filtered/reordered.
+3. At the VS-only call site, built `FlatIndices` by flattening `TriIndices`/`LineIndices` per instance (biased exactly like the rasterizer's own `AbsTriIndices`/`AbsLineIndices`) for topologies that need it; `PointList`/`List`-style topologies keep the plain sequential range, unchanged.
+4. The two geometry-shader-sourced call sites (already correctly merged/ordered) pass a trivial sequential sequence via a new `makeSequentialXfbIndices` helper, unaffected by this fix.
+
+New unit test: `ExecutorTest.CapturesTriangleStripXfbInAssembledPrimitiveOrderWithDuplicatedVertices` — a 4-vertex `TriangleStrip` draw, checking the captured XFB buffer holds the two assembled triangles' own 6 vertex values in duplicated order (`v0,v1,v2,v1,v3,v2`), not the 4 raw invocation values.
+
+## Impact
+
+- Standalone repro (`winding_triangle_strip_with_adjacency_8`): Fail → Pass.
+- Full `L419(n)` residual re-run across all three `simple`/`simple_fast_gpl`/`simple_optimized_gpl` slices: 48-per-slice residual → 9-per-slice (net -39 each, -117 total). Same construction-mode symmetry `L419(b)`/`L419(m)` established.
+- Residual (27, 9/slice): `winding_patch_list_*` (4/slice — tessellated XFB capture, a structurally separate, not-yet-examined code path: the VS-only capture call is gated on `!Pipeline.hasTessellationStages()`, so a tessellated draw's domain-stage output isn't captured at all today, split out as new roadmap row `L419(o)`), `holes_*` (4/slice), `multi_stream_single_raster_non_zero` (1/slice) — both untouched by this fix, confirming they're a separate root cause.
+
+`ninja check-feme`: 3,711 Passed, 3 Unsupported, 0 Failed, 0 regressions (net +1 test).
+
+Docs: new `VulkanCTSReport.md` `## L419(n)` section; `Roadmap.md`'s `L419(n)` row struck through with the fix summary, `H34` row counts updated (48→9/slice), new `L419(o)` row added for the deferred `winding_patch_list_*` residual. Committed separately from the code fix (`d6e8fcc02981`/`d440f1bd3a27`). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: checked, no change needed — `VK_EXT_transform_feedback` was already "Advertised"; internal rendering/capture-ordering fix, no new feature/extension-surface bit.
+
+## Triage: `holes_*` (time-permitting item, not fixed this session)
+
+Reproduced `holes_vert`: `Fail (Invalid data found for vertex 0: expected (10, 0, 30) and found (20, 0, 30))`. Read the CTS source (`TransformFeedbackHolesInstance`, `vktTransformFeedbackSimpleTests.cpp:4051`): three scalar outputs (`goku`, `trunks`, `vegeta`) share `location=0` at different `component` indices; only `goku` (component 0, explicit `xfb_offset=0`) and `vegeta` (component 2, explicit `xfb_offset=8`) are XFB-captured — `trunks` (component 1, no explicit `xfb_offset`/`xfb_buffer`) is deliberately **not** captured, leaving a 4-byte "hole" at offset 4 that must stay zero.
+
+Expected buffer: `[10 (goku), 0 (hole), 30 (vegeta)]`. Found: `[20, 0, 30]` — `20` is `trunks`'s own value, landing at offset 0 (overwriting `goku`'s slot) instead of not being captured at all. This is a signature-canonicalization/XfbOffset-defaulting bug (likely: an Output element lacking an explicit `xfb_offset` decoration defaults to 0 somewhere in FeMe's SPIR-V import/canonicalization, instead of "not XFB-captured at all"), **not** related to `winding_*`'s primitive-assembly bug — confirmed separate root cause, confirmed by this fix leaving `holes_*` untouched. Needs investigation in the signature/canonicalization layer (likely `CanonicalizeStage.cpp` or the SPIR-V-to-LLVM import), not `Executor.cpp`. Estimate: ~half day, not started further this session.
+
+## Not reached this session (carried forward)
+
+1. **(~half day)** Fix `holes_*` (4/slice): an Output element sharing a location via `component` but lacking an explicit `xfb_offset`/`xfb_buffer` is incorrectly getting captured (apparently at offset 0, overwriting a real captured element) instead of being excluded from XFB capture entirely. Triaged this session (see above) — root cause direction identified (signature/canonicalization layer, not `Executor.cpp`), not yet fixed.
+2. **(~half day)** `L419(o)`: reduce one `winding_patch_list_*` case — tessellated XFB capture is entirely unimplemented today (the VS-only capture call is gated on `!Pipeline.hasTessellationStages()`); needs its own domain-stage-output capture path, structurally distinct from the fix in this session.
+3. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path for large MSAA targets (91% of the profiled 4.55s case) — use `gdb` to find the hot loop, no sampling profiler available in this environment. Carried forward unstarted for several sessions now.
+4. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing with 60s/600s full-suite timeout reports — likely `QueueExecutor` thread contention, needs a `run_vulkan_cts.py`-driven contention test to confirm. Also carried forward unstarted.
+5. **(~1 case triage)** `multi_stream_single_raster_non_zero` (1/slice) — smallest remaining residual case, not yet looked at at all; could share `holes_*`'s root cause (same file, same test group) or be distinct.
+6. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS rerun.
+7. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite pattern before calling anything a new regression — not exercised this session, still applies whenever `check-hlsl-feme-vk` work resumes.
+8. **(standing)** Grep `Roadmap.md` for a candidate roadmap ID before using it anywhere — followed this session (`L419(o)` confirmed unused before use).
+9. **(standing)** Before trusting a carried-forward "still unstarted" claim across multiple sessions, check `git log --oneline --all | grep -i <ID>` and the roadmap row itself directly — followed this session (see "Standing check" above), confirmed genuinely unstarted this time.
+
+Next: `holes_*`'s signature/canonicalization-layer XfbOffset-defaulting bug (item 1 above) is the natural next step — same test file, same general subsystem, smaller cluster, and the root-cause direction is already identified from this session's triage.
