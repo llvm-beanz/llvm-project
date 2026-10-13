@@ -24,4 +24,16 @@ int64_t fixedPointEdgeFn(std::array<float, 2> A, std::array<float, 2> B,
   return (Px - Ax) * (By - Ay) - (Py - Ay) * (Bx - Ax);
 }
 
+FixedPointEdge makeFixedPointEdge(std::array<float, 2> A,
+                                  std::array<float, 2> B, unsigned Bits) {
+  return {toSubpixelCoord(A[0], Bits), toSubpixelCoord(A[1], Bits),
+          toSubpixelCoord(B[0], Bits), toSubpixelCoord(B[1], Bits)};
+}
+
+int64_t evaluateFixedPointEdge(const FixedPointEdge &Edge, int64_t Px,
+                               int64_t Py) {
+  return (Px - Edge.Ax) * (Edge.By - Edge.Ay) -
+        (Py - Edge.Ay) * (Edge.Bx - Edge.Ax);
+}
+
 } // namespace feme::graphics

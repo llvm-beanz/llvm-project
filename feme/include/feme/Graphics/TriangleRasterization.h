@@ -56,6 +56,31 @@ namespace feme::graphics {
 int64_t fixedPointEdgeFn(std::array<float, 2> A, std::array<float, 2> B,
                          std::array<float, 2> P, unsigned Bits);
 
+/// Roadmap L418(a): `fixedPointEdgeFn` above quantizes all three of `A`,
+/// `B`, *and* `P` on every call, but the per-sample coverage test in
+/// `Executor.cpp`'s tiled rasterizer calls it three times (once per edge)
+/// for every lane of every sample of every covered quad, always with the
+/// *same* triangle (so the same `A`/`B` per edge) and testing many
+/// different `P` -- re-quantizing each edge's two endpoints on every one
+/// of those calls was pure redundant work once profiling (see `L418(a)`'s
+/// own roadmap entry) showed this loop as the dominant cost of a large
+/// MSAA `Draw`. `FixedPointEdge` holds one edge's own quantized endpoints,
+/// computed once per triangle by `makeFixedPointEdge`; `evaluateFixedPointEdge`
+/// then only quantizes `P` (itself shared across all three edges a given
+/// sample tests, so better computed once by the caller too) and performs
+/// the same arithmetic `fixedPointEdgeFn` does -- bit-for-bit identical
+/// results, since `toSubpixelCoord` is a pure function of its own
+/// argument regardless of how many times or where it is called.
+struct FixedPointEdge {
+  int64_t Ax, Ay, Bx, By;
+};
+
+FixedPointEdge makeFixedPointEdge(std::array<float, 2> A,
+                                  std::array<float, 2> B, unsigned Bits);
+
+int64_t evaluateFixedPointEdge(const FixedPointEdge &Edge, int64_t Px,
+                               int64_t Py);
+
 } // namespace feme::graphics
 
 #endif // FEME_GRAPHICS_TRIANGLERASTERIZATION_H

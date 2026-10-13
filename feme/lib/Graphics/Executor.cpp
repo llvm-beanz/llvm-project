@@ -3941,6 +3941,21 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                                      Tri.Pos[2],
                                                      LineSubPixelPrecisionBits)
                                  : 0;
+        // (roadmap L418(a)) Precomputed once per triangle, not per
+        // lane/sample below: gdb-sampled profiling of a large MSAA
+        // `Draw` (see `L418(a)`'s own roadmap entry) found this per-
+        // sample coverage test's repeated `fixedPointEdgeFn` calls --
+        // each re-quantizing both of an edge's own endpoints on every
+        // lane and every sample, even though those endpoints never
+        // change for the life of this triangle -- to be its dominant
+        // cost. See `FixedPointEdge`'s own comment for why this is
+        // bit-for-bit identical to the old per-call quantization.
+        FixedPointEdge Edge0 = makeFixedPointEdge(Tri.Pos[1], Tri.Pos[2],
+                                                  LineSubPixelPrecisionBits);
+        FixedPointEdge Edge1 = makeFixedPointEdge(Tri.Pos[2], Tri.Pos[0],
+                                                  LineSubPixelPrecisionBits);
+        FixedPointEdge Edge2 = makeFixedPointEdge(Tri.Pos[0], Tri.Pos[1],
+                                                  LineSubPixelPrecisionBits);
         for (int32_t QY = QStartY; QY < QMaxY; QY += 2) {
           for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
             PendingQuad Quad;
@@ -3982,12 +3997,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   // derived from this same sample below stay in `float`
                   // (this is a coverage decision, not an interpolated
                   // value).
-                  int64_t E0 = fixedPointEdgeFn(Tri.Pos[1], Tri.Pos[2], P,
-                                                 LineSubPixelPrecisionBits);
-                  int64_t E1 = fixedPointEdgeFn(Tri.Pos[2], Tri.Pos[0], P,
-                                                 LineSubPixelPrecisionBits);
-                  int64_t E2 = fixedPointEdgeFn(Tri.Pos[0], Tri.Pos[1], P,
-                                                 LineSubPixelPrecisionBits);
+                  int64_t Px = toSubpixelCoord(P[0], LineSubPixelPrecisionBits);
+                  int64_t Py = toSubpixelCoord(P[1], LineSubPixelPrecisionBits);
+                  int64_t E0 = evaluateFixedPointEdge(Edge0, Px, Py);
+                  int64_t E1 = evaluateFixedPointEdge(Edge1, Px, Py);
+                  int64_t E2 = evaluateFixedPointEdge(Edge2, Px, Py);
                   bool In0 =
                       E0 > 0 ||
                       (E0 == 0 && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
