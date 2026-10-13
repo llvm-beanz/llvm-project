@@ -118,7 +118,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Cluster | Cases | Roadmap ownership |
 |---|---:|---|
 | Transform feedback: `simple*` (188 each for monolithic, fast GPL, and optimized GPL), fuzz, and primitive restart | 570 | H34, H36, H37, H173(c), L419(b) |
-| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 0 -- fully fixed by a `BlockAccessChainPattern` templating fix, a struct-of-vec3 CompositeInsert/Extract fix, and a final `matrix_3x3.float`-specific Function-storage/InBoundsAccessChain tight-matrix fix), `opmemoryaccess` (35), and `decoration_group` (30) | 309 | L419(a) |
+| SPIR-V assembly instructions, led by `opquantize` (160, now 13 after an upstream `OpQuantizeToF16` fix), compute `opinboundsaccesschain` (72, now 0 -- fully fixed by a `BlockAccessChainPattern` templating fix, a struct-of-vec3 CompositeInsert/Extract fix, and a final `matrix_3x3.float`-specific Function-storage/InBoundsAccessChain tight-matrix fix), `opmemoryaccess` (35, now 0 -- fully fixed by a new upstream `CopyMemoryPattern` SPIRVToLLVM lowering plus an upstream SPIR-V deserializer `Aligned`-bit-detection fix), and `decoration_group` (30) | 274 | L419(a), L419(l) |
 | Pipeline multisample, extended dynamic state, graphics-library, and interpolation cases | 203 | L419(c) |
 | GraphicsFuzz correctness cases; no crashes or timeouts remain | 83 | L116 |
 | Coherent Vulkan memory-model `fence_fence` message-passing and write-after-read cases | 52 | K9, L419(d) |
@@ -129,7 +129,7 @@ Roadmap IDs point to the bounded follow-up work.
 | Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,330** | |
+| **Total** | **1,295** | |
 
 ## Persistent abnormal outcomes
 
@@ -311,6 +311,51 @@ likely reflect full-suite contention (many concurrent `QueueExecutor`
 worker threads competing for CPU) rather than this case's isolated cost.
 Optimizing the rasterizer itself is out of scope for this session; see
 `Roadmap.md`'s `L418` entry for the follow-up breakdown.
+
+### `opmemoryaccess` fix (L419(a))
+
+All 35 `dEQP-VK.spirv_assembly.instruction.graphics.opmemoryaccess.*`
+cases (7 `MemoryAccess` variants x 5 shader stages) failed identically
+with `error: failed to legalize operation 'spirv.CopyMemory'`. Root
+cause: `spirv.CopyMemory` had no SPIRVToLLVM lowering pattern anywhere
+(upstream MLIR or FeMe) -- a clean upstream gap, structurally identical
+to the earlier `opquantize`/`OpQuantizeToF16` discovery (an op the
+SPIR-V dialect fully defines/parses/deserializes but for which no
+lowering was ever written).
+
+Implementing a new `CopyMemoryPattern` (lowering to an LLVM load from
+`source` followed by a store to `target`, decoding each side's
+independent `(memory_access, alignment)` pair per the op's own
+single-mask-applies-to-both-sides spec text) surfaced a second, deeper
+bug: a crash (`std::optional<unsigned>::operator*()`, not engaged) on
+`nontemporal_aligned_*` specifically. Root-caused via `gdb` plus
+temporary `llvm::errs()` instrumentation (the Release build has no
+debug info for local variables in heavily-templated/inlined conversion
+pattern code, so printf-style debugging was the effective fallback) to
+the SPIR-V deserializer's `processOp<spirv::CopyMemoryOp>`: it detected
+the `Aligned` bit via exact mask equality (`attrValue == 2`) instead of
+a bit test. Since `MemoryAccess` is a combinable bit-enum (`Volatile`,
+`Aligned`, `Nontemporal` are independent bits), this silently failed
+whenever `Aligned` co-occurred with another bit (`Aligned|Nontemporal`
+= 6), skipping the alignment literal word and desynchronizing every
+subsequent word read for that instruction.
+
+Both fixed upstream (outside `feme/`, two separate isolated/self-tested
+commits): the new `CopyMemoryPattern`
+(`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) and the
+deserializer's `isAlignedAttr` fix
+(`mlir/lib/Target/SPIRV/Deserialization/DeserializeOps.cpp`, now
+`spirv::bitEnumContainsAll(..., Aligned)`), each with new round-trip
+lit coverage (`memory-ops-to-llvm.mlir`'s `@copy_memory*` tests;
+`memory-ops.mlir`'s combined-bit `OpCopyMemory` cases). Result: full
+`opmemoryaccess` cluster 35/35 Pass, 0 Fail (net -35). Re-verified: the
+full `mlir/test/{Conversion/SPIRVToLLVM,Target/SPIRV,Dialect/SPIRV}` lit
+suites (145 tests, 0 Fail) and `ninja check-feme` (3707/3710 Passed, 3
+Unsupported, 0 Failed, 0 regressions).
+
+Combined net reduction across all four `L419(a)` fixing sessions:
+1,549 -> 1,295. `decoration_group` (30) remains untouched -- tracked as
+new roadmap row `L419(l)`.
 
 ## Validation outside CTS
 
