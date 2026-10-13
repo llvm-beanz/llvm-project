@@ -120714,3 +120714,111 @@ Next: `streams_1`'s `rasterizationStream` path in `Executor.cpp` -- read
 `GraphicsPipeline.cpp`'s `rasterizationStream` plumbing end to end before
 touching anything, since the earlier "it's implemented" grep hit does not
 mean it's implemented *correctly*.
+
+# Session: L419(r)/L419(s) streams_* fully fixed (39/39 Pass), closes pre-existing H173(c)
+
+Start here: `L419(q)`'s `streams_1`/`streams_clipdistance_1`/
+`streams_culldistance_1` -- the largest untriaged transform-feedback
+cluster, carried forward from last session with zero root-cause progress.
+Fully fixed this session, two distinct bugs.
+
+## What's done, concretely
+
+1. Mandatory device check: `FeMe CPU Vulkan Device`, confirmed via
+   explicit `VK_ICD_FILENAMES=.../feme_icd.json` (the shell's ambient
+   default silently points at llvmpipe -- always override explicitly).
+2. Verified carried-forward claims via `git log --oneline --all | grep
+   -iE "L419(q)|L419(o)|L418(a)|L418(b)|rasterizationStream|multi_stream"`
+   -- found one relevant prior commit establishing `RasterizationStream`
+   plumbing exists but is buggy. No stale handoff found.
+3. **Root cause #1, `L419(r)` (`CanonicalizeStage.cpp`).** SPIR-V's
+   `Stream` decoration is whole-variable, like `XfbBuffer`/`XfbStride` --
+   but unlike those two, it had no inheritance onto `BuiltIn` block
+   members. Every member (`gl_Position` included) silently defaulted to
+   stream 0, so rasterization (reading the real non-zero stream) saw a
+   position-less bucket -- the whole-image `(255, 0, 255, 0)` mismatch.
+   Fix: one-line inheritance add, mirroring the existing pattern. New
+   unit test `CanonicalizeStageTest.
+   InheritsStreamOntoBuiltInBlockMembersWithNoOwnStream`. Fixed
+   monolithic `simple` slice (13/13 Fail -> Pass, including the bonus
+   `multi_stream_single_raster_non_zero`) but left both GPL slices still
+   13/13 Fail.
+4. **Root cause #2, `L419(s)` (`GraphicsPipeline.cpp`/`.h`).**
+   `VK_EXT_graphics_pipeline_library` capture unconditionally stripped
+   `VkPipelineRasterizationStateCreateInfo::pNext`, silently dropping
+   `VkPipelineRasterizationStateStreamCreateInfoEXT` for every GPL-built
+   pipeline. Identical shape to a problem `TessellationDomainOrigin`
+   (`L340`) already solved -- copied that exact pattern (capture by
+   value, fold across children, re-chain at link time). New unit test
+   `GraphicsPipelineTest.LinksLibraryWithNonZeroRasterizationStream`
+   (mirrors `LinksLibraryWithLowerLeftTessellationDomainOrigin`).
+5. **Combined measured impact**: 39-case targeted caselist
+   (`streams_*`/`streams_clipdistance_*`/`streams_culldistance_*` +
+   `multi_stream_single_raster_non_zero`, x3 slices) now **39/39 Pass**.
+   `ninja check-feme`: 3,713/3,716 Passed (net +2 new tests), 0
+   regressions.
+6. Committed in 4 small commits: fix #1 + its test, fix #2 + its test,
+   `Roadmap.md` sync, `VulkanCTSReport.md` new section.
+
+## Mistake caught and fixed this session
+
+**Pre-existing roadmap row missed, not a collision.** While reducing
+fix #2, found `H173(c)` ("Fix nonzero rasterization-stream selection for
+point-input geometry shaders... 36 `streams*` failures... Hand-trace one
+matched triplet") already named this exact cluster (12/slice x 3 = 36,
+matching exactly) -- but last session's `L419(q)` treated it as newly
+discovered, never finding `H173(c)`. The standing "grep `Roadmap.md`
+before using a new ID" check only prevents *collisions* (two rows with
+the same ID), not *missed ownership* (one bug tracked twice under two
+different IDs with different wording). Both rows now closed, cross-
+referencing each other.
+
+**Action for future sessions**: when triaging any "newly discovered"
+CTS cluster, also grep `Roadmap.md` for the test-name substring itself
+(e.g. `grep -i streams` ), not just for candidate new IDs -- a
+differently-worded existing row for the same bug won't surface from an
+ID-collision check alone.
+
+## What's still wrong (prioritized)
+
+1. **(~half day)** `L419(o)`: `winding_patch_list_*` (4/slice) --
+   tessellated XFB capture unimplemented (the VS-only capture call is
+   gated on `!Pipeline.hasTessellationStages()`), carried forward
+   unstarted for three sessions now. Needs its own domain-stage-output
+   capture path, structurally distinct from every fix landed so far.
+2. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path
+   for large MSAA targets -- carried forward unstarted for many sessions
+   now (profiling already isolated the hot path, just needs a
+   `gdb`-driven reduction since no sampling profiler exists here).
+3. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing
+   with 60s/600s full-suite timeout reports -- also carried forward
+   unstarted.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
+   the `L418`-`L419` roadmap counts synchronized after every fix and
+   isolated CTS rerun -- done this session (inventories needed no
+   change, confirmed by grep: both internal correctness fixes for
+   already-declared feature/extension surface).
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression
+   -- not exercised this session, no `check-hlsl-feme-vk` work was done.
+
+## Standing reminders (apply every session)
+
+1. Grep `Roadmap.md` for a candidate roadmap ID before using it anywhere
+   -- followed this session (`L419(r)`/`L419(s)` confirmed unused).
+2. **(new this session, see "Mistake caught" above)** Also grep
+   `Roadmap.md` for the failing test-name substring itself, not just
+   candidate IDs, before treating any cluster as newly discovered --
+   this is the only check that would have caught `H173(c)` sooner.
+3. Before trusting a carried-forward "still unstarted" claim across
+   multiple sessions, check `git log --oneline --all | grep -i <ID>` and
+   the roadmap row itself directly -- followed this session, confirmed
+   genuinely unstarted for `L419(o)`/`L418(a)`/`L418(b)`.
+4. Remember the shell's ambient `VK_ICD_FILENAMES` defaults to llvmpipe,
+   not FeMe -- always set it explicitly for every `vulkaninfo`/`deqp-vk`
+   invocation, every session.
+
+Next: `L419(o)`'s `winding_patch_list_*` -- read `Executor.cpp`'s
+tessellation domain-stage output path end to end (the `hasTessellationStages()`
+gate around the existing VS-only capture call) before writing any code,
+since this needs a new capture path, not a tweak to an existing one.
