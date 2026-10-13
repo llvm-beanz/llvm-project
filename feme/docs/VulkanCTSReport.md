@@ -958,3 +958,88 @@ pure performance optimization, not a correctness fix).
 This closes `L418(a)`. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change needed -- an internal
 performance optimization only, no feature/extension-surface change.
+
+## `L418(b)`/`L421`: `VkDeviceMemory` use-after-free race under contention; `L422` found, not yet fixed
+
+`L418(b)` set out to reconcile `L418`'s own ~5s standalone per-case timing
+with the roadmap's original 60s/600s full-suite timeout reports, under the
+leading hypothesis that `QueueExecutor` worker-thread contention (not raw
+per-case cost) produced the timeout numbers.
+
+**Reproduction**: built a 17-case caselist of the heaviest
+`1024x1024x2*img2img_msaa` cases and ran it fully concurrently
+(`run_vulkan_cts.py --batch-size=1 --workers=17`, oversubscribing the
+12-CPU host). Total wall time was only 43s, but several `initial-*.log`
+files were truncated mid-case, needing the script's own recovery/verify
+rounds to re-run ~9-11 of the 17 to get a complete result -- i.e.
+processes were dying mid-case, not just slowing down. Confirmed via a raw
+bash launch of all 17 `deqp-vk` processes directly (bypassing the script,
+which deliberately ignores exit status): **6/17 exited with signal 139
+(SIGSEGV)**. Solo (non-concurrent) runs of the same case never crash
+(10/10 clean passes).
+
+**Key isolation**: the crash does not require other FeMe processes at
+all -- saturating all 12 CPUs with unrelated `bash` busy-loops
+(`timeout N bash -c 'while :; do :; done'` x12) while running a *single*
+`deqp-vk` process reproduced the SIGSEGV reliably. This is an internal
+multi-threading race within one process, exposed by general scheduling
+pressure increasing context-switch opportunities, not an inter-process
+resource conflict. This is a more general, more reliable repro technique
+than attach-based sampling and is worth keeping for future
+concurrency-bug hunting.
+
+**Root cause (`L421`)**: `gdb -batch -ex "handle SIGSEGV stop print
+nopass" -ex run -ex "thread apply all bt"` under the busy-loop stress
+caught the crash live: a `QueueExecutor` worker thread inside
+`packClearColor`/`executeDraws` racing the main/test thread concurrently
+inside `vkFreeMemory` -> `close()` (`vk::SimpleAllocation`'s own
+teardown). `Image`/`Buffer` have been `PendingExecutionRefCounted` since
+`L409`/`L410`, but both hold only a raw, non-owning `DeviceMemory *`
+(`MemoryRangeBinding`, `MemoryBinding.h`) -- so keeping the `Image`/
+`Buffer` wrapper alive does not stop its *bound memory* from being freed
+out from under an in-flight task. This is fully legal Vulkan usage per
+spec: an application only needs to keep the command buffer alive until
+its submission completes, not every resource it references.
+
+**Fix**: made `DeviceMemory` itself inherit `PendingExecutionRefCounted`,
+mirroring `L409`/`L410`'s established pattern exactly. `vkFreeMemory`
+(`Memory.cpp`) now calls `requestDestroy()`, freeing immediately only if
+it returns `true`. `Sync.cpp`'s `collectExecutionRefs` gained a final
+pass (`collectDeviceMemoryRefs`) that walks every already-collected
+`Image`'s/`Buffer`'s `ranges()` (covering every one reached directly or
+indirectly through `ImageView`/`DescriptorSet`/`Framebuffer` collection)
+to find bound `DeviceMemory`, with matching `retainExecutionRefs`/
+`releaseExecutionRefs` loops -- the release loop additionally calls
+`freeShareableDeviceMemory` before destroying the object, unlike every
+other `PendingExecutionRefCounted` type, since `vkFreeMemory`'s own
+immediate-free path does both steps. New unit test
+`SyncTest.SubmitThenImmediatelyFreeMemoryWithNoWaitSucceeds`.
+
+**Verification**: `check-feme`: 3716/3716 Passed, 3 Unsupported, 0
+regressions. Re-ran the exact isolated repro (busy-loop CPU saturation +
+`gdb`) at matched 8-concurrent-process load: the pre-fix build crashed
+with this exact signature (`packClearColor`/`vkFreeMemory` race) **8/8**
+times; the post-fix build shows **0/8** occurrences of it.
+
+**`L422` found, not fixed**: the same stress test against the post-fix
+build still shows a *different*, lower-rate crash (3/8 at matched
+concurrency): `feme::vulkan::Image::setLayout` crashes while the main
+thread is not racing it at all -- it is already blocked in
+`QueueExecutor::~QueueExecutor()`'s `std::thread::join()`
+(`vkDestroyDevice` teardown), meaning the `Image` was freed earlier by
+some other path not visible in that backtrace. A 20-process stress
+variant also showed `runValidatedDraw`/
+`feme::vulkan::DescriptorSetLayout::dynamicOffsetCount` crash signatures,
+raising a specific suspicion: `DescriptorSetLayout` does not appear to be
+in `L410`'s original `PendingExecutionRefCounted` list (only
+`DescriptorSet` is), which would make this a `DescriptorSetLayout` analog
+of `L421`'s own `DeviceMemory` gap -- not yet confirmed. Filed as its own
+roadmap entry, `L422`, not fixed this session.
+
+This substantially answers `L418(b)`'s original question: full-suite
+timeout/`DeviceLost` reports are very plausibly explained, at least in
+part, by this crash family manifesting under load, not merely by
+`L418`'s own per-case cost (independently already -16% faster, see
+`L418(a)`). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+no change needed for either `L421` or `L422` -- internal correctness
+fixes/findings only, no feature/extension-surface change.
