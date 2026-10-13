@@ -36,6 +36,15 @@ with one worker. Of those, 442 passed and 24 reproduced `DeviceLost`. The 20
 unfinished large copy/blit cases were rerun individually with a 600-second
 limit: four passed and 16 again exceeded the limit.
 
+**Update (`L420`):** the harness now automates both of the manual steps
+above. `DeviceLost` receives exactly the same one-case-per-process solo
+re-verification `Fail` already got, and any case killed for exceeding
+`--final-timeout` while running completely alone (the only granularity at
+which a process timeout can be attributed to one specific case) is
+recorded directly as a first-class `TimedOut` outcome rather than reverting
+to `Unrun`. A future full re-triage will no longer need the by-hand
+`DeviceLost`/long-timeout reruns this section describes.
+
 The full run exposed a previously diagnosed VK-GL-CTS host-layout defect in
 58 `mesh_shader.ext.in_out.with_f16` cases: C++ arrays of `tcu::Vec3` used a
 12-byte stride while the matching std430 shader arrays used 16 bytes. The
