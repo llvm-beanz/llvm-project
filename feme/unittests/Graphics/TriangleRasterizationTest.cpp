@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Graphics/LineRasterization.h"
 #include "feme/Graphics/TriangleRasterization.h"
 
 #include "gtest/gtest.h"
@@ -121,6 +122,43 @@ TEST(TriangleRasterizationTest, L402NearTieMatchesReferenceRasterizer) {
 /// correctly reports the sample point as covered. This is why
 /// `LineSubPixelPrecisionBits` (`LineRasterization.h`) was raised from 4
 /// to 8.
+/// Roadmap L418(a): `FixedPointEdge`/`makeFixedPointEdge`/
+/// `evaluateFixedPointEdge` exist purely to avoid re-quantizing a
+/// triangle edge's own endpoints on every per-sample coverage test call
+/// (see their own comments in `TriangleRasterization.h`) -- this must
+/// produce bit-for-bit identical results to the original single-call
+/// `fixedPointEdgeFn`, for every edge of both the axis-aligned triangle
+/// above and the `L402` near-tie case, at several sample points each
+/// (including on, and off, a shared edge).
+TEST(TriangleRasterizationTest,
+     PrecomputedEdgeMatchesFixedPointEdgeFnBitForBit) {
+  auto checkEdgeMatches = [](std::array<float, 2> A, std::array<float, 2> B,
+                             std::array<float, 2> P, unsigned Bits) {
+    FixedPointEdge Edge = makeFixedPointEdge(A, B, Bits);
+    int64_t Px = toSubpixelCoord(P[0], Bits);
+    int64_t Py = toSubpixelCoord(P[1], Bits);
+    EXPECT_EQ(evaluateFixedPointEdge(Edge, Px, Py),
+             fixedPointEdgeFn(A, B, P, Bits));
+  };
+
+  std::array<float, 2> V0{0.0f, 0.0f}, V1{0.0f, 10.0f}, V2{10.0f, 0.0f};
+  for (std::array<float, 2> P :
+       {std::array<float, 2>{2.5f, 2.5f}, std::array<float, 2>{8.5f, 8.5f},
+        std::array<float, 2>{0.0f, 0.0f}, std::array<float, 2>{5.0f, 5.0f}}) {
+    checkEdgeMatches(V0, V1, P, Bits);
+    checkEdgeMatches(V1, V2, P, Bits);
+    checkEdgeMatches(V2, V0, P, Bits);
+  }
+
+  std::array<float, 2> T0{18.530607223510742f, 0.9789028167724609f};
+  std::array<float, 2> T1{7.186938285827637f, 0.41660499572753906f};
+  std::array<float, 2> T2{24.08245849609375f, 13.12424087524414f};
+  std::array<float, 2> PixelCenter{8.5f, 0.5f};
+  checkEdgeMatches(T0, T1, PixelCenter, Bits);
+  checkEdgeMatches(T1, T2, PixelCenter, Bits);
+  checkEdgeMatches(T2, T0, PixelCenter, Bits);
+}
+
 TEST(TriangleRasterizationTest,
      SubPixelScaleTriangleSurvivesQuantizationAtEightBitsNotFour) {
   constexpr float PX = 12.5f, PY = 12.5f;
