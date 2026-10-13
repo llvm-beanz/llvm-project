@@ -3500,8 +3500,9 @@ bool isInputArrayAccessChain(mlir::spirv::AccessChainOp Op) {
 /// through this pointer's own outer array dimension -- whenever
 /// layOutStructIfOffsetsMatch's own natural-alignment gap insertion has
 /// shifted that member's physical field index away from its declared one.
+template <typename SPIRVOp>
 bool remapNestedStructMemberIndices(
-    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    mlir::Type CurrentType, SPIRVOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
     llvm::SmallVectorImpl<mlir::Value> &Indices,
@@ -4248,8 +4249,9 @@ unsigned getStructMemberPhysicalIndex(mlir::spirv::StructType Struct,
 /// member-selector and forwarded every further index unchanged --
 /// exactly wrong once a member navigated by one of those further
 /// indices is itself a reordered/padded struct.
+template <typename SPIRVOp>
 bool remapNestedStructMemberIndices(
-    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    mlir::Type CurrentType, SPIRVOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
     llvm::SmallVectorImpl<mlir::Value> &Indices,
@@ -4364,8 +4366,9 @@ mlir::Type substituteArrayOfMatrixElementType(
 /// (one instance per array element) for the latter, whose own element
 /// type (not `Op.getBasePtr()`'s own pointee) is what Element was actually
 /// derived from.
+template <typename SPIRVOp>
 mlir::LogicalResult rewriteBlockAccess(
-    mlir::spirv::AccessChainOp Op, mlir::ConversionPatternRewriter &Rewriter,
+    SPIRVOp Op, mlir::ConversionPatternRewriter &Rewriter,
     const mlir::TypeConverter &TypeConverter, const BlockElement &Element,
     mlir::spirv::StructType BlockStruct, mlir::Value Handle,
     mlir::ValueRange AllIndices, unsigned Selector) {
@@ -4871,14 +4874,24 @@ mlir::LogicalResult rewriteBlockAccess(
 /// ArrayedBlockAccessChainPattern instead, since its handle needs a runtime
 /// index this pattern's own base pointer -- already converted to a handle
 /// with no such index -- cannot supply.
-class BlockAccessChainPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+///
+/// Templated over `spirv.AccessChain`/`spirv.InBoundsAccessChain`: per the
+/// SPIR-V spec the latter "has the same operands, result, and semantic
+/// restrictions as AccessChain, except that if the input pointer is a
+/// pointer into a composite object, then the resulting pointer is
+/// guaranteed to point within the same composite object" -- a stronger
+/// contract this rewrite's own `llvm.spv.resource.getpointer`/GEP output
+/// already satisfies either way, so one pattern body, instantiated twice,
+/// covers both ops.
+template <typename SPIRVOp>
+class BlockAccessChainPattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using OpAdaptor =
+      typename mlir::SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
 
   mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+  matchAndRewrite(SPIRVOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
         Adaptor.getBasePtr().getType());
@@ -4916,7 +4929,7 @@ public:
     }
 
     return rewriteBlockAccess(
-        Op, Rewriter, *getTypeConverter(), *Element,
+        Op, Rewriter, *this->getTypeConverter(), *Element,
         mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType()),
         Adaptor.getBasePtr(), Indices, Selector);
   }
@@ -7013,8 +7026,9 @@ unsigned getStructMemberPhysicalIndexInRealType(
 /// possible past its own component index), so this insertion is only
 /// ever attempted once per access chain, and the loop naturally stops on
 /// the next iteration regardless.
+template <typename SPIRVOp>
 bool remapNestedStructMemberIndices(
-    mlir::Type CurrentType, mlir::spirv::AccessChainOp Op, unsigned StartIndex,
+    mlir::Type CurrentType, SPIRVOp Op, unsigned StartIndex,
     const mlir::TypeConverter &Converter,
     mlir::ConversionPatternRewriter &Rewriter,
     llvm::SmallVectorImpl<mlir::Value> &Indices,
@@ -16373,7 +16387,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BitFieldInsertPattern, BitFieldSExtractPattern, BitFieldUExtractPattern,
       BranchConditionalPattern, BuiltInAddressOfPattern,
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
-      BlockAccessChainPattern, CompositeConstructPattern,
+      BlockAccessChainPattern<mlir::spirv::AccessChainOp>,
+      BlockAccessChainPattern<mlir::spirv::InBoundsAccessChainOp>,
+      CompositeConstructPattern,
       ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
       CopyObjectConversionPattern, CopyLogicalConversionPattern,
       DemoteToHelperInvocationConversionPattern,

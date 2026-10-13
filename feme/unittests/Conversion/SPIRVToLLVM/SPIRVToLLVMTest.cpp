@@ -1855,4 +1855,54 @@ TEST(SPIRVToLLVMTest,
   EXPECT_NE(Result.find(", 1, 1] :"), std::string::npos) << Result;
 }
 
+// (Roadmap L419(a)) `BlockAccessChainPattern` -- the pattern matching a
+// storage/uniform buffer block's single-member `BufferBlock` wrapper
+// shape (see its own doc comment above) -- used to be templated only on
+// `spirv.AccessChain`, never `spirv.InBoundsAccessChain`, even though
+// upstream MLIR's own generic `AccessChainConversion` is templated over
+// both (per the SPIR-V spec, `OpInBoundsAccessChain` has identical
+// operands/results/semantics to `OpAccessChain`, just a stronger
+// guarantee). Since no FeMe pattern matched `spirv.InBoundsAccessChain`
+// against this wrapper shape, MLIR's own generic (lower-benefit, and
+// incompatible with FeMe's handle-typed base pointers) pattern was all
+// that was left to try, and legalization failed outright with
+// `'spirv.InBoundsAccessChain' op : not a block access`. This exact
+// shape -- a single-member `!spirv.rtarray<f32, stride=4>` wrapped in a
+// `BufferBlock` struct, reached via `OpInBoundsAccessChain` rather than
+// plain `OpAccessChain` -- is what every one of the 72
+// `dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.*`
+// CTS cases shares; glslang itself only ever emits
+// `OpInBoundsAccessChain` (never plain `OpAccessChain`) for indexing
+// into SSBO array elements. Fixed by templating both
+// `BlockAccessChainPattern` and the `rewriteBlockAccess`/
+// `remapNestedStructMemberIndices` helpers it calls over the SPIR-V op
+// type, and registering both `AccessChainOp` and `InBoundsAccessChainOp`
+// instantiations.
+TEST(SPIRVToLLVMTest, InBoundsAccessChainIntoStorageBufferWrapperConverts) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @ssbo bind(0, 0) : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), "
+      "BufferBlock>, Uniform> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%ptr = spirv.mlir.addressof @ssbo : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), "
+      "BufferBlock>, Uniform> "
+      "%c0 = spirv.Constant 0 : i32 "
+      "%idx = spirv.Constant 3 : i32 "
+      "%elt = spirv.InBoundsAccessChain %ptr[%c0, %idx] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0]), "
+      "BufferBlock>, Uniform>, i32, i32 -> "
+      "!spirv.ptr<f32, Uniform> "
+      "%v = spirv.Load \"Uniform\" %elt : f32 "
+      "spirv.Return } spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.spv.resource.getpointer"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.load"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.InBoundsAccessChain"), std::string::npos)
+      << Result;
+}
+
 } // namespace
