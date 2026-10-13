@@ -63,12 +63,17 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. Reduce `matrix_3x3.float`
-   (`dEQP-VK.spirv_assembly.instruction.compute.opinboundsaccesschain.
-   matrix_3x3.float`) — the one case still failing, now a *data
-   mismatch*, not a crash. `matrix_3x2`/`matrix_3x4` pass with the exact
-   same code path; something specific to 3 columns. ~half day.
-2. Profile the L418 1024x1024x2 MSAA image-to-image case — carried over
-   two sessions now, still unstarted. ~2-4 hours.
-3. Reduce one `opmemoryaccess` (35 cases) and one `decoration_group` (30
-   cases) representative — still untouched. ~1 day.
+1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image
+   case — split time across shader/pipeline compilation, image copy, and
+   fence wait. Unstarted for the third session running.
+2. **(~1 day)** Compare one identical transform-feedback case across
+   monolithic/fast-GPL/optimized-GPL construction — the 188/188/188
+   symmetry (570 cases, `L419(b)`) is still unexplained.
+3. **(~half day)** Extend the CTS runner so DeviceLost gets automatic
+   isolated re-verification and timed-out cases are a first-class
+   outcome, not a manual reconciliation step.
+4. **(standing)** Before trusting any new `.spvasm` lit test's `PASS`,
+   check `spirv_tools_tests` in `lit.site.cfg.py` first — see lesson
+   above. Add this to whatever checklist future sessions use.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   offload-test-suite pattern before calling anything a new regression.
