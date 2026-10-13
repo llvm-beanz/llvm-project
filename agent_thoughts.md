@@ -120135,3 +120135,144 @@ now describes the current failures instead of the old baseline.**
    it matches the `VkBool32`/`WaveActiveMax` pattern above first -- a
    previously-applied, `offload-test-suite`-local fix that a fresh
    cherry-pick silently dropped.
+
+# Session: L419(a) partial fix — OpQuantizeToF16 (upstream MLIR) + InBoundsAccessChain (FeMe)
+
+**Action taken, in order:**
+
+1. **Verified the FeMe device first.** `vulkaninfo --summary` with explicit
+   `VK_ICD_FILENAMES` showed `FeMe CPU Vulkan Device`.
+2. **Re-did the standing environment ritual.** Cherry-picked
+   `llvm-beanz/offload-test-suite`'s `feme` branch commit (`854cc3f`) into
+   the root-script-wiped `offload-test-suite` checkout. **Found the
+   `VkBool32` spec-constant fix had been silently dropped again**, exactly
+   the pattern item 6 of last session's next-steps warned about. Re-applied
+   it (`feme/.instructions.md`-documented fix: `DataFormat::Bool` must use
+   `VkBool32`/`VK_FALSE`, not C++ `bool`/`false`), committed in
+   `offload-test-suite` only (`2e72553`). `check-hlsl-feme-vk`: 489/27/273/2
+   Failed (`Mandelbrot.test`, `WaveActiveMax.test` — both already-documented
+   known issues)/1 XPASS (`array_of_matrices.test` — known flaky) — exact
+   historical clean baseline, 0 regressions.
+3. **Picked up next-steps item 2 (`opquantize` + compute
+   `opinboundsaccesschain`), skipped items 1/3/4** (profiling, GPL
+   comparison, CTS runner work) — too large to fit alongside item 2 in one
+   session; carried forward below.
+4. **Root-caused `opquantize`: not a FeMe bug at all.** `OpQuantizeToF16`
+   (SPIR-V opcode 116) was never defined anywhere in upstream MLIR's SPIR-V
+   dialect — confirmed via `grep` finding zero references anywhere in
+   `mlir/`. Fixed upstream, 2 isolated commits, outside `feme/`:
+   - `6ace49f904fb`: added `SPIRV_QuantizeToF16Op` (`SPIRVArithmeticOps.td`)
+     and its missing `SPIRV_OC_OpQuantizeToF16` opcode enum case
+     (`SPIRVBase.td`) — opcode 116 had simply never been allocated, a clean
+     gap between `OpFConvert`(115) and `OpConvertPtrToU`(117). Added parse
+     and serialize/deserialize round-trip lit tests.
+   - `bdcd8d8b5ea7`: added a lowering pattern to LLVM dialect (fptrunc-to-f16-
+     then-fpext-back — no single LLVM instruction does SPIR-V's
+     `QuantizeToF16` semantics directly). Added scalar + vector lit tests.
+   - Verified: `mlir/test/Dialect/SPIRV`, `mlir/test/Target/SPIRV`,
+     `mlir/test/Conversion` (full suites): 553/553 + 23/23 passed, 0
+     regressions.
+5. **Root-caused compute `opinboundsaccesschain`: a real FeMe gap.** All 72
+   CTS cases share one `!spirv.struct<(!spirv.rtarray<T, stride=4> [0]),
+   BufferBlock>` wrapper shape, reached via `OpInBoundsAccessChain`
+   (glslang never emits plain `OpAccessChain` for SSBO element indexing).
+   FeMe's own `BlockAccessChainPattern` — and the `rewriteBlockAccess`/
+   `remapNestedStructMemberIndices` helpers it shares with
+   `ArrayedBlockAccessChainPattern` — was templated only on
+   `spirv::AccessChainOp`, never `InBoundsAccessChainOp`, even though
+   upstream MLIR's own generic pattern handles both. Fixed
+   (`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, commit
+   `cbd7d1e845f2`): templated all three over the SPIR-V op type, registered
+   both `AccessChainOp`/`InBoundsAccessChainOp` instantiations. Added
+   `InBoundsAccessChainIntoStorageBufferWrapperConverts` unit test.
+6. **Verified both fixes together.** `check-feme`: 3,705/3,708 Passed, 3
+   Unsupported, 0 Failed, 0 regressions (+1 net new unit test). Full CTS
+   re-run of the complete `opquantize`/`opspecconstantop_opquantize` family
+   (175 cases, compute + every graphics stage): **160 Fail → 13 Fail**.
+   Compute `opinboundsaccesschain` (72 cases): **72 Fail → 6 Fail**. Net
+   reduction this session: **213 cases**. Sibling
+   `indexing.input.struct.opinboundsaccesschain_*` cases (a different
+   access shape) re-verified unaffected (0 Fail, 0 regression).
+7. **Docs updated and committed together** (`e35cf79376fe`):
+   `Roadmap.md`'s `L419(a)` entry (not struck through — `opmemoryaccess`
+   (35) and `decoration_group` (30) remain untouched, and both fixed
+   signatures carry a small residual), `VulkanCTSReport.md`'s failure-
+   cluster table (528 → 315) and validation footer.
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed
+   no change needed — both fixes are internal compiler correctness, not
+   feature/extension-surface changes (same precedent as `L417`).
+
+## Residuals found, documented, not pursued this session
+
+1. `opquantize.flush_to_zero` (2 cases, compute scalar + vec4): needs
+   `DenormFlushToZero` execution-mode support for f16 results; the
+   fptrunc/fpext round-trip pattern preserves subnormals instead of
+   flushing them.
+2. `opquantize.{too_small,spec_const_too_small}_{frag,geom,tessc,tesse,vert}`
+   (11 graphics cases): a distinct, unrelated validation-size check, not
+   touched by the `OpQuantizeToF16` op/lowering fix.
+3. `opinboundsaccesschain.{vec_3,matrix_3x{2,3,4}}` (6 cases, float/int/
+   uint): fail with `'llvm.insertvalue' op position out of bounds: 2` — a
+   distinct vec3/matrix-3-row layout bug, unrelated to the `AccessChainOp`
+   vs `InBoundsAccessChainOp` legalization gap just fixed.
+
+## Lessons worth keeping
+
+1. **The git-commit-message-via-`-m`-string pitfall is real.** A
+   multi-line `-m "..."` string with parentheses failed silently
+   ("did not match any file(s) known to git"). Always write the message to
+   a temp file and use `git commit -F <file>` for anything non-trivial.
+2. **MLIR SPIR-V (de)serialization is fully tablegen-generated.** Defining
+   a new op via `SPIRV_ArithmeticUnaryOp<...>` plus its `SPIRV_OC_Op*`
+   opcode enum case is sufficient — no hand-written (de)serializer needed.
+3. **A templated-pattern fix can have a wider blast radius than the
+   pattern class itself.** Templating `BlockAccessChainPattern` required
+   also templating 2 helper free functions
+   (`rewriteBlockAccess`/`remapNestedStructMemberIndices`, 3 declarations
+   each) it called, since C++ function templates don't implicitly cover
+   helpers called with a dependent-typed argument.
+4. **MLIR struct-type decoration syntax is unforgiving about angle-bracket
+   nesting.** `!spirv.struct<(member [offset]), Decoration>` — the member
+   tuple's closing `)` must be followed directly by `, Decoration>`, not
+   an extra `>`. A stray bracket produces a confusing "unknown storage
+   class: BufferBlock" parse error that looks unrelated to the real typo.
+5. **Always verify a cluster's true scope before picking a representative
+   case.** The roadmap's `opquantize (160)` turned out to mean "160 Fail
+   cases within a 175-case family" (not 160 total cases) — running the
+   full family instead of just the 5 compute-stage subtypes revealed the
+   fix also repaired every graphics-stage `opquantize` case for free,
+   nearly tripling the real win (147 net fixes vs. an initially-assumed 4).
+
+## Next steps
+
+1. **(~2-4 hours)** Profile one L418 1024x1024x2 image-to-image MSAA case.
+   Split time among shader/pipeline compilation, image copy execution, and
+   fence wait; use the same case for a before/after performance bound.
+   (Carried forward unstarted — not reached this session either.)
+2. **(~half day)** Investigate the `opquantize.flush_to_zero` residual
+   (`DenormFlushToZero` execution mode for f16 results) — 2 cases, isolated
+   root cause already known (see Residuals above), just needs the
+   execution-mode plumbing.
+3. **(~half day)** Investigate the `opinboundsaccesschain.{vec_3,
+   matrix_3xN}` residual (`'llvm.insertvalue' op position out of bounds`)
+   — 6 cases, likely a vec3/matrix-3-row struct-layout bug distinct from
+   the pattern-templating fix just landed; reduce one case first.
+4. **(~1 day)** Reduce one `opmemoryaccess` (35) and one `decoration_group`
+   (30) representative — the other two signatures `L419(a)` names but this
+   session didn't touch.
+5. **(~1 day)** Compare one identical transform-feedback case across
+   monolithic, fast GPL, and optimized GPL construction. The exact
+   188/188/188 symmetry is still unexplained and still the strongest single
+   lead for a large (570-case) cluster.
+6. **(~half day)** Extend the CTS runner so DeviceLost receives automatic
+   isolated verification and timed-out cases are persisted as a first-class
+   outcome. (Carried forward, unstarted.)
+7. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
+   the L418-L419 roadmap counts synchronized after every fix and isolated
+   CTS rerun.
+8. **(standing)** Before concluding any `check-hlsl-feme-vk` discrepancy is
+   a new FeMe regression, check whether it matches the
+   `VkBool32`/`WaveActiveMax` pattern first — confirmed again this session
+   that the `VkBool32` fix gets silently dropped by the auxiliary-repo reset
+   every single time; re-applying it should be step 2 of every future
+   session, not a surprise.
