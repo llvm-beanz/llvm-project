@@ -130,6 +130,19 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, Linkage], []> {
     // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Aligned", 8], ["Aligned", 4] : f32
     spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned", 8], ["Aligned", 4] : f32
 
+    // `MemoryAccess` is a bit-enum mask (its `Volatile`/`Aligned`/
+    // `Nontemporal` bits are independently combinable), so a single memory
+    // operand word combining `Aligned` with another bit must still read
+    // its alignment literal correctly -- the deserializer previously
+    // tested the raw word value for equality with `Aligned` alone, so any
+    // combined mask (silently) skipped the following alignment literal
+    // and desynchronized every word read after it.
+    // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Aligned|Nontemporal", 4], ["Aligned|Nontemporal", 4] : f32
+    spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned|Nontemporal", 4] : f32
+
+    // CHECK: spirv.CopyMemory "Function" %{{.*}}, "Function" %{{.*}} ["Volatile|Aligned|Nontemporal", 4], ["Volatile|Aligned", 8] : f32
+    spirv.CopyMemory "Function" %0, "Function" %1 ["Aligned|Volatile|Nontemporal", 4], ["Aligned|Volatile", 8] : f32
+
     spirv.Return
   }
 }

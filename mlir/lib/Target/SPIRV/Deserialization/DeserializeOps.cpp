@@ -761,7 +761,21 @@ Deserializer::processOp<spirv::CopyMemoryOp>(ArrayRef<uint32_t> words) {
         static_cast<spirv::MemoryAccess>(attrValue));
     attributes.push_back(
         opBuilder.getNamedAttr(attributeName<MemoryAccess>(), attr));
-    isAlignedAttr = (attrValue == 2);
+    // `MemoryAccess` is a bit-enum mask (its `Volatile`/`Aligned`/
+    // `Nontemporal` bits are independently combinable, e.g. a single
+    // `OpCopyMemory` memory operand word legitimately carrying
+    // `Aligned|Nontemporal` together), so this must test the `Aligned`
+    // bit specifically, not compare the whole mask for equality with
+    // `Aligned` alone -- `attrValue == 2` only matched a lone `Aligned`
+    // bit and silently skipped the following alignment literal operand
+    // whenever `Aligned` was combined with any other bit, desynchronizing
+    // every word read after it (misreading the alignment literal itself
+    // as `source_memory_access`, and so on). A real
+    // `dEQP-VK.spirv_assembly.instruction.graphics.opmemoryaccess.
+    // nontemporal_aligned_*` case does exactly this.
+    isAlignedAttr =
+        spirv::bitEnumContainsAll(static_cast<spirv::MemoryAccess>(attrValue),
+                                   spirv::MemoryAccess::Aligned);
   }
 
   if (isAlignedAttr && wordIndex < words.size()) {
