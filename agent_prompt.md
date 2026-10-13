@@ -63,20 +63,33 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Profile the L418 1024x1024x2 MSAA image-to-image case —
-   split time across shader/pipeline compilation, image copy, and fence wait.
-   Unstarted for the **fourth** session running now.
-2. **(~1 day)** Reduce one `resume_*` and one `winding_*` transform-feedback
-   representative (new `L419(m)`, 231 cases, the two largest sub-clusters of
-   this session's own residual) — the natural next step on the same bug family,
-   not yet started.
-3. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
+1. **(~half day)** Reduce one `winding_*` case (new `L419(n)`, 43/slice, the
+   largest remaining sub-cluster) — "Vertex data verification failed" at
+   `vktTransformFeedbackSimpleTests.cpp:1749`, a per-primitive
+   vertex-rotation/winding-order check, not yet investigated at all. Likely a
+   FeMe rasterizer primitive-decomposition bug, distinct from the counter-buffer
+   bug just fixed.
+2. **(~half day)** Triage `holes_*` (4/slice) and
+   `multi_stream_single_raster_non_zero` (1/slice) — much smaller, not yet
+   looked at; could plausibly share `winding_*`'s root cause or be separate
+   again.
+3. **(~2-4 hours)** `L418(a)`: optimize the CPU rasterizer's `Draw` path for
+   large MSAA targets (91% of the profiled 4.55s case) — use `gdb` to find the
+   hot loop, no sampling profiler available in this environment.
+4. **(~half day)** `L418(b)`: reconcile the ~5s standalone `L418` timing with
+   60s/600s full-suite timeout reports — likely `QueueExecutor` thread
+   contention, needs a `run_vulkan_cts.py`-driven contention test to confirm.
+5. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
    `L418`-`L419` roadmap counts synchronized after every fix and isolated CTS
    rerun.
-4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
    offload-test-suite pattern before calling anything a new regression — not
    exercised this session, still applies whenever `check-hlsl-feme-vk` work
    resumes.
-5. **(standing, new this session)** Grep `Roadmap.md` for a candidate roadmap ID
-   *before* using it anywhere (code comments, test files, commit messages) — see
-   "Mistake caught and fixed" above.
+7. **(standing)** Grep `Roadmap.md` for a candidate roadmap ID before using it
+   anywhere.
+8. **(standing, new this session)** Before trusting a carried-forward "still
+   unstarted" claim across multiple sessions, check `git log --oneline --all |
+   grep -i <ID>` and the roadmap row itself directly — this is the second time
+   handoff notes have silently gone stale across a compaction boundary (first
+   was the `L146` ID-collision near-miss).
