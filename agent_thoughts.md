@@ -121709,3 +121709,46 @@ Commit: `66780637f179` (triage write-up only, no source changes).
 `samplerMirrorClampToEdge` and `fullDrawIndexUint32`, and confirm whether
 either is a genuinely small (struct-field-only) fix before committing to
 a larger `D1` plan.
+
+# Session: Merged `origin/main` into `cbieneman/feme`, fixed 2 build regressions, CTS sanity-verified
+
+**Device check:** `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (required `VK_ICD_FILENAMES` export first — fresh shell had no env, bare `vulkaninfo` showed `llvmpipe`).
+
+**Task:** fetch upstream LLVM `main`, merge/rebase onto it, run FeMe tests, fix regressions.
+
+## What happened, in order
+
+1. Tried `git rebase origin/main` first — 6,144 commits, hit a real conflict at commit 347/6144 in a shared non-FeMe file (`DXIL.td`). A full linear rebase of this scale isn't worth it. **Pivoted to `git merge origin/main --no-edit`** instead (2 prior precedents in this branch's own history for the same call).
+2. Merge produced only **5 conflicted files**, all shared SPIR-V/MLIR infrastructure, **none under `feme/`**:
+   - `llvm/include/llvm/IR/IntrinsicsSPIRV.td`
+   - `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`
+   - `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`
+   - `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`
+   - `mlir/lib/Target/SPIRV/Deserialization/Deserializer.h`
+3. Resolved all 5. The one needing real judgment: `SPIRVToLLVM.cpp`'s `MulExtendedPattern` — both branches had independently written it. Checked whether upstream's version would even compile against the merged file's helper functions (it wouldn't — FeMe had refactored `createIntegerConstant` to a 4-arg signature, upstream's new code still called the old 5-arg form). **Kept FeMe's version**, discarded upstream's duplicate. Everything else in that file (FeMe's `ModfPattern`/`FrexpPattern`) was a pure addition, kept as-is. Committed as merge commit `23e5d72c6b38`.
+4. **Build regression 1**: `mlir-tblgen` rejected 4 `DXSAOps.td` ops (`DXSA_Operand`, `DXSA_OperandImm`, `DXSA_IndexImm`, `DXSA_IndexRelImm`) — upstream's new "Strict Property Assembly Formats" rule requires every inherent attribute to be bound by name or covered by `prop-dict` in the `assemblyFormat`. Fixed by adding `prop-dict` (and `attr-dict`, which the verifier requires unconditionally alongside it — found this the hard way, first fix attempt produced a new error). This changes the *printed* syntax from `{imm = 0 : i32}` to `<imm = 0 : i32>` — cosmetic only, no IR semantics change. Committed in `0e02a7821173`.
+5. **Build regression 2**: `AtomicLoadPattern` (`SPIRVToLLVMPatterns.cpp`) failed to compile — upstream added a new `isNoundef` bool parameter to `LLVM::LoadOp::create`'s convenience overload. Added `/*isNoundef=*/false` at the right position. Committed in `5ec7f932f921`.
+6. Both fixes broke exactly 2 existing tests (`atomics.dxasm`, `interface1.dxasm`), purely because their `CHECK:` lines hard-coded the old brace-dict print syntax. Regenerated the real new output (`dxbc-as ... | feme-translate --import-dxsa-bin -`) and updated both files to match exactly. Included in the same commit as the `DXSAOps.td` fix (fix + its own test-sync, one coherent unit).
+7. **`ninja check-feme`: 3,722/3,722 applicable tests Passed** (3 Unsupported, 0 Failed) — full green after the fixes.
+8. **CTS sanity run** (not a full 3.25M-case re-triage — no behavior change was expected from either fix, so a full re-triage would just re-confirm the existing baseline at large time cost): ran every `dEQP-VK.{geometry,tessellation,rasterization,info}.*` case plus every case with `atomic` in its name (43,764 cases, chosen to cover both recently-active areas and the specific `AtomicLoadPattern` code path) via `feme/utils/run_vulkan_cts.py`. Result: **87 Fail, 2,940 Pass, 40,737 NotSupported, 0 DeviceLost/TimedOut**. Cross-referenced every failure against `VulkanCTSReport.md`'s existing baseline — **all 87 are pre-existing and already triaged** (30 tessellation-invariance `L419(g)`, 2 line_continuity `L419(j)`, 1 mandatory_features `L419(j)`/`D1`, 52 memory_model matching the documented baseline row, 2 terminate_invocation part of the documented 528-case `spirv_assembly` baseline). **Zero new regressions.** Documented in `VulkanCTSReport.md`, committed in `916362a4a861`.
+9. Checked the offload-test-suite `VkBool32`/`WaveActiveMax` pattern per standing instruction: current local checkout (`main`, HEAD `2e72553`) already has both the FeMe-test-target cherry-pick (`9af8bce`) and the `VkBool32` fix (`2e72553`) applied on top — not silently dropped this time. No `check-hlsl-feme-vk` work done this session, so this was just a precautionary check, not exercised against a real discrepancy.
+10. Inventories (`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`): confirmed via grep, no changes needed — this was a merge/build-fix session, no feature/extension-surface change.
+
+## Wins
+- Merge done, 5 conflicts resolved correctly (one needed real cross-file verification, not just "pick a side").
+- 2 build regressions found and fixed, both root-caused precisely via the compiler's own overload-candidate error lists rather than guesswork.
+- `check-feme` back to 100% green.
+- 43,764-case CTS sanity sweep confirms **zero regressions** from the merge.
+
+## Standing items not touched this session
+- `L418(a)` sanity check — not re-run, no reason to this session (no `L418`-area changes).
+- `CMAKE_BUILD_TYPE` `RelWithDebInfo` vs `Release` — still not revisited, no new information either way.
+- The `backup-before-rebase-20261014` tag (pre-merge safety net, points at `91facac522e9`) — left in place for now.
+
+## Next steps
+
+1. **(~5 min)** Decide whether to delete `backup-before-rebase-20261014` now that the merge is build+test+CTS-sanity verified clean, or keep it longer as a historical safety net. Leaning toward keeping it a while longer given the scale of this merge (6,144 commits).
+2. **(standing)** Resume the actual roadmap work next session — this session was 100% merge-and-regression-fix, no roadmap-stage progress. Check `Roadmap.md`'s open items (last known: `L419(j)` line_continuity generalization in `EntryWrapper.cpp`, and `D1`'s mandatory-feature-bit-by-bit closure) for where to pick back up.
+3. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE` decision — still deferred.
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s current open items (the merge didn't touch it) and resume wherever the last non-merge session left off — most likely `L419(j)`'s `line_continuity` pair or `D1`'s mandatory-feature work.
