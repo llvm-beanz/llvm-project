@@ -2045,3 +2045,77 @@ to `yes` (roadmap K6g). `VulkanExtensionInventory.md`:
 txt` gained its own `K6g` row (and backfilled two pre-existing missing
 rows, `K6e`/`K6f`, found while adding it -- see `agent_thoughts.md` for
 details).
+
+## `K6h`: `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` implemented (roadmap K6h, measured impact)
+
+Unlike `K6b`/`K6d`-`K6g`'s pure advertisement gaps, `K6a`'s
+`drawIndirectCount` bit required two brand-new Vulkan command entry
+points (`VK_KHR_draw_indirect_count`, core in Vulkan 1.2): there was
+no `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` symbol
+anywhere in `CommandBuffer.cpp`/`EntryPoints.cpp` before this session.
+
+Investigation found two directly reusable building blocks already in
+place from the `VK_EXT_mesh_shader` work (roadmap H6f):
+`readIndirectDrawCount` (reads a single bounds-checked `uint32_t` from
+a count buffer, clamped to a caller-supplied `maxDrawCount`) and
+`readIndirectDraws` (reads the draw-command array itself). The new
+commands reuse both verbatim, and `drawMeshTasksIndirectCount`
+(`CommandBuffer.h`) served as the exact structural template for the
+new `drawIndirectCount` recording method. The execution-time switch
+merges the two new `RecordedCommand::Kind` values
+(`DrawIndirectCount`/`DrawIndexedIndirectCount`) into the existing
+`DrawIndirect`/`DrawIndexedIndirect` case, rather than duplicating the
+case, mirroring the pre-existing `DrawMeshTasksIndirect`/
+`DrawMeshTasksIndirectCount` merged-case pattern.
+
+`vk_gen_entrypoints.py`'s generated entrypoint table already carried
+unimplemented entries for both command names (they are promoted to
+Vulkan 1.2 core, read via the generator's own core-feature pass,
+independent of `SUPPORTED_EXTENSIONS`); adding both names to
+`ImplementedEntrypoints.txt` was the only generator-side change
+needed. Confirmed (by checking CTS's own `vkInitDeviceFunctionPointers.
+inl`) that `deqp-vk`'s device-function-pointer loader tries the core,
+non-`KHR`-suffixed name first unconditionally and only falls back to
+the `KHR`-suffixed alias if that lookup returns null -- so no
+`SUPPORTED_EXTENSIONS` entry (and thus no `KHR`-suffixed alias symbol)
+is needed for CTS to exercise the core entry points this ICD now
+implements.
+
+`ProcAddrTest.UnimplementedCommandNeverResolves` previously used
+`vkCmdDrawIndexedIndirectCount` as its "real command this driver does
+not implement" example; now that it is implemented, the test was
+re-pointed at `vkGetPhysicalDeviceImageFormatProperties2` (instance-
+level) and `vkCmdBindIndexBuffer2KHR` (device-level, an alias whose
+own `KHR`-suffixed name is not in `ImplementedEntrypoints.txt` even
+though its core counterpart `vkCmdBindIndexBuffer2` is) -- confirmed
+by a small Python script cross-checking every 1.0-1.4 core command
+name in `vk.xml` against `ImplementedEntrypoints.txt`, which found
+**zero** remaining unimplemented 1.0-1.4 *core* commands (every gap
+left in the roadmap is a semantic/feature-completeness gap, not a
+missing entry point).
+
+Ran the full live case list (`--deqp-runmode=stdout-caselist`, not the
+static mustpass `.txt` files, per this project's own recurring "static
+mustpass can be incomplete" lesson) filtered to `*indirect_count*`:
+2,695 cases (`dEQP-VK.draw.*`, `dEQP-VK.conditional_rendering.*`,
+`dEQP-VK.transform_feedback.*`). Result: **449 Pass, 0 Fail, 2,246
+NotSupported** (the `NotSupported` cases need unrelated extensions
+this ICD does not implement at all, e.g. `maintenance6`,
+`shader_objects`, `VK_KHR_device_address_commands`, or exceed
+`maxTransformFeedbackBufferDataSize`).
+
+Ran the broader `dEQP-VK.draw.*` regression sweep (29,475 cases):
+**4,282 Pass, 0 Fail, 25,193 NotSupported**. Ran `dEQP-VK.api.info.*`
+(10,490 cases): **5,966 Pass, 0 Fail, 4,524 NotSupported** (identical
+totals to the `K6g` baseline -- no regression). Re-ran `ninja
+check-feme` after every code change: 3,728/3,731 pass, 0 fail, 3
+unsupported (pre-existing, unrelated); 3 new tests added this session
+(`DrawTest.DrawIndirectCountClampsToCountBuffer`,
+`DrawTest.DrawIndexedIndirectCountClampsToCountBuffer`,
+`PhysicalDeviceProperties2Test.DrawIndirectCountFeatureIsTrue`).
+
+`Vulkan14FeatureInventory.md`: `drawIndirectCount` feature bit moved
+to `yes` (roadmap K6h). `VulkanExtensionInventory.md`:
+`VK_KHR_draw_indirect_count` moved from "Planned (in scope, not
+implemented)" to "Implemented". `Roadmap.md`: `K6h` split off `K6a`
+and struck through.

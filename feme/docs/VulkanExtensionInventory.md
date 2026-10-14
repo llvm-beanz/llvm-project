@@ -212,7 +212,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_device_group_creation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_display` | Not implemented |  |
 | `VK_KHR_display_swapchain` | Not implemented |  |
-| `VK_KHR_draw_indirect_count` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_draw_indirect_count` | Implemented | roadmap K6h: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` are new `CommandBuffer.cpp` entry points, reusing the pre-existing `readIndirectDrawCount`/`readIndirectDraws` helpers built for `vkCmdDrawMeshTasksIndirectCountEXT` (roadmap H6f) |
 | `VK_KHR_driver_properties` | Implemented (core, not advertised by name) | roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties) |
 | `VK_KHR_dynamic_rendering` | Advertised |  |
 | `VK_KHR_dynamic_rendering_local_read` | Advertised |  |

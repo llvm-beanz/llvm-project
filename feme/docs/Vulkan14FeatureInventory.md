@@ -127,7 +127,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_1 | `VK_KHR_storage_buffer_storage_class` | yes | core, not advertised by name: the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_variable_pointers` | no |  |
 | feature | VK_VERSION_1_2 | `samplerMirrorClampToEdge` | yes |  |
-| feature | VK_VERSION_1_2 | `drawIndirectCount` | no |  |
+| feature | VK_VERSION_1_2 | `drawIndirectCount` | yes | roadmap K6h |
 | feature | VK_VERSION_1_2 | `storageBuffer8BitAccess` | no |  |
 | feature | VK_VERSION_1_2 | `uniformAndStorageBuffer8BitAccess` | no |  |
 | feature | VK_VERSION_1_2 | `storagePushConstant8` | no |  |
