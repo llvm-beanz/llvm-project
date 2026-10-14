@@ -60,25 +60,5 @@ file.
 
 # Request
 
-Can you please continue the work on the Vulkan FeMe ICD? A previous session
-suggested the next steps:
-
-1. **(~1 day+, bigger than previously estimated)** Scope and implement
-   general nested-control-flow support in `EntryWrapper.cpp`'s barrier
-   region splitter, OR find a narrower special case that covers this
-   specific loop-with-nested-conditional-barriers shape without a full
-   generalization. Repro is pinned: `-n="dEQP-VK.rasterization.line_continuity.*"`.
-   Read `EntryWrapper.cpp`'s file-header comment and `isLinearChain` first.
-2. **(~1-2 hours each)** `L419(j)`'s last 2 untouched singletons:
-   `primitive_id.matching` and `device_mandatory_features` — still
-   completely untriaged, no repro run yet this session.
-3. **(standing)** Doc sync — done this session for both wins above.
-4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
-   check — not exercised, no `check-hlsl-feme-vk` work done.
-5. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE`
-   `RelWithDebInfo` vs `Release` — still not revisited.
-
-**Immediate next action for next session:** run
-`-n="dEQP-VK.rasterization.geometry.*primitive_id*matching*"` to get the
-exact failing case name and error for the `primitive_id` singleton —
-it's untriaged and smaller than the line_continuity generalization.
+Can you please fetch main from the upstream LLVM repo and rebase this branch on
+the latest main? Then run the feme tests to verify no regressions.
