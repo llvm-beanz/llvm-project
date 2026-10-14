@@ -35,6 +35,7 @@ VK_KHR_depth_stencil_resolve = roadmap K6: advertised by name (PhysicalDeviceInf
 VK_KHR_driver_properties = core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp)
 VK_KHR_imageless_framebuffer = core, not advertised by name: roadmap C6, VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT + VkRenderPassAttachmentBeginInfo (RenderPass.cpp, CommandBuffer.cpp)
 VK_KHR_shader_subgroup_extended_types = core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp)
+VK_KHR_sampler_mirror_clamp_to_edge = roadmap K6b: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); adds no commands of its own, only the pre-existing MIRROR_CLAMP_TO_EDGE address mode and its own feature bit
 VK_KHR_timeline_semaphore = core, not advertised by name: V3's timeline semaphores (Sync.cpp)
 VK_KHR_uniform_buffer_standard_layout = core, not advertised by name: roadmap C6, no std140 restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp)
 #

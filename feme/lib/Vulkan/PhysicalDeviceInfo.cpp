@@ -1625,6 +1625,17 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here for the same reason.
       {VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
        VK_KHR_CREATE_RENDERPASS_2_SPEC_VERSION},
+      // (roadmap K6b) `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` is
+      // already fully implemented (`Image.cpp`'s address-mode mapping,
+      // `FeMeRuntimeCPU.c`'s `femeRTApplyAddressMode` mode 4); this
+      // extension adds no commands of its own (only the address-mode enum
+      // value, pre-dating its own feature bit), but its name must still
+      // be enumerable for a custom device created below this extension's
+      // 1.2 core-promotion point, the same `unavailable_entry_points`
+      // shape as `VK_KHR_depth_stencil_resolve`/`VK_KHR_create_renderpass2`
+      // above.
+      {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,
+       VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_SPEC_VERSION},
   };
   return Extensions;
 }

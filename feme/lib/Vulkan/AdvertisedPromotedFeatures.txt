@@ -130,6 +130,11 @@ timelineSemaphore
 # required" promise to be moot against.
 shaderOutputViewportIndex
 shaderOutputLayer
+# samplerMirrorClampToEdge: roadmap K6b -- Image.cpp already maps
+# VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE, and FeMeRuntimeCPU.c's
+# femeRTApplyAddressMode already implements its mode-4 math; only the
+# advertisement was missing.
+samplerMirrorClampToEdge
 # Roadmap L12: dynamic texel-buffer indexing and the descriptor binding
 # behaviors below are implemented and reported consistently by both the
 # aggregate Vulkan 1.2 and dedicated descriptor-indexing feature structs.

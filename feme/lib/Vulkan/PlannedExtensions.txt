@@ -68,7 +68,6 @@ VK_KHR_ray_query = roadmap J5
 VK_KHR_ray_tracing_maintenance1 = roadmap J7
 VK_KHR_ray_tracing_pipeline = roadmap J6
 VK_KHR_ray_tracing_position_fetch = roadmap J8
-VK_KHR_sampler_mirror_clamp_to_edge = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_sampler_ycbcr_conversion = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_separate_depth_stencil_layouts = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_KHR_shader_atomic_int64 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)

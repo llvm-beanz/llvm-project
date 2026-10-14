@@ -1651,7 +1651,15 @@ void fillFeatures2Chain(void *pNext) {
       // VULKAN_1_1_FEATURES` above documents -- this struct has no
       // "leave everything else zeroed" shortcut since some of its fields
       // are true.
-      Features->samplerMirrorClampToEdge = VK_FALSE;
+      // (roadmap K6b) `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` is
+      // already a fully-implemented per-axis addressing mode: `Image.cpp`
+      // maps the enum to `SamplerAddressMode::MirrorClampToEdge`, and the
+      // CPU runtime's `femeRTApplyAddressMode` (FeMeRuntimeCPU.c) already
+      // handles mode 4 (`M = Coord < 0 ? -1 - Coord : Coord; return M >=
+      // Size ? Size - 1 : M;`), identically to every other address mode.
+      // This feature bit only gates *advertising* that pre-existing
+      // support, not implementing new behavior.
+      Features->samplerMirrorClampToEdge = VK_TRUE;
       Features->drawIndirectCount = VK_FALSE;
       Features->storageBuffer8BitAccess = VK_FALSE;
       Features->uniformAndStorageBuffer8BitAccess = VK_FALSE;
