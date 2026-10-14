@@ -63,27 +63,39 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
-   the prior investigation's exact failure list (`PtrAccessChain` "explicitly
-   marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
-   pointer types) -- three prior sessions have now confirmed this empirically as
-   a real lowering gap, not a quick flip. With K6l and K6m both closed this
-   session and last, `K6a` is now the only open bundled-feature row left on the
-   roadmap with known starting material.
-2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+1. **(~1-2 days, new this session)** `K6n`: 124 cases, CPU-backend
+   resource-handle-normalization architectural limitation (`"unsupported raised
+   operation: ... register-bound resource handle ..."`). Not yet root-caused
+   beyond signature-level bucketing -- likely the deepest, hardest-to-fix piece
+   of the whole `variablePointers` feature, possibly needing a runtime dispatch
+   mechanism rather than a lowering-pattern fix. Worth its own investigation
+   session before committing to an approach.
+2. **(~half day, new this session, "issue outside FeMe")** `K6o`: 16 cases,
+   upstream-MLIR `OpConstantNull`-on-pointer-type deserializer gap
+   (`getNullAttrForType` has no pointer-type case). Confirmed outside FeMe;
+   needs an isolated reproducer and a commit touching only non-`feme/` files per
+   the standing instruction. Not yet attempted.
+3. **(~1-2 days, new this session, "issue outside FeMe")** `K6p`: 11 cases,
+   upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403)
+   entirely undefined in MLIR's SPIR-V dialect TableGen. Larger than `K6o`:
+   needs new TableGen op definitions, deserializer cases, and likely a
+   `SPIRVToLLVMPatterns.cpp` lowering once the ops exist, before feme can even
+   see a shader using them. Not yet attempted.
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
-3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration
-   (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
-   files still stale from several prior sessions).
-4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+   regeneration.
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the single K6m compiler-fix task, same scoping choice as
-   several recent sessions).
+   stayed scoped to `K6a`'s compiler-fix work, same scoping choice as several
+   recent sessions).
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row
-(now the only open bundled-feature row), pick `variablePointers`, and start from
-the exact failure list already logged across three prior sessions
-(`PtrAccessChain`/`OpPtrEqual` family) rather than re-deriving it.
+**Immediate next action for next session:** pick `K6n` (the largest remaining
+bucket, 124 cases) and start by root-causing *one* representative `"unsupported
+raised operation"` case down to the specific resource-handle-normalization code
+path in `feme/lib/Target/CPU` (not yet located this session) before guessing at
+a fix approach -- or pick the smaller, more contained `K6o`
+(`OpConstantNull`-on-pointer, 16 cases, single upstream deserializer function)
+for a faster, more isolated win first.
