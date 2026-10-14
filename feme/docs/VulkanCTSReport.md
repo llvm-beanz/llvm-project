@@ -2499,3 +2499,112 @@ needed: this is a pure bug fix in an already-advertised feature's own
 lowering path (`scalarBlockLayout`/`VK_EXT_scalar_block_layout`, already
 advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6m`
 struck through -- K6l's own 5-case residual is now fully closed.
+
+## `K6a`: `PtrAccessChain`/`InBoundsPtrAccessChain` lowering added, 296 -> 152 Fail (roadmap K6a, measured impact)
+
+Resumed `K6a`'s `variablePointers`/`variablePointersStorageBuffer`
+investigation (a prior session's "tried and reverted" 296-failure
+baseline). The missing piece for triaging these failures turned out to
+be a pre-existing but previously-undiscovered env var,
+`FEME_VULKAN_LOG_CREATION_ERRORS` (`Diagnostics.cpp`): unset/`"0"` is
+silent (the default), any other value prints the real underlying
+`llvm::Error` for a failed pipeline compile. Using it, bucketed all 296
+`dEQP-VK.spirv_assembly.*variable_pointer*` mustpass failures by exact
+error signature:
+
+- **156**: `"failed to legalize operation 'spirv.PtrAccessChain'...
+  explicitly marked illegal"` -- `spirv.PtrAccessChain`/
+  `spirv.InBoundsPtrAccessChain` had no conversion pattern at all, in
+  either feme or upstream MLIR.
+- **112** (+1 separate `feme-cpu-simdize` groupshared-pointer-chain
+  diagnostic, grouped together as 113): `"unsupported raised
+  operation: ... is a register-bound resource handle the FeMe CPU
+  target cannot normalize ..."` -- a CPU-backend architectural
+  limitation once a pointer may dynamically refer to more than one
+  descriptor binding.
+- **16**: `"unsupported OpConstantNull type: '!spirv.ptr<...>'"` --
+  confirmed upstream-MLIR deserializer gap (`getNullAttrForType` has no
+  pointer-type case).
+- **11** (4 `OpPtrEqual` + 4 `OpPtrNotEqual` + 3 `OpPtrDiff`):
+  `"unhandled opcode 401/402/403"` -- these three ops are entirely
+  undefined in MLIR's SPIR-V dialect TableGen, an upstream gap.
+
+Root-caused the `PtrAccessChain` gap's exact shape via `PtrAccessChainOp
+::build`/`verify` (`mlir/lib/Dialect/SPIRV/IR/MemoryOps.cpp`): both
+compute the op's result type purely from `getElementPtrType(basePtr,
+indices, loc)`, **never looking at the `element` operand at all** --
+proving `PtrAccessChain(base, element, idx1, idx2, ...)`'s result type
+always equals `AccessChain(base, idx1, idx2, ...)`'s own. Semantically,
+`element` only ever shifts the base address by `element` whole units of
+`base`'s own pointee type before `idx1, idx2, ...` then descend into
+that shifted base exactly like an ordinary `AccessChain` would.
+
+Implemented `PtrAccessChainPattern` (`SPIRVToLLVMPatterns.cpp`) across
+two commits this session:
+
+- **First commit**: handled the two shapes an initial ~10-case sample
+  (one per `opptraccesschain_*` sub-family) suggested covered
+  everything -- a compile-time-constant-zero `element` (re-expressed as
+  a plain `AccessChain`, letting this file's own much more intricate
+  existing struct-layout/block/matrix machinery finish the job via the
+  dialect conversion driver's standard "newly created illegal op gets
+  reconverted" idiom), and a genuinely dynamic `element` with *zero*
+  trailing indices into a bare scalar pointee (a single
+  `llvm.getelementptr`, matching C's own `scalarPtr[i]` pointer
+  arithmetic). Declined (via `notifyMatchFailure`) a non-zero/dynamic
+  `element` combined with real trailing indices, since the initial
+  sample suggested no case needed it.
+- **Second commit**: a full post-fix CTS bucketing run found that guess
+  wrong -- 24 real `opptraccesschain_float_*` cases need exactly that
+  declined combination (`%ptr<vector<4xf32>> -> (element)(idx) ->
+  %ptr<f32>`: step to vector lane `element`'s own base address, then
+  select component `idx` within it). An initial attempt re-expressed
+  each step as a new, still-SPIR-V op for the dialect conversion driver
+  to reprocess (mirroring the already-working zero-element case) but
+  failed to converge: the newly created `AccessChain`'s own
+  legalization ran before its `PtrAccessChain` operand had itself
+  converted, so its "base is not an LLVM pointer yet" failure was never
+  retried, rolling the whole rewrite back and reporting the *original*,
+  unconverted op as unlegalizable. Fixed instead with a direct, chained
+  pair of `llvm.getelementptr`s (mirroring upstream's own
+  `AccessChainConversion` for a plain `AccessChain`), sidestepping the
+  ordering hazard entirely. Scoped to a non-struct pointee only (every
+  known case reaches this with a bare scalar/vector pointee).
+
+New `spirv-to-llvm-ptr-access-chain.mlir` lit test (4 cases: zero-element
++index, zero-element-identity, dynamic-element-no-index, and
+element+index together).
+
+CTS (full 4464-case `variable_pointer` mustpass sweep, via
+`feme/utils/run_vulkan_cts.py`, with `variablePointers`/
+`variablePointersStorageBuffer` temporarily flipped to `VK_TRUE` for
+the sweep only -- reverted before every commit, since the feature bits
+remain `VK_FALSE` with failures still outstanding):
+
+- Session-start baseline: 296 Fail / 3492 NotSupported / 676 Pass.
+- After first commit (156 `PtrAccessChain` cases targeted): 176 Fail /
+  3492 NotSupported / 796 Pass -- 120 newly fixed, 0 new failures
+  (confirmed via case-by-case fail-list diff). The remaining 176 bucket
+  as: 124 `"unsupported raised operation"` (112 original + 12 newly
+  revealed once `PtrAccessChain` legalization itself no longer masked
+  them), 24 `PtrAccessChain` legalization failures (the undiscovered
+  `opptraccesschain_float_*` combination), 16 `OpConstantNull`, 11
+  opcode-401/402/403, 1 `feme-cpu-simdize`.
+- After second commit (the 24-case `opptraccesschain_float_*`
+  combination): 152 Fail / 3492 NotSupported / 820 Pass -- 24 more newly
+  fixed, 0 new failures. The `PtrAccessChain` cluster is now **fully
+  closed** (0 of 152 remaining failures are a `PtrAccessChain`/
+  `AccessChain` legalization error); the 152 bucket exactly as: 124
+  `"unsupported raised operation"`, 16 `OpConstantNull`, 11
+  opcode-401/402/403, 1 `feme-cpu-simdize` -- confirmed via a full
+  re-bucketing pass after the second commit.
+- Re-ran `ninja check-feme` after each commit: 3,731/3,738 pass, 0 fail,
+  7 unsupported (pre-existing, unrelated) both times.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes:
+`variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`
+(152 failures still outstanding, split into three new roadmap rows --
+`K6n`, `K6o`, `K6p` -- each tracking one of the three remaining distinct
+problem classes). `Roadmap.md`: `K6a` updated in place (left open,
+`variablePointers` is a genuine multi-session effort, not a single
+drive-by fix); `K6n`/`K6o`/`K6p` added as new top-level rows.
