@@ -1584,3 +1584,54 @@ analysis), not a quick fix -- scoped out for a future session.
 
 No source changes made for this item this session; `Roadmap.md`'s
 `L419(j)` row updated with this triage finding.
+
+### `L419(j)`: `geometry primitive ID` fixed -- `gl_PrimitiveIDIn` after tessellation
+
+`dEQP-VK.geometry.builtin_variable.primitive_id.matching` failed with:
+
+```
+At (0, 0) gl_PrimitiveID in tessellation evaluation shader was 0, but
+gl_PrimitiveID in geometry shader was 7
+```
+
+Root cause: per the GLSL/Vulkan spec, a geometry shader's
+`gl_PrimitiveIDIn` downstream of tessellation must equal the *source
+patch's own ordinal index* (every triangle/line one patch's tessellation
+generates shares that one ID) -- not a running count of primitives
+assembled so far, which is only correct for the ordinary, non-tessellated
+geometry-input case. `Executor.cpp` used the running-count convention
+unconditionally.
+
+Fix: thread the generating patch's own index (already computed and
+already used as that patch's `SV_PrimitiveID` for TCS/TES) through a
+parallel shadow-vector pipeline mirroring the existing index-only
+vectors: `PatchPrimitiveIDs` -> `TessTriPatchIDs`/`TessLinePatchIDs` ->
+`AbsTriPatchIDs`/`AbsLinePatchIDs` -> `PrimitivePatchIDs`, then use it in
+place of the running count whenever tessellation feeds the `Lines`/
+`Triangles` geometry-input assembly (`HavePatchIDs =
+PrimitivePatchIDs.size() == PrimitiveCount`). The `Points`/
+`*WithAdjacency` branches, which never combine with tessellation, are
+unaffected and keep the old running-count behavior.
+
+Verification:
+- `dEQP-VK.geometry.builtin_variable.primitive_id.matching`: Fail ->
+  **Pass**.
+- `dEQP-VK.geometry.*`: 191/200 Pass, **0 Fail** (9 Not Supported,
+  pre-existing) -- no regressions.
+- `dEQP-VK.tessellation.*`: 646/1114 Pass, 30 Fail (confirmed via grep
+  against this report to be the pre-existing, already-documented
+  `L419(g)` tessellation-invariance group, not a new regression), 438 Not
+  Supported.
+- `ninja check-feme`: 3,722/3,725 Passed, 3 Unsupported, 0 Failed (+1 new
+  test vs. prior baseline, 0 regressions).
+- New unit test `ExecutorTest.GeometryStagePrimitiveIDInMatchesSourcePatchNotRunningEmitCount`:
+  a two-patch tessellation+geometry pipeline reporting `gl_PrimitiveIDIn`
+  through an `R32_UINT` attachment; confirmed red (fails on the pre-fix
+  code) / green (passes post-fix) by a manual revert-and-rerun.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- confirmed via grep; this is an internal compiler-correctness
+  fix with no feature/extension-surface change.
+
+`Roadmap.md`: `L419(j)` updated -- 4 of its original 7 cases remain: line
+continuity (2, triaged not fixed), mandatory-feature reporting (1,
+untriaged), own conformance-version reporting (1, `L412(g)` won't-fix).
