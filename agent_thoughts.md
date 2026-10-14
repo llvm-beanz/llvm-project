@@ -121787,3 +121787,41 @@ a larger `D1` plan.
 3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now narrowed) and pick `shaderDrawParameters` or another bundle bit, following the same investigate-then-flip-bit pattern as `K6b`.
+
+# Session: K6c -- shaderDrawParameters / gl_DrawID fix
+
+**Task:** continue `K6a`'s bundle, picking `shaderDrawParameters` per the last session's "likely-cheap" flag.
+
+## What happened, in order
+
+1. Mandatory device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Traced the full pipeline: `CanonicalizeStage.cpp` maps `BaseVertex`/`BaseInstance`/`DrawIndex` builtin IDs correctly; `VertexWrapper.cpp`'s `loadVertexSystemValue` has real, working cases for all three. So far so "nearly free," as the roadmap claimed.
+3. **Found the roadmap's claim was wrong**: `Executor.cpp` set `Inv.BaseVertex`/`Inv.BaseInstance` from real per-draw command fields, but hardcoded `Inv.DrawID = 0` always. Root cause: `feme::graphics::DrawCommand` (the vertex-pipeline draw struct) had no `DrawID` field at all -- unlike its mesh-pipeline sibling `MeshDrawCommand`, which already had one, working, for `vkCmdDrawMeshTasksIndirectEXT`. A real, 1/3 gap in a combined feature bit, not a pure advertisement fix.
+4. Fixed it: added `DrawCommand::DrawID`, set it from `CommandBuffer.cpp`'s `readIndirectDraws` per-draw loop index `I`, threaded it into `Executor.cpp` instead of the hardcoded 0. Direct (non-indirect) draws needed no change -- the field's default `0` already matches `gl_DrawID`'s spec value for those.
+5. New unit test `DrawTest.MultiDrawIndirectReportsDistinctDrawID`: 3-entry `vkCmdDrawIndirect`, vertex shader stores `(gl_DrawID + 1) * 11` per draw; only passes with real, distinct IDs.
+6. Flipped `EntryPoints.cpp`'s two `shaderDrawParameters` sites to `VK_TRUE`, advertised `VK_KHR_shader_draw_parameters` by name in `PhysicalDeviceInfo.cpp` (same sub-1.1-apiVersion custom-device rationale as `K6b`). Updated `AdvertisedPromotedFeatures.txt`/`AdvertisedPromotedExtensions.txt`/`PlannedExtensions.txt`.
+7. Build caught two pre-existing tests whose expectations assumed the old `VK_FALSE`/41-extension state: `PhysicalDeviceInfoTest`'s `PreVulkan11PromotionDedicatedFeatureStructsAreFullyOverwritten` and `DrawTest`'s `AdvertisesDynamicRenderingExtension`. Fixed both expected values (not test logic).
+8. `ninja check-feme`: **3,724/3,727 Passed, 3 Unsupported, 0 Failed.**
+9. Re-confirmed device before CTS (per "every time" instruction): `FeMe CPU Vulkan Device`.
+10. CTS: full `dEQP-VK.draw.*shader_draw_parameters*` (76 cases) **76 Pass, 0 Fail**. Both `dEQP-VK.api.*shader_draw_parameters_features` cases: **2 Pass, 0 Fail**. Broader `dEQP-VK.draw.*indirect*` regression sweep (3,898 cases, since `readIndirectDraws` itself changed): **0 Fail**, rest Pass/NotSupported (pre-existing unrelated gaps).
+11. Caught a naming-convention slip mid-session: I initially labeled my new comments `K6b` (copy-pasted from the existing `samplerMirrorClampToEdge` precedent comments) instead of the correct next letter, `K6c`. Found and fixed via grep before committing -- a good reminder to re-check the roadmap's actual next-available-letter before writing precedent-styled comments.
+12. `Roadmap.md`: split `K6c` off `K6a`, struck through. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/`VulkanCTSReport.md` updated (targeted edits, not full regen -- same caution as last session given known pre-existing drift elsewhere).
+13. Checked offload-test-suite `VkBool32`/`WaveActiveMax` pattern — not exercised, no `check-hlsl-feme-vk` work this session.
+
+## Wins
+- `K6c` fully closed: `shaderDrawParameters` now truthfully `VK_TRUE`, all three builtins real.
+- Found and fixed a genuine runtime gap (not just an advertisement gap like `K6b`) -- `gl_DrawID` was silently wrong for every multi-draw-indirect call with `DrawCount > 1`, a real correctness bug independent of the feature-bit advertisement question.
+- 3 small, separately-committed changes: core runtime fix + unit test, feature-bit/extension advertisement + bookkeeping + pre-existing test fixes, docs.
+- Caught and corrected my own `K6b`→`K6c` labeling slip before committing, via a deliberate grep sweep -- worth repeating as a habit for every future lettered-bit assignment.
+
+## Standing items not touched this session
+- `L419(j)`'s remaining untriaged items, `L418(a)` sanity re-check, `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE` `RelWithDebInfo` vs `Release` decision, deferred full `Vulkan14FeatureInventory.md` regeneration (blocked on `VK_KHR_shader_float_controls` + two `VK_VERSION_1_4` limit notes) -- all still deferred, no new information.
+- `check-hlsl-feme-vk` / offload-test-suite work -- none done this session.
+
+## Next steps
+
+1. **(~2-4 hours)** Pick the next bit from `K6a`'s further-narrowed bundle: `variablePointers`, `scalarBlockLayout`, `samplerFilterMinmax`, `drawIndirectCount`, `shaderOutputViewportIndex`/`shaderOutputLayer`, `VK_KHR_image_format_list`, `VK_EXT_separate_stencil_usage`, or `VK_KHR_shader_float_controls`. No bit in this remaining list has been flagged "likely-cheap" yet -- worth a quick 15-minute grep sweep per candidate (same shape as this session's `shaderDrawParameters` trace) before committing to one, since this session showed that "nearly free" labels aren't always accurate.
+2. **(~1-2 hours, hygiene)** Still-deferred **full regeneration** of `Vulkan14FeatureInventory.md`, blocked on fixing `VK_KHR_shader_float_controls`'s manifest entry and the two `VK_VERSION_1_4` limit notes first.
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now narrower: 8 bits) and grep-trace one candidate's existing SPIR-V/wrapper/runtime plumbing before flipping any bit, following this session's lesson that the "nearly free" label needs re-verifying per bit.
