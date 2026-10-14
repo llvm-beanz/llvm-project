@@ -1720,3 +1720,32 @@ No new rows needed in `Roadmap.md` -- every failure in this sanity run
 was already tracked. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: confirmed via grep to need no changes
 (pure merge/build-fix session, no feature/extension-surface change).
+
+## `K6b`: `samplerMirrorClampToEdge` advertised (roadmap K6b, measured impact)
+
+Pure advertisement fix (see `agent_thoughts.md` for the full
+investigation): `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` was
+already fully implemented (`Image.cpp`'s enum mapping,
+`FeMeRuntimeCPU.c`'s `femeRTApplyAddressMode` mode 4), so no runtime
+behavior changed. `EntryPoints.cpp`'s `samplerMirrorClampToEdge` feature
+bit now reports `VK_TRUE`, and `VK_KHR_sampler_mirror_clamp_to_edge` is
+now advertised by name in `PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions`.
+
+Ran `dEQP-VK.info.device_mandatory_features`: still **Fail** (expected --
+the other bits in K6a's remaining bundle are still missing), but the
+case's log no longer lists `samplerMirrorClampToEdge` among the missing
+mandatory features, confirming the fix closed that specific gap.
+
+Ran the full `dEQP-VK.*mirror_clamp*` case list (`dEQP-VK.texture.
+filtering.{2d,cube,...}.combinations.*.mirror_clamp_to_edge.*` and
+related, 23,749 cases): **7,910 Pass, 0 Fail, 15,839 NotSupported**
+(the NotSupported cases require other, still-unimplemented combinations
+such as anisotropy, unrelated to this fix). Zero regressions.
+
+`Vulkan14FeatureInventory.md`: 1.2 features 21->22, 1.2 extensions
+10->11 (applied as a targeted doc edit, not a full regeneration -- see
+that doc's own note on remaining unrelated manifest drift).
+`VulkanExtensionInventory.md`: `VK_KHR_sampler_mirror_clamp_to_edge`
+moved to Implemented. `Roadmap.md`: `K6b` split off `K6a` and struck
+through.
