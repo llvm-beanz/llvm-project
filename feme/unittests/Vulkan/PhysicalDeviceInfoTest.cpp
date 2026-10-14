@@ -2320,8 +2320,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.pNext = &SamplerFilterMinmax;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
 
-  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxSingleComponentFormats, VK_FALSE);
-  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxImageComponentMapping, VK_FALSE);
+  // Roadmap K6g: samplerFilterMinmax is now implemented (CPU runtime does
+  // real min/max reduction, FILTER_MINMAX_BIT is advertised alongside
+  // FILTER_LINEAR_BIT), so both properties are truthfully VK_TRUE rather
+  // than the VK_FALSE placeholder this test originally guarded.
+  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxSingleComponentFormats, VK_TRUE);
+  EXPECT_EQ(SamplerFilterMinmax.filterMinmaxImageComponentMapping, VK_TRUE);
   EXPECT_EQ(Props12.filterMinmaxSingleComponentFormats,
             SamplerFilterMinmax.filterMinmaxSingleComponentFormats);
   EXPECT_EQ(Props12.filterMinmaxImageComponentMapping,

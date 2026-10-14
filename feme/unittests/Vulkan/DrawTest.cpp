@@ -4047,7 +4047,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 45u);
+  // Roadmap K6g added VK_EXT_sampler_filter_minmax to the advertised list.
+  ASSERT_EQ(Count, 46u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -4132,6 +4133,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_EXT_SEPARATE_STENCIL_USAGE_EXTENSION_NAME));
   // Roadmap K6f.
   EXPECT_TRUE(HasExtension(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME));
+  // Roadmap K6g.
+  EXPECT_TRUE(HasExtension(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
