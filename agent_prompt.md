@@ -68,14 +68,13 @@ suggested the next steps:
    marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
    pointer types) rather than re-deriving it -- two sessions already confirmed
    empirically it's a real lowering gap, not a quick flip.
-2. **(~1 day)** New `K6j`: the residual
-   `single_nested_struct`/`random.scalar.83` nested-struct scalar-layout gap
-   this session found (`VK_ERROR_INITIALIZATION_FAILED` on a struct containing a
-   nested-struct member at a scalar-tight offset). Not yet grep-traced -- likely
-   needs the same kind of fix as this session's bugs #1/#2 but for
-   `convertOffsetStructTypeIgnoringDecorations`'s nested-struct-member handling
-   specifically, not its vector/matrix-member handling (which this session
-   fixed).
+2. **(~1 day, new this session)** New `K6k`: the `RowMajor`-matrix SSBO
+   `*_store_cols` bug (62 cases, result-comparison mismatch, not a
+   pipeline-creation error) -- not yet grep-traced. Likely in the
+   `RowMajorMatrixStorePattern`/`getMatrixWholeAccess`-family column-store
+   addressing math, given the `_store_cols`-only failure pattern (loads and
+   whole-matrix stores are unaffected). Confirmed pre-existing (not a `K6j`
+   regression) via `git stash` baseline re-run.
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
@@ -86,9 +85,11 @@ suggested the next steps:
    files still stale from `K6b`-`K6h`'s own prior sessions).
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the single `K6i` compiler-fix task).
+   stayed scoped to the single `K6j` compiler-fix task, same scoping choice as
+   `K6g`-`K6i`'s own sessions).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit
 `K6a` row, pick `variablePointers`, and start from the exact failure list two
 prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot
-to the new `K6j` nested-struct gap if a break from `K6a` is wanted.
+to the new `K6k` SSBO `RowMajor`-matrix store bug if a break from `K6a` is
+wanted.
