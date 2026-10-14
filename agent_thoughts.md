@@ -121984,3 +121984,45 @@ Picked `drawIndirectCount` per the prior session's recommendation -- the "no com
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6h` command-plumbing task, same as `K6g`'s scoping choice last session).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s now-2-bit `K6a` row, pick `variablePointers` or `scalarBlockLayout`, and start from the prior investigation's exact failure list (`PtrAccessChain` et al., or `getNaturalAlignmentIgnoringPacking`) rather than re-tracing from scratch.
+
+# Session: `K6i` closed -- `scalarBlockLayout` implemented via 3 struct-layout bug fixes
+
+## What happened
+
+Picked `scalarBlockLayout` per the prior session's recommendation -- `K6a`'s last 2 bits said to start from `getNaturalAlignmentIgnoringPacking` relaxation, not re-trace from scratch.
+
+1. **Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` (standing instruction, every session).
+2. **Generalized the existing single-level tight-array substitution** (`getTightVectorArrayType`/`getTightMatrixType`, used to represent a vector/matrix member at a scalar-tight offset below its natural SIMD alignment) to arbitrary nesting depth via a new recursive helper, `getTightNestedArrayOfVectorsOrMatricesType`.
+3. **Bug #1**: the struct-member-building loop's plain type-conversion call had no retry for a single-level tight array, aborting the whole struct. Fixed via fallback to the new helper (also wired into `rewriteBlockAccess`'s standalone conversion call).
+4. **Bug #2**: `layOutStructIfOffsetsMatch`'s alignment-overshoot pre-check unconditionally rejected a member placed below its own natural alignment, even in the packed-struct `AllowInteriorPad` retry tier that never actually needs that alignment. Relaxed to only reject genuinely-backward placement.
+5. **Bug #3 (the subtle one)**: after fixing #1+#2, CTS `ubo.random.*` showed 234 failures -- looked like a regression, but `ubo.random.*`'s shader content is *dynamically generated* based on whether `scalarBlockLayout` is advertised, so a `git stash` true-baseline comparison was needed to tell "new harder content" from "real bug." Found a real bug anyway: the rewritten array-peeling retry tier matched **bare, non-array** vector/matrix members too (peeling zero levels is a no-op), turning a should-be "skip, not applicable" into a hard failure. Bisected via a unit-test regression (`OutOfOrderOffsetInterfaceBlockLegalizes`) plus targeted `llvm::errs()` traces -- numbered-tag `notifyMatchFailure` suffixes pinpoint *which* branch fires, but raw value prints were what actually cracked this one. Fixed with an explicit "is this really an array" guard before peeling.
+6. **Flipped `scalarBlockLayout` to `VK_TRUE`** in `EntryPoints.cpp`, updated the one unit test whose hardcoded expectation this flip broke (`PreVulkan12PromotionDedicatedFeatureStructsAreFullyOverwritten`), added 2 new lit tests for bugs #1/#2 (bug #3's regression guard is the pre-existing unit test above, kept as-is).
+
+## CTS results
+
+- `dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.scalar.*` (1,512 cases): **1,032 Pass, 0 Fail** (previously 32/192/192 failures).
+- Full `dEQP-VK.ubo.*` regression sweep (13,240 cases): **8,293 Pass, 25 Fail, 4,922 NotSupported**. All 25 failures are `single_nested_struct.*scalar*` (24) or `random.scalar.83` (1) -- a **separate** nested-struct scalar-layout gap, not this session's bug. An interim measurement with only bugs #1+#2 (before #3's fix) showed 340 failures on this same sweep -- bug #3 alone closed 315 of them.
+- `ninja check-feme`: 3,730/3,733 Passed, 0 Failed, 3 Unsupported (pre-existing, unrelated).
+
+## Commits (2, plus this file)
+
+1. `SPIRVToLLVMPatterns.cpp`'s 3-bug fix + 2 new lit tests (kept together: the tests directly exercise the fix, independent of the feature bit).
+2. Feature-bit flip + the one broken unit-test expectation + doc sync (`Roadmap.md`, `Vulkan14FeatureInventory.md`, `VulkanExtensionInventory.md`, `VulkanCTSReport.md`).
+
+## Where `K6a` stands now
+
+Down to its last bit: `variablePointers` (confirmed, by two prior sessions' empirical CTS runs, to be a real `SPIRVToLLVMPatterns.cpp` lowering gap -- `PtrAccessChain`/`OpPtrEqual`/`OpPtrNotEqual`/`OpConstantNull` on pointer types -- not an advertisement fix). `scalarBlockLayout` is now closed, split off as `K6i`. New `K6j` tracks the residual `single_nested_struct` scalar gap this session found but did not fix.
+
+## Lesson worth repeating
+
+A single passing MLIR reproducer or unit test is not enough evidence once a feature bit changes *generated test content*, not just *pass/fail of existing content*. `ubo.random.*`'s 234 "failures" on the first measurement were genuinely alarming until a `git stash` baseline run (same code, feature OFF) showed those exact cases already passed at baseline -- proving a real regression, not just harder exercised content. Always diff against a true baseline when a feature flip can change what the test suite even generates, not just whether it passes.
+
+## Next steps
+
+1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from the prior investigation's exact failure list (`PtrAccessChain` "explicitly marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointer types) rather than re-deriving it -- two sessions already confirmed empirically it's a real lowering gap, not a quick flip.
+2. **(~1 day)** New `K6j`: the residual `single_nested_struct`/`random.scalar.83` nested-struct scalar-layout gap this session found (`VK_ERROR_INITIALIZATION_FAILED` on a struct containing a nested-struct member at a scalar-tight offset). Not yet grep-traced -- likely needs the same kind of fix as this session's bugs #1/#2 but for `convertOffsetStructTypeIgnoringDecorations`'s nested-struct-member handling specifically, not its vector/matrix-member handling (which this session fixed).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files still stale from `K6b`-`K6h`'s own prior sessions).
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6i` compiler-fix task).
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit `K6a` row, pick `variablePointers`, and start from the exact failure list two prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot to the new `K6j` nested-struct gap if a break from `K6a` is wanted.
