@@ -122116,3 +122116,31 @@ Still just `variablePointers`. Untouched again this session (picked `K6k` instea
 6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done.
 
 **Immediate next action for next session:** pick `K6l`'s 8 `RowMajor` `random.scalar.*` cases (pull real SPIR-V from `.qpa` logs first) as the smallest direct continuation of this session's own fix, or pivot to `variablePointers` (`K6a`) for a change of pace.
+
+# Session: K6l fixed (scalar-layout `RuntimeArrayType`-of-vector stride bug)
+
+**Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep deviceName`** at session start, per standing instructions.
+
+## What now works
+
+`dEQP-VK.ssbo.layout.random.scalar.{3,11,15,20,49,60,61,88}` (8 of K6l's 9 bundled cases) now pass. Full `dEQP-VK.ssbo.*` sweep: 4,741 -> 4,749 Pass, 13 -> 5 Fail. `ninja check-feme`: 3,733/3,736 pass, 0 fail, 1 new lit test.
+
+## The bug, in one paragraph
+
+A trailing runtime-sized array of a bare 3-component vector (`vec3 d[]`) under scalar/tight layout (`-fvk-use-scalar-layout`) declares an `ArrayStride` of 12 bytes. But MLIR always reports a `vector<3xf32>`'s own DataLayout size as 16 bytes (rounds lane count up to the next power of two for SIMD-register reasons). The existing stride-mismatch-repair code in `SPIRVToLLVMPatterns.cpp`'s `RuntimeArrayType` conversion only handled the *opposite* direction (stride wider than natural size, the ordinary std430 case) -- never this narrower-than-natural-size direction, which only scalar layout produces. Every array read silently computed the wrong byte offset.
+
+## The real lesson this session re-learned (again)
+
+1. The original roadmap guess for K6l ("8 of 9 cases are deeper `RowMajor` matrix nesting") was wrong. Don't trust a prior session's root-cause theory for an un-triaged case -- pull the real SPIR-V from the `.qpa` log and look.
+2. Hand-reconstructing SPIR-V text from a `.qpa` log and round-tripping it through `spirv-as`/`mlir-translate`/`feme-opt` as *separate processes* hit two real-but-irrelevant MLIR SPIR-V-dialect parser/verifier quirks (`OpIAdd` signed/unsigned mismatch) that look exactly like the bug under investigation but aren't. `feme-translate --import-spirv-skip-verify` exists precisely to route around the first one; a hand-crafted minimal reproducer routes around the second (text re-parsing re-triggers a stricter check than the original in-memory op had).
+3. The most reliable way to get the *authentic* SPIR-V a CTS case uses: a temporary `getenv`-gated dump of `pCode` bytes in `Pipeline.cpp`'s `copyShaderModuleWords`, rebuild just `libfeme_vulkan.so`, re-run with the env var set. Fast, byte-exact, no reconstruction-fidelity risk. (Reverted before committing, as always.)
+
+## Next steps
+
+1. **(~half day)** `K6m` (split off from K6l): `random.scalar.41` + 4 `3_level_unsized_array.scalar.*` cases, all failing *legalization* (`spirv.AccessChain`...explicitly marked illegal`), not a result mismatch -- a different bug class, not yet triaged at all. Pull real SPIR-V from `.qpa` logs first, same lesson as above.
+2. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from the prior investigation's exact failure list (`PtrAccessChain` "explicitly marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointer types).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done.
+
+**Immediate next action for next session:** pick `K6m`'s legalization failures (pull real SPIR-V from `.qpa` logs, same technique as this session) as the smallest direct continuation, or pivot to `variablePointers` (`K6a`) for a change of pace.
