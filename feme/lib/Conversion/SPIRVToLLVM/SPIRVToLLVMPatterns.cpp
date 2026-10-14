@@ -16357,6 +16357,27 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
             if (NaturalSize < Stride)
               ElementType = mlir::LLVM::LLVMArrayType::get(
                   mlir::IntegerType::get(Type.getContext(), 8), Stride);
+            // (Roadmap K6l) The opposite mismatch -- a declared Stride
+            // *narrower* than a raw vector element's own DataLayout-
+            // reported size -- happens for exactly the same
+            // `-fvk-use-scalar-layout` reason `getStridedTightVectorArrayType`
+            // already compensates for elsewhere in this file (a 3-
+            // component vector's own size is always rounded up to the
+            // next power-of-two lane count, e.g. 16 bytes for `vec3`,
+            // regardless of the tightly packed 12-byte `ArrayStride`
+            // scalar layout actually declares): without substituting a
+            // tight, alignment-free array-of-scalars marker here, this
+            // runtime array's own element type keeps reporting a 16-byte
+            // footprint, and every later GEP indexing through it (e.g.
+            // `dEQP-VK.ssbo.layout.random.scalar.*`'s own trailing
+            // `vec3 d[]` member) advances by that wrong, wider stride
+            // instead of the real, tightly packed one.
+            else if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(
+                         Type.getElementType())) {
+              if (mlir::Type Tight = getStridedTightVectorArrayType(
+                      VectorTy, Stride, TypeConverter))
+                ElementType = Tight;
+            }
           }
         }
         return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
