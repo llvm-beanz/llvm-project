@@ -60,6 +60,22 @@ file.
 
 # Request
 
-Can you please fetch main from the upstream LLVM repo and rebase this branch on
-the latest main? Then run the feme tests to verify no regressions and address
-any that arise.
+Can you please continue the work on the Vulkan FeMe ICD? A previous session
+suggested the next steps:
+
+1. **(~5 min)** Decide whether to delete `backup-before-rebase-20261014` now
+   that the merge is build+test+CTS-sanity verified clean, or keep it longer as
+   a historical safety net. Leaning toward keeping it a while longer given the
+   scale of this merge (6,144 commits).
+2. **(standing)** Resume the actual roadmap work next session — this session was
+   100% merge-and-regression-fix, no roadmap-stage progress. Check
+   `Roadmap.md`'s open items (last known: `L419(j)` line_continuity
+   generalization in `EntryWrapper.cpp`, and `D1`'s mandatory-feature-bit-by-bit
+   closure) for where to pick back up.
+3. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE` decision — still
+   deferred.
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s current open
+items (the merge didn't touch it) and resume wherever the last non-merge session
+left off — most likely `L419(j)`'s `line_continuity` pair or `D1`'s
+mandatory-feature work.
