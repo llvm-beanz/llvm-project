@@ -121942,3 +121942,45 @@ Picked `samplerFilterMinmax` as the smallest of `K6a`'s 4 remaining real-impleme
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6g` CPU-runtime task).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s now-3-bit `K6a` row and pick `drawIndirectCount` (new commands, no compiler work) as the next likely-smallest real implementation task, or pivot to one of the standing backlog items if roadmap-stage work needs a break.
+
+# Session: `K6h` closed -- `drawIndirectCount` implemented (`vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount`)
+
+## What happened
+
+Picked `drawIndirectCount` per the prior session's recommendation -- the "no compiler work, just new commands" bit from `K6a`'s remaining 3-bit bundle.
+
+1. **Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` (standing instruction, every session).
+2. **Scoped the implementation by tracing existing infrastructure first**, not writing code blind: `readIndirectDrawCount` (built for `vkCmdDrawMeshTasksIndirectCountEXT`, roadmap H6f) already does exactly the count-buffer read the new commands need -- bounds-checked, clamped to `maxDrawCount`. `readIndirectDraws` already does the draw-array read. `drawMeshTasksIndirectCount` (`CommandBuffer.h`) is the exact structural template for a new count-buffer-aware recording method. **Lesson: two sessions of prior H6f mesh-shader work paid off directly here -- almost zero new buffer-handling logic needed, just wiring.**
+3. **Found the entry-point registration mechanism**: `vk_gen_entrypoints.py` reads `vk.xml` itself (not a hand-maintained list) and already carries *unimplemented* table entries for both new command names, since they're core Vulkan 1.2 (read via the generator's own core-feature pass). Only `ImplementedEntrypoints.txt` needed a two-line addition -- no generator/CMake changes at all.
+4. **Checked VK-GL-CTS's own loader fallback logic** (`vkInitDeviceFunctionPointers.inl`) before assuming a `KHR`-suffixed alias symbol was needed: `deqp-vk` tries the core name first unconditionally, only falls back to `...KHR` if that resolves null. Confirmed no `SUPPORTED_EXTENSIONS` entry (and thus no alias symbol) was needed.
+5. **Implemented**: `CommandBuffer.h` gained 2 new `RecordedCommand::Kind` enumerators + a `drawIndirectCount` recording method; `CommandBuffer.cpp` merged the new kinds into the existing `DrawIndirect`/`DrawIndexedIndirect` execution-switch case (not duplicated); `EntryPoints.h`/`.cpp` got the 2 new declarations + feature-bit flip; `PhysicalDeviceInfo.cpp` got the extension-name advertisement.
+6. **Fixed two now-stale unit tests before they'd even fail in CI**: `ProcAddrTest.UnimplementedCommandNeverResolves` used `vkCmdDrawIndexedIndirectCount` as its "genuinely unimplemented" example -- now implemented, so it breaks its own premise. Wrote a small Python script cross-checking every Vulkan 1.0-1.4 *core* command name in `vk.xml` against `ImplementedEntrypoints.txt`: **found zero remaining unimplemented core commands** -- every roadmap gap left is now a semantic-completeness gap, not a missing entry point. Re-pointed the test at an instance-level core-but-unimplemented command (`vkGetPhysicalDeviceImageFormatProperties2`) plus a device-level alias-but-unimplemented command (`vkCmdBindIndexBuffer2KHR`) to keep both halves of the test meaningful.
+7. **Added 3 new unit tests**: `DrawTest.DrawIndirectCountClampsToCountBuffer`/`DrawIndexedIndirectCountClampsToCountBuffer` (mirroring the existing `DrawMeshTasksIndirectCountClampsToCountBuffer` pattern -- 2-entry indirect buffer, count buffer naming only 1, confirms the clamp), `PhysicalDeviceProperties2Test.DrawIndirectCountFeatureIsTrue`.
+
+## CTS results
+
+- Live case list (`--deqp-runmode=stdout-caselist`, not static mustpass) filtered to `*indirect_count*`: 2,695 cases across `dEQP-VK.draw.*`/`conditional_rendering.*`/`transform_feedback.*`. **449 Pass, 0 Fail, 2,246 NotSupported** (unrelated extension gaps: `maintenance6`, `shader_objects`, `VK_KHR_device_address_commands`, oversized transform-feedback buffers).
+- `dEQP-VK.draw.*` regression sweep (29,475 cases): **4,282 Pass, 0 Fail**.
+- `dEQP-VK.api.info.*` (10,490 cases): **5,966 Pass, 0 Fail** (identical totals to the `K6g` baseline -- no regression).
+- `ninja check-feme`: 3,728/3,731 Passed, 0 Failed, 3 Unsupported (pre-existing, unrelated), both before and after every code change.
+
+## Commits (3)
+
+1. Command implementation + entry points + `ImplementedEntrypoints.txt` + the `ProcAddrTest.cpp` fix + 2 new `DrawTest.cpp` tests (kept together since the new tests exercise the new code directly, independent of the feature bit).
+2. Feature-bit flip + extension-name advertisement + the `DrawTest.cpp` extension-count fix + the new `PhysicalDeviceInfoTest.cpp` test.
+3. Doc sync (`Roadmap.md`, `Vulkan14FeatureInventory.md`, `VulkanExtensionInventory.md`, `VulkanCTSReport.md`).
+4. (this file, its own commit as usual).
+
+## Where `K6a` stands now
+
+2 bits remain, both confirmed genuine `SPIRVToLLVMPatterns.cpp`-level implementation tasks (not advertisement gaps), per two prior sessions' investigation: `variablePointers` (lowering gaps for `PtrAccessChain`/`OpPtrEqual`/`OpPtrNotEqual`/`OpConstantNull` on pointer types) and `scalarBlockLayout` (`layOutStructIfOffsetsMatch`'s alignment check needs relaxing to scalar-component granularity). `drawIndirectCount` is now closed, split off as `K6h`.
+
+## Next steps
+
+1. **(~1-2 days each)** Pick `variablePointers` or `scalarBlockLayout` -- `K6a`'s only 2 remaining bits, both real `SPIRVToLLVMPatterns.cpp` changes per prior sessions' empirical CTS-backed investigation (not just grep-reads). Neither has an obvious "smaller" edge the way `drawIndirectCount` did; whichever is picked should start from the prior sessions' own failure-mode notes (`PtrAccessChain`/`OpPtrEqual` family for `variablePointers`; `getNaturalAlignmentIgnoringPacking` relaxation for `scalarBlockLayout`) rather than re-deriving them.
+2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 2 bits should get individually-tracked roadmap rows now that the bundle is down to its final two, rather than staying combined.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files still stale from `K6b`-`K6g`'s own prior sessions).
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6h` command-plumbing task, same as `K6g`'s scoping choice last session).
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-2-bit `K6a` row, pick `variablePointers` or `scalarBlockLayout`, and start from the prior investigation's exact failure list (`PtrAccessChain` et al., or `getNaturalAlignmentIgnoringPacking`) rather than re-tracing from scratch.
