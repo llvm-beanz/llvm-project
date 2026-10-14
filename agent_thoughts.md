@@ -121283,3 +121283,74 @@ grep for `R10G10B10A2_SNORM` to find the alpha-component pack/unpack
 case, then rerun the standalone `astc_10x5_unorm_block.
 a2b10g10r10_snorm_pack32.general_general_linear` case with a targeted
 debug print on the alpha channel specifically.
+
+# Session: L265/L419(e) ASTC-alpha tie root-caused (decode precision, not rounding)
+
+Device check: `FeMe CPU Vulkan Device`. Confirmed.
+
+**What I found**: the 12-case `astc_{8x8,10x5,12x12}_unorm_block` ->
+`a2b10g10r10_snorm_pack32` blit failure isn't a rounding-direction bug.
+Two prior sessions thought it needed "ties away from zero" (conflicting
+with `L260`'s own "ties to even" fix elsewhere) and gave up there.
+
+Real cause: FeMe's ASTC decoder truncates to 8-bit RGBA8 immediately.
+VK-GL-CTS's reference decoder keeps 16-bit float precision. Instrumented
+both decoders (temporarily, both reverted) side by side on the same
+source texels and the values differ by ~0.001-0.002. That tiny gap is
+invisible almost everywhere (RGB threshold here is ~0.065) but this
+specific destination channel is a 2-bit SNORM alpha field -- only 3
+possible values, one exact tie point at 0.5. FeMe's pre-truncated inputs
+land exactly on that tie; CTS's higher-precision inputs land just above
+it with no tie at all. Confirmed `L260`'s ties-to-even fix is correct
+per spec (checked against CTS's own `convertSatRte`) and not at fault.
+
+**No code fix landed this session.** A real fix means giving ASTC decode
+16-bit precision through the blit sampling path -- touches code shared
+by every passing ASTC/BC/ETC2 case, too risky to rush. Scoped it into
+`Roadmap.md`'s new `L424(a)` (add a 16-bit decode entry point, 1 day) and
+`L424(b)` (wire it into the blit path, 2-4 hours).
+
+**Verification done**: full `check-feme` after reverting all debug
+instrumentation -- 3719 Passed, 3 Unsupported, 0 Failed, 0 regressions
+(expected: no FeMe source changed, docs only this session).
+
+**Commits this session**:
+1. `feme: root-cause L265/L419(e) ASTC-alpha SNORM tie as decode precision gap`
+   (Roadmap.md + VulkanCTSReport.md)
+2. This `agent_thoughts.md` commit.
+
+No outside-FeMe fix needed this session -- the only non-FeMe-tree change
+was temporary debug instrumentation in VK-GL-CTS's
+`vktApiBlittingTests.cpp`, fully reverted before finishing (`git diff
+--stat` confirmed clean in that checkout).
+
+## Next steps
+
+1. **(~1 day) `L424(a)`**: add a 16-bit ASTC decode entry point next to
+   the existing `decodeASTCBlock` in `feme/lib/Vulkan/ASTCDecode.cpp`,
+   matching CTS's `c/65536.0f` convention. Keep the existing 8-bit path
+   for every other caller unchanged. New unit test asserting the exact
+   16-bit value (not 8-bit-truncated) for a known block.
+2. **(~2-4 hours) `L424(b)`**: wire `L424(a)`'s entry point into
+   `ImageOps.cpp`'s blit/copy per-texel ASTC fetch. Confirm the 12
+   originally-failing cases now Pass, 0 regressions in the other 61
+   passing ASTC-involved `blit_image.*` cases. Strike through `L419(e)`
+   and `L265` in `Roadmap.md` once confirmed; update
+   `VulkanCTSReport.md`.
+3. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged, deferred again this session (didn't touch it, spent the
+   whole session on `L265`).
+4. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs. Run `git log --oneline --all | grep -i
+   L418` before ever touching it again -- not run this session either,
+   still untouched.
+5. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+   `L418`-`L419` roadmap counts synced after every fix -- done this
+   session (inventories confirmed via grep to need no change, pure
+   investigation/doc session).
+6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
+   discrepancy a new regression -- not exercised this session.
+7. **(unresolved, carried for several sessions)** Decide whether to
+   revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
+   still not revisited.
