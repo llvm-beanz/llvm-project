@@ -5882,6 +5882,68 @@ mlir::Type getTightNestedArrayOfVectorsOrMatricesType(
   return mlir::LLVM::LLVMArrayType::get(TightInner, ArrayTy.getNumElements());
 }
 
+/// (Roadmap K6m) Same recursive nested-array-of-vectors substitution as
+/// `getTightNestedArrayOfVectorsOrMatricesType` immediately above, minus
+/// the matrix case and its `Struct`/`Index` decoration lookup -- needed
+/// by a context with no owning struct member index of its own to look a
+/// `MatrixStride` decoration up against: `spirv::RuntimeArrayType`'s own
+/// element-type conversion (below), reached whenever a trailing runtime-
+/// sized array's element is *itself* a (possibly multiply nested) fixed-
+/// size `spirv::ArrayType` of vectors under scalar/tight layout -- e.g.
+/// `dEQP-VK.ssbo.layout.random.scalar.41`'s own trailing `ivec3 d[][2]`
+/// member, `!spirv.rtarray<!spirv.array<2 x vector<3xsi32>, stride=12>,
+/// stride=24>`. `convertArrayTypeIgnoringDecorations` (the ordinarily-
+/// registered `spirv::ArrayType` conversion) bails outright (returns
+/// null) for that inner `array<2 x vector<3xsi32>, stride=12>` on its
+/// own -- exactly like a bare, single-level `vec3 xs[3]` with
+/// `stride=12` already does -- but unlike a direct struct member (which
+/// has `getTightNestedArrayOfVectorsOrMatricesType` to retry with, inside
+/// `convertOffsetStructTypeIgnoringDecorations`'s own member loop and
+/// `rewriteBlockAccess`'s own per-member re-convert), nothing previously
+/// retried this nested-inside-a-runtime-array shape at all: the raw
+/// conversion failure propagated straight up through
+/// `RuntimeArrayType`'s own conversion (`TypeConverter.convertType(Type.
+/// getElementType())` returning null), aborting the whole runtime
+/// array's conversion, which in turn is exactly the
+/// `"failed to legalize operation 'spirv.AccessChain'...explicitly
+/// marked illegal"` failure this fixes -- a *legalization* error, not a
+/// miscompile, since no LLVM type for the member ever existed for
+/// `rewriteBlockAccess`'s own GEP to use at all.
+///
+/// Returns null if \p ElementTy is not (an array, at any nesting depth,
+/// of) a vector, if any inner conversion fails, or if a non-innermost
+/// array level's own declared Stride does not already exactly match its
+/// element's recursively tight-substituted natural size (same
+/// conservative "reject outright" stance as the matrix-aware sibling
+/// above, for the same reason: no real scalar-layout-emitted shape this
+/// was developed against ever has a genuine interior gap at that level).
+mlir::Type
+getTightNestedArrayOfVectorsType(mlir::Type ElementTy,
+                                 const mlir::TypeConverter &Converter) {
+  auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy);
+  if (!ArrayTy)
+    return nullptr;
+  mlir::Type Inner = ArrayTy.getElementType();
+  if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Inner)) {
+    mlir::Type TightElementTy = getStridedTightVectorArrayType(
+        VectorTy, ArrayTy.getArrayStride(), Converter);
+    if (!TightElementTy)
+      return nullptr;
+    return mlir::LLVM::LLVMArrayType::get(TightElementTy,
+                                          ArrayTy.getNumElements());
+  }
+  mlir::Type TightInner =
+      getTightNestedArrayOfVectorsType(Inner, Converter);
+  if (!TightInner)
+    return nullptr;
+  if (unsigned Stride = ArrayTy.getArrayStride()) {
+    mlir::DataLayout DL;
+    if (DL.getTypeSize(TightInner) != Stride)
+      return nullptr;
+  }
+  return mlir::LLVM::LLVMArrayType::get(TightInner, ArrayTy.getNumElements());
+}
+
 /// If \p ElementTy is a SPIR-V struct (any member count -- e.g.
 /// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
 /// `!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision],
@@ -16346,6 +16408,30 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
           mlir::spirv::RuntimeArrayType Type) -> std::optional<mlir::Type> {
         mlir::Type ElementType =
             TypeConverter.convertType(Type.getElementType());
+        // (Roadmap K6m) The element's own raw conversion fails outright
+        // (returns null, not merely an oversized-per-DataLayout type)
+        // whenever it is itself a (possibly multiply nested) fixed-size
+        // `spirv::ArrayType` of vectors whose own declared `Stride` is
+        // narrower than its vector element's natural size --
+        // `convertArrayTypeIgnoringDecorations`'s own deliberate "give up,
+        // let a more specialized caller retry" behavior for exactly that
+        // shape (see its own comment). A direct struct member reaching
+        // that same shape has `getTightNestedArrayOfVectorsOrMatricesType`
+        // to retry with; this runtime array's own element has no owning
+        // struct/index of its own to retry through that path, so retry
+        // via its matrix-decoration-free sibling,
+        // `getTightNestedArrayOfVectorsType`, instead -- e.g.
+        // `dEQP-VK.ssbo.layout.random.scalar.41`'s own trailing `ivec3
+        // d[][2]` member, `rtarray<array<2 x vector<3xsi32>,
+        // stride=12>, stride=24>`. Without this retry, the whole runtime
+        // array's own conversion fails, which previously surfaced many
+        // steps later as a `"failed to legalize operation
+        // 'spirv.AccessChain'...explicitly marked illegal"` error, not a
+        // miscompile, since no LLVM type for this member ever existed at
+        // all.
+        if (!ElementType)
+          ElementType = getTightNestedArrayOfVectorsType(
+              Type.getElementType(), TypeConverter);
         if (!ElementType)
           return std::nullopt;
         if (unsigned Stride = Type.getArrayStride()) {
