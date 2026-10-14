@@ -5046,6 +5046,110 @@ public:
   }
 };
 
+/// Converts `spirv.PtrAccessChain`/`spirv.InBoundsPtrAccessChain` (roadmap
+/// K6a, the `variablePointers`/`variablePointersStorageBuffer` feature's
+/// own `PtrAccessChain`-legalization-failure cluster, 156 of the
+/// `dEQP-VK.spirv_assembly.instruction.*variable_pointer*` mustpass set's
+/// 296 failures under those two bits) -- an op with no existing
+/// conversion pattern at all, in either feme or upstream MLIR, unlike
+/// plain `spirv.AccessChain` (an unrelated sibling op this file already
+/// converts a dozen different ways above and below).
+///
+/// Per the op's own spec (see `SPIRVMemoryOps.td`'s `SPIRV_PtrAccessChainOp`
+/// doc and `PtrAccessChainOp::build`/`verify`'s shared `getElementPtrType`
+/// call, which -- tellingly -- never even looks at the `element` operand):
+/// `PtrAccessChain(base, element, idx1, idx2, ...)` has exactly
+/// `AccessChain(base, idx1, idx2, ...)`'s own result type, computed from
+/// `idx1, idx2, ...` alone. Semantically, `element` only ever *shifts the
+/// base address* by `element` whole units of `base`'s own pointee type
+/// (C's `(&base)[element]`, "the Base-type's Array Stride if decorated...
+/// for all other objects, the implementation calculates the stride") --
+/// before `idx1, idx2, ...` then descend into that shifted base exactly
+/// like an ordinary `AccessChain` would.
+///
+/// Two distinct shapes cover every failing CTS case this pattern closes
+/// (confirmed by dumping each case's own real SPIR-V via a temporary
+/// `FEME_DEBUG_DUMP_SPIRV` hook, never committed -- see this roadmap row's
+/// own investigation notes): the `complex_types_compute`/`graphics`-style
+/// families (`opptraccesschain_{arrays,structs,matrices,vec4,...}_*`)
+/// always pass a compile-time-constant-zero `element` alongside one or
+/// more real trailing `idx1, idx2, ...`, while the `float`/
+/// `reads_opptraccesschain_*` family instead passes a genuine *dynamic*
+/// `element` (built from `gl_GlobalInvocationID`) with *zero* trailing
+/// indices, always into a plain scalar (`float`) pointee with no
+/// `ArrayStride` decoration to honor. Handling only these two shapes --
+/// rather than the fully general "dynamic element into a decorated,
+/// composite-typed pointee" case neither this mustpass set nor any other
+/// known caller exercises -- keeps the byte-stride question moot in both:
+/// a zero `element` contributes no offset regardless of what stride would
+/// otherwise apply, and a bare scalar pointee's own natural size *is* the
+/// spec's own "for all other objects, the implementation calculates"
+/// stride, with no declared `ArrayStride` to disagree with. A combination
+/// this pattern cannot yet handle (a non-zero `element` together with one
+/// or more trailing indices, which would need a real `ArrayStride`-aware
+/// byte-offset computation this file's own
+/// `convertOffsetStructTypeIgnoringDecorations` machinery does not yet
+/// expose for a pointer *type* itself, only a struct's own members)
+/// declines via `notifyMatchFailure` rather than miscompiling.
+template <typename SPIRVOp, typename AccessChainOp>
+class PtrAccessChainPattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    auto PointerType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+    mlir::Type ConvertedPointeeTy =
+        this->getTypeConverter()->convertType(PointerType.getPointeeType());
+    if (!ConvertedPointeeTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    std::optional<uint64_t> ConstantElement =
+        getConstantMemberIndex(Op.getElement());
+    bool ElementIsZero = ConstantElement && *ConstantElement == 0;
+
+    if (!ElementIsZero) {
+      if (!Op.getIndices().empty())
+        return Rewriter.notifyMatchFailure(
+            Op, "non-zero/dynamic element combined with further indices "
+                "not yet supported");
+      mlir::Type ResultTy =
+          this->getTypeConverter()->convertType(Op.getType());
+      if (!ResultTy)
+        return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+      mlir::Value Gep = mlir::LLVM::GEPOp::create(
+          Rewriter, Loc, ResultTy, ConvertedPointeeTy, Adaptor.getBasePtr(),
+          llvm::ArrayRef<mlir::LLVM::GEPArg>{Adaptor.getElement()});
+      Rewriter.replaceOp(Op, Gep);
+      return mlir::success();
+    }
+
+    if (Op.getIndices().empty()) {
+      // No real indices left once the zero `element` is dropped -- the
+      // result is `base` itself, unchanged (the "This computed Base has
+      // the same type as the originating Base" case with nothing further
+      // to apply).
+      Rewriter.replaceOp(Op, Adaptor.getBasePtr());
+      return mlir::success();
+    }
+
+    // Re-express as a plain `AccessChain`/`InBoundsAccessChain` over the
+    // same base and remaining indices, and let the rest of this file's
+    // own (considerably more intricate) `AccessChain` pattern set -- the
+    // dialect conversion driver reprocesses any newly created, still-
+    // illegal SPIR-V op the same as the original -- handle every
+    // block/struct-layout/matrix/tight-vector subtlety that machinery
+    // already covers, rather than duplicating any of it here.
+    Rewriter.replaceOpWithNewOp<AccessChainOp>(Op, Op.getBasePtr(),
+                                              Op.getIndices());
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.AccessChain` into an array-of-blocks pointer (`T
 /// blocks[N]` in GLSL) -- a single binding covering `N` descriptors, each
 /// its own storage/uniform buffer block instance -- building the
@@ -16750,6 +16854,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern<mlir::spirv::AccessChainOp>,
       BlockAccessChainPattern<mlir::spirv::InBoundsAccessChainOp>,
+      PtrAccessChainPattern<mlir::spirv::PtrAccessChainOp,
+                            mlir::spirv::AccessChainOp>,
+      PtrAccessChainPattern<mlir::spirv::InBoundsPtrAccessChainOp,
+                            mlir::spirv::InBoundsAccessChainOp>,
       CompositeConstructPattern,
       ControlBarrierConversionPattern, MemoryBarrierConversionPattern,
       CopyObjectConversionPattern, CopyLogicalConversionPattern,
