@@ -1574,7 +1574,14 @@ void fillFeatures2Chain(void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
       auto *Features = reinterpret_cast<
           VkPhysicalDeviceShaderDrawParametersFeatures *>(Base);
-      Features->shaderDrawParameters = VK_FALSE;
+      // (roadmap K6c) gl_BaseVertex/gl_BaseInstance/gl_DrawID are all real:
+      // CanonicalizeStage.cpp maps the three SPIR-V builtins,
+      // VertexWrapper.cpp's loadVertexSystemValue reads each from the
+      // compiled per-invocation struct, and Executor.cpp populates that
+      // struct's BaseVertex/BaseInstance/DrawID fields from the real draw
+      // command (including each indirect draw's own position for
+      // gl_DrawID, see DrawCommand::DrawID's own comment).
+      Features->shaderDrawParameters = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES: {
@@ -1640,7 +1647,9 @@ void fillFeatures2Chain(void *pNext) {
       Features->variablePointers = VK_FALSE;
       Features->protectedMemory = VK_FALSE;
       Features->samplerYcbcrConversion = VK_FALSE;
-      Features->shaderDrawParameters = VK_FALSE;
+      // (roadmap K6c) see the dedicated VK_PHYSICAL_DEVICE_SHADER_DRAW_
+      // PARAMETERS_FEATURES case above for why this is real.
+      Features->shaderDrawParameters = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {

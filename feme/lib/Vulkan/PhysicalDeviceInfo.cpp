@@ -1636,6 +1636,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // above.
       {VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,
        VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_SPEC_VERSION},
+      // (roadmap K6c) `gl_BaseVertex`/`gl_BaseInstance`/`gl_DrawID` are
+      // all real (CanonicalizeStage.cpp's builtin mapping,
+      // VertexWrapper.cpp's per-invocation reads, Executor.cpp's
+      // DrawCommand::DrawID threading through every indirect draw); same
+      // "custom device below this extension's 1.1 core-promotion point"
+      // rationale as `VK_KHR_depth_stencil_resolve`/`VK_KHR_sampler_
+      // mirror_clamp_to_edge` above.
+      {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,
+       VK_KHR_SHADER_DRAW_PARAMETERS_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -2149,7 +2149,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(VariablePointers.variablePointers, VK_FALSE);
   EXPECT_EQ(ProtectedMemory.protectedMemory, VK_FALSE);
   EXPECT_EQ(SamplerYcbcr.samplerYcbcrConversion, VK_FALSE);
-  EXPECT_EQ(ShaderDrawParams.shaderDrawParameters, VK_FALSE);
+  EXPECT_EQ(ShaderDrawParams.shaderDrawParameters, VK_TRUE);
 
   // Each dedicated struct's value must also agree with its bit in the
   // aggregate `VkPhysicalDeviceVulkan11Features` view of the same feature,

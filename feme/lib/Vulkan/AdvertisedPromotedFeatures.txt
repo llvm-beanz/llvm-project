@@ -135,6 +135,12 @@ shaderOutputLayer
 # femeRTApplyAddressMode already implements its mode-4 math; only the
 # advertisement was missing.
 samplerMirrorClampToEdge
+# shaderDrawParameters: roadmap K6c -- gl_BaseVertex/gl_BaseInstance were
+# already real (Executor.cpp's per-draw command fields); gl_DrawID's own
+# gap (DrawCommand had no DrawID field, so Executor.cpp hardcoded 0 for
+# every draw) is now closed too, so all three builtins the one combined
+# bit covers are real.
+shaderDrawParameters
 # Roadmap L12: dynamic texel-buffer indexing and the descriptor binding
 # behaviors below are implemented and reported consistently by both the
 # aggregate Vulkan 1.2 and dedicated descriptor-indexing feature structs.
