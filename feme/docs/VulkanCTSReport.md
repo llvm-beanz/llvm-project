@@ -1660,3 +1660,63 @@ multi-feature undertaking, not a 1-2 hour fix. No source changes made
 this session; `Roadmap.md`'s `L419(j)` row cross-references `D1` rather
 than duplicating new rows here, since `D1` already tracks the full
 feature-by-feature breakdown.
+
+## Merge-verification sanity run: `origin/main` merged into `cbieneman/feme`
+
+Not a new-feature session -- merged upstream LLVM `main` into the
+long-lived `cbieneman/feme` branch (merge commit `23e5d72c6b38`, 5
+conflicted files, all shared SPIR-V/MLIR infrastructure, none under
+`feme/`) and fixed two resulting build regressions:
+
+- Four `DXSAOps.td` ops (`DXSA_Operand`, `DXSA_OperandImm`,
+  `DXSA_IndexImm`, `DXSA_IndexRelImm`) needed `prop-dict` added to their
+  `assemblyFormat` to satisfy upstream's new MLIR "Strict Property
+  Assembly Formats" verifier rule. This changes those ops' *printed*
+  property syntax from brace-dict (`{imm = 0 : i32}`) to angle-bracket
+  key-value (`<imm = 0 : i32>`) -- purely cosmetic, no IR semantics
+  change. Two FileCheck tests (`atomics.dxasm`, `interface1.dxasm`)
+  updated to match.
+- `AtomicLoadPattern` (`SPIRVToLLVMPatterns.cpp`) needed an explicit
+  `isNoundef=false` argument added to its `LLVM::LoadOp::create` call
+  after upstream inserted a new `isNoundef` parameter into that
+  convenience overload.
+
+Both fixes are internal-compiler-only, no behavior change expected.
+`ninja check-feme`: **3,722/3,722 applicable tests Passed** (3
+Unsupported, 0 Failed) after the fixes -- full green, no regressions
+from the merge.
+
+Given no behavior change is expected from either fix, ran a **targeted
+sanity subset** rather than a full 3.25M-case re-triage: every
+`dEQP-VK.geometry.*`, `dEQP-VK.tessellation.*`, `dEQP-VK.rasterization.*`,
+`dEQP-VK.info.*`, and every case with `atomic` in its name (43,764 cases
+total -- chosen to cover both the areas most recently under active
+development and, via the `atomic` filter, the specific code path touched
+by the `AtomicLoadPattern` fix). Run via `feme/utils/run_vulkan_cts.py`
+(6 workers, batch size 1,800, full solo re-verification round for every
+apparent `Fail`/`DeviceLost`).
+
+Result: **87 Fail, 2,940 Pass, 40,737 NotSupported**, zero `DeviceLost`/
+`TimedOut`. All 87 failures cross-referenced against this report's
+existing baseline and confirmed **pre-existing, already-triaged**, not
+new regressions:
+
+- 30 `dEQP-VK.tessellation.{common_edge,invariance}.*`: the documented
+  `L419(g)` tessellation-invariance group.
+- 2 `dEQP-VK.rasterization.line_continuity.*`: the documented `L419(j)`
+  line-continuity pair (deferred, needs `EntryWrapper.cpp` barrier-region
+  splitter generalization).
+- 1 `dEQP-VK.info.device_mandatory_features`: the documented `L419(j)`/
+  `D1` mandatory-feature gap (large, multi-session item).
+- 52 `dEQP-VK.memory_model.{message_passing,write_after_read}.*`:
+  matches this report's own full-baseline `memory_model` row (169 Fail
+  out of... -- summary table shows 52 confirmed/isolated `Fail`,
+  consistent count).
+- 2 `dEQP-VK.spirv_assembly.instruction.terminate_invocation.*`: part of
+  this report's documented 528-case `spirv_assembly` baseline failure
+  count.
+
+No new rows needed in `Roadmap.md` -- every failure in this sanity run
+was already tracked. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed via grep to need no changes
+(pure merge/build-fix session, no feature/extension-surface change).
