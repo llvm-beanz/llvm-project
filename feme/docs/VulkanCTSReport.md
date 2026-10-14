@@ -2420,3 +2420,82 @@ advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6l`
 struck through; new `K6m` added tracking the residual
 `random.scalar.41`/`3_level_unsized_array.scalar.*` legalization
 failures.
+
+## `K6m`: `RuntimeArrayType`-of-`array`-of-vector legalization gap fixed (roadmap K6m, measured impact)
+
+K6l's own sweep left 5 residual `dEQP-VK.ssbo.*` failures, split into
+roadmap row `K6m`: `dEQP-VK.ssbo.layout.random.scalar.41` and the 4
+`dEQP-VK.ssbo.layout.3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,
+vec3}` cases. Unlike K6l's own result-comparison mismatches, all 5 of
+these failed a *legalization* error instead --
+`"failed to legalize operation 'spirv.AccessChain'...explicitly marked
+illegal"` -- meaning no LLVM type for the accessed member ever existed
+at all, not merely a wrong one.
+
+Root-caused via the same temporary `FEME_DEBUG_DUMP_SPIRV_DIR` dump
+hook in `Pipeline.cpp`'s `copyShaderModuleWords` used for K6l (reverted
+before this fix's own commit) to pull `.41`'s own authentic SPIR-V, then
+a hand-crafted, internally consistent minimal MLIR reproducer (the
+usual `feme-translate`/`feme-opt` text-round-trip artifact -- a harmless
+`OpIAdd` `i32`/`si32` parser inconsistency -- made round-tripping the
+real disassembly impractical, same as several prior sessions' notes).
+`.41`'s real failing shape: `layout(scalar, ...) buffer Block { ...;
+ivec3 d[][2]; };`'s own trailing `d[][2]` member is `!spirv.rtarray
+<!spirv.array<2 x vector<3xsi32>, stride=12>, stride=24>` -- a
+*runtime* array whose own element is *itself* a **fixed-size array of a
+bare vector**, one level of nesting deeper than K6l's own direct
+`rtarray<vector<...>>` shape.
+
+Traced the failure through `rewriteBlockAccess` down to
+`convertArrayTypeIgnoringDecorations` (the plain, standalone
+`spirv::ArrayType` conversion): its own stride-mismatch handling widens
+an undersized element (`NaturalSize < Stride`) or pads a struct-typed
+one, but when `NaturalSize > Stride` (this scalar-layout direction --
+the inner `array<2 x vector<3xsi32>>`'s declared 12-byte stride is
+narrower than `vector<3xsi32>`'s own 16-byte, power-of-two-rounded
+natural size), it unconditionally returns null rather than substituting
+a tight marker. That null propagates up through
+`spirv::RuntimeArrayType`'s own element-type conversion, aborting the
+whole `AccessChain` conversion. A direct struct member reaching this
+same shape already has a retry path
+(`getTightNestedArrayOfVectorsOrMatricesType`), but it requires a
+`Struct`/`Index` (to look up `MatrixStride` decorations) and only
+accepts a top-level `spirv::ArrayType`, not a `spirv::RuntimeArrayType`
+-- so it could never apply to this runtime-array-rooted shape regardless
+of whether the primary conversion were fixed.
+
+Fixed by adding `getTightNestedArrayOfVectorsType`, a
+`Struct`/`Index`-decoration-free sibling of
+`getTightNestedArrayOfVectorsOrMatricesType` (no matrix support needed:
+a matrix nested this way always has its own owning struct member to
+carry a `MatrixStride` decoration, so a decoration-free context can
+never legitimately encounter one), and retrying through it inside the
+`RuntimeArrayType` conversion lambda whenever the element's own raw
+conversion fails outright.
+
+Added `spirv-to-llvm-scalar-runtime-array-of-array-of-vectors.mlir`, a
+minimal, hand-crafted reproducer of `.41`'s own exact failing shape (one
+leading scalar member plus the `rtarray<array<2 x vector<3xsi32>,
+stride=12>, stride=24>` member, confirmed to reproduce the same
+legalization failure before the fix and the same tight-marker-using
+conversion after it).
+
+CTS:
+- `dEQP-VK.ssbo.layout.random.scalar.41`: **Pass** (previously Fail).
+- `dEQP-VK.ssbo.layout.3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,
+  vec3}`: **4 Pass, 0 Fail** (previously 4 Fail) -- the same fix covers
+  all 4, confirming the roadmap's own guess that they share K6m's root
+  cause one level deeper.
+- Full `dEQP-VK.ssbo.*` regression sweep (12,225 cases, via
+  `feme/utils/run_vulkan_cts.py`, with its mandatory solo
+  re-verification pass): **4,754 Pass (+5), 0 Fail (-5), 7,471
+  NotSupported** (unchanged) -- zero new failures, and K6l's own 5
+  residual cases are now fully closed.
+- Re-ran `ninja check-feme`: 3,730/3,737 pass, 0 fail, 7 unsupported
+  (pre-existing, unrelated); 1 new lit test added this session.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed: this is a pure bug fix in an already-advertised feature's own
+lowering path (`scalarBlockLayout`/`VK_EXT_scalar_block_layout`, already
+advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6m`
+struck through -- K6l's own 5-case residual is now fully closed.
