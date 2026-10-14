@@ -744,6 +744,79 @@ TEST_F(ImageOpsTest, BlitDecodesASTCSource) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// Roadmap L424: a filtered (non-`VK_FILTER_NEAREST`) blit from a non-sRGB
+/// LDR ASTC source routes through `decodeASTCBlockHDR` plus a
+/// half-precision rounding step (`SrcASTCFilteredHighPrecision`), rather
+/// than `decodeASTCBlock`'s lossy UNORM8 truncation, so that a blend
+/// landing near (but not exactly on) a narrow destination channel's
+/// rounding boundary resolves the same way VK-GL-CTS's own reference
+/// decoder would (see `ImageOps.cpp`'s own comment on that path, and
+/// `VulkanCTSReport.md`'s L265 section, for the full root-cause writeup).
+///
+/// Two adjacent void-extent (solid-fill) blocks encode alpha endpoints
+/// `1` and `65535` (16-bit) -- i.e. a near-zero and an exactly-`1.0`
+/// alpha. `decodeASTCBlock`'s 8-bit truncation collapses both to `0` and
+/// `255` respectively, so a naive 50/50 blend of the *truncated* values
+/// averages to an exact tie (`0.5`) -- an artificial tie the source
+/// values alone do not justify. `decodeASTCBlockHDR` plus
+/// half-precision rounding keeps enough precision that the same 50/50
+/// blend instead averages to `~0.500008`, unambiguously on the
+/// high side of `0.5`. `R10G10B10A2_SNORM`'s 2-bit alpha channel's own
+/// `roundTiesToEven` pack step (`ImageFixture.cpp`'s `Norm2`) resolves
+/// these two cases differently: an exact `0.5` tie rounds down to `0`
+/// (the nearest *even* integer), but `~0.500008` is not a tie at all --
+/// it unambiguously rounds up to `1`.
+TEST_F(ImageOpsTest, FilteredASTCBlitPreservesBlendPrecision) {
+  VkImage Src = createImage(8, 4, VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+  VkImage Dst = createImage(1, 4, VK_FORMAT_A2B10G10R10_SNORM_PACK32);
+
+  auto makeVoidExtentBlock = [](uint32_t A16) {
+    std::array<uint8_t, 16> Block{};
+    setAstcBits(Block.data(), 0, 9, 0x1FC); // Void extent signature.
+    setAstcBits(Block.data(), 9, 1, 0);     // LDR.
+    setAstcBits(Block.data(), 10, 2, 0x3);  // Reserved bits, both 1.
+    setAstcBits(Block.data(), 64, 16, 0);   // R.
+    setAstcBits(Block.data(), 80, 16, 0);   // G.
+    setAstcBits(Block.data(), 96, 16, 0);   // B.
+    setAstcBits(Block.data(), 112, 16, A16); // A.
+    return Block;
+  };
+  std::array<uint8_t, 16> Block0 = makeVoidExtentBlock(1);
+  std::array<uint8_t, 16> Block1 = makeVoidExtentBlock(65535);
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0),
+              Block0.data(), Block0.size());
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 1, 0, 0),
+              Block1.data(), Block1.size());
+
+  // A 1-wide destination, scaled down from the 8-wide, two-block source:
+  // the single destination column's sample center maps exactly to the
+  // boundary between the two blocks' last/first texel (`U = 4.0`, so
+  // `WX == 0.5` exactly -- an even 50/50 blend). The height is identity
+  // (`4 -> 4`), so no Y-blending occurs.
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {8, 4, 1};
+  Region.dstOffsets[1] = {1, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_LINEAR));
+
+  for (uint32_t Y = 0; Y != 4; ++Y) {
+    std::array<uint8_t, 4> Texel = texel(Dst, 0, Y);
+    uint32_t Word;
+    std::memcpy(&Word, Texel.data(), 4);
+    int32_t RawAlpha = int32_t(Word >> 30) & 0x3;
+    if (RawAlpha >= 2)
+      RawAlpha -= 4; // Sign-extend the 2-bit two's-complement field.
+    EXPECT_EQ(RawAlpha, 1)
+        << "expected the non-tie high-precision blend to round alpha up";
+  }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 /// The HDR-only ASTC formats (roadmap E21) are rejected as a blit source:
 /// `decodeASTCBlock` is LDR-only, and `decodeASTCBlockHDR`'s
 /// float-producing interface does not fit the UNORM8 unpack/pack path

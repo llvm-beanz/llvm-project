@@ -17,6 +17,7 @@
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/LayeredRendering.h"
 
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLFunctionalExtras.h"
 
 #include <algorithm>
@@ -26,6 +27,30 @@
 
 using namespace feme::vulkan;
 using namespace llvm;
+
+namespace {
+/// Rounds \p F to the nearest representable IEEE binary16 (half-precision)
+/// value and widens it back to `float` -- mirrors `feme::graphics`'s own
+/// private `floatToHalfBits`/`halfBitsToFloat` round-trip
+/// (`ImageFixture.cpp`), reimplemented here since that pair is file-local
+/// there and this file has no dependency on it. Used by the filtered
+/// (non-`VK_FILTER_NEAREST`) ASTC blit-source path below to replicate the
+/// precision VK-GL-CTS's own reference decoder stores a decompressed
+/// non-sRGB ASTC texture at (`TextureFormat(RGBA, HALF_FLOAT)`,
+/// `tcuCompressedTexture.cpp`'s `getUncompressedFormat`) before blending
+/// texels together, rather than this ICD's own full-float decode's
+/// strictly-higher precision -- see that path's own comment for why the
+/// difference matters.
+float roundToHalfPrecision(float F) {
+  bool LosesInfo;
+  APFloat Value(F);
+  Value.convert(APFloat::IEEEhalf(), APFloat::rmNearestTiesToEven,
+               &LosesInfo);
+  Value.convert(APFloat::IEEEsingle(), APFloat::rmNearestTiesToEven,
+               &LosesInfo);
+  return Value.convertToFloat();
+}
+} // namespace
 
 std::array<double, 4>
 feme::vulkan::unpackClearColorValue(feme::cpu::ResourceFormat Format,
@@ -822,9 +847,16 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
   // region loop below fetches, rather than reallocated per texel. Sized
   // for the larger of an ASTC block's own always-RGBA8 decode (4 bytes/
   // texel), a BC source's own per-format target (`SrcBCTarget`, up to
-  // `R16G16B16A16_FLOAT`'s 8 bytes/texel for BC6H), or an ETC2/EAC
-  // source's own per-format target (`SrcETC2Target`, up to
-  // `R16G16_UNORM`/`_SNORM`'s 4 bytes/texel for `EAC_R11G11_*`).
+  // `R16G16B16A16_FLOAT`'s 8 bytes/texel for BC6H), or an ETC2/EAC source's
+  // own per-format target (`SrcETC2Target`, up to `R16G16_UNORM`/`_SNORM`'s
+  // 4 bytes/texel for `EAC_R11G11_*`) the filtered (non-`VK_FILTER_NEAREST`)
+  // path below uses instead of the plain 4-byte RGBA8 one. (Roadmap L424)
+  // non-sRGB LDR ASTC sources under filtering bypass `DecodeBuf` entirely
+  // via `SrcASTCFilteredHighPrecision` (see that path's own comment), so
+  // they don't need a `DecodeBuf` sizing case here.
+  bool SrcIsASTC = SrcCompressed && !SrcIsBC && !SrcIsETC2;
+  bool SrcASTCFilteredHighPrecision = SrcIsASTC && Filter != VK_FILTER_NEAREST &&
+                                      !isASTCSRGBFormat(Src->format());
   uint32_t DecodeBytesPerTexel =
       SrcIsBC ? SrcBCTarget.BytesPerTexel
               : SrcIsETC2 ? SrcETC2Target.BytesPerTexel : 4;
@@ -995,11 +1027,15 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
               // into whichever already-runtime-supported `ResourceFormat`
               // its own sub-family maps to (`SrcBCTarget`); (roadmap H8j)
               // an ETC2/EAC source likewise through `decodeETC2FormatBlock`
-              // (`SrcETC2Target`); an ASTC source always decodes through
-              // `decodeASTCBlock` into RGBA8, reported as
+              // (`SrcETC2Target`); an ASTC source decodes through
+              // `decodeASTCBlock` into RGBA8 (reported as
               // `R8G8B8A8_UNORM_SRGB` rather than plain `R8G8B8A8_UNORM`
               // when `Src->format()` is one of the 14 `_SRGB` ASTC
-              // footprints (roadmap L228(b)) -- `decodeASTCBlock` itself
+              // footprints, roadmap L228(b)) for `VK_FILTER_NEAREST` and
+              // every sRGB ASTC footprint, or (roadmap L424) through
+              // `decodeASTCBlockHDR`'s higher-precision path
+              // (`SrcASTCFilteredHighPrecision`, see below) for a
+              // filtered non-sRGB ASTC source -- `decodeASTCBlock` itself
               // has no notion of sRGB (it unpacks the same raw bytes
               // either way), so `unpackColor` below is what must apply
               // the sRGB decode curve, exactly like `CommandBuffer.cpp`'s
@@ -1018,6 +1054,51 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                 decodeETC2FormatBlock(Src->format(), Block, DecodeBuf.data());
                 DecodedFormat = SrcETC2Target.Format;
                 DecodedBytesPerTexel = SrcETC2Target.BytesPerTexel;
+              } else if (SrcASTCFilteredHighPrecision) {
+                // (Roadmap L424) `decodeASTCBlock`'s UNORM8 output loses
+                // precision `decodeASTCBlockHDR`'s full-float LDR decode
+                // does not (ASTC's own weight-interpolation formula is
+                // defined over a 16-bit numerator, per the specification's
+                // "Weight Application" text -- see ASTCDecode.h's file
+                // comment) -- invisible for a single unfiltered fetch, but
+                // significant once this filtered path *blends* several
+                // texels together: VK-GL-CTS's own reference decompresses
+                // a non-sRGB ASTC source into a `HALF_FLOAT`-precision
+                // texture (`tcuCompressedTexture.cpp`'s
+                // `getUncompressedFormat`) *before* its own blit/copy
+                // filtering blends texels, so its blended result reflects
+                // each texel's own half-precision rounding -- not the
+                // higher-precision value a full-float (or UNORM8) decode
+                // would blend from. An exact-prior-rounding blend average
+                // (e.g. two texels' decoded alpha averaging to precisely
+                // `0.5`) can land off that half-precision-rounded tie by a
+                // few ULPs once CTS's own rounding is applied first,
+                // which -- for a channel as narrow as
+                // `a2b10g10r10_snorm_pack32`'s 2-bit alpha -- is enough to
+                // flip which of the field's only three representable
+                // values (`-1`/`0`/`1`) the final round-ties-to-even pack
+                // step lands on. Rounding each decoded component to the
+                // nearest half-precision value here reproduces that
+                // rounding-before-blend behavior. The half-rounded value
+                // is written straight into `Out` (bypassing `DecodeBuf`'s
+                // `unpackColor` path entirely): any fixed-width integer
+                // round-trip here (e.g. widening to UNORM16) would itself
+                // introduce a *new*, unrelated tie -- 65535 is odd, so an
+                // exact `0.5` scaled to a 16-bit numerator lands exactly
+                // on `32767.5`, which cannot round-trip back to exactly
+                // `0.5` under any integer rounding rule, reintroducing
+                // the very kind of spurious tie-breaking bias this path
+                // exists to eliminate.
+                std::vector<float> FloatBuf(size_t(SrcBlockW) * SrcBlockH * 4);
+                decodeASTCBlockHDR(Block, SrcBlockW, SrcBlockH,
+                                  FloatBuf.data());
+                for (float &F : FloatBuf)
+                  F = roundToHalfPrecision(F);
+                uint32_t InBlockX = TX % SrcBlockW, InBlockY = TY % SrcBlockH;
+                size_t TexelIdx = size_t(InBlockY) * SrcBlockW + InBlockX;
+                for (unsigned C = 0; C != 4; ++C)
+                  Out[C] = std::clamp(FloatBuf[TexelIdx * 4 + C], 0.0f, 1.0f);
+                return Error::success();
               } else {
                 decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
               }
