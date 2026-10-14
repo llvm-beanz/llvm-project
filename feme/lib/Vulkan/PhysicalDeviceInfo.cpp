@@ -1645,6 +1645,21 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // mirror_clamp_to_edge` above.
       {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,
        VK_KHR_SHADER_DRAW_PARAMETERS_SPEC_VERSION},
+      // (roadmap K6d) `VkImageFormatListCreateInfo` adds no commands of
+      // its own, has no feature bit, and is purely a hint: it lets an app
+      // declare up front the exact set of formats it may later use to
+      // create a `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` image's views, so a
+      // driver that needs to prepare per-format compression/aliasing
+      // metadata ahead of time can do so -- `vkCreateImageView`'s own
+      // format-compatibility-class validation already enforces the real
+      // mutable-format rule unconditionally (`Image.cpp`), independent of
+      // whether this struct is chained, so a CPU target with no
+      // format-specific image representation to prepare has nothing
+      // further to do with the list itself. Same "custom device below
+      // this extension's 1.2 core-promotion point" rationale as
+      // `VK_KHR_create_renderpass2` above.
+      {VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
+       VK_KHR_IMAGE_FORMAT_LIST_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -107,6 +107,61 @@ TEST_F(ImageTest, CreateBindDestroy2D) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+/// Roadmap K6d: `VkImageFormatListCreateInfo` (`VK_KHR_image_format_list`,
+/// core-promoted into Vulkan 1.2) is a pure hint with no commands and no
+/// feature bit of its own -- `vkCreateImageView`'s own format-compatibility-
+/// class check (not this struct) is what actually enforces the mutable-
+/// format rule, so a mutable-format image's creation must still succeed
+/// whether or not an app chains a (possibly narrower, possibly empty)
+/// declared view-format list.
+TEST_F(ImageTest, AcceptsImageFormatListOnMutableFormatImage) {
+  VkFormat ViewFormats[] = {VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_FORMAT_R8G8B8A8_UINT};
+  VkImageFormatListCreateInfo FormatList{};
+  FormatList.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+  FormatList.viewFormatCount = 2;
+  FormatList.pViewFormats = ViewFormats;
+
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.pNext = &FormatList;
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  ImageInfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  // The reinterpreted view format (`UINT`, not the image's own `UNORM`)
+  // must also still be creatable -- the whole point of the mutable-format
+  // flag, unaffected by whether the format list was chained above.
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ViewInfo.format = VK_FORMAT_R8G8B8A8_UINT;
+  ViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkImageView View = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(ImageTest, MipChainSizeIsSumOfLevels) {
   VkDeviceMemory Memory = VK_NULL_HANDLE;
   // 4x4 with 3 mips: level 0 = 4x4 (64B), level 1 = 2x2 (16B),
