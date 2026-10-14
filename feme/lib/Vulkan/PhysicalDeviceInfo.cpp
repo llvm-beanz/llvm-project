@@ -1684,6 +1684,18 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // itself for a custom sub-1.2 device.
       {VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
        VK_KHR_SHADER_FLOAT_CONTROLS_SPEC_VERSION},
+      // (roadmap K6g) `samplerFilterMinmax` is now a real feature:
+      // `Sampler`'s constructor (Image.cpp) parses a chained
+      // `VkSamplerReductionModeCreateInfo`, and the CPU runtime's own
+      // bilinear/trilinear/cube-seamless blend sites (FeMeRuntimeCPU.c)
+      // reduce via component-wise min/max instead of blending whenever
+      // requested, confirmed against a real
+      // `dEQP-VK.pipeline.monolithic.sampler.view_type.*.{mag,min}_reduce`
+      // CTS run. Same "custom device below this extension's 1.2
+      // core-promotion point" rationale as `VK_KHR_shader_float_controls`
+      // immediately above.
+      {VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME,
+       VK_EXT_SAMPLER_FILTER_MINMAX_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -1124,8 +1124,17 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // `_FILTER_LINEAR_BIT`: the real mandatory-format-table `deqp-vk` run
   // this row's own investigation used does not require it for
   // `d16_unorm`, unlike the packed-16-bit formats above.
+  // `VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT` is still required
+  // (roadmap K6g): the spec's own mandatory-minmax-format table lists
+  // single-component depth formats unconditionally, independent of
+  // `_FILTER_LINEAR_BIT` -- min/max reduction never needs real bilinear
+  // interpolation, just multiple taps, so depth formats that can't claim
+  // `_FILTER_LINEAR_BIT` can still claim `_FILTER_MINMAX_BIT`. Caught by
+  // `dEQP-VK.api.info.format_properties.d16_unorm` once `K6g`'s post-switch
+  // `_FILTER_LINEAR_BIT`-gated rule below left this format out.
   case ResourceFormat::D16_UNORM:
-    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
     break;
   // (Roadmap L193) `D32_FLOAT`: the same H8e-shaped omission, just for
   // the other depth format the CPU runtime already fully decodes and
@@ -1149,7 +1158,8 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // themselves, so `_FILTER_LINEAR_BIT` was never a meaningful
   // capability to claim for either depth format.
   case ResourceFormat::D32_FLOAT:
-    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
     break;
   default:
     if (ASTCLdr)
@@ -1331,6 +1341,22 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   if (isSupportedDepthAttachmentFormat(Format) ||
       isSupportedStencilAttachmentFormat(Format))
     Flags |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+  // (Roadmap K6g) `samplerFilterMinmax`: the CPU runtime's min/max sampler
+  // reduction math (`femeRTSampleLinear2D`/`Filtered2D` and their 1D/3D
+  // counterparts, `FeMeRuntimeCPU.c`) operates on exactly the same decoded
+  // float/fixed-point texel taps the existing weighted-average blend
+  // already reads -- there's no separate decode path a reduction mode
+  // could be unsupported for, so any format that can be linearly filtered
+  // today can also be min/max-reduced. Advertising
+  // `SAMPLED_IMAGE_FILTER_MINMAX_BIT` everywhere `FILTER_LINEAR_BIT` is
+  // already advertised keeps the two bits' format sets identical by
+  // construction, confirmed against a real CTS run
+  // (`dEQP-VK.pipeline.monolithic.sampler.view_type.*.mag_reduce`/
+  // `min_reduce`) rather than just the mandatory single-component subset
+  // the spec technically requires.
+  if (Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
 
   return Flags;
 }

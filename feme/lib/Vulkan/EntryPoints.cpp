@@ -369,14 +369,22 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // (roadmap L412(a)) for the general mechanism (an unmatched `sType`
     // falls through this `switch` untouched, caught by the same
     // double-query/byte-pattern-pre-fill consistency-check technique).
-    // Both fields stay `VK_FALSE`: no min/max sampler reduction mode is
-    // implemented for any image format yet.
+    // (roadmap K6g) Both fields now `VK_TRUE`: `filterMinmaxSingleComponentFormats`
+    // is truthful because `formatFeatureFlags` (Format.cpp) advertises
+    // `SAMPLED_IMAGE_FILTER_MINMAX_BIT` for every linearly-filterable
+    // format, a strict superset of the single-component-only minimum the
+    // spec requires; `filterMinmaxImageComponentMapping` is truthful
+    // because every per-tap texel fetch already applies the image view's
+    // component swizzle (`ApplySwizzle=1`) *before* the min/max reduction
+    // runs, so a non-identity mapping and reduction compose correctly
+    // (both are per-component operations, applied independently per
+    // channel -- there is no order-of-operations hazard between them).
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES: {
       auto *SamplerFilterMinmax =
           reinterpret_cast<VkPhysicalDeviceSamplerFilterMinmaxProperties *>(
               Base);
-      SamplerFilterMinmax->filterMinmaxSingleComponentFormats = VK_FALSE;
-      SamplerFilterMinmax->filterMinmaxImageComponentMapping = VK_FALSE;
+      SamplerFilterMinmax->filterMinmaxSingleComponentFormats = VK_TRUE;
+      SamplerFilterMinmax->filterMinmaxImageComponentMapping = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: {
@@ -509,8 +517,11 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
       Props12->independentResolveNone = VK_FALSE;
       Props12->independentResolve = VK_FALSE;
-      Props12->filterMinmaxSingleComponentFormats = VK_FALSE;
-      Props12->filterMinmaxImageComponentMapping = VK_FALSE;
+      // (roadmap K6g) Must agree with the dedicated
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES`
+      // case's own identical comment above.
+      Props12->filterMinmaxSingleComponentFormats = VK_TRUE;
+      Props12->filterMinmaxImageComponentMapping = VK_TRUE;
       // (roadmap C6) The promoted twin of
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES`
       // above; both must agree; see PhysicalDeviceInfo.h's field comment
@@ -1790,7 +1801,16 @@ void fillFeatures2Chain(void *pNext) {
       // `overflow-unbounded-array.test` dispatch.
       Features->descriptorBindingVariableDescriptorCount = VK_TRUE;
       Features->runtimeDescriptorArray = VK_TRUE;
-      Features->samplerFilterMinmax = VK_FALSE;
+      // (roadmap K6g) `Sampler`'s constructor (Image.cpp) now parses a
+      // chained `VkSamplerReductionModeCreateInfo` and the CPU runtime's
+      // own bilinear/trilinear (and cube-seamless) blend sites
+      // (`femeRTSampleLinear{1D,2D,3D}`/`Filtered{1D,2D,3D}`/
+      // `CubeLinearAtLevel`/`FilteredCube`, FeMeRuntimeCPU.c) reduce via
+      // component-wise min/max instead of blending whenever `Samp`'s
+      // `ReductionMode` requests it -- confirmed against a real CTS run
+      // (`dEQP-VK.pipeline.monolithic.sampler.view_type.*.mag_reduce`/
+      // `min_reduce`).
+      Features->samplerFilterMinmax = VK_TRUE;
       Features->scalarBlockLayout = VK_FALSE;
       Features->imagelessFramebuffer = VK_TRUE;
       Features->uniformBufferStandardLayout = VK_TRUE;
