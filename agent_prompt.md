@@ -61,4 +61,5 @@ file.
 # Request
 
 Can you please fetch main from the upstream LLVM repo and rebase this branch on
-the latest main? Then run the feme tests to verify no regressions.
+the latest main? Then run the feme tests to verify no regressions and address
+any that arise.
