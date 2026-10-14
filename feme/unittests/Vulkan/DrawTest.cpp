@@ -3406,6 +3406,107 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap K6h) `vkCmdDrawIndirectCount` clamps its actual draw count to
+/// the minimum of `maxDrawCount` and the `uint32_t` stored in its count
+/// buffer, per the specification -- mirroring
+/// `DrawMeshTasksIndirectCountClampsToCountBuffer`'s own count-buffer
+/// coverage for the direct-vertex-draw command this ICD now also
+/// implements.
+TEST_F(DrawTest, DrawIndirectCountClampsToCountBuffer) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory IndirectMemory = VK_NULL_HANDLE;
+  VkBuffer Indirect = createBuffer(2 * sizeof(VkDrawIndirectCommand),
+                                   IndirectMemory,
+                                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawIndirectCommand Args[2] = {{3, 1, 0, 0}, {3, 1, 0, 0}};
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), Args, sizeof(Args));
+
+  VkDeviceMemory CountMemory = VK_NULL_HANDLE;
+  VkBuffer CountBuffer = createBuffer(sizeof(uint32_t), CountMemory,
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  // The count buffer names only one draw, even though `maxDrawCount` (2)
+  // and the indirect buffer itself both have room for two.
+  uint32_t Count = 1;
+  std::memcpy(fromHandle<Buffer>(CountBuffer)->data(), &Count, sizeof(Count));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndirectCount(Cmd, Indirect, 0, CountBuffer, 0, 2,
+                        sizeof(VkDrawIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(1, 2)[0], 0xFF);
+  EXPECT_EQ(texel(1, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, CountBuffer, nullptr);
+  vkFreeMemory(Device, CountMemory, nullptr);
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, IndirectMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap K6h) `vkCmdDrawIndexedIndirectCount`'s own indexed-draw
+/// counterpart, mirroring `DrawIndirectCountClampsToCountBuffer` but
+/// through a bound index buffer, exercising the merged execution-switch
+/// case's `Indexed` branch with a real count-buffer read.
+TEST_F(DrawTest, DrawIndexedIndirectCountClampsToCountBuffer) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory IndexMemory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), IndexMemory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  uint32_t Indices[3] = {0, 1, 2};
+  std::memcpy(fromHandle<Buffer>(IndexBuffer)->data(), Indices,
+              sizeof(Indices));
+
+  VkDeviceMemory IndirectMemory = VK_NULL_HANDLE;
+  VkBuffer Indirect = createBuffer(2 * sizeof(VkDrawIndexedIndirectCommand),
+                                   IndirectMemory,
+                                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawIndexedIndirectCommand Args[2] = {{3, 1, 0, 0, 0}, {3, 1, 0, 0, 0}};
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), Args, sizeof(Args));
+
+  VkDeviceMemory CountMemory = VK_NULL_HANDLE;
+  VkBuffer CountBuffer = createBuffer(sizeof(uint32_t), CountMemory,
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  // Like `DrawIndirectCountClampsToCountBuffer`, the count buffer names
+  // only one draw even though `maxDrawCount` and the indirect buffer both
+  // have room for two.
+  uint32_t Count = 1;
+  std::memcpy(fromHandle<Buffer>(CountBuffer)->data(), &Count, sizeof(Count));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer(Cmd, IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexedIndirectCount(Cmd, Indirect, 0, CountBuffer, 0, 2,
+                               sizeof(VkDrawIndexedIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF);
+  EXPECT_EQ(texel(2, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, CountBuffer, nullptr);
+  vkFreeMemory(Device, CountMemory, nullptr);
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, IndirectMemory, nullptr);
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, IndexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H6f) `vkCmdDrawMeshTasksEXT` routes through the same
 /// prepared-draw code (`runPreparedDraw`) `vkCmdDraw` does: it resolves
 /// attachments, binds resources, and drives the executor's rasterization

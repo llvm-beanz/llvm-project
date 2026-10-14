@@ -118,6 +118,8 @@ const char *recordedCommandKindName(RecordedCommand::Kind K) {
   FEME_RECORDED_COMMAND_KIND(DrawIndexed)
   FEME_RECORDED_COMMAND_KIND(DrawIndirect)
   FEME_RECORDED_COMMAND_KIND(DrawIndexedIndirect)
+  FEME_RECORDED_COMMAND_KIND(DrawIndirectCount)
+  FEME_RECORDED_COMMAND_KIND(DrawIndexedIndirectCount)
   FEME_RECORDED_COMMAND_KIND(ClearColorImage)
   FEME_RECORDED_COMMAND_KIND(ClearDepthStencilImage)
   FEME_RECORDED_COMMAND_KIND(ClearAttachments)
@@ -3817,15 +3819,30 @@ Error executeCommandsInto(
         return E;
       break;
     case RecordedCommand::Kind::DrawIndirect:
-    case RecordedCommand::Kind::DrawIndexedIndirect: {
+    case RecordedCommand::Kind::DrawIndexedIndirect:
+    case RecordedCommand::Kind::DrawIndirectCount:
+    case RecordedCommand::Kind::DrawIndexedIndirectCount: {
       if (!BoundGraphicsPipeline)
         return createStringError(inconvertibleErrorCode(),
                                  "draw with no bound graphics pipeline");
-      bool Indexed = Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirect;
+      bool Indexed = Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirect ||
+                    Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirectCount;
+      uint32_t DrawCount = Cmd.Count[0];
+      if (Cmd.Op == RecordedCommand::Kind::DrawIndirectCount ||
+          Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirectCount) {
+        // (roadmap K6h) The actual draw count used is the minimum of
+        // `maxDrawCount` (`Cmd.Count[0]`) and the count stored in the
+        // count buffer, mirroring `DrawMeshTasksIndirectCount`'s own
+        // `readIndirectDrawCount` use just below.
+        Expected<uint32_t> ActualCount = readIndirectDrawCount(
+            Cmd.CountBuffer, Cmd.CountBufferOffset, Cmd.Count[0]);
+        if (!ActualCount)
+          return ActualCount.takeError();
+        DrawCount = *ActualCount;
+      }
       Expected<std::vector<feme::graphics::DrawCommand>> Draws =
-          readIndirectDraws(Cmd.IndirectBuffer, Cmd.IndirectOffset,
-                            Cmd.Count[0], static_cast<uint32_t>(Cmd.DstSize),
-                            Indexed);
+          readIndirectDraws(Cmd.IndirectBuffer, Cmd.IndirectOffset, DrawCount,
+                            static_cast<uint32_t>(Cmd.DstSize), Indexed);
       if (!Draws)
         return Draws.takeError();
       for (const feme::graphics::DrawCommand &Draw : *Draws)
@@ -5519,6 +5536,33 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirect(
       ->drawIndirect(RecordedCommand::Kind::DrawIndexedIndirect,
                      fromHandle<vulkan::Buffer>(buffer), offset, drawCount,
                      stride);
+}
+
+// (roadmap K6h) `VK_KHR_draw_indirect_count`'s two commands, promoted to
+// Vulkan 1.2 core: like `vkCmdDrawIndirect`/`vkCmdDrawIndexedIndirect`
+// above, but the real draw count is read from `countBuffer` at execution
+// time (capped at `maxDrawCount`) rather than supplied directly, mirroring
+// `vkCmdDrawMeshTasksIndirectCountEXT`'s own count-buffer shape.
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirectCount(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndirectCount(RecordedCommand::Kind::DrawIndirectCount,
+                         fromHandle<vulkan::Buffer>(buffer), offset,
+                         fromHandle<vulkan::Buffer>(countBuffer),
+                         countBufferOffset, maxDrawCount, stride);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirectCount(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndirectCount(RecordedCommand::Kind::DrawIndexedIndirectCount,
+                         fromHandle<vulkan::Buffer>(buffer), offset,
+                         fromHandle<vulkan::Buffer>(countBuffer),
+                         countBufferOffset, maxDrawCount, stride);
 }
 
 // (roadmap H6f) `VK_EXT_mesh_shader`'s three draw commands: direct,

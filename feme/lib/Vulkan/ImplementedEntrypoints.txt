@@ -286,6 +286,8 @@ vkCmdDraw
 vkCmdDrawIndexed
 vkCmdDrawIndirect
 vkCmdDrawIndexedIndirect
+vkCmdDrawIndirectCount
+vkCmdDrawIndexedIndirectCount
 vkCmdDrawMeshTasksEXT
 vkCmdDrawMeshTasksIndirectEXT
 vkCmdDrawMeshTasksIndirectCountEXT

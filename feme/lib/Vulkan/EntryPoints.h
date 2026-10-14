@@ -890,6 +890,16 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirect(
     VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
     uint32_t drawCount, uint32_t stride);
+// (roadmap K6h) `VK_KHR_draw_indirect_count`'s two commands, promoted to
+// Vulkan 1.2 core.
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirectCount(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirectCount(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    VkBuffer countBuffer, VkDeviceSize countBufferOffset,
+    uint32_t maxDrawCount, uint32_t stride);
 // (roadmap H6f) `VK_EXT_mesh_shader`'s three draw commands.
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawMeshTasksEXT(VkCommandBuffer commandBuffer,
                                                  uint32_t groupCountX,

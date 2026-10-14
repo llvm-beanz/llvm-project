@@ -48,17 +48,26 @@ TEST(ProcAddr, NonNullInstanceResolvesEveryImplementedLevel) {
 }
 
 TEST(ProcAddr, UnimplementedCommandNeverResolves) {
-  // `vkCmdDrawIndexedIndirectCount` is a real core Vulkan 1.2 command this
-  // driver does not implement; the generated table still carries an entry
-  // for it (mapped to null), matching "Loader Integration"'s requirement
-  // that the table cover every known command name. (Roadmap L236(a):
-  // `vkQueueBindSparse`, this test's previous example, is now implemented
-  // -- see Sync.cpp's own comment -- so this test now exercises a
-  // still-genuinely-unimplemented command instead.)
-  EXPECT_EQ(
-      getInstanceProcAddr(dummyInstance(), "vkCmdDrawIndexedIndirectCount"),
-      nullptr);
-  EXPECT_EQ(getDeviceProcAddr("vkCmdDrawIndexedIndirectCount"), nullptr);
+  // `vkGetPhysicalDeviceImageFormatProperties2` is a real core Vulkan 1.1
+  // command this driver does not implement; the generated table still
+  // carries an entry for it (mapped to null), matching "Loader
+  // Integration"'s requirement that the table cover every known command
+  // name. (Roadmap L236(a): `vkQueueBindSparse`, this test's previous
+  // example, is now implemented -- see Sync.cpp's own comment --
+  // `vkCmdDrawIndexedIndirectCount`, a later example, is now also
+  // implemented (roadmap K6h) -- see CommandBuffer.cpp's
+  // `drawIndirectCount` -- so this test now exercises a still-genuinely-
+  // unimplemented command instead.)
+  EXPECT_EQ(getInstanceProcAddr(dummyInstance(),
+                                "vkGetPhysicalDeviceImageFormatProperties2"),
+            nullptr);
+  // `vkCmdBindIndexBuffer2KHR` is a real device-level command (its core,
+  // non-`KHR`-suffixed alias `vkCmdBindIndexBuffer2` is implemented, see
+  // `ImplementedEntrypoints.txt`, but the `KHR`-suffixed name itself is
+  // not in that file, so the generated table still maps it to null --
+  // exercising `getDeviceProcAddr`'s own null-`Addr` path, distinct from
+  // the instance-level command above).
+  EXPECT_EQ(getDeviceProcAddr("vkCmdBindIndexBuffer2KHR"), nullptr);
 }
 
 TEST(ProcAddr, UnknownNameNeverResolves) {

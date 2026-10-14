@@ -137,6 +137,13 @@ struct RecordedCommand {
     DrawIndexed,
     DrawIndirect,
     DrawIndexedIndirect,
+    // (roadmap K6h) `VK_KHR_draw_indirect_count`'s two commands: like
+    // `DrawIndirect`/`DrawIndexedIndirect` above, but the actual draw count
+    // is itself read from a device-side buffer (capped at `Count[0]`'s own
+    // `maxDrawCount`) rather than supplied directly, mirroring
+    // `DrawMeshTasksIndirectCount`'s own count-buffer shape exactly.
+    DrawIndirectCount,
+    DrawIndexedIndirectCount,
     ClearColorImage,
     ClearDepthStencilImage,
     ClearAttachments,
@@ -168,11 +175,13 @@ struct RecordedCommand {
   /// three `uint32_t`s are read from at execution time.
   Buffer *IndirectBuffer = nullptr;
   uint64_t IndirectOffset = 0;
-  /// (roadmap H6f) `DrawMeshTasksIndirectCount`: the buffer/offset
-  /// `vkCmdDrawMeshTasksIndirectCountEXT`'s own actual draw count (a single
-  /// `uint32_t`, capped at `Count[0]`'s `maxDrawCount`) is read from at
-  /// execution time -- distinct from `IndirectBuffer` above, which still
-  /// holds the `VkDrawMeshTasksIndirectCommandEXT` array itself.
+  /// (roadmap H6f, K6h) `DrawMeshTasksIndirectCount`/`DrawIndirectCount`/
+  /// `DrawIndexedIndirectCount`: the buffer/offset each one's own actual
+  /// draw count (a single `uint32_t`, capped at `Count[0]`'s own
+  /// `maxDrawCount`) is read from at execution time -- distinct from
+  /// `IndirectBuffer` above, which still holds the
+  /// `VkDrawMeshTasksIndirectCommandEXT`/`VkDrawIndirectCommand`/
+  /// `VkDrawIndexedIndirectCommand` array itself.
   Buffer *CountBuffer = nullptr;
   uint64_t CountBufferOffset = 0;
   /// `BindDescriptorSets`: the first bound set index, the sets themselves,
@@ -965,6 +974,25 @@ public:
     Cmd.IndirectBuffer = IndirectBuffer;
     Cmd.IndirectOffset = Offset;
     Cmd.Count[0] = DrawCount;
+    Cmd.DstSize = Stride;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap K6h) `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount`:
+  /// like `drawIndirect` above, but the actual draw count is itself read
+  /// from \p CountBuf at \p CountOffset (a single `uint32_t`, clamped to
+  /// \p MaxDrawCount) rather than supplied directly, mirroring
+  /// `drawMeshTasksIndirectCount`'s own count-buffer shape exactly.
+  void drawIndirectCount(RecordedCommand::Kind Op, Buffer *IndirectBuffer,
+                        uint64_t Offset, Buffer *CountBuf,
+                        uint64_t CountOffset, uint32_t MaxDrawCount,
+                        uint32_t Stride) {
+    RecordedCommand Cmd;
+    Cmd.Op = Op;
+    Cmd.IndirectBuffer = IndirectBuffer;
+    Cmd.IndirectOffset = Offset;
+    Cmd.CountBuffer = CountBuf;
+    Cmd.CountBufferOffset = CountOffset;
+    Cmd.Count[0] = MaxDrawCount;
     Cmd.DstSize = Stride;
     Commands.push_back(Cmd);
   }
