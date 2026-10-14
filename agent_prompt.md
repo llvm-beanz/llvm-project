@@ -63,39 +63,31 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day) Root-cause the remaining 12 `L419(e)` cases**: the
-   `astc_{8x8,10x5,12x12}_unorm_block` -> `a2b10g10r10_snorm_pack32`
-   group. Known repro:
-   `astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
-   shows a full-scale (`1.0`) alpha diff with RGB within threshold -- a
-   completely different signature from the `inf`/minifloat bug just
-   fixed (different destination format, no `inf` involved, only the
-   alpha channel affected). First step: check `packClearColor`'s/
-   `unpackColor`'s `R10G10B10A2_SNORM` alpha-component handling
-   specifically (4th component is only 2 bits wide, a much coarser
-   field than RGB's 10 bits each -- a likely place for a sign/clamp
-   edge case to live), and whether ASTC's own alpha-channel decode path
-   (`decodeASTCBlock`) is a plausible second suspect.
-2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
-   untriaged, deferred again this session in favor of finishing
-   `L419(e)`'s in-progress investigation instead of starting fresh work.
-3. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
-   several sessions' handoffs now; the standing self-correction reminder
-   (`git log --oneline --all | grep -i L418`) was not run again this
-   session since no `L418` work was touched -- still worth doing before
-   ever touching `L418(a)` again, but not urgent while it stays untouched.
-4. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+1. **(~1 day) `L424(a)`**: add a 16-bit ASTC decode entry point next to
+   the existing `decodeASTCBlock` in `feme/lib/Vulkan/ASTCDecode.cpp`,
+   matching CTS's `c/65536.0f` convention. Keep the existing 8-bit path
+   for every other caller unchanged. New unit test asserting the exact
+   16-bit value (not 8-bit-truncated) for a known block.
+2. **(~2-4 hours) `L424(b)`**: wire `L424(a)`'s entry point into
+   `ImageOps.cpp`'s blit/copy per-texel ASTC fetch. Confirm the 12
+   originally-failing cases now Pass, 0 regressions in the other 61
+   passing ASTC-involved `blit_image.*` cases. Strike through `L419(e)`
+   and `L265` in `Roadmap.md` once confirmed; update
+   `VulkanCTSReport.md`.
+3. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged, deferred again this session (didn't touch it, spent the
+   whole session on `L265`).
+4. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs. Run `git log --oneline --all | grep -i
+   L418` before ever touching it again -- not run this session either,
+   still untouched.
+5. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
    `L418`-`L419` roadmap counts synced after every fix -- done this
-   session for `L419(e)`'s partial close.
-5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   session (inventories confirmed via grep to need no change, pure
+   investigation/doc session).
+6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
    `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
    discrepancy a new regression -- not exercised this session.
-6. **(unresolved, carried for several sessions)** Decide whether to
+7. **(unresolved, carried for several sessions)** Decide whether to
    revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
    still not revisited.
-
-**Next concrete action**: open `feme/lib/Graphics/ImageFixture.cpp` and
-grep for `R10G10B10A2_SNORM` to find the alpha-component pack/unpack
-case, then rerun the standalone `astc_10x5_unorm_block.
-a2b10g10r10_snorm_pack32.general_general_linear` case with a targeted
-debug print on the alpha channel specifically.
