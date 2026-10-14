@@ -63,17 +63,19 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days each)** Pick `variablePointers` or `scalarBlockLayout` --
-   `K6a`'s only 2 remaining bits, both real `SPIRVToLLVMPatterns.cpp` changes
-   per prior sessions' empirical CTS-backed investigation (not just grep-reads).
-   Neither has an obvious "smaller" edge the way `drawIndirectCount` did;
-   whichever is picked should start from the prior sessions' own failure-mode
-   notes (`PtrAccessChain`/`OpPtrEqual` family for `variablePointers`;
-   `getNaturalAlignmentIgnoringPacking` relaxation for `scalarBlockLayout`)
-   rather than re-deriving them.
-2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 2
-   bits should get individually-tracked roadmap rows now that the bundle is down
-   to its final two, rather than staying combined.
+1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
+   the prior investigation's exact failure list (`PtrAccessChain` "explicitly
+   marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
+   pointer types) rather than re-deriving it -- two sessions already confirmed
+   empirically it's a real lowering gap, not a quick flip.
+2. **(~1 day)** New `K6j`: the residual
+   `single_nested_struct`/`random.scalar.83` nested-struct scalar-layout gap
+   this session found (`VK_ERROR_INITIALIZATION_FAILED` on a struct containing a
+   nested-struct member at a scalar-tight offset). Not yet grep-traced -- likely
+   needs the same kind of fix as this session's bugs #1/#2 but for
+   `convertOffsetStructTypeIgnoringDecorations`'s nested-struct-member handling
+   specifically, not its vector/matrix-member handling (which this session
+   fixed).
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
@@ -81,13 +83,12 @@ suggested the next steps:
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration
    (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
-   files still stale from `K6b`-`K6g`'s own prior sessions).
+   files still stale from `K6b`-`K6h`'s own prior sessions).
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the single `K6h` command-plumbing task, same as `K6g`'s
-   scoping choice last session).
+   stayed scoped to the single `K6i` compiler-fix task).
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s now-2-bit
-`K6a` row, pick `variablePointers` or `scalarBlockLayout`, and start from the
-prior investigation's exact failure list (`PtrAccessChain` et al., or
-`getNaturalAlignmentIgnoringPacking`) rather than re-tracing from scratch.
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit
+`K6a` row, pick `variablePointers`, and start from the exact failure list two
+prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot
+to the new `K6j` nested-struct gap if a break from `K6a` is wanted.
