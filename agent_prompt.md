@@ -63,26 +63,22 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day)** Finish root-causing `L419(j)`'s `output_location` pair:
-   open `StageIOArrayAccessChainPattern` in `SPIRVToLLVMPatterns.cpp` and
-   trace the exact GEP/extract sequence it emits for a dynamic row index
-   into a `vec3`-element array followed by a `.x`/`CompositeExtract`, vs.
-   the same for `vec2`/`vec3`-full (both of which work). Likely suspects:
-   an index computed from the *output* component count being reused for
-   the *input* read (a 3-vs-1 width mismatch somewhere in address/stride
-   math), or a bitcast/GEP that assumes matching vector widths on both
-   sides of the dynamic access chain. Once found: fix, add a unit test at
-   the SPIR-V→LLVM lowering phase (narrowest-possible repro: a minimal
-   module with a dynamically-indexed `vec3[N]` input array read via
-   `.x`-only `CompositeExtract` into a scalar output array), rebuild, and
-   confirm both `output_location` cases + the full 28-case group pass with
-   0 regressions.
-2. **(~2-4 hours)** `L419(j)`'s `line_continuity` pair (`line-strip`,
-   `polygon-mode-lines`) — still untriaged, next signature after
-   `output_location` closes.
-3. **(~1-2 hours each)** `L419(j)`'s remaining 2 singletons:
+1. **(~1 day+, bigger than previously estimated)** Scope and implement
+   general nested-control-flow support in `EntryWrapper.cpp`'s barrier
+   region splitter, OR find a narrower special case that covers this
+   specific loop-with-nested-conditional-barriers shape without a full
+   generalization. Repro is pinned: `-n="dEQP-VK.rasterization.line_continuity.*"`.
+   Read `EntryWrapper.cpp`'s file-header comment and `isLinearChain` first.
+2. **(~1-2 hours each)** `L419(j)`'s last 2 untouched singletons:
    `primitive_id.matching` and `device_mandatory_features` — still
-   untriaged.
-4. **(standing)** Keep doc sync, offload-test-suite pattern check, and the
-   `CMAKE_BUILD_TYPE` decision on the list for whenever they become
-   relevant.
+   completely untriaged, no repro run yet this session.
+3. **(standing)** Doc sync — done this session for both wins above.
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check — not exercised, no `check-hlsl-feme-vk` work done.
+5. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE`
+   `RelWithDebInfo` vs `Release` — still not revisited.
+
+**Immediate next action for next session:** run
+`-n="dEQP-VK.rasterization.geometry.*primitive_id*matching*"` to get the
+exact failing case name and error for the `primitive_id` singleton —
+it's untriaged and smaller than the line_continuity generalization.
