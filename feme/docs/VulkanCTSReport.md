@@ -134,11 +134,11 @@ Roadmap IDs point to the bounded follow-up work.
 | Tessellation invariance/common-edge cases | 30 | L419(g) |
 | API all-format color blits (20) and conformance-version reporting (1) | 21 | L419(e), L419(j) |
 | GLSL loops, demote, derivatives, and loop-in-switch cases | 18 | L419(h) |
-| Storage images without a format using `A2B10G10R10_SINT_PACK32` | 14 | L419(i) |
+| ~~Storage images without a format using `A2B10G10R10_SINT_PACK32`~~ (14, now 0 -- re-verified this session; already resolved as an incidental side effect of unrelated prior fixes, no dedicated code change needed) | 0 | L419(i) |
 | Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,295** | |
+| **Total** | **1,281** | |
 
 ## Persistent abnormal outcomes
 
