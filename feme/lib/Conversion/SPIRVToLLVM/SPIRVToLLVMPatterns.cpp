@@ -3237,6 +3237,46 @@ bool isSignedInt16LeafType(mlir::Type Ty) {
   return IntTy && IntTy.getWidth() == 16 && IntTy.isSigned();
 }
 
+/// Converts a stage-IO `spirv.GlobalVariable`'s `initial_value` attribute (a
+/// plain scalar or vector `OpConstant`/`OpConstantComposite` Initializer --
+/// see `SPIRV_GlobalVariableOp`'s own `initial_value` doc) into an attribute
+/// usable directly as `StageIOGlobalVariablePattern`'s new
+/// `llvm.mlir.global`'s own `value`, converting a signed/unsigned SPIR-V
+/// integer (or vector thereof) to the signless integer type the LLVM
+/// dialect requires -- the exact sibling of MLIR upstream's own
+/// (file-local, so not reusable here) `convertInitialValueForGlobal` in
+/// `SPIRVToLLVM.cpp`, needed because this pattern -- not that one -- is the
+/// one that actually wins for a non-builtin `Input`/`Output` stage-IO
+/// variable (see `getStageIOAddressSpace`'s own comment on why its higher
+/// benefit claims these two storage classes first). A float/vector-of-float
+/// `initial_value` (e.g. `gl_FragDepth`'s own INITIALIZE-mutation-mode CTS
+/// shape, `dEQP-VK.renderpasses.renderpass1.depth_stencil_write_conditions.
+/// depth_kill_initialize_*`) needs no such conversion and passes through
+/// unchanged.
+mlir::Attribute convertStageIOInitialValue(mlir::Type SrcType,
+                                           mlir::Attribute SrcAttr,
+                                           mlir::OpBuilder &Builder) {
+  auto IsSignedOrUnsignedInteger = [](mlir::Type Ty) {
+    if (Ty.isSignedInteger() || Ty.isUnsignedInteger())
+      return true;
+    auto VecTy = mlir::dyn_cast<mlir::VectorType>(Ty);
+    return VecTy && (VecTy.getElementType().isSignedInteger() ||
+                     VecTy.getElementType().isUnsignedInteger());
+  };
+  if (!IsSignedOrUnsignedInteger(SrcType))
+    return SrcAttr;
+  unsigned BitWidth = SrcType.isIntOrFloat()
+                          ? SrcType.getIntOrFloatBitWidth()
+                          : mlir::cast<mlir::VectorType>(SrcType)
+                                .getElementTypeBitWidth();
+  mlir::Type SignlessType = Builder.getIntegerType(BitWidth);
+  if (auto VecAttr = mlir::dyn_cast<mlir::DenseIntElementsAttr>(SrcAttr))
+    return VecAttr.mapValues(
+        SignlessType, [](const llvm::APInt &Value) { return Value; });
+  auto IntAttr = mlir::cast<mlir::IntegerAttr>(SrcAttr);
+  return Builder.getIntegerAttr(SignlessType, IntAttr.getValue());
+}
+
 class StageIOGlobalVariablePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
 public:
@@ -3262,9 +3302,30 @@ public:
     // MLIR's own `GlobalVariablePattern` treats these two storage classes.
     bool IsConstant =
         SrcType.getStorageClass() == mlir::spirv::StorageClass::Input;
+    // (Roadmap L419(k)) An `Output` variable's own `initial_value` (e.g.
+    // `gl_FragDepth`/`gl_FragStencilRefARB` declared with a literal
+    // SPIR-V `Initializer` rather than a real runtime `OpStore`) must
+    // carry through to the new `llvm.mlir.global`'s own initializer: per
+    // the SPIR-V/Vulkan spec, that literal is the variable's value from
+    // the start of the invocation, exactly as if an implicit store had
+    // executed before the entry point's first instruction, so a
+    // fragment that never overwrites it (and is not itself discarded)
+    // must still produce that literal as its final output. Before this
+    // fix, every `initial_value` was silently dropped (hardcoded to
+    // `mlir::Attribute()` below) regardless of storage class -- leaving
+    // `CanonicalizeStage.cpp`'s own `FSDepthOut`/`FSStencilRefOut`
+    // `findElement` lookup correctly unable to find an output element
+    // for a builtin no SPIR-V instruction ever stores to, which in turn
+    // made `Executor.cpp`'s late depth/stencil-write path fall back to
+    // the rasterizer's own interpolated depth / the pipeline's static
+    // stencil reference instead of the shader's real (literal) output.
+    mlir::Attribute InitialValue;
+    if (mlir::Attribute InitialValueAttr = Op.getInitialValueAttr())
+      InitialValue = convertStageIOInitialValue(SrcType.getPointeeType(),
+                                                InitialValueAttr, Rewriter);
     auto NewGlobal = Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
         Op, DstType, IsConstant, mlir::LLVM::Linkage::External, Op.getSymName(),
-        mlir::Attribute(), /*alignment=*/0, *AddrSpace);
+        InitialValue, /*alignment=*/0, *AddrSpace);
 
     if (mlir::ArrayAttr Decorations = buildStageIODecorationsAttr(Op))
       NewGlobal->setAttr(feme::spirv::getStageIODecorationsAttrName(),

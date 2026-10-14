@@ -115,6 +115,36 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// (Roadmap L419(k)) An `Output` builtin variable's own `initial_value` --
+// e.g. `gl_FragDepth`'s CTS `depth_stencil_write_conditions.*_initialize_*`
+// shape, declared `= 0.2` and never actually `OpStore`d anywhere in the
+// entry's body -- must survive this lowering as the new `llvm.mlir.global`'s
+// own initializer, exactly like an ordinary (non-builtin) `Output`
+// variable's would, rather than being silently dropped (the global
+// previously came out `external`, i.e. uninitialized, discarding the
+// literal). `StageIOGlobalVariablePattern` (not `BuiltInGlobalVariablePattern`,
+// which only ever handles a *read*, as `read_builtin` above exercises) is
+// still the pattern that matches here: a `BuiltIn`-decorated variable with
+// no `llvm.spv.*` intrinsic equivalent (`FragDepth` has none -- there is no
+// hardware depth-output "read" to intrinsify) falls through to the same
+// ordinary-memory path every non-builtin stage-IO variable uses.
+//
+// CHECK: llvm.mlir.global external @frag_depth(2.000000e-01 : f32) {addr_space = 8 : i32{{.*}}} : f32
+// CHECK-LABEL: llvm.func @write_builtin_initial_value
+// CHECK: %[[PTR:.*]] = llvm.mlir.addressof @frag_depth : !llvm.ptr<8>
+// CHECK: llvm.store %{{.*}}, %[[PTR]] : f32, !llvm.ptr<8>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @frag_depth initial_value(0.2 : f32) built_in("FragDepth")
+      : !spirv.ptr<f32, Output>
+  spirv.func @write_builtin_initial_value(%v: f32) -> () "None" {
+    %0 = spirv.mlir.addressof @frag_depth : !spirv.ptr<f32, Output>
+    spirv.Store "Output" %0, %v : f32
+    spirv.Return
+  }
+}
+
+// -----
+
 // A *graphics* builtin (`Position` here) has no `llvm.spv.*` intrinsic to
 // legalize to, so it converts through the ordinary stage-IO path above --
 // with its `BuiltIn` decoration (code 11) preserved, which is what lets
