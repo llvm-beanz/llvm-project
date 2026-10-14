@@ -9,9 +9,10 @@ counts previously recorded in this file.
 - FeMe revision: `d3577f8378eb`
 - VK-GL-CTS upstream revision: `c28b36293093`
   (`vulkan-cts-1.4.7.0-40-gc28b3629`)
-- VK-GL-CTS tested revision: `6b0464e83`, the upstream revision plus an
-  isolated host-mirror fix for std430 `vec3` arrays in
-  `vktMeshShaderInOutTestsEXT.cpp`
+- VK-GL-CTS tested revision: `6b0464e83` plus `f43894f9a`, the upstream
+  revision with an isolated host-mirror fix for std430 `vec3` arrays in
+  `vktMeshShaderInOutTestsEXT.cpp` and an isolated `checkSupport`-argument
+  fix in `vktRenderPassDepthStencilResolveTests.cpp` (see L419(k))
 - Vulkan registry: `VK_HEADER_VERSION` 365
 - Device: `FeMe CPU Vulkan Device`
 - Build: Release, LLVM assertions enabled, precompiled headers disabled,
@@ -135,10 +136,10 @@ Roadmap IDs point to the bounded follow-up work.
 | API all-format color blits (20) and conformance-version reporting (1) | 21 | L419(e), L419(j) |
 | GLSL loops, demote, derivatives, and loop-in-switch cases | 18 | L419(h) |
 | ~~Storage images without a format using `A2B10G10R10_SINT_PACK32`~~ (14, now 0 -- re-verified this session; already resolved as an incidental side effect of unrelated prior fixes, no dedicated code change needed) | 0 | L419(i) |
-| ~~Render-pass depth/stencil write conditions~~ (9, now 0 -- fixed this session: `StageIOGlobalVariablePattern` was silently dropping a stage-IO global's `initial_value` during SPIR-V-to-LLVM conversion, `CanonicalizeStage.cpp`'s unused-global signature-discovery fallback unconditionally excluded every `BuiltIn` global regardless of a real initializer, and no code synthesized the implicit "initial store" the SPIR-V/Vulkan spec requires for a never-`OpStore`d-but-initialized output -- all three fixed) and resolve (4, not yet triaged) | 4 | L419(k) |
+| ~~Render-pass depth/stencil write conditions (9) and resolve (4)~~ (now 0 -- both fixed this session: the write-condition cluster via three stacked FeMe-side fixes to `initial_value` handling for a never-`OpStore`d `BuiltIn` output; the resolve cluster via an isolated upstream VK-GL-CTS fix to a `checkSupport` call that was silently skipping its own alternative-format capability check) | 0 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,272** | |
+| **Total** | **1,268** | |
 
 ## Persistent abnormal outcomes
 
