@@ -12865,14 +12865,31 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   if (!Shape)
     return std::nullopt;
   auto [Struct, MemberSelectorPos] = *Shape;
-  if (Op.getIndices().size() != MemberSelectorPos + 2)
+  if (MemberSelectorPos >= Op.getIndices().size())
     return std::nullopt;
   std::optional<uint64_t> MemberIndex =
       getConstantMemberIndex(Op.getIndices()[MemberSelectorPos]);
   if (!MemberIndex)
     return std::nullopt;
-  auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
-      Struct.getElementType(static_cast<unsigned>(*MemberIndex)));
+  // (K6k) The member itself may be a (possibly multiply-nested) array of
+  // `RowMajor` matrices rather than a matrix directly -- e.g. plain GLSL
+  // `buffer Block { float padding; mat2 var[3]; }`, where `var` is member 1
+  // of the block struct, not the matrix itself. Peel through each array
+  // level, consuming one more index (the element selector within that
+  // array) per level, before requiring the innermost type to be the
+  // matrix.
+  mlir::Type MemberTy =
+      Struct.getElementType(static_cast<unsigned>(*MemberIndex));
+  unsigned ColumnIndexPos = MemberSelectorPos + 1;
+  while (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(MemberTy)) {
+    if (ColumnIndexPos >= Op.getIndices().size())
+      return std::nullopt;
+    MemberTy = ArrayTy.getElementType();
+    ++ColumnIndexPos;
+  }
+  if (Op.getIndices().size() != ColumnIndexPos + 1)
+    return std::nullopt;
+  auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(MemberTy);
   if (!MatrixTy)
     return std::nullopt;
   std::optional<MatrixMemberLayout> Layout =
@@ -12880,7 +12897,7 @@ getMatrixColumnAccess(mlir::spirv::AccessChainOp Op) {
   if (!Layout || !Layout->IsRowMajor)
     return std::nullopt;
   return MatrixColumnAccess{MatrixTy, *Layout,
-                            Op.getIndices()[MemberSelectorPos + 1]};
+                            Op.getIndices()[ColumnIndexPos]};
 }
 
 /// Builds the `!llvm.array<NumRows x MajorEntryTy>` physical member type
