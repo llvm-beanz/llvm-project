@@ -6,16 +6,19 @@
 // `dEQP-VK.spirv_assembly.instruction.*variable_pointer*` case that
 // lowered one (156 of the `variablePointers`/`variablePointersStorageBuffer`
 // feature bits' own 296 mustpass failures). `PtrAccessChainPattern`
-// (SPIRVToLLVMPatterns.cpp) covers the two shapes that cluster actually
+// (SPIRVToLLVMPatterns.cpp) covers every shape the cluster actually
 // exercises: a compile-time-constant-zero `element` operand alongside one
 // or more real trailing indices (re-expressed as a plain `AccessChain` and
 // reconverted by this file's own existing, much more intricate
-// `AccessChain` pattern set), and a genuinely dynamic `element` operand
-// with no trailing indices into a plain scalar pointee (lowered directly
-// to a single `llvm.getelementptr`, matching C's own `scalarPtr[i]`
-// pointer arithmetic). A non-zero `element` combined with further indices
-// is not covered (no known caller needs it) and is left to decline
-// legalization rather than miscompile.
+// `AccessChain` pattern set), a genuinely dynamic `element` operand with
+// no trailing indices into a plain scalar pointee (lowered directly to a
+// single `llvm.getelementptr`, matching C's own `scalarPtr[i]` pointer
+// arithmetic), and a non-zero/dynamic `element` *together with* real
+// trailing indices into a non-struct (scalar/vector) pointee (lowered to
+// a chained pair of `llvm.getelementptr`s). A non-zero `element` combined
+// with further indices into a *struct* pointee is not covered (no known
+// caller needs it) and is left to decline legalization rather than
+// miscompile.
 
 // A zero `element` with one trailing (struct-member-selecting) index is
 // reconverted as a plain `AccessChain`, letting the already-correct
@@ -79,3 +82,32 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader, VariablePointers
     spirv.Return
   }
 }
+
+// -----
+
+// A non-zero `element` *together with* a trailing index -- the
+// `opptraccesschain_float_*` family's own
+// `%ptr<v4f32> -> (element)(idx) -> %ptr<f32>` shape: step to vector lane
+// `element`'s own base address, then select component `idx` within it --
+// lowers to a chained pair of `llvm.getelementptr`s rather than
+// re-expressing either step as a new SPIR-V op for the dialect conversion
+// driver to reprocess (an op-reprocessing attempt at this same shape
+// previously failed to converge: a newly created `AccessChain`'s
+// legalization ran before its own `PtrAccessChain` operand had converted,
+// so its failure was never retried).
+//
+// CHECK-LABEL: llvm.func @ptr_access_chain_element_and_index
+// CHECK: %[[VAR:.*]] = llvm.alloca
+// CHECK: %[[STEP:.*]] = llvm.getelementptr %[[VAR]][%{{.*}}] : (!llvm.ptr, i32) -> !llvm.ptr, vector<4xf32>
+// CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i32)
+// CHECK: %[[PTR:.*]] = llvm.getelementptr %[[STEP]][%[[ZERO]], %{{.*}}] : (!llvm.ptr, i32, i32) -> !llvm.ptr, vector<4xf32>
+// CHECK: llvm.store %{{.*}}, %[[PTR]] : f32, !llvm.ptr
+spirv.module Logical GLSL450 requires #spirv.vce<v1.6, [Shader, VariablePointers], [SPV_KHR_variable_pointers]> {
+  spirv.func @ptr_access_chain_element_and_index(%val : f32, %element : si32, %idx : si32) -> () "None" {
+    %var = spirv.Variable : !spirv.ptr<vector<4xf32>, Function>
+    %elem = spirv.PtrAccessChain %var[%element %idx] : !spirv.ptr<vector<4xf32>, Function>, si32, si32 -> !spirv.ptr<f32, Function>
+    spirv.Store "Function" %elem, %val : f32
+    spirv.Return
+  }
+}
+

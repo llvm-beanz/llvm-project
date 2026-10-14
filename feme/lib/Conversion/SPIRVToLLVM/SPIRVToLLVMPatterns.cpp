@@ -5067,30 +5067,39 @@ public:
 /// before `idx1, idx2, ...` then descend into that shifted base exactly
 /// like an ordinary `AccessChain` would.
 ///
-/// Two distinct shapes cover every failing CTS case this pattern closes
+/// Every shape seen across the full 176-case post-K6a-session-one residual
 /// (confirmed by dumping each case's own real SPIR-V via a temporary
 /// `FEME_DEBUG_DUMP_SPIRV` hook, never committed -- see this roadmap row's
-/// own investigation notes): the `complex_types_compute`/`graphics`-style
-/// families (`opptraccesschain_{arrays,structs,matrices,vec4,...}_*`)
-/// always pass a compile-time-constant-zero `element` alongside one or
-/// more real trailing `idx1, idx2, ...`, while the `float`/
-/// `reads_opptraccesschain_*` family instead passes a genuine *dynamic*
-/// `element` (built from `gl_GlobalInvocationID`) with *zero* trailing
-/// indices, always into a plain scalar (`float`) pointee with no
-/// `ArrayStride` decoration to honor. Handling only these two shapes --
-/// rather than the fully general "dynamic element into a decorated,
-/// composite-typed pointee" case neither this mustpass set nor any other
-/// known caller exercises -- keeps the byte-stride question moot in both:
-/// a zero `element` contributes no offset regardless of what stride would
-/// otherwise apply, and a bare scalar pointee's own natural size *is* the
-/// spec's own "for all other objects, the implementation calculates"
-/// stride, with no declared `ArrayStride` to disagree with. A combination
-/// this pattern cannot yet handle (a non-zero `element` together with one
-/// or more trailing indices, which would need a real `ArrayStride`-aware
-/// byte-offset computation this file's own
-/// `convertOffsetStructTypeIgnoringDecorations` machinery does not yet
-/// expose for a pointer *type* itself, only a struct's own members)
-/// declines via `notifyMatchFailure` rather than miscompiling.
+/// own investigation notes) reduces to the same two primitive steps: (1)
+/// shift `base` by `element` whole units of its own pointee type -- a bare
+/// `GEPOp` (an `element`-into-undecorated-pointee shift never needs
+/// `ArrayStride`, since the spec's own "for all other objects, the
+/// implementation calculates" stride *is* that pointee's natural size);
+/// (2) once shifted, walk `idx1, idx2, ...` with a second, ordinary
+/// "zero-then-indices" GEP exactly like `AccessChainConversion`
+/// (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) already builds for
+/// a plain `AccessChain`. A compile-time-constant-zero `element` elides
+/// step (1) (nothing to shift by), and an empty index list elides step (2)
+/// (nothing further to select) -- both are pure instruction-count
+/// optimizations over always emitting both GEPs, which would still be
+/// correct, just one extra (no-op, zero-offset) instruction wider. The one
+/// combination needing *both* steps together -- confirmed live in the
+/// `opptraccesschain_float_*` family's own
+/// `%ptr<v4float> -> (element=%int_1)(idx=%int_3) -> %ptr<float>` shape
+/// (step to vector lane 1's own base address, then select component 3
+/// within it) -- chains the two GEPs directly rather than re-expressing
+/// either step as a new SPIR-V op for the dialect conversion driver to
+/// reprocess (an initial attempt at that -- decomposing step (1) into a
+/// new, zero-index `PtrAccessChainOp` and step (2) into a new
+/// `AccessChainOp` over its result -- silently failed to converge: the
+/// newly created `AccessChainOp`'s own legalization attempt ran before its
+/// `PtrAccessChainOp` operand had itself converted, so its "base is not an
+/// LLVM pointer yet" `notifyMatchFailure` was never retried, rolling the
+/// whole rewrite back to report the original op as unlegalizable). Scoped
+/// to a non-struct pointee only (every known case reaches this with a bare
+/// scalar/vector pointee): a struct-typed pointee declines rather than
+/// risk silently sidestepping this file's own much more intricate struct-
+/// layout/block/matrix machinery for a shape no known CTS case exercises.
 template <typename SPIRVOp, typename AccessChainOp>
 class PtrAccessChainPattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
@@ -5112,11 +5121,19 @@ public:
         getConstantMemberIndex(Op.getElement());
     bool ElementIsZero = ConstantElement && *ConstantElement == 0;
 
-    if (!ElementIsZero) {
-      if (!Op.getIndices().empty())
-        return Rewriter.notifyMatchFailure(
-            Op, "non-zero/dynamic element combined with further indices "
-                "not yet supported");
+    if (ElementIsZero && Op.getIndices().empty()) {
+      // No real indices and nothing to shift by -- the result is `base`
+      // itself, unchanged (the "This computed Base has the same type as
+      // the originating Base" case with nothing further to apply).
+      Rewriter.replaceOp(Op, Adaptor.getBasePtr());
+      return mlir::success();
+    }
+
+    if (!ElementIsZero && Op.getIndices().empty()) {
+      // Step (1) alone: shift `base` by `element` whole pointee-sized
+      // units. A bare scalar/vector pointee's own natural size *is* the
+      // spec's own "for all other objects, the implementation
+      // calculates" stride, with no `ArrayStride` decoration to honor.
       mlir::Type ResultTy =
           this->getTypeConverter()->convertType(Op.getType());
       if (!ResultTy)
@@ -5128,24 +5145,62 @@ public:
       return mlir::success();
     }
 
-    if (Op.getIndices().empty()) {
-      // No real indices left once the zero `element` is dropped -- the
-      // result is `base` itself, unchanged (the "This computed Base has
-      // the same type as the originating Base" case with nothing further
-      // to apply).
-      Rewriter.replaceOp(Op, Adaptor.getBasePtr());
+    if (ElementIsZero) {
+      // Step (2) alone: re-express as a plain `AccessChain`/
+      // `InBoundsAccessChain` over the same base and remaining indices,
+      // and let the rest of this file's own (considerably more
+      // intricate) `AccessChain` pattern set -- the dialect conversion
+      // driver reprocesses any newly created, still-illegal SPIR-V op
+      // the same as the original -- handle every block/struct-layout/
+      // matrix/tight-vector subtlety that machinery already covers,
+      // rather than duplicating any of it here.
+      Rewriter.replaceOpWithNewOp<AccessChainOp>(Op, Op.getBasePtr(),
+                                                Op.getIndices());
       return mlir::success();
     }
 
-    // Re-express as a plain `AccessChain`/`InBoundsAccessChain` over the
-    // same base and remaining indices, and let the rest of this file's
-    // own (considerably more intricate) `AccessChain` pattern set -- the
-    // dialect conversion driver reprocesses any newly created, still-
-    // illegal SPIR-V op the same as the original -- handle every
-    // block/struct-layout/matrix/tight-vector subtlety that machinery
-    // already covers, rather than duplicating any of it here.
-    Rewriter.replaceOpWithNewOp<AccessChainOp>(Op, Op.getBasePtr(),
-                                              Op.getIndices());
+    // Both a non-zero/dynamic `element` and real trailing indices are
+    // present (e.g. the `opptraccesschain_float_*` family's own
+    // `%ptr<v4float> -> (element=1)(idx=3) -> %ptr<float>` shape: step to
+    // vector lane 1's own base address, then select component 3 within
+    // it). Every known case reaches this with a bare scalar/vector
+    // pointee (never a struct), so a plain two-GEP chain -- one GEP
+    // shifting by `element` whole pointee-sized units, then a second,
+    // ordinary "zero-then-indices" GEP into the shifted pointer exactly
+    // like `AccessChainConversion` (`mlir/lib/Conversion/SPIRVToLLVM/
+    // SPIRVToLLVM.cpp`) already builds for a plain `AccessChain` -- covers
+    // it without needing any of this file's own struct-layout/block/
+    // matrix machinery. A struct-typed pointee declines rather than
+    // risk silently sidestepping that machinery's own offset/reordering
+    // rules for a shape no known CTS case exercises.
+    if (mlir::isa<mlir::spirv::StructType>(PointerType.getPointeeType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "non-zero/dynamic element with indices into a struct "
+              "pointee not yet supported");
+
+    mlir::Type SteppedResultTy =
+        this->getTypeConverter()->convertType(Op.getBasePtr().getType());
+    if (!SteppedResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Stepped = mlir::LLVM::GEPOp::create(
+        Rewriter, Loc, SteppedResultTy, ConvertedPointeeTy,
+        Adaptor.getBasePtr(),
+        llvm::ArrayRef<mlir::LLVM::GEPArg>{Adaptor.getElement()});
+
+    mlir::Type ResultTy = this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultTy)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Type IndexType =
+        this->getTypeConverter()->convertType(Op.getIndices().front().getType());
+    if (!IndexType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, IndexType, Rewriter.getIntegerAttr(IndexType, 0));
+    llvm::SmallVector<mlir::Value, 4> Indices2;
+    Indices2.push_back(Zero);
+    llvm::append_range(Indices2, Adaptor.getIndices());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
+        Op, ResultTy, ConvertedPointeeTy, Stepped, Indices2);
     return mlir::success();
   }
 };
