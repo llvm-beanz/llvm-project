@@ -13,10 +13,10 @@ Current registry: VK-GL-CTS `c28b36293093`
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |
 | 1.1 | 3 of 12 | n/a | 7 of 23 |
-| 1.2 | 21 of 47 | n/a | 10 of 24 |
+| 1.2 | 22 of 47 | n/a | 11 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **Total** | **90 of 150** | **70** | **51 of 86** |
+| **Total** | **91 of 150** | **70** | **52 of 86** |
 
 Regenerate after changing feature or promoted-extension support:
 
@@ -126,7 +126,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_1 | `VK_KHR_shader_draw_parameters` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_storage_buffer_storage_class` | yes | core, not advertised by name: the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_variable_pointers` | no |  |
-| feature | VK_VERSION_1_2 | `samplerMirrorClampToEdge` | no |  |
+| feature | VK_VERSION_1_2 | `samplerMirrorClampToEdge` | yes |  |
 | feature | VK_VERSION_1_2 | `drawIndirectCount` | no |  |
 | feature | VK_VERSION_1_2 | `storageBuffer8BitAccess` | no |  |
 | feature | VK_VERSION_1_2 | `uniformAndStorageBuffer8BitAccess` | no |  |
@@ -187,7 +187,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_2 | `VK_KHR_driver_properties` | yes | core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_image_format_list` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_imageless_framebuffer` | yes | core, not advertised by name: roadmap C6, VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT + VkRenderPassAttachmentBeginInfo (RenderPass.cpp, CommandBuffer.cpp) |
-| extension | VK_VERSION_1_2 | `VK_KHR_sampler_mirror_clamp_to_edge` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_sampler_mirror_clamp_to_edge` | yes | roadmap K6b: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); adds no commands of its own, only the pre-existing MIRROR_CLAMP_TO_EDGE address mode and its own feature bit |
 | extension | VK_VERSION_1_2 | `VK_KHR_separate_depth_stencil_layouts` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |

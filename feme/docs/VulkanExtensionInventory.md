@@ -277,7 +277,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_ray_tracing_position_fetch` | Planned (in scope, not implemented) | roadmap J8 |
 | `VK_KHR_relaxed_block_layout` | Implemented (core, not advertised by name) | SPIR-V block access uses each member's declared offset/stride rather than imposing or validating a std140 re-layout (SPIRVToLLVMPatterns.cpp's getUniformBlockElement) |
 | `VK_KHR_robustness2` | Not implemented |  |
-| `VK_KHR_sampler_mirror_clamp_to_edge` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_sampler_mirror_clamp_to_edge` | Implemented | roadmap K6b: `samplerMirrorClampToEdge` feature bit now `VK_TRUE`, extension advertised by name (PhysicalDeviceInfo.cpp); `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` math (FeMeRuntimeCPU.c's `femeRTApplyAddressMode` mode 4) was already implemented, only the advertisement was missing |
 | `VK_KHR_sampler_ycbcr_conversion` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_separate_depth_stencil_layouts` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_abort` | Not implemented |  |
