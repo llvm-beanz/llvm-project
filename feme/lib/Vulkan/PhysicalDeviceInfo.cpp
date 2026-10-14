@@ -1674,6 +1674,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // `VkImageFormatListCreateInfo` immediately above.
       {VK_EXT_SEPARATE_STENCIL_USAGE_EXTENSION_NAME,
        VK_EXT_SEPARATE_STENCIL_USAGE_SPEC_VERSION},
+      // (roadmap K6f) Properties-only, no commands and no feature bit:
+      // `VkPhysicalDeviceFloatControlsProperties` is already filled in
+      // truthfully above (roadmap L414(a)) -- `shaderSignedZeroInfNan
+      // PreserveFloat{16,32}` genuinely `VK_TRUE`, every other field the
+      // conservative "least capable" value, consistent with
+      // `VkPhysicalDeviceVulkan12Properties`'s matching fields -- so there
+      // is nothing further to implement before advertising the name
+      // itself for a custom sub-1.2 device.
+      {VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
+       VK_KHR_SHADER_FLOAT_CONTROLS_SPEC_VERSION},
   };
   return Extensions;
 }
