@@ -122144,3 +122144,31 @@ A trailing runtime-sized array of a bare 3-component vector (`vec3 d[]`) under s
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done.
 
 **Immediate next action for next session:** pick `K6m`'s legalization failures (pull real SPIR-V from `.qpa` logs, same technique as this session) as the smallest direct continuation, or pivot to `variablePointers` (`K6a`) for a change of pace.
+
+# Session: K6m fixed (`RuntimeArrayType`-of-`array`-of-vector legalization bug)
+
+**Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep deviceName`** at session start, per standing instructions.
+
+## What now works
+
+All 5 K6m cases pass: `dEQP-VK.ssbo.layout.random.scalar.41` and `dEQP-VK.ssbo.layout.3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,vec3}`. Full `dEQP-VK.ssbo.*` sweep: 4,749 -> 4,754 Pass, 5 -> 0 Fail. `ninja check-feme`: 3,730/3,737 pass, 0 fail, 1 new lit test.
+
+## The bug, in one paragraph
+
+`.41`'s real shape (confirmed via authentic SPIR-V dump): a trailing member `rtarray<array<2 x vector<3xsi32>, stride=12>, stride=24>` -- a runtime array whose element is itself a fixed array of a bare vector, one level deeper than K6l's direct `rtarray<vector>` shape. `convertArrayTypeIgnoringDecorations` (the plain `spirv::ArrayType` conversion) unconditionally returns null when a declared stride is narrower than a vector's natural size, instead of substituting a tight marker. That null propagates up through `RuntimeArrayType`'s own conversion, aborting the whole `AccessChain`'s legalization. The existing retry path for this mismatch (`getTightNestedArrayOfVectorsOrMatricesType`) needs a `Struct`/`Index` for matrix decorations and only accepts a top-level `spirv::ArrayType`, not `RuntimeArrayType` -- so it could never help here. Fixed by adding a decoration-free sibling helper and retrying through it inside the `RuntimeArrayType` conversion lambda.
+
+## Process notes
+
+1. Same "authentic SPIR-V dump" technique as K6l (temporary `FEME_DEBUG_DUMP_SPIRV_DIR` hook in `Pipeline.cpp`, reverted before commit) -- still the fastest, most reliable way to get a CTS case's real shader bytes.
+2. Same text-round-trip artifact as before (`feme-translate`/`feme-opt` as separate processes re-triggers a harmless `OpIAdd` parser quirk) -- worked around with a hand-crafted minimal MLIR reproducer instead, same as last session.
+3. One fix (the decoration-free `getTightNestedArrayOfVectorsType` retry) closed all 5 bundled cases in one shot -- the roadmap's own guess that the 4 `3_level_unsized_array` cases shared K6m's root cause one level deeper was correct, confirmed empirically rather than assumed.
+4. Did not need to touch `getTightNestedArrayOfVectorsOrMatricesType` itself or `rewriteBlockAccess` -- fixing the `RuntimeArrayType` conversion lambda's own retry was sufficient; the recursive `TypeConverter.convertType` call inside it is what needed the extra fallback, not any of its callers.
+
+## Next steps
+
+1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from the prior investigation's exact failure list (`PtrAccessChain` "explicitly marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointer types) -- three prior sessions have now confirmed this empirically as a real lowering gap, not a quick flip. With K6l and K6m both closed this session and last, `K6a` is now the only open bundled-feature row left on the roadmap with known starting material.
+2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files still stale from several prior sessions).
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single K6m compiler-fix task, same scoping choice as several recent sessions).
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now the only open bundled-feature row), pick `variablePointers`, and start from the exact failure list already logged across three prior sessions (`PtrAccessChain`/`OpPtrEqual` family) rather than re-deriving it.
