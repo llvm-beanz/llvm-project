@@ -1660,6 +1660,20 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // `VK_KHR_create_renderpass2` above.
       {VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
        VK_KHR_IMAGE_FORMAT_LIST_SPEC_VERSION},
+      // (roadmap K6e) `VkImageStencilUsageCreateInfo` adds no commands of
+      // its own and no feature bit, letting a depth/stencil image declare
+      // a different `usage` for its stencil aspect than its depth aspect.
+      // `Image.h`'s `Image` class only ever tracks one combined `usage()`
+      // field, but grepping every caller confirms nothing reads it back at
+      // all outside a single explanatory comment (`Image.cpp`) -- no
+      // command validates a view's/attachment's/descriptor's usage
+      // against `Image::usage()`, per-aspect or otherwise -- so there is
+      // no path that could observe or enforce the depth/stencil usage
+      // divergence this struct declares either way. Same "chained struct
+      // with no corresponding validation path" rationale as K6d's
+      // `VkImageFormatListCreateInfo` immediately above.
+      {VK_EXT_SEPARATE_STENCIL_USAGE_EXTENSION_NAME,
+       VK_EXT_SEPARATE_STENCIL_USAGE_SPEC_VERSION},
   };
   return Extensions;
 }
