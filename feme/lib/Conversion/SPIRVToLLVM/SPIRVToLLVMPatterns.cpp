@@ -4441,6 +4441,14 @@ mlir::Type substituteArrayOfMatrixElementType(
              : nullptr;
 }
 
+/// Forward declaration: defined below (used by multiple earlier callers,
+/// including rewriteBlockAccess here and
+/// convertOffsetStructTypeIgnoringDecorations's own member-list-building
+/// loop) -- see its own definition/comment for details.
+mlir::Type getTightNestedArrayOfVectorsOrMatricesType(
+    mlir::spirv::StructType Struct, unsigned Index, mlir::Type ElementTy,
+    const mlir::TypeConverter &Converter);
+
 /// \p BlockStruct is the struct Element was itself derived from (see
 /// BlockElement's own comment) -- always a plain struct type, whether or
 /// not `Element.HasWrapper`, since both getBufferBlockElement and
@@ -4578,6 +4586,22 @@ mlir::LogicalResult rewriteBlockAccess(
     DecorationStruct = ContentStruct;
   }
   mlir::Type ElementType = TypeConverter.convertType(SelectedType);
+  // (Roadmap K6a) The ordinarily-registered spirv::ArrayType conversion
+  // (convertArrayTypeIgnoringDecorations) fails outright for a
+  // `-fvk-use-scalar-layout`-style array of vectors/matrices whose
+  // declared Stride is narrower than its element's own natural (SIMD-
+  // register-rounded) ABI size -- exactly scalar layout's own defining
+  // trait -- unlike convertOffsetStructTypeIgnoringDecorations's own
+  // member-list-building loop, this standalone convertType call has no
+  // later "tight" retry tier of its own to fall through to at all, so
+  // retry directly via the same recursive substitution helper that loop
+  // now falls back to (see getTightNestedArrayOfVectorsOrMatricesType's
+  // own comment) using DecorationStruct/MatrixDecorationMemberIndex,
+  // already set up above for exactly this kind of lookup.
+  if (!ElementType)
+    ElementType = getTightNestedArrayOfVectorsOrMatricesType(
+        DecorationStruct, MatrixDecorationMemberIndex, SelectedType,
+        TypeConverter);
   if (!ElementType)
     return Rewriter.notifyMatchFailure(Op, "type conversion failed");
   // (Roadmap L124(m)) A *whole*-matrix access reached through 2+ array
@@ -5782,6 +5806,82 @@ mlir::Type getTightOrPhysicalMatrixMemberType(
   return getPhysicalMatrixMemberType(MatrixTy, *Layout, Converter, DL);
 }
 
+/// (Roadmap K6a) Generalizes getStridedTightVectorArrayType/
+/// getTightOrPhysicalMatrixMemberType to recurse through any number of
+/// nested `spirv::ArrayType` levels before reaching the innermost vector
+/// or matrix element -- needed for a `-fvk-use-scalar-layout`-style
+/// doubly (or deeper) nested array member (e.g. a `vec3 xs[3][4]`-shaped
+/// `!spirv.array<3 x !spirv.array<4 x vector<3xf32>, stride=12>,
+/// stride=48>`, or the same shape with a matrix element instead;
+/// `dEQP-VK.ubo.2_level_array.scalar.*`'s own test shapes), which every
+/// existing single-level retry above (getStridedTightVectorArrayType's
+/// own caller in the array-of-matrix/array-of-vector retry tier below)
+/// only ever substitutes one array level past a struct member's own top-
+/// level element type, not two or more.
+///
+/// This doubles as this struct's own *initial* member conversion's
+/// fallback (see this function's caller inside the member-building loop
+/// below) whenever the ordinarily-registered `spirv::ArrayType`
+/// conversion (`convertArrayTypeIgnoringDecorations`) fails outright --
+/// which it always does whenever a declared `Stride` is narrower than
+/// its vector element's own natural (SIMD-register-rounded) ABI size,
+/// exactly scalar layout's own defining trait (e.g. a bare, *single*-
+/// level `vec3 xs[3]` with `stride=12`, narrower than a raw `vector<3xf32>`'s
+/// own natural ~16-byte ABI size) -- without this fallback, that single
+/// failed member conversion aborts this whole struct's conversion before
+/// any of this file's later "tight" retry tiers below ever get a chance
+/// to run.
+///
+/// Returns null if \p ElementTy is not (an array, at any nesting depth,
+/// of) a vector or `spirv::MatrixType`, if any inner conversion fails, or
+/// if a non-innermost array level's own declared `Stride` does not
+/// already exactly match its element's recursively tight-substituted
+/// natural size -- a genuine interior gap at that outer level, which no
+/// real `-fvk-use-scalar-layout`/std430-emitted nested-array layout
+/// actually produces (unlike the innermost, vector-level stride, which
+/// `getStridedTightVectorArrayType` already compensates for via its own
+/// marker-struct padding -- see its own comment), so safer to reject
+/// outright than to guess at silently.
+mlir::Type getTightNestedArrayOfVectorsOrMatricesType(
+    mlir::spirv::StructType Struct, unsigned Index, mlir::Type ElementTy,
+    const mlir::TypeConverter &Converter) {
+  auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy);
+  if (!ArrayTy)
+    return nullptr;
+  mlir::Type Inner = ArrayTy.getElementType();
+  if (auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Inner)) {
+    mlir::Type TightElementTy = getStridedTightVectorArrayType(
+        VectorTy, ArrayTy.getArrayStride(), Converter);
+    if (!TightElementTy)
+      return nullptr;
+    return mlir::LLVM::LLVMArrayType::get(TightElementTy,
+                                          ArrayTy.getNumElements());
+  }
+  if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(Inner)) {
+    mlir::Type TightElementTy = getTightOrPhysicalMatrixMemberType(
+        Struct, Index, MatrixTy, Converter);
+    if (!TightElementTy)
+      return nullptr;
+    return mlir::LLVM::LLVMArrayType::get(TightElementTy,
+                                          ArrayTy.getNumElements());
+  }
+  // Recurse one array level further in; this level's own declared
+  // Stride (if any) must already exactly match the recursively tight-
+  // substituted inner array/matrix's own natural size -- see this
+  // function's own comment for why no further padding is attempted at
+  // this (non-innermost) level.
+  mlir::Type TightInner = getTightNestedArrayOfVectorsOrMatricesType(
+      Struct, Index, Inner, Converter);
+  if (!TightInner)
+    return nullptr;
+  if (unsigned Stride = ArrayTy.getArrayStride()) {
+    mlir::DataLayout DL;
+    if (DL.getTypeSize(TightInner) != Stride)
+      return nullptr;
+  }
+  return mlir::LLVM::LLVMArrayType::get(TightInner, ArrayTy.getNumElements());
+}
+
 /// If \p ElementTy is a SPIR-V struct (any member count -- e.g.
 /// `!spirv.struct<(vector<4xf32> [RelaxedPrecision])>`, or a two-member
 /// `!spirv.struct<(!spirv.matrix<3 x vector<3xf32>> [RelaxedPrecision],
@@ -6286,9 +6386,24 @@ mlir::Type layOutStructIfOffsetsMatch(
     // succeed with no pad at all, whether or not it's the physically
     // first member.
     uint64_t NaturalCursor = llvm::alignTo(Cursor, Alignment);
-    if (NaturalCursor > DeclaredOffset)
-      return nullptr; // Even natural alignment alone overshoots.
-    if (NaturalCursor < DeclaredOffset) {
+    if (NaturalCursor > DeclaredOffset) {
+      // (Roadmap K6a, scalarBlockLayout) A tightly/scalar-packed struct
+      // can legitimately declare a member's Offset below what its own
+      // natural (SIMD-rounded) alignment would otherwise require -- e.g.
+      // a 2-column matrix of vec2 columns placed immediately after a
+      // single leading scalar, with no padding between them at all. This
+      // struct is always built *packed* below regardless, so no
+      // alignment-driven gap is ever implicitly inserted by LLVM; the
+      // only genuinely impossible case is Cursor itself (the true,
+      // unaligned running byte offset) already exceeding DeclaredOffset,
+      // which no amount of padding could fix by moving Member backward.
+      // Gate the stricter, natural-alignment-respecting placement behind
+      // AllowInteriorPad so every already-passing non-scalar-layout
+      // struct (relying on this function's original, more conservative
+      // first-attempt behavior) is completely unaffected.
+      if (!AllowInteriorPad || Cursor > DeclaredOffset)
+        return nullptr; // Even natural alignment alone overshoots.
+    } else if (NaturalCursor < DeclaredOffset) {
       // A gap before the struct's own physically-first member is always
       // padded (matches this function's pre-H129 behavior exactly); any
       // later (interior) one only if the caller opted in. This only
@@ -6561,8 +6676,22 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
                      ? getTightNestedStructType(NestedStructTy, Converter)
                      : convertOffsetStructTypeIgnoringDecorations(
                            NestedStructTy, Converter, nullptr);
-    else
+    else {
       MemberTy = Converter.convertType(ElementTy);
+      // (Roadmap K6a) The ordinarily-registered spirv::ArrayType
+      // conversion (convertArrayTypeIgnoringDecorations) fails outright
+      // -- rather than deferring to this function's own later "tight"
+      // retry tiers -- whenever a declared Stride is narrower than its
+      // vector/matrix element's own natural (SIMD-register-rounded) ABI
+      // size, exactly scalar layout's own defining trait. Without this
+      // fallback, that one failed member conversion would abort this
+      // whole struct's conversion before any retry tier below ever runs
+      // at all -- see getTightNestedArrayOfVectorsOrMatricesType's own
+      // comment.
+      if (!MemberTy)
+        MemberTy = getTightNestedArrayOfVectorsOrMatricesType(
+            Type, I, ElementTy, Converter);
+    }
     if (!MemberTy)
       return nullptr;
     // (Roadmap L124(g)) A member that is (possibly nested-array-of-) a
@@ -6763,75 +6892,14 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
   bool SubstitutedArrayOrMatrix = false;
   for (unsigned I = 0, E = WithArraysAndMatrices.size(); I != E; ++I) {
     mlir::Type ElementTy = Type.getElementType(I);
-    // A member that is itself an *array of vectors* (e.g. a
-    // `!spirv.array<2 x vector<2xi32>>` member of a multi-member,
-    // explicitly-offset block, the shape `dEQP-VK.transform_feedback.
-    // fuzz.random_geometry.all_instance_array`'s own trailing member
-    // takes) needs the same tight-vector substitution as a bare vector
-    // member, just one array dimension further in: the *array's* own ABI
-    // alignment is still driven by its vector element's ABI-padded
-    // alignment (e.g. a 2-lane `i32` vector's own 8-byte alignment,
-    // itself a SIMD-register-driven rounding no tightly-packed XFB/
-    // `-fvk-use-scalar-layout` offset scheme reserves room for), so it
-    // hits the exact same declared-offset mismatch a bare vector member
-    // would, just discovered one level of nesting later.
-    //
-    // A `spirv.matrix` member (converted, per `MatrixTypeConverter`, to
-    // an `!llvm.array` of column vectors -- structurally identical to an
-    // ordinary array-of-vectors member for this purpose) hits the exact
-    // same gap: its own ABI alignment is still its column vector's own
-    // (possibly padded) alignment, which a tightly-packed offset scheme
-    // need not leave room for -- e.g. `all_instance_array.11`'s own
-    // `mat3x4`-typed member, declared at (whole-block-relative) offset
-    // 44, not a multiple of a `vec4` column's own 16-byte alignment.
-    // A member that is itself an *array of matrices* (roadmap H134,
-    // e.g. `!spirv.array<5 x !spirv.matrix<4 x vector<3xf32>>>`, a
-    // `float4x3` instance array member of a multi-member, explicitly-
-    // offset block) hits the same gap one dimension further in still --
-    // its own ABI alignment is driven by the matrix's own column
-    // vector's (possibly padded) alignment, exactly like a bare matrix
-    // member, just wrapped in one more array dimension the two cases
-    // below do not look through. Handled separately (rather than falling
-    // into the array-of-vectors/matrix-of-vectors case below, which only
-    // ever looks one level past `ElementTy` for a `VectorType`) since
-    // the substitution here needs *two* array dimensions preserved: the
-    // declared array's own `InnerCount` around a tight matrix, itself an
-    // array of tight column vectors.
-    if (auto OuterArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
-      if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(
-              OuterArrayTy.getElementType())) {
-        // (Roadmap L124(o)) Widen (not just tighten) if this
-        // array-of-matrices member's own RowMajor/MatrixStride
-        // decorations are not representable by the natural conversion
-        // -- see getTightOrPhysicalMatrixMemberType's own comment.
-        mlir::Type TightMatrixTy =
-            getTightOrPhysicalMatrixMemberType(Type, I, MatrixTy, Converter);
-        if (!TightMatrixTy)
-          return nullptr;
-        WithArraysAndMatrices[I] = mlir::LLVM::LLVMArrayType::get(
-            TightMatrixTy, OuterArrayTy.getNumElements());
-        SubstitutedArrayOrMatrix = true;
-        continue;
-      }
-    }
-    unsigned InnerCount;
-    mlir::Type InnerElementTy;
-    if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy)) {
-      InnerElementTy = ArrayTy.getElementType();
-      InnerCount = ArrayTy.getNumElements();
-    } else if (auto MatrixTy =
-                   mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
-      // (Roadmap L124(o)) A *direct* matrix member hits this same
-      // tighten-only gap the array-of-matrices case above already
-      // widens for instead of tightening whenever its own RowMajor/
-      // MatrixStride decorations are not representable by the natural
-      // conversion -- see getTightOrPhysicalMatrixMemberType's own
-      // comment. Handled here, rather than falling into the generic
-      // array-of-vectors substitution below (which would naively
-      // tighten this matrix's own column vector regardless of
-      // representability, exactly the bug this roadmap item fixes),
-      // since a direct matrix member needs the same widen-or-tighten
-      // choice the array-of-matrices case above already makes.
+    if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(ElementTy)) {
+      // (Roadmap L124(o)) A *direct* (not array-wrapped) matrix member
+      // hits the same ABI-alignment-driven gap as a bare vector member
+      // (see getTightNestedArrayOfVectorsOrMatricesType's own comment
+      // for the array-wrapped case below), widening (not just
+      // tightening) instead whenever its own RowMajor/MatrixStride
+      // decorations are not representable by the natural conversion --
+      // see getTightOrPhysicalMatrixMemberType's own comment.
       mlir::Type MatrixMemberTy =
           getTightOrPhysicalMatrixMemberType(Type, I, MatrixTy, Converter);
       if (!MatrixMemberTy)
@@ -6839,27 +6907,40 @@ mlir::Type convertOffsetStructTypeIgnoringDecorations(
       WithArraysAndMatrices[I] = MatrixMemberTy;
       SubstitutedArrayOrMatrix = true;
       continue;
-    } else {
-      continue;
     }
-    auto InnerVectorTy = mlir::dyn_cast<mlir::VectorType>(InnerElementTy);
-    if (!InnerVectorTy)
+    // (Roadmap H134, L290, K6a) A member that is itself an *array* of
+    // vectors or matrices -- at any nesting depth, not just one level in
+    // (roadmap H134's own single-level case, or a
+    // `-fvk-use-scalar-layout`-style doubly-nested array,
+    // `dEQP-VK.ubo.2_level_array.scalar.*`'s own shapes) -- hits this
+    // same ABI-alignment-driven gap, just discovered one or more array
+    // dimensions further in than a bare vector/matrix member. This tier
+    // is only ever for an array-wrapped member -- a *bare* (non-array)
+    // vector member is already fully handled by the VectorOnly tier
+    // above, and must `continue` here unchanged rather than being
+    // re-offered to getTightNestedArrayOfVectorsOrMatricesType (which
+    // requires at least one real array level to peel through, and
+    // returns nullptr -- "not applicable" -- for anything else, wrongly
+    // hard-failing this whole retry for a struct that needs no
+    // array-of-vector/matrix substitution at all otherwise). Only
+    // attempt the substitution (and only ever hard-fail this whole
+    // retry, rather than merely skipping this member, if it does) when
+    // this member's own innermost, fully-array-peeled element actually
+    // is a vector or matrix -- anything else (a scalar or nested-struct
+    // array element) is not this tier's concern at all.
+    if (!mlir::isa<mlir::spirv::ArrayType>(ElementTy))
       continue;
-    // (Roadmap L290) An array-of-vectors member's own per-element stride
-    // is this tight-vector substitution's own natural size, with no
-    // later tier able to insert a gap *between* elements once this
-    // array type is built -- bake any padding the declared `ArrayStride`
-    // needs directly into the marker struct itself (see
-    // `getStridedTightVectorArrayType`'s own comment).
-    unsigned InnerStride = 0;
-    if (auto InnerArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(ElementTy))
-      InnerStride = InnerArrayTy.getArrayStride();
-    mlir::Type TightElementTy =
-        getStridedTightVectorArrayType(InnerVectorTy, InnerStride, Converter);
-    if (!TightElementTy)
+    mlir::Type Peeled = ElementTy;
+    while (auto PeelArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Peeled))
+      Peeled = PeelArrayTy.getElementType();
+    if (!mlir::isa<mlir::VectorType>(Peeled) &&
+        !mlir::isa<mlir::spirv::MatrixType>(Peeled))
+      continue;
+    mlir::Type TightTy = getTightNestedArrayOfVectorsOrMatricesType(
+        Type, I, ElementTy, Converter);
+    if (!TightTy)
       return nullptr;
-    WithArraysAndMatrices[I] =
-        mlir::LLVM::LLVMArrayType::get(TightElementTy, InnerCount);
+    WithArraysAndMatrices[I] = TightTy;
     SubstitutedArrayOrMatrix = true;
   }
   if (SubstitutedArrayOrMatrix) {
