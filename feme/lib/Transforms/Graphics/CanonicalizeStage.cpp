@@ -5391,7 +5391,31 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
         continue;
       ParsedSPIRVDecorations D =
           parseSPIRVDecorations(GV.getMetadata("spirv.Decorations"));
-      if (D.BuiltIn || !D.Location)
+      // (Roadmap L419(k)) A `BuiltIn`-decorated global this phase's own
+      // body never loads or stores (`use_empty()` above) is ordinarily
+      // excluded here -- unlike a plain `Location`-decorated varying,
+      // nothing links a builtin output by position, so a genuinely
+      // never-written one (no `OpStore`, no `initial_value`) needs no
+      // signature element of its own at all (`Executor.cpp`'s own
+      // `FSDepthOut`/`FSStencilRefOut`-null fallback -- the rasterizer's
+      // interpolated depth / the pipeline's static stencil reference --
+      // is exactly the correct behavior for it). A real `initial_value`
+      // (`gl_FragDepth`/`gl_FragStencilRefARB` declared `= 0.2`/`= 1`
+      // rather than conditionally stored at runtime, e.g. every CTS
+      // `depth_stencil_write_conditions.*_initialize_*` case) changes
+      // that: per the SPIR-V/Vulkan spec, that literal *is* the
+      // variable's value from the start of the invocation, exactly as
+      // if an implicit store had executed before the entry point's
+      // first instruction, so this phase must still build a signature
+      // element for it (StageIOGlobalVariablePattern.cpp now preserves
+      // that literal as the new `llvm.mlir.global`'s own initializer,
+      // but it still needs a real `SignatureElement`/`ElementID` for
+      // `FSOutput` to allocate storage against and
+      // `resolveSelectedStageIOLoad`'s own late-depth/stencil read to
+      // find).
+      bool HasRealInitializer =
+          GV.hasInitializer() && !isa<UndefValue>(GV.getInitializer());
+      if ((D.BuiltIn && !HasRealInitializer) || (!D.BuiltIn && !D.Location))
         continue;
       Seen.insert(&GV);
       SPIRVElementInfo Info =
