@@ -2203,3 +2203,93 @@ genuine regressions from newly-exercised-and-failing content):
 "Planned (in scope, not implemented)" to "Implemented". `Roadmap.md`:
 `K6i` split off `K6a` and struck through; new `K6j` added tracking the
 residual nested-struct scalar-layout gap as future work.
+
+## `K6j`: nested-struct scalar-layout gap fixed (roadmap K6j, measured impact)
+
+K6i's own residual sweep left 25 `dEQP-VK.ubo.*` failures
+(`single_nested_struct.*scalar*`, 24 cases, plus `random.scalar.83`), all
+`VK_ERROR_INITIALIZATION_FAILED` building a graphics pipeline whose `Block`
+struct has a *nested struct* member declared at a scalar-tight offset.
+
+Root-caused via a minimal, isolated `feme-opt`-only MLIR reproducer,
+bisected from the real CTS struct shape down to a 2-member struct: a
+nested, explicitly-offset struct member (itself containing a
+`stride=36`, scalar-tight array-of-`mat3x3` member) immediately followed
+by a plain `vector<2xf32>` member, with no interior gap needed between
+them at all. `--debug-only=dialect-conversion` traced the failing
+`spirv.AccessChain` legalization back one level further than it first
+appeared: the resource-handle intrinsic
+(`llvm.spv.resource.handlefrombinding`) was building with a degenerate
+`!llvm.ptr<12>` result type instead of a real, typed
+`!llvm.target<"spirv.VulkanBuffer", ...>` handle -- meaning the *whole
+outer struct's own type conversion* was silently returning null, not
+anything AccessChain-specific.
+
+The bug is in `getTightNestedStructType` -- the "tight," alignment-free
+nested-struct re-conversion that `convertOffsetStructTypeIgnoringDecorations`'s
+`VectorOnly` retry tier calls for any nested-struct member once the
+struct's first (natural) conversion attempt fails to reproduce every
+declared offset. Its array-member branch had neither of the two
+safeguards `convertOffsetStructTypeIgnoringDecorations`'s own member loop
+already has for a scalar-tight array-of-matrix member:
+
+1. No fallback to `getTightNestedArrayOfVectorsOrMatricesType` when the
+   ordinarily-registered `spirv::ArrayType` conversion fails outright for
+   a stride narrower than the matrix column's natural (SIMD-rounded) ABI
+   size.
+2. No `substituteArrayOfMatrixElementType` correction for the more
+   insidious case where that conversion does *not* fail outright, but
+   instead silently succeeds with the wrong (natural, vector-ABI-padded,
+   too-wide) layout -- exactly the failure mode
+   `substituteArrayOfMatrixElementType`'s own doc comment describes: the
+   upstream `spirv::ArrayType` conversion validates against
+   `VulkanLayoutUtils::getNaturalArrayStride`'s own tightly-packed-
+   scalar-count size, which happens to equal the declared stride here,
+   and builds the array around the natural (wrong) matrix conversion
+   anyway. This was the actual failure in this case: the matrix-array
+   member "succeeded" with `array<4 x array<3 x vector<3xf32>>>` instead
+   of the correct, tight `array<4 x array<3 x array<3 x f32>>>`, so the
+   outer struct's offset-matching for the member immediately following
+   it never lined up.
+
+`convertOffsetStructTypeIgnoringDecorations`'s own member loop already
+unconditionally re-validates every member's matrix representability
+(`isMatrixMemberLayoutRepresentable`/`isMatrixLayoutRepresentable`)
+regardless of which of these two ways its initial conversion went wrong,
+and substitutes a corrected physical layout
+(`getPhysicalMatrixMemberType`/`wrapPhysicalMatrixInArrays`) either way --
+but `getTightNestedStructType` had neither check at all. Fixed by
+applying the same two safeguards inside `getTightNestedStructType`'s own
+array-member branch.
+
+Added `spirv-to-llvm-nested-struct-array-of-matrices-scalar-offset.mlir`,
+mirroring the exact failing CTS struct shape (2-member `Block`: nested
+offset-struct with a scalar-tight array-of-`mat3x3` member, followed by a
+plain vector member at the nested struct's own natural tight size).
+
+CTS:
+- `dEQP-VK.ubo.single_nested_struct.*` plus `dEQP-VK.ubo.random.scalar.83`
+  (145 cases): **145 Pass, 0 Fail**.
+- Full `dEQP-VK.ubo.*` regression sweep (13,240 cases): **8,318 Pass, 0
+  Fail, 4,922 NotSupported** -- the prior session's 25 residual failures
+  are now all closed, with no new regressions (8,293 + 25 = 8,318,
+  exactly accounting for the fix).
+- `dEQP-VK.ssbo.*` regression sweep (12,225 cases, run as a broader
+  regression check since this fix touches a function shared by both UBO
+  and SSBO struct-layout conversion): **4,687 Pass, 67 Fail (62 distinct
+  cases plus duplicates), 7,471 NotSupported**. Confirmed via `git stash`
+  (rebuilding `libfeme_vulkan.so` against the pre-fix code and re-running
+  just these 62 cases) that all 62 failures are **pre-existing**, not a
+  regression from this fix -- a separate `RowMajor`-matrix SSBO
+  `*_store_cols` bug (result-comparison mismatch, not a legalization/
+  pipeline-creation error), tracked as new roadmap row `K6k`.
+- Re-ran `ninja check-feme`: 3,731/3,734 pass, 0 fail, 3 unsupported
+  (pre-existing, unrelated); 1 new lit test added this session.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed: `scalarBlockLayout`/`VK_EXT_scalar_block_layout` were already
+advertised as of K6i; K6j is a pure bug fix closing that feature's own
+residual gap, not a new feature-bit flip. `Roadmap.md`: `K6j` struck
+through; new `K6k` added tracking the pre-existing, unrelated
+`RowMajor`-matrix SSBO `*_store_cols` bug found (but not fixed) as part
+of this session's broader regression sweep.
