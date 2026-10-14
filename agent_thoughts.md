@@ -122172,3 +122172,33 @@ All 5 K6m cases pass: `dEQP-VK.ssbo.layout.random.scalar.41` and `dEQP-VK.ssbo.l
 4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single K6m compiler-fix task, same scoping choice as several recent sessions).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now the only open bundled-feature row), pick `variablePointers`, and start from the exact failure list already logged across three prior sessions (`PtrAccessChain`/`OpPtrEqual` family) rather than re-deriving it.
+
+# Session: K6a `PtrAccessChain`/`InBoundsPtrAccessChain` lowering added (296 -> 152 Fail)
+
+**Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep deviceName`** at session start, per standing instructions.
+
+## What now works
+
+The entire 156-case `spirv.PtrAccessChain`/`spirv.InBoundsPtrAccessChain` legalization-failure cluster is closed -- 0 of the remaining 152 `variable_pointer` CTS failures are a `PtrAccessChain`/`AccessChain` legalization error. Full `variable_pointer` sweep (4464 cases, feature bits temporarily flipped for the sweep only): 296 Fail/676 Pass -> 152 Fail/820 Pass, 0 new failures. `ninja check-feme`: 3731/3731 pass, 0 fail, 7 unsupported (pre-existing).
+
+## The bug, in one paragraph
+
+Neither feme nor upstream MLIR had ever had a conversion pattern for `spirv.PtrAccessChain`/`spirv.InBoundsPtrAccessChain`. Per the op's own `build`/`verify` (`getElementPtrType` call, which never looks at `element`), the op's result type always equals plain `AccessChain`'s with the same trailing indices -- `element` only shifts the base address by `element` whole pointee-sized units first. Two shapes cover all 156 real cases: (1) `element` is compile-time-constant-zero (just a plain `AccessChain` in disguise), (2) `element` is dynamic/non-zero (real pointer arithmetic, needs a GEP shift first). A 3rd combination -- non-zero/dynamic `element` *and* real trailing indices together -- looked unneeded from an initial ~10-case sample, but a post-fix full bucketing run found 24 real cases needing it (the `opptraccesschain_float_*` family, stepping to a vector lane then selecting a component within it).
+
+## The real lesson this session learned
+
+1. **`FEME_VULKAN_LOG_CREATION_ERRORS` already existed** (`Diagnostics.cpp`) and would have saved several prior sessions' worth of ad-hoc debug-dump-hook effort triaging silent `VK_ERROR_INITIALIZATION_FAILED` failures. Check for an existing diagnostics knob before building a new one.
+2. **A representative sample is not a proof.** The first ~10-case sample across every `opptraccesschain_*` sub-family missed a real combination (non-zero element + indices) that a full 296-case signature bucketing run later caught. Bucket the *entire* failure set by exact error signature before declaring a fix "covers everything" -- a partial fix that silently declines an untested shape looks identical to a complete one until the next full sweep.
+3. **Re-expressing a newly created op as *another* new, still-illegal op for the dialect conversion driver to reprocess doesn't always converge**, even though it's a precedented, working idiom elsewhere in this file for a single level of re-expression. Chaining two levels (new `PtrAccessChain` -> new `AccessChain` over its result) failed silently: the second op's legalization attempt ran before the first had converted, its failure was never retried, and the whole rewrite rolled back to report the *original* op as unlegalizable -- a confusing symptom that looks exactly like "the pattern never matched at all." A direct, single-pattern GEP chain sidesteps the ordering hazard entirely. Worth remembering before reaching for "just create another SPIR-V op and let the framework handle it" again.
+4. **A minimal MLIR reproducer isolates compiler bugs far faster than full CTS cycles.** Once the real SPIR-V shape was known (via the error message's own printed operand/type info, no dump hook needed this time), a 20-line hand-written `spirv.module` reproducer and `feme-opt --feme-convert-spirv-to-llvm` let me debug the ordering hazard above in minutes rather than re-running `deqp-vk` each iteration.
+
+## Next steps
+
+1. **(~1-2 days, new this session)** `K6n`: 124 cases, CPU-backend resource-handle-normalization architectural limitation (`"unsupported raised operation: ... register-bound resource handle ..."`). Not yet root-caused beyond signature-level bucketing -- likely the deepest, hardest-to-fix piece of the whole `variablePointers` feature, possibly needing a runtime dispatch mechanism rather than a lowering-pattern fix. Worth its own investigation session before committing to an approach.
+2. **(~half day, new this session, "issue outside FeMe")** `K6o`: 16 cases, upstream-MLIR `OpConstantNull`-on-pointer-type deserializer gap (`getNullAttrForType` has no pointer-type case). Confirmed outside FeMe; needs an isolated reproducer and a commit touching only non-`feme/` files per the standing instruction. Not yet attempted.
+3. **(~1-2 days, new this session, "issue outside FeMe")** `K6p`: 11 cases, upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely undefined in MLIR's SPIR-V dialect TableGen. Larger than `K6o`: needs new TableGen op definitions, deserializer cases, and likely a `SPIRVToLLVMPatterns.cpp` lowering once the ops exist, before feme can even see a shader using them. Not yet attempted.
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6a`'s compiler-fix work, same scoping choice as several recent sessions).
+
+**Immediate next action for next session:** pick `K6n` (the largest remaining bucket, 124 cases) and start by root-causing *one* representative `"unsupported raised operation"` case down to the specific resource-handle-normalization code path in `feme/lib/Target/CPU` (not yet located this session) before guessing at a fix approach -- or pick the smaller, more contained `K6o` (`OpConstantNull`-on-pointer, 16 cases, single upstream deserializer function) for a faster, more isolated win first.
