@@ -121021,3 +121021,42 @@ With both handoff items closed, the next session should pick a fresh target. The
 3. **(fresh)** Pick a new CTS cluster to triage from scratch: a full `dEQP-VK.api.object_management.*` sweep (beyond just the one `L423` case) might surface more loader-adjacent "not FeMe's fault" findings worth ruling out early via the cross-ICD technique above, or might surface genuine new FeMe bugs in the same family worth root-causing properly.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the `L418`-`L423` roadmap counts synchronized after every fix and isolated CTS rerun -- done this session (`L422`/`L423` both cross-referenced; inventories confirmed via direct grep, not just asserted, to need no change for either).
 5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax` offload-test-suite pattern before calling anything a new regression -- not exercised this session, no `check-hlsl-feme-vk` work was done.
+
+# Session: L418/L419 re-verification + L419(i) resolved + L419(k) narrowed
+
+**Next action for the next session**: trace `Executor.cpp`'s `FragDepth`-read path (~line 4684, `FSOutput->readFloat(FSDepthOut->ElementID, ...)`) for a `D32_SFLOAT` `depth_kill_initialize_d32sf` run with a debug-symbol build, to see what value actually comes back for a never-stored, initializer-only `FragDepth` global. See L419(k) below for exactly what's already ruled out.
+
+## Verified before starting (device check, every session)
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed again at the end too.
+
+## Wins this session
+
+1. **L418(a)/L418(b): already done.** Checked `git log --oneline --all | grep -i L418` and `Roadmap.md` directly instead of trusting the handoff text. Both struck through, both verified fixed in earlier sessions. Zero new work needed — saved a wasted re-investigation.
+2. **`dEQP-VK.api.object_management.*` fresh sweep: 457/457 Pass.** No new regressions, consistent with `L423`'s known "needs 20-40+ solo reruns to manifest" probabilistic race.
+3. **L419(i) (storage image without format, 14 cases): resolved, no code change needed.** Re-ran the exact `A2B10G10R10_SINT_PACK32` cluster twice: 14/14 Pass both times. This was a **stale finding** — already fixed as a side effect of unrelated work sometime after the original full-suite sweep found it, and nobody had re-verified or struck it through since. Committed the doc update (`28329c4d608a`).
+4. **L419(k) (9 depth/stencil write-condition failures): reproduced and narrowed, not yet fixed.** Committed the triage (`5c3be313f1e6`). See below for the exact next debugging step.
+
+## L419(k) deep-dive: what's ruled out, what's left
+
+The 9 failures are **only** the `_initialize` mutation mode (`depth_{demote,kill,terminate}_initialize_{d24unorm_s8ui,d32sf,d32sf_s8ui}`) — never `_write` or `_write_initialize`, and never the 4th format (`X8_D24_UNORM_PACK32`), which passes in every mode.
+
+Ruled out this session:
+1. **Depth-compare-op/quantization bug** — ruled out because `_write` mode (same `GREATER` compare, same `0.1`/`0.2` clear/write values, same 3 "bad" formats) passes every time. The compare path itself is fine.
+2. **A FeMe-specific "constant/initializer-only depth" fast-path bug** — ruled out by grep (`hasInitializer`/`ConstantDepth`/`StaticDepth` across `SPIRVToLLVMPatterns.cpp`, `ResourceInfo.cpp`, `LocalizePrivateGlobals.cpp`, `GroupShared.cpp`). No such mechanism exists in FeMe; this is standard MLIR SPIR-V-dialect global-with-initializer lowering.
+
+Still open: the actual mechanism connecting the SPIR-V `OpVariable ... Output %initializer_constant` (no runtime `OpStore` at all, for any invocation) to the value `Executor.cpp`'s late depth-test path reads back — and specifically why that path differs by attachment format. The 4 depth/stencil-resolve failures (same L419(k) item) weren't touched this session.
+
+**Next step (~2-4 hours)**: build with debug symbols (current build is `Release` + assertions, not confirmed to have `-g`), `gdb` a single `deqp-vk --deqp-case=dEQP-VK.renderpasses.renderpass1.depth_stencil_write_conditions.depth_kill_initialize_d32sf` run, break at `Executor.cpp`'s `FSOutput->readFloat(FSDepthOut->ElementID, ...)` call (~L4684), and print the actual value read for both `x%2==0` and `x%2==1` lanes. That tells you whether the initializer value (0.2) never reaches the output buffer at all for these formats, or reaches it but gets mis-encoded/mis-read back from the depth attachment itself.
+
+## Standing items (not touched this session)
+
+1. `L418(a)`/`L418(b)`/`L421`/`L422`/`L423`: all confirmed done, no action needed.
+2. `VkBool32`/`WaveActiveMax` `offload-test-suite` pattern: not exercised, no `check-hlsl-feme-vk` work this session.
+3. `L419(e)` (all-format color blits, 20 cases) and `L419(j)` (small long tail, 7 cases): not triaged this session — good next candidates once `L419(k)` is closed. `L419(e)`'s underlying test group (`api.copy_and_blit.core.blit_image.all_formats.color`) has 70,140 total cases upstream, so finding the exact 20 failing ones needs either the original failure log (not located this session) or a targeted format-pair reduction, not a blind full-group rerun.
+
+## Doc sync this session
+
+`Roadmap.md`: `L419(i)` struck through; `L419(k)` updated with full triage narrative, no new nesting depth introduced (file names/format strings stayed in backticks, not new lettered sub-items). `VulkanCTSReport.md`: failure-ownership table total `1,295 → 1,281`, `L419(i)` row zeroed. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: grepped, no change needed (both this session's items are internal-correctness findings, no feature/extension-surface change).
+
+No commits outside `feme/` this session — no non-FeMe bugs found.
