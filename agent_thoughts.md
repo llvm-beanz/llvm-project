@@ -121434,3 +121434,116 @@ surface).
 5. **(unresolved, carried for many sessions)** Decide whether to revert
    `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
    revisited, no new information this session either way.
+
+# Session 2026-10-14: L419(j) output_location narrowed, L418(a) reconfirmed
+
+**Next action**: open `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`
+around `StageIOArrayAccessChainPattern` (~3572) and trace how a dynamic
+`OpAccessChain` into `vec3 color_in[3]` (3-component rows) lowers when only
+`.x` is extracted and stored into a `float frag_out[3]` (1-component rows).
+That is now the single remaining candidate location for the `L419(j)`
+`output_location` bug.
+
+## Device check
+
+`vulkaninfo --summary | grep deviceName` (with `VK_ICD_FILENAMES` exported)
+confirmed `FeMe CPU Vulkan Device`. Done first, as required every session.
+
+## What happened this session
+
+Spent the whole session on 2 of the 7 `L419(j)` cases:
+`dEQP-VK.draw.renderpass.output_location.array.b10g11r11-ufloat-pack32-{highp,mediump}-output-float`.
+Did **not** fix them, but narrowed the trigger a lot. No code changes landed
+(temporary debug `fprintf` added to `Executor.cpp` during investigation was
+reverted — `git status` confirms clean).
+
+### Key finding: this is not a format bug, it's a vector-width-mismatch bug
+
+Previous sessions' hunch was "something about `R11G11B10_FLOAT` pack/unpack."
+That's ruled out — existing round-trip unit tests pass, and `Executor.cpp`'s
+multi-row-to-multi-attachment binding (`L134(b)`) is confirmed correct
+(Row0/1/2 route to the right attachment every time).
+
+Pixel-level instrumentation at (10,10) showed the array pipeline's raw
+pre-pack float values were: Row0=0.65 (correct), Row1=0.825 (== `1 -
+0.175`, where 0.175 is the correct ref value), Row2=0.65 (== `1 - 0.35`).
+A reproducible exact complement (`1 - x`) for every non-zero row.
+
+Reran the full 28-case `output_location.array.*` group and diffed the
+amber source of the one passing "sibling" test
+(`b10g11r11-ufloat-pack32-highp-output-vec2`, PASS) against the failing one
+(`...-output-float`, FAIL). The **only** difference between them is:
+output type `vec2 frag_out[3]` + `color_in[i].xy` (passes) vs. `float
+frag_out[3]` + `color_in[i].x` (fails). Everything else — vertex data,
+pipeline setup, reference comparison — is identical.
+
+Then checked every other scalar-output-array case in the whole 28-case
+group:
+- `r32-sfloat-highp` (scalar `float color_in[3]` input, scalar output) — PASS.
+- `r16g16-sfloat-highp-output-float` (2-component `vec2 color_in[3]` input,
+  `.x`-extracted to scalar output) — PASS.
+- `b10g11r11-ufloat-pack32-highp` (3-component `vec3 color_in[3]` input,
+  **3-component** output, no truncation) — PASS.
+- `b10g11r11-ufloat-pack32-{highp,mediump}-output-float` (3-component
+  `vec3 color_in[3]` input, truncated via `.x` to **1-component** output) —
+  the only 2 FAILs in the entire 28-case group.
+
+So the bug needs **both**: (a) a 3-component (`vec3`) dynamically-indexed
+stage-IO input array, AND (b) truncation down to a 1-component scalar
+output via `.x` extraction. 2-component truncation (`.xy`) and no
+truncation both work fine; `vec3`→scalar is the one broken combination.
+`b10g11r11` just happens to be the only format in this CTS group whose test
+variants happen to use a `vec3` input — the format itself is not special.
+
+This means the actual bug almost certainly lives in SPIR-V→LLVM lowering
+of the dynamic `AccessChain`/`CompositeExtract` sequence for a
+multi-component row with a component sub-index, most likely in
+`StageIOArrayAccessChainPattern` in `SPIRVToLLVMPatterns.cpp` (the
+`Input`-storage composite-array dynamic-index pattern) — not in
+`Executor.cpp`, not in `ImageFixture.cpp`'s format pack/unpack, and not in
+`CanonicalizeStage.cpp`'s row-shape computation (all three were checked
+and ruled out this session).
+
+### L418(a) sanity check — reconfirmed DONE, no action taken
+
+`git log --oneline --all | grep -i L418` shows real landed commits:
+`b5405d8ec4cd` (precompute per-triangle fixed-point edge coefficients),
+`ca109ef7b051` (unit test for it), `80ddd348a27d` (docs updated). Several
+sessions' "done" status is correct — this was not memory drift. No further
+action needed; stop re-checking this every session unless something
+actually touches L418 again.
+
+## Standing items — status this session
+
+1. **Doc sync** (`VulkanCTSReport.md`, inventories, roadmap counts): no
+   change needed — no fix landed this session.
+2. **`VkBool32`/`WaveActiveMax` offload-test-suite pattern check**: not
+   exercised — no `check-hlsl-feme-vk` work this session.
+3. **`CMAKE_BUILD_TYPE`** (`RelWithDebInfo` vs `Release`): still unresolved,
+   still no new information. Carried again.
+
+## Next steps (ranked)
+
+1. **(~1 day)** Finish root-causing `L419(j)`'s `output_location` pair:
+   open `StageIOArrayAccessChainPattern` in `SPIRVToLLVMPatterns.cpp` and
+   trace the exact GEP/extract sequence it emits for a dynamic row index
+   into a `vec3`-element array followed by a `.x`/`CompositeExtract`, vs.
+   the same for `vec2`/`vec3`-full (both of which work). Likely suspects:
+   an index computed from the *output* component count being reused for
+   the *input* read (a 3-vs-1 width mismatch somewhere in address/stride
+   math), or a bitcast/GEP that assumes matching vector widths on both
+   sides of the dynamic access chain. Once found: fix, add a unit test at
+   the SPIR-V→LLVM lowering phase (narrowest-possible repro: a minimal
+   module with a dynamically-indexed `vec3[N]` input array read via
+   `.x`-only `CompositeExtract` into a scalar output array), rebuild, and
+   confirm both `output_location` cases + the full 28-case group pass with
+   0 regressions.
+2. **(~2-4 hours)** `L419(j)`'s `line_continuity` pair (`line-strip`,
+   `polygon-mode-lines`) — still untriaged, next signature after
+   `output_location` closes.
+3. **(~1-2 hours each)** `L419(j)`'s remaining 2 singletons:
+   `primitive_id.matching` and `device_mandatory_features` — still
+   untriaged.
+4. **(standing)** Keep doc sync, offload-test-suite pattern check, and the
+   `CMAKE_BUILD_TYPE` decision on the list for whenever they become
+   relevant.
