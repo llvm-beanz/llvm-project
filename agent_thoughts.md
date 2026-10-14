@@ -122026,3 +122026,48 @@ A single passing MLIR reproducer or unit test is not enough evidence once a feat
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6i` compiler-fix task).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit `K6a` row, pick `variablePointers`, and start from the exact failure list two prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot to the new `K6j` nested-struct gap if a break from `K6a` is wanted.
+
+# Session: `K6j` closed -- nested-struct scalar-layout gap fixed, found new `K6k` SSBO bug
+
+## What happened
+
+Picked `K6j` per the prior session's recommendation (the 25-case `single_nested_struct`/`random.scalar.83` residual left over from `K6i`).
+
+1. **Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` (standing instruction, every session).
+2. **Built a minimal, isolated `feme-opt`-only MLIR reproducer**, bisected down from the real CTS struct shape to a 2-member struct: a nested, explicitly-offset struct member (itself containing a scalar-tight array-of-`mat3x3` member) immediately followed by a plain vector member, with no interior gap needed at all. Far faster to iterate on than re-running CTS each time -- instant pass/fail plus full error text.
+3. **Traced via `--debug-only=dialect-conversion` twice**: once on the failing `spirv.AccessChain` (found it falls through every pattern, including `BlockAccessChainPattern`, to "no matched legalization pattern"), then on the `addressof` op that builds the resource handle -- found the handle intrinsic's result type was a degenerate `!llvm.ptr<12>` instead of a typed `VulkanBuffer` handle, meaning the *whole outer struct's own type conversion* silently returned null.
+4. **Root cause**: `getTightNestedStructType` (the "tight" nested-struct re-conversion `convertOffsetStructTypeIgnoringDecorations`'s `VectorOnly` retry tier calls) had neither of that caller's own two safeguards for a scalar-tight array-of-matrix member: no fallback to `getTightNestedArrayOfVectorsOrMatricesType` when the ordinary array conversion fails outright, and no `substituteArrayOfMatrixElementType` correction for the sneakier case where it does *not* fail but silently substitutes the wrong (natural, too-wide) layout instead. Added debug `llvm::errs()` prints (same proven-effective technique as last session) to pin down exactly which of the two was happening -- it was the second, sneakier one: the matrix-array member "succeeded" with the wrong type, so the outer struct's offset-matching for the member after it never lined up.
+5. **Fixed** by applying both of those safeguards inside `getTightNestedStructType`'s own array-member branch, removed the debug prints, added a new lit test mirroring the exact CTS struct shape.
+6. **Ran a broader `dEQP-VK.ssbo.*` regression sweep** (12,225 cases, since the fixed function is shared between UBO and SSBO conversion) and found 62 failures. Used `git stash` to rebuild the pre-fix `libfeme_vulkan.so` and re-ran just those 62 cases against it -- confirmed all 62 already failed at baseline, so **not** a regression from this fix. Tracked as new roadmap row `K6k` (a separate `RowMajor`-matrix SSBO `*_store_cols` bug, not yet grep-traced).
+
+## CTS results
+
+- `dEQP-VK.ubo.single_nested_struct.*`/`random.scalar.83` (145 cases): **145 Pass, 0 Fail**.
+- Full `dEQP-VK.ubo.*` regression sweep (13,240 cases): **8,318 Pass, 0 Fail, 4,922 NotSupported** -- the prior session's 25 residual failures all closed, zero regressions (8,293 + 25 = 8,318, exact accounting).
+- `dEQP-VK.ssbo.*` regression sweep (12,225 cases): 4,687 Pass, 67 Fail (62 distinct), 7,471 NotSupported -- confirmed pre-existing via baseline re-run, new `K6k` row opened, not fixed this session.
+- `ninja check-feme`: 3,731/3,734 Passed, 0 Failed, 3 Unsupported (pre-existing, unrelated); 1 new lit test added.
+
+## Commits (2, plus this file)
+
+1. `SPIRVToLLVMPatterns.cpp`'s fix + new lit test.
+2. Doc sync (`Roadmap.md`: `K6j` struck through, new `K6k` added; `VulkanCTSReport.md`: new section).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes needed -- `scalarBlockLayout` was already advertised as of `K6i`; this was a pure bug fix, not a feature-bit flip.
+
+## Lesson worth repeating
+
+"The conversion returned null" and "the conversion returned the wrong thing" are different bugs needing different fixes, and a function can have a safeguard for one but not the other. `getTightNestedStructType`'s array-member branch already *looked* like it had the right fallback (`if (!MemberTy) MemberTy = getTightNestedArrayOfVectorsOrMatricesType(...)`), and that fix alone built cleanly and even "improved" the reproducer's error output -- but the real failure mode here was the conversion silently succeeding with a wrong type, which no null-check will ever catch. Only `llvm::errs()`-printing the actual resulting LLVM type (not just pass/fail) surfaced the mismatch. When a null-guarded fallback doesn't fix a bug, check whether the guarded call is actually failing at all, or silently succeeding wrong.
+
+## Where `K6a` stands now
+
+Still just `variablePointers` (confirmed by two prior sessions' empirical CTS runs to be a real lowering gap). `K6j` is now closed. New `K6k` tracks the pre-existing SSBO `RowMajor`-matrix `*_store_cols` bug this session found but did not fix.
+
+## Next steps
+
+1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from the prior investigation's exact failure list (`PtrAccessChain` "explicitly marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointer types) rather than re-deriving it -- two sessions already confirmed empirically it's a real lowering gap, not a quick flip.
+2. **(~1 day, new this session)** New `K6k`: the `RowMajor`-matrix SSBO `*_store_cols` bug (62 cases, result-comparison mismatch, not a pipeline-creation error) -- not yet grep-traced. Likely in the `RowMajorMatrixStorePattern`/`getMatrixWholeAccess`-family column-store addressing math, given the `_store_cols`-only failure pattern (loads and whole-matrix stores are unaffected). Confirmed pre-existing (not a `K6j` regression) via `git stash` baseline re-run.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files still stale from `K6b`-`K6h`'s own prior sessions).
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6j` compiler-fix task, same scoping choice as `K6g`-`K6i`'s own sessions).
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit `K6a` row, pick `variablePointers`, and start from the exact failure list two prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot to the new `K6k` SSBO `RowMajor`-matrix store bug if a break from `K6a` is wanted.
