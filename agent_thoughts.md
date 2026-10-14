@@ -121060,3 +121060,92 @@ Still open: the actual mechanism connecting the SPIR-V `OpVariable ... Output %i
 `Roadmap.md`: `L419(i)` struck through; `L419(k)` updated with full triage narrative, no new nesting depth introduced (file names/format strings stayed in backticks, not new lettered sub-items). `VulkanCTSReport.md`: failure-ownership table total `1,295 → 1,281`, `L419(i)` row zeroed. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: grepped, no change needed (both this session's items are internal-correctness findings, no feature/extension-surface change).
 
 No commits outside `feme/` this session — no non-FeMe bugs found.
+
+# Session: L419(k) fully closed -- FeMe initializer fix + upstream CTS registration-bug fix
+
+**Device check**: `FeMe CPU Vulkan Device` -- confirmed multiple times this session, including right before the final `check-feme` run.
+
+## What's done (both halves of L419(k), 13 cases total -> 0)
+
+1. **Write-condition sub-cluster (9 cases), FeMe-side.** Three stacked bugs in how
+   a `BuiltIn`-decorated SPIR-V output with a static `initial_value` but zero
+   runtime `OpStore` (`gl_FragDepth = 0.2;` and friends) reaches the depth test:
+   - `SPIRVToLLVMPatterns.cpp` dropped `initial_value` when converting the
+     global -> fixed with a new `convertStageIOInitialValue` helper.
+   - `CanonicalizeStage.cpp`'s discovery pass excluded every `BuiltIn` global
+     from the unused-global fallback -> fixed by admitting ones with a real
+     initializer.
+   - Nothing synthesized the SPIR-V-spec-mandated "implicit initial store" ->
+     fixed by inserting a real `StoreInst` via `IRBuilder<>` at the top of the
+     entry block, which the existing store-rewriting walk then picks up for free.
+   - Verified: `depth_stencil_write_conditions` group, 27/27 supported Pass, 0 Fail.
+   - New tests: `spirv-to-llvm-stage-io.mlir` (conversion level),
+     `spirv-canonicalize-stage-output-initial-value.ll` (pass level).
+   - Commits: `1e5e56731b7a`, `756861baceb8`, `d96f005c6020`, `3e6f706ae28d` (docs).
+
+2. **Resolve sub-cluster (4 cases), NOT a FeMe bug -- upstream CTS bug.**
+   `dEQP-VK.renderpasses.*.depth_stencil_resolve.*d24_unorm_s8_uint*.compatibility_
+   depth_zero_stencil_zero*_testing_depth` failed inside `vkCreateImage`
+   (`VK_ERROR_FORMAT_NOT_SUPPORTED`) because FeMe genuinely doesn't support
+   `VK_FORMAT_X8_D24_UNORM_PACK32` (correct gap, confirmed absent from
+   `Format.cpp`'s `mapVkFormat`). The CTS test's own `checkSupport()` should
+   have caught that up front and reported `NotSupported`, but its
+   `compatibility_*` test registration passed the *original* `testConfig`
+   (no `compatibleFormat` set) to `CheckSupport::Args` instead of
+   `compatibilityTestConfig` (the copy that actually sets it) -- so the
+   alternative-format capability check was silently skipped. Same bug exists
+   in the sibling stencil-compatibility registration a few lines down, just
+   invisible there because `VK_FORMAT_S8_UINT` happens to actually be
+   supported by FeMe.
+   - Fix applied **outside FeMe**, isolated to the VK-GL-CTS checkout:
+     `vktRenderPassDepthStencilResolveTests.cpp`, two one-line changes
+     (`testConfig` -> `compatibilityTestConfig` at both call sites).
+     Commit `f43894f9a` in `/home/dev/dev/VK-GL-CTS` -- touches only that
+     one file, nothing in `feme/`.
+   - Verified: rebuilt `deqp-vk`, reran the whole `depth_stencil_resolve`
+     group (22,953 cases): 768 Pass / 0 Fail / 22,185 NotSupported (was
+     768/4/22,181). All 4 previously-failing cases now correctly report
+     `NotSupported (Alternative image format for compatibility test not
+     supported)`.
+
+3. **Docs synced**: `Roadmap.md`'s `L419(k)` row fully struck through (both
+   sub-clusters); `VulkanCTSReport.md` failure-ownership row closed to 0,
+   running total `1,272 -> 1,268`, and the "tested configuration" section
+   now records the extra isolated CTS commit (`f43894f9a`) on top of the
+   existing `6b0464e83` baseline. Grepped both Vulkan inventories: no
+   feature/extension surface changed, confirmed no edits needed.
+
+4. **Regression check**: full `check-feme` -- 3718/3721 passed (3 unsupported),
+   0 failures, both before this session's doc-only final commit and after the
+   FeMe source commits earlier in the session.
+
+5. Cleaned up all `/tmp/l419k_*`, `/tmp/t1.mlir`, `/tmp/fragdepth_init*`
+   throwaway debug files from this and the prior segment.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~1 day) Start `L419(e)`**: all-format color blits, 20 cases
+   (`api.copy_and_blit.core.blit_image.all_formats.color`, 70,140 total cases
+   upstream -- no cached failure log exists, so first step is a targeted
+   format-pair sweep or filter to isolate the exact 20, not a blind full rerun).
+2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- not yet triaged,
+   good second pick after `L419(e)` since both were deferred pending `L419(k)`'s
+   close, which is now done.
+3. **(~2-4 hours) `L418(a)`**: CPU rasterizer `Draw`-path MSAA optimization --
+   still flagged "done" by the last two sessions' handoffs; worth one quick
+   `git log --oneline --all | grep -i L418` sanity check before trusting that,
+   per a prior session's own caught-in-the-act warning about memory drift on
+   this exact item, but not re-opening work without that check first.
+4. **(standing)** Keep `VulkanCTSReport.md` + both inventories + `L418`-`L419`
+   roadmap counts synced after every fix -- done this session for both halves
+   of `L419(k)`.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
+   discrepancy a new regression -- not exercised this session, no
+   `check-hlsl-feme-vk` work was done.
+6. **(unresolved, carried for several sessions)** Decide whether to revert
+   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
+   revisited, no new information this session either way.
+
+**Next concrete action**: run `git log --oneline --all | grep -i L418` to
+verify item 3 above before starting `L419(e)`.
