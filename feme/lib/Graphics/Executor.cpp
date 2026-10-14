@@ -5869,6 +5869,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     StageStorage TessOutput;
     SmallVector<std::array<uint32_t, 3>, 8> TessTris;
     SmallVector<std::array<uint32_t, 2>, 8> TessLines;
+    // (Roadmap L419(j)) Parallel to `TessTris`/`TessLines`: the source
+    // patch's own `SV_PrimitiveID` (see `PatchPrimitiveIDs` above) for
+    // each tessellator-emitted triangle/line, so a geometry stage
+    // downstream of tessellation can give its `gl_PrimitiveIDIn` the
+    // same value for every primitive one patch generates -- per the
+    // Vulkan/GLSL spec, when geometry shading follows tessellation the
+    // primitive ID is the *patch* ordinal, not a running count of
+    // emitted primitives (contrast the ordinary non-tessellated
+    // geometry-input case below, which *is* numbered by running count).
+    SmallVector<uint32_t, 8> TessTriPatchIDs;
+    SmallVector<uint32_t, 8> TessLinePatchIDs;
     if (TessLink) {
       const TessellationState &Tess = Pipeline.getTessellationState();
       if (Tess.InputControlPointCount == 0)
@@ -5886,6 +5897,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       uint32_t PatchesPerInstance = PerInstance / Tess.InputControlPointCount;
       std::vector<PatchPipelineResult> Patches;
       SmallVector<uint32_t, 8> PatchBases;
+      // (Roadmap L419(j)) Parallel to `Patches`/`PatchBases`: the exact
+      // `P` passed to `runPatchPipeline` below for each patch, i.e. the
+      // same value the TCS/TES saw as their own `SV_PrimitiveID`/
+      // `gl_PrimitiveID`. A geometry stage downstream of tessellation
+      // needs this same per-*patch* value for its own `gl_PrimitiveIDIn`
+      // (every primitive the tessellator emits from one patch shares that
+      // patch's ID -- see the comment where `TessTriPatchIDs`/
+      // `TessLinePatchIDs` are populated below), not a running count of
+      // emitted primitives the way an ordinary (non-tessellated)
+      // geometry-shader input is numbered.
+      SmallVector<uint32_t, 8> PatchPrimitiveIDs;
       SmallVector<uint32_t, 8> ControlPointInvocations;
       uint32_t TotalPoints = 0;
       for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
@@ -5910,6 +5932,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           if (!Patch)
             return Patch.takeError();
           PatchBases.push_back(TotalPoints);
+          PatchPrimitiveIDs.push_back(P);
           TotalPoints +=
               static_cast<uint32_t>(Patch->Tessellated.Points.size());
           Patches.push_back(std::move(*Patch));
@@ -5946,12 +5969,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         uint32_t Base = PatchBases[I];
         ArrayRef<uint32_t> Indices = Patches[I].Tessellated.Indices;
         if (Tess.OutputPrimitive == TessOutputPrimitive::Line) {
-          for (size_t K = 0; K + 2 <= Indices.size(); K += 2)
+          for (size_t K = 0; K + 2 <= Indices.size(); K += 2) {
             TessLines.push_back({Base + Indices[K], Base + Indices[K + 1]});
+            TessLinePatchIDs.push_back(PatchPrimitiveIDs[I]);
+          }
         } else if (Tess.OutputPrimitive != TessOutputPrimitive::Point) {
-          for (size_t K = 0; K + 3 <= Indices.size(); K += 3)
+          for (size_t K = 0; K + 3 <= Indices.size(); K += 3) {
             TessTris.push_back({Base + Indices[K], Base + Indices[K + 1],
                                 Base + Indices[K + 2]});
+            TessTriPatchIDs.push_back(PatchPrimitiveIDs[I]);
+          }
         }
       }
       RasterOut = &TessOutput;
@@ -6015,9 +6042,18 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // per-instance stride to bias by.
     SmallVector<std::array<uint32_t, 3>, 8> AbsTriIndices;
     SmallVector<std::array<uint32_t, 2>, 8> AbsLineIndices;
+    // (Roadmap L419(j)) Parallel to `AbsTriIndices`/`AbsLineIndices`, but
+    // only ever populated in the `TessLink` branch below -- see
+    // `TessTriPatchIDs`/`TessLinePatchIDs`'s own comment above for why a
+    // tessellated draw's geometry-stage `gl_PrimitiveIDIn` needs this
+    // instead of a running count.
+    SmallVector<uint32_t, 8> AbsTriPatchIDs;
+    SmallVector<uint32_t, 8> AbsLinePatchIDs;
     if (TessLink) {
       AbsTriIndices = std::move(TessTris);
       AbsLineIndices = std::move(TessLines);
+      AbsTriPatchIDs = std::move(TessTriPatchIDs);
+      AbsLinePatchIDs = std::move(TessLinePatchIDs);
     } else {
       for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
         uint32_t Base = Inst * PerInstance;
@@ -6061,6 +6097,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       // instead return primitive/adjacent vertices grouped separately
       // (see their own comments in Pipeline.h).
       SmallVector<SmallVector<uint32_t, 6>, 8> Primitives;
+      // (Roadmap L419(j)) Parallel to `Primitives`, giving each row's own
+      // `gl_PrimitiveIDIn` value when it differs from that row's
+      // sequential index (i.e. only when `TessLink` is set): the source
+      // patch's own `SV_PrimitiveID`, copied from `AbsTriPatchIDs`/
+      // `AbsLinePatchIDs` in the `Lines`/`Triangles` branches below. Left
+      // empty for every other branch (point input, and the four
+      // `*WithAdjacency` topologies, none of which combine with
+      // tessellation), so the `PrimitiveIDs` loop further down falls back
+      // to the sequential numbering those inputs actually use.
+      SmallVector<uint32_t, 8> PrimitivePatchIDs;
       auto reorderAdjacency = [](const SplitPrimitiveAdjacency &Split) {
         SmallVector<uint32_t, 6> Order;
         if (Split.Adjacent.size() == 2) { // a *lines*-with-adjacency window
@@ -6124,11 +6170,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         for (uint32_t J = 0; J != RasterOut->InvocationCount; ++J)
           Primitives.push_back({J});
       } else if (GeomExpectedInput == GeometryInputPrimitive::Lines) {
-        for (std::array<uint32_t, 2> Ln : AbsLineIndices)
+        bool HavePatchIDs = TessLink && AbsLinePatchIDs.size() ==
+                                            AbsLineIndices.size();
+        for (size_t Idx = 0; Idx != AbsLineIndices.size(); ++Idx) {
+          std::array<uint32_t, 2> Ln = AbsLineIndices[Idx];
           Primitives.push_back({Ln[0], Ln[1]});
+          if (HavePatchIDs)
+            PrimitivePatchIDs.push_back(AbsLinePatchIDs[Idx]);
+        }
       } else { // Triangles
-        for (std::array<uint32_t, 3> Tri : AbsTriIndices)
+        bool HavePatchIDs = TessLink && AbsTriPatchIDs.size() ==
+                                            AbsTriIndices.size();
+        for (size_t Idx = 0; Idx != AbsTriIndices.size(); ++Idx) {
+          std::array<uint32_t, 3> Tri = AbsTriIndices[Idx];
           Primitives.push_back({Tri[0], Tri[1], Tri[2]});
+          if (HavePatchIDs)
+            PrimitivePatchIDs.push_back(AbsTriPatchIDs[Idx]);
+        }
       }
 
       // Every `Output`-direction element of the geometry stage's own
@@ -6224,10 +6282,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
 
         std::vector<uint32_t> PrimitiveIDs(RowCount);
         std::vector<uint32_t> InvocationIDs(RowCount);
+        // (Roadmap L419(j)) `PrimitivePatchIDs` is only populated (and
+        // only ever the same size as `Primitives`) when this draw
+        // tessellates and this stage's input came from the `Lines`/
+        // `Triangles` branches above -- every other shape still gets the
+        // ordinary running-count numbering `gl_PrimitiveIDIn` uses for a
+        // geometry stage with no preceding tessellation.
+        bool HavePatchIDs = PrimitivePatchIDs.size() == PrimitiveCount;
         for (uint32_t P = 0; P != PrimitiveCount; ++P)
           for (uint32_t Inv = 0; Inv != Invocations; ++Inv) {
             uint32_t Row = P * Invocations + Inv;
-            PrimitiveIDs[Row] = P;
+            PrimitiveIDs[Row] = HavePatchIDs ? PrimitivePatchIDs[P] : P;
             InvocationIDs[Row] = Inv;
           }
         std::vector<cpu::FemeGeometryInvocation> GeomInvocations =

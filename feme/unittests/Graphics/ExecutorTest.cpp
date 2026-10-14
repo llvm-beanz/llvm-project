@@ -10088,9 +10088,280 @@ TEST(ExecutorTest, TessellatedPatchListCoversTheWholeViewport) {
   }
 }
 
+// (Roadmap L419(j)) A geometry stage reading `gl_PrimitiveIDIn`
+// (`SystemValue::PrimitiveID`) downstream of tessellation: passes the
+// domain stage's own `SV_Position` straight through (element 0, a
+// vertex-indexed `SystemValue::Position` input, exactly matching
+// `TessDomainShaderIR`'s own `SV_Position` output) and writes
+// `gl_PrimitiveIDIn` to a flat, per-vertex varying (element 3) the
+// fragment stage forwards unchanged to an `R32_UINT` attachment -- so
+// every covered pixel directly reports the `gl_PrimitiveIDIn` the
+// geometry invocation that produced it actually observed.
+constexpr char PrimitiveIDGeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %pid = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+
+    %p0x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %p0y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+    %p0z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+    %p0w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p0x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p0y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p0z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float %p0w, i32 0)
+    call void @feme.stage.output.store.i32(i32 3, i32 0, i32 0, i32 %pid, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p1x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+    %p1y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 1)
+    %p1z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 1)
+    %p1w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 1)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p1x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p1y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p1z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float %p1w, i32 0)
+    call void @feme.stage.output.store.i32(i32 3, i32 0, i32 0, i32 %pid, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+
+    %p2x = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 2)
+    %p2y = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 2)
+    %p2z = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 2)
+    %p2w = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 2)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %p2x, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %p2y, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %p2z, i32 0)
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float %p2w, i32 0)
+    call void @feme.stage.output.store.i32(i32 3, i32 0, i32 0, i32 %pid, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+// Reads `gl_PrimitiveIDIn` (element 0, a flat `UInt` varying) and writes
+// it straight through to a single-channel `R32_UINT` color attachment.
+constexpr char PrimitiveIDGeometryFragmentShaderIR[] = R"(
+  define void @fs_main() #0 {
+    %pid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+    call void @feme.stage.output.store.i32(i32 1, i32 0, i32 0, i32 %pid, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.i32(i32, i32, i32, i32, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+/// Builds a two-patch pipeline (`buildTessellatedPipeline`'s own vertex/
+/// hull/patch-constant/domain chain, reused unmodified) whose geometry
+/// stage reads `gl_PrimitiveIDIn` and whose fragment stage reports it as
+/// an `R32_UINT` pixel value. The two patches are disjoint triangles
+/// covering the left and right halves of the viewport respectively, each
+/// given a tessellation factor large enough to subdivide into several
+/// sub-triangles -- so a correct implementation renders a uniform
+/// `PatchIndex` (0 on the left half, 1 on the right) across every pixel,
+/// while the pre-fix behavior (numbering `gl_PrimitiveIDIn` by a running
+/// count of emitted primitives, not by source patch) would instead show
+/// different, incrementing values scattered across each half.
+Expected<GraphicsPipeline>
+buildTessellatedGeometryPrimitiveIDPipeline(Context &Ctx, StringRef Factor,
+                                            uint32_t AttachmentSize) {
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 3, /*Location=*/1),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS = compileStage(
+      Ctx, TessVertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  if (!VS)
+    return VS.takeError();
+
+  EntrySignature HSSig;
+  SignatureElement ControlPointID =
+      makeElement(2, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::OutputControlPointID);
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  HSSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    makeElement(1, SignatureDirection::Input, 4,
+                                /*Location=*/0),
+                    ControlPointID,
+                    makeElement(3, SignatureDirection::Output, 3,
+                                /*Location=*/1),
+                    makeElement(4, SignatureDirection::Output, 4,
+                                /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> HS =
+      compileStage(Ctx, TessHullShaderIR, "hs_main", HSSig, ShaderStage::Hull);
+  if (!HS)
+    return HS.takeError();
+
+  EntrySignature PCSig;
+  SignatureElement Edges =
+      makeElement(1, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorEdge, /*RowCount=*/3);
+  Edges.Frequency = SignatureFrequency::PerPatch;
+  SignatureElement Inside =
+      makeElement(2, SignatureDirection::PatchOutput, 1,
+                  /*Location=*/std::nullopt,
+                  SignatureSystemValue::TessFactorInside, /*RowCount=*/1);
+  Inside.Frequency = SignatureFrequency::PerPatch;
+  PCSig.Elements = {makeElement(0, SignatureDirection::Input, 3,
+                                /*Location=*/1),
+                    Edges, Inside};
+  std::string PCIR = formatPatchConstantIR(Factor);
+  Expected<std::shared_ptr<CompiledStage>> PCS =
+      compileStage(Ctx, PCIR, "pc_main", PCSig, ShaderStage::Hull);
+  if (!PCS)
+    return PCS.takeError();
+
+  EntrySignature DSSig;
+  DSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/std::nullopt,
+                  SignatureSystemValue::DomainLocation),
+      makeElement(1, SignatureDirection::Input, 3, /*Location=*/1),
+      makeElement(2, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(4, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> DS = compileStage(
+      Ctx, TessDomainShaderIR, "ds_main", DSSig, ShaderStage::Domain);
+  if (!DS)
+    return DS.takeError();
+
+  EntrySignature GSSig;
+  SignatureElement GSPrimitiveID =
+      makeElement(1, SignatureDirection::Input, 1, /*Location=*/std::nullopt,
+                  SignatureSystemValue::PrimitiveID);
+  GSPrimitiveID.ComponentType = SignatureComponentType::UInt;
+  SignatureElement GSOutPrimitiveID =
+      makeElement(3, SignatureDirection::Output, 1, /*Location=*/0);
+  GSOutPrimitiveID.ComponentType = SignatureComponentType::UInt;
+  GSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      GSPrimitiveID,
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      GSOutPrimitiveID};
+  Expected<std::shared_ptr<CompiledStage>> GS =
+      compileStage(Ctx, PrimitiveIDGeometryShaderIR, "gs_main", GSSig,
+                   ShaderStage::Geometry);
+  if (!GS)
+    return GS.takeError();
+
+  EntrySignature FSSig;
+  SignatureElement FSPrimitiveID =
+      makeElement(0, SignatureDirection::Input, 1, /*Location=*/0);
+  FSPrimitiveID.ComponentType = SignatureComponentType::UInt;
+  SignatureElement FSOutPrimitiveID =
+      makeElement(1, SignatureDirection::Output, 1, /*Location=*/0);
+  FSOutPrimitiveID.ComponentType = SignatureComponentType::UInt;
+  FSSig.Elements = {FSPrimitiveID, FSOutPrimitiveID};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, PrimitiveIDGeometryFragmentShaderIR, "fs_main", FSSig,
+                   ShaderStage::Fragment);
+  if (!FS)
+    return FS.takeError();
+
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R32_UINT, AttachmentSize, AttachmentSize}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::PatchList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/1, std::move(Attachments));
+  TessellationState Tess;
+  Tess.Domain = TessellatorDomain::Triangle;
+  Tess.Partitioning = TessPartitioning::Integer;
+  Tess.OutputPrimitive = TessOutputPrimitive::TriangleCcw;
+  Tess.InputControlPointCount = 3;
+  Tess.OutputControlPointCount = 3;
+  Pipeline.setTessellationStages(std::move(*HS), std::move(*PCS),
+                                 std::move(*DS), Tess);
+  GeometryState Geom;
+  Geom.InputPrimitive = GeometryInputPrimitive::Triangles;
+  Geom.OutputPrimitive = GeometryOutputPrimitive::TriangleStrip;
+  Geom.MaxOutputVertices = 3;
+  Pipeline.setGeometryStage(std::move(*GS), Geom);
+  return Pipeline;
+}
+
+TEST(ExecutorTest,
+     GeometryStagePrimitiveIDInMatchesSourcePatchNotRunningEmitCount) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline =
+      buildTessellatedGeometryPrimitiveIDPipeline(Ctx, "4.0",
+                                                  /*AttachmentSize=*/8);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Patch 0: a CCW triangle with its right angle at (-1, -1), one leg
+  // along the top edge to the shared midline (0, -1), and its other leg
+  // stretched far past the viewport's top (-1, 100) -- so the
+  // hypotenuse, which exits the viewport almost immediately, leaves the
+  // whole left half of the [-1, 1] NDC square (all but a sliver far
+  // thinner than one pixel, near the very top edge) covered. Patch 1 is
+  // the mirror image, covering the right half. Factor 4.0 subdivides
+  // each patch into several sub-triangles, so the geometry stage runs
+  // multiple invocations per patch -- every one of which must still
+  // report that same patch's own index as `gl_PrimitiveIDIn`, not a
+  // running count of primitives emitted so far across both patches.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // patch 0, cp 0
+      0.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // patch 0, cp 1
+      -1.0f, 100.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // patch 0, cp 2
+      1.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // patch 1, cp 0
+      0.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // patch 1, cp 1
+      1.0f,  100.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // patch 1, cp 2
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::vector<VertexBufferBinding> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  uint32_t Size = 8;
+  std::vector<uint32_t> Storage(Size * Size, ~0u);
+  AttachmentView Color{
+      MutableArrayRef(reinterpret_cast<uint8_t *>(Storage.data()),
+                      Storage.size() * sizeof(uint32_t)),
+      cpu::ResourceFormat::R32_UINT, Size, Size};
+  std::array<AttachmentView, 1> Attachs{Color};
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.Viewports[0] =
+      ViewportState{0.0f, 0.0f, (float)Size, (float)Size, 0.0f, 1.0f};
+  Draw.Scissors[0] = ScissorRect{0, 0, Size, Size};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 6;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw, /*WorkerCount=*/1),
+                    Succeeded());
+
+  for (uint32_t Y = 0; Y != Size; ++Y)
+    for (uint32_t X = 0; X != Size; ++X) {
+      uint32_t Expected = X < Size / 2 ? 0u : 1u;
+      EXPECT_EQ(Storage[Y * Size + X], Expected)
+          << "texel (" << X << ", " << Y << ")";
+    }
+}
+
 TEST(ExecutorTest, TessellationFactorZeroCullsTheWholePatch) {
   Context Ctx;
   // A non-positive tessellation factor culls the patch entirely (see
+
   // `feme::graphics::TessFactors`), so the tessellator emits no domain
   // points, the domain stage runs zero invocations, and nothing is
   // rasterized at all.
