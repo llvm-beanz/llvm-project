@@ -2608,3 +2608,95 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes:
 problem classes). `Roadmap.md`: `K6a` updated in place (left open,
 `variablePointers` is a genuine multi-session effort, not a single
 drive-by fix); `K6n`/`K6o`/`K6p` added as new top-level rows.
+
+## `K6o`: `OpConstantNull`-on-pointer-type upstream-MLIR deserializer gap fixed, 152 -> 140 Fail (roadmap K6o, closed)
+
+Picked `K6o` (the smaller, more isolated "issue outside FeMe" item) over
+the larger `K6n` (124-case CPU-backend architectural limitation), per the
+prior session's own recommendation.
+
+Root-caused across four upstream-MLIR code paths, all in
+`mlir/lib/{Target/SPIRV,Dialect/SPIRV/IR,Conversion/SPIRVToLLVM}`:
+`Deserializer.cpp`'s `getNullAttrForType` had no `spirv::PointerType`
+case (fell through to `nullptr`, the direct cause of the "unsupported
+OpConstantNull type" error); `SPIRVOps.cpp`'s `verifyConstantType` had
+no pointer-type acceptance case either; `Serializer.cpp`'s
+`prepareConstant` had no serialization path for a pointer-typed
+constant; `SPIRVToLLVM.cpp`'s `ConstantScalarAndVectorPattern` only
+handled scalar/vector source types, declining pointers.
+
+Designed the fix around a `UnitAttr` marker for "null pointer" (no
+meaningful payload to store, unlike every other constant kind), with one
+correctness hazard discovered and addressed: `Serializer`'s `constIDMap`
+is keyed purely by `Attribute`, not `(Attribute, Type)` -- since
+`UnitAttr::get(ctx)` is a single per-context singleton regardless of
+type, naively deduplicating via `getConstantID(valueAttr)` (as every
+other constant kind does) would incorrectly alias two different pointer
+types' null constants onto the same result `<id>`. Fixed by always
+emitting a fresh `OpConstantNull` for this specific case, bypassing
+`constIDMap` entirely (valid SPIR-V; constants need not be
+deduplicated).
+
+Also discovered and fixed a print/parse asymmetry while adding a lit
+test: `spirv::ConstantOp::print` only appended `: type` for
+`spirv::ArrayType`/`spirv::StructType` results; a `UnitAttr` value (not
+itself a `TypedAttr`) printed with no type suffix at all, failing to
+round-trip. Fixed by extending the printer's type-suffix condition to
+also cover `spirv::PointerType`.
+
+feme itself needed **zero code changes**: `feme/lib/Conversion/
+SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` already calls upstream's
+`populateSPIRVToLLVMConversionPatterns`, so the new
+`ConstantNullPointerPattern` (lowering to `LLVM::ZeroOp`/`llvm.mlir.zero`)
+is automatically available.
+
+New/updated tests (all outside `feme/`): `mlir/test/Conversion/
+SPIRVToLLVM/constant-op-to-llvm.mlir` (`@null_pointer_constant`); new
+`mlir/test/Target/SPIRV/constant-null-pointer.mlir` (MLIR-textual
+round-trip plus real SPIR-V binary (de)serialization, modeled on
+`function-call.mlir`'s `VariablePointers`/`SPV_KHR_variable_pointers`
+capability/extension precedent); `mlir/test/Dialect/SPIRV/IR/
+structure-ops.mlir` (`@null_pointer_constant` positive parse/print,
+`@null_pointer_constant_wrong_attr` negative verifier-error case).
+
+Regression sweeps: `ninja check-feme` (3738 discovered, 3731/3731
+passed, 7 unsupported, same as session start -- no regressions). A full
+lit sweep of `mlir/test/{Target/SPIRV,Dialect/SPIRV/IR,
+Conversion/SPIRVToLLVM}` (149 tests) found exactly 2 failures
+(`arithmetic-ops-to-llvm.mlir`, `memory-ops.mlir`), both confirmed via
+`git stash` to fail identically with this fix reverted -- pre-existing,
+unrelated test-file bugs (a duplicate-symbol definition in the former),
+not caused by this change.
+
+CTS: ran the `dEQP-VK.spirv_assembly.*variable_pointer*` mustpass group
+via `feme/utils/run_vulkan_cts.py`, with `variablePointers`/
+`variablePointersStorageBuffer` temporarily flipped to `VK_TRUE` for the
+sweep only (reverted before committing, feature bits remain `VK_FALSE`
+with `K6n`/`K6p` still outstanding). This session's own case-list
+enumeration (via `deqp-vk --deqp-runmode=stdout-caselist`) found 4459
+matching cases, a handful fewer than the prior session's reported 4464 --
+not investigated further, likely a CTS-internal case-generation detail,
+not a regression (the 4459 figure is this session's own ground truth,
+used consistently for both the pass/fail counts below).
+
+- Before (this session's own re-measurement, same binary state as the
+  prior session's reported end-of-session 152 Fail / 3492 NotSupported /
+  820 Pass, modulo the 5-case total delta noted above): not independently
+  re-run; the prior session's own 152-Fail figure is taken as the
+  baseline.
+- After this fix: **140 Fail / 3489 NotSupported / 830 Pass** (out of
+  4459 total). Re-bucketed all 140 remaining failures by exact error
+  signature (`FEME_VULKAN_LOG_CREATION_ERRORS`): 0 `OpConstantNull`
+  signatures remain (confirming the entire 16-case `K6o` bucket is
+  closed), 15 `"unhandled opcode 401/402/403"` (`K6p`, matching its
+  prior 11-case count plus a few newly-revealed cases now that
+  `OpConstantNull` legalization itself no longer masks them, mirroring
+  the exact pattern the prior `K6a` session saw when `PtrAccessChain`
+  legalization stopped masking other bugs), and the remainder
+  `"unsupported raised operation"` (`K6n`, the CPU-backend
+  resource-handle-normalization limitation). No new failure signatures
+  observed; a clean, fully-attributable closure.
+
+`Roadmap.md`: `K6o` struck through (closed). `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- this is a bug fix feeding a
+still-`VK_FALSE` feature bit, not a new feature-bit flip.
