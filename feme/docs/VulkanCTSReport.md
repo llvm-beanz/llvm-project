@@ -1305,7 +1305,7 @@ different diff channel/magnitude pattern) from the `b10g11r11_ufloat`
 group just fixed. Not yet root-caused; left for a future session (see
 `Roadmap.md`'s `L419(e)` entry).
 
-## `L265`: ASTC-alpha SNORM "tie" root-caused as an 8-bit decode-precision gap, not a rounding bug (12 cases, not yet fixed)
+## `L265`: ASTC-alpha SNORM "tie" root-caused as an 8-bit decode-precision gap, not a rounding bug (12 cases, fixed)
 
 Two prior sessions investigated the residual 12-case
 `astc_{8x8,10x5,12x12}_unorm_block` -> `a2b10g10r10_snorm_pack32` cluster
@@ -1403,3 +1403,90 @@ count is unchanged (unavoidable, since no fix was applied) --
 needed -- confirmed via grep, no feature/extension-surface touched; this
 was a pure investigation/root-cause session with a documentation-only
 roadmap update.
+
+### Update (follow-up session): fixed, with one self-caught regression along the way
+
+Implemented the `L424(a)`/`L424(b)` fix scoped above. One design
+simplification from the original plan: no new entry point was added to
+`ASTCDecode.cpp` -- the already-existing `decodeASTCBlockHDR` (full-float
+LDR decode, previously proven bit-exact against CTS's own reference) already
+provides exactly the precision needed. The missing piece was entirely on
+the *consuming* side.
+
+**The fix** (`ImageOps.cpp`): added a new `SrcASTCFilteredHighPrecision`
+branch to the blit's `srcColor` per-texel fetch lambda, used only when the
+source is a non-sRGB LDR ASTC format *and* the blit filter is not
+`VK_FILTER_NEAREST` (every other caller -- unfiltered fetches, sRGB ASTC
+footprints, regular texture sampling, `CommandBuffer.cpp`'s upload path --
+is unchanged, still on the original `decodeASTCBlock` 8-bit path). This
+branch decodes via `decodeASTCBlockHDR`, then rounds each decoded
+component to the nearest IEEE binary16 (half-precision) value via a new
+`roundToHalfPrecision` helper (round-tripping through
+`llvm::APFloat::IEEEhalf()`) -- replicating CTS's own
+`TextureFormat(RGBA, HALF_FLOAT)` decompressed-ASTC-texture storage
+(`tcuCompressedTexture.cpp`'s `getUncompressedFormat`) before its own
+blit/copy filtering blends texels together. This is the key insight this
+fix depends on: the bug was never simply "FeMe's ASTC decode is too
+imprecise" (`decodeASTCBlockHDR` was already bit-exact), it was "FeMe's
+decode doesn't replicate the *specific* precision budget CTS's own
+reference applies before blending" -- matching that budget exactly (not
+exceeding it) is what makes FeMe's blend tie/non-tie the same way CTS's
+does.
+
+**Mid-session self-caught regression.** The first version of this fix
+widened the half-rounded float to a 16-bit UNORM integer and routed it
+through the pre-existing `R16G16B16A16_UNORM` `unpackColor` case, to reuse
+that code rather than adding a new bypass path. This introduced a *second*,
+unrelated tie: `65535` is odd, so an exact half-precision `0.5` scaled to a
+16-bit numerator lands on exactly `32767.5`, which cannot round-trip back
+to exactly `0.5` under any integer rounding rule (`std::lround`'s
+round-half-away-from-zero rounds it to `32768`, and `32768 / 65535.0 =
+0.500007629...`) -- turning what should have been an exact, legitimate tie
+into a spurious non-tie bias. This flipped two previously-passing pixels
+(`(44, 33)`/`(34, 40)`, in one of this same test's *identity-scale*
+regions -- a pure single-texel sample, no blending at all) from Pass to
+Fail, within the very test the fix was meant to repair.
+
+Caught via a full qpa Result/Reference PNG diff against a saved pre-fix
+baseline screenshot (confirming the regression was newly introduced by
+this session's own change, not a pre-existing issue merely unmasked), then
+root-caused via targeted `fprintf` instrumentation of the exact 8-neighbor
+bilinear blend weights and per-neighbor alpha samples at the regressed
+pixel -- which showed `Weight == 1.0` for a single neighbor (a pure,
+unblended sample) whose own half-rounded alpha was exactly `0.5`, yet the
+accumulated result was `0.50000762951094835`, pinpointing the 16-bit
+round-trip step (not the ASTC decode or the blend itself) as the actual
+source of the bias.
+
+**Fixed** by removing the lossy 16-bit-UNORM round-trip entirely: the
+half-rounded float components are now written directly into the fetch's
+own output array, bypassing `DecodeBuf`/`unpackColor` for this path
+altogether, so no further integer-precision rounding is introduced after
+the deliberate half-precision rounding step.
+
+**Verified:**
+- The original repro (`astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`)
+  now fully Passes (was 0/1, now 1/1), with both the originally-reported
+  `(34, 1)`/`(36, 1)` pixels and the mid-session regression's `(44,
+  33)`/`(34, 40)` pixels all correct.
+- The full 12-case cluster (`astc_{8x8,10x5,12x12}_unorm_block.a2b10g10r10_snorm_pack32.*`,
+  168 cases including unsupported tilings): 112 Passed, **0 Failed**, 56 Not
+  supported.
+- The full `dEQP-VK.api.copy_and_blit.core.blit_image.*` CTS group (73,839
+  cases): 26,941 Passed, **0 Failed**, 46,898 Not supported -- no
+  regressions anywhere else in the family.
+- New unit test `ImageOpsTest.FilteredASTCBlitPreservesBlendPrecision`
+  (`feme/unittests/Vulkan/ImageOpsTest.cpp`) constructs two adjacent
+  void-extent ASTC blocks encoding alpha `1`/`65535` and confirms a 50/50
+  blit blend resolves to the non-tie, high-precision answer (alpha rounds
+  up to `1`) rather than the artificial 8-bit-truncated tie (which would
+  round down to `0`).
+- `ninja check-feme`: 3,720/3,723 Passed, 3 Unsupported, 0 Failed -- zero
+  regressions.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- confirmed via grep; this is an internal precision-matching
+  fix with no feature/extension-surface change.
+
+`Roadmap.md`: `L265`, `L419(e)`, `L424`, `L424(a)`, and `L424(b)` all
+struck through as done.
+
