@@ -5967,6 +5967,47 @@ mlir::Type getTightNestedStructType(mlir::spirv::StructType NestedStruct,
               TightElement, ArrayTy.getNumElements());
       } else {
         MemberTy = Converter.convertType(ElementTy);
+        // (Roadmap K6j) An array-of-matrix (or a further-nested array
+        // of vectors/matrices) member -- unlike the array-of-vector
+        // case just above, which already has its own tight substitution
+        // -- has no retry here at all once the ordinary
+        // `spirv::ArrayType` conversion fails outright for a
+        // scalar-tight (narrower-than-natural-alignment) declared
+        // Stride, exactly `getTightNestedArrayOfVectorsOrMatricesType`'s
+        // own struct-member-loop fallback (see its own comment) exists
+        // for -- but this nested-struct retry path
+        // (`convertOffsetStructTypeIgnoringDecorations`'s own
+        // `VectorOnly` tier calling into this function, rather than that
+        // function's own member loop directly) never offered it the
+        // same fallback, so a nested struct whose own matrix-array
+        // member needs scalar-tight substitution failed this whole
+        // nested struct's own tight re-conversion outright, cascading up
+        // to fail the *outer* struct's own handle-type conversion
+        // entirely (found via `dEQP-VK.ubo.single_nested_struct.*scalar*`).
+        if (!MemberTy)
+          MemberTy = getTightNestedArrayOfVectorsOrMatricesType(
+              NestedStruct, I, ElementTy, Converter);
+        // (Roadmap K6j) Unlike this case above, a scalar-tight (but
+        // still square, natural-size-matching) `MatrixStride` does not
+        // make `convertArrayTypeIgnoringDecorations` fail outright at
+        // all -- it instead falls through to MLIR's own upstream
+        // `spirv::ArrayType` conversion, which validates against
+        // `VulkanLayoutUtils::getNaturalArrayStride`'s own tightly-
+        // packed-scalar-count size (coincidentally equal to the declared
+        // Stride here) and silently *succeeds*, building the array
+        // around the natural, vector-ABI-padded matrix conversion
+        // anyway -- exactly `substituteArrayOfMatrixElementType`'s own
+        // comment describes. `convertOffsetStructTypeIgnoringDecorations`'s
+        // own member loop (used for the "raw", non-offset nested-struct
+        // path) already re-validates every member's matrix
+        // representability unconditionally further down, independent of
+        // whether this initial conversion failed or silently
+        // substituted the wrong (too-wide) natural layout -- this
+        // "tight" conversion path has no such unconditional re-check, so
+        // apply the same substitution explicitly here too.
+        if (MemberTy)
+          MemberTy = substituteArrayOfMatrixElementType(
+              ElementTy, MemberTy, NestedStruct, I, Converter);
       }
     } else if (auto InnerStructTy =
                    mlir::dyn_cast<mlir::spirv::StructType>(ElementTy)) {
