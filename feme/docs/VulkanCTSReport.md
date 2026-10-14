@@ -1749,3 +1749,46 @@ that doc's own note on remaining unrelated manifest drift).
 `VulkanExtensionInventory.md`: `VK_KHR_sampler_mirror_clamp_to_edge`
 moved to Implemented. `Roadmap.md`: `K6b` split off `K6a` and struck
 through.
+
+## `K6c`: `shaderDrawParameters` / `gl_DrawID` fixed (roadmap K6c, measured impact)
+
+Unlike `K6b`, this was *not* a pure advertisement fix: `gl_BaseVertex`/
+`gl_BaseInstance` were already real (`Executor.cpp`'s per-draw
+`Inv.BaseVertex`/`Inv.BaseInstance`), but `gl_DrawID` was not --
+`Executor.cpp` hardcoded `Inv.DrawID = 0` for every vertex-pipeline draw
+because `feme::graphics::DrawCommand` had no `DrawID` field at all
+(unlike its mesh-pipeline sibling `MeshDrawCommand`, which already had a
+working one). Every multi-draw-indirect invocation therefore silently
+reported `gl_DrawID == 0` regardless of its real position within the
+command. Added `DrawCommand::DrawID`, populated from
+`CommandBuffer.cpp`'s `readIndirectDraws` per-draw loop index (direct,
+non-indirect draws correctly keep the field's default `0`, matching
+`gl_DrawID`'s spec-mandated value for those), and threaded it through
+`Executor.cpp`. `EntryPoints.cpp`'s two `shaderDrawParameters` sites now
+report `VK_TRUE`, and `VK_KHR_shader_draw_parameters` is now advertised
+by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`.
+
+New unit test: `DrawTest.MultiDrawIndirectReportsDistinctDrawID` -- a
+3-entry `vkCmdDrawIndirect` whose vertex stage stores
+`(gl_DrawID + 1) * 11` into `buf[gl_DrawID]`; the resulting `{11, 22,
+33}` triple is only reachable with real, distinct per-draw IDs (the
+pre-fix hardcoded-0 state would collide every write on `buf[0]`).
+
+Ran the full `dEQP-VK.draw.*shader_draw_parameters*` case list (76
+cases): **76 Pass, 0 Fail**. Ran both `dEQP-VK.api.*
+shader_draw_parameters_features` cases: **2 Pass, 0 Fail**. Ran the
+broader `dEQP-VK.draw.*indirect*` regression sweep (3,898 cases, since
+`readIndirectDraws` itself changed) to confirm no regression in any
+other indirect-draw path: **36 Pass (`OK`), 1,185 Pass (`Pass`), 2,677
+NotSupported** (all NotSupported cases are pre-existing, unrelated
+extension gaps -- `vertexInputDynamicState`, `robustness2
+nullDescriptor`, `VK_EXT_shader_object`, `VK_EXT_vertex_attribute_
+divisor`, `VK_EXT_vertex_input_dynamic_state`,
+`VK_KHR_device_address_commands`, `VK_KHR_draw_indirect_count`), **0
+Fail**.
+
+`Vulkan14FeatureInventory.md`: 1.1 `shaderDrawParameters` feature flipped
+to `yes` (targeted doc edit, not a full regeneration -- see that doc's
+own note on remaining unrelated manifest drift).
+`VulkanExtensionInventory.md`: `VK_KHR_shader_draw_parameters` moved to
+Implemented. `Roadmap.md`: `K6c` split off `K6a` and struck through.

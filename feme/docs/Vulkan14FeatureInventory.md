@@ -102,7 +102,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `variablePointers` | no |  |
 | feature | VK_VERSION_1_1 | `protectedMemory` | no |  |
 | feature | VK_VERSION_1_1 | `samplerYcbcrConversion` | no |  |
-| feature | VK_VERSION_1_1 | `shaderDrawParameters` | no |  |
+| feature | VK_VERSION_1_1 | `shaderDrawParameters` | yes | roadmap K6c: gl_BaseVertex/gl_BaseInstance were already real; gl_DrawID's own gap (DrawCommand had no DrawID field, Executor.cpp hardcoded 0) is now closed too |
 | extension | VK_VERSION_1_1 | `VK_KHR_16bit_storage` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_bind_memory2` | yes | core, not advertised by name: vkBindBufferMemory2/vkBindImageMemory2 (Buffer.cpp, Image.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_dedicated_allocation` | no |  |
