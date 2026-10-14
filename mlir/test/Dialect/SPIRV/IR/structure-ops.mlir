@@ -98,6 +98,22 @@ func.func @unaccepted_std_attr() -> () {
 
 // -----
 
+func.func @null_pointer_constant() -> () {
+  // CHECK: spirv.Constant unit : !spirv.ptr<f32, Function>
+  %0 = spirv.Constant unit : !spirv.ptr<f32, Function>
+  return
+}
+
+// -----
+
+func.func @null_pointer_constant_wrong_attr() -> () {
+  // expected-error @+1 {{expected unit attribute for pointer-typed constant (null pointer), but found 1 : i32}}
+  %0 = "spirv.Constant"() <{value = 1 : i32}> : () -> !spirv.ptr<f32, Function>
+  return
+}
+
+// -----
+
 func.func @array_constant() -> () {
   // expected-error @+1 {{result or element type ('vector<2xf32>') does not match value type ('vector<2xi32>')}}
   %0 = spirv.Constant [dense<3.0> : vector<2xf32>, dense<4> : vector<2xi32>] : !spirv.array<2xvector<2xf32>>
