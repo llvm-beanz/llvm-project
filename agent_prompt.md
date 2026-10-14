@@ -63,33 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day)** New `K6l`: 8 of its 9 `random.scalar.*` failures are still
-   `RowMajor`-matrix-related but in more deeply/irregularly nested shapes than
-   this session's fix covers (matrix reached through a struct AND an array in
-   the same chain). `getMatrixColumnAccessShape`'s array-of-struct branch likely
-   needs the same array-peel treatment this session added to the
-   direct-struct-member branch. Pull each failing case's real SPIR-V from its
-   `.qpa` log first (see lesson above) before guessing at the shape.
-2. **(~half day, separate bug class)** `K6l`'s other residual:
-   `random.scalar.41` plus 4 `3_level_unsized_array.scalar.*` cases fail with a
-   *legalization* error (not a result mismatch) on a plain `vector<3x*>` member
-   (no matrix involved) reached through a multiply-nested `rtarray`-of-`array`.
-   Not yet triaged at all -- worth its own roadmap row once looked at, since
-   it's unrelated to `RowMajor` matrices.
-3. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
+1. **(~half day)** `K6m` (split off from K6l): `random.scalar.41` + 4
+   `3_level_unsized_array.scalar.*` cases, all failing *legalization*
+   (`spirv.AccessChain`...explicitly marked illegal`), not a result mismatch --
+   a different bug class, not yet triaged at all. Pull real SPIR-V from `.qpa`
+   logs first, same lesson as above.
+2. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
    the prior investigation's exact failure list (`PtrAccessChain` "explicitly
    marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
    pointer types).
-4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
-5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done.
 
-**Immediate next action for next session:** pick `K6l`'s 8 `RowMajor`
-`random.scalar.*` cases (pull real SPIR-V from `.qpa` logs first) as the
-smallest direct continuation of this session's own fix, or pivot to
-`variablePointers` (`K6a`) for a change of pace.
+**Immediate next action for next session:** pick `K6m`'s legalization failures
+(pull real SPIR-V from `.qpa` logs, same technique as this session) as the
+smallest direct continuation, or pivot to `variablePointers` (`K6a`) for a
+change of pace.
