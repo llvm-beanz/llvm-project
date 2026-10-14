@@ -496,6 +496,23 @@ TEST_F(PhysicalDeviceProperties2Test, ShaderViewportIndexLayerFeaturesAreTrue) {
   EXPECT_EQ(Vulkan12Features.shaderOutputLayer, VK_TRUE);
 }
 
+TEST_F(PhysicalDeviceProperties2Test, SamplerMirrorClampToEdgeFeatureIsTrue) {
+  // Roadmap K6b: `samplerMirrorClampToEdge`'s address mode
+  // (VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE) was already fully
+  // implemented (Image.cpp's enum mapping, FeMeRuntimeCPU.c's
+  // femeRTApplyAddressMode mode 4); only the feature bit's advertisement
+  // was missing.
+  VkPhysicalDeviceVulkan12Features Vulkan12Features{};
+  Vulkan12Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Vulkan12Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Vulkan12Features.samplerMirrorClampToEdge, VK_TRUE);
+}
+
 TEST_F(PhysicalDeviceProperties2Test,
        SubgroupBasicBitMatchesPromotedVulkan11Properties) {
   VkPhysicalDeviceSubgroupProperties Subgroup{};
