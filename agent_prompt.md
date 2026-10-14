@@ -63,28 +63,31 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day)** Pick the next `K6a` bit. `drawIndirectCount` is probably the
-   next smallest now (straightforward indirect-count semantics, no compiler
-   work, just new `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` entry
-   points) -- `variablePointers`/`scalarBlockLayout` both require real
-   `SPIRVToLLVMPatterns.cpp` changes and are likely bigger.
-2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 3
-   bits should get individually-tracked roadmap rows now that each is a
-   confirmed real task, rather than staying bundled.
+1. **(~1-2 days each)** Pick `variablePointers` or `scalarBlockLayout` --
+   `K6a`'s only 2 remaining bits, both real `SPIRVToLLVMPatterns.cpp` changes
+   per prior sessions' empirical CTS-backed investigation (not just grep-reads).
+   Neither has an obvious "smaller" edge the way `drawIndirectCount` did;
+   whichever is picked should start from the prior sessions' own failure-mode
+   notes (`PtrAccessChain`/`OpPtrEqual` family for `variablePointers`;
+   `getNaturalAlignmentIgnoringPacking` relaxation for `scalarBlockLayout`)
+   rather than re-deriving them.
+2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 2
+   bits should get individually-tracked roadmap rows now that the bundle is down
+   to its final two, rather than staying combined.
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session either; scope stayed tightly on `K6g`.
+   revisited this session either.
 4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration (the underlying
-   `AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
-   files are still stale from `K6b`-`K6f`'s own prior sessions, separate from
-   the `AdvertisedPromotedExtensions.txt` gap fixed this session).
+   regeneration
+   (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
+   files still stale from `K6b`-`K6g`'s own prior sessions).
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the single `K6g` CPU-runtime task).
+   stayed scoped to the single `K6h` command-plumbing task, same as `K6g`'s
+   scoping choice last session).
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s now-3-bit
-`K6a` row and pick `drawIndirectCount` (new commands, no compiler work) as the
-next likely-smallest real implementation task, or pivot to one of the standing
-backlog items if roadmap-stage work needs a break.
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-2-bit
+`K6a` row, pick `variablePointers` or `scalarBlockLayout`, and start from the
+prior investigation's exact failure list (`PtrAccessChain` et al., or
+`getNaturalAlignmentIgnoringPacking`) rather than re-tracing from scratch.
