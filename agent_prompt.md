@@ -63,23 +63,34 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Pick the next bit from `K6a`'s further-narrowed bundle:
-   `variablePointers`, `scalarBlockLayout`, `samplerFilterMinmax`,
-   `drawIndirectCount`, `shaderOutputViewportIndex`/`shaderOutputLayer`,
-   `VK_KHR_image_format_list`, `VK_EXT_separate_stencil_usage`, or
-   `VK_KHR_shader_float_controls`. No bit in this remaining list has been
-   flagged "likely-cheap" yet -- worth a quick 15-minute grep sweep per
-   candidate (same shape as this session's `shaderDrawParameters` trace) before
-   committing to one, since this session showed that "nearly free" labels aren't
-   always accurate.
-2. **(~1-2 hours, hygiene)** Still-deferred **full regeneration** of
-   `Vulkan14FeatureInventory.md`, blocked on fixing
-   `VK_KHR_shader_float_controls`'s manifest entry and the two `VK_VERSION_1_4`
-   limit notes first.
-3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+1. **(~1-2 hours)** Grep-trace `scalarBlockLayout` next: check whether
+   `SPIRVToLLVMPatterns.cpp`'s struct/block offset math already honors scalar
+   (non-std140/std430) member offsets/strides as declared, or imposes its own
+   alignment that would need relaxing.
+   `VK_KHR_relaxed_block_layout`/`VK_KHR_uniform_buffer_standard_layout` are
+   both already "core, not advertised by name" per
+   `AdvertisedPromotedExtensions.txt` (declared offsets used as-is, no re-layout
+   imposed) — if `scalarBlockLayout`'s stricter relaxation is already naturally
+   covered by that same "use declared offsets as-is" policy, this could be
+   another `K6d`-style free win. Verify empirically against real CTS cases
+   before committing, the same way this session caught `variablePointers`.
+2. **(~2-4 hours)** `VK_EXT_separate_stencil_usage`: `Image.cpp`'s `Image` class
+   tracks one combined `Usage` field, not per-aspect — check whether any command
+   actually validates usage flags strictly enough that a stencil-specific usage
+   divergence would matter, or whether (like `VK_KHR_image_format_list`) the
+   chained struct's absence from any validation path makes this also a pure
+   no-op to accept.
+3. **(~30 min)** `VK_KHR_shader_float_controls`: not traced at all yet this
+   session or prior ones for actual feature-completeness (only known issue is an
+   old manifest-entry drift blocking the full `Vulkan14FeatureInventory.md`
+   regen).
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row
-(now narrower: 8 bits) and grep-trace one candidate's existing
-SPIR-V/wrapper/runtime plumbing before flipping any bit, following this
-session's lesson that the "nearly free" label needs re-verifying per bit.
+**Immediate next action for next session:** grep-trace `scalarBlockLayout`'s
+relationship to the already-implemented
+`VK_KHR_relaxed_block_layout`/`VK_KHR_uniform_buffer_standard_layout` "no
+re-layout imposed" policy in `SPIRVToLLVMPatterns.cpp`, then empirically verify
+against a real CTS case list (not just absence-of-rejection) before committing
+to it as `K6a`'s next split-off bit — same two-step discipline that caught
+`variablePointers` this session.
