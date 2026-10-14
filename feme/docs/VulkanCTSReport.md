@@ -138,8 +138,8 @@ Roadmap IDs point to the bounded follow-up work.
 | ~~Storage images without a format using `A2B10G10R10_SINT_PACK32`~~ (14, now 0 -- re-verified this session; already resolved as an incidental side effect of unrelated prior fixes, no dedicated code change needed) | 0 | L419(i) |
 | ~~Render-pass depth/stencil write conditions (9) and resolve (4)~~ (now 0 -- both fixed this session: the write-condition cluster via three stacked FeMe-side fixes to `initial_value` handling for a never-`OpStore`d `BuiltIn` output; the resolve cluster via an isolated upstream VK-GL-CTS fix to a `checkSupport` call that was silently skipping its own alternative-format capability check) | 0 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
-| Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,268** | |
+| ~~Draw output-location (2)~~, line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 4 | L419(j) |
+| **Total** | **1,266** | |
 
 ## Persistent abnormal outcomes
 
@@ -1490,3 +1490,68 @@ the deliberate half-precision rounding step.
 `Roadmap.md`: `L265`, `L419(e)`, `L424`, `L424(a)`, and `L424(b)` all
 struck through as done.
 
+
+## `L419(j)` (partial): draw output-location Row/Component mis-resolution fixed
+
+`CanonicalizeStage.cpp`'s `resolveOffsetWithinElement` forced the tight,
+ABI-padding-free array stride for every single-global `Input`-direction
+stage-IO access (`UseTightArrayStride || !IsOutput`), on the premise --
+true for a genuine SPIR-V matrix, but empirically false for an ordinary
+array-of-narrow-vectors varying (e.g. `vec3 color_in[3]`) -- that a bare
+`Input`/`Output` interface variable's GEPs always fold tight (the SPIR-V
+spec permits `ArrayStride`/`MatrixStride` decorations only on a
+`Block`/`BufferBlock` struct member, never on a bare interface variable).
+Both shapes erase to the identical LLVM `[N x <M x float>]` type with no
+decoration or residual-byte-offset signal left to distinguish them once
+erased -- `resolveRowComponent`'s own pre-existing `L272` comment already
+documented this exact array shape folding against *either* stride
+depending on `DataLayout` timing.
+
+This mis-resolved a plain `vec3[3]` `Input` varying's non-zero-row,
+component-0 reads as `(Row, Component=Row)` instead of `(Row,
+Component=0)`, failing the `output_location.array.*` pair with a
+complementary (`1-x`) value-mismatch signature -- CTS's own test-vertex-
+color data is specifically shaped to catch exactly this class of
+wrong-component bug.
+
+**Fixed** by tracking SPIR-V's own matrix-vs-array distinction *before* it
+is lost: `SPIRVToLLVMPatterns.cpp`'s `StageIOGlobalVariablePattern` now
+records whether a stage-IO global's declared type is (an array of) a
+genuine `spirv.matrix` via a new `feme.spirv.NarrowMatrix` metadata
+channel (mirroring the existing `feme.spirv.Int16Signed` one, same
+collect/attach shape in `StageIODecorations.cpp`/`SPIRVToLLVMTranslator.cpp`).
+`resolveOffsetWithinElement` now only forces the tight stride for an
+`Input` access when this metadata says the global is a genuine matrix,
+restoring `resolveRowComponent`'s own self-discovery (its exact-division
+test, not `L404`'s aggressive packed-row fallback) for the ordinary array
+case. This directly conflicted with, and required narrowing rather than
+reverting, `L404`'s prior fix for the genuine-matrix case -- the two
+scenarios share the identical byte-offset (16) and LLVM type shape
+(`[3 x <3 x float>]`) with opposite correct answers, resolvable only with
+this new, earlier-captured provenance bit.
+
+**Verified:**
+- New unit test
+  `CanonicalizeStageTest.ResolvesComponentZeroOfOrdinaryNarrowVectorArrayRowsAtPaddedStride`
+  covers the previously-regressed array case; the existing
+  `...AtTightStride` mat3 regression test's hand-written IR now carries
+  the new metadata too, matching what the real conversion attaches for a
+  genuine matrix. Full `CanonicalizeStageTest` suite: 143/143 Passed (+1
+  new test, 0 regressions).
+- `dEQP-VK.draw.renderpass.output_location.array.*`: **28/28 Pass** (was
+  26/28).
+- `dEQP-VK.draw.renderpass.output_location.*` (the wider group): 30/30
+  Pass.
+- `dEQP-VK.pipeline.pipeline_library.vertex_input.*mat*` (`L404`'s own
+  regression scope): 1,840/1,840 effective Pass (1,840 Pass, 2,026 Not
+  supported, 3 Warnings pre-existing and unrelated), **0 Fail** -- no
+  regression from narrowing `L404`'s fix.
+- `ninja check-feme`: 3,721/3,724 Passed, 3 Unsupported, 0 Failed (+1 new
+  test, 0 regressions).
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+  needed -- confirmed via grep; this is an internal compiler-correctness
+  fix with no feature/extension-surface change.
+
+`Roadmap.md`: `L419(j)` updated (not struck through -- 5 of its 7 cases
+remain: line continuity (2), geometry primitive ID (1), mandatory-feature
+reporting (1), own conformance-version reporting (1, `L412(g)` won't-fix)).
