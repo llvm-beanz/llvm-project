@@ -122071,3 +122071,48 @@ Still just `variablePointers` (confirmed by two prior sessions' empirical CTS ru
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6j` compiler-fix task, same scoping choice as `K6g`-`K6i`'s own sessions).
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit `K6a` row, pick `variablePointers`, and start from the exact failure list two prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot to the new `K6k` SSBO `RowMajor`-matrix store bug if a break from `K6a` is wanted.
+
+# Session: K6k `RowMajor`-matrix SSBO column store/load fixed
+
+**Fixed `K6k`.** `dEQP-VK.ssbo.layout.single_basic_array.scalar.row_major_mat2_store_cols` and 53 sibling `2_level_array`/`3_level_array` cases now pass. 3 commits: regression test, fix, docs.
+
+## What was broken
+
+`buffer Block { float padding; mat2 var[3]; }` (SSBO, `RowMajor`) -- writing one column of `var[i]` silently wrote the wrong bytes, ignoring which column was requested. Not a crash, not a compile error: just wrong numbers. 62 CTS cases failed this way.
+
+## Root cause
+
+`getMatrixColumnAccess` in `SPIRVToLLVMPatterns.cpp` only recognized a struct member that IS the matrix directly (`[member, colIdx]` -- 2 indices). It didn't know a member could be an *array* of matrices (`[member, elemIdx, colIdx]` -- 3 indices). When it declined to match, the access chain fell through to a different code path that doesn't understand `RowMajor` at all, and silently dropped the column index.
+
+## How it was found (useful lesson, read this before guessing at MLIR reproducers again)
+
+Two hand-written MLIR reproducers this session built from guesses at the shape both converted *correctly* -- a false "nothing's wrong here" signal that nearly derailed the investigation. The actual bug only showed up once the REAL SPIR-V was pulled straight from the CTS `.qpa` log's `<SpirVAssemblySource>` section (every `deqp-vk` run writes one). That log also had the GLSL source, which is how the `float padding;` member (shifting the matrix to struct index 1, not 0) was found -- a detail no amount of guessing reproduced.
+
+**Takeaway for next time:** when debugging an SPIRVToLLVM lowering bug against a specific CTS case, pull the real `.qpa` log's `<SpirVAssemblySource>`/`<ShaderSource>` FIRST. Don't hand-write an MLIR guess until the guess is confirmed to match the real shape byte-for-byte (struct member order, decoration values, everything). A guess that "looks right" and compiles cleanly proves nothing.
+
+## The fix
+
+Peel through the member's own array levels (any number of them, so `2_level_array`/`3_level_array` are covered by the same code) before requiring the innermost type to be the matrix, consuming one more `AccessChain` index per level. ~20 lines, `SPIRVToLLVMPatterns.cpp`.
+
+One bug while writing the fix: moved a bounds check (`Op.getIndices().size() != MemberSelectorPos + 2`) earlier in the function without noticing a different, unrelated shape (`RWStructuredBuffer<Doggo>`-style whole-struct array element access) relied on indexing past that same bound and crashed on `ninja check-feme`. Caught immediately because check-feme is cheap to run after every change -- fixed with a one-line early-return guard.
+
+## Verified
+
+1. New lit test fails without the fix (`git stash` + rebuild), passes with it.
+2. `ninja check-feme`: 3,732/3,735 pass (3 unsupported, pre-existing).
+3. Full `dEQP-VK.ssbo.*` sweep (12,225 cases): 4,687 -> 4,741 Pass, 67 -> 13 Fail. The 13 remaining failures (9 `random.scalar.*` + 4 `3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,vec3}`) are confirmed **pre-existing** -- same failure on a before/after rebuild -- and unrelated to this fix's shape. Split off as new roadmap row `K6l`.
+
+## Where `K6a` stands now
+
+Still just `variablePointers`. Untouched again this session (picked `K6k` instead, per the prior session's own suggestion).
+
+## Next steps
+
+1. **(~1 day)** New `K6l`: 8 of its 9 `random.scalar.*` failures are still `RowMajor`-matrix-related but in more deeply/irregularly nested shapes than this session's fix covers (matrix reached through a struct AND an array in the same chain). `getMatrixColumnAccessShape`'s array-of-struct branch likely needs the same array-peel treatment this session added to the direct-struct-member branch. Pull each failing case's real SPIR-V from its `.qpa` log first (see lesson above) before guessing at the shape.
+2. **(~half day, separate bug class)** `K6l`'s other residual: `random.scalar.41` plus 4 `3_level_unsized_array.scalar.*` cases fail with a *legalization* error (not a result mismatch) on a plain `vector<3x*>` member (no matrix involved) reached through a multiply-nested `rtarray`-of-`array`. Not yet triaged at all -- worth its own roadmap row once looked at, since it's unrelated to `RowMajor` matrices.
+3. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from the prior investigation's exact failure list (`PtrAccessChain` "explicitly marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointer types).
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either.
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done.
+
+**Immediate next action for next session:** pick `K6l`'s 8 `RowMajor` `random.scalar.*` cases (pull real SPIR-V from `.qpa` logs first) as the smallest direct continuation of this session's own fix, or pivot to `variablePointers` (`K6a`) for a change of pace.
