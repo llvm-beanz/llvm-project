@@ -1854,3 +1854,75 @@ a feature-bit flip. Reverted the `EntryPoints.cpp` change (and its
 would-be `PhysicalDeviceInfoTest.cpp` expectation update) in full;
 `variablePointers` stays `VK_FALSE` and remains in `K6a`'s bundle as a
 genuine implementation task for a future session, not a quick pick.
+
+### `scalarBlockLayout` tried and reverted (roadmap `K6a`, negative result)
+
+Grep-traced `SPIRVToLLVMPatterns.cpp`'s `layOutStructIfOffsetsMatch`
+(the struct-layout-from-declared-offsets function) first, following
+the discipline `variablePointers` established: its alignment-gating
+check (`getNaturalAlignmentIgnoringPacking`, shared by every one of
+its five retry tiers) validates each member's declared `Offset`
+against its full *natural/vector* ABI alignment, not its *scalar-
+component* alignment. That is exactly `relaxedBlockLayout`/
+`uniformBufferStandardLayout`'s level of relaxation (already
+documented in `AdvertisedPromotedExtensions.txt` as "declared
+offsets/strides used as-is, no std140 re-layout imposed") -- but
+`scalarBlockLayout` is spec'd strictly looser still: a `vec4` member
+may sit at any 4-byte-aligned offset, not just a 16-byte one. None of
+the five retry tiers change the `Alignment` value itself, only which
+substituted member type is tried against the same check.
+
+Flipping `EntryPoints.cpp`'s two `scalarBlockLayout` sites to
+`VK_TRUE` builds clean and passes the full `check-feme` suite
+(3,724/3,724 unit tests) -- same "looks free by grep/build alone"
+signal `variablePointers` gave before its real CTS run.
+
+Empirically running `dEQP-VK.ubo.2_level_array.scalar.*` (504 cases,
+previously 100% `NotSupported` with the feature `VK_FALSE`) disproved
+it: **152 Pass, 192 Fail, 160 NotSupported**. Every failure is
+`error: failed to legalize operation 'spirv.AccessChain' that was
+explicitly marked illegal`, against exactly the predicted shape: an
+`f32` member at offset 0 immediately followed by a `vec4` array at
+offset 4, which violates `vec4`'s natural 16-byte alignment and is
+precisely the kind of access a true scalar layout permits. Reverted
+the `EntryPoints.cpp` change in full; `scalarBlockLayout` stays
+`VK_FALSE` and remains in `K6a`'s bundle, needing a real relaxation of
+`layOutStructIfOffsetsMatch`'s alignment check (gated on the feature
+being enabled) before it can be advertised -- another genuine
+implementation task, not a quick pick.
+
+## `K6e`: `VK_EXT_separate_stencil_usage` advertised (roadmap K6e, measured impact)
+
+Genuinely free, same shape as `K6d`'s `VK_KHR_image_format_list`:
+`VkImageStencilUsageCreateInfo` adds no commands and has no feature
+bit of its own. `Image.h`'s `Image` class tracks only one combined
+`usage()` field, but grepping every caller of `Image::usage()` found
+none at all outside a single explanatory comment in `Image.cpp` --
+no command validates a view's/attachment's/descriptor's usage against
+it, per-aspect or otherwise, so there is no path that could observe or
+enforce the depth/stencil usage divergence this struct declares either
+way. Added `VK_EXT_separate_stencil_usage` to `PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions` name array.
+
+Extended the existing `DrawTest.AdvertisesDynamicRenderingExtension`
+extension-enumeration test rather than adding a new dedicated test,
+since this struct has no behavioral surface of its own to exercise
+beyond presence (same rationale as `K6b`/`K6c`'s advertisement-only
+assertions, as distinct from `K6d`'s dedicated `ImageTest`, which had
+an actual mutable-format-view behavior to exercise).
+
+Ran the full `dEQP-VK.renderpasses.*separate_stencil_usage*` mustpass
+group (207 cases, the only mustpass file referencing this struct by
+name): **0 Pass, 0 Fail, 207 NotSupported** -- unaffected by this
+change; every case still gates on unrelated multisample depth/stencil
+format support or `VK_KHR_extended_flags`, confirming the chained
+struct itself has no observable effect either way. Ran the broader
+`dEQP-VK.api.info.*` regression sweep (10,490 cases, since
+`PhysicalDeviceInfo.cpp`'s extension table is read by every API/
+extension-enumeration test in that group): **5,966 Pass, 0 Fail,
+4,524 NotSupported**. Zero regressions.
+
+`Vulkan14FeatureInventory.md`: unaffected (no feature bit).
+`VulkanExtensionInventory.md`: `VK_EXT_separate_stencil_usage` moved to
+Implemented. `Roadmap.md`: `K6e` split off `K6a` and struck through.
+

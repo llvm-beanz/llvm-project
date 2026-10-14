@@ -16,9 +16,9 @@ Current registry: VK-GL-CTS `c28b36293093`
 
 | Status | Count |
 |---|---:|
-| Advertised | 42 |
+| Advertised | 43 |
 | Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 48 |
+| Planned (in scope, not implemented) | 47 |
 | Not implemented | 194 |
 | **Total** | **302** |
 
@@ -150,7 +150,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_sample_locations` | Not implemented |  |
 | `VK_EXT_sampler_filter_minmax` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_EXT_scalar_block_layout` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_EXT_separate_stencil_usage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_EXT_separate_stencil_usage` | Implemented | roadmap K6e: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; adds no commands and has no feature bit of its own, and `Image::usage()` has no reader anywhere outside a comment, so there is no per-aspect usage validation path for a chained `VkImageStencilUsageCreateInfo` to disagree with |
 | `VK_EXT_shader_64bit_indexing` | Not implemented |  |
 | `VK_EXT_shader_atomic_float` | Not implemented |  |
 | `VK_EXT_shader_atomic_float2` | Not implemented |  |
