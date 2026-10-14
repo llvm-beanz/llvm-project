@@ -1037,6 +1037,28 @@ uint32_t Serializer::prepareConstant(Location loc, Type constType,
     return id;
   }
 
+  // A null-pointer constant (`OpConstantNull` on a pointer type) is
+  // represented as a type-free `UnitAttr` marker (see
+  // `Deserializer::getNullAttrForType`), since there is no meaningful
+  // payload to serialize. Unlike every other constant kind, this is
+  // handled before the dedup-by-attribute logic below: a bare `UnitAttr`
+  // carries no type of its own, so looking it up in `constIDMap` (keyed
+  // purely by `Attribute`, not by `(Attribute, Type)`) would incorrectly
+  // alias two different pointer types' null constants onto the same
+  // result <id>. Always emitting a fresh `OpConstantNull` instead is
+  // valid SPIR-V (constants need not be deduplicated) and avoids that
+  // hazard entirely.
+  if (isa<spirv::PointerType>(constType) && isa<UnitAttr>(valueAttr)) {
+    uint32_t typeID = 0;
+    if (failed(processType(loc, constType, typeID))) {
+      return 0;
+    }
+    uint32_t resultID = getNextID();
+    encodeInstructionInto(typesGlobalValues, spirv::Opcode::OpConstantNull,
+                          {typeID, resultID});
+    return resultID;
+  }
+
   // This is a composite literal. We need to handle each component separately
   // and then emit an OpConstantComposite for the whole.
 

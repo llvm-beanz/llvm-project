@@ -651,6 +651,34 @@ public:
   }
 };
 
+/// Converts a `spirv.Constant` with a pointer-type result and a `UnitAttr`
+/// value (the type-free null-pointer marker `getNullAttrForType` produces
+/// for `OpConstantNull` on a pointer type -- see `Deserializer.cpp`) to
+/// `llvm.mlir.zero`, MLIR's own null-pointer-constant idiom. `ConstantOp`'s
+/// own verifier (`verifyConstantType` in `SPIRVOps.cpp`) only accepts a
+/// `UnitAttr` for a pointer-typed result, so this pattern can rely on the
+/// value already being well-formed by construction.
+class ConstantNullPointerPattern
+    : public SPIRVToLLVMConversion<spirv::ConstantOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::ConstantOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::ConstantOp constOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<spirv::PointerType>(constOp.getType()) ||
+        !isa<UnitAttr>(constOp.getValue()))
+      return failure();
+
+    Type dstType = getTypeConverter()->convertType(constOp.getType());
+    if (!dstType)
+      return rewriter.notifyMatchFailure(constOp, "type conversion failed");
+
+    rewriter.replaceOpWithNewOp<LLVM::ZeroOp>(constOp, dstType);
+    return success();
+  }
+};
+
 class BitFieldSExtractPattern
     : public SPIRVToLLVMConversion<spirv::BitFieldSExtractOp> {
 public:
@@ -2848,7 +2876,7 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       IComparePattern<spirv::ULessThanOp, LLVM::ICmpPredicate::ult>,
 
       // Constant op
-      ConstantScalarAndVectorPattern,
+      ConstantScalarAndVectorPattern, ConstantNullPointerPattern,
 
       // Control Flow ops
       BranchConversionPattern, BranchConditionalConversionPattern,
