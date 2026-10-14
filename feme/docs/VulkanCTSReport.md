@@ -2355,3 +2355,68 @@ lowering path (`scalarBlockLayout`/`VK_EXT_scalar_block_layout`, already
 advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6k`
 struck through; new `K6l` added tracking the residual `random.scalar.*`
 and `3_level_unsized_array` failures this sweep surfaced.
+
+## `K6l`: scalar-layout `RuntimeArrayType`-of-vector stride fixed (roadmap K6l, measured impact)
+
+K6k's own sweep left 13 residual `dEQP-VK.ssbo.*` failures, bundled into
+roadmap row `K6l`: 9 `dEQP-VK.ssbo.layout.random.scalar.*` cases
+(`.3`, `.11`, `.15`, `.20`, `.41`, `.49`, `.60`, `.61`, `.88`) and 4
+`dEQP-VK.ssbo.layout.3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,
+vec3}` cases. The original guess (8 of the 9 `random.scalar.*` cases
+being a deeper `RowMajor`-matrix-nesting shape than K6k's own fix covers)
+turned out to be wrong once the real SPIR-V was pulled from `.3`'s own
+`.qpa` log: the actual failing shape has no nested matrix at all --
+`layout(scalar, ...) buffer Block { uint a; mat2x3 b; bvec4 c; vec3
+d[]; };`'s own trailing `d[]` member is a plain, direct `rtarray<vector
+<3xf32>, stride=12>`.
+
+Root-caused to `SPIRVToLLVMPatterns.cpp`'s `RuntimeArrayType`
+`TypeConverter.addConversion` lambda: upstream MLIR's own
+`getDefaultTypeSizeInBits` always rounds a vector type's own
+DataLayout-reported size up to the next power-of-two lane count (16
+bytes for `vector<3xf32>`, not its real 12-byte natural size) -- true
+for ordinary std430 layout (whose own declared `ArrayStride` for a
+`vec3` array is also 16, matching) but not for this scalar/tight-layout
+shape, whose declared `ArrayStride` stays 12. The lambda's own
+Stride-mismatch retry only ever widened a too-small element up to a
+*wider* declared Stride (the ordinary direction) -- never the reverse,
+narrower-than-element-size direction scalar layout produces here, so
+every `d[i]` read (any index, since even the first element's own Y/Z
+lanes are read through the oversized vector's own internal layout)
+computed the wrong byte offset.
+
+Fixed by falling back to the existing `getStridedTightVectorArrayType`
+tight, alignment-free array-of-scalars marker substitution (already
+used elsewhere in this file for the identical mismatch on a *fixed-size*
+array of vectors) whenever a *runtime*-sized array's own vector
+element's natural size exceeds its declared Stride.
+
+Added `spirv-to-llvm-scalar-runtime-array-of-vectors.mlir`, mirroring
+`random.scalar.3`'s own exact failing struct shape (confirmed via a
+temporary `FEME_DEBUG_DUMP_SPIRV_DIR` dump hook in `Pipeline.cpp`'s
+`copyShaderModuleWords`, reverted before this fix's own commit, that the
+hand-reconstructed SPIR-V byte-matches the real pipeline's own shader
+module).
+
+CTS:
+- `dEQP-VK.ssbo.layout.random.scalar.{3,11,15,20,49,60,61,88}` (8 of
+  K6l's original 9 cases): **8 Pass, 0 Fail** (previously 8 Fail).
+  `.41` remains Fail -- a distinct legalization-error bug class, split
+  off as new roadmap row `K6m`.
+- Full `dEQP-VK.ssbo.*` regression sweep (12,225 cases, via
+  `feme/utils/run_vulkan_cts.py`, with its mandatory solo
+  re-verification pass): **4,749 Pass (+8), 5 Fail (-8), 7,471
+  NotSupported** (unchanged). The 5 remaining failures are exactly
+  `random.scalar.41` plus the 4 `3_level_unsized_array.scalar.*` cases
+  -- confirmed as K6l's own pre-existing, untouched-by-this-fix
+  residual, now tracked as `K6m`.
+- Re-ran `ninja check-feme`: 3,733/3,736 pass, 0 fail, 3 unsupported
+  (pre-existing, unrelated); 1 new lit test added this session.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed: this is a pure bug fix in an already-advertised feature's own
+lowering path (`scalarBlockLayout`/`VK_EXT_scalar_block_layout`, already
+advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6l`
+struck through; new `K6m` added tracking the residual
+`random.scalar.41`/`3_level_unsized_array.scalar.*` legalization
+failures.
