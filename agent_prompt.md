@@ -63,19 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~5 min)** Decide whether to delete `backup-before-rebase-20261014` now
-   that the merge is build+test+CTS-sanity verified clean, or keep it longer as
-   a historical safety net. Leaning toward keeping it a while longer given the
-   scale of this merge (6,144 commits).
-2. **(standing)** Resume the actual roadmap work next session — this session was
-   100% merge-and-regression-fix, no roadmap-stage progress. Check
-   `Roadmap.md`'s open items (last known: `L419(j)` line_continuity
-   generalization in `EntryWrapper.cpp`, and `D1`'s mandatory-feature-bit-by-bit
-   closure) for where to pick back up.
-3. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE` decision — still
-   deferred.
+1. **(~2-4 hours)** Pick the next bit from `K6a`'s narrowed bundle:
+   `variablePointers`, `shaderDrawParameters`, `scalarBlockLayout`,
+   `samplerFilterMinmax`, `drawIndirectCount`, `VK_KHR_image_format_list`,
+   `VK_EXT_separate_stencil_usage`, or `VK_KHR_shader_float_controls`.
+   `shaderDrawParameters` is flagged as likely-cheap (builtins already mapped by
+   `CanonicalizeStage.cpp`) -- good next pick by the same "nearly free" logic
+   that made `K6b` tractable this session.
+2. **(~1-2 hours, hygiene)** Do the deferred **full regeneration** of
+   `Vulkan14FeatureInventory.md` once `VK_KHR_shader_float_controls`'s manifest
+   entry and the two `VK_VERSION_1_4` limit notes
+   (`nonStrictSinglePixelWideLinesUseParallelogram`/`nonStrictWideLinesUseParallelogram`)
+   are brought back in sync with the doc's current hand-verified state -- same
+   drift pattern as this session's `VK_KHR_depth_stencil_resolve` fix, just not
+   yet tracked down to its source.
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+   re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s current open
-items (the merge didn't touch it) and resume wherever the last non-merge session
-left off — most likely `L419(j)`'s `line_continuity` pair or `D1`'s
-mandatory-feature work.
+**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row
+(now narrowed) and pick `shaderDrawParameters` or another bundle bit, following
+the same investigate-then-flip-bit pattern as `K6b`.
