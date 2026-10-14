@@ -63,26 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
-   untriaged across many sessions now. Mixed bag per `Roadmap.md`: own
-   conformance-version reporting (won't-fix per `L412(g)`), draw output
-   location (2), rasterization line continuity (2), geometry primitive ID
-   (1), mandatory-feature reporting (1). Don't lump these together --
-   triage each signature separately, starting with whichever has the most
-   cases (draw output location or rasterization line continuity, 2 each).
-2. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
-   several sessions' handoffs now, several sessions in a row without
-   re-verifying. Run `git log --oneline --all | grep -i L418` once before
-   ever touching it again -- still not run this session either (not
-   touched, no reason to).
-3. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
-   `L418`-`L419` roadmap counts synced after every fix -- done this
-   session (`L419(e)`/`L265`/`L424`/`L424(a)`/`L424(b)` all struck
-   through; inventories confirmed via grep to need no change).
-4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
-   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
-   discrepancy a new regression -- not exercised this session, no
-   `check-hlsl-feme-vk` work done.
-5. **(unresolved, carried for many sessions)** Decide whether to revert
-   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
-   revisited, no new information this session either way.
+1. **(~1 day)** Finish root-causing `L419(j)`'s `output_location` pair:
+   open `StageIOArrayAccessChainPattern` in `SPIRVToLLVMPatterns.cpp` and
+   trace the exact GEP/extract sequence it emits for a dynamic row index
+   into a `vec3`-element array followed by a `.x`/`CompositeExtract`, vs.
+   the same for `vec2`/`vec3`-full (both of which work). Likely suspects:
+   an index computed from the *output* component count being reused for
+   the *input* read (a 3-vs-1 width mismatch somewhere in address/stride
+   math), or a bitcast/GEP that assumes matching vector widths on both
+   sides of the dynamic access chain. Once found: fix, add a unit test at
+   the SPIR-V→LLVM lowering phase (narrowest-possible repro: a minimal
+   module with a dynamically-indexed `vec3[N]` input array read via
+   `.x`-only `CompositeExtract` into a scalar output array), rebuild, and
+   confirm both `output_location` cases + the full 28-case group pass with
+   0 regressions.
+2. **(~2-4 hours)** `L419(j)`'s `line_continuity` pair (`line-strip`,
+   `polygon-mode-lines`) — still untriaged, next signature after
+   `output_location` closes.
+3. **(~1-2 hours each)** `L419(j)`'s remaining 2 singletons:
+   `primitive_id.matching` and `device_mandatory_features` — still
+   untriaged.
+4. **(standing)** Keep doc sync, offload-test-suite pattern check, and the
+   `CMAKE_BUILD_TYPE` decision on the list for whenever they become
+   relevant.
