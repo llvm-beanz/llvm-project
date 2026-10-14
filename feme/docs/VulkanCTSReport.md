@@ -2119,3 +2119,87 @@ to `yes` (roadmap K6h). `VulkanExtensionInventory.md`:
 `VK_KHR_draw_indirect_count` moved from "Planned (in scope, not
 implemented)" to "Implemented". `Roadmap.md`: `K6h` split off `K6a`
 and struck through.
+
+## `K6i`: `scalarBlockLayout` implemented via struct/array/matrix offset-layout fixes (roadmap K6i, measured impact)
+
+A prior session's grep-only read of `SPIRVToLLVMPatterns.cpp`'s
+`layOutStructIfOffsetsMatch` found its alignment-gating check validating
+each member's declared offset against full natural/vector ABI alignment
+rather than scalar-component alignment, and a quick empirical flip
+surfaced 192 `dEQP-VK.ubo.2_level_array.scalar.*` failures confirming a
+real compiler gap. This session root-caused and fixed three distinct,
+related bugs in the struct/array/matrix offset-layout conversion logic,
+all stemming from the existing "tight vector/matrix substitution"
+infrastructure only ever handling one level of array nesting:
+
+1. The struct-member-list-building loop's plain `TypeConverter::convertType`
+   call failed outright for a *single-level* tight array
+   (`!spirv.array<N x vector<M x T>>` with a scalar-tight, non-SIMD-rounded
+   stride), aborting the whole enclosing struct's conversion before any
+   later retry tier ran. Fixed via a fallback to a new recursive helper,
+   `getTightNestedArrayOfVectorsOrMatricesType`, generalizing the existing
+   single-level substitution to peel arbitrary-depth `spirv::ArrayType`
+   nesting around a vector/matrix element. The same fallback was wired
+   into `rewriteBlockAccess`'s own standalone conversion call, which hit
+   an analogous failure for UBO/SSBO resource-handle-based access.
+2. `layOutStructIfOffsetsMatch`'s "natural alignment overshoot" pre-check
+   (`NaturalCursor > DeclaredOffset`) unconditionally rejected placements
+   where a member's natural (SIMD-rounded) alignment exceeded its declared
+   offset, even inside the existing last-resort `AllowInteriorPad` retry
+   tier where the struct is always built packed anyway (no implicit
+   alignment gap is ever actually inserted by LLVM). Fixed by relaxing the
+   rejection to fire only when the raw, unaligned running byte cursor
+   itself exceeds the declared offset -- the one placement no amount of
+   synthesized padding could fix.
+3. The rewritten array-peeling applicability check in the
+   `WithArraysAndMatrices` retry tier incorrectly matched **bare
+   (non-array) vector/matrix members** too, since peeling zero array
+   levels is a no-op leaving the peeled type unchanged, and a bare
+   `VectorType` member still passes `isa<VectorType>`. The caller then
+   treated the helper's correct "not applicable, not an array" `nullptr`
+   as a hard failure of the *whole* retry, rather than "already handled
+   by the earlier `VectorOnly` tier." Found by bisecting a regression in
+   the existing `SPIRVToLLVMTest.cpp` `OutOfOrderOffsetInterfaceBlockLegalizes`
+   unit test (a physically-reordered struct with a bare `mat4x2` member)
+   after fixes #1+#2 landed. Fixed with an explicit
+   `isa<spirv::ArrayType>(ElementTy)` guard before peeling begins.
+
+Flipped both `EntryPoints.cpp` `scalarBlockLayout` sites to `VK_TRUE`.
+Added `spirv-to-llvm-nested-array-of-vectors-tight-stride.mlir` (bug #1)
+and `spirv-to-llvm-nested-array-of-matrices-scalar-offset.mlir` (bug #2)
+lit tests; confirmed the pre-existing `OutOfOrderOffsetInterfaceBlockLegalizes`
+unit test now serves as bug #3's regression guard; updated
+`PhysicalDeviceInfoTest.cpp`'s
+`PreVulkan12PromotionDedicatedFeatureStructsAreFullyOverwritten` expected
+value (`ScalarBlockLayout.scalarBlockLayout` from `VK_FALSE` to `VK_TRUE`,
+matching the now-advertised feature).
+
+CTS (methodology note: `dEQP-VK.ubo.random.*`'s shader content is
+dynamically generated based on whether the device advertises
+`scalarBlockLayout`, so a true pre-fix baseline -- same code, feature bit
+left `VK_FALSE` -- was run alongside each measurement below to distinguish
+genuine regressions from newly-exercised-and-failing content):
+
+- `dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.scalar.*`
+  (1,512 cases): **1,032 Pass, 0 Fail, 480 NotSupported** (previously 32,
+  192, and 192 failures respectively before this session's fixes).
+- Full `dEQP-VK.ubo.*` regression sweep (13,240 cases): **8,293 Pass, 25
+  Fail, 4,922 NotSupported**. All 25 failures are
+  `single_nested_struct.*scalar*` (24 cases) or `random.scalar.83` (1
+  case) -- a **separate**, still-open nested-struct scalar-layout gap
+  (`VK_ERROR_INITIALIZATION_FAILED` on a struct containing a nested-struct
+  member at a scalar-tight offset), distinct from this session's
+  vector/matrix-array-nesting fix and split off as a new roadmap follow-up
+  (`K6j`). An interim measurement with only bugs #1+#2 fixed (before bug
+  #3's regression guard landed) showed 340 failures on this same sweep;
+  bug #3's fix alone closed 315 of those. Zero non-scalar-layout
+  regressions observed at any point.
+- Re-ran `ninja check-feme`: 3,730/3,733 pass, 0 fail, 3 unsupported
+  (pre-existing, unrelated); 2 new lit tests added this session.
+
+`Vulkan14FeatureInventory.md`: `scalarBlockLayout` feature bit and
+`VK_EXT_scalar_block_layout` extension both moved to `yes` (roadmap K6i).
+`VulkanExtensionInventory.md`: `VK_EXT_scalar_block_layout` moved from
+"Planned (in scope, not implemented)" to "Implemented". `Roadmap.md`:
+`K6i` split off `K6a` and struck through; new `K6j` added tracking the
+residual nested-struct scalar-layout gap as future work.

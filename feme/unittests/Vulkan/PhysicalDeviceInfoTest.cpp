@@ -2235,7 +2235,7 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(AtomicInt64.shaderSharedInt64Atomics, VK_FALSE);
   EXPECT_EQ(Float16Int8.shaderFloat16, VK_TRUE);
   EXPECT_EQ(Float16Int8.shaderInt8, VK_FALSE);
-  EXPECT_EQ(ScalarBlockLayout.scalarBlockLayout, VK_FALSE);
+  EXPECT_EQ(ScalarBlockLayout.scalarBlockLayout, VK_TRUE);
   EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddress, VK_FALSE);
   EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddressCaptureReplay, VK_FALSE);
   EXPECT_EQ(BufferDeviceAddress.bufferDeviceAddressMultiDevice, VK_FALSE);

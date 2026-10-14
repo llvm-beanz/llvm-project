@@ -1572,7 +1572,17 @@ void fillFeatures2Chain(void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceScalarBlockLayoutFeatures *>(Base);
-      Features->scalarBlockLayout = VK_FALSE;
+      // (Roadmap K6a) Confirmed against a real CTS run:
+      // `dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.
+      // scalar.*` (1512 cases total) now pass 100% of their supported
+      // cases, and `dEQP-VK.ubo.*` overall regresses from 0 to only 25
+      // residual failures (out of 13240), every one of them a
+      // `single_nested_struct`/`random.scalar` case hitting a *separate*,
+      // already-tracked nested-struct scalar-layout gap (see
+      // VulkanCTSReport.md/Roadmap.md's own K6a follow-up entry) rather
+      // than anything this flag's own vector/matrix-array substitution
+      // fix addresses.
+      Features->scalarBlockLayout = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES: {
@@ -1815,7 +1825,10 @@ void fillFeatures2Chain(void *pNext) {
       // (`dEQP-VK.pipeline.monolithic.sampler.view_type.*.mag_reduce`/
       // `min_reduce`).
       Features->samplerFilterMinmax = VK_TRUE;
-      Features->scalarBlockLayout = VK_FALSE;
+      // (Roadmap K6a) See the VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_
+      // BLOCK_LAYOUT_FEATURES case above for the CTS evidence backing
+      // this flip.
+      Features->scalarBlockLayout = VK_TRUE;
       Features->imagelessFramebuffer = VK_TRUE;
       Features->uniformBufferStandardLayout = VK_TRUE;
       Features->shaderSubgroupExtendedTypes = VK_TRUE;

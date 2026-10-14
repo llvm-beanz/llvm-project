@@ -157,7 +157,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | yes |  |
 | feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | yes |  |
 | feature | VK_VERSION_1_2 | `samplerFilterMinmax` | yes | roadmap K6g |
-| feature | VK_VERSION_1_2 | `scalarBlockLayout` | no |  |
+| feature | VK_VERSION_1_2 | `scalarBlockLayout` | yes | roadmap K6a: `SPIRVToLLVMPatterns.cpp`'s offset-struct layout conversion now generalizes its tight vector/matrix substitution to arbitrary array nesting depth and relaxes its ABI-alignment pre-check for the `AllowInteriorPad` retry tier, confirmed against real CTS (`dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.scalar.*` 100% of supported cases; `dEQP-VK.ubo.*` overall 25/13240 residual failures, all `single_nested_struct`/`random.scalar` nested-struct-member cases -- a separate, still-open gap, see Roadmap.md) |
 | feature | VK_VERSION_1_2 | `imagelessFramebuffer` | yes |  |
 | feature | VK_VERSION_1_2 | `uniformBufferStandardLayout` | yes |  |
 | feature | VK_VERSION_1_2 | `shaderSubgroupExtendedTypes` | yes |  |
@@ -176,7 +176,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_2 | `VK_EXT_descriptor_indexing` | no |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_host_query_reset` | yes | core, not advertised by name: roadmap C6, vkResetQueryPool (QueryPool.cpp) |
 | extension | VK_VERSION_1_2 | `VK_EXT_sampler_filter_minmax` | no |  |
-| extension | VK_VERSION_1_2 | `VK_EXT_scalar_block_layout` | no |  |
+| extension | VK_VERSION_1_2 | `VK_EXT_scalar_block_layout` | yes | core, not advertised by name: roadmap K6a, `scalarBlockLayout` feature bit VK_TRUE (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_EXT_separate_stencil_usage` | no |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_shader_viewport_index_layer` | yes | core, not advertised by name: roadmap H3, shaderOutputViewportIndex/shaderOutputLayer both VK_TRUE (Executor.cpp's VSViewportOut/VSLayerOut) |
 | extension | VK_VERSION_1_2 | `VK_KHR_8bit_storage` | no |  |
