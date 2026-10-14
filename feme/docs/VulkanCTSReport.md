@@ -135,10 +135,10 @@ Roadmap IDs point to the bounded follow-up work.
 | API all-format color blits (20) and conformance-version reporting (1) | 21 | L419(e), L419(j) |
 | GLSL loops, demote, derivatives, and loop-in-switch cases | 18 | L419(h) |
 | ~~Storage images without a format using `A2B10G10R10_SINT_PACK32`~~ (14, now 0 -- re-verified this session; already resolved as an incidental side effect of unrelated prior fixes, no dedicated code change needed) | 0 | L419(i) |
-| Render-pass depth/stencil write conditions (9) and resolve (4) | 13 | L419(k) |
+| ~~Render-pass depth/stencil write conditions~~ (9, now 0 -- fixed this session: `StageIOGlobalVariablePattern` was silently dropping a stage-IO global's `initial_value` during SPIR-V-to-LLVM conversion, `CanonicalizeStage.cpp`'s unused-global signature-discovery fallback unconditionally excluded every `BuiltIn` global regardless of a real initializer, and no code synthesized the implicit "initial store" the SPIR-V/Vulkan spec requires for a never-`OpStore`d-but-initialized output -- all three fixed) and resolve (4, not yet triaged) | 4 | L419(k) |
 | Mesh-shader properties and miscellaneous correctness after removing the 58 CTS-side failures | 11 | L419(f) |
 | Draw output-location (2), line continuity (2), geometry primitive ID (1), and mandatory-feature reporting (1) | 6 | L419(j) |
-| **Total** | **1,281** | |
+| **Total** | **1,272** | |
 
 ## Persistent abnormal outcomes
 
