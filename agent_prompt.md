@@ -63,23 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Pick the next bit from `K6a`'s narrowed bundle:
-   `variablePointers`, `shaderDrawParameters`, `scalarBlockLayout`,
-   `samplerFilterMinmax`, `drawIndirectCount`, `VK_KHR_image_format_list`,
-   `VK_EXT_separate_stencil_usage`, or `VK_KHR_shader_float_controls`.
-   `shaderDrawParameters` is flagged as likely-cheap (builtins already mapped by
-   `CanonicalizeStage.cpp`) -- good next pick by the same "nearly free" logic
-   that made `K6b` tractable this session.
-2. **(~1-2 hours, hygiene)** Do the deferred **full regeneration** of
-   `Vulkan14FeatureInventory.md` once `VK_KHR_shader_float_controls`'s manifest
-   entry and the two `VK_VERSION_1_4` limit notes
-   (`nonStrictSinglePixelWideLinesUseParallelogram`/`nonStrictWideLinesUseParallelogram`)
-   are brought back in sync with the doc's current hand-verified state -- same
-   drift pattern as this session's `VK_KHR_depth_stencil_resolve` fix, just not
-   yet tracked down to its source.
+1. **(~2-4 hours)** Pick the next bit from `K6a`'s further-narrowed bundle:
+   `variablePointers`, `scalarBlockLayout`, `samplerFilterMinmax`,
+   `drawIndirectCount`, `shaderOutputViewportIndex`/`shaderOutputLayer`,
+   `VK_KHR_image_format_list`, `VK_EXT_separate_stencil_usage`, or
+   `VK_KHR_shader_float_controls`. No bit in this remaining list has been
+   flagged "likely-cheap" yet -- worth a quick 15-minute grep sweep per
+   candidate (same shape as this session's `shaderDrawParameters` trace) before
+   committing to one, since this session showed that "nearly free" labels aren't
+   always accurate.
+2. **(~1-2 hours, hygiene)** Still-deferred **full regeneration** of
+   `Vulkan14FeatureInventory.md`, blocked on fixing
+   `VK_KHR_shader_float_controls`'s manifest entry and the two `VK_VERSION_1_4`
+   limit notes first.
 3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row
-(now narrowed) and pick `shaderDrawParameters` or another bundle bit, following
-the same investigate-then-flip-bit pattern as `K6b`.
+(now narrower: 8 bits) and grep-trace one candidate's existing
+SPIR-V/wrapper/runtime plumbing before flipping any bit, following this
+session's lesson that the "nearly free" label needs re-verifying per bit.
