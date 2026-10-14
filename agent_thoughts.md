@@ -121898,3 +121898,47 @@ All 4 remaining bits (`variablePointers`, `scalarBlockLayout`, `samplerFilterMin
 6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check — not exercised this session either, no `check-hlsl-feme-vk` work done.
 
 **Immediate next action for next session:** decide whether to keep narrowing `K6a` (pick `samplerFilterMinmax` as the smallest real task) or pivot to a different roadmap area now that `K6a`'s "quick advertisement wins" are exhausted.
+
+# Session: `K6g` closed -- `samplerFilterMinmax` real min/max reduction math implemented
+
+Device check: `FeMe CPU Vulkan Device`, confirmed (twice -- re-checked after context compaction mid-session too, per standing instruction).
+
+## What happened
+
+Picked `samplerFilterMinmax` as the smallest of `K6a`'s 4 remaining real-implementation bits (prior session's recommendation). Unlike `K6b`-`K6f`'s pure advertisement gaps, this one needed actual math:
+
+1. **CTS coverage was hiding.** A broad/exact mustpass grep for `filter_minmax`/`minmax` found nothing. Turned out this checkout's static mustpass `.txt` files **exclude the entire `sampler.view_type.*.{mag,min}_reduce` test area** -- confirmed by dumping `deqp-vk`'s full live case list (`--deqp-runmode=stdout-caselist`) instead of trusting mustpass. **Lesson banked for future sessions: when a mustpass grep comes up empty, cross-check the live case dump before concluding "no CTS coverage."**
+2. **Implemented the real math** in `FeMeRuntimeCPU.c`: two new `femeRTv4f32Min`/`femeRTv4f32Max` helpers, threaded `ReductionMode`-conditional branching into every bilinear/trilinear/cube-seamless blend site (2D/1D/3D/cube, single-level and mip-blend variants). Depth-comparison paths left untouched (spec forbids combining with filterMinmax).
+3. **Wired the Vulkan layer**: `Image.cpp`'s `Sampler` constructor now parses a chained `VkSamplerReductionModeCreateInfo` from `pNext`.
+4. **Advertised it**: `Format.cpp` now sets `FILTER_MINMAX_BIT` wherever `FILTER_LINEAR_BIT` is set; `EntryPoints.cpp` flips the feature bit and both properties structs to `VK_TRUE`; `PhysicalDeviceInfo.cpp` adds the extension name.
+5. **Caught and fixed a real regression along the way**: the initial `Format.cpp` rule (minmax bit follows linear bit) missed `D16_UNORM`/`D32_FLOAT` -- the spec's mandatory-minmax-format table requires these two single-component depth formats to support `FILTER_MINMAX_BIT` *independent* of `FILTER_LINEAR_BIT` (reduction only needs multiple taps, not real bilinear interpolation). Caught by a genuine `dEQP-VK.api.info.format_properties.d16_unorm` failure, not by inspection -- fixed directly in each format's switch case.
+6. **Found and fixed a pre-existing doc-sync gap unrelated to this session's own change**: `AdvertisedPromotedExtensions.txt` was missing the `K6e`/`K6f` rows entirely, despite both being implemented, advertised, and tested (confirmed via `DrawTest.cpp`'s existing assertions and `PhysicalDeviceInfo.cpp`'s own code comments). Backfilled both rows using their `PhysicalDeviceInfo.cpp` comment wording, alongside adding the new `K6g` row -- noted as a prior-session gap, not misattributed as new work.
+
+## CTS results
+
+- `dEQP-VK.pipeline.monolithic.sampler.view_type.*.format.r8g8b8a8_unorm.{mag,min}_reduce.*` (420 cases, all view types): **252 Pass, 0 Fail, 168 NotSupported**. Traced the `NotSupported` cases to `vktPipelineImageSamplingInstance.cpp`'s `checkSupportImageSamplingInstance`, which unconditionally rejects any non-identity/non-R `componentMapping.r` *before* ever querying the device's actual `filterMinmaxImageComponentMapping` property (a separate, correct query exists later in the same file but never gets reached) -- a CTS test-source quirk, not a driver gap. Out of scope for a self-contained fix since VK-GL-CTS is a wholly separate checkout, not part of this repo.
+- `dEQP-VK.api.info.*` (10,490 cases): 1 failure (`d16_unorm`) before the depth-format fix, **0 failures** after.
+- `ninja check-feme`: 3,725/3,728 Passed, 0 Failed, 3 Unsupported, both before and after every code change (two unit tests needed updating to match the new truthful values: `PhysicalDeviceProperties2Test.SamplerFilterMinmaxPropertiesIsFullyOverwritten` and `DrawTest.AdvertisesDynamicRenderingExtension`'s extension count/list).
+
+## Commits (5, each independently buildable except where noted)
+
+1. Runtime math + Vulkan-layer `pNext` parsing (`FeMeRuntimeCPU.c`, `Image.cpp`).
+2. Feature bit + format-feature-flag + extension-name advertisement (`EntryPoints.cpp`, `Format.cpp`, `PhysicalDeviceInfo.cpp`).
+3. Unit test updates (`DrawTest.cpp`, `PhysicalDeviceInfoTest.cpp`).
+4. Bookkeeping doc sync + `K6e`/`K6f` backfill (`AdvertisedPromotedExtensions.txt`, `PlannedExtensions.txt`).
+5. `Roadmap.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`/`VulkanCTSReport.md` sync.
+6. (this file, its own commit as usual).
+
+## Where `K6a` stands now
+
+3 bits remain, all genuine implementation tasks (not advertisement gaps), per last session's investigation: `variablePointers` (SPIRVToLLVMPatterns.cpp lowering gaps), `scalarBlockLayout` (layOutStructIfOffsetsMatch alignment relaxation), `drawIndirectCount` (no entry points exist at all -- new-command task). `samplerFilterMinmax` is now closed, split off as `K6g`.
+
+## Next steps
+
+1. **(~1 day)** Pick the next `K6a` bit. `drawIndirectCount` is probably the next smallest now (straightforward indirect-count semantics, no compiler work, just new `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` entry points) -- `variablePointers`/`scalarBlockLayout` both require real `SPIRVToLLVMPatterns.cpp` changes and are likely bigger.
+2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 3 bits should get individually-tracked roadmap rows now that each is a confirmed real task, rather than staying bundled.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session either; scope stayed tightly on `K6g`.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration (the underlying `AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files are still stale from `K6b`-`K6f`'s own prior sessions, separate from the `AdvertisedPromotedExtensions.txt` gap fixed this session).
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the single `K6g` CPU-runtime task).
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-3-bit `K6a` row and pick `drawIndirectCount` (new commands, no compiler work) as the next likely-smallest real implementation task, or pivot to one of the standing backlog items if roadmap-stage work needs a break.
