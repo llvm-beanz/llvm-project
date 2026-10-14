@@ -1926,3 +1926,37 @@ extension-enumeration test in that group): **5,966 Pass, 0 Fail,
 `VulkanExtensionInventory.md`: `VK_EXT_separate_stencil_usage` moved to
 Implemented. `Roadmap.md`: `K6e` split off `K6a` and struck through.
 
+## `K6f`: `VK_KHR_shader_float_controls` advertised (roadmap K6f, measured impact)
+
+Genuinely free, properties-only like `K6e`: no commands, no feature
+bit, and `VkPhysicalDeviceFloatControlsProperties` is already filled
+in truthfully by a prior session's `L414(a)` fix --
+`shaderSignedZeroInfNanPreserveFloat{16,32}` genuinely `VK_TRUE`,
+every other field the conservative "least capable" value, matching
+`VkPhysicalDeviceVulkan12Properties`'s mirrored fields exactly. Added
+`VK_KHR_shader_float_controls` to `PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions` name array.
+
+Extended the existing `DrawTest.AdvertisesDynamicRenderingExtension`
+extension-enumeration test, same rationale as `K6e`.
+
+Ran the 13,638-case `dEQP-VK.spirv_assembly.instruction.*float_controls*`
+group: **733 Pass, 4 Fail, 12,901 NotSupported**. Investigated the 4
+failures (`dEQP-VK.spirv_assembly.instruction.compute.
+float_controls_extensionless.{spirv1p4,vulkan1_2}.{fp16,fp32}_signed_
+zero_inf_nan_preserve`): `error: unhandled deserialization of OpNop`
+during pipeline creation, a pre-existing SPIR-V-deserializer gap
+unrelated to this extension (the `extensionless` case name signals
+these never check for `VK_KHR_shader_float_controls` at all -- they
+exercise plain Vulkan-1.2-core/SPIR-V-1.4 float-controls execution
+modes directly). Confirmed by reverting `PhysicalDeviceInfo.cpp`'s
+change and re-running: identical `OpNop` failure either way, so this
+is 0 new failures, not a regression. Ran the broader
+`dEQP-VK.api.info.*` regression sweep (10,490 cases): **5,966 Pass,
+0 Fail, 4,524 NotSupported**. Zero regressions.
+
+`Vulkan14FeatureInventory.md`: unaffected (no feature bit).
+`VulkanExtensionInventory.md`: `VK_KHR_shader_float_controls` moved to
+Implemented. `Roadmap.md`: `K6f` split off `K6a` and struck through.
+
+

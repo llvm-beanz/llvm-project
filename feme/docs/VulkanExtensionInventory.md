@@ -16,9 +16,9 @@ Current registry: VK-GL-CTS `c28b36293093`
 
 | Status | Count |
 |---|---:|
-| Advertised | 43 |
+| Advertised | 44 |
 | Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 47 |
+| Planned (in scope, not implemented) | 46 |
 | Not implemented | 194 |
 | **Total** | **302** |
 
@@ -288,7 +288,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_shader_draw_parameters` | Implemented | roadmap K6c: core-promoted into Vulkan 1.1 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.1 device |
 | `VK_KHR_shader_expect_assume` | Advertised |  |
 | `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_shader_float_controls` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_shader_float_controls` | Implemented | roadmap K6f: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; properties-only, no commands, no feature bit, and `VkPhysicalDeviceFloatControlsProperties` is already filled in truthfully (roadmap L414(a)) |
 | `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F3 |
 | `VK_KHR_shader_fma` | Not implemented |  |
 | `VK_KHR_shader_integer_dot_product` | Advertised |  |
