@@ -121354,3 +121354,83 @@ was temporary debug instrumentation in VK-GL-CTS's
 7. **(unresolved, carried for several sessions)** Decide whether to
    revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
    still not revisited.
+
+# Session: L424(a)/(b) fixed -- ASTC blit precision, L419(e)/L265 fully closed
+
+**Device check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+Vulkan Device`. Confirmed.
+
+**Fixed this session**: the 12-case `astc_{8x8,10x5,12x12}_unorm_block` ->
+`a2b10g10r10_snorm_pack32` cluster the last session root-caused but didn't
+fix (`L265`). `L419(e)` (20 cases) is now fully closed.
+
+**The fix** (`feme/lib/Vulkan/ImageOps.cpp`): filtered (non-NEAREST) blits
+from a non-sRGB ASTC source now decode via `decodeASTCBlockHDR` (already
+bit-exact, no changes needed there) instead of the lossy 8-bit
+`decodeASTCBlock`, then round each component to half precision
+(`roundToHalfPrecision`, new helper, round-trips through
+`llvm::APFloat::IEEEhalf()`) before blending. That half-round step is the
+actual fix -- it replicates the exact precision budget CTS's own reference
+decoder applies (`HALF_FLOAT`-precision decompressed ASTC textures) before
+blending texels, turning FeMe's artificial exact-`0.5` ties back into the
+same non-tie values CTS computes. Every other ASTC caller (NEAREST,
+sRGB footprints, texture sampling, upload) is untouched.
+
+**Found and fixed a regression I introduced mid-session**: first version
+routed the half-rounded float through the existing `R16G16B16A16_UNORM`
+`unpackColor` path (reuse, less new code). That silently broke two
+*different* pixels in the same test (`(44,33)`/`(34,40)`) -- caught via a
+qpa PNG diff against a saved pre-fix baseline. Cause: `65535` is odd, so an
+exact `0.5` scaled to 16 bits lands on `32767.5`, and `std::lround` rounds
+that *away from zero* to `32768` -- `32768/65535.0 = 0.500007629...`, a
+brand new spurious tie-break where an exact tie should have stayed exact.
+Fixed by dropping the 16-bit round-trip and writing the half-rounded
+floats straight into the fetch's output, no further integer rounding.
+
+**Verification**:
+1. Original repro (`astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`): 0/1 -> 1/1.
+2. Full 12-case cluster (168 cases incl. unsupported): 112 Passed, **0 Failed**, 56 Not supported.
+3. Full `blit_image.*` sweep (73,839 cases): 26,941 Passed, **0 Failed**, 46,898 Not supported.
+4. New unit test `ImageOpsTest.FilteredASTCBlitPreservesBlendPrecision` (two adjacent void-extent ASTC blocks, alpha `1`/`65535`, confirms 50/50 blend rounds up, not down).
+5. `ninja check-feme`: 3,720/3,723 Passed, 3 Unsupported, **0 Failed**.
+
+**Commits this session**:
+1. `[feme] Fix ASTC blit-blend precision loss for narrow SNORM channels (L424)` -- the fix + unit test.
+2. `[feme] Update roadmap/CTS report: L419(e)/L265/L424 closed` -- docs.
+3. This `agent_thoughts.md` commit.
+
+No outside-FeMe fix needed this session. VK-GL-CTS tree stayed clean
+throughout (only untracked `build/`/`run/` artifacts, no tracked-file
+diffs) -- confirmed via `git status --short` before finishing.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: confirmed via
+grep to need no change (internal precision fix, no new feature/extension
+surface).
+
+`L419(j)` not touched this session -- spent the whole session on
+`L424`/`L265` plus its mid-session regression.
+
+## Next steps
+
+1. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged across many sessions now. Mixed bag per `Roadmap.md`: own
+   conformance-version reporting (won't-fix per `L412(g)`), draw output
+   location (2), rasterization line continuity (2), geometry primitive ID
+   (1), mandatory-feature reporting (1). Don't lump these together --
+   triage each signature separately, starting with whichever has the most
+   cases (draw output location or rasterization line continuity, 2 each).
+2. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs now, several sessions in a row without
+   re-verifying. Run `git log --oneline --all | grep -i L418` once before
+   ever touching it again -- still not run this session either (not
+   touched, no reason to).
+3. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+   `L418`-`L419` roadmap counts synced after every fix -- done this
+   session (`L419(e)`/`L265`/`L424`/`L424(a)`/`L424(b)` all struck
+   through; inventories confirmed via grep to need no change).
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
+   discrepancy a new regression -- not exercised this session, no
+   `check-hlsl-feme-vk` work done.
+5. **(unresolved, carried for many sessions)** Decide whether to revert
+   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
+   revisited, no new information this session either way.
