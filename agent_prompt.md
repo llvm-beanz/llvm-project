@@ -63,25 +63,27 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `K6m` (split off from K6l): `random.scalar.41` + 4
-   `3_level_unsized_array.scalar.*` cases, all failing *legalization*
-   (`spirv.AccessChain`...explicitly marked illegal`), not a result mismatch --
-   a different bug class, not yet triaged at all. Pull real SPIR-V from `.qpa`
-   logs first, same lesson as above.
-2. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
+1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
    the prior investigation's exact failure list (`PtrAccessChain` "explicitly
    marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
-   pointer types).
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+   pointer types) -- three prior sessions have now confirmed this empirically as
+   a real lowering gap, not a quick flip. With K6l and K6m both closed this
+   session and last, `K6a` is now the only open bundled-feature row left on the
+   roadmap with known starting material.
+2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
-4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration.
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
-   not exercised this session either, no `check-hlsl-feme-vk` work done.
+   regeneration
+   (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
+   files still stale from several prior sessions).
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+   not exercised this session either, no `check-hlsl-feme-vk` work done (session
+   stayed scoped to the single K6m compiler-fix task, same scoping choice as
+   several recent sessions).
 
-**Immediate next action for next session:** pick `K6m`'s legalization failures
-(pull real SPIR-V from `.qpa` logs, same technique as this session) as the
-smallest direct continuation, or pivot to `variablePointers` (`K6a`) for a
-change of pace.
+**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row
+(now the only open bundled-feature row), pick `variablePointers`, and start from
+the exact failure list already logged across three prior sessions
+(`PtrAccessChain`/`OpPtrEqual` family) rather than re-deriving it.
