@@ -4148,8 +4148,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  // Roadmap K6g added VK_EXT_sampler_filter_minmax to the advertised list.
-  ASSERT_EQ(Count, 46u);
+  // Roadmap K6h added VK_KHR_draw_indirect_count to the advertised list.
+  ASSERT_EQ(Count, 47u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),

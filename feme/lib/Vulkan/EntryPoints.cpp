@@ -1680,7 +1680,11 @@ void fillFeatures2Chain(void *pNext) {
       // This feature bit only gates *advertising* that pre-existing
       // support, not implementing new behavior.
       Features->samplerMirrorClampToEdge = VK_TRUE;
-      Features->drawIndirectCount = VK_FALSE;
+      // (roadmap K6h) `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount`
+      // (`VK_KHR_draw_indirect_count`, core in 1.2) are now implemented --
+      // see `CommandBuffer.cpp`'s `drawIndirectCount` and the merged
+      // `DrawIndirect`/`DrawIndirectCount` execution-switch case.
+      Features->drawIndirectCount = VK_TRUE;
       Features->storageBuffer8BitAccess = VK_FALSE;
       Features->uniformAndStorageBuffer8BitAccess = VK_FALSE;
       Features->storagePushConstant8 = VK_FALSE;

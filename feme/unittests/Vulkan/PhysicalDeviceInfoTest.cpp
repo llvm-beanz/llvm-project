@@ -513,6 +513,21 @@ TEST_F(PhysicalDeviceProperties2Test, SamplerMirrorClampToEdgeFeatureIsTrue) {
   EXPECT_EQ(Vulkan12Features.samplerMirrorClampToEdge, VK_TRUE);
 }
 
+TEST_F(PhysicalDeviceProperties2Test, DrawIndirectCountFeatureIsTrue) {
+  // Roadmap K6h: `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount`
+  // (CommandBuffer.cpp) reuse the existing `readIndirectDrawCount` helper
+  // built for `vkCmdDrawMeshTasksIndirectCountEXT` (roadmap H6f).
+  VkPhysicalDeviceVulkan12Features Vulkan12Features{};
+  Vulkan12Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Vulkan12Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Vulkan12Features.drawIndirectCount, VK_TRUE);
+}
+
 TEST_F(PhysicalDeviceProperties2Test,
        SubgroupBasicBitMatchesPromotedVulkan11Properties) {
   VkPhysicalDeviceSubgroupProperties Subgroup{};

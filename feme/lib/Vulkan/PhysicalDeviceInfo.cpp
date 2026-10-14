@@ -1696,6 +1696,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // immediately above.
       {VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME,
        VK_EXT_SAMPLER_FILTER_MINMAX_SPEC_VERSION},
+      // (roadmap K6h) `drawIndirectCount` is now a real feature:
+      // `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` are
+      // implemented in `CommandBuffer.cpp`, reusing the existing
+      // `readIndirectDrawCount` helper built for
+      // `vkCmdDrawMeshTasksIndirectCountEXT` (roadmap H6f). Same "custom
+      // device below this extension's 1.2 core-promotion point" rationale
+      // as the two extensions immediately above.
+      {VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME,
+       VK_KHR_DRAW_INDIRECT_COUNT_SPEC_VERSION},
   };
   return Extensions;
 }
