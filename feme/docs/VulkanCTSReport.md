@@ -1635,3 +1635,28 @@ Verification:
 `Roadmap.md`: `L419(j)` updated -- 4 of its original 7 cases remain: line
 continuity (2, triaged not fixed), mandatory-feature reporting (1,
 untriaged), own conformance-version reporting (1, `L412(g)` won't-fix).
+
+### `L419(j)` triage: `mandatory_features` singleton (not fixed -- cross-referenced to `D1`)
+
+`dEQP-VK.info.device_mandatory_features` fails, reporting 14 distinct
+unsupported mandatory feature bits: `robustImageAccess`,
+`vulkanMemoryModel`/`vulkanMemoryModelDeviceScope`, `bufferDeviceAddress`,
+`fullDrawIndexUint32`, `shaderUniformBufferArrayDynamicIndexing`,
+`shaderSampledImageArrayDynamicIndexing`,
+`shaderStorageBufferArrayDynamicIndexing`,
+`shaderStorageImageArrayDynamicIndexing`, `shaderInt16`,
+`samplerYcbcrConversion`, `storageBuffer16BitAccess`,
+`variablePointers`/`variablePointersStorageBuffer`,
+`samplerMirrorClampToEdge`, `scalarBlockLayout`, `shaderInt8`,
+`storageBuffer8BitAccess`, `shaderFloatControls2`.
+
+This is not a narrow, isolated bug -- it is the `L419(j)`-visible symptom
+of `D1`'s own much larger, already-documented finding that only
+`dynamicRendering` is genuinely implemented of the full 1.3/1.4 mandatory
+feature set. Fixing this CTS case for real requires implementing each
+missing feature bit (and, for most of them, the corresponding SPIR-V
+capability/shader-lowering support) individually -- a substantial,
+multi-feature undertaking, not a 1-2 hour fix. No source changes made
+this session; `Roadmap.md`'s `L419(j)` row cross-references `D1` rather
+than duplicating new rows here, since `D1` already tracks the full
+feature-by-feature breakdown.
