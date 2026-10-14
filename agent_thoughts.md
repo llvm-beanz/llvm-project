@@ -121752,3 +121752,38 @@ a larger `D1` plan.
 3. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE` decision — still deferred.
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s current open items (the merge didn't touch it) and resume wherever the last non-merge session left off — most likely `L419(j)`'s `line_continuity` pair or `D1`'s mandatory-feature work.
+
+# Session: `K6b` closed -- `samplerMirrorClampToEdge` advertised, manifest drift fixed
+
+**Device check:** `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (`VK_ICD_FILENAMES` exported first).
+
+**Task:** resume actual roadmap work (last session was 100% merge-and-regression-fix). Picked `Roadmap.md`'s `K6a` bundle's own "nearly free" call-out: `samplerMirrorClampToEdge`.
+
+## What happened, in order
+
+1. Root-caused: purely an advertisement gap. `Image.cpp` already maps `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE`, and `FeMeRuntimeCPU.c`'s `femeRTApplyAddressMode` already implements mode 4 identically to every other address mode. Only `EntryPoints.cpp`'s feature bit and the extension's name advertisement were missing.
+2. Fixed both: `EntryPoints.cpp`'s `samplerMirrorClampToEdge` → `VK_TRUE`, added `VK_KHR_sampler_mirror_clamp_to_edge` to `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` name array (same "custom sub-1.2 device enables it by name" precedent as `VK_KHR_depth_stencil_resolve`).
+3. While regenerating `Vulkan14FeatureInventory.md` via `vk_gen_feature_inventory.py` (using the exact command documented in the file's own header), **found real pre-existing manifest drift**: `AdvertisedPromotedFeatures.txt`'s notes for `shaderImageGatherExtended` and `storageInputOutput16` were stale (missing later roadmap detail the doc itself already had), and `AdvertisedPromotedExtensions.txt` was **entirely missing `VK_KHR_depth_stencil_resolve`** despite it being fully implemented and already listed as "yes" in the committed doc. A blind full regeneration would have silently regressed those two notes and undercounted the 1.2 extension total. Fixed the manifest files to match the doc's already-accurate state, in its own separate commit — this is drift correction, not new information, so it's a safe no-functional-change fix.
+4. Given that remaining drift exists elsewhere too (`VK_KHR_shader_float_controls`, two `VK_VERSION_1_4` limit notes), did **not** do a full blind regeneration of `Vulkan14FeatureInventory.md` this session — applied a targeted, minimal edit instead (just this fix's own rows + roll-up counts), leaving the rest of the drift for a dedicated future hygiene pass.
+5. Added `PhysicalDeviceProperties2Test.SamplerMirrorClampToEdgeFeatureIsTrue` (mirrors the existing `ShaderViewportIndexLayerFeaturesAreTrue` pattern). Build caught a second needed fix: `DrawTest.cpp`'s `AdvertisesDynamicRenderingExtension` hardcoded the device extension count (40); bumped to 41.
+6. `ninja check-feme`: **3,723/3,723 applicable tests Passed** (3 Unsupported, 0 Failed).
+7. CTS: `dEQP-VK.info.device_mandatory_features` still Fails overall (K6a's remaining bundle), but no longer lists `samplerMirrorClampToEdge` as missing. Full `dEQP-VK.*mirror_clamp*` list (23,749 cases): **7,910 Pass, 0 Fail, 15,839 NotSupported**. Zero regressions.
+8. `Roadmap.md`: split `K6b` off `K6a`'s bundle, struck through with full closure detail; narrowed `K6a`'s remaining text. `VulkanExtensionInventory.md` updated to "Implemented". `VulkanCTSReport.md` got its own measured-impact section.
+9. Checked offload-test-suite `VkBool32`/`WaveActiveMax` pattern — not exercised, no `check-hlsl-feme-vk` work this session.
+
+## Wins
+- `K6b` fully closed: one more real mandatory-feature bit genuinely implemented and now truthfully advertised.
+- Found and fixed a **real pre-existing documentation-drift bug** (missing `VK_KHR_depth_stencil_resolve` manifest entry, two stale notes) that would have caused silent regressions on the next blind doc regeneration — caught before it did damage, fixed in its own isolated commit.
+- 6 small, separately-committed changes: manifest hygiene fix, core source fix + bookkeeping, unit tests, docs, CTS report.
+
+## Standing items not touched this session
+- `L419(j)`'s remaining untriaged items, `L418(a)` sanity re-check, `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE` `RelWithDebInfo` vs `Release` decision — all still deferred, no new information.
+- `check-hlsl-feme-vk` / offload-test-suite work — none done this session.
+
+## Next steps
+
+1. **(~2-4 hours)** Pick the next bit from `K6a`'s narrowed bundle: `variablePointers`, `shaderDrawParameters`, `scalarBlockLayout`, `samplerFilterMinmax`, `drawIndirectCount`, `VK_KHR_image_format_list`, `VK_EXT_separate_stencil_usage`, or `VK_KHR_shader_float_controls`. `shaderDrawParameters` is flagged as likely-cheap (builtins already mapped by `CanonicalizeStage.cpp`) -- good next pick by the same "nearly free" logic that made `K6b` tractable this session.
+2. **(~1-2 hours, hygiene)** Do the deferred **full regeneration** of `Vulkan14FeatureInventory.md` once `VK_KHR_shader_float_controls`'s manifest entry and the two `VK_VERSION_1_4` limit notes (`nonStrictSinglePixelWideLinesUseParallelogram`/`nonStrictWideLinesUseParallelogram`) are brought back in sync with the doc's current hand-verified state -- same drift pattern as this session's `VK_KHR_depth_stencil_resolve` fix, just not yet tracked down to its source.
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
+
+**Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now narrowed) and pick `shaderDrawParameters` or another bundle bit, following the same investigate-then-flip-bit pattern as `K6b`.
