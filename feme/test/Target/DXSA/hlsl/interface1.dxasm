@@ -11,7 +11,7 @@
 // CHECK:         dxsa.dcl_output o<0, <x>>
 // CHECK:         dxsa.dcl_temps 2
 // CHECK:         dxsa.mov r<0, <x>>, cb<[0, 0], vector, <x>>
-// CHECK:         %0 = dxsa.operand  {num_components = 0 : i32, type = 0 : i32}
+// CHECK:         %0 = dxsa.operand  <type = 0, num_components = 0>
 // CHECK:         dxsa.instruction "fcall" %0
 // CHECK:         dxsa.mov o<0, <x>>, r<0, <y>>
 // CHECK:         dxsa.ret

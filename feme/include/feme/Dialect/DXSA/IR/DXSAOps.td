@@ -515,7 +515,7 @@ def DXSA_Operand : DXSA_Op<"operand"> {
 		       OptionalAttr<I32Attr>:$min_precision,
 		       OptionalAttr<I32Attr>:$non_uniform);
   let results = (outs DXSA_LegacyOperandType:$operand);
-  let assemblyFormat = "$operands attr-dict";
+  let assemblyFormat = "$operands prop-dict attr-dict";
 }
 
 def DXSA_OperandImm : DXSA_Op<"operand.imm"> {
@@ -526,7 +526,7 @@ def DXSA_OperandImm : DXSA_Op<"operand.imm"> {
 
   let arguments = (ins AnyAttrOf<[I32ElementsAttr, I64ElementsAttr]>:$imm);
   let results = (outs DXSA_LegacyOperandType:$operand);
-  let assemblyFormat = "attr-dict";
+  let assemblyFormat = "prop-dict attr-dict";
 }
 
 def DXSA_IndexImm : DXSA_Op<"index.imm"> {
@@ -537,7 +537,7 @@ def DXSA_IndexImm : DXSA_Op<"index.imm"> {
 
   let arguments = (ins AnyAttrOf<[I32Attr, I64Attr]>:$imm);
   let results = (outs DXSA_IndexType:$index);
-  let assemblyFormat = "attr-dict";
+  let assemblyFormat = "prop-dict attr-dict";
 }
 
 def DXSA_IndexRel : DXSA_Op<"index.rel"> {
@@ -559,7 +559,7 @@ def DXSA_IndexRelImm : DXSA_Op<"index.rel.imm"> {
 
   let arguments = (ins DXSA_LegacyOperandType:$operand, StrAttr:$op, I32Attr:$imm);
   let results = (outs DXSA_IndexType:$index);
-  let assemblyFormat = "$operand attr-dict";
+  let assemblyFormat = "$operand prop-dict attr-dict";
 }
 
 def DXSA_Instruction : DXSA_Op<"instruction"> {
