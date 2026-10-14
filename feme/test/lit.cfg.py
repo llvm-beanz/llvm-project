@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 
 import lit.formats
 from lit.llvm import llvm_config
@@ -142,12 +143,35 @@ llvm_config.add_tool_substitutions(tools, tool_dirs)
 # `Shader`/structured-CF profile). Tests validating roadmap milestone V0.5's
 # "a glslang/DXC/Clang corpus" (feme/docs/Roadmap.md) against real compiler
 # output use `REQUIRES: system-dxc` and `%dxc` so they skip cleanly wherever
-# `dxc` is not installed, the same way `system-vulkan-loader` gates the
+# `dxc` is not installed or was built without SPIR-V code generation (as the
+# Windows SDK's copy can be), the same way `system-vulkan-loader` gates the
 # Vulkan loader below.
 _dxc = shutil.which("dxc")
+_dxc_supports_spirv = False
 if _dxc:
+    try:
+        _dxc_supports_spirv = subprocess.run(
+            [
+                _dxc,
+                "-T",
+                "cs_6_0",
+                "-E",
+                "main",
+                "-spirv",
+                "-Fo",
+                os.devnull,
+                "-",
+            ],
+            input=b"[numthreads(1,1,1)] void main() {}",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+if _dxc_supports_spirv:
     config.available_features.add("system-dxc")
-    config.substitutions.append(("%dxc", _dxc))
+    config.substitutions.append(("%dxc", "'%s'" % _dxc))
 
 # `spirv-as` (SPIRV-Tools' own textual-SPIR-V assembler) is another external
 # tool this tree does not build, gated the same way `system-dxc` is above --

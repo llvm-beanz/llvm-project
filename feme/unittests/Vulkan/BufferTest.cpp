@@ -154,6 +154,9 @@ TEST_F(BufferTest, BindSparseRangeAccumulatesWithoutDisturbingData) {
 // `reserveVirtualAddressSpace`'s own comment (Buffer.h) for why no live
 // buffer can reach this yet.
 TEST_F(BufferTest, VirtualAddressReservationTracksBoundMemoryContent) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Virtual address reservations are not supported on Windows";
+#endif
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = 64;
   BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -198,6 +201,9 @@ TEST_F(BufferTest, VirtualAddressReservationTracksBoundMemoryContent) {
 }
 
 TEST_F(BufferTest, VirtualAddressReservationTracksSparseRangeRebind) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "Virtual address reservations are not supported on Windows";
+#endif
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = 128;
   BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;

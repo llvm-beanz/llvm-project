@@ -135,6 +135,8 @@ def run_one_batch(deqp_vk, case_list_path, qpa_path, log_path, extra_args,
            "--deqp-caselist-file=" + case_list_path,
            "--deqp-shadercache=disable",
            "--deqp-log-filename=" + qpa_path] + list(extra_args)
+    if os.name == "nt" and deqp_vk.lower().endswith(".py"):
+        args.insert(0, sys.executable)
     with open(log_path, "w", encoding="utf-8") as log_file:
         try:
             subprocess.run(args, cwd=cwd, stdout=log_file,
