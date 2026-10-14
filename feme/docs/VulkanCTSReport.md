@@ -1237,3 +1237,70 @@ than "fixed" -- the only true fix is an upstream Vulkan-Loader patch.
 `check-feme`, the Vulkan14FeatureInventory, and the VulkanExtensionInventory
 all need no change for this entry (no FeMe code or feature/extension
 surface was touched).
+
+## `L419(e)`: all-format color blits, `b10g11r11_ufloat_pack32` half closed (20 -> 12)
+
+The 20-case `api.copy_and_blit.core.blit_image.all_formats.color` cluster
+splits cleanly into two unrelated groups by destination format: 8 cases
+(`bc4_snorm_block`/`bc5_snorm_block` sources x 4 tilings) targeting
+`VK_FORMAT_B10G11R11_UFLOAT_PACK32`, and 12 cases
+(`astc_{8x8,10x5,12x12}_unorm_block` sources x 4 tilings) targeting
+`VK_FORMAT_A2B10G10R10_SNORM_PACK32`.
+
+**`b10g11r11_ufloat_pack32` group (8, fixed this session)**: reduced to one
+standalone case
+(`...bc5_snorm_block.b10g11r11_ufloat_pack32.general_general_linear`).
+`tcu::ImageCompare`'s own diff output showed `max difference = (inf,
+0.0078125, 5.91278e-05, 0)` -- a literal `Infinity` in the R channel, G/B
+within threshold, alpha diff 0 (format has no alpha). Decoded the qpa log's
+embedded `Result`/`Reference`/`ErrorMask` PNGs directly (base64 + Pillow)
+to find the single failing pixel, `(13, 10)`; confirmed it falls inside one
+of this test's own 20 `VkImageBlit` regions (a 64x64-source-to-16x16-
+destination minification step), not an untouched background pixel as
+initially hypothesized.
+
+Instrumented (temporarily, removed before landing) the exact write at
+`(13, 10)`: the blend accumulator's own inputs were a safe, finite
+`(R=6.9388939039072284e-18, G=-0.1417322834645669, B=0, A=1)` -- nowhere
+near overflow -- yet the packed output word decoded to `R11=1984,
+G11=2047 (all-1s), B10=31 (all-1s)`, impossible for these inputs under
+`encodeR11G11B10Float`'s documented algorithm. Root-caused to
+`packUnsignedMinifloat` (`ImageFixture.cpp`): its subnormal/underflow
+branch computes `Shift = (EMin - Exp) + (52 - MantissaBits)` with no upper
+bound. For `R=6.94e-18` (`Exp` around `-58`, far below this 11-bit
+minifloat's own denormal floor around `1e-7`), `Shift` reaches `90`, so
+`Half = 1ull << (Shift - 1)` becomes a 64-bit left-shift by `89` --
+undefined behavior in C++ (shift amount must be `< 64`). In practice this
+produced a garbage, non-zero `R11` field large enough to overflow past its
+own 11-bit boundary and corrupt the adjacent `G11`/`B10` fields once
+OR'd together in `encodeR11G11B10Float`, landing on an all-1s exponent
+(`Infinity`'s own bit pattern) in the unrelated `G` channel.
+
+**Fix**: added a `Shift >= 54` short-circuit returning a flat `0` before
+the shift arithmetic -- mathematically correct (not just a safety clamp),
+since `Full`'s significand is always a 53-bit value and can never reach
+the halfway rounding point once shifted right by 54 or more bits, so the
+correctly-rounded answer for any value this small is exactly zero. New
+unit test `ImageFixtureTest.PacksR11G11B10FloatUnderflowsTinyValuesToZero`
+(confirmed to reproduce the actual symptom, `nan`, against a stashed
+pre-fix build via `git stash`/rebuild/revert).
+
+**Measured impact**: all 8 `b10g11r11_ufloat_pack32` cases Fail -> Pass.
+A full `dEQP-VK.api.copy_and_blit.core.blit_image.*` regression sweep
+(73,839 cases) shows exactly 12 Fail both before and after this fix,
+identical case names each time (the `a2b10g10r10_snorm_pack32` group
+below) -- 0 regressions, 0 newly-passing cases outside the targeted 8.
+`check-feme`: 3,719 Passed, 3 Unsupported, 0 Failed, 0 regressions.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal pack/unpack correctness fix for an already-supported
+core format, no feature/extension-surface change.
+
+**Residual (12, not yet investigated)**: the `a2b10g10r10_snorm_pack32`
+group shows a full-scale (`1.0`) alpha-channel diff (confirmed via an
+earlier standalone run of `astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.
+general_general_linear`: `max difference = (0.00391394, 0.00391394,
+0.00391394, 1)`, RGB tiny/within-threshold, alpha diff full-scale), an
+unrelated failure signature (no `inf`, different destination format,
+different diff channel/magnitude pattern) from the `b10g11r11_ufloat`
+group just fixed. Not yet root-caused; left for a future session (see
+`Roadmap.md`'s `L419(e)` entry).
