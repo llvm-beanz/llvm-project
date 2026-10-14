@@ -4399,7 +4399,8 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
                            uint64_t ByteOffset, Type *ValueTy,
                            const DataLayout &DL, bool IsOutput, Value *Vertex,
                            bool AllowBlockArrayInstanceFold = false,
-                           bool UseTightArrayStride = false) {
+                           bool UseTightArrayStride = false,
+                           bool IsNarrowMatrix = false) {
   LLVMContext &Ctx = ElemTy->getContext();
   auto AsConstant = [&](uint64_t V) -> Value * {
     return V ? ConstantInt::get(Type::getInt32Ty(Ctx), V) : nullptr;
@@ -4407,22 +4408,39 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
   if (IDs.size() == 1) {
     if (ValueTy == ElemTy)
       return StageIOAccess{IDs, nullptr, nullptr, Vertex, IsOutput};
-    // (Roadmap L404) An ordinary, single-global `Input` access (e.g. a
-    // vertex attribute or fragment varying read, as opposed to a
-    // `Buffer`-backed struct member reached by the `IDs.size() != 1`
-    // path below) is never subject to any `ArrayStride`/`MatrixStride`
-    // decoration at all -- the SPIR-V spec permits those only on a
+    // (Roadmap L404, narrowed by L419(j)) A genuine SPIR-V matrix's own
+    // single-global `Input` access (e.g. a `mat3` vertex attribute, as
+    // opposed to a `Buffer`-backed struct member reached by the
+    // `IDs.size() != 1` path below, or an ordinary array-of-narrow-vectors
+    // varying -- see below) is never subject to any `MatrixStride`
+    // decoration at all -- the SPIR-V spec permits that only on a
     // `Block`/`BufferBlock`-decorated struct member, never on a bare
     // `Input`/`Output` interface variable -- so its GEPs always fold
     // against the tight, ABI-padding-free stride, unlike the genuinely
     // ambiguous (sometimes padded) case `UseTightArrayStride`'s own
     // caller-supplied `hasXfbBufferDecoration` value models for an
     // `Output` (see `resolveRowComponent`'s own L272 comment). Force it
-    // on here for `Input` regardless of what was passed in, leaving
-    // `Output`'s own XFB-decoration-keyed value (and every other,
-    // `IDs.size() != 1` caller) untouched.
+    // on here when \p IsNarrowMatrix (`feme.spirv.NarrowMatrix` metadata,
+    // attached by `feme::spirv::attachStageIONarrowMatrix`) says so,
+    // leaving `Output`'s own XFB-decoration-keyed value (and every other,
+    // `IDs.size() != 1` caller) untouched. (Roadmap L419(j)) L404's own
+    // original fix forced this unconditionally for *every* `Input`
+    // access (`!IsOutput`, with no `IsNarrowMatrix` check at all), on the
+    // mistaken assumption that a plain `vec3 var[N]` array-of-narrow-
+    // vectors `Input` varying's own GEPs fold tight the same way a
+    // matrix's do -- empirically false (see `resolveRowComponent`'s own
+    // L272 comment, which predates L404 and already documented this
+    // same array case folding to *either* stride depending on
+    // `DataLayout` timing): both shapes erase to the identical LLVM
+    // `[N x <M x float>]` type with no decoration or type-level signal
+    // left to tell them apart from a byte offset alone once erased,
+    // which is exactly why this bit must be tracked all the way back at
+    // `SPIRVToLLVMPatterns.cpp`'s `spirv` -> `llvm` dialect conversion
+    // time, before SPIR-V's own matrix-vs-array distinction (still
+    // visible there as `spirv.matrix` vs `spirv.array`) is lost.
     auto [Row, Component] = resolveRowComponent(
-        ElemTy, ByteOffset, ValueTy, DL, UseTightArrayStride || !IsOutput);
+        ElemTy, ByteOffset, ValueTy, DL,
+        UseTightArrayStride || (IsNarrowMatrix && !IsOutput));
     return StageIOAccess{IDs, AsConstant(Row), AsConstant(Component), Vertex,
                          IsOutput};
   }
@@ -4762,7 +4780,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
         ElemTy, It->second, Dyn->ByteOffset, ValueTy, DL,
         OutputGlobals.contains(Dyn->GV), Dyn->VertexIndex,
         /*AllowBlockArrayInstanceFold=*/false,
-        hasXfbBufferDecoration(Dyn->GV));
+        hasXfbBufferDecoration(Dyn->GV),
+        Dyn->GV->getMetadata("feme.spirv.NarrowMatrix") != nullptr);
   }
 
   std::optional<std::pair<GlobalVariable *, uint64_t>> BaseAndOffset =
@@ -4848,7 +4867,8 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       return resolveOffsetWithinElement(
           ElemTy, It->second, Residual, ValueTy, DL,
           OutputGlobals.contains(GV), Vertex,
-          /*AllowBlockArrayInstanceFold=*/false, hasXfbBufferDecoration(GV));
+          /*AllowBlockArrayInstanceFold=*/false, hasXfbBufferDecoration(GV),
+          GV->getMetadata("feme.spirv.NarrowMatrix") != nullptr);
     }
   }
 
@@ -4922,7 +4942,9 @@ std::optional<StageIOAccess> resolveStageIOAccess(
                                     ValueTy, DL, OutputGlobals.contains(GV),
                                     /*Vertex=*/nullptr,
                                     AllowBlockArrayInstanceFold,
-                                    hasXfbBufferDecoration(GV));
+                                    hasXfbBufferDecoration(GV),
+                                    GV->getMetadata("feme.spirv.NarrowMatrix") !=
+                                        nullptr);
 }
 
 /// (Roadmap L136) Builds the loaded value for a load whose pointer operand

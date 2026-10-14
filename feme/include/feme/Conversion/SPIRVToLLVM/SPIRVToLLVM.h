@@ -371,6 +371,52 @@ collectStageIOInt16Signedness(mlir::Operation *Module);
 void attachStageIOInt16Signedness(const StageIOInt16SignednessSet &SignedNames,
                                   llvm::Module &LLVMModule);
 
+/// (Roadmap L419(j)) The name of the `llvm.mlir.global` attribute the
+/// stage-IO global variable pattern records a plain (non-block) `Input`/
+/// `Output` variable's own *genuine SPIR-V matrix* type under -- true only
+/// when the variable's declared type is (an array of) `spirv.matrix`,
+/// never for an ordinary narrow-vector array (`vec3 var[N]`), even though
+/// both erase to the identical `llvm` dialect/LLVM IR array-of-vector
+/// shape once `getTypeConverter()->convertType` runs (see
+/// `isNarrowMatrixLeafType`'s own comment). The SPIR-V spec permits a
+/// `MatrixStride` decoration only on a `Block`/`BufferBlock` struct
+/// member, never on a bare `Input`/`Output` interface variable, so a
+/// genuine matrix's own per-column (row-major: per-row) stride can only
+/// ever be the type's own tight, ABI-padding-free one -- but a plain
+/// array-of-vectors varying's per-element stride is governed by the
+/// *array*'s own (potentially padded) `DataLayout`-determined stride
+/// instead, which may or may not agree. `CanonicalizeStage.cpp`'s
+/// `resolveOffsetWithinElement` needs exactly this one bit back (see its
+/// own comment) to know which of those two cases it is looking at --
+/// SPIR-V's own matrix-vs-array distinction is otherwise fully erased by
+/// this conversion, with no surviving decoration or type-shape signal left
+/// to recover it from downstream. Present (a `UnitAttr`) only when true,
+/// mirroring getStageIOInt16SignednessAttrName()'s own convention; absent
+/// means "not a genuine matrix", the correct default for every ordinary
+/// array-of-vectors stage-IO variable.
+llvm::StringRef getStageIONarrowMatrixAttrName();
+
+/// A non-builtin stage-IO global that is a genuine SPIR-V matrix (see
+/// getStageIONarrowMatrixAttrName), keyed by the `llvm.mlir.global`'s
+/// symbol name -- a name's mere presence in this set is the whole signal,
+/// matching getStageIOInt16SignednessAttrName()'s own set-based encoding.
+using StageIONarrowMatrixSet = llvm::StringSet<>;
+
+/// Collects every `llvm.mlir.global` in \p Module carrying a
+/// getStageIONarrowMatrixAttrName() attribute, keyed by symbol name. Must
+/// run before `mlir::translateModuleToLLVMIR`, the same way
+/// collectStageIOInt16Signedness does, and for the same reason.
+StageIONarrowMatrixSet collectStageIONarrowMatrix(mlir::Operation *Module);
+
+/// Re-attaches \p MatrixNames (from collectStageIONarrowMatrix, run on the
+/// `llvm` dialect module \p LLVMModule was translated from) as an empty
+/// `!feme.spirv.NarrowMatrix` metadata node (presence alone is the signal)
+/// on the matching `llvm::GlobalVariable`s in \p LLVMModule, looked up by
+/// name. A no-op for any name \p LLVMModule does not declare a global
+/// under.
+void attachStageIONarrowMatrix(const StageIONarrowMatrixSet &MatrixNames,
+                               llvm::Module &LLVMModule);
+
 } // namespace spirv
 } // namespace feme
 

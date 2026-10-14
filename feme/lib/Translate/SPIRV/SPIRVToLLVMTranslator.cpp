@@ -55,6 +55,12 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
   feme::spirv::StageIOInt16SignednessSet Int16SignedNames =
       feme::spirv::collectStageIOInt16Signedness(
           LLVMDialectModule->getMLIROperation());
+  // (Roadmap L419(j)) A plain stage-IO variable's own genuine-SPIR-V-
+  // matrix-ness survives the same way -- see
+  // feme::spirv::getStageIONarrowMatrixAttrName.
+  feme::spirv::StageIONarrowMatrixSet NarrowMatrixNames =
+      feme::spirv::collectStageIONarrowMatrix(
+          LLVMDialectModule->getMLIROperation());
 
   LLVMDialectToLLVMIRTranslator ToLLVMIR;
   llvm::Expected<Module> LLVMIRModule =
@@ -68,6 +74,8 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
                                               LLVMIRModule->getLLVMModule());
   feme::spirv::attachStageIOInt16Signedness(Int16SignedNames,
                                             LLVMIRModule->getLLVMModule());
+  feme::spirv::attachStageIONarrowMatrix(NarrowMatrixNames,
+                                        LLVMIRModule->getLLVMModule());
   return LLVMIRModule;
 }
 

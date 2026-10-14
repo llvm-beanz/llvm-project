@@ -1220,15 +1220,28 @@ TEST(CanonicalizeStageTest,
 /// check so a `UseTightArrayStride`-signalled candidate need only land
 /// an in-range row, not divide the whole byte offset exactly, and (2)
 /// forcing that signal on for every ordinary (`IDs.size() == 1`)
-/// `Input`-direction global in `resolveOffsetWithinElement`, regardless
-/// of `hasXfbBufferDecoration` (which, for an `Input`, is always false
-/// and never a meaningful signal in the first place -- XFB capture only
-/// ever decorates certain `Output`s).
+/// `Input`-direction global in `resolveOffsetWithinElement`.
+///
+/// (Roadmap L419(j)) (2) above was later narrowed: forcing the tight
+/// stride for *every* `Input`-direction global, not just a genuine
+/// matrix, mis-resolved an ordinary `vec3 var[N]` array-of-narrow-
+/// vectors `Input` varying the same way (both erase to the identical
+/// `[N x <3 x float>]` LLVM shape, with the array case's own GEPs
+/// empirically folding against *either* stride depending on
+/// `DataLayout` timing -- see this function's own L272 comment,
+/// predating this fix). `resolveOffsetWithinElement` now only forces
+/// the tight stride when the global's `!feme.spirv.NarrowMatrix`
+/// metadata (attached by `feme::spirv::attachStageIONarrowMatrix` at
+/// `spirv` -> `llvm` dialect conversion time, before SPIR-V's own
+/// matrix-vs-array distinction is erased) says it is a genuine SPIR-V
+/// matrix -- which is why this test's own IR below now carries that
+/// metadata explicitly, matching what the real conversion attaches for
+/// an actual `spirv.matrix`-typed `Input` variable.
 TEST(CanonicalizeStageTest,
     ResolvesScalarComponentsOfOrdinaryNarrowVectorMatrixColumnsAtTightStride) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    @in_mat3 = external addrspace(7) constant [3 x <3 x float>], !spirv.Decorations !0
+    @in_mat3 = external addrspace(7) constant [3 x <3 x float>], !spirv.Decorations !0, !feme.spirv.NarrowMatrix !2
     define void @main() #0 {
       %c0r0 = load float, ptr addrspace(7) @in_mat3
       %c0r1 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_mat3, i64 4)
@@ -1244,6 +1257,7 @@ TEST(CanonicalizeStageTest,
     attributes #0 = { "feme.shader.stage"="vertex" }
     !0 = !{!1}
     !1 = !{i32 30, i32 0}
+    !2 = !{}
   )");
   ASSERT_TRUE(M);
   EXPECT_TRUE(run(*M));
@@ -1279,6 +1293,71 @@ TEST(CanonicalizeStageTest,
            (std::set<std::pair<uint64_t, uint64_t>>{
                {0, 0}, {0, 1}, {0, 2}, {1, 0}, {1, 1}, {1, 2}, {2, 0}, {2, 1},
                {2, 2}}));
+}
+
+/// (Roadmap L419(j)) The companion, previously-regressed case the comment
+/// above's own narrowing fixes: an *ordinary* `vec3 var[3]` array-of-
+/// narrow-vectors `Input` varying (not a genuine SPIR-V matrix -- no
+/// `!feme.spirv.NarrowMatrix` metadata here, unlike
+/// `ResolvesScalarComponentsOfOrdinaryNarrowVectorMatrixColumnsAtTightStride`'s
+/// own global above), whose GEPs happen to fold against the *padded*
+/// (16-byte) stride, reading only each row's own component 0 (e.g. a
+/// fragment shader's `in vec3 color_in[3]`, each row's `.x` lane read
+/// into a separate scalar `Output`). Before this fix,
+/// `resolveOffsetWithinElement`'s blanket `!IsOutput`-keyed
+/// `UseTightArrayStride` override (forcing the tight, 12-byte stride for
+/// *every* `Input`-direction global, genuine matrix or not) misread row
+/// 1's byte offset 16 as `(Row=1, Component=1)` and row 2's byte offset
+/// 32 as `(Row=2, Component=2)` -- a 36-case `dEQP-VK.pipeline.
+/// monolithic.output_location.array.*` CTS regression (the complementary
+/// "wrong lane" symptom CTS's own test-vertex-color data is specifically
+/// shaped to catch) that went unnoticed because the original (`L404`)
+/// fix's own verification scope only covered genuine-matrix `vertex_input.
+/// *` cases, never this array-of-vectors shape. With `IsNarrowMatrix`
+/// correctly absent here, `resolveRowComponent`'s own self-discovery
+/// (its exact-division test, not `UseTightArrayStride`'s aggressive
+/// fallback) now picks the 16-byte stride match unambiguously for every
+/// row, each landing at that row's own component 0.
+TEST(CanonicalizeStageTest,
+    ResolvesComponentZeroOfOrdinaryNarrowVectorArrayRowsAtPaddedStride) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @in_colors = external addrspace(7) constant [3 x <3 x float>], !spirv.Decorations !0
+    define void @main() #0 {
+      %r0 = load float, ptr addrspace(7) @in_colors
+      %r1 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_colors, i64 16)
+      %r2 = load float, ptr addrspace(7) getelementptr inbounds nuw (i8, ptr addrspace(7) @in_colors, i64 32)
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+
+  const SignatureElement &Elt = Sig->Elements[0];
+  EXPECT_EQ(Elt.RowCount, 3u);
+  EXPECT_EQ(Elt.ComponentCount, 3u);
+
+  std::set<std::pair<uint64_t, uint64_t>> SeenPairs;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
+      continue;
+    std::optional<uint64_t> Row = getStageOpConstantOperand(*CI, 1);
+    std::optional<uint64_t> Component = getStageOpConstantOperand(*CI, 2);
+    ASSERT_TRUE(Row.has_value());
+    ASSERT_TRUE(Component.has_value());
+    SeenPairs.insert({*Row, *Component});
+  }
+  EXPECT_EQ(SeenPairs, (std::set<std::pair<uint64_t, uint64_t>>{
+                           {0, 0}, {1, 0}, {2, 0}}));
 }
 
 /// H101k/H101l's own "leading `[N x i8]` pad" shape

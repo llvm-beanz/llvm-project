@@ -3237,6 +3237,25 @@ bool isSignedInt16LeafType(mlir::Type Ty) {
   return IntTy && IntTy.getWidth() == 16 && IntTy.isSigned();
 }
 
+/// (Roadmap L419(j)) Returns true if \p Ty -- an SPIR-V-dialect type, read
+/// before this conversion erases it -- is, or is an array of, a genuine
+/// `spirv.matrix`. Only descends through `ArrayType` (a matrix-typed
+/// vertex attribute consuming more than one `Location`-worth of rows can
+/// still be array-wrapped one level, e.g. `mat3 M[2]`, the same way a
+/// per-vertex-arrayed one is -- that outer dimension is peeled off before
+/// this global's own `ElemTy` ever reaches `resolveOffsetWithinElement`,
+/// so it is safe to peel here too), unlike `isSignedInt16LeafType`'s own
+/// `VectorType` descent: a matrix's own *rows* are never represented as a
+/// nested `spirv.array`, only as `spirv.matrix`'s own column count, so
+/// there is nothing further to peel once a `VectorType` (an ordinary
+/// narrow-vector array's own leaf) is reached -- correctly returning false
+/// there, the whole point of this query.
+bool isNarrowMatrixLeafType(mlir::Type Ty) {
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Ty))
+    return isNarrowMatrixLeafType(ArrayTy.getElementType());
+  return mlir::isa<mlir::spirv::MatrixType>(Ty);
+}
+
 /// Converts a stage-IO `spirv.GlobalVariable`'s `initial_value` attribute (a
 /// plain scalar or vector `OpConstant`/`OpConstantComposite` Initializer --
 /// see `SPIRV_GlobalVariableOp`'s own `initial_value` doc) into an attribute
@@ -3358,6 +3377,13 @@ public:
     // feme::spirv::getStageIOInt16SignednessAttrName's.
     if (isSignedInt16LeafType(SrcType.getPointeeType()))
       NewGlobal->setAttr(feme::spirv::getStageIOInt16SignednessAttrName(),
+                         Rewriter.getUnitAttr());
+
+    // Roadmap L419(j): likewise record whether this variable is a genuine
+    // SPIR-V matrix -- see isNarrowMatrixLeafType's own comment and
+    // feme::spirv::getStageIONarrowMatrixAttrName's.
+    if (isNarrowMatrixLeafType(SrcType.getPointeeType()))
+      NewGlobal->setAttr(feme::spirv::getStageIONarrowMatrixAttrName(),
                          Rewriter.getUnitAttr());
     return mlir::success();
   }

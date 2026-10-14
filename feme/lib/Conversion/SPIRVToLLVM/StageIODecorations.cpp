@@ -42,6 +42,17 @@
 // numerically-wrong-for-a-negative-value `zext` every other narrow-scalar
 // case here still correctly uses.
 //
+// Roadmap L419(j) adds a fourth channel of the same shape
+// (`feme.spirv.NarrowMatrix`): whether a plain (non-block) `Input`/
+// `Output` variable's declared type is a genuine SPIR-V matrix, as opposed
+// to an ordinary array-of-narrow-vectors varying -- the two erase to an
+// identical `llvm` dialect/LLVM IR shape (an array of fixed-width vectors)
+// once `SPIRVToLLVMPatterns.cpp`'s type converter runs, with no decoration
+// (the SPIR-V spec forbids `MatrixStride` on a bare interface variable)
+// or residual-byte-offset signal left downstream to recover the
+// distinction from. See `getStageIONarrowMatrixAttrName`'s own comment for
+// why `CanonicalizeStage.cpp` needs this bit back.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
@@ -175,6 +186,31 @@ void feme::spirv::attachStageIOInt16Signedness(
     if (!GV)
       continue;
     GV->setMetadata("feme.spirv.Int16Signed", llvm::MDNode::get(Ctx, {}));
+  }
+}
+
+llvm::StringRef feme::spirv::getStageIONarrowMatrixAttrName() {
+  return "feme.spirv.narrow.matrix";
+}
+
+feme::spirv::StageIONarrowMatrixSet
+feme::spirv::collectStageIONarrowMatrix(mlir::Operation *Module) {
+  StageIONarrowMatrixSet Result;
+  Module->walk([&](mlir::LLVM::GlobalOp Global) {
+    if (Global->hasAttr(getStageIONarrowMatrixAttrName()))
+      Result.insert(Global.getSymName());
+  });
+  return Result;
+}
+
+void feme::spirv::attachStageIONarrowMatrix(
+    const StageIONarrowMatrixSet &MatrixNames, llvm::Module &LLVMModule) {
+  llvm::LLVMContext &Ctx = LLVMModule.getContext();
+  for (const auto &Entry : MatrixNames) {
+    llvm::GlobalVariable *GV = LLVMModule.getGlobalVariable(Entry.getKey());
+    if (!GV)
+      continue;
+    GV->setMetadata("feme.spirv.NarrowMatrix", llvm::MDNode::get(Ctx, {}));
   }
 }
 
