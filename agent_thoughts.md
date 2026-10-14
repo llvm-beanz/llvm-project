@@ -121866,3 +121866,35 @@ a larger `D1` plan.
 4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
 **Immediate next action for next session:** grep-trace `scalarBlockLayout`'s relationship to the already-implemented `VK_KHR_relaxed_block_layout`/`VK_KHR_uniform_buffer_standard_layout` "no re-layout imposed" policy in `SPIRVToLLVMPatterns.cpp`, then empirically verify against a real CTS case list (not just absence-of-rejection) before committing to it as `K6a`'s next split-off bit — same two-step discipline that caught `variablePointers` this session.
+
+# Session: `K6a` further narrowed -- `scalarBlockLayout` ruled out, `K6e`/`K6f` closed (`VK_EXT_separate_stencil_usage`, `VK_KHR_shader_float_controls`)
+
+Device check: `FeMe CPU Vulkan Device`, confirmed.
+
+## What happened
+
+1. **`scalarBlockLayout` investigated and ruled out, not cheap.** Grep-traced `SPIRVToLLVMPatterns.cpp`'s `layOutStructIfOffsetsMatch` first (same discipline `variablePointers` established): its alignment check validates each member's declared offset against its full *natural/vector* ABI alignment, exactly `relaxedBlockLayout`'s level, not `scalarBlockLayout`'s strictly looser scalar-component alignment. Flipping the two `EntryPoints.cpp` sites built clean and passed `check-feme` — looked free by grep+build alone, same false signal `variablePointers` gave last session. Empirically ran `dEQP-VK.ubo.2_level_array.scalar.*` (504 cases): **192 real failures**, all `spirv.AccessChain` "explicitly marked illegal" against exactly the predicted shape. Reverted. Documented in `Roadmap.md`'s `K6a` row and `VulkanCTSReport.md`.
+2. **`K6e`: `VK_EXT_separate_stencil_usage` closed.** Grepped every caller of `Image::usage()` and found none outside a single comment — no command validates per-aspect (or any) usage against it, so the chained struct is a pure no-op, same shape as `K6d`. Advertised it, extended `DrawTest.AdvertisesDynamicRenderingExtension`, empirically confirmed via the 207-case `dEQP-VK.renderpasses.*separate_stencil_usage*` group (0 Fail, unchanged — all gate on unrelated MSAA/`VK_KHR_extended_flags` gaps) and the 10,490-case `dEQP-VK.api.info.*` sweep (0 Fail). Closed, 2 commits.
+3. **`K6f`: `VK_KHR_shader_float_controls` closed.** Properties-only; `VkPhysicalDeviceFloatControlsProperties` was already filled in truthfully by a prior session's `L414(a)` fix. Advertised it, ran the 13,638-case `dEQP-VK.spirv_assembly.instruction.*float_controls*` group: 4 failures, all pre-existing `OpNop`-deserialization gaps in `extensionless` cases that don't even check for this extension — confirmed by reverting the change and re-running (identical failure either way). 0 new failures. Closed, 2 commits.
+4. **`check-feme` green throughout:** every intermediate build (the empirical `scalarBlockLayout`/`K6e`/`K6f` flips) passed or was reverted cleanly; final state is 3,725/3,728 Passed, 0 Failed, 3 Unsupported.
+
+## Where `K6a` stands now
+
+All 4 remaining bits (`variablePointers`, `scalarBlockLayout`, `samplerFilterMinmax`, `drawIndirectCount`) have now been individually investigated and ruled out as **not** advertisement-only gaps — every one needs a real implementation task:
+- `variablePointers`: `SPIRVToLLVMPatterns.cpp` lowering gaps (`spirv.PtrAccessChain`, `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on pointers).
+- `scalarBlockLayout`: `layOutStructIfOffsetsMatch`'s alignment check needs relaxing to scalar-component granularity.
+- `samplerFilterMinmax`: `FeMeRuntimeCPU.c`'s sampling math never branches on reduction mode — needs real `Min`/`Max` math.
+- `drawIndirectCount`: no `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` entry points exist at all — a new-command task.
+
+`K6`'s original advertisement-only bundle is exhausted: every remaining item is a genuine feature-implementation task, not a quick pick. This is a milestone shift — future sessions should stop re-grep-tracing `K6a`'s remaining bits hoping for another free win and instead budget real implementation time for one of the four, or move to a different roadmap area entirely.
+
+## Next steps
+
+1. **(~1 day)** If continuing `K6a`: pick one of the 4 real implementation tasks above. `samplerFilterMinmax` is probably the smallest (bounded to `FeMeRuntimeCPU.c`'s sampling math, no new SPIR-V opcodes), `drawIndirectCount` the next smallest (new commands, but straightforward indirect-count semantics, no compiler work). `variablePointers`/`scalarBlockLayout` both touch `SPIRVToLLVMPatterns.cpp` lowering/layout internals — likely the two biggest.
+2. **(unexplored)** Consider whether `K6a`'s 4 remaining bits should be split into their own individually-tracked roadmap rows (`K6g`-`K6j`?) now that none of them are quick picks, rather than staying bundled under one row whose own description keeps growing.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag — still present, no decision made this session either.
+4. **(standing, unresolved many sessions)** `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` — still not revisited.
+5. **(standing)** `L419(j)` remaining untriaged items (`line_continuity` generalization in `EntryWrapper.cpp`), `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md` regeneration (the `AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input files are stale — `K6b`-`K6f` were never added to them, only to the hand-edited `VulkanExtensionInventory.md` table directly; a true regen run would currently diverge from the doc).
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check — not exercised this session either, no `check-hlsl-feme-vk` work done.
+
+**Immediate next action for next session:** decide whether to keep narrowing `K6a` (pick `samplerFilterMinmax` as the smallest real task) or pivot to a different roadmap area now that `K6a`'s "quick advertisement wins" are exhausted.
