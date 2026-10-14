@@ -63,25 +63,39 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day) Start `L419(e)`**: all-format color blits, 20 cases
-   (`api.copy_and_blit.core.blit_image.all_formats.color`, 70,140 total cases
-   upstream -- no cached failure log exists, so first step is a targeted
-   format-pair sweep or filter to isolate the exact 20, not a blind full rerun).
-2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- not yet triaged,
-   good second pick after `L419(e)` since both were deferred pending `L419(k)`'s
-   close, which is now done.
-3. **(~2-4 hours) `L418(a)`**: CPU rasterizer `Draw`-path MSAA optimization --
-   still flagged "done" by the last two sessions' handoffs; worth one quick
-   `git log --oneline --all | grep -i L418` sanity check before trusting that,
-   per a prior session's own caught-in-the-act warning about memory drift on
-   this exact item, but not re-opening work without that check first.
-4. **(standing)** Keep `VulkanCTSReport.md` + both inventories + `L418`-`L419`
-   roadmap counts synced after every fix -- done this session for both halves
-   of `L419(k)`.
+1. **(~half day) Root-cause the remaining 12 `L419(e)` cases**: the
+   `astc_{8x8,10x5,12x12}_unorm_block` -> `a2b10g10r10_snorm_pack32`
+   group. Known repro:
+   `astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
+   shows a full-scale (`1.0`) alpha diff with RGB within threshold -- a
+   completely different signature from the `inf`/minifloat bug just
+   fixed (different destination format, no `inf` involved, only the
+   alpha channel affected). First step: check `packClearColor`'s/
+   `unpackColor`'s `R10G10B10A2_SNORM` alpha-component handling
+   specifically (4th component is only 2 bits wide, a much coarser
+   field than RGB's 10 bits each -- a likely place for a sign/clamp
+   edge case to live), and whether ASTC's own alpha-channel decode path
+   (`decodeASTCBlock`) is a plausible second suspect.
+2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged, deferred again this session in favor of finishing
+   `L419(e)`'s in-progress investigation instead of starting fresh work.
+3. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs now; the standing self-correction reminder
+   (`git log --oneline --all | grep -i L418`) was not run again this
+   session since no `L418` work was touched -- still worth doing before
+   ever touching `L418(a)` again, but not urgent while it stays untouched.
+4. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+   `L418`-`L419` roadmap counts synced after every fix -- done this
+   session for `L419(e)`'s partial close.
 5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
    `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
-   discrepancy a new regression -- not exercised this session, no
-   `check-hlsl-feme-vk` work was done.
-6. **(unresolved, carried for several sessions)** Decide whether to revert
-   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
-   revisited, no new information this session either way.
+   discrepancy a new regression -- not exercised this session.
+6. **(unresolved, carried for several sessions)** Decide whether to
+   revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
+   still not revisited.
+
+**Next concrete action**: open `feme/lib/Graphics/ImageFixture.cpp` and
+grep for `R10G10B10A2_SNORM` to find the alpha-component pack/unpack
+case, then rerun the standalone `astc_10x5_unorm_block.
+a2b10g10r10_snorm_pack32.general_general_linear` case with a targeted
+debug print on the alpha channel specifically.
