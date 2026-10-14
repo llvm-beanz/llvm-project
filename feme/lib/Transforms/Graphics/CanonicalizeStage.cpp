@@ -5421,6 +5421,25 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       SPIRVElementInfo Info =
           classifySPIRVElement(Stage, Phase, AddrSpace, D, &GV);
       (Info.IsOutput ? OutputGlobals : InputGlobals).push_back(&GV);
+      // (Roadmap L419(k)) Registering a `SignatureElement`/`ElementID`
+      // above is not, by itself, enough to make this global's literal
+      // `initial_value` reach `Executor.cpp`'s `FSOutput` storage at
+      // runtime: with zero real `OpStore`s to rewrite, the ordinary
+      // store-rewriting walk further down this function (which converts
+      // every genuine `StoreInst` it finds into a `feme.stage.output.
+      // store` call) never visits this global at all. Synthesizing one
+      // real `StoreInst` here -- at the very top of the entry block, so
+      // it always executes before any discard/demote decision the real
+      // body might make, matching the spec's own "value from the start
+      // of the invocation" semantics for an `initial_value` -- lets that
+      // same, already-correct walk pick it up and lower it exactly like
+      // any other output write, rather than duplicating its full
+      // struct/array/vector-decomposition logic here.
+      if (HasRealInitializer) {
+        IRBuilder<> EntryBuilder(
+            &*F.getEntryBlock().getFirstInsertionPt());
+        EntryBuilder.CreateStore(GV.getInitializer(), &GV);
+      }
     }
   }
 
