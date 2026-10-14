@@ -230,6 +230,21 @@ uint32_t packUnsignedMinifloat(double Value, unsigned MantissaBits) {
   if (Shift <= 0) // Overflow: Value's exponent is already far beyond
                   // what any double-rounding could have reached.
     return ((1u << ExpBits) - 1u) << MantissaBits;
+  // Underflow: `Full` is always a 53-bit significand (bit 52 set, plus up
+  // to 52 mantissa bits), so once `Shift >= 54` the entire significand
+  // shifts out and `Full` (< 2^53 <= 2^(Shift-1)) can never reach the
+  // halfway-rounding point either -- the correctly-rounded result is
+  // always a flat zero. Values this far below the format's own smallest
+  // denormal (e.g. a blit's bilinear blend producing a double on the
+  // order of 1e-18, far smaller than an 11-bit minifloat's ~1e-7 denormal
+  // floor) previously fell through to `Half = 1ull << (Shift - 1)` with
+  // `Shift - 1 >= 64`, a 64-bit shift-by-overflow that is undefined
+  // behavior in C++ and was observed (CTS `blit_image.all_formats.color`,
+  // roadmap L419(e)) to produce a garbage, non-zero result that corrupted
+  // not just this channel's own field but its neighbors' once OR'd
+  // together in `encodeR11G11B10Float`.
+  if (Shift >= 54)
+    return 0;
 
   uint64_t Half = 1ull << (Shift - 1);
   uint64_t Trunc = Full >> Shift;

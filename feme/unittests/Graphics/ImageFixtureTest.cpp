@@ -1560,6 +1560,39 @@ TEST(ImageFixtureTest, PacksAndUnpacksR11G11B10FloatClampsNegativeToZero) {
   EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
 }
 
+// (Roadmap L419(e)) `packUnsignedMinifloat`'s subnormal/underflow branch
+// computed `Shift = (EMin - Exp) + (52 - MantissaBits)` without bounding
+// it: a `double` many orders of magnitude below this format's own
+// smallest denormal (e.g. a blit's bilinear blend producing something on
+// the order of `1e-18`, far under an 11-bit minifloat's ~1e-7 denormal
+// floor) drives `Shift` past 64, so `Half = 1ull << (Shift - 1)` becomes
+// an out-of-range 64-bit shift -- undefined behavior in C++, observed in
+// practice (CTS `dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.
+// color.2d.bc5_snorm_block.b10g11r11_ufloat_pack32.*`, root-caused via
+// direct instrumentation of this exact call) to produce a garbage
+// non-zero result large enough to corrupt the packed word's *other*
+// channels once OR'd together in `encodeR11G11B10Float`, manifesting as
+// a literal `Infinity` bit pattern in an entirely unrelated field. The
+// mathematically correct answer for any value this small is a flat
+// zero (its magnitude is nowhere near the halfway rounding point of the
+// smallest representable denormal), which is what this test confirms.
+TEST(ImageFixtureTest, PacksR11G11B10FloatUnderflowsTinyValuesToZero) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::R11G11B10_FLOAT,
+                     {6.9388939039072284e-18, 6.9388939039072284e-18,
+                      6.9388939039072284e-18, 1.0},
+                     Texel),
+      Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R11G11B10_FLOAT, Texel, Unpacked),
+      Succeeded());
+  EXPECT_DOUBLE_EQ(Unpacked[0], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[1], 0.0);
+  EXPECT_DOUBLE_EQ(Unpacked[2], 0.0);
+}
+
 // (Roadmap L411) `encodeR11G11B10Float` previously right-shifted each
 // channel's binary16 encoding straight down to its own narrower field
 // width, truncating (rounding toward zero) instead of rounding to
