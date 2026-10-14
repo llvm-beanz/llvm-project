@@ -63,32 +63,28 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day)** If continuing `K6a`: pick one of the 4 real implementation tasks
-   above. `samplerFilterMinmax` is probably the smallest (bounded to
-   `FeMeRuntimeCPU.c`'s sampling math, no new SPIR-V opcodes),
-   `drawIndirectCount` the next smallest (new commands, but straightforward
-   indirect-count semantics, no compiler work).
-   `variablePointers`/`scalarBlockLayout` both touch `SPIRVToLLVMPatterns.cpp`
-   lowering/layout internals — likely the two biggest.
-2. **(unexplored)** Consider whether `K6a`'s 4 remaining bits should be split
-   into their own individually-tracked roadmap rows (`K6g`-`K6j`?) now that none
-   of them are quick picks, rather than staying bundled under one row whose own
-   description keeps growing.
+1. **(~1 day)** Pick the next `K6a` bit. `drawIndirectCount` is probably the
+   next smallest now (straightforward indirect-count semantics, no compiler
+   work, just new `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` entry
+   points) -- `variablePointers`/`scalarBlockLayout` both require real
+   `SPIRVToLLVMPatterns.cpp` changes and are likely bigger.
+2. **(unexplored, carried forward again)** Consider whether `K6a`'s remaining 3
+   bits should get individually-tracked roadmap rows now that each is a
+   confirmed real task, rather than staying bundled.
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
-   — still present, no decision made this session either.
-4. **(standing, unresolved many sessions)** `CMAKE_BUILD_TYPE=RelWithDebInfo` vs
-   `Release` — still not revisited.
-5. **(standing)** `L419(j)` remaining untriaged items (`line_continuity`
-   generalization in `EntryWrapper.cpp`), `L418(a)` sanity re-check, deferred
-   full `Vulkan14FeatureInventory.md` regeneration (the
+   decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session either; scope stayed tightly on `K6g`.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
+   regeneration (the underlying
    `AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
-   files are stale — `K6b`-`K6f` were never added to them, only to the
-   hand-edited `VulkanExtensionInventory.md` table directly; a true regen run
-   would currently diverge from the doc).
-6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check —
-   not exercised this session either, no `check-hlsl-feme-vk` work done.
+   files are still stale from `K6b`-`K6f`'s own prior sessions, separate from
+   the `AdvertisedPromotedExtensions.txt` gap fixed this session).
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+   not exercised this session either, no `check-hlsl-feme-vk` work done (session
+   stayed scoped to the single `K6g` CPU-runtime task).
 
-**Immediate next action for next session:** decide whether to keep narrowing
-`K6a` (pick `samplerFilterMinmax` as the smallest real task) or pivot to a
-different roadmap area now that `K6a`'s "quick advertisement wins" are
-exhausted.
+**Immediate next action for next session:** re-read `Roadmap.md`'s now-3-bit
+`K6a` row and pick `drawIndirectCount` (new commands, no compiler work) as the
+next likely-smallest real implementation task, or pivot to one of the standing
+backlog items if roadmap-stage work needs a break.
