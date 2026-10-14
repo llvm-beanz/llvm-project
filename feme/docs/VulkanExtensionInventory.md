@@ -16,9 +16,9 @@ Current registry: VK-GL-CTS `c28b36293093`
 
 | Status | Count |
 |---|---:|
-| Advertised | 41 |
+| Advertised | 42 |
 | Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 49 |
+| Planned (in scope, not implemented) | 48 |
 | Not implemented | 194 |
 | **Total** | **302** |
 
@@ -237,7 +237,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_get_physical_device_properties2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_get_surface_capabilities2` | Planned (in scope, not implemented) | roadmap H10 (V8) |
 | `VK_KHR_global_priority` | Advertised |  |
-| `VK_KHR_image_format_list` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_image_format_list` | Implemented | roadmap K6d: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; adds no commands and has no feature bit of its own, and `vkCreateImageView`'s format-compatibility-class check already enforces the real mutable-format rule unconditionally |
 | `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
 | `VK_KHR_index_type_uint8` | Advertised |  |

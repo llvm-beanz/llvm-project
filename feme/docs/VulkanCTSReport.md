@@ -1792,3 +1792,65 @@ to `yes` (targeted doc edit, not a full regeneration -- see that doc's
 own note on remaining unrelated manifest drift).
 `VulkanExtensionInventory.md`: `VK_KHR_shader_draw_parameters` moved to
 Implemented. `Roadmap.md`: `K6c` split off `K6a` and struck through.
+
+## `K6d`: `VK_KHR_image_format_list` advertised (roadmap K6d, measured impact)
+
+Genuinely free, unlike two other `K6a` candidates investigated and
+rejected this same session (`samplerFilterMinmax`, `drawIndirectCount`
+-- see `Roadmap.md`'s `K6a` row for why) and unlike `variablePointers`
+(tried, reverted -- see below): `VkImageFormatListCreateInfo` adds no
+commands and has no feature bit of its own, and `vkCreateImageView`'s
+own format-compatibility-class check (`Image.cpp`, unconditional,
+independent of whether this struct is chained to `VkImageCreateInfo`)
+is what actually enforces the real mutable-format rule. A CPU target
+with no format-specific image representation to prepare ahead of time
+has nothing further to do with the declared view-format list itself.
+Added `VK_KHR_image_format_list` to `PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions` name array.
+
+New unit test: `ImageTest.AcceptsImageFormatListOnMutableFormatImage`
+-- creates a `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` image with a 2-entry
+`VkImageFormatListCreateInfo` chained, then successfully creates a view
+reinterpreting it to the list's second (non-native) format.
+
+No dedicated `dEQP-VK.*image_format_list*`/`*format_list*` mustpass
+cases exist by that name (the extension's effect is implicitly
+exercised, if at all, within broader image/image-view test groups).
+Ran the full `dEQP-VK.api.*` regression sweep (173,397 cases, since
+`PhysicalDeviceInfo.cpp`'s extension table is read by every API/
+extension-enumeration test in that group): **73,608 Pass, 0 Fail,
+99,789 NotSupported**. Zero regressions. Ran
+`dEQP-VK.info.device_mandatory_features`: unaffected (this extension
+has no feature bit, so it was never part of that test's mandatory-
+feature list).
+
+`Vulkan14FeatureInventory.md`: unaffected (no feature bit).
+`VulkanExtensionInventory.md`: `VK_KHR_image_format_list` moved to
+Implemented (Advertised count 41->42, Planned count 49->48).
+`Roadmap.md`: `K6d` split off `K6a` and struck through.
+
+### `variablePointers` tried and reverted (roadmap `K6a`, negative result)
+
+Flipping `EntryPoints.cpp`'s two `variablePointersStorageBuffer`/
+`variablePointers` sites to `VK_TRUE` builds clean and passes the full
+`check-feme` suite (3,724/3,724 unit tests) -- no pattern anywhere in
+`SPIRVToLLVMPatterns.cpp` or upstream MLIR's SPIR-V dialect rejects a
+pointer-typed `OpPhi`/`OpSelect`/function parameter at conversion-
+pattern-registration time, which looked like strong evidence this was
+another "advertisement-only" gap in the `K6b`/`K6c`/`K6d` mold.
+
+Empirically running the full `dEQP-VK.spirv_assembly.*variable_pointer*`
+mustpass list (4,459 cases, previously 100% `NotSupported` with the
+feature `VK_FALSE`) disproved that: **674 Pass, 296 Fail, 3,489
+NotSupported** (the NotSupported remainder gates on an unrelated
+feature, `VK_KHR_workgroup_memory_explicit_layout`). The 296 failures
+are real lowering gaps the unit-test suite's existing coverage never
+exercised: `spirv.PtrAccessChain` "explicitly marked illegal" during
+MLIR dialect conversion, unhandled `OpPtrEqual`/`OpPtrNotEqual`-family
+opcodes (SPIR-V opcodes 401-403), and `OpConstantNull` on
+`StorageBuffer`/`Workgroup`-class pointer types. Implementing these
+would be a real, multi-op `SPIRVToLLVMPatterns.cpp` lowering task, not
+a feature-bit flip. Reverted the `EntryPoints.cpp` change (and its
+would-be `PhysicalDeviceInfoTest.cpp` expectation update) in full;
+`variablePointers` stays `VK_FALSE` and remains in `K6a`'s bundle as a
+genuine implementation task for a future session, not a quick pick.
