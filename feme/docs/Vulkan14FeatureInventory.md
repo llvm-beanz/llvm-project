@@ -156,7 +156,7 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `descriptorBindingPartiallyBound` | yes |  |
 | feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | yes |  |
 | feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | yes |  |
-| feature | VK_VERSION_1_2 | `samplerFilterMinmax` | no |  |
+| feature | VK_VERSION_1_2 | `samplerFilterMinmax` | yes | roadmap K6g |
 | feature | VK_VERSION_1_2 | `scalarBlockLayout` | no |  |
 | feature | VK_VERSION_1_2 | `imagelessFramebuffer` | yes |  |
 | feature | VK_VERSION_1_2 | `uniformBufferStandardLayout` | yes |  |

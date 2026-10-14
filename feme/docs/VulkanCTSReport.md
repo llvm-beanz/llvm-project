@@ -1960,3 +1960,88 @@ is 0 new failures, not a regression. Ran the broader
 Implemented. `Roadmap.md`: `K6f` split off `K6a` and struck through.
 
 
+
+## `K6g`: `samplerFilterMinmax` implemented with real min/max reduction math (roadmap K6g, measured impact)
+
+Unlike `K6b`-`K6f`'s pure advertisement gaps, this bit needed real
+math: `FeMeRuntimeCPU.c`'s bilinear/trilinear/cube-seamless sampling
+blend sites (2D/1D/3D/cube, single-level and mip-blend variants alike)
+previously always did a weighted-average blend regardless of the ABI's
+already-plumbed `ReductionMode` field. Added two component-wise
+reduction helpers (`femeRTv4f32Min`/`femeRTv4f32Max`) and threaded
+`Samp->ReductionMode`-conditional branching into every one of those
+blend sites; depth-comparison sampling paths were deliberately left
+untouched (the spec forbids combining depth compare with filterMinmax
+reduction). `Image.cpp`'s `Sampler` constructor now parses a chained
+`VkSamplerReductionModeCreateInfo` from `pNext`, mapping its
+`reductionMode` to the runtime ABI enum (defaulting to
+`WeightedAverage`, matching prior behavior, when the struct is absent).
+
+`Format.cpp`'s `formatFeatureFlags` now also sets
+`SAMPLED_IMAGE_FILTER_MINMAX_BIT` wherever `SAMPLED_IMAGE_FILTER_LINEAR_
+BIT` is already advertised (broader than the spec's single-component-
+only mandatory minimum, since real CTS cases use multi-channel formats
+like `r8g8b8a8_unorm`), plus explicitly for `D16_UNORM`/`D32_FLOAT` --
+the spec's own mandatory-minmax-format table requires these two
+single-component depth formats independent of `FILTER_LINEAR_BIT`,
+since min/max reduction only needs multiple taps, not real bilinear
+interpolation. This depth-format case was initially missed (the
+post-switch `FILTER_LINEAR_BIT`-gated rule alone left `D16_UNORM`/
+`D32_FLOAT` out, since neither advertises `FILTER_LINEAR_BIT`), and was
+caught by a real regression in `dEQP-VK.api.info.format_properties.
+d16_unorm` before being fixed directly in each format's own switch
+case.
+
+Flipped `EntryPoints.cpp`'s `samplerFilterMinmax` feature bit to
+`VK_TRUE`, and both properties structs' `filterMinmaxSingleComponent
+Formats`/`filterMinmaxImageComponentMapping` fields to `VK_TRUE` (the
+dedicated `VkPhysicalDeviceSamplerFilterMinmaxProperties` struct and
+the promoted `VkPhysicalDeviceVulkan12Properties` view, which must
+agree per a CTS properties2-consistency check). Added
+`VK_EXT_sampler_filter_minmax` to `PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions` name array (same sub-1.2-apiVersion
+custom-device rationale as `K6b`-`K6f`).
+
+Updated `PhysicalDeviceProperties2Test.SamplerFilterMinmaxProperties
+IsFullyOverwritten` (now expects `VK_TRUE` rather than the prior
+`VK_FALSE` placeholder) and extended `DrawTest.
+AdvertisesDynamicRenderingExtension`'s extension-enumeration
+assertions.
+
+CTS coverage discovery: the static mustpass `.txt` files under this
+checkout's `vk-default` profile turned out to **exclude** the entire
+`sampler.view_type.*.{mag,min}_reduce` test area (zero hits for `mag_
+reduce`/`min_reduce` across every mustpass file). Confirmed real
+coverage exists by dumping `deqp-vk`'s full live case list
+(`--deqp-runmode=stdout-caselist`) instead of trusting the mustpass
+files.
+
+Ran `dEQP-VK.pipeline.monolithic.sampler.view_type.*.format.
+r8g8b8a8_unorm.{mag,min}_reduce.*` (420 cases, all view types: 1d,
+1d_array, 2d, 2d_array, 3d, cube, cube_array): **252 Pass, 0 Fail, 168
+NotSupported**. Every `NotSupported` case uses a non-identity/non-R
+`componentMapping.r` swizzle (`comp_one_r_r_r` group); traced to
+`vktPipelineImageSamplingInstance.cpp`'s `checkSupportImageSamplingInstance`,
+which unconditionally throws `NotSupportedError` for any such mapping
+*before* ever querying the device's actual `filterMinmaxImageComponent
+Mapping` property (a separate, correct query exists later in the same
+file, at the actual pipeline-creation check, but this earlier
+unconditional check runs first and always wins) -- a CTS test-source
+quirk, not a driver gap, and out of scope for a FeMe-local fix since
+this checkout's VK-GL-CTS tree is a separate repository.
+
+Ran the broader `dEQP-VK.api.info.*` regression sweep (10,490 cases):
+initially **1 Fail** (`format_properties.d16_unorm`, missing
+`SAMPLED_IMAGE_FILTER_MINMAX_BIT`) before the `D16_UNORM`/`D32_FLOAT`
+fix above; after the fix, **5,966 Pass, 0 Fail, 4,524 NotSupported**
+(one more pass than the `K6f` baseline, from `d16_unorm` now passing).
+Re-ran `ninja check-feme` after every code change: 3,725/3,728 pass,
+0 fail, 3 unsupported (pre-existing, unrelated) throughout.
+
+`Vulkan14FeatureInventory.md`: `samplerFilterMinmax` feature bit moved
+to `yes` (roadmap K6g). `VulkanExtensionInventory.md`:
+`VK_EXT_sampler_filter_minmax` moved to Implemented. `Roadmap.md`:
+`K6g` split off `K6a` and struck through; `AdvertisedPromotedExtensions.
+txt` gained its own `K6g` row (and backfilled two pre-existing missing
+rows, `K6e`/`K6f`, found while adding it -- see `agent_thoughts.md` for
+details).

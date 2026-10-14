@@ -148,7 +148,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_rgba10x6_formats` | Not implemented |  |
 | `VK_EXT_robustness2` | Not implemented |  |
 | `VK_EXT_sample_locations` | Not implemented |  |
-| `VK_EXT_sampler_filter_minmax` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_EXT_sampler_filter_minmax` | Implemented | roadmap K6g: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; `FeMeRuntimeCPU.c`'s sampling blend sites now do real component-wise min/max reduction (not just the weighted-average blend), `Image.cpp`'s `Sampler` parses `VkSamplerReductionModeCreateInfo`, and `Format.cpp` advertises `SAMPLED_IMAGE_FILTER_MINMAX_BIT` |
 | `VK_EXT_scalar_block_layout` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_EXT_separate_stencil_usage` | Implemented | roadmap K6e: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; adds no commands and has no feature bit of its own, and `Image::usage()` has no reader anywhere outside a comment, so there is no per-aspect usage validation path for a chained `VkImageStencilUsageCreateInfo` to disagree with |
 | `VK_EXT_shader_64bit_indexing` | Not implemented |  |
