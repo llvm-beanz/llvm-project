@@ -63,31 +63,26 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day) `L424(a)`**: add a 16-bit ASTC decode entry point next to
-   the existing `decodeASTCBlock` in `feme/lib/Vulkan/ASTCDecode.cpp`,
-   matching CTS's `c/65536.0f` convention. Keep the existing 8-bit path
-   for every other caller unchanged. New unit test asserting the exact
-   16-bit value (not 8-bit-truncated) for a known block.
-2. **(~2-4 hours) `L424(b)`**: wire `L424(a)`'s entry point into
-   `ImageOps.cpp`'s blit/copy per-texel ASTC fetch. Confirm the 12
-   originally-failing cases now Pass, 0 regressions in the other 61
-   passing ASTC-involved `blit_image.*` cases. Strike through `L419(e)`
-   and `L265` in `Roadmap.md` once confirmed; update
-   `VulkanCTSReport.md`.
-3. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
-   untriaged, deferred again this session (didn't touch it, spent the
-   whole session on `L265`).
-4. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
-   several sessions' handoffs. Run `git log --oneline --all | grep -i
-   L418` before ever touching it again -- not run this session either,
-   still untouched.
-5. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+1. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged across many sessions now. Mixed bag per `Roadmap.md`: own
+   conformance-version reporting (won't-fix per `L412(g)`), draw output
+   location (2), rasterization line continuity (2), geometry primitive ID
+   (1), mandatory-feature reporting (1). Don't lump these together --
+   triage each signature separately, starting with whichever has the most
+   cases (draw output location or rasterization line continuity, 2 each).
+2. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs now, several sessions in a row without
+   re-verifying. Run `git log --oneline --all | grep -i L418` once before
+   ever touching it again -- still not run this session either (not
+   touched, no reason to).
+3. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
    `L418`-`L419` roadmap counts synced after every fix -- done this
-   session (inventories confirmed via grep to need no change, pure
-   investigation/doc session).
-6. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   session (`L419(e)`/`L265`/`L424`/`L424(a)`/`L424(b)` all struck
+   through; inventories confirmed via grep to need no change).
+4. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
    `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
-   discrepancy a new regression -- not exercised this session.
-7. **(unresolved, carried for several sessions)** Decide whether to
-   revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
-   still not revisited.
+   discrepancy a new regression -- not exercised this session, no
+   `check-hlsl-feme-vk` work done.
+5. **(unresolved, carried for many sessions)** Decide whether to revert
+   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
+   revisited, no new information this session either way.
