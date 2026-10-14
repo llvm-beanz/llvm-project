@@ -1555,3 +1555,32 @@ this new, earlier-captured provenance bit.
 `Roadmap.md`: `L419(j)` updated (not struck through -- 5 of its 7 cases
 remain: line continuity (2), geometry primitive ID (1), mandatory-feature
 reporting (1), own conformance-version reporting (1, `L412(g)` won't-fix)).
+
+### `L419(j)` triage: `line_continuity` pair root-caused (not yet fixed)
+
+`dEQP-VK.rasterization.line_continuity.{line-strip,polygon-mode-lines}`
+both fail identically:
+
+```
+error: feme-cpu-wrap-entry: function 'main' has a barrier inside
+non-linear control flow (a surviving branch not part of a supported
+loop); region splitting only supports a straight-line wave body or a
+single uniform loop (roadmap milestone 9 deviation)
+```
+
+This is **not** a line-rasterization bug -- it is a compile failure in
+the test's own flood-fill connectivity-check *compute* shader (used to
+verify the rendered line image has no gaps), which `GLSL`-disassembles to
+a `while (!done)` loop whose body contains several further nested,
+non-uniform (`gl_LocalInvocationID`-guarded) `if` regions, each with its
+own `barrier()`. `EntryWrapper.cpp`'s `splitAtGroupSyncBarriers` /
+`isLinearChain` only supports a straight-line wave body or a single
+uniform loop (explicitly documented in-code as a "roadmap milestone 9
+deviation") -- it does not yet generalize to a loop whose body itself
+branches around further barrier regions. Extending barrier-region
+splitting to arbitrary nested control flow is a substantial compiler
+feature in its own right (akin to a general structurizer/divergence
+analysis), not a quick fix -- scoped out for a future session.
+
+No source changes made for this item this session; `Roadmap.md`'s
+`L419(j)` row updated with this triage finding.
