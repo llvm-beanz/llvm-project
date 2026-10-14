@@ -332,8 +332,37 @@ Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
   Descriptor.LodBias = CreateInfo.mipLodBias;
   Descriptor.MinLod = CreateInfo.minLod;
   Descriptor.MaxLod = CreateInfo.maxLod;
+  // (Roadmap K6g) `samplerFilterMinmax`: default to `WeightedAverage`
+  // (ordinary blending, this ICD's only behavior before this roadmap row)
+  // unless the application chained a `VkSamplerReductionModeCreateInfo`
+  // explicitly requesting `MIN`/`MAX` reduction -- mirrors real Vulkan's
+  // own default for this struct's absence (`VkSamplerReductionModeCreateInfo`
+  // is `VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE` whenever it isn't
+  // chained at all).
   Descriptor.ReductionMode =
       static_cast<uint32_t>(SamplerReductionMode::WeightedAverage);
+  for (const auto *Base =
+           static_cast<const VkBaseInStructure *>(CreateInfo.pNext);
+       Base; Base = Base->pNext) {
+    if (Base->sType != VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO)
+      continue;
+    const auto *ReductionInfo =
+        reinterpret_cast<const VkSamplerReductionModeCreateInfo *>(Base);
+    switch (ReductionInfo->reductionMode) {
+    case VK_SAMPLER_REDUCTION_MODE_MIN:
+      Descriptor.ReductionMode = static_cast<uint32_t>(SamplerReductionMode::Min);
+      break;
+    case VK_SAMPLER_REDUCTION_MODE_MAX:
+      Descriptor.ReductionMode = static_cast<uint32_t>(SamplerReductionMode::Max);
+      break;
+    case VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE:
+    default:
+      Descriptor.ReductionMode =
+          static_cast<uint32_t>(SamplerReductionMode::WeightedAverage);
+      break;
+    }
+    break;
+  }
 
   uint32_t Flags = 0;
   if (CreateInfo.compareEnable) {

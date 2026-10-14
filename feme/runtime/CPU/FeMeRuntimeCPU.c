@@ -5643,9 +5643,36 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
                             /*ApplySwizzle=*/1);
 }
 
+// (Roadmap K6g) Component-wise min/max across two `FemeRTv4f32` taps --
+// `samplerFilterMinmax`'s own reduction replaces a filter's weighted blend
+// entirely rather than reweighting it, so every reduction blend site below
+// picks between these two helpers and the pre-existing lerp rather than
+// composing with it.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTv4f32Min(FemeRTv4f32 A, FemeRTv4f32 B) {
+  FemeRTv4f32 R;
+  for (int I = 0; I < 4; ++I)
+    R[I] = A[I] < B[I] ? A[I] : B[I];
+  return R;
+}
+
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTv4f32Max(FemeRTv4f32 A, FemeRTv4f32 B) {
+  FemeRTv4f32 R;
+  for (int I = 0; I < 4; ++I)
+    R[I] = A[I] > B[I] ? A[I] : B[I];
+  return R;
+}
+
 // Bilinearly filters `Img` at `(U, V)`, array layer `Layer` (roadmap
 // H7b-a; always `0` for a non-arrayed image), blending the four texels
-// `femeRTComputeBilinearSupport` selects.
+// `femeRTComputeBilinearSupport` selects. (Roadmap K6g) When `Samp`'s
+// `ReductionMode` requests `Min`/`Max` reduction (`VK_EXT_sampler_filter_
+// minmax`/core 1.2 `samplerFilterMinmax`), the four taps are reduced via
+// component-wise min/max instead of being weighted-blended -- the
+// `Wx`/`Wy` fractional weights `femeRTComputeBilinearSupport` computed are
+// unused in that case, matching the spec's own definition of reduction
+// filtering as a replacement for averaging, not a reweighting of it.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
                      const FemeRTSamplerDescriptor *Samp, float U, float V,
@@ -5665,6 +5692,10 @@ femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
       Img, Level, Layer, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
       Samp->BorderColor, /*ApplySwizzle=*/1);
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(femeRTv4f32Min(T00, T10), femeRTv4f32Min(T01, T11));
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(femeRTv4f32Max(T00, T10), femeRTv4f32Max(T01, T11));
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -5704,6 +5735,13 @@ femeRTSampleFiltered2D(const FemeRTImageDescriptor *Img,
                                        OffsetX, OffsetY)
                : femeRTSamplePoint2D(Img, Samp, U, V, MipPlan.Level1, Layer,
                                      OffsetX, OffsetY);
+  // (Roadmap K6g) Same min/max-replaces-blend rule as `femeRTSampleLinear2D`
+  // above, applied across the two mip levels' own already-reduced results
+  // instead of across one level's four texels.
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(Lo, Hi);
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(Lo, Hi);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5754,6 +5792,11 @@ femeRTSampleLinear1D(const FemeRTImageDescriptor *Img,
                                            /*Sample=*/0, BorderX1,
                                            Samp->BorderColor,
                                            /*ApplySwizzle=*/1);
+  // (Roadmap K6g) Same min/max-replaces-blend rule as `femeRTSampleLinear2D`.
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(T0, T1);
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(T0, T1);
   return T0 + (T1 - T0) * Wx;
 }
 
@@ -5782,6 +5825,10 @@ femeRTSampleFiltered1D(const FemeRTImageDescriptor *Img,
                                               Layer, OffsetX)
                        : femeRTSamplePoint1D(Img, Samp, U, MipPlan.Level1,
                                             Layer, OffsetX);
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(Lo, Hi);
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(Lo, Hi);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -5881,6 +5928,16 @@ femeRTSampleLinear3D(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 T111 = femeRTFetchTexel3D(Img, Level, X1, Y1, Z1,
                                         BX1 || BY1 || BZ1, Samp->BorderColor,
                                         /*ApplySwizzle=*/1);
+  // (Roadmap K6g) Same min/max-replaces-blend rule as `femeRTSampleLinear2D`,
+  // reduced across all eight corners rather than four.
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(
+        femeRTv4f32Min(femeRTv4f32Min(T000, T100), femeRTv4f32Min(T010, T110)),
+        femeRTv4f32Min(femeRTv4f32Min(T001, T101), femeRTv4f32Min(T011, T111)));
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(
+        femeRTv4f32Max(femeRTv4f32Max(T000, T100), femeRTv4f32Max(T010, T110)),
+        femeRTv4f32Max(femeRTv4f32Max(T001, T101), femeRTv4f32Max(T011, T111)));
   FemeRTv4f32 Top0 = T000 + (T100 - T000) * Wx;
   FemeRTv4f32 Bottom0 = T010 + (T110 - T010) * Wx;
   FemeRTv4f32 Slice0 = Top0 + (Bottom0 - Top0) * Wy;
@@ -5923,6 +5980,10 @@ femeRTSampleFiltered3D(const FemeRTImageDescriptor *Img,
                                        OffsetX, OffsetY, OffsetZ)
                : femeRTSamplePoint3D(Img, Samp, U, V, W, MipPlan.Level1,
                                      OffsetX, OffsetY, OffsetZ);
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(Lo, Hi);
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(Lo, Hi);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
@@ -11006,7 +11067,7 @@ femeRTComputeCubeBilinearSupport(const FemeRTImageDescriptor *Img, float U,
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTSampleCubeLinearAtLevel(const FemeRTImageDescriptor *Img, uint32_t Level,
                              uint32_t LayerBase, uint32_t BaseFace, float U,
-                             float V) {
+                             float V, uint32_t ReductionMode) {
   int32_t Size;
   FemeRTCubeBilinearSupport S =
       femeRTComputeCubeBilinearSupport(Img, U, V, Level, &Size);
@@ -11034,6 +11095,17 @@ femeRTSampleCubeLinearAtLevel(const FemeRTImageDescriptor *Img, uint32_t Level,
     T01 = (T00 + T10 + T11) * (1.0f / 3.0f);
   else if (Amb11)
     T11 = (T00 + T10 + T01) * (1.0f / 3.0f);
+  // (Roadmap K6g) Same min/max-replaces-blend rule as `femeRTSampleLinear2D`
+  // above, applied after the seamless ambiguous-corner resolution above
+  // (the one real difference from the plain-2D reduction: the "corner"
+  // being reduced here is already a 3-tap average when a cube edge/corner
+  // forced one, matching VK-GL-CTS's own `getCubeLinearSamples` doing the
+  // same ambiguous-corner resolution before either averaging or
+  // reducing).
+  if (ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(femeRTv4f32Min(T00, T10), femeRTv4f32Min(T01, T11));
+  if (ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(femeRTv4f32Max(T00, T10), femeRTv4f32Max(T01, T11));
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -11064,17 +11136,22 @@ femeRTSampleFilteredCube(const FemeRTImageDescriptor *Img,
   FemeRTv4f32 Lo =
       UseLinear
           ? femeRTSampleCubeLinearAtLevel(Img, Level0, LayerBase, BaseFace, U,
-                                         V)
+                                         V, Samp->ReductionMode)
           : femeRTSamplePoint2D(Img, Samp, U, V, Level0, LayerBase + BaseFace,
                                 /*OffsetX=*/0, /*OffsetY=*/0);
   if (!Trilinear)
     return Lo;
   FemeRTv4f32 Hi =
       UseLinear ? femeRTSampleCubeLinearAtLevel(Img, MipPlan.Level1, LayerBase,
-                                              BaseFace, U, V)
+                                              BaseFace, U, V,
+                                              Samp->ReductionMode)
                : femeRTSamplePoint2D(Img, Samp, U, V, MipPlan.Level1,
                                      LayerBase + BaseFace, /*OffsetX=*/0,
                                      /*OffsetY=*/0);
+  if (Samp->ReductionMode == /*Min=*/1)
+    return femeRTv4f32Min(Lo, Hi);
+  if (Samp->ReductionMode == /*Max=*/2)
+    return femeRTv4f32Max(Lo, Hi);
   return Lo + (Hi - Lo) * MipPlan.Frac;
 }
 
