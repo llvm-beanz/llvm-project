@@ -121609,3 +121609,103 @@ Commit: `c5efb6dffef1` (triage write-up only, no source changes).
 `-n="dEQP-VK.rasterization.geometry.*primitive_id*matching*"` to get the
 exact failing case name and error for the `primitive_id` singleton —
 it's untriaged and smaller than the line_continuity generalization.
+
+# Session: L419(j) `primitive_id.matching` fixed; `mandatory_features` triaged
+
+**Next action:** run `check-hlsl-feme-vk` and apply the `VkBool32`/
+`WaveActiveMax` `offload-test-suite` cherry-pick check before calling
+anything there a new regression — not done this session (no
+`check-hlsl-feme-vk` work happened).
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed first action, this
+session, via `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary`.
+
+## Win: `primitive_id.matching` fixed (1 of `L419(j)`'s remaining 2 untriaged)
+
+Root cause: `Executor.cpp` numbered a geometry shader's
+`gl_PrimitiveIDIn` by a running count of assembled primitives,
+unconditionally. Per spec, that's only correct without tessellation —
+*with* tessellation, every primitive one patch's tessellation generates
+must share that patch's own ordinal index instead.
+
+Fix: thread the generating patch's own index through a new parallel
+shadow-vector pipeline mirroring the existing index-only vectors —
+`PatchPrimitiveIDs` → `TessTriPatchIDs`/`TessLinePatchIDs` →
+`AbsTriPatchIDs`/`AbsLinePatchIDs` → `PrimitivePatchIDs` — used only when
+tessellation feeds the `Lines`/`Triangles` geometry-input assembly
+(`Points`/`*WithAdjacency`, which never combine with tessellation, are
+untouched).
+
+Verified:
+- `dEQP-VK.geometry.builtin_variable.primitive_id.matching`: Fail → Pass.
+- `dEQP-VK.geometry.*`: 191/200 Pass, 0 Fail (9 Not Supported) — no
+  regressions.
+- `dEQP-VK.tessellation.*`: 646/1114 Pass, 30 Fail (confirmed pre-existing
+  `L419(g)`, not new), 438 Not Supported.
+- `ninja check-feme`: 3,722/3,725 Passed, 0 Failed, 3 Unsupported (+1 new
+  test vs. prior baseline).
+- New unit test `ExecutorTest.GeometryStagePrimitiveIDInMatchesSourcePatchNotRunningEmitCount`
+  — confirmed red (fails pre-fix) / green (passes post-fix) via a manual
+  revert-and-rerun, not just a single passing run.
+
+Commits: `369a4d7969e2` (fix + unit test), `e9c61c85e848` (doc sync).
+
+## Triaged, not fixed: `mandatory_features` (the other remaining singleton)
+
+`dEQP-VK.info.device_mandatory_features` fails on **14** distinct
+unsupported mandatory feature bits (`robustImageAccess`,
+`vulkanMemoryModel`[`DeviceScope`], `bufferDeviceAddress`,
+`fullDrawIndexUint32`, 4 `shader*ArrayDynamicIndexing` bits,
+`shaderInt16`, `samplerYcbcrConversion`, `storageBuffer16BitAccess`,
+`variablePointers`[`StorageBuffer`], `samplerMirrorClampToEdge`,
+`scalarBlockLayout`, `shaderInt8`, `storageBuffer8BitAccess`,
+`shaderFloatControls2`).
+
+This is **not** a 1-2 hour fix as previously estimated — it's the
+`L419(j)`-visible symptom of `D1`'s own much bigger, already-documented
+gap ("of 1.3/1.4's 36 mandatory feature bits, only `dynamicRendering` is
+genuinely implemented"). Closing it for real means implementing each
+feature bit (several needing real SPIR-V capability/shader-lowering
+work, not just flipping a struct field) one at a time. Cross-referenced
+to `D1` in `Roadmap.md` instead of inventing new rows — `D1` already has
+the feature-by-feature breakdown.
+
+Commit: `66780637f179` (triage write-up only, no source changes).
+
+## Standing items not touched this session
+
+- `L418(a)` sanity check: ran `git log --oneline --all | grep -i L418`
+  again — still shows the expected prior fix commits
+  (`b5405d8ec4cd`/`ca109ef7b051`/`80ddd348a27d`), nothing new, no action
+  needed.
+- offload-test-suite `VkBool32`/`WaveActiveMax` pattern check: not
+  exercised — no `check-hlsl-feme-vk` work this session.
+- `CMAKE_BUILD_TYPE` `RelWithDebInfo` vs `Release`: still not revisited.
+
+## Next steps
+
+1. **(~1 day+)** `line_continuity` generalization in `EntryWrapper.cpp`'s
+   barrier-region splitter — still the only item left with concrete
+   scoping from a prior session (see the September triage write-up for
+   `EntryWrapper.cpp`'s `isLinearChain`/`splitAtGroupSyncBarriers`
+   limits). Repro: `-n="dEQP-VK.rasterization.line_continuity.*"`.
+2. **(large, multi-session)** Start closing `D1`'s mandatory-feature gap
+   one bit at a time. Suggested first picks (narrowest-looking, least
+   likely to need new SPIR-V capability plumbing):
+   `samplerMirrorClampToEdge` (a sampler address-mode enum value) and
+   `fullDrawIndexUint32` (a draw-call index-range limit) — check
+   `PhysicalDeviceInfo.cpp` for where these are currently reported
+   `VK_FALSE` before estimating further.
+3. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+   `L418`-`L419` roadmap counts synced after every fix — done this
+   session for both the fix and the triage-only item.
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check — only relevant once `check-hlsl-feme-vk` work resumes.
+5. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE` decision —
+   still deferred, no new information this session either way.
+
+**Immediate next action for next session:** open
+`feme/lib/Vulkan/PhysicalDeviceInfo.cpp`, grep for
+`samplerMirrorClampToEdge` and `fullDrawIndexUint32`, and confirm whether
+either is a genuinely small (struct-field-only) fix before committing to
+a larger `D1` plan.
