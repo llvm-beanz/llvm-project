@@ -121149,3 +121149,137 @@ No commits outside `feme/` this session — no non-FeMe bugs found.
 
 **Next concrete action**: run `git log --oneline --all | grep -i L418` to
 verify item 3 above before starting `L419(e)`.
+
+# Session: L419(e) half-closed -- packUnsignedMinifloat underflow UB fix
+
+**Next action**: run `grep -n "a2b10g10r10_snorm_pack32" feme/docs/VulkanCTSReport.md`
+then start on the 12-case alpha-diff residual below -- standalone repro
+already known (`astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.
+general_general_linear`), shows `max difference = (0.00391, 0.00391,
+0.00391, 1)` (alpha full-scale, RGB fine).
+
+## What happened this session
+
+1. **Device check (mandatory, done)**: `vulkaninfo --summary | grep
+   deviceName` with `VK_ICD_FILENAMES` set -> `FeMe CPU Vulkan Device`.
+   Confirmed.
+
+2. **Picked up `L419(e)` (20-case all-format color blit cluster) where a
+   prior session left off mid-investigation** (summary showed debug
+   instrumentation still in the tree, root cause not yet found). Finished
+   the trace:
+   - Standalone case reproduced an `inf` diff in the R channel for
+     `bc5_snorm_block.b10g11r11_ufloat_pack32.general_general_linear`.
+   - Ruled out (via instrumentation) that any blitted pixel's own RGB
+     *input* to the encoder was ever out of `[-1, 1]` range.
+   - Decoded the qpa log's embedded Result/Reference/ErrorMask PNGs
+     directly (Python + Pillow) to find the exact failing pixel: `(13,
+     10)`. Confirmed it's inside one of this blit's own 20 regions (a
+     real minification step), not an untouched background pixel as
+     hypothesized at the end of the last session.
+   - Added a targeted debug print at that exact pixel: the blend
+     accumulator was a safe, finite `(6.94e-18, -0.1417, 0, 1)` but the
+     *packed output word* decoded to `R11=1984, G11=2047 (all-1s),
+     B10=31 (all-1s)` -- impossible for that input under the documented
+     algorithm. That mismatch was the smoking gun.
+   - **Root cause**: `packUnsignedMinifloat`'s subnormal/underflow branch
+     computes `Shift` with no upper bound. For a tiny-enough input (here,
+     `~6.94e-18`, itself a legitimate product of this blit's own bilinear
+     minification, not a bug upstream of this function), `Shift` reaches
+     90. `Half = 1ull << (Shift - 1)` is then a 64-bit shift by 89 --
+     undefined behavior in C++ -- which produced a garbage non-zero field
+     that overflowed its own 11-bit boundary and corrupted the
+     *neighboring* packed field once OR'd together, landing on
+     `Infinity`'s own bit pattern in an unrelated channel.
+   - **Fix**: one guard clause, `if (Shift >= 54) return 0;`, added right
+     after `Shift` is computed -- not just a safety clamp, the
+     mathematically correct rounded answer for any value that small.
+   - Removed every piece of temporary debug instrumentation
+     (`fprintf`/`#include <cstdio>` in both `ImageOps.cpp` and
+     `ImageFixture.cpp`) before committing -- confirmed via `git diff
+     --stat` that `ImageOps.cpp`'s diff came back empty.
+
+3. **Tested thoroughly**:
+   - New unit test `ImageFixtureTest.
+     PacksR11G11B10FloatUnderflowsTinyValuesToZero`, placed next to the
+     other `R11G11B10` pack/unpack tests in `ImageFixtureTest.cpp`.
+   - Confirmed the test actually catches the bug: `git stash`'d just the
+     fix, rebuilt, reran -- test failed with `nan` (the literal real-world
+     symptom), not a contrived assertion. `git stash pop` restored the fix,
+     reran -- green.
+   - `check-feme`: 3719 Passed, 3 Unsupported, 0 Failed.
+   - CTS: all 8 `b10g11r11_ufloat_pack32` cases (`bc4_snorm_block`/
+     `bc5_snorm_block` sources x 4 tilings) now Pass.
+   - Broader regression sweep: the full `blit_image.*` group (73,839
+     cases) -- 12 Fail both before and after, identical case names each
+     time. 0 regressions, 0 unexpected new passes.
+
+4. **Docs synced**:
+   - `Roadmap.md`'s `L419(e)` row updated (not struck through -- 12 of 20
+     cases remain open, a distinct unrelated failure signature).
+   - `VulkanCTSReport.md`: new `## L419(e): all-format color blits,
+     b10g11r11_ufloat_pack32 half closed (20 -> 12)` section, matching the
+     file's existing per-fix section format.
+   - Grepped both Vulkan inventories for any `b10g11r11`/`R11G11B10`
+     reference: none exist. No change needed -- confirmed, not assumed
+     (this is an internal pack/unpack correctness fix for an
+     already-supported core format, no feature/extension-surface change).
+
+5. **Commits** (2, each self-contained):
+   - Fix + unit test (`ImageFixture.cpp`, `ImageFixtureTest.cpp`).
+   - Doc sync (`Roadmap.md`, `VulkanCTSReport.md`).
+
+6. **Cleanup**: removed all `/tmp/l419e_*`, `/tmp/img_*.png`,
+   `/tmp/verify1*`, `/tmp/blit_regress*` throwaway artifacts from this and
+   the prior segment's investigation.
+
+## Not done this session
+
+- **No `check-hlsl-feme-vk`/offload-test-suite work** -- the
+  `VkBool32`/`WaveActiveMax` pattern check was not exercised (standing
+  reminder, not forgotten, just not relevant this session since no
+  offload-test-suite work happened).
+- **No outside-FeMe issue found** this session, so the "isolated
+  reproducer in a self-contained commit" instruction didn't apply --
+  this fix is entirely inside `feme/`.
+- **`CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release`**: still unresolved,
+  still not revisited, carried forward again with no new information.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~half day) Root-cause the remaining 12 `L419(e)` cases**: the
+   `astc_{8x8,10x5,12x12}_unorm_block` -> `a2b10g10r10_snorm_pack32`
+   group. Known repro:
+   `astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
+   shows a full-scale (`1.0`) alpha diff with RGB within threshold -- a
+   completely different signature from the `inf`/minifloat bug just
+   fixed (different destination format, no `inf` involved, only the
+   alpha channel affected). First step: check `packClearColor`'s/
+   `unpackColor`'s `R10G10B10A2_SNORM` alpha-component handling
+   specifically (4th component is only 2 bits wide, a much coarser
+   field than RGB's 10 bits each -- a likely place for a sign/clamp
+   edge case to live), and whether ASTC's own alpha-channel decode path
+   (`decodeASTCBlock`) is a plausible second suspect.
+2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- still
+   untriaged, deferred again this session in favor of finishing
+   `L419(e)`'s in-progress investigation instead of starting fresh work.
+3. **(~2-4 hours) `L418(a)` sanity check**: still flagged "done" by
+   several sessions' handoffs now; the standing self-correction reminder
+   (`git log --oneline --all | grep -i L418`) was not run again this
+   session since no `L418` work was touched -- still worth doing before
+   ever touching `L418(a)` again, but not urgent while it stays untouched.
+4. **(standing)** Keep `VulkanCTSReport.md` + both inventories +
+   `L418`-`L419` roadmap counts synced after every fix -- done this
+   session for `L419(e)`'s partial close.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
+   discrepancy a new regression -- not exercised this session.
+6. **(unresolved, carried for several sessions)** Decide whether to
+   revert `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` --
+   still not revisited.
+
+**Next concrete action**: open `feme/lib/Graphics/ImageFixture.cpp` and
+grep for `R10G10B10A2_SNORM` to find the alpha-component pack/unpack
+case, then rerun the standalone `astc_10x5_unorm_block.
+a2b10g10r10_snorm_pack32.general_general_linear` case with a targeted
+debug print on the alpha channel specifically.
