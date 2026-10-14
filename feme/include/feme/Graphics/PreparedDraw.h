@@ -173,6 +173,13 @@ struct DrawCommand {
   bool Indexed = false;
   uint32_t FirstIndex = 0;
   int32_t VertexOffset = 0;
+  /// SPIR-V's `DrawIndex` builtin (`gl_DrawID`, roadmap K6c): zero for a
+  /// direct (`vkCmdDraw`/`vkCmdDrawIndexed`) draw, or the draw's own
+  /// zero-based position within its `vkCmdDrawIndirect`/
+  /// `vkCmdDrawIndexedIndirect`/`...IndirectCount` command otherwise --
+  /// mirrors `MeshDrawCommand::DrawID`'s own meaning for the mesh
+  /// pipeline.
+  uint32_t DrawID = 0;
 };
 
 /// One mesh-pipeline draw command (roadmap H6e), used in place of

@@ -181,6 +181,39 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (roadmap K6c) A vertex stage reading `gl_DrawID` (SPIR-V's `DrawIndex`
+/// built-in) and storing `(gl_DrawID + 1) * 11` into `buf[gl_DrawID]`,
+/// modeled directly on `VertexStorageBufferSource`'s own
+/// `gl_VertexIndex`-derived write above.
+constexpr llvm::StringLiteral VertexDrawIndexStorageBufferSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DrawParameters], [SPV_KHR_shader_draw_parameters]> {
+  spirv.GlobalVariable @did built_in("DrawIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %didp = spirv.mlir.addressof @did : !spirv.ptr<i32, Input>
+    %d = spirv.Load "Input" %didp : i32
+    %x = spirv.Constant 0.0 : f32
+    %y = spirv.Constant 0.0 : f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %bufp = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>
+    %ac = spirv.AccessChain %bufp[%c0, %d] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %eleven = spirv.Constant 11 : i32
+    %dp1 = spirv.IAdd %d, %c1 : i32
+    %val = spirv.IMul %dp1, %eleven : i32
+    spirv.Store "StorageBuffer" %ac, %val : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @did, @pos, @buf
+}
+)mlir";
+
 /// (roadmap H7g) `RedFragmentSource` plus a `StorageBuffer` write: every
 /// covered fragment stores the same constant `42` into `buf[0]` (bound at
 /// set 0, binding 0), unconditionally -- since every invocation writes the
@@ -3198,6 +3231,109 @@ TEST_F(DrawTest, RendersIndirectDrawAtNonzeroBufferOffset) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap K6c) `gl_DrawID`'s own value is each draw's zero-based position
+/// within a single `vkCmdDrawIndirect` call with `drawCount > 1`, not
+/// always zero: a 3-entry indirect buffer drives one
+/// `VertexDrawIndexStorageBufferSource` draw each, and the resulting
+/// `buf[gl_DrawID] == (gl_DrawID + 1) * 11` triple (`{11, 22, 33}`) is only
+/// reachable if every draw's `gl_DrawID` is real and distinct --
+/// `DrawCommand::DrawID` defaulting to 0 for all three (the pre-fix state)
+/// would instead collide every write on `buf[0]`.
+TEST_F(DrawTest, MultiDrawIndirectReportsDistinctDrawID) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  Binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+      VK_SUCCESS);
+
+  VkDeviceMemory BufMemory = VK_NULL_HANDLE;
+  VkBuffer Buf = createBuffer(3 * sizeof(uint32_t), BufMemory,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  void *Mapped = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, BufMemory, 0, VK_WHOLE_SIZE, 0, &Mapped),
+            VK_SUCCESS);
+  std::memset(Mapped, 0xEE, 3 * sizeof(uint32_t));
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+  VkDescriptorBufferInfo BufInfo{Buf, 0, VK_WHOLE_SIZE};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkShaderModule Vertex = createModule(VertexDrawIndexStorageBufferSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, nullptr, StorageLayout);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  VkDeviceMemory IndirectMemory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(3 * sizeof(VkDrawIndirectCommand), IndirectMemory,
+                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawIndirectCommand Args[3]{};
+  for (VkDrawIndirectCommand &A : Args) {
+    A.vertexCount = 1;
+    A.instanceCount = 1;
+  }
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), Args, sizeof(Args));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindDescriptorSets(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, StorageLayout,
+                          0, 1, &Set, 0, nullptr);
+  vkCmdDrawIndirect(Cmd, Indirect, 0, 3, sizeof(VkDrawIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  const auto *Values = static_cast<const uint32_t *>(Mapped);
+  EXPECT_EQ(Values[0], 11u);
+  EXPECT_EQ(Values[1], 22u);
+  EXPECT_EQ(Values[2], 33u);
+
+  vkUnmapMemory(Device, BufMemory);
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, IndirectMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipelineLayout(Device, StorageLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, BufMemory, nullptr);
+}
+
 /// (roadmap H21b) `vkCmdDrawIndirectByteCountEXT` computes its vertex count
 /// from a counter buffer's own byte count (`(byteCount - counterOffset) /
 /// vertexStride`) rather than taking it directly -- 12 bytes at
@@ -3911,7 +4047,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 41u);
+  ASSERT_EQ(Count, 42u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -3988,6 +4124,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   // Roadmap L412.
   EXPECT_TRUE(HasExtension(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME));
   EXPECT_TRUE(HasExtension(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME));
+  // Roadmap K6c.
+  EXPECT_TRUE(HasExtension(VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

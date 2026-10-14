@@ -5362,7 +5362,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         Inv.BaseVertex = Cmd.Indexed ? Cmd.VertexOffset
                                      : static_cast<int32_t>(Cmd.FirstVertex);
         Inv.BaseInstance = Cmd.FirstInstance;
-        Inv.DrawID = 0;
+        Inv.DrawID = Cmd.DrawID;
         // (roadmap L110) Same device-index substitution as the fragment
         // site above, for the vertex stage's own pre-rasterization group.
         Inv.ViewIndex = Pipeline.getPreRasterViewIndexIsDeviceIndex()

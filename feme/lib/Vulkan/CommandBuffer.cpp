@@ -2884,6 +2884,10 @@ readIndirectDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
   for (uint32_t I = 0; I != DrawCount; ++I) {
     const uint8_t *Src = Base + uint64_t(Stride) * I;
     feme::graphics::DrawCommand Draw;
+    // (roadmap K6c) `gl_DrawID`'s own value: this draw's zero-based
+    // position within the multi-draw-indirect command, matching
+    // VK_KHR_shader_draw_parameters's spec text exactly.
+    Draw.DrawID = I;
     if (Indexed) {
       VkDrawIndexedIndirectCommand Args{};
       std::memcpy(&Args, Src, sizeof(Args));
