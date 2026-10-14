@@ -63,14 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. `L418(a)`/`L418(b)`/`L421`/`L422`/`L423`: all confirmed done, no action
-   needed.
-2. `VkBool32`/`WaveActiveMax` `offload-test-suite` pattern: not exercised, no
-   `check-hlsl-feme-vk` work this session.
-3. `L419(e)` (all-format color blits, 20 cases) and `L419(j)` (small long tail,
-   7 cases): not triaged this session — good next candidates once `L419(k)` is
-   closed. `L419(e)`'s underlying test group
-   (`api.copy_and_blit.core.blit_image.all_formats.color`) has 70,140 total
-   cases upstream, so finding the exact 20 failing ones needs either the
-   original failure log (not located this session) or a targeted format-pair
-   reduction, not a blind full-group rerun.
+1. **(~1 day) Start `L419(e)`**: all-format color blits, 20 cases
+   (`api.copy_and_blit.core.blit_image.all_formats.color`, 70,140 total cases
+   upstream -- no cached failure log exists, so first step is a targeted
+   format-pair sweep or filter to isolate the exact 20, not a blind full rerun).
+2. **(~2-4 hours) `L419(j)`**: small long tail, 7 cases -- not yet triaged,
+   good second pick after `L419(e)` since both were deferred pending `L419(k)`'s
+   close, which is now done.
+3. **(~2-4 hours) `L418(a)`**: CPU rasterizer `Draw`-path MSAA optimization --
+   still flagged "done" by the last two sessions' handoffs; worth one quick
+   `git log --oneline --all | grep -i L418` sanity check before trusting that,
+   per a prior session's own caught-in-the-act warning about memory drift on
+   this exact item, but not re-opening work without that check first.
+4. **(standing)** Keep `VulkanCTSReport.md` + both inventories + `L418`-`L419`
+   roadmap counts synced after every fix -- done this session for both halves
+   of `L419(k)`.
+5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
+   `offload-test-suite` pattern before calling any `check-hlsl-feme-vk`
+   discrepancy a new regression -- not exercised this session, no
+   `check-hlsl-feme-vk` work was done.
+6. **(unresolved, carried for several sessions)** Decide whether to revert
+   `CMAKE_BUILD_TYPE` from `RelWithDebInfo` back to `Release` -- still not
+   revisited, no new information this session either way.
