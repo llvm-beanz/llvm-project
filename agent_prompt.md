@@ -63,33 +63,33 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
+1. **(~1 day)** New `K6l`: 8 of its 9 `random.scalar.*` failures are still
+   `RowMajor`-matrix-related but in more deeply/irregularly nested shapes than
+   this session's fix covers (matrix reached through a struct AND an array in
+   the same chain). `getMatrixColumnAccessShape`'s array-of-struct branch likely
+   needs the same array-peel treatment this session added to the
+   direct-struct-member branch. Pull each failing case's real SPIR-V from its
+   `.qpa` log first (see lesson above) before guessing at the shape.
+2. **(~half day, separate bug class)** `K6l`'s other residual:
+   `random.scalar.41` plus 4 `3_level_unsized_array.scalar.*` cases fail with a
+   *legalization* error (not a result mismatch) on a plain `vector<3x*>` member
+   (no matrix involved) reached through a multiply-nested `rtarray`-of-`array`.
+   Not yet triaged at all -- worth its own roadmap row once looked at, since
+   it's unrelated to `RowMajor` matrices.
+3. **(~1-2 days)** `variablePointers` is `K6a`'s only remaining bit. Start from
    the prior investigation's exact failure list (`PtrAccessChain` "explicitly
    marked illegal", unhandled `OpPtrEqual`/`OpPtrNotEqual`, `OpConstantNull` on
-   pointer types) rather than re-deriving it -- two sessions already confirmed
-   empirically it's a real lowering gap, not a quick flip.
-2. **(~1 day, new this session)** New `K6k`: the `RowMajor`-matrix SSBO
-   `*_store_cols` bug (62 cases, result-comparison mismatch, not a
-   pipeline-creation error) -- not yet grep-traced. Likely in the
-   `RowMajorMatrixStorePattern`/`getMatrixWholeAccess`-family column-store
-   addressing math, given the `_store_cols`-only failure pattern (loads and
-   whole-matrix stores are unaffected). Confirmed pre-existing (not a `K6j`
-   regression) via `git stash` baseline re-run.
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+   pointer types).
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
-4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration
-   (`AdvertisedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt` input
-   files still stale from `K6b`-`K6h`'s own prior sessions).
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
-   not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the single `K6j` compiler-fix task, same scoping choice as
-   `K6g`-`K6i`'s own sessions).
+   regeneration.
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+   not exercised this session either, no `check-hlsl-feme-vk` work done.
 
-**Immediate next action for next session:** re-read `Roadmap.md`'s now-1-bit
-`K6a` row, pick `variablePointers`, and start from the exact failure list two
-prior sessions already logged (`PtrAccessChain`/`OpPtrEqual` family) -- or pivot
-to the new `K6k` SSBO `RowMajor`-matrix store bug if a break from `K6a` is
-wanted.
+**Immediate next action for next session:** pick `K6l`'s 8 `RowMajor`
+`random.scalar.*` cases (pull real SPIR-V from `.qpa` logs first) as the
+smallest direct continuation of this session's own fix, or pivot to
+`variablePointers` (`K6a`) for a change of pace.
