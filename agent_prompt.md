@@ -63,30 +63,14 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours) `L418(a)`**: optimize the CPU rasterizer's `Draw` path for
-   large MSAA targets. This has been "carried forward unstarted" for many
-   sessions now per the handoff text, but the most recent session before this
-   one marked `L418(a)` as its own doc-sync commit (`80ddd348a27d`) --
-   **double-check `git log --oneline --all | grep -i L418` and the `Roadmap.md`
-   row directly before trusting either "unstarted" or "done" from memory.** If
-   genuinely unstarted: profiling from `L418` already isolated the hot path,
-   this just needs a `gdb`-driven reduction session (no sampling profiler
-   available in this environment).
-2. **(~half day) `L418(b)`**: this session's own work *did* resolve the original
-   `L418(b)` framing (reconcile ~5s standalone timing vs. 60s/600s full-suite
-   timeouts) -- it wasn't slowness, it was the `L421`/`L422` crashes. Re-confirm
-   via a fresh full-suite timed run whether the timeout reports are now gone
-   entirely now that both crash bugs are fixed, before assuming any further
-   `L418(b)` work is needed at all.
-3. **(fresh)** Pick a new CTS cluster to triage from scratch: a full
-   `dEQP-VK.api.object_management.*` sweep (beyond just the one `L423` case)
-   might surface more loader-adjacent "not FeMe's fault" findings worth ruling
-   out early via the cross-ICD technique above, or might surface genuine new
-   FeMe bugs in the same family worth root-causing properly.
-4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and the
-   `L418`-`L423` roadmap counts synchronized after every fix and isolated CTS
-   rerun -- done this session (`L422`/`L423` both cross-referenced; inventories
-   confirmed via direct grep, not just asserted, to need no change for either).
-5. **(standing)** Keep checking the `VkBool32`/`WaveActiveMax`
-   offload-test-suite pattern before calling anything a new regression -- not
-   exercised this session, no `check-hlsl-feme-vk` work was done.
+1. `L418(a)`/`L418(b)`/`L421`/`L422`/`L423`: all confirmed done, no action
+   needed.
+2. `VkBool32`/`WaveActiveMax` `offload-test-suite` pattern: not exercised, no
+   `check-hlsl-feme-vk` work this session.
+3. `L419(e)` (all-format color blits, 20 cases) and `L419(j)` (small long tail,
+   7 cases): not triaged this session — good next candidates once `L419(k)` is
+   closed. `L419(e)`'s underlying test group
+   (`api.copy_and_blit.core.blit_image.all_formats.color`) has 70,140 total
+   cases upstream, so finding the exact 20 failing ones needs either the
+   original failure log (not located this session) or a targeted format-pair
+   reduction, not a blind full-group rerun.
