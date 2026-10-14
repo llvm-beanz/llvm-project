@@ -2293,3 +2293,65 @@ residual gap, not a new feature-bit flip. `Roadmap.md`: `K6j` struck
 through; new `K6k` added tracking the pre-existing, unrelated
 `RowMajor`-matrix SSBO `*_store_cols` bug found (but not fixed) as part
 of this session's broader regression sweep.
+
+## `K6k`: `RowMajor`-matrix SSBO array-member column store/load fixed (roadmap K6k, measured impact)
+
+K6j's own broader `dEQP-VK.ssbo.*` regression sweep left 67 raw failures
+(62 distinct cases, roadmap K6k): every
+`dEQP-VK.ssbo.layout.{single_basic_array,2_level_array,3_level_array}.
+scalar.row_major_mat*_{comp_access_,}store_cols` case, plus 8
+`dEQP-VK.ssbo.layout.random.scalar.*` cases -- a result-comparison
+mismatch, not a legalization/pipeline-creation error.
+
+Root-caused by capturing the real SPIR-V `dEQP-VK.ssbo.layout.
+single_basic_array.scalar.row_major_mat2_store_cols` compiles to
+directly from the CTS `.qpa` log's own `<SpirVAssemblySource>` (rather
+than continuing to guess at hand-written MLIR reproducers, which this
+session's own early attempts show is easy to get subtly wrong -- see
+`agent_thoughts.md`). The real `Block` struct has a leading `float
+padding` member before the `mat2 var[3]` member CTS's own GLSL names
+suggested was the block's *sole* member; `var` is therefore member index
+1, reached as `mat2 var[3]` -- an array of matrices, not a matrix
+directly. The failing column-select `AccessChain` is
+`[member=1, elemIdx, colIdx]`, one index deeper than
+`getMatrixColumnAccess`'s own shape-matching helper
+(`getMatrixColumnAccessShape`) expected (`[member, colIdx]`, i.e. the
+member being the matrix directly). It declined to match, so the whole
+`AccessChain` fell through to a different, `RowMajor`-oblivious
+conversion that silently dropped `colIdx`, storing/loading at the
+matrix's base address regardless of which column was requested.
+
+Fixed by peeling through the member's own array levels (any number, to
+also cover `2_level_array`/`3_level_array`) before requiring the
+innermost type be the matrix, consuming one more `AccessChain` index per
+level for the column selector's own position.
+
+Added `spirv-to-llvm-matrix-rowmajor-nonwrapper-array-struct-member-
+column.mlir`, mirroring the exact failing CTS struct shape; confirmed it
+fails without the fix (`git stash`) and passes with it.
+
+CTS:
+- `dEQP-VK.ssbo.layout.single_basic_array.scalar.row_major_mat2_store_cols`
+  (the original case): **Pass** (previously Fail).
+- All 54 `single_basic_array`/`2_level_array`/`3_level_array` `row_major
+  mat*_{comp_access_,}store_cols` cases run directly: **54 Pass, 0 Fail**.
+- Full `dEQP-VK.ssbo.*` regression sweep (12,225 cases, via
+  `feme/utils/run_vulkan_cts.py`): **4,741 Pass (+54), 13 Fail (-54),
+  7,471 NotSupported** (unchanged). The 13 remaining failures are **not**
+  this fix's target shape: 9 `random.scalar.*` cases (a deeper-nesting
+  residual, split off as new roadmap row `K6l`) and 4
+  `3_level_unsized_array.scalar.{bvec3,ivec3,uvec3,vec3}` cases (a
+  separate, unrelated-to-`RowMajor`-matrices legalization bug, also
+  tracked under `K6l`) -- both confirmed **pre-existing**, not caused by
+  this fix, via a before/after rebuild (`git` revert of just this
+  commit's source change, rebuild `libfeme_vulkan.so`, re-run): identical
+  failure signatures on both builds.
+- Re-ran `ninja check-feme`: 3,732/3,735 pass, 0 fail, 3 unsupported
+  (pre-existing, unrelated); 1 new lit test added this session.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes
+needed: this is a pure bug fix in an already-advertised feature's own
+lowering path (`scalarBlockLayout`/`VK_EXT_scalar_block_layout`, already
+advertised as of K6i), not a new feature-bit flip. `Roadmap.md`: `K6k`
+struck through; new `K6l` added tracking the residual `random.scalar.*`
+and `3_level_unsized_array` failures this sweep surfaced.
