@@ -9212,7 +9212,7 @@ public:
         Op, ResultType, Adaptor.getPointer(),
         getAtomicLoadStoreAlignment(ResultType), /*isVolatile=*/false,
         /*isNonTemporal=*/false, /*isInvariant=*/false,
-        /*isInvariantGroup=*/false, Ordering);
+        /*isInvariantGroup=*/false, /*isNoundef=*/false, Ordering);
     return mlir::success();
   }
 };
