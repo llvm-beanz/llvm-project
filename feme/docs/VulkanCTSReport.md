@@ -1304,3 +1304,102 @@ unrelated failure signature (no `inf`, different destination format,
 different diff channel/magnitude pattern) from the `b10g11r11_ufloat`
 group just fixed. Not yet root-caused; left for a future session (see
 `Roadmap.md`'s `L419(e)` entry).
+
+## `L265`: ASTC-alpha SNORM "tie" root-caused as an 8-bit decode-precision gap, not a rounding bug (12 cases, not yet fixed)
+
+Two prior sessions investigated the residual 12-case
+`astc_{8x8,10x5,12x12}_unorm_block` -> `a2b10g10r10_snorm_pack32` cluster
+(`L419(e)`'s residual half, tracked as `L265`) without resolving it. The most
+recent of those sessions bit-exact-verified FeMe's own `ASTCDecode.cpp`
+pipeline end to end against a from-scratch Python re-implementation (every
+stage matched) and concluded the remaining discrepancy was a genuine
+*rounding-direction conflict*: this cluster appeared to need
+ties-away-from-zero, directly contradicting the ties-to-even fix `L260`
+had already landed for a different (smaller) ASTC footprint cluster -- and
+left the investigation deferred as apparently unresolvable with one global
+rule.
+
+**This session re-opened the investigation and found the "tie-direction
+conflict" framing itself was a red herring.**
+
+Reproduced the known repro,
+`astc_10x5_unorm_block.a2b10g10r10_snorm_pack32.general_general_linear`,
+and re-confirmed the two exact failing destination pixels, `(34, 1)` and
+`(36, 1)`, both via embedded qpa PNG diffing (as in earlier sessions) and
+via fresh instrumentation. First used targeted debug instrumentation
+(temporary, fully reverted after use) in `ImageOps.cpp`'s blit region loop
+to dump each failing pixel's actual `VkImageBlit` region geometry -- this
+confirmed the "staircase" multi-region structure hypothesized at the start
+of this segment: pixel `(34,1)` belongs to a `Dst=[33,35)x[0,2)` region and
+`(36,1)` to an independent `Dst=[35,37)x[0,2)` region, both mapping the
+*entire* 60x60 source image down into a 2x2 destination rectangle (a 30x
+minification), each computing an identical region-local sample point
+`(U, V) = (45, 45)` by coincidence of both regions using the same local
+`Tx = 0.75` fraction -- not a geometric bug, just an explanation for why
+two different destination pixels produce identical source coordinates.
+
+With the geometry confirmed benign, re-verified by hand (and via a direct
+Python float32 simulation) that FeMe's own blend of its four decoded
+source-alpha samples lands on an *exact* IEEE-754 `0.5` -- consistent with
+every prior session's finding. The new, decisive step: **instrumented
+VK-GL-CTS's own reference code directly** (`vktApiBlittingTests.cpp`,
+temporary debug print added and fully reverted before this document was
+written -- `git diff --stat` in the `VK-GL-CTS` checkout confirmed clean
+afterward) to print the *actual* decoded source-texel alpha values CTS's
+own `tcuAstcUtil.cpp` decoder computes for the same four source texels
+FeMe's blit blends (`(44,44)`, `(45,44)`, `(44,45)`, `(45,45)`):
+
+```
+FeMe:  0.937255, 0.921569, 0.070588, 0.070588   (RGBA8-quantized)
+CTS:   0.936035, 0.921387, 0.072449, 0.072449   (16-bit float, unquantized)
+```
+
+These do **not** match -- a small (~0.001-0.002) but real per-texel
+decode discrepancy. Tracing `tcuAstcUtil.cpp`'s own weight/endpoint
+interpolation (`c = (c0*(64-w) + c1*w + 32) / 64`, run at 16-bit precision,
+`c0`/`c1` being each 8-bit endpoint replicated into a 16-bit value) showed
+CTS keeps this intermediate as a **float** (`c == 65535 ? 1.0f :
+(float)c / 65536.0f`) for any non-sRGB LDR decode -- it never quantizes
+down to 8 bits. FeMe's `ASTCDecode.cpp::decodeASTCBlockLDR` computes the
+exact same 16-bit `Interp` value internally, but **always** truncates it
+to a `uint8_t` RGBA8 output texel (`Output[...] =
+(Interp*255+32767)/65536`, i.e. `239.228 -> 239`) -- a deliberate,
+long-standing architectural convention shared by every compressed-format
+decoder in this codebase (ASTC, BC, ETC2 all decode straight into an
+`R8G8B8A8_UNORM` intermediate for sampling simplicity; see `Image.h`,
+`CommandBuffer.cpp`, `ImageOps.cpp`'s own comments).
+
+That 8-bit truncation is exactly what turns CTS's own unambiguous,
+no-tie blend (`(0.936035+0.921387+0.072449+0.072449)/4 = 0.500577...`,
+which rounds up to SNORM-2-bit code `1` with no tie at all) into FeMe's
+blend from pre-truncated 8-bit inputs landing on a mathematically *exact*
+`0.5` -- a genuine tie that CTS's own math never actually has. **This
+conclusively rules out a rounding-direction bug entirely**: `L260`'s
+`ties-to-even` fix is independently confirmed correct per spec (checked
+against CTS's own `tcuTexture.cpp::convertSatRte`, used by
+`snormFloatToChannel`) and is not implicated here. The real mechanism is
+a precision gap between FeMe's 8-bit ASTC-decode architecture and CTS's
+16-bit-float reference model, which only produces a hard, binary pass/fail
+cliff in this specific case because the destination format's alpha
+channel is a 2-bit SNORM field -- a 3-way quantization with exactly one
+possible tie value (`0.5`) -- any wider destination channel would have
+simply absorbed the ~0.001 discrepancy within its own comparison
+threshold, the same way this test's RGB channels already do (`~0.0039`
+diff, comfortably inside the `~0.065` RGB threshold logged in the qpa).
+
+**No fix implemented this session.** A real fix requires propagating ASTC
+decode precision beyond 8 bits (at minimum for the blit/copy sampling path)
+through `ASTCDecode.cpp`'s `Output` buffer and `ImageOps.cpp`'s per-texel
+fetch -- a cross-cutting precision-architecture change, scoped out into
+`Roadmap.md`'s new `L424(a)`/`L424(b)` breakdown rather than attempted as a
+single high-risk patch this session, given it touches code shared by every
+passing ASTC/BC/ETC2 case in the suite. All temporary debug
+instrumentation (in both `feme/lib/Vulkan/ImageOps.cpp` and VK-GL-CTS's
+`vktApiBlittingTests.cpp`) was fully reverted; both trees rebuilt clean
+afterward (`libfeme_vulkan.so` and `deqp-vk`), and the 12-case failure
+count is unchanged (unavoidable, since no fix was applied) --
+`check-feme`: unaffected, no FeMe source file changed this session.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- confirmed via grep, no feature/extension-surface touched; this
+was a pure investigation/root-cause session with a documentation-only
+roadmap update.
