@@ -121825,3 +121825,44 @@ a larger `D1` plan.
 3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
 
 **Immediate next action for next session:** re-read `Roadmap.md`'s `K6a` row (now narrower: 8 bits) and grep-trace one candidate's existing SPIR-V/wrapper/runtime plumbing before flipping any bit, following this session's lesson that the "nearly free" label needs re-verifying per bit.
+
+# Session: K6a bundle survey -- K6d (`VK_KHR_image_format_list`) closed, two bits ruled out, `variablePointers` tried and reverted
+
+**Task:** continue `K6a`'s bundle; grep-trace every remaining candidate's real cost *before* picking one, per last session's explicit "nearly free isn't always true" lesson.
+
+## What happened, in order
+
+1. Mandatory device check: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+2. Found a stale `Roadmap.md` entry first: `K6a`'s bundle still listed `shaderOutputViewportIndex`/`shaderOutputLayer`, already `VK_TRUE`/closed by `H3`. Fixed and committed separately before touching the real bundle.
+3. Grep-traced all 7 real remaining candidates before picking:
+   - `samplerFilterMinmax`: ABI plumbing exists (`RuntimeABI.h`'s `SamplerReductionMode` enum, `FemeSamplerDescriptor::ReductionMode`), but `FeMeRuntimeCPU.c`'s sampling math (`femeRTSampleLinear2D` et al.) never branches on it -- always weighted-average blend. **Not cheap** (~1 day, real math needed across every sampling function).
+   - `drawIndirectCount`: `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` don't exist anywhere in `CommandBuffer.cpp`/`EntryPoints.cpp`. **Not cheap** (~1 day, new commands).
+   - `VK_KHR_image_format_list`: no feature bit, no commands, `vkCreateImageView`'s own format-compatibility check already does the real enforcement regardless of whether the hint struct is chained. **Genuinely cheap — picked this one.**
+   - `variablePointers`: no capability-gating code found anywhere in `SPIRVToLLVMPatterns.cpp`/upstream MLIR's SPIR-V dialect. Looked cheap like `VK_KHR_image_format_list` — **tried it**, see below.
+4. **Flipped `variablePointers`/`variablePointersStorageBuffer` to `VK_TRUE`** (`EntryPoints.cpp`, two sites), fixed the one unit test that broke (`PhysicalDeviceInfoTest`'s dedicated-struct-overwrite test). `check-feme`: 3,724/3,724 passed clean.
+5. **Empirically verified against real CTS before trusting the grep-based "looks free" read** (the actual lesson from last session, applied correctly this time): ran all 4,459 `dEQP-VK.spirv_assembly.*variable_pointer*` mustpass cases. Result: **674 Pass, 296 Fail, 3,489 NotSupported.** Real new failures: `spirv.PtrAccessChain` legalization rejected, unhandled `OpPtrEqual`/`OpPtrNotEqual` opcodes, `OpConstantNull` on pointer types unsupported. **Not actually free** — reverted the whole change (`EntryPoints.cpp` + the test file) back to a clean working tree.
+6. Implemented `VK_KHR_image_format_list` for real: added it to `PhysicalDeviceInfo.cpp`'s extension name array, fixed the one extension-count unit test that broke (41→42), added a dedicated `ImageTest.AcceptsImageFormatListOnMutableFormatImage` test (mutable-format image + 2-entry format list + a reinterpreted view of the second format).
+7. `ninja check-feme`: 3,725/3,725 passed, 3 unsupported, 0 failed.
+8. Re-confirmed device before CTS: `FeMe CPU Vulkan Device`.
+9. CTS: full `dEQP-VK.api.*` regression sweep (173,397 cases, since the extension-enumeration table changed) — **73,608 Pass, 0 Fail, 99,789 NotSupported.** Zero regressions. No dedicated `*image_format_list*` CTS cases exist by name to run.
+10. Docs: `Roadmap.md` (`K6d` split off, struck through; `K6a`'s row updated with the `samplerFilterMinmax`/`drawIndirectCount`/`variablePointers` findings so a future session doesn't re-investigate the same two "nearly free" traps), `VulkanExtensionInventory.md` (moved to Implemented, counts 41→42/49→48), `VulkanCTSReport.md` (new `K6d` section + the `variablePointers` negative-result writeup), `AdvertisedPromotedExtensions.txt`/`PlannedExtensions.txt` (entry moved).
+11. Checked the offload-test-suite `VkBool32`/`WaveActiveMax` fix is still present at the top of that checkout's `feme` branch history (`2e72553 Fix VkBool32 specialization constant override size`) — no new `check-hlsl-feme-vk` work needed this session since nothing SPIR-V/wrapper-level changed.
+
+## Wins
+- `K6d` closed: `VK_KHR_image_format_list` advertised, zero-regression CTS verified across the full `api.*` group.
+- Ruled out 3 of `K6a`'s remaining bits as genuinely **not** cheap, with concrete evidence recorded in `Roadmap.md` so no future session re-investigates them expecting a quick flip: `samplerFilterMinmax`, `drawIndirectCount`, `variablePointers`.
+- Caught the `variablePointers` false-cheap signal **before committing it** by empirically running the real CTS mustpass list instead of trusting the absence-of-rejection grep result — exactly the discipline the prior session's `shaderDrawParameters` lesson asked for, and it worked: would have shipped 296 new CTS failures otherwise.
+- 4 small, separately-committed changes: stale-roadmap cleanup, `K6d` core fix + test, doc sync, bookkeeping-file move.
+
+## Standing items not touched this session
+- `L419(j)`'s remaining untriaged items (`line_continuity`, `primitive_id.matching`, `device_mandatory_features` singletons), `L418(a)` sanity re-check, `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE` `RelWithDebInfo` vs `Release` decision, deferred full `Vulkan14FeatureInventory.md` regeneration (blocked on `VK_KHR_shader_float_controls` + two `VK_VERSION_1_4` limit notes) — all still deferred, no new information.
+- `K6a`'s still-untraced remainder: `scalarBlockLayout`, `VK_EXT_separate_stencil_usage`, `VK_KHR_shader_float_controls` — not grep-traced this session (ran out of time budget after the `variablePointers` detour).
+
+## Next steps
+
+1. **(~1-2 hours)** Grep-trace `scalarBlockLayout` next: check whether `SPIRVToLLVMPatterns.cpp`'s struct/block offset math already honors scalar (non-std140/std430) member offsets/strides as declared, or imposes its own alignment that would need relaxing. `VK_KHR_relaxed_block_layout`/`VK_KHR_uniform_buffer_standard_layout` are both already "core, not advertised by name" per `AdvertisedPromotedExtensions.txt` (declared offsets used as-is, no re-layout imposed) — if `scalarBlockLayout`'s stricter relaxation is already naturally covered by that same "use declared offsets as-is" policy, this could be another `K6d`-style free win. Verify empirically against real CTS cases before committing, the same way this session caught `variablePointers`.
+2. **(~2-4 hours)** `VK_EXT_separate_stencil_usage`: `Image.cpp`'s `Image` class tracks one combined `Usage` field, not per-aspect — check whether any command actually validates usage flags strictly enough that a stencil-specific usage divergence would matter, or whether (like `VK_KHR_image_format_list`) the chained struct's absence from any validation path makes this also a pure no-op to accept.
+3. **(~30 min)** `VK_KHR_shader_float_controls`: not traced at all yet this session or prior ones for actual feature-completeness (only known issue is an old manifest-entry drift blocking the full `Vulkan14FeatureInventory.md` regen).
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, backup tag decision, `CMAKE_BUILD_TYPE` decision.
+
+**Immediate next action for next session:** grep-trace `scalarBlockLayout`'s relationship to the already-implemented `VK_KHR_relaxed_block_layout`/`VK_KHR_uniform_buffer_standard_layout` "no re-layout imposed" policy in `SPIRVToLLVMPatterns.cpp`, then empirically verify against a real CTS case list (not just absence-of-rejection) before committing to it as `K6a`'s next split-off bit — same two-step discipline that caught `variablePointers` this session.
