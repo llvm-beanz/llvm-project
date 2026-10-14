@@ -31,6 +31,7 @@ VK_KHR_storage_buffer_storage_class = core, not advertised by name: the StorageB
 # --- Promoted into Vulkan 1.2, all core-only (roadmap C6/V3/C5).
 VK_EXT_host_query_reset = core, not advertised by name: roadmap C6, vkResetQueryPool (QueryPool.cpp)
 VK_KHR_create_renderpass2 = core, not advertised by name: vkCreateRenderPass2 and its command family (RenderPass.cpp, CommandBuffer.cpp)
+VK_KHR_depth_stencil_resolve = roadmap K6: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom sub-1.2 device), VK_RESOLVE_MODE_SAMPLE_ZERO_BIT only (RenderPass.cpp, CommandBuffer.cpp, Executor.cpp, EntryPoints.cpp)
 VK_KHR_driver_properties = core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp)
 VK_KHR_imageless_framebuffer = core, not advertised by name: roadmap C6, VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT + VkRenderPassAttachmentBeginInfo (RenderPass.cpp, CommandBuffer.cpp)
 VK_KHR_shader_subgroup_extended_types = core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp)

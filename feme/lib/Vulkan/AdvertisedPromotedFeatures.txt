@@ -35,7 +35,7 @@ alphaToOne
 pipelineStatisticsQuery
 vertexPipelineStoresAndAtomics
 fragmentStoresAndAtomics
-shaderImageGatherExtended = roadmap L125(g)/L125(m)/L125(n): component selection and singular/plural constant offsets are implemented; the fresh full run's dynamic-offset regressions remain tracked separately
+shaderImageGatherExtended = roadmap L125(g)/L125(m)/L125(n)/L202/L202(a)/L202(b): component selection, singular/plural constant offsets, and dynamic (runtime, non-constant) offsets (including `ImageDrefGather`+`ConstOffsets`) are all implemented; the full 616-case `texture_gather` CTS list now passes 616/616
 shaderStorageImageMultisample
 shaderStorageImageExtendedFormats
 shaderStorageImageReadWithoutFormat
@@ -93,7 +93,7 @@ drawIndirectFirstInstance
 #
 # storageInputOutput16: roadmap L98(a) -- 16-bit floating-point stage I/O is
 # widened to 32-bit at the stage-storage boundary and narrowed on output.
-storageInputOutput16 = roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; integer 16-bit storage remains unimplemented
+storageInputOutput16 = roadmap L98(a): float16 stage I/O is widened at the stage-storage boundary; roadmap L201(a): 16-bit-*integer* stage I/O is canonicalized the same way (widened to 32 bits at the `CanonicalizeStage.cpp` boundary); roadmap L206 (done): a stage-IO global's true SPIR-V `OpTypeInt` signedness now survives SPIRVToLLVM conversion as `feme.spirv.Int16Signed` metadata, so a signed 16-bit integer's real-data (nonzero, sign-bit-set) round-trip through a signed integer color-attachment format is correct -- CTS-confirmed, `input_output_int_16_to_16.*` 200/200; roadmap L201(d) (mesh-shader half, done): `MeshOutputWrapper.cpp` was missing the same widen-before-store step every other stage wrapper already had for mesh-shader per-vertex/per-primitive outputs specifically -- CTS-confirmed, `mesh_shader.ext.in_out.with_f16.*` 80/80 (tessellation half split to roadmap L215, not yet fixed)
 # multiview: roadmap H2 -- vkCreateFramebuffer accepts layers > 1,
 # vkCreateRenderPass/vkCreateRenderPass2 accept a nonzero viewMask
 # (RenderPass.cpp), and CommandBuffer.cpp's runDraw runs one draw per set
