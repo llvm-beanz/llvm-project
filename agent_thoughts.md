@@ -121547,3 +121547,65 @@ actually touches L418 again.
 4. **(standing)** Keep doc sync, offload-test-suite pattern check, and the
    `CMAKE_BUILD_TYPE` decision on the list for whenever they become
    relevant.
+
+# Session: L419(j) output_location fix + line_continuity triage
+
+**Device check:** `FeMe CPU Vulkan Device` confirmed (belatedly — should
+have run this before any other work; ran it mid-segment this time).
+
+## Win: `output_location` pair fixed (2 of `L419(j)`'s 7 cases)
+
+Root cause: `CanonicalizeStage.cpp` forced the tight array stride for
+every `Input`-direction stage-IO global, correct for a genuine SPIR-V
+matrix (`L404`) but wrong for an ordinary `vec3[3]` array — both erase to
+the identical LLVM type with no surviving signal to tell them apart.
+Fixed by capturing SPIR-V's own matrix-vs-array distinction *before* it's
+lost, via a new `feme.spirv.NarrowMatrix` metadata channel (mirrors the
+existing `Int16Signed` one exactly — same 4-point producer/collect/attach
+shape).
+
+Verified: `CanonicalizeStageTest` 143/143 (+1 new), CTS
+`output_location.array.*` 28/28 (was 26/28), wider `output_location.*`
+30/30, `L404`'s own `vertex_input.*mat*` scope 1840/1840 effective 0 Fail
+(no regression), `check-feme` 3721/3724 Passed / 0 Failed.
+
+Commits: `c014b4dceb8f` (fix), `e4f0514d4b00` (doc sync).
+
+## Triaged, not fixed: `line_continuity` pair (2 more of the 7)
+
+`dEQP-VK.rasterization.line_continuity.{line-strip,polygon-mode-lines}`
+fail compiling the *test's own verification compute shader* (a flood-fill
+connectivity check), not line rasterization itself. Error:
+`feme-cpu-wrap-entry: ... barrier inside non-linear control flow`.
+
+Cause: the shader has a `while` loop whose body contains several further
+nested, non-uniform conditional barrier regions. `EntryWrapper.cpp`'s
+`splitAtGroupSyncBarriers`/`isLinearChain` only supports a straight-line
+wave body or a single uniform loop (documented in-code as a known
+"roadmap milestone 9 deviation"). Generalizing this to arbitrary nested
+control flow is a standalone compiler feature (structurizer/divergence-
+analysis scale), not a quick fix — did not attempt it this session.
+
+Commit: `c5efb6dffef1` (triage write-up only, no source changes).
+
+## Next steps
+
+1. **(~1 day+, bigger than previously estimated)** Scope and implement
+   general nested-control-flow support in `EntryWrapper.cpp`'s barrier
+   region splitter, OR find a narrower special case that covers this
+   specific loop-with-nested-conditional-barriers shape without a full
+   generalization. Repro is pinned: `-n="dEQP-VK.rasterization.line_continuity.*"`.
+   Read `EntryWrapper.cpp`'s file-header comment and `isLinearChain` first.
+2. **(~1-2 hours each)** `L419(j)`'s last 2 untouched singletons:
+   `primitive_id.matching` and `device_mandatory_features` — still
+   completely untriaged, no repro run yet this session.
+3. **(standing)** Doc sync — done this session for both wins above.
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check — not exercised, no `check-hlsl-feme-vk` work done.
+5. **(unresolved, carried many sessions)** `CMAKE_BUILD_TYPE`
+   `RelWithDebInfo` vs `Release` — still not revisited.
+
+**Immediate next action for next session:** run
+`-n="dEQP-VK.rasterization.geometry.*primitive_id*matching*"` to get the
+exact failing case name and error for the `primitive_id` singleton —
+it's untriaged and smaller than the line_continuity generalization.
