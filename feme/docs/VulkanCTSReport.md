@@ -3512,3 +3512,96 @@ pick, see `agent_thoughts.md`).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
 `variablePointers`/`variablePointersStorageBuffer` remain unsupported/
 `VK_FALSE`; no feature bit flipped permanently this session.
+
+## `K6v`: relocated uniform latch check behind trivial relay fixed; new `K6w` residual root-caused (roadmap K6v, closed)
+
+**Starting point:** `K6v` (split off from the prior session's `K6u`
+closure, once `variable_pointers_vars_ssbo_2_diff` progressed from a
+phi-merge deadlock to a new, distinct `feme-cpu-linearize` diagnostic:
+`"loop ... has a mask-affecting operation in its body but no recognized
+uniform exit check"`).
+
+**Root cause:** `StructurizeCFG` can place a loop's real, uniform
+trip-count check one block upstream of the nominal `Latch`, in a block
+whose "stay in loop" edge targets a trivial, phi-less relay stub.
+`LoopLinearizer` previously only recognized `Latch`'s own terminator (or
+a relay chain entirely made of unconditional branches, via
+`recoverRelayExitCheck`) as the loop's real check, missing this
+relocated shape entirely.
+
+**Fix** (`feme/lib/Transforms/CPU/Linearize.cpp`): a new structural
+pre-pass ("Part A") promotes such a predecessor into the `Latch` role
+when `Latch` is a phi-less, pure relay block; its unique predecessor's
+branch is uniform (not already a recognized `Header`/`Latch` check);
+and it directly matches `matchExitCheckWithRelay`. This pre-pass must
+run *after* the existing fold fixed-point loop
+(`foldRedundantFlowBlocksInCycle`/`peelConstantFlowPredecessorsInCycle`/
+`collapseTriviallyRedundantPhisInCycle`/`mergeTrivialRelayBlocksInCycle`),
+not before it -- debugging two real regressions
+(`loop-body-diamond.ll`, `CompiledStageTest.
+LoopWithBarrierSurvivesCompiledStageCreation`) found that a
+`StructurizeCFG`-rotated "guard loop with barrier" shape produces a
+transient "shared `Flow`-style dispatch block" that structurally
+matches this same promotion criteria *before* the pre-existing folds
+get a chance to simplify it away into the trivial pass-through it
+really is; running the new pre-pass first promotes it prematurely and
+corrupts the CFG. A new `LatchWasPromoted` flag lets the pre-existing
+"uniform loop with mask ops" early-return branch correctly skip itself
+only for the genuinely-promoted shape (an initial `!LatchExit` guard
+was too broad, also wrongly skipping the ordinary, already-correct
+"`Latch` already owns its own real check" shape).
+
+New unit test (`LinearizeTest.cpp`):
+`PromotesUniformLatchCheckBehindTrivialRelay`.
+
+**CTS verification:**
+- `variable_pointers_vars_ssbo_2_diff` now builds and runs its pipeline
+  successfully (previously failed pipeline creation with the `K6v`
+  diagnostic) -- progress -- but produces an incorrect numeric result
+  at index 0 (`-382273908` instead of the expected `0`).
+- Root-caused (via `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DUMP_IR_PRESIMD`
+  dumps) this remaining failure to a second, deeper, NOT-yet-fixed
+  bug, split off as its own roadmap row, **K6w**: the loop's
+  resource pointer's backedge is a `getelementptr` feeding an if/else
+  diamond's own intermediate phis (an inner `+1`/`-1` offset
+  selection) before looping back to the outer phi -- one level of
+  indirection deeper than `K6u`'s `isPhiSelfReferentialBackedge` (which
+  only strips a direct `getelementptr` chain, not one routed through an
+  intermediate `PHINode`) recognizes, causing `mergeIntoPhi` to wait
+  forever for an "external" resolution that can never arrive, leaving
+  the raw pointer phi's entry-edge value `poison` and a first-iteration
+  `ptrtoint` use of it producing garbage. This is a genuinely separate,
+  deeper bug from `K6v` itself (confirmed present already in the
+  pre-linearize dump, i.e. produced entirely upstream of
+  `LoopLinearizer`), not a regression `K6v` introduced -- `K6v`'s own
+  fix is cleanly verified working for its own targeted diagnostic.
+- Full `opptrdiff.*` sweep (5 cases, feature bits transiently flipped
+  for measurement only, not committed): 1 Pass
+  (`variable_pointers_vars_ssbo_diff`, unaffected by this session), 4
+  Fail -- `variable_pointers_vars_ssbo_2_diff` now fails on the new
+  `K6w` signature (progress from `K6v`'s own diagnostic); the other 3
+  are unaffected, already-documented, distinct pre-existing limitations
+  (two CFG-linearization `reconvergence block` cases, one
+  `groupshared`-canonicalization case) -- no undiagnosed residual, zero
+  regressions.
+
+**No regression:** `variablePointers`/`variablePointersStorageBuffer`
+remain `VK_FALSE` in the committed configuration; reverted the
+temporary flip and re-confirmed all 5 `opptrdiff.*` cases still report
+`NotSupported` by default.
+
+Full `check-feme` target (fix in place, feature flag `VK_FALSE`):
+3752/3759 passed, 7 unsupported (expected), 0 failures.
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` this session, per the standing "every session, every time"
+instruction.
+
+`Roadmap.md`: `K6v` row added and struck through (closed) with the fix
+description and CTS results; new, open `K6w` row added for the
+newly-root-caused residual, following the single-lowercase-letter
+nesting rule.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- `variablePointers`/`variablePointersStorageBuffer` remain
+unsupported/`VK_FALSE`; no feature bit flipped permanently this
+session.
