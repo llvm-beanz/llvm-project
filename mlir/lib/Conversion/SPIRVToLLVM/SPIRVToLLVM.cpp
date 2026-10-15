@@ -1491,6 +1491,27 @@ public:
     if (!dstType)
       return rewriter.notifyMatchFailure(op, "type conversion failed");
 
+    // `llvm.icmp` only accepts (possibly vector-of-)signless-integer or
+    // LLVM-pointer operands. `OpPtrEqual`/`OpPtrNotEqual` legally compare
+    // two *whole* resource handles (no intervening `OpAccessChain`,
+    // e.g. two `StorageBuffer`-class `OpVariable`s directly), whose
+    // lowered LLVM type is instead an opaque `!llvm.target<"spirv...">`
+    // resource handle -- not a real pointer. Reject that shape here
+    // rather than emit an `llvm.icmp` the LLVM dialect verifier rejects;
+    // comparing such handles is a FeMe CPU-backend-level resource-index
+    // concern, not something this generic pattern can lower.
+    auto isICmpComparable = [](Type Ty) {
+      Type ElTy = Ty;
+      if (auto VecTy = dyn_cast<VectorType>(Ty))
+        ElTy = VecTy.getElementType();
+      return isa<LLVM::LLVMPointerType>(ElTy) ||
+             (isa<IntegerType>(ElTy) &&
+              cast<IntegerType>(ElTy).isSignless());
+    };
+    if (!isICmpComparable(adaptor.getOperand1().getType()))
+      return rewriter.notifyMatchFailure(
+          op, "operand is not an LLVM pointer or signless integer");
+
     rewriter.template replaceOpWithNewOp<LLVM::ICmpOp>(
         op, dstType, predicate, adaptor.getOperand1(), adaptor.getOperand2());
     return success();
