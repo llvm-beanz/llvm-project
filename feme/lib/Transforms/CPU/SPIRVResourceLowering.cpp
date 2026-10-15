@@ -16,6 +16,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/Sequence.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -3744,6 +3745,14 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
 struct PointerMergeState {
   Value *DescIndexMerge = nullptr;
   Value *OffsetMerge = nullptr;
+  // `PHINode` only (roadmap K6u): set just before `mergeIntoPhi` first
+  // recurses into the merged phi's own users -- see that function's
+  // comment for why a self-referential backedge (a loop-carried pointer
+  // phi's own `getelementptr` feeding back into itself) makes that
+  // recursion re-enter `mergeIntoPhi` for the very phi it was invoked
+  // from, and why this flag is what keeps that re-entrant call from
+  // repeating (and double-erasing) the same recursion.
+  bool RewriteStarted = false;
   // `SelectInst` only: each half is filled independently by whichever of
   // the select's two operands matches the chain currently being lowered,
   // or, same as `PHINode`'s null handling, by a `ConstantPointerNull`
@@ -3756,6 +3765,27 @@ struct PointerMergeState {
   Value *PendingFalseOffset = nullptr;
 };
 using PointerMergeMap = DenseMap<Instruction *, PointerMergeState>;
+
+/// (Roadmap K6u) Returns whether \p V -- one of \p Phi's own incoming
+/// values -- is \p Phi's own loop-carried backedge: a chain of zero or
+/// more `getelementptr`s rooted at \p Phi itself, rather than a pointer
+/// chain some other, entirely separate top-level `BoundHandle` walk will
+/// eventually reach \p Phi through. `mergeIntoPhi` below needs this
+/// distinction because the two cases require different handling: a
+/// genuinely external incoming edge (e.g. `K6n`'s own
+/// `LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess` shape,
+/// two different buffers merged by a condition) must still wait for that
+/// separate chain's own walk to arrive and fill it in, but a
+/// self-referential backedge *never arrives externally* -- the only way
+/// it is ever resolved is by `mergeIntoPhi` recursing into \p Phi's own
+/// users itself, so waiting for it the same way would deadlock forever
+/// (the original, pre-K6u bug: both `opptrdiff.*` cases' loop-carried
+/// SSBO-pointer iterators hit exactly this shape).
+bool isPhiSelfReferentialBackedge(const PHINode *Phi, const Value *V) {
+  while (auto *GEP = dyn_cast<GetElementPtrInst>(V))
+    V = GEP->getPointerOperand();
+  return V == Phi;
+}
 
 /// (Roadmap K6p) `PointerMergeState`'s binary-pointer-operation
 /// counterpart: tracks the shared, in-progress record of one `icmp eq`/
@@ -3802,9 +3832,15 @@ Value *nullPointerMergeOffset(LLVMContext &Ctx) {
 /// pair into \p Phi's shared `PointerMergeState`, creating the state's
 /// merged phis the first time any chain reaches \p Phi, and continuing
 /// the rewrite past \p Phi itself (as though it were just another
-/// pointer with its own resolved pair) only once every one of \p Phi's
-/// incoming slots has a real value -- see `PointerMergeState`'s own
-/// comment for the overall design.
+/// pointer with its own resolved pair) once every *externally*-resolvable
+/// incoming slot has a real value -- see `PointerMergeState`'s own
+/// comment for the overall design, and `isPhiSelfReferentialBackedge`'s
+/// comment for why a loop-carried backedge is deliberately excluded from
+/// that wait (roadmap K6u): such a slot is filled by the very recursion
+/// below re-entering this function for \p Phi itself, not by any
+/// separate chain arriving later, so waiting for it like an external
+/// edge would deadlock forever -- `RewriteStarted` guards that re-entrant
+/// call from repeating the recursion a second time.
 void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
                   Value *Offset, const ResourceCallEnv &Env,
                   const DataLayout &DL, PointerMergeMap &Merges,
@@ -3848,9 +3884,29 @@ void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
       OffPhi->setIncomingValue(I, nullPointerMergeOffset(Ctx));
     }
   }
-  if (llvm::any_of(DescPhi->incoming_values(),
-                   [](const Use &U) { return isa<UndefValue>(U.get()); }))
-    return; // Some other incoming chain hasn't reached this merge yet.
+  if (State.RewriteStarted)
+    return; // Re-entrant call from this same recursion resolving one of
+            // `Phi`'s own self-referential backedges (see this
+            // function's comment) -- the slot above is filled; the
+            // outer, already-in-progress call owns finishing the
+            // recursion, not this one.
+  if (llvm::any_of(llvm::seq(N), [&](unsigned I) {
+        return isa<UndefValue>(DescPhi->getIncomingValue(I)) &&
+              !isPhiSelfReferentialBackedge(Phi, Phi->getIncomingValue(I));
+      }))
+    return; // Some other, externally-resolved incoming chain hasn't
+            // reached this merge yet -- unlike a self-referential
+            // backedge, nothing recurses into `Phi` to fill this slot
+            // on its own, so it's only safe to proceed once it (like
+            // every other such slot) has arrived.
+  // Every remaining undef slot, if any, is a self-referential backedge:
+  // mark the rewrite started *before* recursing, since the walk below
+  // reaching that backedge's own `getelementptr` (one of `Phi`'s own
+  // users) re-enters this function for `Phi` itself once that GEP's
+  // chain reaches back around to the phi -- the guard above then makes
+  // that re-entrant call a no-op rather than a second, overlapping
+  // recursion.
+  State.RewriteStarted = true;
   lowerRawPointerUses(Phi, Env, DescPhi, OffPhi, DL, Merges, Compares);
   Phi->eraseFromParent();
 }

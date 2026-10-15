@@ -21,6 +21,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "gtest/gtest.h"
 
@@ -9266,6 +9267,85 @@ TEST(SPIRVResourceLoweringTest,
   // the mathematically correct answer -- not some zero-extended-garbage
   // value a naive treatment of the negative GEP offset would produce.
   EXPECT_EQ(RetConst->getSExtValue(), 4);
+}
+
+// Roadmap K6u: the full `opptrdiff.variable_pointers_vars_ssbo_diff`/
+// `_ssbo_2_diff` CTS shape neither straight-line reduction above captures
+// -- a pointer carried *around a loop's own backedge* by a `getelementptr`
+// of the loop's own pointer-typed `phi`, rather than reaching the `phi`
+// from two independent, externally-resolved chains the way
+// `LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess` above
+// does. `hasOnlySupportedPointerUses`'s validation phase already accepted
+// this shape; `mergeIntoPhi`'s rewrite phase did not -- its original
+// "wait for every incoming slot to resolve" gating could never make
+// progress on a slot whose only possible resolution *is* that same
+// rewrite recursing back into itself, permanently deadlocking (silently
+// leaving the loop's raw pointer phi/GEP un-rewritten, rather than
+// failing loudly) and producing a garbage numeric result downstream.
+// This test exercises exactly that shape directly against the pass
+// (rather than only via a full CTS run) to pin the fix down with a fast,
+// deterministic unit test: a loop that walks `%ptr` forward one element
+// per iteration and takes `OpPtrDiff` against a second, fixed pointer
+// each iteration, matching each CTS case's own forward-iterator shape.
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrDiffOnLoopCarriedPointerBackedgeToOffsetSubtraction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i64 @main() {
+    entry:
+      %h = call target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr0 = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 0)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 4)
+      br label %loop
+    loop:
+      %i = phi i64 [ 0, %entry ], [ %i.next, %loop ]
+      %ptr = phi ptr [ %ptr0, %entry ], [ %ptr.next, %loop ]
+      %ia = ptrtoint ptr %ptr to i64
+      %ib = ptrtoint ptr %ptrb to i64
+      %diff = sub i64 %ia, %ib
+      %ptr.next = getelementptr i32, ptr %ptr, i32 1
+      %i.next = add i64 %i, 1
+      %cond = icmp slt i64 %i.next, 4
+      br i1 %cond, label %loop, label %exit
+    exit:
+      ret i64 %diff
+    }
+    declare target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // Before the K6u fix, `mergeIntoPhi` deadlocked on `%ptr`'s own
+  // self-referential backedge (`%ptr.next`) and left both the pointer
+  // phi and its feeding GEP entirely un-rewritten; confirm neither
+  // survives, and no `ptrtoint` does either.
+  for (Instruction &I : instructions(*F)) {
+    EXPECT_FALSE(isa<PtrToIntInst>(&I));
+    EXPECT_FALSE(isa<GetElementPtrInst>(&I));
+    if (auto *Phi = dyn_cast<PHINode>(&I))
+      EXPECT_FALSE(Phi->getType()->isPointerTy());
+  }
+  // `%diff` must still be a live `sub` fed by the loop's own synthesized
+  // byte-offset phi (not a dangling reference to the erased `%ia`/`%ib`,
+  // and not folded to a single constant, since the offset genuinely
+  // varies iteration to iteration) -- i.e. the loop's pointer arithmetic
+  // was faithfully translated, not just silently dropped.
+  auto *RI = dyn_cast<ReturnInst>(F->back().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *Diff = dyn_cast<BinaryOperator>(RI->getReturnValue());
+  ASSERT_TRUE(Diff);
+  EXPECT_EQ(Diff->getOpcode(), Instruction::Sub);
+  EXPECT_TRUE(isa<PHINode>(Diff->getOperand(0)) ||
+             isa<PHINode>(Diff->getOperand(1)));
 }
 
 // Roadmap K6t: `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on two whole
