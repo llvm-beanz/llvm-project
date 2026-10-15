@@ -9348,6 +9348,85 @@ TEST(SPIRVResourceLoweringTest,
              isa<PHINode>(Diff->getOperand(1)));
 }
 
+// Roadmap K6w: generalizes K6u's loop-carried-pointer-backedge shape one
+// level further -- `variable_pointers_vars_ssbo_2_diff`'s own loop steps
+// its iterator pointer by `+1` or `-1` elements depending on a per-
+// iteration condition (a modulo-3 direction reversal in the real CTS
+// case; reduced here to a simple `icmp` for a fast, deterministic unit
+// test), so the loop phi's backedge is not a direct `getelementptr` of
+// the phi itself (K6u's shape) but a *further* `PHINode` --
+// `%ptr.next` below -- merging the if/else diamond's two `getelementptr`
+// arms, which only then feeds the loop phi's backedge. The original K6u
+// fix's `isPhiSelfReferentialBackedge` only recognized `V == Phi`
+// (after stripping `getelementptr`s) as self-referential, so it did not
+// recognize this intermediate phi as part of the same cycle and
+// `mergeIntoPhi` deadlocked waiting for an external resolution that
+// would never arrive, exactly as K6u's own bug did one level shallower.
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrDiffOnLoopCarriedPointerBackedgeThroughIntermediateDiamondPhi) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i64 @main(i1 %dir) {
+    entry:
+      %h = call target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr0 = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 0)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 4)
+      br label %loop
+    loop:
+      %i = phi i64 [ 0, %entry ], [ %i.next, %merge ]
+      %ptr = phi ptr [ %ptr0, %entry ], [ %ptr.next, %merge ]
+      %ia = ptrtoint ptr %ptr to i64
+      %ib = ptrtoint ptr %ptrb to i64
+      %diff = sub i64 %ia, %ib
+      br i1 %dir, label %fwd, label %bwd
+    fwd:
+      %ptr.fwd = getelementptr i32, ptr %ptr, i32 1
+      br label %merge
+    bwd:
+      %ptr.bwd = getelementptr i32, ptr %ptr, i32 -1
+      br label %merge
+    merge:
+      %ptr.next = phi ptr [ %ptr.fwd, %fwd ], [ %ptr.bwd, %bwd ]
+      %i.next = add i64 %i, 1
+      %cond = icmp slt i64 %i.next, 4
+      br i1 %cond, label %loop, label %exit
+    exit:
+      ret i64 %diff
+    }
+    declare target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // Before the K6w fix, `mergeIntoPhi` deadlocked on `%ptr.next`'s own
+  // diamond-merge backedge (treating `%ptr.fwd`/`%ptr.bwd`'s shared
+  // `%ptr.next` phi as an unresolved *external* chain rather than part of
+  // the same self-referential cycle) and left the loop's raw pointer
+  // phi/GEPs entirely un-rewritten; confirm none of them survive.
+  for (Instruction &I : instructions(*F)) {
+    EXPECT_FALSE(isa<PtrToIntInst>(&I));
+    EXPECT_FALSE(isa<GetElementPtrInst>(&I));
+    if (auto *Phi = dyn_cast<PHINode>(&I))
+      EXPECT_FALSE(Phi->getType()->isPointerTy());
+  }
+  auto *RI = dyn_cast<ReturnInst>(F->back().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *Diff = dyn_cast<BinaryOperator>(RI->getReturnValue());
+  ASSERT_TRUE(Diff);
+  EXPECT_EQ(Diff->getOpcode(), Instruction::Sub);
+  EXPECT_TRUE(isa<PHINode>(Diff->getOperand(0)) ||
+             isa<PHINode>(Diff->getOperand(1)));
+}
+
 // Roadmap K6t: `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on two whole
 // resource handles (no `getpointer` on either side -- e.g. a real
 // `different_ssbos_equal` reduction's own `%v1_eq_v1 = OpPtrEqual %bool

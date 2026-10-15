@@ -3753,6 +3753,31 @@ struct PointerMergeState {
   // from, and why this flag is what keeps that re-entrant call from
   // repeating (and double-erasing) the same recursion.
   bool RewriteStarted = false;
+  // (Roadmap K6w) True exactly while `Phi`'s own top-level
+  // `lowerRawPointerUses(Phi, ...)` call (triggered once right after
+  // `RewriteStarted` is set) is still active on the call stack. A
+  // reentrant call landing on `Phi` *while this is true* is nested
+  // *inside* that same still-running walk over `Phi`'s own users (e.g.
+  // a mutually-recursive chain through one or more other phis that
+  // loops back to `Phi` itself before that walk has finished visiting
+  // every one of `Phi`'s users) -- erasing `Phi` at that point, even if
+  // every slot now looks filled, would free it out from under the
+  // outer frame's own in-progress iteration over its remaining users,
+  // a use-after-free. Erasure is therefore only ever performed once
+  // this is back to false, deferring to whichever call (the outer
+  // frame itself, once its own recursion returns, or some wholly
+  // separate later reentrant call) observes both completion and no
+  // active recursion.
+  bool RecursionActive = false;
+  // (Roadmap K6w) Set once every incoming slot genuinely holds a real
+  // resolved value (not merely a self-referential-backedge slot the
+  // gate below has chosen to tolerate as still-`undef` for now) and
+  // `Phi` has accordingly been erased -- guards against a later,
+  // structurally-impossible-in-practice but still worth defending
+  // against duplicate reentrant call trying to erase (or dereference)
+  // an already-erased `Phi` a second time. See `mergeIntoPhi`'s comment
+  // on why erasure itself must be deferred past `RewriteStarted`.
+  bool Erased = false;
   // `SelectInst` only: each half is filled independently by whichever of
   // the select's two operands matches the chain currently being lowered,
   // or, same as `PHINode`'s null handling, by a `ConstantPointerNull`
@@ -3766,25 +3791,61 @@ struct PointerMergeState {
 };
 using PointerMergeMap = DenseMap<Instruction *, PointerMergeState>;
 
-/// (Roadmap K6u) Returns whether \p V -- one of \p Phi's own incoming
-/// values -- is \p Phi's own loop-carried backedge: a chain of zero or
-/// more `getelementptr`s rooted at \p Phi itself, rather than a pointer
-/// chain some other, entirely separate top-level `BoundHandle` walk will
-/// eventually reach \p Phi through. `mergeIntoPhi` below needs this
-/// distinction because the two cases require different handling: a
-/// genuinely external incoming edge (e.g. `K6n`'s own
-/// `LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess` shape,
-/// two different buffers merged by a condition) must still wait for that
-/// separate chain's own walk to arrive and fill it in, but a
+/// (Roadmap K6u, generalized K6w) Returns whether \p V -- one of \p Phi's
+/// own incoming values -- is part of \p Phi's own loop-carried backedge:
+/// a chain of zero or more `getelementptr`s, possibly routed through one
+/// or more further `PHINode`s (see below), ultimately rooted at \p Phi
+/// itself, rather than a pointer chain some other, entirely separate
+/// top-level `BoundHandle` walk will eventually reach \p Phi through.
+/// `mergeIntoPhi` below needs this distinction because the two cases
+/// require different handling: a genuinely external incoming edge (e.g.
+/// `K6n`'s own `LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess`
+/// shape, two different buffers merged by a condition) must still wait
+/// for that separate chain's own walk to arrive and fill it in, but a
 /// self-referential backedge *never arrives externally* -- the only way
 /// it is ever resolved is by `mergeIntoPhi` recursing into \p Phi's own
 /// users itself, so waiting for it the same way would deadlock forever
 /// (the original, pre-K6u bug: both `opptrdiff.*` cases' loop-carried
 /// SSBO-pointer iterators hit exactly this shape).
+///
+/// (Roadmap K6w) `V`, after stripping `getelementptr`s, is not always
+/// \p Phi itself: a per-iteration `if (...) +1 else -1` byte-offset
+/// adjustment (e.g. a direction-reversing stride selected by a modulo
+/// check, `variable_pointers_vars_ssbo_2_diff`'s own shape) places one or
+/// more further `PHINode`s -- each merging the diamond's two arms, with
+/// the "other" arm `poison` on whichever edge it structurally cannot be
+/// reached from -- between \p Phi and the `getelementptr`(s) that
+/// actually close the loop back around to it. Requiring `V == Phi`
+/// exactly (the original K6u check) therefore misses this shape:
+/// `mergeIntoPhi`, invoked separately for each such intermediate phi
+/// (reached the same way \p Phi itself originally was, via
+/// `lowerRawPointerUses`'s generic `PHINode` dispatch once an earlier GEP
+/// leg forwards into it), uses *that* phi's own identity as its "root"
+/// when it in turn calls this function -- so a chain spanning multiple
+/// mutually-dependent phis never actually lands back on the single, most
+/// deeply-nested \p Phi any individual call happens to be checking
+/// against.
+///
+/// Landing on *any* `PHINode` (not only \p Phi) is still safe to treat as
+/// "don't wait for an external arrival, `mergeIntoPhi`'s own recursion
+/// resolves it": whichever phi `V` resolves to will, in its own turn,
+/// either (a) be reached by this same self-referential recursion (a
+/// genuine cycle, exactly like \p Phi's own case), or (b) separately
+/// receive a real external value later via `mergeIntoPhi`'s existing
+/// per-slot matching -- and `PointerMergeState::RewriteStarted`'s
+/// existing reentrant-call guard already tolerates a real value arriving
+/// for an already-"started" phi at any time, live-updating the very same
+/// `DescPhi`/`OffPhi` instructions every downstream use already
+/// references by SSA value, not by snapshot -- so no real resolution is
+/// ever silently lost by optimistically deferring here. A literal
+/// `poison`/`undef` leaf (the diamond's own structurally-unreachable
+/// "other arm") is likewise safe to defer: nothing will ever supply it a
+/// real value, matching the dead control path it denotes.
 bool isPhiSelfReferentialBackedge(const PHINode *Phi, const Value *V) {
   while (auto *GEP = dyn_cast<GetElementPtrInst>(V))
     V = GEP->getPointerOperand();
-  return V == Phi;
+  return V == Phi || isa<PHINode>(V) || isa<PoisonValue>(V) ||
+         isa<UndefValue>(V);
 }
 
 /// (Roadmap K6p) `PointerMergeState`'s binary-pointer-operation
@@ -3841,12 +3902,34 @@ Value *nullPointerMergeOffset(LLVMContext &Ctx) {
 /// separate chain arriving later, so waiting for it like an external
 /// edge would deadlock forever -- `RewriteStarted` guards that re-entrant
 /// call from repeating the recursion a second time.
+///
+/// (Roadmap K6w) Once `isPhiSelfReferentialBackedge` tolerates a slot
+/// landing on some *other* `PHINode` (not \p Phi itself -- the nested
+/// diamond-merge shape that function's own comment describes), that
+/// slot's real value does *not* necessarily arrive via *this* call's own
+/// recursion into \p Phi's users below: it may instead arrive via a
+/// wholly separate top-level walk (e.g. the one that resolves \p Phi's
+/// own predecessor pointer, discovering \p Ptr as one of *its* users)
+/// reaching a later point in the program and reentering this function
+/// for \p Phi. If \p Phi had already been erased by the time that
+/// reentrant call arrives, it would dereference a freed `PHINode` --
+/// erasure is therefore deferred past the point this function used to
+/// perform it unconditionally, until a completion check (run after every
+/// slot-filling, both the first call and every later reentrant one)
+/// confirms every slot genuinely holds a real value, not just a
+/// tolerated placeholder.
 void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
                   Value *Offset, const ResourceCallEnv &Env,
                   const DataLayout &DL, PointerMergeMap &Merges,
                   PointerCompareMap &Compares) {
   LLVMContext &Ctx = Phi->getContext();
   PointerMergeState &State = Merges[Phi];
+  if (State.Erased)
+    return; // See this function's comment: a structurally-impossible-
+            // in-practice but still worth-guarding-against duplicate
+            // reentrant call arriving after `Phi` was already fully
+            // resolved and erased -- a no-op rather than a
+            // use-after-free.
   unsigned N = Phi->getNumIncomingValues();
   if (!State.DescIndexMerge) {
     auto *DescPhi = PHINode::Create(Type::getInt32Ty(Ctx), N,
@@ -3884,12 +3967,35 @@ void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
       OffPhi->setIncomingValue(I, nullPointerMergeOffset(Ctx));
     }
   }
-  if (State.RewriteStarted)
-    return; // Re-entrant call from this same recursion resolving one of
-            // `Phi`'s own self-referential backedges (see this
-            // function's comment) -- the slot above is filled; the
-            // outer, already-in-progress call owns finishing the
-            // recursion, not this one.
+  // (Roadmap K6w) Once every slot genuinely holds a real value (not a
+  // merely-tolerated placeholder) *and* no recursion into `Phi`'s own
+  // users is still active on the stack (see `RecursionActive`'s
+  // comment), erase `Phi` -- this check runs after every slot-filling
+  // call, first or reentrant, since completion may not happen on the
+  // same call that starts the recursion below.
+  auto EraseIfComplete = [&] {
+    if (!State.Erased && !State.RecursionActive &&
+       llvm::none_of(llvm::seq(N), [&](unsigned I) {
+             return isa<UndefValue>(DescPhi->getIncomingValue(I));
+           })) {
+      State.Erased = true;
+      Phi->eraseFromParent();
+    }
+  };
+  if (State.RewriteStarted) {
+    // Re-entrant call, either resolving one of `Phi`'s own self-
+    // referential backedges directly (K6u's original shape) or, now
+    // that `isPhiSelfReferentialBackedge` also tolerates landing on a
+    // *different* phi (K6w), one whose real value took a separate
+    // top-level walk to arrive -- either way the slot above is filled;
+    // only erase once every slot is *and* `Phi`'s own recursion has
+    // fully returned (see `EraseIfComplete`), not unconditionally, so
+    // neither a still-later reentrant call for a different slot nor a
+    // call nested inside `Phi`'s own still-active recursion
+    // dereferences (or frees out from under) an already-freed `Phi`.
+    EraseIfComplete();
+    return;
+  }
   if (llvm::any_of(llvm::seq(N), [&](unsigned I) {
         return isa<UndefValue>(DescPhi->getIncomingValue(I)) &&
               !isPhiSelfReferentialBackedge(Phi, Phi->getIncomingValue(I));
@@ -3904,11 +4010,23 @@ void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
   // reaching that backedge's own `getelementptr` (one of `Phi`'s own
   // users) re-enters this function for `Phi` itself once that GEP's
   // chain reaches back around to the phi -- the guard above then makes
-  // that re-entrant call a no-op rather than a second, overlapping
-  // recursion.
+  // that re-entrant call a no-op (beyond the completion check) rather
+  // than a second, overlapping recursion.
   State.RewriteStarted = true;
+  State.RecursionActive = true;
   lowerRawPointerUses(Phi, Env, DescPhi, OffPhi, DL, Merges, Compares);
-  Phi->eraseFromParent();
+  State.RecursionActive = false;
+  // Not every slot may be filled yet even after the recursion above
+  // returns: a slot tolerated above because it lands on a *different*
+  // phi (K6w) may still be waiting on that other phi's own, wholly
+  // separate top-level walk to reach `Ptr`'s equivalent for this phi --
+  // `EraseIfComplete` leaves `Phi` alive in that case, to be erased by
+  // whichever later reentrant call finally fills the last slot. Any
+  // reentrant call into `Phi` that arrived *while `RecursionActive` was
+  // still true above (nested inside this very call's own walk over
+  // `Phi`'s users) deferred its own completion check to this point
+  // rather than erasing underneath this still-active frame.
+  EraseIfComplete();
 }
 
 /// `mergeIntoPhi`'s `SelectInst` counterpart: a select only ever has two
