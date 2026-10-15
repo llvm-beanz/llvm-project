@@ -3762,3 +3762,107 @@ with fix descriptions and CTS results, split off from `K6w`.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
 `variablePointers`/`variablePointersStorageBuffer` remain
 unsupported/`VK_FALSE`; no feature bit flipped permanently this session.
+
+## First `check-hlsl-feme-vk` exercise: two offload-test-suite drift fixes, 24/26 residual failures root-caused to one shared compiler gap (roadmap `L424`/`K6z`)
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` this session, per the standing "every session, every time"
+instruction.
+
+This session finally exercised the standing, several-sessions-overdue
+`check-hlsl-feme-vk` requirement (offload-test-suite's `feme` branch,
+`llvm-beanz/offload-test-suite.git`) for the first time. Unlike every
+prior session, the FeMe-enabling CMake commit (`9af8bce`) and the
+previously-documented `VkBool32` harness fix (`2e72553`) were both
+already present at the local `feme` branch's HEAD -- no cherry-pick
+needed this time. Only two much smaller, test-expectation-level fixes
+had been dropped by the per-session `agent-setup.sh` reset.
+
+**Baseline sweep** (792 total tests): 464 Passed, 273 Unsupported, 27
+Failed, 1 Unexpectedly Passed.
+
+**Two re-applied drift fixes** (both isolated, `offload-test-suite`-only
+commits, no FeMe files touched, per the standing "issue outside FeMe"
+instruction):
+- `test/WaveOps/WaveActiveMax.test`: re-added `XFAIL: FeMe &&
+  host-arm64` (host confirmed `aarch64` via `uname -m`) -- genuinely
+  still broken on this architecture, previously fixed for `x86_64`.
+  Commit `14387a0`.
+- `test/Feature/PushConstant/array_of_matrices.test`: removed a stale
+  `XFAIL: DXC` directive for a DXC bug the currently-checked-out DXC no
+  longer reproduces (test now genuinely passes). Commit `ec08762`. Hit
+  the known lit directive-scanning pitfall once: an unanchored literal
+  `XFAIL: DXC` substring inside the replacement comment's prose was
+  misparsed as a real (malformed) directive, producing `UNRESOLVED`
+  rather than `PASS` on the first attempt; reworded to avoid the literal
+  substring, reconfirmed `PASS`.
+
+**Post-fix sweep**: 465 Passed, 273 Unsupported, 26 Failed, 28
+Expectedly Failed, 0 Unexpectedly Passed -- exactly the expected shift,
+zero other regressions.
+
+**Root-caused 24 of the remaining 26 failures to one shared compiler
+gap** (new roadmap row `K6z`, left open as a well-scoped follow-up, not
+fixed this session): `Basic/Matrix/matrix_single_subscript_load`/
+`matrix_swizzle_{one,zero}_based`, `Feature/CBuffer/Matrix/
+LayoutKeyword/{subscript,transpose}`, `Feature/HLSLLib/
+{AllMemoryBarrierWithGroupSync,DeviceMemoryBarrierWithGroupSync,
+InterlockedCompareExchange.resources.32,InterlockedExchange.resources.32}`,
+`Feature/ResourceControlFlow/licm-hoist-load`, `Feature/Textures/
+{Array.SRVToUAV.array,SRVToUAV.array}`, `Tools/Offloader/
+BufferExact-error-array`, `UseCase/particle-life`, and all 10 remaining
+`WaveOps/{WaveActiveMax,WaveActiveMin}.{fp16,fp32,int32}`/
+`WaveReadLaneFirst.{fp16,fp32,int16,int32}` cases all emit the exact
+same `feme-cpu-linearize` diagnostic: `"loop at '' has an internal
+branch in a body shape this milestone does not yet lower (e.g. an empty
+diamond arm, or one crossing another cycle's own boundary); unsupported
+(roadmap milestone 6 deviation)"`.
+
+Root-caused via `FEME_DUMP_IR_PRELINEARIZE` on `matrix_single_subscript_
+load.test` (the simplest repro, a `for(i<4)` outer loop with a uniform
+`i%2`/`i%3` diamond-chain body followed by a nested `for(j<4)` sibling
+loop before the latch): `DiamondFlattener::flattenLoopBodyRegion`'s
+existing `CycleBoundaryBlocks` tolerance (added for `dEQP-VK.glsl.demote.
+dynamic_loop_always`'s shape) only accepts a boundary block whose own
+branch target is `End` *directly* -- the loop's own uniform exit check
+sitting at the tail of the region, not a genuine nested child cycle
+(already fully linearized by `linearizeCyclePostOrder`'s post-order
+traversal, confirmed via the same dump) with real body code and its own
+relay chain between it and `End`. The inner loop's header fails that
+direct-successor test, so the region is rejected outright. A correct
+fix needs `validate`'s walk to recognize an already-linearized
+(`HeaderActiveMasks`-tracked) nested cycle, continue validating from its
+own exit blocks to `End`, and teach `flatten` to skip its already-
+finalized interior while still masking the code between its exit and
+`End` -- judged too large and too correctness-risky (masking-semantics
+bugs around nested cycles dominate this file's own history, e.g. `K6w`/
+`K6y`) to attempt in the time remaining this session. Left open as
+`K6z`.
+
+The other 2 residual failures are unrelated to this cluster:
+`Feature/HLSLLib/InterlockedAdd.resources.32.test` fails a genuine
+numeric-correctness check (expected all `0x1`, actual all `0x0`, not yet
+root-caused past that observation), and `InterlockedCompareStore.
+resources.32.test` hits the pre-existing, already-tracked `H154`/
+`H155`-family "barrier inside non-linear control flow" milestone-9
+diagnostic (a different, already-closed-elsewhere scope limitation, not
+new).
+
+**No regression:** no FeMe (`llvm-project`) files have any net change
+this session -- a temporary `git checkout <parent> --`/`git checkout
+HEAD --` bisect on `Pipeline.cpp`/`SIMDize.cpp` (to rule out this
+session's own prior `K6x`/`K6y` work as the WaveOps cluster's cause,
+confirmed NOT a regression: the same diagnostic reproduces identically
+against the pre-`K6x` state) was fully reverted before concluding. Full
+`check-feme` target unaffected (no FeMe source changed); re-confirmed
+clean.
+
+**No `VK-GL-CTS` rerun or `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` update this session** -- both landed
+fixes are `offload-test-suite`-only test-expectation corrections with
+no FeMe code or feature/extension-surface change, so neither the
+Vulkan CTS nor either inventory document had anything new to capture.
+
+`Roadmap.md`: new `L424` row (the `check-hlsl-feme-vk` sweep + two drift
+fixes, done) and new `K6z` row (the shared root cause, left open as
+follow-up) added.
