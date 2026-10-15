@@ -2685,6 +2685,40 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
           return false; // Already logged by the recursive call.
         continue;
       }
+    // (Roadmap K6n) A `variablePointers`/`variablePointersStorageBuffer`
+    // shader may merge two (or more) otherwise-independently-recognized
+    // pointer chains -- rooted at the same handle's own differing array
+    // index, or at two entirely different handles/bindings -- with an
+    // `OpPhi` after a conditional branch or an `OpSelect`, before the
+    // final load/store/GEP. Gated behind `AllowGEPs` like the GEP case
+    // just above: only the buffer kinds that permit further pointer
+    // navigation at all can meaningfully reach a merge point, since
+    // `getpointer`'s own result is already the final, whole-element
+    // pointer for every other kind. `lowerRawPointerUses` below has the
+    // matching rewrite: each incoming chain's own (descriptor index,
+    // byte offset) pair is threaded through a newly synthesized
+    // phi/select of its own, rather than ever materializing a real SSA
+    // pointer value for the merge, which this pass' "lower each load/
+    // store in place" model has no way to represent.
+    if (AllowGEPs)
+      if (const auto *Phi = dyn_cast<PHINode>(U)) {
+        if (!hasOnlySupportedPointerUses(*Phi, Writable, IsTexel, AllowGEPs,
+                                         DL))
+          return false; // Already logged by the recursive call.
+        continue;
+      }
+    if (AllowGEPs)
+      if (const auto *Sel = dyn_cast<SelectInst>(U)) {
+        if (!Sel->getCondition()->getType()->isIntegerTy(1)) {
+          logNormalizationRejection(
+              "select over a pointer with a non-scalar condition", Sel);
+          return false;
+        }
+        if (!hasOnlySupportedPointerUses(*Sel, Writable, IsTexel, AllowGEPs,
+                                         DL))
+          return false; // Already logged by the recursive call.
+        continue;
+      }
     logNormalizationRejection("pointer used by an unrecognized instruction", U);
     return false;
   }
@@ -3445,6 +3479,159 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
   createRawStore(Builder, Env, DescriptorIndex, Offset, Val, Mask);
 }
 
+/// (Roadmap K6n) Shared, in-progress record of one `PHINode`/`SelectInst`
+/// that merges two or more pointer chains `hasOnlySupportedPointerUses`
+/// has separately accepted -- keyed by the original pointer-typed
+/// merge instruction's address. `lowerAccesses` rewrites one
+/// `BoundHandle`'s own chain at a time (the outer loop in `run()`), so
+/// whichever chain reaches the merge point first synthesizes the new
+/// merged (descriptor index, byte offset) phi/select (for a `PHINode`,
+/// with every slot still `undef`; for a `SelectInst`, with both halves
+/// still unset below), and each subsequent chain fills in its own
+/// slot(s); `lowerRawPointerUses` only continues rewriting the merge
+/// point's own downstream users once every slot has a real value --
+/// see `mergeIntoPhi`/`mergeIntoSelect`'s own comments for why a
+/// `ConstantPointerNull` incoming edge (a `variablePointers` null check,
+/// never itself produced by a recognized handle chain) is instead
+/// filled in directly with a sentinel, rather than waited on forever.
+struct PointerMergeState {
+  Value *DescIndexMerge = nullptr;
+  Value *OffsetMerge = nullptr;
+  // `SelectInst` only: each half is filled independently by whichever of
+  // the select's two operands matches the chain currently being lowered,
+  // or, same as `PHINode`'s null handling, by a `ConstantPointerNull`
+  // operand's own sentinel -- `DescIndexMerge`/`OffsetMerge` above are
+  // only synthesized (as real `select` instructions) once both halves are
+  // known.
+  Value *PendingTrueDescIndex = nullptr;
+  Value *PendingTrueOffset = nullptr;
+  Value *PendingFalseDescIndex = nullptr;
+  Value *PendingFalseOffset = nullptr;
+};
+using PointerMergeMap = DenseMap<Instruction *, PointerMergeState>;
+
+void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
+                         Value *DescriptorIndex, Value *Offset,
+                         const DataLayout &DL, PointerMergeMap &Merges);
+
+/// Out-of-range sentinel for a merge edge whose own original pointer value
+/// is a `ConstantPointerNull` rather than a recognized handle chain --
+/// matching `computeClampedIndex`'s own identical out-of-range encoding,
+/// so a dynamically-dead load/store reached only through a null-checked
+/// branch (common in `variablePointers` shaders) reads back as zero /
+/// drops the store, rather than this merge waiting forever for an edge
+/// that no handle chain will ever reach.
+Value *nullPointerMergeDescIndex(LLVMContext &Ctx) {
+  return ConstantInt::get(Type::getInt32Ty(Ctx), 0xFFFFFFFFu);
+}
+Value *nullPointerMergeOffset(LLVMContext &Ctx) {
+  return ConstantInt::get(Type::getInt64Ty(Ctx), 0);
+}
+
+/// Merges \p Ptr's own already-resolved (descriptor index, byte offset)
+/// pair into \p Phi's shared `PointerMergeState`, creating the state's
+/// merged phis the first time any chain reaches \p Phi, and continuing
+/// the rewrite past \p Phi itself (as though it were just another
+/// pointer with its own resolved pair) only once every one of \p Phi's
+/// incoming slots has a real value -- see `PointerMergeState`'s own
+/// comment for the overall design.
+void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
+                  Value *Offset, const ResourceCallEnv &Env,
+                  const DataLayout &DL, PointerMergeMap &Merges) {
+  LLVMContext &Ctx = Phi->getContext();
+  PointerMergeState &State = Merges[Phi];
+  unsigned N = Phi->getNumIncomingValues();
+  if (!State.DescIndexMerge) {
+    auto *DescPhi = PHINode::Create(Type::getInt32Ty(Ctx), N,
+                                    Phi->getName() + ".descidx");
+    DescPhi->insertBefore(Phi->getIterator());
+    auto *OffPhi = PHINode::Create(Type::getInt64Ty(Ctx), N,
+                                   Phi->getName() + ".offset");
+    OffPhi->insertBefore(Phi->getIterator());
+    for (unsigned I = 0; I != N; ++I) {
+      DescPhi->addIncoming(UndefValue::get(DescPhi->getType()),
+                           Phi->getIncomingBlock(I));
+      OffPhi->addIncoming(UndefValue::get(OffPhi->getType()),
+                         Phi->getIncomingBlock(I));
+    }
+    State.DescIndexMerge = DescPhi;
+    State.OffsetMerge = OffPhi;
+  }
+  auto *DescPhi = cast<PHINode>(State.DescIndexMerge);
+  auto *OffPhi = cast<PHINode>(State.OffsetMerge);
+  for (unsigned I = 0; I != N; ++I) {
+    if (Phi->getIncomingValue(I) == Ptr) {
+      DescPhi->setIncomingValue(I, DescriptorIndex);
+      OffPhi->setIncomingValue(I, Offset);
+      // Drop the original phi's own reference to this incoming leg's
+      // pointer chain (`Ptr`, e.g. a GEP) now that its (descriptor
+      // index, byte offset) pair has been captured above: the caller
+      // that invoked `lowerRawPointerUses` on `Ptr` is about to erase it
+      // once this call returns, and the original `Phi` itself -- kept
+      // alive until every leg is filled, below -- must not still
+      // reference it when that happens.
+      Phi->setIncomingValue(I, PoisonValue::get(Phi->getType()));
+    } else if (isa<UndefValue>(DescPhi->getIncomingValue(I)) &&
+              isa<ConstantPointerNull>(Phi->getIncomingValue(I))) {
+      DescPhi->setIncomingValue(I, nullPointerMergeDescIndex(Ctx));
+      OffPhi->setIncomingValue(I, nullPointerMergeOffset(Ctx));
+    }
+  }
+  if (llvm::any_of(DescPhi->incoming_values(),
+                   [](const Use &U) { return isa<UndefValue>(U.get()); }))
+    return; // Some other incoming chain hasn't reached this merge yet.
+  lowerRawPointerUses(Phi, Env, DescPhi, OffPhi, DL, Merges);
+  Phi->eraseFromParent();
+}
+
+/// `mergeIntoPhi`'s `SelectInst` counterpart: a select only ever has two
+/// operands, known up front, so no `undef`-filled placeholder phase is
+/// needed -- just record whichever half \p Ptr matches (or, for a
+/// `ConstantPointerNull` operand, the same sentinel `mergeIntoPhi` uses),
+/// and synthesize the real `select`s (continuing the rewrite past \p Sel)
+/// once both halves are known.
+void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
+                     Value *Offset, const ResourceCallEnv &Env,
+                     const DataLayout &DL, PointerMergeMap &Merges) {
+  LLVMContext &Ctx = Sel->getContext();
+  PointerMergeState &State = Merges[Sel];
+  if (Sel->getTrueValue() == Ptr) {
+    State.PendingTrueDescIndex = DescriptorIndex;
+    State.PendingTrueOffset = Offset;
+    // See `mergeIntoPhi`'s identical comment: drop `Sel`'s own reference
+    // to this leg's pointer chain now that its pair has been captured,
+    // since the caller is about to erase it.
+    Sel->setTrueValue(PoisonValue::get(Sel->getTrueValue()->getType()));
+  }
+  if (Sel->getFalseValue() == Ptr) {
+    State.PendingFalseDescIndex = DescriptorIndex;
+    State.PendingFalseOffset = Offset;
+    Sel->setFalseValue(PoisonValue::get(Sel->getFalseValue()->getType()));
+  }
+  if (!State.PendingTrueDescIndex &&
+      isa<ConstantPointerNull>(Sel->getTrueValue())) {
+    State.PendingTrueDescIndex = nullPointerMergeDescIndex(Ctx);
+    State.PendingTrueOffset = nullPointerMergeOffset(Ctx);
+  }
+  if (!State.PendingFalseDescIndex &&
+      isa<ConstantPointerNull>(Sel->getFalseValue())) {
+    State.PendingFalseDescIndex = nullPointerMergeDescIndex(Ctx);
+    State.PendingFalseOffset = nullPointerMergeOffset(Ctx);
+  }
+  if (!State.PendingTrueDescIndex || !State.PendingFalseDescIndex)
+    return; // The other operand's own chain hasn't reached this merge yet.
+  IRBuilder<> Builder(Sel);
+  Value *DescSel =
+      Builder.CreateSelect(Sel->getCondition(), State.PendingTrueDescIndex,
+                           State.PendingFalseDescIndex,
+                           Sel->getName() + ".descidx");
+  Value *OffSel =
+      Builder.CreateSelect(Sel->getCondition(), State.PendingTrueOffset,
+                           State.PendingFalseOffset, Sel->getName() + ".offset");
+  lowerRawPointerUses(Sel, Env, DescSel, OffSel, DL, Merges);
+  Sel->eraseFromParent();
+}
+
 /// Rewrites every raw-buffer load/store/atomic reachable from \p Ptr
 /// (either directly or, for a structured storage block, through a GEP
 /// chain) using the already-resolved descriptor index and byte offset. An
@@ -3459,10 +3646,14 @@ void lowerRawStore(IRBuilderBase &Builder, const ResourceCallEnv &Env,
 /// GEP navigating to that field) is handled uniformly with a flat
 /// `Storage` buffer's atomic: both already have their cumulative byte
 /// \p Offset threaded in by the recursive GEP case below before reaching
-/// here.
+/// here. A `PHINode`/`SelectInst` user (roadmap K6n) is handled by
+/// `mergeIntoPhi`/`mergeIntoSelect` instead: those functions call back
+/// into this one (continuing the rewrite past the merge point) only once
+/// every incoming chain's own pair has been threaded through, so unlike
+/// every other case here, encountering one does not immediately recurse.
 void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
                          Value *DescriptorIndex, Value *Offset,
-                         const DataLayout &DL) {
+                         const DataLayout &DL, PointerMergeMap &Merges) {
   Value *Mask = ConstantInt::getTrue(Ptr->getContext());
   for (User *U : llvm::make_early_inc_range(Ptr->users())) {
     if (auto *LI = dyn_cast<LoadInst>(U)) {
@@ -3553,11 +3744,20 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
       continue;
     }
 
+    if (auto *Phi = dyn_cast<PHINode>(U)) {
+      mergeIntoPhi(Phi, Ptr, DescriptorIndex, Offset, Env, DL, Merges);
+      continue;
+    }
+    if (auto *Sel = dyn_cast<SelectInst>(U)) {
+      mergeIntoSelect(Sel, Ptr, DescriptorIndex, Offset, Env, DL, Merges);
+      continue;
+    }
+
     auto *GEP = cast<GetElementPtrInst>(U);
     IRBuilder<> Builder(GEP);
     Value *NestedOffset =
         Builder.CreateAdd(Offset, computePointerOffset(Builder, *GEP, DL));
-    lowerRawPointerUses(GEP, Env, DescriptorIndex, NestedOffset, DL);
+    lowerRawPointerUses(GEP, Env, DescriptorIndex, NestedOffset, DL, Merges);
     GEP->eraseFromParent();
   }
 }
@@ -3593,7 +3793,7 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
 /// letting the CPU runtime's format conversion (keyed off the bound
 /// `FemeDescriptor::Format`) do the rest.
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
-                   uint32_t HeapBase) {
+                   uint32_t HeapBase, PointerMergeMap &Merges) {
   LLVMContext &Ctx = BH.Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
   IRBuilder<> IndexBuilder(BH.Handle);
@@ -3788,7 +3988,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
         CmpXchg->eraseFromParent();
       }
     } else {
-      lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL);
+      lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL, Merges);
     }
     GetPtr->eraseFromParent();
   }
@@ -6402,6 +6602,13 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // at two different handles.
     MapVector<CallInst *, ImageHeapEntry> ImageHeapIndices;
     bool UsesSamplerHeap = false;
+    // (Roadmap K6n) Shared across every buffer `BoundHandle` in this
+    // function: a `PHINode`/`SelectInst` merging two chains rooted at
+    // different handles (e.g. the `two_buffers` CTS variants) is only
+    // ever reachable from two different `BoundHandle`s' own
+    // `lowerAccesses` calls below, so the map recording each merge's own
+    // progress must outlive any single one of those calls.
+    PointerMergeMap Merges;
     for (const BoundHandle &BH : Handles) {
       const RangeEntry &Entry = Ranges.at(BH.Key);
       if (Entry.Conflicting)
@@ -6411,7 +6618,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
         RewroteAny = true;
       }
       if (isBufferHandleKind(BH.Kind)) {
-        lowerAccesses(BH, Env, Entry.HeapBase);
+        lowerAccesses(BH, Env, Entry.HeapBase, Merges);
         continue;
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
