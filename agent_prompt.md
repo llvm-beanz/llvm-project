@@ -63,37 +63,38 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, CPU-backend resource-handle-normalization architectural limitation.
-   Still not root-caused beyond signature-level bucketing -- unchanged from
-   every prior session's framing, not touched this session (scope stayed on
-   `K6u`).
-2. **(~half day, newly discovered)** `variable_pointers_vars_ssbo_2_diff`'s
-   now-exposed `feme-cpu-linearize` failure (`"... has a mask-affecting
-   operation in its body but no recognized uniform exit check"`) -- a
-   milestone-9-scope CFG-linearization gap, distinct from the already-closed
-   `reconvergence block` signature (`K6s`) and the `K6u` deadlock this session
-   fixed. Not yet root-caused past the printed error text; worth a focused look
-   since it's the only remaining undiagnosed residual in the `opptrdiff.*`
-   bucket.
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
-   decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session.
+1. **(~1-2 days)** `K6w`: fix the nested self-referential phi/GEP-through-
+   diamond backedge. Needs generalizing self-referential-backedge
+   detection (and the matching rewrite recursion) from a single phi to a
+   whole strongly-connected component of mutually-dependent
+   `PHINode`/`getelementptr` values -- synthesize a `descidx`/`offset` phi
+   pair for *every* intermediate phi in the component, not just the
+   outermost one. Bigger design change than `isPhiSelfReferentialBackedge`'s
+   current single-phi guard. New unit test needs a genuine GEP-diamond-
+   phi backedge shape (not the simpler direct-GEP shape `K6u`'s test
+   uses). Good next pick: directly blocks the one remaining
+   `opptrdiff.*` case.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation. Still not root-caused beyond signature-level bucketing --
+   unchanged from every prior session's framing, not touched this session
+   (scope stayed on `K6v`/`K6w`).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014`
+   tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision --
+   neither revisited this session.
 4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
-   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration.
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
-   not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6u`'s compiler fix).
+   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-
+   manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check -- not exercised this session either, no `check-hlsl-feme-vk`
+   work done (session stayed scoped to `K6v`/`K6w`'s compiler
+   investigation).
 6. **(standing, profiling, ~2-4 hours)** The original "profile one L418
-   1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this
-   is now 8+ sessions overdue.
+   1024x1024x2 image-to-image MSAA case" next step -- still not picked up;
+   this is now 9+ sessions overdue.
 
-**Immediate next action for next session:** pick `K6n`-proper (now the only
-remaining large, unattempted `variablePointers` bucket --
-`K6o`/`K6p`/`K6q`/`K6r`/`K6s`/`K6t`/`K6u` are all closed) and start by
-root-causing one representative case down to its specific
-resource-handle-normalization code path, or pick the newly-discovered
-`variable_pointers_vars_ssbo_2_diff` linearize gap (smaller, already has a
-printed error signature to start from) for a change of pace, or finally break
-the L418 profiling task out of its 8-session backlog.
+**Immediate next action for next session:** pick `K6w` (directly blocks
+the one remaining `opptrdiff.*` case, already root-caused down to a
+specific function and the exact generalization needed) for a focused
+fix, or `K6n`-proper if a larger, harder investigation feels like the
+better use of a fresh session.
