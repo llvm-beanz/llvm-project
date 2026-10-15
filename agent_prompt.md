@@ -64,32 +64,43 @@ Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
 1. **(~2-4 hours)** The original "profile one L418 1024x1024x2
-   image-to-image MSAA case" next step -- still not picked up; this is
-   now 10+ sessions overdue, every session since it was first suggested
-   has had an open compiler bucket take priority. Worth prioritizing
-   purely as a change of pace if no other compiler bucket feels urgent.
-2. **(~half day)** Root-cause the remaining 3 `opptrdiff.*` failures past
-   their current signature-level bucketing: `ssbo_comparisons_diff` and
-   `wg_comparisons_diff` both hit `"reconvergence block '' does not have
-   exactly two predecessors"` (CFG-linearization, milestone 9 scope);
-   `variable_pointers_vars_wg_diff` hits the `feme-cpu-simdize`
-   groupshared-canonicalization limitation. Both are pre-existing,
-   already-tracked limitations, not new -- this is about root-causing
-   them individually rather than leaving them bucketed.
+   image-to-image MSAA case" next step -- **this item is now stale**:
+   `L418`/`L418(a)`/`L418(b)` are all already marked "done" in
+   `Roadmap.md` from an earlier session (the profiling, the rasterizer
+   fix, and the `QueueExecutor`/`DeviceMemory` race it uncovered are all
+   closed, see `L421`). Drop this from future next-steps lists -- it was
+   carried forward stale for several sessions.
+2. **(~half day)** Root-cause the single remaining undiagnosed
+   `opptrdiff.*` failure past its current signature-level bucketing:
+   `wg_comparisons_diff`/`variable_pointers_vars_wg_diff` both now hit
+   the same `rewriteGroupSharedGlobals` "groupshared global ... is used
+   in a way this milestone does not yet canonicalize" diagnostic
+   (milestone 9 scope) -- a pre-existing, correctly-functioning
+   limitation, not a bug, but still worth individually root-causing (the
+   `ptrtoint`-of-groupshared-global shape specifically) if milestone 9
+   scope is ever revisited.
 3. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
    `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
-   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-
-   manifest regeneration.
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
-   check -- not exercised this session either, no `check-hlsl-feme-vk`
-   work done (session stayed scoped to `K6w`'s compiler fix).
+4. **(standing)** `L419(j)` remaining untriaged items (rasterization line
+   continuity needs barrier-region splitting generalized to nested
+   control flow; mandatory-feature reporting needs 14 missing feature
+   bits, cross-referenced to `D1`), deferred full
+   `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation -- still not root-caused beyond signature-level bucketing,
+   unchanged from every prior session's framing. Not touched this
+   session either (scope stayed on the `opptrdiff.*` CFG/SIMDize bugs).
 
-**Immediate next action for next session:** with `K6u` through `K6w` all
-closed, there is no remaining *known, bucketed* `variablePointers`/
-`opptrdiff` legalization gap left -- either root-cause one of the 3
-remaining `opptrdiff.*` CFG-linearization/groupshared cases for a change
-of pace (item 2 above), or finally break the L418 profiling task out of
-its 10-session backlog (item 1 above).
+**Immediate next action for next session:** with the diamond-into-loop-
+header CFG gap and the `widenGroupSharedGEP` crash both fixed, the only
+remaining `opptrdiff.*` residual is the single, already-tracked,
+*correctly-functioning* `rewriteGroupSharedGlobals` diagnostic shared by
+the last 2 cases (item 2 above) -- a narrow, optional root-causing task,
+not a bug fix. The much bigger, still-fully-open item is `K6n`-proper
+(item 5 above), unattempted for many sessions now and the largest
+remaining `variablePointers` bucket; that or `check-hlsl-feme-vk`
+exercise against offload-test-suite (never run yet, despite the standing
+requirement) are the two strongest candidates for a change of pace.
