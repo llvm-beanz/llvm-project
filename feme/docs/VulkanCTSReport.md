@@ -4264,3 +4264,117 @@ entirely untouched for many sessions and is still the single largest
 open item in this file; `Basic/Mandelbrot.test`'s contention flake and
 `InterlockedAdd.resources.32.test`'s numeric mismatch remain open,
 pre-existing, separately-tracked issues, neither touched this session.
+
+## `L426` fixed: `matchLoopShape`'s wave-persistent induction machinery generalized to a genuine (non-invariant) non-constant-seeded recurrence; all 4 `L425(a)` cases now pass (roadmap `L426`, closed)
+
+`L425(a)`'s own planned fix path -- re-apply the reverted `isLinearChain`
+patch and debug the `DominatorTree` crash it caused in
+`splitAtGroupSyncBarriers` -- was abandoned early this session after
+re-reproducing that exact crash with a full `gdb` backtrace: the crash
+site is deep inside `SROAPass` computing a fresh `DominatorTree` over a
+region function, confirming `splitAtGroupSyncBarriers`'s own
+region-calling code (`buildWrapper`) is a strictly flat,
+call-each-region-exactly-once-in-sequence model with **no looping
+construct at all**. No patch to `isLinearChain` alone could ever make a
+genuine loop backedge representable through that code path -- the whole
+approach was an architectural dead end, not merely buggy.
+
+Pivoted instead to `matchLoopShape`/`buildWrapperForLoop`,
+`EntryWrapper.cpp`'s own separate, purpose-built "barrier inside a
+uniform loop" machinery, which already covers a collapsed body+latch
+block (roadmap `H124e(a)`) and wave-persistent mask-phi inductions
+(roadmap `H159(b)`) -- a structural match for all 4 of `L425(a)`'s cases'
+own shared shape on paper (confirmed via a fresh `FEME_DUMP_IR` capture
+and manual IR trace). Root-caused why `matchLoopShape` still rejected the
+shape down to two real, independent bugs, both now fixed:
+
+1. **`matchLoopShape`'s own induction-seeding check was too narrow.**
+   `L425(a)`'s prior fix let a wave-persistent induction carry a
+   non-constant seed, but only if its recurrence fed back the header phi
+   unchanged (`NextValue == HeaderPhi`, i.e. loop-invariant) --
+   unconditionally bailing out for a *genuine* (non-invariant) induction
+   with a non-constant seed, even though `spillValuesLiveAcrossBarriers`'s
+   existing seed/store-back machinery already supports both cases
+   identically (the seed lands immediately after its own definition
+   either way; only the store-back, and whether the recurrence must be an
+   `Instruction` for `buildWrapperForLoop`'s own `cast<Instruction>`,
+   differ). Relaxed to accept any wave-persistent induction whose
+   recurrence is an `Instruction`, regardless of whether it equals the
+   header phi.
+2. **`collectClonableScalarRecurrence` never checked for vector types.**
+   Used to decide whether a recurrence can simply be cloned into the
+   wrapper's own scalar per-iteration loop (since it depends on nothing
+   but constants and header phis), it wrongly accepted a genuinely
+   per-lane mask recurrence (`select i1 %narrow, <4 x i1> %mask, <4 x i1>
+   zeroinitializer`, depending only on the mask's own header phi and a
+   constant) as "clonable" -- producing a wrapper-side clone referencing
+   a per-lane header phi the wrapper never actually has (it is threaded
+   through the per-wave spill array instead). Confirmed via
+   `FEME_OPT_DUMP_INVALID=1`: the clone showed up as a `select`
+   instruction with a `void <badref>` operand, a verifier-rejected
+   module. Fixed by rejecting any vector-typed instruction or
+   vector-typed allowed-phi dependency in that function.
+
+New regression test `entry-wrapper-loop-wave-persistent-mask-recurrence.ll`
+(modeled on the existing `L425(a)` loop-invariant-mask-seed test, but
+with a genuinely narrowing mask recurrence instead of an invariant one),
+confirmed to crash/reject pre-fix and pass post-fix.
+
+**Debugging note for future sessions**: an early attempt to instrument
+`matchLoopShape` with `llvm::errs()` traces before each
+`return std::nullopt;` produced a misleading, self-inflicted false
+signal -- none of 12 instrumented traces fired at runtime, yet the
+function still appeared to return `nullopt`. Root cause: the debug
+statements themselves broke C++'s dangling-`if`-without-braces rule
+(`if (cond) errs(); return std::nullopt;` executes the `return`
+unconditionally, regardless of `cond`), silently corrupting every
+instrumented check into an unconditional early return. Fixed by wrapping
+each inserted trace+return pair in its own `{ }` block -- a lesson for any
+future single-line debug-print insertion into an existing
+brace-less-single-statement `if`.
+
+**Verification**:
+- `FeMeTransformsCPUTests`: 634/634 passed (1 net new test).
+- `ninja check-feme`: 3,760/3,767 Passed, 7 Unsupported, 0 Failed, 0
+  regressions (1 net new test).
+- All 4 of this task's own standalone repro cases
+  (`/tmp/l425a/{AllMemoryBarrierWithGroupSync,DeviceMemoryBarrierWithGroupSync,InterlockedCompareExchange.resources.32,InterlockedExchange.resources.32}/`)
+  now compile, execute, and match their expected output exactly
+  (`BufferExact` pass) via the standalone `offloader` tool.
+- Targeted `VK-GL-CTS` regression check (same groups `L425(a)`'s own
+  session sampled):
+  - `dEQP-VK.glsl.loops.*` (624 cases): 606/624 Pass, unchanged.
+  - `dEQP-VK.glsl.demote.*` (30 cases): 30/30 Pass, unchanged.
+  - Both counts exactly match the pre-existing documented baseline -- 0
+    regressions, 0 newly fixed, as expected: neither group's own shapes
+    exercise a wave-persistent, non-invariant mask recurrence inside a
+    barrier loop the way this fix's 4 target cases do.
+
+**No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed** -- pure internal `feme-cpu-wrap-entry` compiler fix, no Vulkan
+feature or extension surface changed.
+
+**`check-hlsl-feme-vk` still not run this session.** Building
+`offload-test-suite`'s own generated target set requires a full
+`clang`+HLSL build (`cmake -C <llvm-project>/clang/cmake/caches/HLSL.cmake
+...`), which has never yet been completed in this environment across many
+sessions -- a multi-hour undertaking of its own, separate from this
+session's bounded `L426` task. Opened new roadmap row `L427` to track
+this standing gap explicitly, rather than letting it remain an implicit,
+easily-forgotten assumption in each session's own next-steps list. The
+standalone `offloader` tool remains the only available substitute this
+session (and every prior session) actually used for per-case
+verification.
+
+`Roadmap.md`: `L426` struck through (done -- fixed, with the actual
+mechanism differing from the row's own original plan); new `L427` row
+opened for the standing `offload-test-suite` build gap.
+
+**Next steps**: `L427` (actually build `check-hlsl-feme-vk`'s
+dependencies, likely the single highest-value infrastructure task left
+standing after many sessions' worth of deferral); `K6n`-proper (the
+largest remaining `variablePointers` bucket) remains entirely untouched
+for many sessions and is still the single largest open *compiler* item in
+this file; `Basic/Mandelbrot.test`'s contention flake and
+`InterlockedAdd.resources.32.test`'s numeric mismatch remain open,
+pre-existing, separately-tracked issues, neither touched this session.
