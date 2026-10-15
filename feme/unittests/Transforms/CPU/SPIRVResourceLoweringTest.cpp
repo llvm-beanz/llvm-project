@@ -9158,3 +9158,241 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(RetConst);
   EXPECT_EQ(RetConst->getSExtValue(), -4);
 }
+
+// Roadmap K6t: `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on two whole
+// resource handles (no `getpointer` on either side -- e.g. a real
+// `different_ssbos_equal` reduction's own `%v1_eq_v1 = OpPtrEqual %bool
+// %var1 %var2`) cannot lower to a plain `icmp` the way a pointer-derived
+// comparison does: LLVM's `icmp` has no notion of an opaque resource-
+// handle target-extension type. `HandleCompareConversionPattern`
+// (FeMe-local MLIR pattern) instead emits a call to the new
+// `llvm.spv.resource.handleequal` intrinsic, which `mergeIntoHandleCompare`
+// resolves into a plain descriptor-index comparison once each handle's own
+// chain is known -- mirroring
+// `LowersPtrEqualOnTwoHandleChainsToDescriptorAndOffsetComparison` above
+// one level earlier (no byte offset to compare, since neither side went
+// through `getpointer`).
+TEST(SPIRVResourceLoweringTest,
+     LowersHandleEqualOnTwoDifferentHandlesToDescriptorComparison) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %eq = call i1 @llvm.spv.resource.handleequal(
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %ha,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %hb)
+      ret i1 %eq
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare i1 @llvm.spv.resource.handleequal(
+        target("spirv.VulkanBuffer", [0 x float], 12, 1),
+        target("spirv.VulkanBuffer", [0 x float], 12, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // The original `handleequal` call must be gone, replaced by
+  // `mergeIntoHandleCompare`'s `desc0 == desc1` rewrite -- which, since
+  // both sides here resolve to compile-time-constant descriptor indices
+  // (two distinct, non-bindless bindings), constant-folds away entirely to
+  // the mathematically correct answer, `false`.
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(), Intrinsic::spv_resource_handleequal);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_FALSE(RetConst->getZExtValue());
+}
+
+// Roadmap K6t: a whole-handle self-comparison (the same handle literally
+// compared against itself, e.g. a real `different_ssbos_equal` reduction's
+// own `%v1_eq_v1 = OpPtrEqual %bool %var1 %var1`) must be folded by
+// `foldSameOperandHandleCompares` to the constant `true` *before*
+// `collectHandles`/`hasOnlySupportedUses` ever run: left unfolded, the
+// handle's own `users()` walk would reach the same `handleequal` call
+// twice (once per argument), and `mergeIntoHandleCompare` would erase it
+// on the first visit, leaving the second visit's already-captured
+// use-list iterator dangling (this pass would simply crash without the
+// fold).
+TEST(SPIRVResourceLoweringTest,
+     FoldsSelfComparedHandleEqualToTrueBeforeLowering) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %eq = call i1 @llvm.spv.resource.handleequal(
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %h,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %h)
+      ret i1 %eq
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare i1 @llvm.spv.resource.handleequal(
+        target("spirv.VulkanBuffer", [0 x float], 12, 1),
+        target("spirv.VulkanBuffer", [0 x float], 12, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(), Intrinsic::spv_resource_handleequal);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_TRUE(RetConst->getZExtValue());
+}
+
+// Roadmap K6t: a null-vs-null comparison (e.g. a real
+// `null_comparisons_ssbo_equal` reduction's own `%null_ssbo_equal =
+// OpPtrEqual %bool %ptr_ssbo_struct_null %ptr_ssbo_struct_null2`, two
+// *separate* SPIR-V `OpConstantNull`s of the same pointer type) resolves
+// the same way as the self-comparison test above: both arguments convert
+// to the identical, uniqued `zeroinitializer` (`ConstantTargetNone`)
+// `Value*` by the time this pass runs, so
+// `foldSameOperandHandleCompares`'s same-operand check folds this call to
+// `true` too, without ever reaching `mergeIntoHandleCompare`'s own
+// null-handle-sentinel path (exercised instead by the real-handle-vs-null
+// test below, where the two arguments are *not* the same `Value*`).
+TEST(SPIRVResourceLoweringTest, FoldsNullVsNullHandleEqualToTrue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %eq = call i1 @llvm.spv.resource.handleequal(
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) zeroinitializer,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) zeroinitializer)
+      ret i1 %eq
+    }
+    declare i1 @llvm.spv.resource.handleequal(
+        target("spirv.VulkanBuffer", [0 x float], 12, 1),
+        target("spirv.VulkanBuffer", [0 x float], 12, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_TRUE(RetConst->getZExtValue());
+}
+
+// Roadmap K6t: a real handle compared against a null handle (e.g. a real
+// `null_comparisons_ssbo_equal` reduction's own comparison of a genuine
+// `StorageBuffer` handle against `OpConstantNull`) is the one shape that
+// actually reaches `mergeIntoHandleCompare`'s `ConstantTargetNone` branch:
+// the real handle's own chain resolves a genuine descriptor index, while
+// the null argument resolves immediately to the out-of-range
+// `nullPointerMergeDescIndex` sentinel, which can never equal a real
+// handle's own in-range descriptor index -- so the whole comparison
+// constant-folds to `false`, the mathematically correct answer (a real,
+// non-null handle is never itself the null handle).
+TEST(SPIRVResourceLoweringTest,
+     LowersRealHandleVsNullHandleEqualToFalse) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %eq = call i1 @llvm.spv.resource.handleequal(
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %h,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) zeroinitializer)
+      ret i1 %eq
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare i1 @llvm.spv.resource.handleequal(
+        target("spirv.VulkanBuffer", [0 x float], 12, 1),
+        target("spirv.VulkanBuffer", [0 x float], 12, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(), Intrinsic::spv_resource_handleequal);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_FALSE(RetConst->getZExtValue());
+}
+
+// Roadmap K6t: `spirv.PtrNotEqual`'s own negation of `handleequal`'s
+// result is a plain `xor` (`HandleCompareConversionPattern`'s own
+// `Negate` case) consuming the call's result, left entirely untouched by
+// this pass -- it only ever rewrites the `handleequal` call itself. This
+// test exercises that the `xor` survives the rewrite unchanged (still
+// consuming whatever the call was rewritten to), and that the overall
+// expression still constant-folds to the mathematically correct answer:
+// two different handles are *not equal*, so `PtrNotEqual` must yield
+// `true`.
+TEST(SPIRVResourceLoweringTest,
+     LeavesNegationXorInPlaceForHandleNotEqual) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %eq = call i1 @llvm.spv.resource.handleequal(
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %ha,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %hb)
+      %ne = xor i1 %eq, true
+      ret i1 %ne
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare i1 @llvm.spv.resource.handleequal(
+        target("spirv.VulkanBuffer", [0 x float], 12, 1),
+        target("spirv.VulkanBuffer", [0 x float], 12, 1))
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  // Unlike the EQ-only tests above, nothing folds `xor i1 false, true`
+  // itself to a plain constant here -- this pass never touches the `xor`
+  // at all, and (per `feme::cpu::Pipeline`'s own comment) nothing upstream
+  // of it runs a generic `InstCombinePass`/`ConstantFoldInstruction` able
+  // to fold a constant-operand `xor` either. So the returned value is
+  // still the live `xor` instruction itself; what matters is that its
+  // first operand -- `mergeIntoHandleCompare`'s own `desc0 == desc1`
+  // rewrite -- has itself already constant-folded to `false` (two
+  // different, non-bindless bindings can never compare equal), and its
+  // second operand is still the original `true` from `%ne`'s own `xor`.
+  auto *Xor = dyn_cast<BinaryOperator>(RI->getReturnValue());
+  ASSERT_TRUE(Xor);
+  EXPECT_EQ(Xor->getOpcode(), Instruction::Xor);
+  auto *EqOperand = dyn_cast<ConstantInt>(Xor->getOperand(0));
+  ASSERT_TRUE(EqOperand);
+  EXPECT_FALSE(EqOperand->getZExtValue());
+  auto *TrueOperand = dyn_cast<ConstantInt>(Xor->getOperand(1));
+  ASSERT_TRUE(TrueOperand);
+  EXPECT_TRUE(TrueOperand->getZExtValue());
+}

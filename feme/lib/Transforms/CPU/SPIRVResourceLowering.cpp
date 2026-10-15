@@ -2879,6 +2879,26 @@ bool hasOnlySupportedHandleUse(const User *U, const Instruction &Owner,
   if (const auto *Sel = dyn_cast<SelectInst>(U))
     return hasOnlySupportedHandleMergeUses(*Sel, Kind, Writable, IsTexel,
                                            AllowGEPs, DL, Visited);
+  // (Roadmap K6t) `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on two
+  // whole resource handles (no `getpointer` on either side) cannot lower
+  // to a plain `icmp` at all -- LLVM's `icmp` has no notion of an opaque
+  // resource-handle target-extension type, unlike the pointer-derived
+  // case `hasOnlySupportedPointerUses` accepts. Instead
+  // `HandleCompareConversionPattern` (FeMe-local MLIR pattern,
+  // `SPIRVToLLVMPatterns.cpp`) lowers both ops to a call of the new
+  // `llvm.spv.resource.handleequal` intrinsic (`PtrNotEqual`'s own
+  // negation is a plain `xor` *consuming* that call's result, so this
+  // handle's own direct user is always the call itself, never that
+  // `xor`). `foldSameOperandHandleCompares` already folded the one shape
+  // that would otherwise double-visit this handle (a self-comparison),
+  // so every call reached here compares \p Owner against either a
+  // genuinely different handle (resolved by `mergeIntoHandleCompare`'s
+  // own two-call merge once this handle's chain is lowered) or a
+  // null-handle sentinel (`ConstantTargetNone`, resolved immediately --
+  // see that function's comment).
+  if (const auto *CI = dyn_cast<CallInst>(U);
+      CI && getIntrinsicID(CI) == Intrinsic::spv_resource_handleequal)
+    return true;
   const auto *GetPtr = dyn_cast<CallInst>(U);
   if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
     logNormalizationRejection("handle used other than by getpointer", &Owner);
@@ -3170,6 +3190,63 @@ void foldSampledImageStructs(Function &F) {
   for (InsertValueInst *IV : llvm::reverse(Inserts))
     if (IV->use_empty())
       IV->eraseFromParent();
+}
+
+/// (Roadmap K6t) Folds any call to the `llvm.spv.resource.handleequal`
+/// intrinsic in \p F whose two arguments are literally the same SSA value
+/// -- always `true` (the two handles are, trivially, equal) regardless of
+/// what that value is -- *before* `collectHandles`/`hasOnlySupportedUses`
+/// ever run, so neither needs its own special case for this shape.
+/// `spirv.PtrNotEqual`'s own negation of this intrinsic's result is a
+/// separate, already-in-place `xor` consuming the call's result (see
+/// `HandleCompareConversionPattern`), so folding the call itself to `true`
+/// here is also correct for a same-operand `PtrNotEqual` (the `xor` then
+/// folds it to `false` on its own, same as any other constant-operand
+/// `xor`). This single fold covers two distinct `spirv.PtrEqual`/
+/// `spirv.PtrNotEqual` shapes this pass would otherwise need bespoke
+/// handling for:
+///
+/// - A whole-handle self-comparison (e.g. a real `different_ssbos_equal`
+///   reduction's own `%v1_eq_v1 = OpPtrEqual %bool %var1 %var1`): both
+///   arguments are, before any lowering, the identical `handlefrombinding`
+///   `CallInst` -- already literally the same `Value*` here, with no
+///   lowering needed to observe it. Folding this immediately means
+///   `hasOnlySupportedHandleUse`'s/`mergeIntoHandleCompare`'s own below
+///   never need to special-case a handle being its own `handleequal`
+///   call's both arguments (which, left unfolded, would reach
+///   `lowerHandleAccesses`'s `Handle->users()` walk *twice* for the same
+///   call -- once per argument -- and crash: `mergeIntoHandleCompare`
+///   would set both sides and erase the call on the first visit, leaving
+///   the second visit's already-captured use-list iterator dangling).
+/// - A null-vs-null comparison (e.g. a real `null_comparisons_ssbo_equal`
+///   reduction's own `%null_ssbo_equal = OpPtrEqual %bool
+///   %ptr_ssbo_struct_null %ptr_ssbo_struct_null2`, two *separate* SPIR-V
+///   `OpConstantNull`s of the same pointer type): neither argument is a
+///   `handlefrombinding` call at all, so this `handleequal` call is never
+///   reached by any `BoundHandle`'s own `lowerHandleAccesses` walk -- but
+///   both `OpConstantNull`s convert (via roadmap K6o's own
+///   `ConstantNullPointerPattern`, `llvm.mlir.zero` of the resource
+///   handle's target-extension type) to `llvm::ConstantTargetNone::get`,
+///   which -- confirmed via a real `feme-opt
+///   --feme-convert-spirv-to-llvm` reduction -- is uniqued per type in the
+///   `LLVMContext` exactly like `ConstantInt`/`ConstantPointerNull`, so two
+///   independently-declared nulls of the identical pointer type resolve to
+///   the exact same `Value*` by the time this pass runs on the real
+///   `llvm::Module`, even though nothing upstream of this pass ever runs
+///   a generic `InstCombinePass` capable of folding this itself (see
+///   `feme::cpu::Pipeline`'s own comment on why not).
+void foldSameOperandHandleCompares(Function &F) {
+  SmallVector<CallInst *, 4> SameOperandCompares;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I);
+        CI && getIntrinsicID(CI) == Intrinsic::spv_resource_handleequal &&
+        CI->getArgOperand(0) == CI->getArgOperand(1))
+      SameOperandCompares.push_back(CI);
+  for (CallInst *CI : SameOperandCompares) {
+    Constant *True = ConstantInt::getTrue(CI->getContext());
+    CI->replaceAllUsesWith(True);
+    CI->eraseFromParent();
+  }
 }
 
 /// Collects every normalizable `handlefrombinding` call in \p F, or
@@ -3916,11 +3993,28 @@ struct HandleMergeState {
 };
 using HandleMergeMap = DenseMap<Instruction *, HandleMergeState>;
 
+/// (Roadmap K6t) `PointerCompareState`'s whole-handle counterpart: tracks
+/// the shared, in-progress record of one `icmp eq`/`icmp ne` (from
+/// `spirv.PtrEqual`/`spirv.PtrNotEqual`) whose two operands are each a raw
+/// resource *handle* -- not a pointer already derived via `getpointer`,
+/// `PointerCompareState`'s own case -- resolved by this pass' own
+/// per-handle recursion independently, same "whichever side arrives first
+/// waits" design one level earlier. Only a single `i32` descriptor index
+/// needs comparing here (unlike `PointerCompareState`'s descriptor-index/
+/// byte-offset pair): no byte offset exists yet at this point, since no
+/// `getpointer` has been called on either side.
+struct HandleCompareState {
+  Value *LHSDescIndex = nullptr;
+  Value *RHSDescIndex = nullptr;
+};
+using HandleCompareMap = DenseMap<Instruction *, HandleCompareState>;
+
 void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
                          const ResourceCallEnv &Env, Value *DescriptorIndex,
                          const DataLayout &DL, PointerMergeMap &Merges,
                          PointerCompareMap &Compares,
-                         HandleMergeMap &HandleMerges);
+                         HandleMergeMap &HandleMerges,
+                         HandleCompareMap &HandleCompares);
 
 /// `mergeIntoPhi`'s handle-level counterpart (roadmap K6q): merges \p
 /// Handle's own already-resolved descriptor index into \p Phi's shared
@@ -3940,7 +4034,8 @@ void mergeIntoHandlePhi(PHINode *Phi, Value *Handle, Value *DescriptorIndex,
                        const BoundHandle &BH, const ResourceCallEnv &Env,
                        const DataLayout &DL, PointerMergeMap &Merges,
                        PointerCompareMap &Compares,
-                       HandleMergeMap &HandleMerges) {
+                       HandleMergeMap &HandleMerges,
+                       HandleCompareMap &HandleCompares) {
   LLVMContext &Ctx = Phi->getContext();
   HandleMergeState &State = HandleMerges[Phi];
   unsigned N = Phi->getNumIncomingValues();
@@ -3973,7 +4068,7 @@ void mergeIntoHandlePhi(PHINode *Phi, Value *Handle, Value *DescriptorIndex,
                    [](const Use &U) { return isa<UndefValue>(U.get()); }))
     return; // Some other incoming handle chain hasn't reached this merge yet.
   lowerHandleAccesses(Phi, BH, Env, DescPhi, DL, Merges, Compares,
-                      HandleMerges);
+                      HandleMerges, HandleCompares);
   Phi->eraseFromParent();
 }
 
@@ -3993,7 +4088,8 @@ void mergeIntoHandleSelect(SelectInst *Sel, Value *Handle,
                           const ResourceCallEnv &Env, const DataLayout &DL,
                           PointerMergeMap &Merges,
                           PointerCompareMap &Compares,
-                          HandleMergeMap &HandleMerges) {
+                          HandleMergeMap &HandleMerges,
+                          HandleCompareMap &HandleCompares) {
   HandleMergeState &State = HandleMerges[Sel];
   if (Sel->getTrueValue() == Handle) {
     State.PendingTrueDescIndex = DescriptorIndex;
@@ -4014,8 +4110,70 @@ void mergeIntoHandleSelect(SelectInst *Sel, Value *Handle,
                           State.PendingFalseDescIndex,
                           Sel->getName() + ".descidx");
   lowerHandleAccesses(Sel, BH, Env, DescSel, DL, Merges, Compares,
-                      HandleMerges);
+                      HandleMerges, HandleCompares);
   Sel->eraseFromParent();
+}
+
+/// `mergeIntoCompare`'s whole-handle counterpart (roadmap K6t): merges \p
+/// Handle's own already-resolved descriptor index into \p HandleEqCI's
+/// shared `HandleCompareState`, re-expressing the comparison directly as
+/// `desc0 == desc1` (no byte offset exists at this point -- see
+/// `HandleCompareState`'s own comment) once both sides are known. \p
+/// HandleEqCI is always a call to the `llvm.spv.resource.handleequal`
+/// intrinsic (`HandleCompareConversionPattern`, FeMe-local MLIR pattern):
+/// unlike a pointer-derived compare, an `icmp` cannot be emitted directly
+/// on an opaque resource-handle type at all, so there is no predicate to
+/// recover here -- `spirv.PtrNotEqual`'s own negation of this intrinsic's
+/// result is a separate, already-in-place `xor` consuming
+/// \p HandleEqCI's result, left untouched by this function exactly like
+/// any other already-converted instruction downstream of a merge. A
+/// whole-handle self-comparison (the same handle literally compared
+/// against itself, e.g. a real `different_ssbos_equal` reduction's own
+/// `%v1_eq_v1 = OpPtrEqual %bool %var1 %var1`) never reaches this
+/// function at all -- `foldSameOperandHandleCompares` folds it directly
+/// to a constant before `collectHandles`/`hasOnlySupportedUses` even run,
+/// precisely so this function (and `hasOnlySupportedHandleUse`'s own
+/// `Handle->users()` walk) never needs to tolerate the same call being
+/// reached twice for one handle.
+///
+/// Unlike a pointer-derived compare (`mergeIntoCompare`), one argument may
+/// instead be a `ConstantTargetNone` -- the null-handle sentinel a SPIR-V
+/// `OpConstantNull` of a resource-handle pointer type converts to (roadmap
+/// K6o's `ConstantNullPointerPattern`, confirmed via a real
+/// `null_comparisons_ssbo_equal` reduction) -- rather than another
+/// `BoundHandle`'s own chain reaching this same call: a real bound
+/// handle is never itself null, so that side is resolved immediately to
+/// the same out-of-range `nullPointerMergeDescIndex` sentinel
+/// `mergeIntoPhi`'s own `ConstantPointerNull` case uses, guaranteed to
+/// never equal any real handle's own clamped descriptor index.
+void mergeIntoHandleCompare(CallInst *HandleEqCI, Value *Handle,
+                           Value *DescriptorIndex,
+                           HandleCompareMap &HandleCompares) {
+  LLVMContext &Ctx = HandleEqCI->getContext();
+  HandleCompareState &State = HandleCompares[HandleEqCI];
+  if (HandleEqCI->getArgOperand(0) == Handle) {
+    State.LHSDescIndex = DescriptorIndex;
+    HandleEqCI->setArgOperand(
+        0, PoisonValue::get(HandleEqCI->getArgOperand(0)->getType()));
+  }
+  if (HandleEqCI->getArgOperand(1) == Handle) {
+    State.RHSDescIndex = DescriptorIndex;
+    HandleEqCI->setArgOperand(
+        1, PoisonValue::get(HandleEqCI->getArgOperand(1)->getType()));
+  }
+  if (!State.LHSDescIndex &&
+      isa<ConstantTargetNone>(HandleEqCI->getArgOperand(0)))
+    State.LHSDescIndex = nullPointerMergeDescIndex(Ctx);
+  if (!State.RHSDescIndex &&
+      isa<ConstantTargetNone>(HandleEqCI->getArgOperand(1)))
+    State.RHSDescIndex = nullPointerMergeDescIndex(Ctx);
+  if (!State.LHSDescIndex || !State.RHSDescIndex)
+    return; // The other operand's own chain hasn't reached this merge yet.
+  IRBuilder<> Builder(HandleEqCI);
+  Value *DescEq = Builder.CreateICmpEQ(State.LHSDescIndex, State.RHSDescIndex);
+  DescEq->setName(HandleEqCI->getName());
+  HandleEqCI->replaceAllUsesWith(DescEq);
+  HandleEqCI->eraseFromParent();
 }
 
 /// (Roadmap K6r) `hasOnlySupportedPointerUses`'s own comment above
@@ -4279,7 +4437,8 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
                          const ResourceCallEnv &Env, Value *DescriptorIndex,
                          const DataLayout &DL, PointerMergeMap &Merges,
                          PointerCompareMap &Compares,
-                         HandleMergeMap &HandleMerges) {
+                         HandleMergeMap &HandleMerges,
+                         HandleCompareMap &HandleCompares) {
   LLVMContext &Ctx = Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
   Value *Mask = ConstantInt::getTrue(Ctx);
@@ -4359,13 +4518,29 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
     if (auto *Phi = dyn_cast<PHINode>(U)) {
       mergeIntoHandlePhi(Phi, Handle, DescriptorIndex, BH, Env, DL, Merges,
                          Compares,
-                        HandleMerges);
+                        HandleMerges, HandleCompares);
       continue;
     }
     if (auto *Sel = dyn_cast<SelectInst>(U)) {
       mergeIntoHandleSelect(Sel, Handle, DescriptorIndex, BH, Env, DL, Merges,
                             Compares,
-                           HandleMerges);
+                           HandleMerges, HandleCompares);
+      continue;
+    }
+    // (Roadmap K6t) `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on this
+    // whole handle -- `hasOnlySupportedHandleUse` already validated it is
+    // a call to the `llvm.spv.resource.handleequal` intrinsic -- is
+    // handled by `mergeIntoHandleCompare` instead of the direct
+    // `getpointer` dispatch below: it only finishes rewriting the call
+    // once the other side's own descriptor index (or null-handle
+    // sentinel) is known, so encountering one does not immediately
+    // produce a result the way a `getpointer` call does. Must be checked
+    // before the `getpointer` cast below since both are `CallInst`s.
+    if (auto *HandleEqCI = dyn_cast<CallInst>(U);
+        HandleEqCI &&
+        getIntrinsicID(HandleEqCI) == Intrinsic::spv_resource_handleequal) {
+      mergeIntoHandleCompare(HandleEqCI, Handle, DescriptorIndex,
+                            HandleCompares);
       continue;
     }
     auto *GetPtr = cast<CallInst>(U);
@@ -4506,7 +4681,8 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                    uint32_t HeapBase, PointerMergeMap &Merges,
                    PointerCompareMap &Compares,
-                   HandleMergeMap &HandleMerges) {
+                   HandleMergeMap &HandleMerges,
+                   HandleCompareMap &HandleCompares) {
   IRBuilder<> IndexBuilder(BH.Handle);
   Value *Index = BH.Handle->getArgOperand(3);
   Value *DescriptorIndex =
@@ -4514,7 +4690,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
   const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
   lowerHandleAccesses(BH.Handle, BH, Env, DescriptorIndex, DL, Merges,
                       Compares,
-                      HandleMerges);
+                      HandleMerges, HandleCompares);
   BH.Handle->eraseFromParent();
 }
 
@@ -7087,6 +7263,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // classified (see `foldSampledImageStructs`).
     splitCombinedSampledImageHandles(F);
     foldSampledImageStructs(F);
+    foldSameOperandHandleCompares(F);
     std::optional<SmallVector<BoundHandle, 4>> Handles = collectHandles(F);
     if (!Handles || Handles->empty())
       continue;
@@ -7140,6 +7317,10 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // `HandleMergeState`'s own comment explains why it is a distinct,
     // shallower map rather than reusing `Merges` above.
     HandleMergeMap HandleMerges;
+    // (Roadmap K6t) `PointerCompareMap`'s handle-level counterpart,
+    // `HandleMergeMap`'s binary-op counterpart -- see `HandleCompareState`'s
+    // own comment.
+    HandleCompareMap HandleCompares;
     for (const BoundHandle &BH : Handles) {
       const RangeEntry &Entry = Ranges.at(BH.Key);
       if (Entry.Conflicting)
@@ -7149,7 +7330,8 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
         RewroteAny = true;
       }
       if (isBufferHandleKind(BH.Kind)) {
-        lowerAccesses(BH, Env, Entry.HeapBase, Merges, Compares, HandleMerges);
+        lowerAccesses(BH, Env, Entry.HeapBase, Merges, Compares, HandleMerges,
+                     HandleCompares);
         continue;
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
