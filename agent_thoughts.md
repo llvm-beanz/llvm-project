@@ -122231,3 +122231,34 @@ This was an **upstream-MLIR** gap (not feme-local), per the standing "issue outs
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6o`'s upstream-MLIR fix, same scoping choice as several recent sessions).
 
 **Immediate next action for next session:** pick `K6n` (now the only large, unattempted bucket -- `K6o` and the original `PtrAccessChain` cluster are both closed) and start by root-causing *one* representative `"unsupported raised operation"` case down to the specific resource-handle-normalization code path in `feme/lib/Target/CPU` (not yet located in any prior session) before guessing at a fix approach.
+
+# Session: K6n fixed (phi/select-merged resource pointers, 116/140 of cached fail-list passes)
+
+**Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary | grep deviceName`** at session start, with `VK_ICD_FILENAMES` exported first (same standing requirement as every prior session). This session resumed a prior session's `git stash` -- found with `git stash list`, popped cleanly, picked up exactly where it left off.
+
+## What now works
+
+`feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp` now lowers a `variablePointers` shader that merges two resource pointers with `OpPhi`/`OpSelect` before a load/store -- previously this unconditionally failed as "unsupported raised operation ... register-bound resource handle the FeMe CPU target cannot normalize." Both same-handle (different index into one binding) and cross-handle (two different bindings) merges work, as does a null-check idiom (`phi [real_ptr], [null]`). CTS: the prior session's own cached 140-case fail-list, re-run from the correct CTS data directory (not a scratch dir), now has **116/140 passing (82.9%)**, up from 0.
+
+## The bug, in one paragraph
+
+`hasOnlySupportedPointerUses` only ever accepted a `GetElementPtrInst` as a valid continuation of a resource-handle pointer chain -- any `PHINode`/`SelectInst` consumer caused the whole handle to be rejected outright. Fixed by teaching it to accept those two instruction kinds too, recursing into the merge point's own downstream users, backed by a new `PointerMergeMap` (shared per-function, so it can span two separate `BoundHandle`s' own `lowerAccesses` calls for a cross-binding merge) that accumulates each incoming leg's `(DescriptorIndex, Offset)` and lazily builds a matching side-car phi/select once every leg has reported in.
+
+## The real lesson this session learned
+
+1. **Poison consumed operands immediately, not eventually.** The first working version crashed on the very first real CTS case (`UNREACHABLE ... Use still stuck around after Def is destroyed`). Cause: `mergeIntoPhi`/`mergeIntoSelect` captured a leg's value into the new merge state but left the *original* phi/select's own reference to that leg dangling until some later pass finished rewriting it -- so when the caller erased the leg's now-fully-consumed instruction, the not-yet-finished original still pointed at dead IR. Fix: `PoisonValue::get(...)` the original's own operand the instant it's consumed, not when the whole merge finishes. General IR-rewriting lesson, not SPIR-V-specific -- worth remembering any time new IR is synthesized to replace use of an *existing*, still-alive instruction's operand rather than replacing the whole instruction atomically.
+2. **`PHINode::incoming_values()` yields `Use&`, not `Value&`.** A lambda passed to `llvm::any_of`/`llvm::none_of` over this range needs `const Use &` and `.get()`. One-line fix, but would have silently failed to compile with a confusing template error without checking the actual range type first.
+3. **Run the full cached fail-list from the CTS's own data directory, not a scratch dir.** Running from `/tmp/k6n_test` last session mis-reported 14 real cases as `ResourceError` (missing `.amber` files) rather than their true pass/fail outcome. This session re-ran from `/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan` instead and got the real number (116/140, not 116/126) -- the 14 "missing" cases turned out to be real, in-scope-for-a-different-bucket (`K6p`) failures, not noise.
+3. **A `git stash` left from a stalled session is often further along than it looks.** `git stash list` + `git stash pop` recovered ~90% of this session's eventual fix with zero conflicts -- re-deriving it from scratch would have cost most of a session on its own.
+
+## Next steps
+
+1. **(~1-2 days)** `K6q`: 2 cases, handle-level `OpPhi`/`OpSelect` merge (merging raw resource *handles* before `getpointer` is called, not pointers already derived from one). Deeper and architecturally distinct from this session's fix -- `hasOnlySupportedUses` (the handle-level checker) would need the `DescriptorIndex` itself to become phi-mergeable before any GEP/offset is known. Smallest case count of the three new buckets but possibly the hardest.
+2. **(~half day)** `K6r`: 2 cases, storing a handle-derived pointer as a store's *value* operand (not its pointer operand) -- `hasOnlySupportedPointerUses` only checks the pointer-operand position today. Likely the smallest, most contained of the three new buckets -- good first pick for a fast win.
+3. **(~1 day)** `K6s`: 5 cases, frag/tessc/tesse result-correctness bug -- pipeline builds and runs, output is wrong, zero normalization rejection. Needs its own investigation (not a legalization gap at all); start with a minimal single-buffer frag repro and CPU-backend tracing.
+4. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: 14-15 cases, `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely undefined in MLIR's SPIR-V dialect TableGen. Not attempted again this session (scope stayed on `K6n`).
+5. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+6. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+7. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6n`'s compiler fix).
+
+**Immediate next action for next session:** pick `K6r` (2 cases, single-function fix in `hasOnlySupportedPointerUses`'s store-operand check -- smallest, most contained of the three new buckets) for a fast win, or `K6s` if a correctness bug feels more interesting than another legalization gap.
