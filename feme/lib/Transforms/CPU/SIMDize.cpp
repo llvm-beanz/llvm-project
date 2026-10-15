@@ -3577,14 +3577,54 @@ void FunctionWidener::widenGroupSharedGEP(GetElementPtrInst &GEP,
   // behind an `insertelement` chain it cannot see through -- the
   // "divergent index" shape roadmap milestone 9 narrowed
   // (feme/docs/Roadmap.md's §1.6, closed by roadmap step R23).
+  //
+  // `GEP`'s own pointer operand needs the exact same `Widened`-or-as-is
+  // substitution as every index below (K6y): for a first-level GEP off
+  // the raw global, `GEP.getPointerOperand()` is a `Constant` (the global
+  // itself, never present in `Widened`), so this is a no-op there -- but
+  // a *nested* groupshared GEP's own base can itself be another,
+  // genuinely divergent `getelementptr` (already visited and widened
+  // earlier in `FunctionWidener::widen`'s one-pass-forward instruction
+  // order, since a GEP's base always precedes it in that order), whose
+  // widened `<W x ptr addrspace(N)>` form lives only in `Widened`, keyed
+  // by its *old*-function identity. Using the stale, unwidened base
+  // directly, as this used to, built a `getelementptr` instruction whose
+  // pointer operand was a dangling `OldF`-scope `Value*` once `OldF`'s
+  // own instructions were erased -- `getelementptr`'s own vector-base
+  // form (a vector base implicitly broadcasts any scalar index to match
+  // it, the same way a vector index broadcasts a scalar base) is exactly
+  // what is needed to correctly reflect a divergent base here, the same
+  // way a divergent index already was.
+  Value *Base = GEP.getPointerOperand();
+  if (Widened.count(Base))
+    Base = Widened[Base];
   SmallVector<Value *, 4> Indices;
   for (Value *Idx : GEP.indices())
     Indices.push_back(Widened.count(Idx) ? Widened[Idx] : Idx);
 
   Value *NewGEP =
-      Builder.CreateGEP(GEP.getSourceElementType(), GEP.getPointerOperand(),
-                        Indices, GEP.getName() + ".wide", GEP.isInBounds());
-  Widened[&GEP] = NewGEP;
+      Builder.CreateGEP(GEP.getSourceElementType(), Base, Indices,
+                        GEP.getName() + ".wide", GEP.isInBounds());
+  // `GEP` only reaches here because `UniformityInfo` judged its *result*
+  // divergent (see `widenInstruction`'s dispatch gate) -- but that is a
+  // more holistic judgment than "some index in `Indices` above was
+  // actually widened": a loop-carried index that is itself uniform (e.g.
+  // a lane-invariant trip count) can still leave every entry of `Indices`
+  // scalar, so `NewGEP` comes back exactly as uniform/scalar-pointer-typed
+  // as `GEP` itself was (K6y). `getWidened`'s own invariant (every `Widened`/
+  // `Broadcasts` cache entry is vector-typed, see its leading assert) does
+  // not hold for a bare scalar `NewGEP` -- caching it there as-is let a
+  // later divergent consumer (observed: a `ptrtoint` of this groupshared
+  // pointer, further combined with a genuinely divergent operand) read
+  // back a scalar `Widened` entry where it required a `<W x T>`, crashing
+  // `CastInst::Create`'s "Invalid cast!" assertion in `widenElementwise`.
+  // Route a still-scalar `NewGEP` through `getWidened` once here instead,
+  // exactly like every other producer of a uniform value that a divergent
+  // consumer might need widened: it broadcasts it into a real `<W x ptr>`
+  // splat on demand and memoizes that splat, so the cache invariant holds
+  // for every later lookup of this `GEP` by its *old* identity.
+  Widened[&GEP] =
+      NewGEP->getType()->isVectorTy() ? NewGEP : getWidened(NewGEP, Builder);
   ToErase.push_back(&GEP);
 }
 
