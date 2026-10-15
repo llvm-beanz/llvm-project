@@ -2417,6 +2417,75 @@ splitLoopBodyAtBarriers(Function &WaveBody, ArrayRef<BasicBlock *> BodyOrder,
 /// `buildWaveLoop`, with a fence between consecutive regions of the same
 /// chain. Returns nullptr (having emitted a diagnostic) if a region's
 /// cross-barrier liveness is not one this milestone's spilling supports.
+/// Roadmap L429: true if \p I (a `Shape.Header`-local, non-phi
+/// instruction) transitively depends -- following only other
+/// `Header`-local, non-phi instructions -- on any phi in \p
+/// PersistentPhis. Such a value is genuinely per-lane/per-wave (it reads
+/// a `WavePersistentValue` whose slot differs across waves), so it can
+/// never be correctly computed just once, in the wrapper's own scalar
+/// `LoopHeaderBB` clone of `Shape.Header` -- unlike an ordinary
+/// `HeaderDerivedValues` entry (see `buildWrapperForLoop` below), whose
+/// operands are all loop-invariant or driven by a `ScalarInduction`'s own
+/// per-iteration wrapper phi, and so really is the same for every wave.
+/// A `Header` phi that is *not* itself one of \p PersistentPhis (i.e. a
+/// `ScalarInduction`) does not propagate the dependency: the wrapper's own
+/// `LoopHeaderBB` clone already recomputes it correctly every iteration.
+bool dependsOnPersistentInduction(Instruction *I, BasicBlock *Header,
+                                  const SmallPtrSetImpl<PHINode *> &PersistentPhis,
+                                  SmallPtrSetImpl<Instruction *> &Visited) {
+  if (!Visited.insert(I).second)
+    return false;
+  for (Value *Op : I->operand_values()) {
+    auto *OpI = dyn_cast<Instruction>(Op);
+    if (!OpI || OpI->getParent() != Header)
+      continue;
+    if (auto *PN = dyn_cast<PHINode>(OpI)) {
+      if (PersistentPhis.contains(PN))
+        return true;
+      continue;
+    }
+    if (dependsOnPersistentInduction(OpI, Header, PersistentPhis, Visited))
+      return true;
+  }
+  return false;
+}
+
+/// Roadmap L429: clones \p I -- and, recursively, any `Header`-local,
+/// non-phi instruction it depends on that is not already in \p LocalMap --
+/// in place immediately before \p InsertBefore, caching each clone in
+/// \p LocalMap so a chain with a diamond-shaped dependency (two
+/// instructions sharing a common `Header`-local ancestor) still only
+/// clones that ancestor once per call site. Any operand that is *not* a
+/// `Header`-local, non-phi instruction -- a constant, an already-available
+/// value, or (deliberately) one of `Header`'s own phis, including a
+/// `WavePersistentValue`'s -- passes through unchanged: left pointing at
+/// the original phi, a `PersistentInduction`'s own use there is then
+/// picked up and reload-rewritten by `spillValuesLiveAcrossBarriers`'s
+/// usual per-wave-phi scan exactly like any other in-region use, since
+/// this clone now lives inside \p InsertBefore's own region.
+Instruction *cloneHeaderChainAt(Instruction *I, BasicBlock *Header,
+                                Instruction *InsertBefore,
+                                ValueToValueMapTy &LocalMap) {
+  if (auto It = LocalMap.find(I); It != LocalMap.end())
+    return cast<Instruction>(&*It->second);
+  Instruction *Clone = I->clone();
+  // Roadmap L429: remap every `Header`-local operand -- which may itself
+  // insert further clones immediately before `InsertBefore` -- *before*
+  // inserting `Clone` there too, so each such ancestor clone ends up
+  // ordered ahead of (and so dominates) every descendant that reads it;
+  // reversing this order would insert `Clone` first, ahead of operand
+  // clones it depends on.
+  LocalMap[I] = Clone;
+  for (Use &Op : Clone->operands()) {
+    auto *OpI = dyn_cast<Instruction>(Op.get());
+    if (!OpI || OpI->getParent() != Header || isa<PHINode>(OpI))
+      continue;
+    Op.set(cloneHeaderChainAt(OpI, Header, InsertBefore, LocalMap));
+  }
+  Clone->insertBefore(InsertBefore->getIterator());
+  return Clone;
+}
+
 /// Roadmap H159(a): a latch that is itself wave-lane-specific
 /// (`LoopShape::LatchIsWaveRegion`) is instead outlined as the body
 /// chain's own last region rather than cloned, in which case every
@@ -2546,6 +2615,10 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   auto IsInWaveRegionOrSuffix = [&](BasicBlock *BB) {
     return IsInWaveRegion(BB) || is_contained(Shape.SuffixOrder, BB);
   };
+  SmallPtrSet<PHINode *, 2> PersistentPhis;
+  for (LoopInduction &Ind : PersistentInductions)
+    PersistentPhis.insert(Ind.HeaderPhi);
+
   SmallVector<Instruction *, 2> HeaderDerivedValues;
   for (Instruction &I : *Shape.Header) {
     if (isa<PHINode>(I) || I.isTerminator())
@@ -2553,8 +2626,44 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     if (any_of(I.uses(), [&](Use &U) {
           auto *UI = dyn_cast<Instruction>(U.getUser());
           return UI && IsInWaveRegionOrSuffix(UI->getParent());
-        }))
+        })) {
+      // Roadmap L429: a header-local value that (transitively) reads a
+      // `WavePersistentValue`'s own phi is genuinely per-wave -- unlike
+      // every other `HeaderDerivedValues` entry, it cannot be given the
+      // ordinary "clone once into the wrapper's scalar `LoopHeaderBB`"
+      // treatment below (there is no single per-wave value to clone: the
+      // phi's real value lives in a slot that differs across waves, and
+      // `LoopHeaderBB` itself runs once per iteration, outside any
+      // per-wave loop, with no `WaveIndex` to read a slot by). Recompute
+      // it fresh at each of its own uses instead, directly inside
+      // whichever per-wave region that use lives in: `spillValuesLive-
+      // AcrossBarriers` below has not run yet, so the `PersistentPhis`
+      // it is about to rewrite into a per-wave reload are still fully
+      // live, and this clone's own brand-new use of one, now sitting
+      // inside that region for the first time, is simply one more
+      // genuine in-region use for that same reload-rewriting pass to
+      // find and handle exactly like any other -- no further special
+      // casing is needed downstream.
+      SmallPtrSet<Instruction *, 4> Visited;
+      if (dependsOnPersistentInduction(&I, Shape.Header, PersistentPhis,
+                                       Visited)) {
+        SmallVector<Use *, 4> UsesInBody;
+        for (Use &U : I.uses())
+          if (auto *UI = dyn_cast<Instruction>(U.getUser());
+              UI && IsInWaveRegionOrSuffix(UI->getParent()))
+            UsesInBody.push_back(&U);
+        for (Use *U : UsesInBody) {
+          auto *User = cast<Instruction>(U->getUser());
+          Instruction *InsertBefore = User;
+          if (auto *UserPN = dyn_cast<PHINode>(User))
+            InsertBefore = UserPN->getIncomingBlock(*U)->getTerminator();
+          ValueToValueMapTy LocalMap;
+          U->set(cloneHeaderChainAt(&I, Shape.Header, InsertBefore, LocalMap));
+        }
+        continue;
+      }
       HeaderDerivedValues.push_back(&I);
+    }
   }
   for (auto [M, HV] : llvm::enumerate(HeaderDerivedValues)) {
     unsigned N = ScalarInductions.size() + M;

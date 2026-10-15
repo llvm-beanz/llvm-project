@@ -14,6 +14,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -1002,6 +1003,94 @@ TEST(EntryWrapperTest, SplitsFlowMergeLoopWithWavePersistentRecurrence) {
       HeaderBB = &BB;
   ASSERT_TRUE(HeaderBB);
   EXPECT_EQ(std::distance(HeaderBB->phis().begin(), HeaderBB->phis().end()), 1);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap L429 (feme/docs/Roadmap.md): a `HeaderDerivedValues` entry (see
+// `SplitsFlowMergeLoopWithHeaderDerivedValue` above) whose own value is
+// computed *from* a wave-persistent induction's header phi (`%mask`,
+// see `SplitsFlowMergeLoopWithWavePersistentRecurrence` above) rather
+// than from an ordinary scalar one. `%hv` is used only in `after`
+// (`Shape.SuffixOrder`), strictly after the loop -- exactly the shape
+// `InterlockedAdd.resources.32.test` hit: `%mask`'s own `HeaderPhi` is
+// genuinely per-wave (its recurrence depends on `%tid`), so `%hv` cannot
+// be given the ordinary `HeaderDerivedValues` "clone once into the
+// wrapper's own scalar `LoopHeaderBB`" treatment -- by the time that
+// clone would run, `%mask`'s `HeaderPhi` has already been replaced with
+// `poison` (every genuine in-region use of it already redirected to its
+// own per-wave reload by `spillValuesLiveAcrossBarriers`, leaving none
+// behind for `replaceAllUsesWith` to miss) and erased, so a naive clone
+// of `%hv` into the header would silently read that `poison` forever.
+// `%hv` must instead be recomputed fresh, directly inside `after`,
+// reading `%mask`'s own per-wave reload there -- never materializing a
+// `loopvarN` parameter for `%hv` at all.
+TEST(EntryWrapperTest,
+     SplitsFlowMergeLoopWithHeaderDerivedValueFromWavePersistentRecurrence) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [ 0, %entry ], [ %i.next, %flow ]
+      %mask = phi i1 [ true, %entry ], [ %mask.next, %flow ]
+      %hv = select i1 %mask, i32 1, i32 0
+      %cmp = icmp ult i32 %i, 4
+      br i1 %cmp, label %flow, label %after
+    flow:
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %cond2 = icmp eq i32 %tid, 0
+      %mask.next = and i1 %mask, %cond2
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %i.next = add i32 %i, 1
+      br label %header
+    after:
+      %use = add i32 %hv, 1
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+
+  // `%hv` must never get its own `loopvarN` parameter: it is recomputed
+  // fresh at each use instead, so only `%i`'s own induction parameter
+  // exists.
+  Function *Suffix0 = M->getFunction("main.suffix0");
+  ASSERT_TRUE(Suffix0);
+  for (Argument &A : Suffix0->args())
+    EXPECT_FALSE(A.getName() == "loopvar1");
+
+  // `after` (now `main.suffix0`) must recompute `%hv` from a genuine
+  // reload of `%mask`'s own per-wave slot -- never from `poison` (the
+  // regression this test guards against: an un-reloaded operand silently
+  // degrading into a hard-coded constant once the generic optimizer runs
+  // `instcombine`/`SCCP` over it).
+  bool FoundSelect = false;
+  bool FoundReload = false;
+  for (Instruction &I : instructions(*Suffix0)) {
+    if (auto *SelI = dyn_cast<SelectInst>(&I)) {
+      FoundSelect = true;
+      EXPECT_FALSE(isa<PoisonValue>(SelI->getCondition()));
+      EXPECT_FALSE(isa<UndefValue>(SelI->getCondition()));
+    }
+    if (auto *LI = dyn_cast<LoadInst>(&I);
+        LI && LI->getName().starts_with("mask."))
+      FoundReload = true;
+  }
+  EXPECT_TRUE(FoundSelect);
+  EXPECT_TRUE(FoundReload);
 
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
