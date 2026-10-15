@@ -8888,3 +8888,160 @@ TEST(SPIRVResourceLoweringTest,
         SawSentinel = true;
   EXPECT_TRUE(SawSentinel);
 }
+
+// Roadmap K6q: a `variablePointers` shader may merge two raw resource
+// *handles* (not pointers already derived via `getpointer`) with an
+// `OpPhi`, calling `getpointer` only on the merge result -- the shape
+// `dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.
+// complex_types_compute.opphi_outer_struct_two_buffers_first_input`
+// lowers to. Before `mergeIntoHandlePhi`, `hasOnlySupportedUses` rejected
+// the whole handle outright ("handle used other than by getpointer") the
+// moment it saw a `phi` user instead of a `getpointer` call directly,
+// which `UnsupportedOps.cpp` then surfaced as the generic "unsupported
+// raised operation... register-bound resource handle... cannot
+// normalize" Vulkan pipeline-creation failure.
+TEST(SPIRVResourceLoweringTest,
+     LowersPhiMergedHandleToSharedGetPointerAccess) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) {
+    entry:
+      br i1 %cond, label %t, label %f
+    t:
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      br label %merge
+    f:
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      br label %merge
+    merge:
+      %h = phi target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          [ %ha, %t ], [ %hb, %f ]
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 0)
+      %v = load float, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // The merge must survive as a real, newly synthesized descriptor-index
+  // phi feeding the one remaining raw load -- not silently resolved to
+  // one leg's own index -- and the original handle-typed `phi` and both
+  // `getpointer`/`handlefrombinding` calls must be gone, confirming
+  // `mergeIntoHandlePhi` actually rewired the merge rather than leaving
+  // dead IR behind.
+  Value *DescIdx = findRawLoadDescriptorIndex(*F);
+  ASSERT_TRUE(DescIdx);
+  EXPECT_TRUE(isa<PHINode>(DescIdx));
+  for (Instruction &I : instructions(*F)) {
+    if (auto *Phi = dyn_cast<PHINode>(&I))
+      EXPECT_FALSE(Phi->getType()->isTargetExtTy());
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        EXPECT_NE(Callee->getIntrinsicID(), Intrinsic::spv_resource_getpointer);
+  }
+}
+
+// `OpSelect`'s counterpart to the handle-merge test above, exercising
+// `mergeIntoHandleSelect` instead of `mergeIntoHandlePhi`.
+TEST(SPIRVResourceLoweringTest,
+     LowersSelectMergedHandleToSharedGetPointerAccess) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) {
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %h = select i1 %cond,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %ha,
+          target("spirv.VulkanBuffer", [0 x float], 12, 1) %hb
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 0)
+      %v = load float, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  Value *DescIdx = findRawLoadDescriptorIndex(*F);
+  ASSERT_TRUE(DescIdx);
+  EXPECT_TRUE(isa<SelectInst>(DescIdx));
+}
+
+// The real `opphi_outer_struct_two_buffers_{first,second}_input` CTS
+// cases merge a *nested* chain of two phis -- an outer phi merging an
+// inner phi with a direct handle, the inner phi itself merging two direct
+// handles across a diamond nested inside another diamond -- with the
+// inner phi's own dead (never-taken) incoming edge carrying a literal
+// `poison` handle-typed value rather than a second real handle (a
+// `Flow`-block artifact of `LoopLinearizer`/`CanonicalizeStage`'s own
+// control-flow restructuring). This is the exact structural shape
+// `hasOnlySupportedHandleMergeUses`'s `Visited` set and
+// `mergeIntoHandlePhi`'s poison-sentinel handling exist for.
+TEST(SPIRVResourceLoweringTest,
+     LowersNestedPhiMergedHandleWithPoisonEdge) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond0, i1 %cond1) {
+    entry:
+      br i1 %cond0, label %outer_t, label %outer_f
+    outer_t:
+      %hc = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      br label %outer_merge
+    outer_f:
+      br i1 %cond1, label %inner_t, label %inner_f
+    inner_t:
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      br label %inner_merge
+    inner_f:
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      br label %inner_merge
+    inner_merge:
+      %hi = phi target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          [ %ha, %inner_t ], [ %hb, %inner_f ]
+      br label %outer_merge
+    outer_merge:
+      %h = phi target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          [ %hc, %outer_t ], [ %hi, %inner_merge ]
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 0)
+      %v = load float, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  Value *DescIdx = findRawLoadDescriptorIndex(*F);
+  ASSERT_TRUE(DescIdx);
+  EXPECT_TRUE(isa<PHINode>(DescIdx));
+}
