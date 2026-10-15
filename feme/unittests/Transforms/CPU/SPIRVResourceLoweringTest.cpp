@@ -8752,6 +8752,90 @@ TEST(SPIRVResourceLoweringTest, LowersSelectMergedPointerToSharedRawAccess) {
   EXPECT_TRUE(isa<SelectInst>(DescIdx));
 }
 
+// Roadmap K6r: a handle-derived pointer may be stored through ordinary
+// memory -- a module-scope `Private`-storage global -- and loaded back in
+// a *different* function, rather than merged by an `OpPhi`/`OpSelect`
+// within one function (roadmap K6n above). This is exactly the shape
+// `splitTessellationControlEntry`'s own barrierless split
+// (`CanonicalizeStage.cpp`) produces: a value computed in the
+// control-point phase (`main`) and read back in the separately-dispatched
+// patch-constant phase (`main.patchconstant`) has no SSA value that can
+// cross that real function boundary, so `LocalizePrivateGlobalsPass`
+// correctly declines to localize the shared global (it is genuinely used
+// by two functions, not a localizable single-function scratch variable) --
+// leaving `SPIRVResourceLoweringPass` to see the raw global directly, as
+// here. Before `lowerPointerMergeGlobalStore`, the store's own
+// `hasOnlySupportedPointerUses` check rejected this outright ("store
+// where pointer is not the operand", since the handle-derived pointer is
+// the store's *value* operand, not its pointer operand), the exact
+// `dEQP-VK.spirv_assembly.instruction.graphics.variable_pointers.graphics.
+// stores_private_single_buffer_tessc` failure.
+TEST(SPIRVResourceLoweringTest,
+     LowersPointerStoredThroughPrivateGlobalAndLoadedInAnotherFunction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @g = private global ptr undef
+
+    define void @main(i1 %cond) {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptra = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 0)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 1)
+      %ptr = select i1 %cond, ptr %ptra, ptr %ptrb
+      store ptr %ptr, ptr @g
+      ret void
+    }
+
+    define void @main.patchconstant() {
+      %ptr = load ptr, ptr @g
+      %v = load float, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *Main = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(Main);
+  ASSERT_TRUE(PatchConstant);
+  // The load -- in the *other* function -- must be the one that ends up
+  // rewritten to a canonical raw resource load; the original store-side
+  // function merges and threads the (descriptor index, byte offset)
+  // pair through the new scalar globals, but never itself loads.
+  EXPECT_FALSE(hasResourceLoadCall(*Main));
+  EXPECT_TRUE(hasResourceLoadCall(*PatchConstant));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // `@g` itself must be gone -- replaced entirely by the new scalar
+  // descriptor-index/byte-offset globals -- confirming the global-merge
+  // lowering actually ran rather than leaving the original pointer global
+  // (and its store/load) behind unexamined.
+  EXPECT_FALSE(M->getNamedGlobal("g"));
+  Value *DescIdx = findRawLoadDescriptorIndex(*PatchConstant);
+  ASSERT_TRUE(DescIdx);
+  // The loaded-back descriptor index is a load from the new synthetic
+  // scalar global `lowerPointerMergeGlobalStore` materialized in place of
+  // `@g`; the value *stored* into that same global, back in `main`, must
+  // still be the real `select`-merged value (the two legs' own resolved
+  // indices) -- confirming the merge continued correctly across the
+  // store/global/load boundary rather than collapsing to one leg.
+  auto *LI = dyn_cast<LoadInst>(DescIdx);
+  ASSERT_TRUE(LI);
+  auto *DescGV = dyn_cast<GlobalVariable>(LI->getPointerOperand());
+  ASSERT_TRUE(DescGV);
+  bool FoundSelectStore = false;
+  for (User *U : DescGV->users())
+    if (auto *SI = dyn_cast<StoreInst>(U))
+      if (isa<SelectInst>(SI->getValueOperand()))
+        FoundSelectStore = true;
+  EXPECT_TRUE(FoundSelectStore);
+}
+
 // A `variablePointers` null check -- `phi ptr [ %real, %a ], [ null, %b ]`
 // -- merges a recognized handle chain with a `ConstantPointerNull` that no
 // `BoundHandle`'s own chain ever produces or reaches. Before
