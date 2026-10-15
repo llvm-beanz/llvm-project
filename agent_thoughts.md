@@ -122830,3 +122830,92 @@ not a bug fix. The much bigger, still-fully-open item is `K6n`-proper
 remaining `variablePointers` bucket; that or `check-hlsl-feme-vk`
 exercise against offload-test-suite (never run yet, despite the standing
 requirement) are the two strongest candidates for a change of pace.
+
+# Session: first check-hlsl-feme-vk run, 24/26 residual failures root-caused to one shared gap (K6z)
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`.
+
+**Done this session:**
+1. Ran `check-hlsl-feme-vk` for the first time this multi-session project
+   (standing requirement, overdue many sessions). 792 total: 464
+   Passed/273 Unsupported/27 Failed/1 Unexpectedly Passed.
+2. Found both failures matched the known "offload-test-suite local fix
+   dropped by `agent-setup.sh`'s reset" pattern. Fixed both, isolated
+   commits, `offload-test-suite` only:
+   - `WaveOps/WaveActiveMax.test`: re-added `XFAIL: FeMe && host-arm64`
+     (commit `14387a0`).
+   - `Feature/PushConstant/array_of_matrices.test`: removed stale
+     `XFAIL: DXC` (commit `ec08762`). Hit the lit directive-scanning
+     pitfall once (literal `XFAIL: DXC` substring in a comment got
+     misparsed) -- reworded, confirmed `PASS`.
+3. Re-swept: 465 Passed/273 Unsupported/26 Failed/28 Expectedly
+   Failed/0 Unexpectedly Passed. Exactly the expected shift, zero other
+   regressions.
+4. Triaged all 26 remaining failures by exact error signature
+   (`FEME_DUMP_IR_PRELINEARIZE` + direct `llvm-lit -v` runs). **Found
+   24 of 26 share one root cause**: `DiamondFlattener::
+   flattenLoopBodyRegion`'s nested-child-cycle tolerance (in
+   `Linearize.cpp`) only accepts a boundary block whose own branch
+   targets `End` directly (the loop's own exit check) -- not a genuine
+   nested sibling loop sitting in the body before `End`, even though
+   that nested loop is already fully linearized by the time the outer
+   loop is processed (`linearizeCyclePostOrder` runs children first).
+   Confirmed via a real IR dump (`matrix_single_subscript_load.test`):
+   outer `for(i<4)` loop, uniform `i%2`/`i%3` diamond-chain body, then a
+   nested `for(j<4)` sibling loop before the latch -- rejected outright.
+   Documented as new roadmap row `K6z` (left open, not fixed -- see
+   "why not fixed" below). The other 2 failures are unrelated:
+   `InterlockedAdd.resources.32.test` (genuine numeric bug, all-0x1
+   expected vs all-0x0 actual, not yet root-caused further) and
+   `InterlockedCompareStore.resources.32.test` (pre-existing,
+   already-tracked `H154`/`H155`-family milestone-9 diagnostic).
+5. A/B bisected this session's own prior `K6x`/`K6y` commits against the
+   `WaveOps` cluster to rule out a self-inflicted regression: reverted
+   `Pipeline.cpp`/`SIMDize.cpp` to pre-`K6x`, rebuilt, reran -- same
+   diagnostic reproduces identically. Confirmed NOT a regression from
+   this session. Restored both files to `HEAD`.
+6. `check-feme`: 3755/3762 passed, 7 unsupported (expected), 0 failures.
+   No FeMe source has any net change this session (bisect was fully
+   reverted) -- this run is a clean reconfirmation, not a new baseline.
+7. Updated `Roadmap.md` (`K6z`, `L424`) and `VulkanCTSReport.md` (new
+   session section). No `VK-GL-CTS` rerun or inventory-doc update needed
+   -- both landed fixes are `offload-test-suite`-only, no FeMe code or
+   feature/extension surface changed.
+
+**Why K6z wasn't fixed this session:** the correct general fix needs
+`validate`'s walk to recognize an already-linearized
+(`HeaderActiveMasks`-tracked) nested cycle specifically, continue
+validating from its own exit blocks to `End`, and teach `flatten` to
+skip the nested cycle's already-finalized interior while still masking
+the code between its exit and `End`. That is a materially more general
+change to both `validate`'s and `flatten`'s cycle-boundary handling --
+same scale as `K6n`-proper's own long-deferred scope -- and this file's
+own history is dominated by subtle masking-semantics bugs exactly in
+this area (`K6w`, `K6y`). Attempting it without the time to properly
+unit-test every nested-cycle shape risked a worse outcome than leaving
+it open and well-documented.
+
+**Next steps, ranked:**
+1. **(~1-2 days)** Fix `K6z`: generalize `validate`/`flatten`'s
+   nested-cycle-boundary handling to tolerate an already-linearized
+   child cycle anywhere in a uniform loop's body, not just at the exit
+   check. Highest-value pick available: closes 24 of 26 current
+   `check-hlsl-feme-vk` failures in one shot. Start from
+   `matrix_single_subscript_load.test`'s `FEME_DUMP_IR_PRELINEARIZE`
+   dump (already captured this session, see this session's own
+   `K6z` write-up for the exact block numbers) as the unit-test seed
+   shape.
+2. **(~half day)** Root-cause `InterlockedAdd.resources.32.test`'s
+   numeric mismatch (expected all `0x1`, actual all `0x0`) -- not yet
+   looked at past the raw buffer diff.
+3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, still not touched for many sessions.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+5. **(standing)** `L419(j)` remaining untriaged items, deferred full
+   `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+
+**Immediate next action for next session:** pick `K6z` (item 1) --
+highest leverage available, already root-caused down to the exact code
+path and a concrete IR repro shape.
