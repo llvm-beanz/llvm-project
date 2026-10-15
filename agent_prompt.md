@@ -65,37 +65,34 @@ The last session stalled out. Any intermediate states are stoerd in a git stash.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6n`: 124ish cases, CPU-backend
-   resource-handle-normalization architectural limitation (`"unsupported raised
-   operation: ... register-bound resource handle ..."`). Still not root-caused
-   beyond signature-level bucketing -- likely the deepest, hardest-to-fix piece
-   of the whole `variablePointers` feature, possibly needing a runtime dispatch
-   mechanism rather than a lowering-pattern fix. The largest remaining bucket;
-   worth its own investigation session before committing to an approach.
-2. **(~1-2 days, "issue outside FeMe")** `K6p`: now ~15 cases (a few more than
-   its originally-bucketed 11, since closing K6o's `OpConstantNull` legalization
-   let a few previously-masked cases reach the opcode-401/402/403 error instead
-   -- the same "fixing one bug reveals the next" pattern the original `K6a`
-   `PtrAccessChain` session saw). Upstream-MLIR gap:
-   `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` are entirely undefined in MLIR's
-   SPIR-V dialect TableGen. Needs new TableGen op definitions, deserializer
-   cases, and likely a `SPIRVToLLVMPatterns.cpp` lowering once the ops exist.
-   Not yet attempted; larger effort than K6o's single-function fix since it
-   needs new ops, not just a gap in an existing one.
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
-   decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session either.
-4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+1. **(~1-2 days)** `K6q`: 2 cases, handle-level `OpPhi`/`OpSelect` merge
+   (merging raw resource *handles* before `getpointer` is called, not pointers
+   already derived from one). Deeper and architecturally distinct from this
+   session's fix -- `hasOnlySupportedUses` (the handle-level checker) would need
+   the `DescriptorIndex` itself to become phi-mergeable before any GEP/offset is
+   known. Smallest case count of the three new buckets but possibly the hardest.
+2. **(~half day)** `K6r`: 2 cases, storing a handle-derived pointer as a store's
+   *value* operand (not its pointer operand) -- `hasOnlySupportedPointerUses`
+   only checks the pointer-operand position today. Likely the smallest, most
+   contained of the three new buckets -- good first pick for a fast win.
+3. **(~1 day)** `K6s`: 5 cases, frag/tessc/tesse result-correctness bug --
+   pipeline builds and runs, output is wrong, zero normalization rejection.
+   Needs its own investigation (not a legalization gap at all); start with a
+   minimal single-buffer frag repro and CPU-backend tracing.
+4. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: 14-15 cases,
+   `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely
+   undefined in MLIR's SPIR-V dialect TableGen. Not attempted again this session
+   (scope stayed on `K6n`).
+5. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+   decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+6. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+7. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6o`'s upstream-MLIR fix, same scoping choice as several
-   recent sessions).
+   stayed scoped to `K6n`'s compiler fix).
 
-**Immediate next action for next session:** pick `K6n` (now the only large,
-unattempted bucket -- `K6o` and the original `PtrAccessChain` cluster are both
-closed) and start by root-causing *one* representative `"unsupported raised
-operation"` case down to the specific resource-handle-normalization code path in
-`feme/lib/Target/CPU` (not yet located in any prior session) before guessing at
-a fix approach.
+**Immediate next action for next session:** pick `K6r` (2 cases, single-function
+fix in `hasOnlySupportedPointerUses`'s store-operand check -- smallest, most
+contained of the three new buckets) for a fast win, or `K6s` if a correctness
+bug feels more interesting than another legalization gap.
