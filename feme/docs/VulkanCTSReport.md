@@ -3330,3 +3330,93 @@ updated to reflect `K6t`'s closure and this session's `opptrdiff`
 re-check. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
 change -- `variablePointers`/`variablePointersStorageBuffer` remain
 unsupported/`VK_FALSE`; no feature bit flipped permanently this session.
+
+## `opptrdiff` residual fully triaged; one genuine false-rejection bug found and fixed, one deeper gap split off as `K6u` (roadmap `K6p` update)
+
+This session picked up the prior session's open follow-up: individually
+root-cause each of the 5 `dEQP-VK.spirv_assembly.instruction.spirv1p4.
+opptrdiff.*` cases (`ssbo_comparisons_diff`, `wg_comparisons_diff`,
+`variable_pointers_vars_wg_diff`, `variable_pointers_vars_ssbo_diff`,
+`variable_pointers_vars_ssbo_2_diff`) rather than assuming they share one
+bucket, using `FEME_VULKAN_LOG_CREATION_ERRORS`/`FEME_DUMP_IR_PRENORM`
+plus a previously-untried, far more targeted diagnostic,
+`FEME_CPU_LOG_RESOURCE_NORMALIZATION` (prints the exact rejecting
+instruction/reason via `logNormalizationRejection`, rather than requiring
+a manual IR trace).
+
+**Three of the five are confirmed pre-existing, out-of-scope limitations,
+not new gaps:** `ssbo_comparisons_diff`/`wg_comparisons_diff` hit the
+already-documented CFG-linearization `"reconvergence block '' does not
+have exactly two predecessors"` error; `variable_pointers_vars_wg_diff`
+hits the already-documented `feme-cpu-simdize` groupshared-
+canonicalization limitation.
+
+**The remaining two, `variable_pointers_vars_ssbo_diff`/
+`_ssbo_2_diff`, were genuinely new and are now split into two separate
+findings:**
+
+1. **Fixed this session (see commit):** `hasResolvableGEPByteOffset`
+   rejected *any* `getelementptr` with a negative constant byte offset
+   outright -- not just one whose unresolvable-at-compile-time *variable*
+   offset term happened to carry a negative multiplier. Both CTS cases'
+   shaders walk a `Private`-storage SSBO-pointer iterator backward one
+   element per loop iteration (`OpPtrAccessChain %ptr %backward_gep
+   %int_n1`, i.e. `getelementptr i32, ptr %p, i32 -1`) before taking
+   `OpPtrDiff` -- a perfectly ordinary, fully compile-time-resolvable
+   address computation, not an unresolvable one. `computePointerOffset`
+   also needed a matching fix: it materialized the constant offset term
+   via `getZExtValue()`, which would have produced a huge unsigned
+   garbage value for a true negative offset had the rejection above ever
+   let one through; switched to a sign-extending conversion. New,
+   isolated (non-cyclic) unit test
+   `LowersPtrDiffThroughNegativeConstantGEPOffsetToOffsetSubtraction`
+   verifies the fix in a straight-line reduction of the same shape.
+
+2. **Found, not yet fixed -- split off as roadmap `K6u`:** with the false
+   rejection above fixed, both CTS cases now reach pipeline *execution*
+   for the first time (confirmed via `FEME_CPU_LOG_RESOURCE_NORMALIZATION`
+   no longer firing), but both produce an incorrect numeric result
+   (`Line 108: Verifier failed: 920402036 == -33, at index 0`). Root
+   cause, confirmed via `FEME_DUMP_IR_PRENORM`: `mergeIntoPhi`'s rewrite
+   phase has no counterpart to `hasOnlySupportedPointerUses`'s validation-
+   phase `Visited`-set cycle breaker. A loop-carried pointer PHI whose
+   backedge is a `getelementptr` of the phi itself (both iterators in
+   this shader are exactly this: `forward_var`/`backward_var`, `Private`-
+   storage SSBO-pointer iterators incremented/decremented once per loop
+   iteration) can never finish merging -- the synthesized `descidx`/
+   `offset` phi's backedge slot is left `undef` forever, since resolving
+   that slot requires first recursing into the phi, which requires the
+   slot already resolved. The dump confirms exactly this: both synthesized
+   phis show a real value on the entry edge and `undef` on the loop-back
+   edge, while the original raw-pointer phi and its feeding GEPs are left
+   completely untouched in the final IR (silently un-rewritten, rather
+   than becoming `feme.cpu.resource.*` calls) -- whatever the downstream
+   codegen stage does with that leftover raw `ptr addrspace(11)`
+   arithmetic produces the observed garbage value, not a crash.
+
+**No regression:** `variablePointers`/`variablePointersStorageBuffer`
+remain `VK_FALSE` in the committed configuration, so all 5 `opptrdiff.*`
+cases (re-verified individually after the fix, flag reverted) still
+report `NotSupported` by default -- confirmed via a direct rerun of all
+5, zero change from before this session in the default configuration.
+
+Full `check-feme` target (final run, fix in place, feature flag reverted
+to `VK_FALSE`): 3750/3757 passed, 7 unsupported (expected), 0 failures.
+All 630 `FeMeTransformsCPUTests` pass, including the new test.
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` at the start and end of this session, per the standing "every
+session, every time" instruction.
+
+`Roadmap.md`: `K6p`'s own row updated with this session's full 5-case
+triage conclusion (two already-known limitations re-confirmed, one false-
+rejection bug fixed, one new bug split off). New row `K6u` added for the
+still-open loop-carried-pointer-PHI-rewrite-deadlock bug (not yet fixed;
+needs a restructured `mergeIntoPhi` that can resolve a self-referential
+backedge eagerly, e.g. by recursing into the backedge's own GEP using the
+already-created-but-still-filling-in `descidx`/`offset` phi nodes
+themselves as forward SSA references, rather than requiring every
+incoming edge resolved up front).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain unsupported/
+`VK_FALSE`; no feature bit flipped permanently this session.
