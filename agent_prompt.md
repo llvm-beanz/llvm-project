@@ -63,32 +63,14 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `L425(a)`: root-cause the 4 `feme-cpu-wrap-entry`-
-   blocked cases `L425`'s fix newly unblocked reaching
-   (`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`,
-   `InterlockedCompareExchange.resources.32`,
-   `InterlockedExchange.resources.32`). Not yet confirmed whether they
-   share one single still-unsupported barrier-splitting shape or need
-   individual triage the way `L425` itself did -- that diagnostic has a
-   long prior-fix history (`H72`/`H94b`/`H124e`/`H154`/`H155`/`H161`/
-   `L201(e)`) for *other* shapes, so this is likely "one more shape to
-   add," not a from-scratch investigation.
-2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, still not touched for many sessions.
-3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
-   contention-dependent semaphore-wait flake under full-suite parallel
-   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
-   methodology (isolate, stress, `gdb` backtrace under load) if a
-   lower-stakes task is wanted.
-4. **(standing, unresolved many sessions)**
-   `backup-before-rebase-20261014` tag decision,
-   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session.
-5. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration still deferred (not needed this session -- pure compiler
-   fix, no feature/extension surface change).
-
-**Immediate next action for next session:** pick `L425(a)` (item 1) --
-small, bounded, directly continues this session's own momentum, and the
-diagnostic it targets already has substantial prior-fix precedent to
-draw technique from.
+1. Re-apply the reverted `isLinearChain` patch (described in roadmap row `L426`,
+   not re-typed here -- read that row, it has the exact shape).
+2. Repro: `/tmp/l425a/AllMemoryBarrierWithGroupSync/` --
+   `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json
+   ./bin/offloader -debug-layer src/pipeline.yaml shader.o`, crashes in under a
+   second.
+3. `gdb --args ./bin/offloader ...`, backtrace at the `DominatorTree` assertion,
+   find what `splitAtGroupSyncBarriers` assumes.
+4. Fix that assumption, rebuild `libfeme_vulkan.so` + `feme-opt` +
+   `FeMeTransformsCPUTests`, re-run the 4-case repro set and
+   `check-hlsl-feme-vk`.
