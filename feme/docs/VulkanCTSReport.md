@@ -3420,3 +3420,95 @@ incoming edge resolved up front).
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
 `variablePointers`/`variablePointersStorageBuffer` remain unsupported/
 `VK_FALSE`; no feature bit flipped permanently this session.
+
+## `K6u`: self-referential loop-carried pointer-PHI rewrite deadlock fixed, 1/2 targeted cases pass (roadmap K6u, closed)
+
+**Starting point:** `K6u` (split off from the prior session's `opptrdiff`
+triage) -- `mergeIntoPhi`'s rewrite phase deadlocked on a loop-carried
+pointer PHI whose backedge is a `getelementptr` of the phi itself, since
+that backedge's own (descriptor index, byte offset) pair can only ever be
+resolved by recursing into the phi, but that recursion was gated on the
+backedge already being resolved. `variable_pointers_vars_ssbo_diff`/
+`_ssbo_2_diff` both reached pipeline execution (K6p's own
+negative-constant-GEP-offset fix, prior session) but produced an
+incorrect numeric result (`920402036` vs expected `-33`) rather than
+failing cleanly, since the deadlocked phi/GEP chain was silently left
+un-rewritten in the final IR.
+
+**Fix (`feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`):**
+1. New helper `isPhiSelfReferentialBackedge(const PHINode *Phi, const
+   Value *V)`: walks a chain of `GetElementPtrInst::getPointerOperand()`
+   calls backward from `V` until reaching a non-GEP root, and returns
+   whether that root is `Phi` itself -- distinguishing a loop's own
+   backedge (never externally resolved; only `mergeIntoPhi`'s own eager
+   recursion into `Phi`'s users can fill it in) from a genuinely separate
+   incoming chain (e.g. two different buffers merged by a condition,
+   which must still be waited on exactly as before).
+2. New `bool RewriteStarted = false;` field on `PointerMergeState`: a
+   reentrancy guard. The eager recursion into the backedge's own GEP
+   (triggered from inside `lowerRawPointerUses(Phi, ...)`) re-enters
+   `mergeIntoPhi(Phi, ...)` for the very same phi and `PointerMergeState`
+   before the outer call returns -- the guard makes that re-entrant call a
+   no-op instead of a second, overlapping recursion.
+3. `mergeIntoPhi`'s gating logic changed from "wait until every incoming
+   slot is resolved" to "wait until every *non-self-referential* incoming
+   slot is resolved" (checking each still-`undef` slot's original
+   `Phi`-incoming-value against the new helper), with `RewriteStarted`
+   set immediately before the now-eager `lowerRawPointerUses`/
+   `eraseFromParent` call.
+
+**New unit test**
+(`LowersPtrDiffOnLoopCarriedPointerBackedgeToOffsetSubtraction`,
+`SPIRVResourceLoweringTest.cpp`): a genuine 2-block loop (not the
+straight-line/cross-branch shapes every prior phi-merge test used) with a
+self-referential pointer-PHI backedge feeding `OpPtrDiff` against a
+second, fixed pointer each iteration -- mirrors each CTS case's own
+forward-iterator shape. Confirms `verifyModule` passes, the original
+pointer-typed phi/GEP/`ptrtoint` chain is fully replaced, and the result
+is a live `sub` fed by the loop's own synthesized byte-offset phi (not
+folded to a constant, since the offset genuinely varies per iteration).
+The existing `LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess`
+test (the non-cyclic multi-chain case that must *not* regress) still
+passes unchanged.
+
+**CTS verification** (feature bits transiently flipped for verification
+only, reverted immediately after):
+- `variable_pointers_vars_ssbo_diff`: **Pass** (previously produced
+  `920402036` instead of `-33`).
+- `variable_pointers_vars_ssbo_2_diff`: still **Fail**, but now on an
+  entirely different, unrelated signature --
+  `"feme-cpu-linearize: ... loop ... has a mask-affecting operation in
+  its body but no recognized uniform exit check"` (milestone 9 scope,
+  CFG-linearization limitation, not a K6u-scope gap). This confirms
+  `K6u`'s own deadlock is fully resolved for both cases it covered; the
+  second case's remaining failure is a distinct, pre-existing-class
+  limitation newly exposed now that the phi-merge deadlock no longer
+  masks it.
+- Full `opptrdiff.*` sweep (5 cases, feature bits flipped): 1 Pass
+  (`variable_pointers_vars_ssbo_diff`), 4 Fail, each on its own already-
+  documented, distinct signature (two CFG-linearization
+  `reconvergence block` cases, one `groupshared`-canonicalization case,
+  one new linearize `mask-affecting operation`/`uniform exit check` case)
+  -- no undiagnosed residual.
+
+**No regression:** `variablePointers`/`variablePointersStorageBuffer`
+remain `VK_FALSE` in the committed configuration; reverted the temporary
+flip and re-confirmed all 5 `opptrdiff.*` cases still report
+`NotSupported` by default, zero change from before this session.
+
+Full `check-feme` target (fix in place, feature flag `VK_FALSE`):
+3751/3758 passed, 7 unsupported (expected), 0 failures. All 631
+`FeMeTransformsCPUTests` pass (630 pre-existing + 1 new).
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` at the start of this session, per the standing "every session,
+every time" instruction.
+
+`Roadmap.md`: `K6u` row struck through (closed) with the fix description
+and CTS results; the newly-exposed `variable_pointers_vars_ssbo_2_diff`
+linearize-scope failure is noted inline in that same row (milestone 9
+scope, not re-bucketed as its own row this session -- a natural next
+pick, see `agent_thoughts.md`).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain unsupported/
+`VK_FALSE`; no feature bit flipped permanently this session.
