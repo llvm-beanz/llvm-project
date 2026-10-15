@@ -122919,3 +122919,104 @@ it open and well-documented.
 **Immediate next action for next session:** pick `K6z` (item 1) --
 highest leverage available, already root-caused down to the exact code
 path and a concrete IR repro shape.
+
+# Session: `K6z` fixed -- nested-sibling-cycle walk-through in `DiamondFlattener`
+
+**What shipped this session** (3 commits, all `feme/` only -- no
+outside-FeMe fix needed):
+1. `feme: fix K6z nested-sibling-cycle rejection in DiamondFlattener`
+2. `feme: add regression test for K6z nested-sibling-cycle fix`
+3. `feme: update Roadmap.md/VulkanCTSReport.md for K6z fix`
+
+**The bug, in one line**: a uniform loop whose body contained an
+already-fully-linearized nested sibling loop (not just the loop's own
+exit check) was always rejected as "unsupported," even though nothing
+about it actually needed rejecting.
+
+**The fix**: `DiamondFlattener::validate`/`::flatten` now walk straight
+through a strictly-nested child cycle's header (detected via `CI.contains
+(C, ChildHeader)`) to that cycle's own exit block, instead of stopping
+there. Wired in via two new optional callbacks on `LoopLinearizer::
+linearizeCycle`.
+
+**Bonus bug fix, found by accident**: a dangling `llvm::function_ref`.
+The `NarrowChildEntryMasks` lambda was an unnamed temporary passed
+straight into `DiamondFlattener`'s constructor -- which only stores a
+non-owning pointer to it. First real invocation later = SEGV with
+`this=0x5`. Fixed by binding it to a named local first. Lesson banked:
+**any lambda passed to something that stores it as a `function_ref` must
+be a named local, never an inline temporary.**
+
+**Why this took most of a session to test correctly** (useful lesson for
+future `DiamondFlattener` work): my first regression test showed the
+resource calls' mask operands staying `i1 true` after the fix, and I
+spent a long stretch assuming that meant the fix was incomplete. It
+wasn't. `makeActivePNPair()` only seeds a loop's own mask-phi with its
+*non-backedge* incoming edge up front (`addLatchIncoming` adds the
+backedge edge much later, after `flatten()` returns) -- so during
+`flatten()`'s own walk, that phi genuinely has only one incoming value,
+and `isKnownConstantMask`'s `lookThroughTrivialPhi` correctly treats it as
+the constant `true` it currently is. Since nothing in this loop body ever
+has a `discard`/`demote` (confirmed: that combination is its own,
+separately-diagnosed "unsupported" shape, see
+`unsupported-stage-op-in-uniform-loop.ll`), staying `true` is the
+*correct* answer, not a masking bug. **If a future session hits "mask
+operand stayed a constant, is that wrong?" again: check whether the loop
+body has any real discard/demote first** -- if not, constant is correct.
+
+**Numbers**:
+- `FeMeTransformsCPUTests`: 633/633 Pass.
+- `ninja check-feme`: 3756/3756 Pass, 0 Fail.
+- `check-hlsl-feme-vk`: 472 Pass/273 Unsupported/28 XFAIL/19 Fail (up
+  from 465/273/28/26) -- **7 of the 24 cases attributed to `K6z` are
+  fixed**: `matrix_single_subscript_load`, `matrix_swizzle_{one,zero}_
+  based`, `CBuffer/Matrix/LayoutKeyword/{subscript,transpose}`,
+  `BufferExact-error-array`, `Textures/Array.SRVToUAV.array`.
+- The other 17 (`HLSLLib/*MemoryBarrierWithGroupSync`,
+  `InterlockedCompareExchange/Exchange.resources.32`, `licm-hoist-load`,
+  `Textures/SRVToUAV.array`, `particle-life`, all 10 `WaveOps/*`) still
+  hit the **same diagnostic text**, but a **different, not-yet-confirmed**
+  structural cause -- this fix was deliberately scoped to the one shape
+  `matrix_single_subscript_load.test` actually needed, not a blanket fix
+  for every "unsupported loop body shape" diagnostic. New roadmap row
+  `L425` opened to scope that investigation.
+- `VK-GL-CTS` targeted sample (before/after, full fail-list diff, run via
+  temporary `git stash` of the fix + rebuild each way):
+  `dEQP-VK.glsl.loops.*` 606/624 (up from 586/624, 20 fixed, 0 new
+  fails), `dEQP-VK.glsl.demote.*` unchanged 27/30, `dEQP-VK.glsl.
+  matrix.*` 1764/1764 both before and after. No full mustpass sweep run
+  this session (no existing case-list targets this exact shape) -- a
+  deliberate scope call, flagged here rather than silently skipped.
+- `vulkaninfo --summary | grep deviceName`: confirmed `FeMe CPU Vulkan
+  Device` (with `VK_ICD_FILENAMES` exported) at session start, per the
+  standing instruction.
+
+**No outside-FeMe issue found this session** -- the dangling-`function_
+ref` bug was in FeMe's own `Linearize.cpp`, not a dependency.
+
+## Next steps, ranked
+
+1. **(~half day)** `L425`: dump `FEME_DUMP_IR_PRELINEARIZE` on one of the
+   17 remaining `check-hlsl-feme-vk` failures sharing `K6z`'s diagnostic
+   text -- `Feature/HLSLLib/AllMemoryBarrierWithGroupSync.test` looks
+   like the smallest/simplest repro to start with. Goal: confirm whether
+   all 17 share one remaining shape (e.g. a *divergent* nested sibling
+   cycle, a nested sibling *diamond* rather than a cycle, or a
+   doubly-nested cycle) or are several distinct bugs.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation. Still not root-caused beyond signature-level bucketing --
+   unchanged for many sessions now, not touched this session either
+   (scope stayed on `K6z`).
+3. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+4. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
+   regeneration still deferred (not needed this session specifically --
+   pure compiler fix, no feature/extension surface change).
+
+**Immediate next action for next session:** pick item 1 (`L425`'s
+root-cause dump) -- it's a small, bounded investigation with a concrete
+starting test file already identified, and directly continues this
+session's own momentum on the same diagnostic-text cluster.
