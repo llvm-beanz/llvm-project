@@ -63,22 +63,19 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6u`: restructure `mergeIntoPhi` to resolve a
-   self-referential loop-carried-pointer backedge eagerly -- e.g. create the
-   `descidx`/`offset` phis up front (already done today) and recurse into a
-   backedge's own GEP using those in-progress phi nodes themselves as its
-   `Offset`/`DescriptorIndex` inputs (a legal forward SSA reference, since the
-   phis already exist as instructions even before every incoming value is
-   filled), rather than requiring every edge resolved before any recursion
-   happens. Needs careful design around ordering (the GEP's own resolved value
-   must be computed and fed back into the *same* phi's backedge slot without
-   re-entering the same merge state) and a new unit test exercising a genuine
-   2-block loop (not just the straight-line/cross-branch shapes every existing
-   phi-merge test uses).
-2. **(~1-2 days)** `K6n`-proper: the large majority CPU-backend
-   resource-handle-normalization architectural limitation. Still not root-caused
-   beyond signature-level bucketing -- unchanged from every prior session's
-   framing, not touched this session (scope stayed on `opptrdiff`).
+1. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural limitation.
+   Still not root-caused beyond signature-level bucketing -- unchanged from
+   every prior session's framing, not touched this session (scope stayed on
+   `K6u`).
+2. **(~half day, newly discovered)** `variable_pointers_vars_ssbo_2_diff`'s
+   now-exposed `feme-cpu-linearize` failure (`"... has a mask-affecting
+   operation in its body but no recognized uniform exit check"`) -- a
+   milestone-9-scope CFG-linearization gap, distinct from the already-closed
+   `reconvergence block` signature (`K6s`) and the `K6u` deadlock this session
+   fixed. Not yet root-caused past the printed error text; worth a focused look
+   since it's the only remaining undiagnosed residual in the `opptrdiff.*`
+   bucket.
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
@@ -87,13 +84,16 @@ suggested the next steps:
    regeneration.
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to the `opptrdiff` compiler fix).
+   stayed scoped to `K6u`'s compiler fix).
 6. **(standing, profiling, ~2-4 hours)** The original "profile one L418
    1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this
-   is now 7+ sessions overdue and worth prioritizing soon purely because it
-   keeps losing to compiler-bucket work every time.
+   is now 8+ sessions overdue.
 
-**Immediate next action for next session:** pick `K6u` (now the only remaining
-*known, bucketed* `opptrdiff`/`variablePointers` legalization gap -- smaller and
-more contained than `K6n`-proper) for a focused fix, or finally break the L418
-profiling task out of its 7-session backlog if a change of pace is preferred.
+**Immediate next action for next session:** pick `K6n`-proper (now the only
+remaining large, unattempted `variablePointers` bucket --
+`K6o`/`K6p`/`K6q`/`K6r`/`K6s`/`K6t`/`K6u` are all closed) and start by
+root-causing one representative case down to its specific
+resource-handle-normalization code path, or pick the newly-discovered
+`variable_pointers_vars_ssbo_2_diff` linearize gap (smaller, already has a
+printed error signature to start from) for a change of pace, or finally break
+the L418 profiling task out of its 8-session backlog.
