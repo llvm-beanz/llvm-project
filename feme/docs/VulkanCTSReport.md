@@ -4720,3 +4720,93 @@ needed -- no code change, pure investigation/documentation.
 **Next steps**: pivot to `K6n`-proper (largest remaining
 `variablePointers` bucket, untouched for many sessions) since no
 further in-repo action is available for `L428(a)`.
+
+## K6p / K6a closure verification
+
+**Device**: `FeMe CPU Vulkan Device` (confirmed via `vulkaninfo
+--summary` with `VK_ICD_FILENAMES` explicitly set to the build's
+`feme_icd.json`).
+
+Picked up the `K6n`-proper next step from the prior session, but first
+re-verified the roadmap's actual current state rather than trusting
+the "largest remaining `variablePointers` bucket, untouched for many
+sessions" framing several sessions' next-steps text kept carrying
+forward unchanged. Found `K6n` itself, and all of its own split-off
+children (`K6q`, `K6r`, `K6s`, `K6o`, `K6t`-`K6z`), already closed per
+their row text in prior sessions. Only `K6p` (and transitively its
+`K6a` parent bundle) remained open, with its own last update noting
+"K6u is the only remaining `opptrdiff`-shaped residual" -- but `K6u`
+and its own children (`K6v`-`K6z`) have since all been closed too,
+making `K6p`'s row stale.
+
+**Method**: generated the current `*variable_pointer*` CTS case list
+(`deqp-vk --deqp-runmode=stdout-caselist -n 'dEQP-VK.*variable_pointer*'`,
+parsing `^TEST:` lines -- note the correct flag is `-n`/`--deqp-case=`,
+not `--deqp-case-filter=`, which this session initially tried in
+error and which this `deqp-vk` build rejects outright). 4464 cases,
+matching the historical measurement convention. Transiently flipped
+both `EntryPoints.cpp` `variablePointers`/`variablePointersStorageBuffer`
+feature-bit sites to `VK_TRUE` for measurement, rebuilt
+`libfeme_vulkan.so`, and ran the full case list through
+`feme/utils/run_vulkan_cts.py`'s crash-tolerant batch/solo-reverify
+harness.
+
+**Result**: 966 Pass / 3492 NotSupported / **6 Fail** (all 6 verified
+solo, not flaky). All 6 failures:
+
+```
+dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.compute.workgroup_two_buffers
+dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrdiff.variable_pointers_vars_wg_diff
+dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.variable_pointers_vars_wg_equal
+dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.variable_pointers_wg_equal
+dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrnotequal.variable_pointers_vars_wg_not_equal
+dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrnotequal.variable_pointers_wg_not_equal
+```
+
+Re-ran two of these solo to confirm the exact failure signature:
+every one fails identically with `feme-cpu-simdize`'s pre-existing,
+already-documented diagnostic:
+
+```
+error: feme-cpu-simdize: groupshared global 'spirv_var_N' feeds an
+unsupported user; only a getelementptr chain (to any depth) feeding a
+direct load, store, atomicrmw, masked gather/scatter, or (for a
+vector-typed row load, or a uniform row address broadcast into one)
+an extractelement feeding its own scalar leaf access is supported
+(roadmap milestone 9 deviation)
+```
+
+This is the CFG-linearization/`groupshared`-canonicalization gap
+(milestone 9) that both `K6n`'s and `K6p`'s own prior-session text
+already identified as the sole remaining blocker for the bundled
+`variablePointers` feature as a whole -- confirmed here, not a new or
+K6-scoped issue. All 6 cases involve a `workgroup`-storage-class
+(`_wg_`) pointer.
+
+**Disposition**: `K6p` closed (opcode-support gap was already fixed;
+this session confirms no further K6p-scope residual exists). `K6a`
+(the parent `variablePointers` bundle) closed too, since every one of
+its split-off children (`K6n`, `K6o`, `K6p`, and their own further
+splits) is now closed, with only the out-of-scope milestone-9 gap
+remaining. Made the `EntryPoints.cpp` feature-bit flip to `VK_TRUE`
+**permanent** (both the dedicated
+`VK_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES` struct case and the
+`VK_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES` aggregate case), since the
+feature is now genuinely supportable at this level. Updated the one
+unit test (`PhysicalDeviceInfoTest.cpp`) that asserted the old
+`VK_FALSE` default. `check-feme` reconfirmed at the established
+baseline, 3760/3768 (1 pre-existing, unrelated failure,
+`entry-wrapper-loop-header-derived-value-in-suffix.ll`).
+`Vulkan14FeatureInventory.md`'s `variablePointers`/
+`variablePointersStorageBuffer` rows updated to `yes`, noting the
+milestone-9 gap as the only known residual. `Roadmap.md`'s `K6a` and
+`K6p` rows struck through accordingly.
+
+**Next steps**: the milestone-9 CFG-linearization/`groupshared`-
+canonicalization gap remains open as its own, already-tracked item
+(out of K6's scope); no new roadmap row needed for it here. Remaining
+carried-forward items from prior sessions: `Basic/Mandelbrot.test`'s
+contention-dependent flake; the standing
+`backup-before-rebase-20261014` tag and `CMAKE_BUILD_TYPE=
+RelWithDebInfo` vs `Release` decisions; the standing
+`offload-test-suite` `feme`-branch-vs-`main` drift re-check.

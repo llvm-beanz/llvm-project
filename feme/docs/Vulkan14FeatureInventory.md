@@ -98,8 +98,8 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
-| feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | no |  |
-| feature | VK_VERSION_1_1 | `variablePointers` | no |  |
+| feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | yes | roadmap K6p: closed after a full `*variable_pointer*` CTS sweep (4464 cases: 966 Pass, 3492 NotSupported, 6 Fail) found only the pre-existing, already-documented roadmap-milestone-9 groupshared-canonicalization gap (`feme-cpu-simdize`'s "only a getelementptr chain ... is supported" diagnostic) as a residual, not a new or K6-scoped issue |
+| feature | VK_VERSION_1_1 | `variablePointers` | yes | roadmap K6p: see `variablePointersStorageBuffer` row; same verification, same milestone-9-only residual (the 6 `_wg_`/workgroup-groupshared-pointer failing cases) |
 | feature | VK_VERSION_1_1 | `protectedMemory` | no |  |
 | feature | VK_VERSION_1_1 | `samplerYcbcrConversion` | no |  |
 | feature | VK_VERSION_1_1 | `shaderDrawParameters` | yes | roadmap K6c: gl_BaseVertex/gl_BaseInstance were already real; gl_DrawID's own gap (DrawCommand had no DrawID field, Executor.cpp hardcoded 0) is now closed too |
