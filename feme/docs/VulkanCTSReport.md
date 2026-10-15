@@ -3605,3 +3605,90 @@ nesting rule.
 -- `variablePointers`/`variablePointersStorageBuffer` remain
 unsupported/`VK_FALSE`; no feature bit flipped permanently this
 session.
+
+## `K6w`: nested self-referential loop-carried pointer-PHI merge (GEP-through-diamond backedge) fixed; a use-after-free bug the fix itself exposed also fixed, 1/1 targeted case passes (roadmap K6w, closed)
+
+Picked up `K6w`, the residual `variable_pointers_vars_ssbo_2_diff`
+numeric-mismatch bug `K6v` left root-caused but unfixed: the case's
+loop-carried SSBO pointer iterator steps `+1`/`-1` elements per
+iteration through an if/else diamond (a direction reversal), so its
+loop-header phi's backedge is not a direct `getelementptr` of the phi
+itself (`K6u`'s already-fixed shape) but a `getelementptr` feeding an
+intermediate diamond-merge `PHINode`, which only then feeds back into
+the outer phi. `isPhiSelfReferentialBackedge`'s "strip
+`getelementptr`s, check the root is the same `Phi`" walk does not
+recognize this one-level-deeper indirection, so `mergeIntoPhi` treated
+the backedge as an externally-resolved edge that would never actually
+arrive, permanently deadlocking (silently leaving the loop's raw
+pointer phi/GEP chain un-rewritten) and producing a garbage numeric
+result downstream.
+
+- Re-confirmed the exact current IR shape via a fresh
+  `FEME_DUMP_IR_PRELINEARIZE` dump (rather than trusting prior
+  sessions' notes) before implementing: an outer loop phi
+  (`.sroa.0.0`/`.sroa.3.0`, representing two pointers walking in
+  opposite directions) whose backedge is a nested phi (merging a
+  direct `getelementptr` leg and a *further*-nested, poison-containing
+  phi leg from a separate "Flow" dispatch block).
+- **Fix, part 1:** broadened `isPhiSelfReferentialBackedge` to tolerate
+  a GEP-stripped incoming value landing on *any* `PHINode` (not only
+  the literal same `Phi`) or a `PoisonValue`/`UndefValue`, reasoning
+  that each such phi's own `mergeIntoPhi` invocation independently
+  re-applies this same tolerance to its own edges, so a cycle spanning
+  multiple phis still resolves correctly once the gate is relaxed.
+- **Fix, part 2 (a second bug the broadening itself exposed):** the
+  first version of this fix made real progress (no longer garbage, but
+  a precise sign inversion, `2 == -2` in the CTS verifier output) --
+  traced to a use-after-free: tolerating a slot landing on a
+  *different* phi means that slot's real value may arrive via a wholly
+  separate top-level walk, not the current call's own recursion into
+  `Phi`'s users, but `mergeIntoPhi` unconditionally erased `Phi`
+  immediately after its own recursion returned, regardless of whether
+  every slot was genuinely filled yet -- a later reentrant call
+  arriving for the still-outstanding slot then dereferenced a freed
+  `PHINode`. Fixed by deferring erasure: a new
+  `PointerMergeState::Erased` flag plus an `EraseIfComplete` check (run
+  after every slot-filling call) only erases once every slot genuinely
+  holds a real value. A further `RecursionActive` flag was needed on
+  top of that: a mutually-recursive chain can reenter `Phi`'s own merge
+  *from within* that same still-running top-level walk (before every
+  other user of `Phi` has been visited), and erasing at that point
+  would free `Phi` out from under the outer, still-active frame --
+  caught directly by the new unit test crashing with LLVM's own
+  "Use still stuck around after Def is destroyed" assertion before this
+  second part was added, rather than only via a slow full-CTS
+  iteration loop.
+- New unit test (`SPIRVResourceLoweringTest.cpp`):
+  `LowersPtrDiffOnLoopCarriedPointerBackedgeThroughIntermediateDiamondPhi`,
+  a loop stepping a pointer `+1`/`-1` through an if/else diamond before
+  closing the loop's own backedge, feeding `OpPtrDiff`. Full 633-test
+  `FeMeTransformsCPUTests` suite passes with zero regressions.
+- CTS (`variable_pointers_vars_ssbo_2_diff`, feature bits transiently
+  flipped to `VK_TRUE` for measurement only, not committed): **now
+  passes** (previously `Verifier failed: 2 == -2, at index 0` with the
+  use-after-free bug present mid-session, and total garbage before any
+  fix). Full `opptrdiff.*` sweep (5 cases): 2 Pass (up from 1),
+  `variable_pointers_vars_ssbo_diff` (unaffected) and
+  `variable_pointers_vars_ssbo_2_diff` (newly fixed); the other 3 are
+  unaffected, already-documented, distinct pre-existing limitations
+  (two CFG-linearization `reconvergence block` cases, one
+  `groupshared`-canonicalization case) -- every one of the 5 cases is
+  now accounted for by a known, tracked bucket.
+
+**No regression:** `variablePointers`/`variablePointersStorageBuffer`
+remain `VK_FALSE` in the committed configuration; reverted the
+temporary flip and re-confirmed `check-feme` passes clean.
+
+Full `check-feme` target (fix in place, feature flag `VK_FALSE`):
+3753/3760 passed, 7 unsupported (expected), 0 failures.
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` this session, per the standing "every session, every time"
+instruction.
+
+`Roadmap.md`: `K6w` row struck through (closed) with the fix
+description and CTS results.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- `variablePointers`/`variablePointersStorageBuffer` remain
+unsupported/`VK_FALSE`; no feature bit flipped permanently this
+session.
