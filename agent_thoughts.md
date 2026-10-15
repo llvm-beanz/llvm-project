@@ -123020,3 +123020,112 @@ ref` bug was in FeMe's own `Linearize.cpp`, not a dependency.
 root-cause dump) -- it's a small, bounded investigation with a concrete
 starting test file already identified, and directly continues this
 session's own momentum on the same diagnostic-text cluster.
+
+# Session: `L425` fixed -- `MergeVisited`/`ResolvedBlocks` false-conflict in `DiamondFlattener`
+
+**What shipped this session** (3 commits, all `feme/` only -- no
+outside-FeMe fix needed):
+1. `[feme] Fix MergeVisited false-conflict in DiamondFlattener (L425)`
+2. `[feme] Add regression test for L425 MergeVisited fix`
+3. `[feme] Update Roadmap/VulkanCTSReport for L425 fix`
+
+**The bug, in one line**: a loop whose own exit check and backedge
+decision were fused into one `StructurizeCFG`-style `Flow` dispatch
+block, with a divergent inner diamond already flattened earlier in the
+same `linearizeCycle` call, was rejected as "unsupported" even though the
+diamond was never actually contested -- it was already safely resolved.
+
+**The fix**: added a `ResolvedBlocks` set (same whole-function lifetime
+as `MergeVisited`) recording blocks a fully-successful flatten call
+already committed. `validate()`'s conflict check is now "fail only if
+seen in `MergeVisited` but *not yet* in `ResolvedBlocks`" -- the original
+`L375` double-claim protection survives untouched for any still-pending
+candidate; only safe pass-through of an *already-finished* call's own
+diamond is newly permitted.
+
+**Debugging lesson banked**: `FEME_DEBUG_LINEARIZE_TRACE` (a pre-existing
+env var) answers "which code path engaged" in seconds, without writing
+any new instrumentation -- check it before adding fresh `errs()` tracing.
+This session's root cause was found by adding temporary `FEME_DEBUG_L425`
+tracing at every `validate()` failure branch and watching exactly which
+one fired and on which block; that tracing was fully removed before the
+final build (verified via grep, zero matches remain).
+
+**Why the precheck (`canFlattenLoopBodyRegion`) didn't catch this
+earlier**: it always builds a fresh, throwaway `MergeVisited`/
+`ResolvedBlocks` pair that never sees the fixed-point loop's own history
+-- a pre-existing, documented, accepted possibility (the precheck and the
+real call can structurally disagree; the `if (!MasksAtLatch)` diagnostic
+catches it). No change needed there beyond threading the new parameter.
+
+**Numbers**:
+- `FeMeTransformsCPUTests`: 633/633 Pass.
+- `ninja check-feme`: 3757/3757 Pass, 0 Fail (1 net-new test).
+- `check-hlsl-feme-vk`: 792 total, down to **7 Failed from 17** --
+  **13 of the 17 cases now Pass** (all 10 `WaveOps/*`, `licm-hoist-load`,
+  `SRVToUAV.array`, `particle-life`). The remaining 4
+  (`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`,
+  `InterlockedCompareExchange.resources.32`,
+  `InterlockedExchange.resources.32`) no longer hit `L425`'s diagnostic at
+  all -- they now reach a separate, already-extensively-tracked
+  `feme-cpu-wrap-entry` "barrier inside non-linear control flow"
+  milestone-9 limitation (`H72`/`H94b`/`H124e`/`H154`/`H155`/`H161`/
+  `L201(e)`), correctly unblocked but not fixed by this change. New
+  roadmap row `L425(a)` opened for those 4.
+- `InterlockedAdd.resources.32.test` (numeric mismatch) and
+  `InterlockedCompareStore.resources.32.test` (same `feme-cpu-wrap-entry`
+  diagnostic as the 4 above) remain failing, unrelated to `L425`, as
+  expected.
+- `Basic/Mandelbrot.test` failed once in the full-suite parallel run with
+  a semaphore-wait timeout (`VkResult = 2`); re-ran standalone 3/3 Pass --
+  a pre-existing contention flake (same class as `L421`'s own
+  `QueueExecutor`/`DeviceMemory` race), not a regression, not investigated
+  further this session.
+- `VK-GL-CTS` targeted sample (same groups as `K6z`'s own session, since
+  this touches the same code paths): `dEQP-VK.glsl.loops.*` 606/624
+  (unchanged, 0 regressions), `dEQP-VK.glsl.demote.*` unchanged 27/30 (0
+  regressions). No full mustpass sweep -- this fix's specific shape isn't
+  exercised by either existing case-list, a deliberate scope call flagged
+  here rather than silently skipped.
+- `vulkaninfo --summary | grep deviceName` (with `VK_ICD_FILENAMES`
+  exported): confirmed `FeMe CPU Vulkan Device` at session start, per the
+  standing instruction. **Caught a near-miss**: an earlier check in this
+  same session, run *without* the `VK_ICD_FILENAMES` env var explicitly
+  set in that particular bash invocation, showed `llvmpipe` instead --
+  each `bash` tool call is a fresh process with no persisted environment,
+  so the export must be inline on every single invocation that touches
+  Vulkan, not just once per session.
+
+**No outside-FeMe issue found this session.**
+
+## Next steps, ranked
+
+1. **(~half day)** `L425(a)`: root-cause the 4 `feme-cpu-wrap-entry`-
+   blocked cases `L425`'s fix newly unblocked reaching
+   (`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`,
+   `InterlockedCompareExchange.resources.32`,
+   `InterlockedExchange.resources.32`). Not yet confirmed whether they
+   share one single still-unsupported barrier-splitting shape or need
+   individual triage the way `L425` itself did -- that diagnostic has a
+   long prior-fix history (`H72`/`H94b`/`H124e`/`H154`/`H155`/`H161`/
+   `L201(e)`) for *other* shapes, so this is likely "one more shape to
+   add," not a from-scratch investigation.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, still not touched for many sessions.
+3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
+   contention-dependent semaphore-wait flake under full-suite parallel
+   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
+   methodology (isolate, stress, `gdb` backtrace under load) if a
+   lower-stakes task is wanted.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+5. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
+   regeneration still deferred (not needed this session -- pure compiler
+   fix, no feature/extension surface change).
+
+**Immediate next action for next session:** pick `L425(a)` (item 1) --
+small, bounded, directly continues this session's own momentum, and the
+diagnostic it targets already has substantial prior-fix precedent to
+draw technique from.
