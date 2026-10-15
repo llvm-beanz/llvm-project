@@ -237,6 +237,19 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
       : DefaultAttrsIntrinsic<[llvm_any_ty],
                               [llvm_any_ty],
                               [IntrNoMem, IntrConvergent]>;
+
+  // Whether two resource handles refer to the same underlying binding
+  // (SPIR-V's `OpPtrEqual`/`OpPtrNotEqual` compared directly on two whole
+  // resource-handle values, with no intervening `OpAccessChain` on either
+  // side -- a pointer-derived comparison instead lowers to a plain
+  // `icmp` on the derived pointers themselves, with no need for this
+  // intrinsic at all). Both operands must be the same resource-handle
+  // type; a null-handle comparison is represented by one operand being
+  // that type's own zero value (`llvm.mlir.zero`), not a separate
+  // intrinsic.
+  def int_spv_resource_handleequal
+      : DefaultAttrsIntrinsic<[llvm_i1_ty], [llvm_any_ty, LLVMMatchType<0>],
+                              [IntrNoMem]>;
                               
   def int_spv_firstbituhigh : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i32_ty>], [llvm_anyint_ty], [IntrNoMem, IntrTriviallyScalarizable]>;
   def int_spv_firstbitshigh : DefaultAttrsIntrinsic<[LLVMScalarOrSameVectorWidth<0, llvm_i32_ty>], [llvm_anyint_ty], [IntrNoMem, IntrTriviallyScalarizable]>;
