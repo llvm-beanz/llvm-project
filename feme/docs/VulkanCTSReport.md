@@ -3022,3 +3022,61 @@ Discovered Tests passed, 7 unsupported, 0 failed) -- no regressions.
 (`K6p`'s upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` gap and
 `K6n`'s own 124ish-case CPU-backend resource-handle-normalization
 architectural limitation still block closing the bundled feature).
+
+## `K6n`: verified the architectural bucket is already fully closed, 956/16/3492 on the full group (roadmap K6n, closed -- no code change)
+
+Picked up the prior session's suggested next action (`K6n`-proper, "~124
+cases, the largest remaining `variablePointers` bucket... still not
+root-caused"). Before guessing at a fix approach, re-measured the
+current real state directly rather than trusting that framing, which
+turned out to have been carried forward unchanged across several
+sessions' own next-steps text without being re-verified after `K6q`,
+`K6r`, and `K6s` each closed.
+
+Reproduced the broad historical measurement convention exactly: `deqp-vk
+--deqp-runmode=stdout-caselist` filtered to the `*variable_pointer*`
+substring (4464 cases, matching the number multiple prior sessions
+already used, not the narrower `.variable_pointers.` path-segment group
+a stale summary had conflated it with). Ran the full case list through
+`feme/utils/run_vulkan_cts.py`'s crash-tolerant batch/solo-reverify
+harness (`--batch-size 200 --workers 6`), with
+`variablePointers`/`variablePointersStorageBuffer` transiently flipped to
+`VK_TRUE` for measurement only (reverted before committing, not
+committed).
+
+**Result: 956 Pass / 16 Fail / 3492 NotSupported.** Checked every one of
+the 16 failures' exact error signature
+(`FEME_VULKAN_LOG_CREATION_ERRORS=1` on three representative cases
+directly, plus the full verified-failures list for the rest by name):
+zero cases anywhere in the group fail with the
+`"unsupported raised operation... register-bound resource handle..."`
+signature `K6n` was originally filed under. One failure
+(`workgroup_two_buffers`) is the already-documented, unrelated
+`feme-cpu-simdize` groupshared-pointer-chain limitation (confirmed via
+its exact unchanged error text, `"feeds an unsupported user"`). The
+other 15 are `"unhandled opcode 401/402/403"` -- entirely `K6p`'s scope
+(confirmed directly: `opptrequal`/`opptrnotequal`/`opptrdiff` test names,
+opcode 401 and 403 reproduced directly on representative cases).
+
+**Conclusion: `K6n`'s own architectural resource-handle-normalization
+bucket is fully closed.** Every one of its original 124 cases now
+passes -- the large majority via that session's own `PointerMergeMap`
+pointer-level merge fix, and the final 10 residual cases via `K6q`'s
+handle-level merge, `K6r`'s store-value-operand fix, and `K6s`'s
+loop-masking fix, each already closed and verified independently in
+their own sessions. No further code change was needed or made this
+session -- this was a verification-only session that corrected a stale
+roadmap/next-steps framing rather than a fix. `K6p`'s count was also
+re-confirmed and updated: 15 cases now (6 `OpPtrEqual` + 6
+`OpPtrNotEqual` + 3 `OpPtrDiff`), up from its originally-bucketed 11 --
+the same "closing one gap reveals a few more previously-masked cases"
+pattern the original `K6a` and `K6o` sessions both saw.
+
+`Roadmap.md`: `K6n` struck through (closed, no code change -- verification
+only). `K6p`'s row updated with the re-confirmed 15-case count and a note
+that it is now the only remaining code-change bucket blocking the
+`variablePointers`/`variablePointersStorageBuffer` feature bits besides
+the unrelated `workgroup_two_buffers` `feme-cpu-simdize` case.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+feature bits remain `VK_FALSE`, no code was modified this session beyond
+the transient (reverted) measurement flip.
