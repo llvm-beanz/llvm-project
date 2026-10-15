@@ -60,6 +60,8 @@ file.
 
 # Request
 
+The last session stalled out. Any intermediate states are stoerd in a git stash.
+
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
