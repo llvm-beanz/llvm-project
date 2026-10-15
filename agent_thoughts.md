@@ -122407,3 +122407,53 @@ Picked up a stalled prior session's in-progress, uncommitted `K6p` work (new `Po
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6p`'s compiler fix).
 
 **Immediate next action for next session:** pick `K6t` (4+ cases, whole-handle comparison, smallest and most contained of the two remaining `variablePointers` buckets) for a focused fix, or `K6n`-proper if a larger, harder investigation feels like the better use of a fresh session.
+
+# Session: K6t closed (whole-handle OpPtrEqual/OpPtrNotEqual), mergeIntoCompare null-pointer bug fixed
+
+**Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName`, with `VK_ICD_FILENAMES` exported first -- checked at session start, mid-session, and again at the end.
+
+## What now works
+
+`K6t` (whole-handle `OpPtrEqual`/`OpPtrNotEqual` comparison, no `OpAccessChain` on either side) is fully implemented, tested, and CTS-verified. 6/8 targeted CTS cases pass (up from 0/8 -- previously a hard legalization failure); the 2 remaining are the pre-existing, unrelated `feme-cpu-simdize` groupshared limitation. Broader 29-case `opptr*` sweep: 8/29 pass (up from 4/29), zero regressions. `check-feme`: 3749/3756 pass, 0 failed. `FeMeTransformsCPUTests`: 629/629 pass (6 new tests this session). Full `llvm/test/Verifier/` suite (443 tests) and `feme/test/Conversion/SPIRVToLLVM/` lit suite (138 tests) both pass clean.
+
+Also found and fixed a real, previously-latent bug in `mergeIntoCompare` (missing `ConstantPointerNull` handling) -- unrelated to `K6t`'s own scope, but only reachable once `K6t` let the triggering shader legalize far enough to execute for the first time.
+
+## The work, in three layers (this is why it took a full session, not a quick pattern fix)
+
+1. **New upstream LLVM intrinsic** `llvm.spv.resource.handleequal` (`IntrinsicsSPIRV.td`) -- needed because LLVM's `icmp` cannot operate on an opaque resource-handle target-extension type at all. While adding it, found the two operands were declared as independent `llvm_any_ty` placeholders (not enforcing same-type despite the doc comment's claim); fixed with `LLVMMatchType<0>`. New isolated `llvm/test/Verifier/` test (the "issue outside FeMe" piece).
+2. **New FeMe-local `HandleCompareConversionPattern`** (`SPIRVToLLVMPatterns.cpp`) lowers `spirv.PtrEqual`/`spirv.PtrNotEqual` on a resource-handle operand to a call of the new intrinsic (negation via `xor`, not a second intrinsic). New lit test replaces the now-stale `-invalid` test that used to assert this shape failed to legalize.
+3. **`SPIRVResourceLowering.cpp` CPU-backend dispatch** for the new intrinsic call: `mergeIntoHandleCompare` re-expresses it as `desc0 == desc1`; `foldSameOperandHandleCompares` folds a same-operand call to `true` before `collectHandles` runs (avoiding a use-list double-visit crash). 5 new unit tests.
+
+## The null-pointer bug, in one paragraph
+
+`mergeIntoCompare` (the existing pointer-level `icmp`-merge function, K6p's own) had no `ConstantPointerNull` special case, unlike its siblings `mergeIntoPhi`/`mergeIntoSelect`/the new `mergeIntoHandleCompare`. Because `hasOnlySupportedPointerUses` accepts *any* equality `icmp` regardless of the other operand's shape, a literal null never independently reaches `mergeIntoCompare`'s normal chain-walk -- the real side's own operand was left permanently `PoisonValue`, producing `icmp eq poison, null` that silently folds to a wrong constant. Unobservable before `K6t`: the triggering shader shape (`null_comparisons_ssbo_not_equal`) previously failed whole-handle legalization entirely, so this downstream path was never reached. Fixed by mirroring the same three siblings' sentinel-resolution pattern.
+
+## What this session did, in order
+
+1. Fixed the stale lit test (`-invalid` → positive-case `spirv-to-llvm-ptr-equal-whole-handle.mlir`, 3 cases).
+2. Ran the full `feme/test/Conversion/SPIRVToLLVM/` lit suite (138 tests) and `FeMeTransformsCPUTests` (628 tests) -- both clean.
+3. Ran `check-feme` (3748/3755 pass baseline before the null-fix).
+4. Ran 8 targeted CTS cases (feature bits transiently flipped for measurement, reverted after); found the correct case-group name (`opptrnotequal`, not a suffix under `opptrequal`) after an initial wrong guess. 5/8 passed; `null_comparisons_ssbo_not_equal` failed with a sub-result mismatch; the 2 `_wg_` cases hit the pre-existing groupshared limitation.
+5. Root-caused the `null_comparisons_ssbo_not_equal` failure to `mergeIntoCompare`'s missing null-handling (confirmed it was newly-exposed, not newly-introduced, by testing the pre-K6t baseline via a targeted stash).
+6. Fixed `mergeIntoCompare`; CTS re-run: 6/8 targeted, zero regressions on the broader 29-case sweep (8/29, up from 4/29).
+7. Added the new unit test for the null-fix; reverted the temporary feature-flag flip; reran `check-feme` (3749/3756, 0 failed) and `vulkaninfo` again.
+8. Added the isolated upstream intrinsic test (`llvm/test/Verifier/intrinsic-spv-resource-handleequal.ll`), discovering and fixing the `LLVMMatchType<0>` gap along the way; confirmed via manual `llvm-as`/`opt` round-trip (after rebuilding both -- stale binaries silently miss new TableGen constraints).
+9. Re-checked all 5 `opptrdiff.*` cases: one confirmed to hit the exact pre-existing CFG-linearization error text, confirming the residual isn't a new `K6p`/`K6t`-adjacent gap (the other 4 left as a follow-up rather than guessed at).
+10. Updated `Roadmap.md` (struck through `K6t`, refreshed `K6p`'s own row) and `VulkanCTSReport.md` (new section). Checked `Vulkan14FeatureInventory.md` -- no change needed (`variablePointers` still correctly `no`).
+11. Split into 5 commits via precise `git add -p` hunk-level staging (not just whole-file splitting), since the null-fix and the K6t feature landed in the same two files: (1) upstream intrinsic + its test, (2) FeMe MLIR pattern + lit tests, (3) FeMe CPU-backend K6t lowering + its 5 unit tests, (4) the standalone null-fix + its 1 unit test, (5) doc updates. Rebuilt and reran the full unit/lit suites and `check-feme` after the split to confirm no commit boundary broke anything.
+
+## The real lesson this session learned
+
+1. **When a bug fix and a new feature land in the same function/file because the feature's own work exposed the bug, `git add -p`'s per-hunk staging (not just per-file) is the right tool to keep them as separate, independently-revertable commits** -- worth the extra time over bundling "related enough" changes into one commit, especially when the bug is a real pre-existing defect rather than an artifact of the new code.
+2. **A "4+ cases" scope estimate from a prior session's next-steps text can understate the real shape of the work once you dig in** -- `K6t` wasn't just a CPU-backend pattern (like `K6p`'s own closure was); it needed a genuinely new IR-level vocabulary (the intrinsic) because the fundamental operation (comparing two opaque handle values) has no existing LLVM instruction that can express it at all. Recognize this early (as soon as `icmp` on a target-extension type is confirmed impossible, not just "currently rejected") rather than assuming the existing `mergeIntoCompare`-style machinery can be directly reused.
+3. **Re-verify prior sessions' "still the largest remaining bucket" framing against the actual, current `Roadmap.md` text before trusting it** -- this session confirmed (again) that `K6n`-proper was already closed in `Roadmap.md` despite several generations of next-steps prose still describing it as the largest open item. The next-steps text is apparently regenerated from a stale snapshot rather than the live document; always check `Roadmap.md` directly.
+
+## Next steps
+
+1. **(~half day)** `opptrdiff.*` remaining 4 cases: only 1 of the 5 was confirmed this session to hit the exact pre-existing CFG-linearization error text (`"reconvergence block '' does not have exactly two predecessors"`); the other 4 fail pipeline creation without a printed diagnostic in a quick pass. Root-cause each with `FEME_VULKAN_LOG_CREATION_ERRORS`/`FEME_DUMP_IR_PRENORM` before assuming they're all the same bucket -- at least two (`ssbo_comparisons_diff`, a `vars_ssbo_2_diff` case) are SSBO-only, not workgroup-only, so don't assume they're groupshared-specific without checking.
+2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6t`'s compiler fix).
+5. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step from several sessions ago -- still not picked up; every session since has had an open compiler bucket that took priority.
+
+**Immediate next action for next session:** with `K6n`, `K6o`, `K6p`, `K6q`, `K6r`, `K6s`, and now `K6t` all closed, the `variablePointers` bundle (`K6a`) has no remaining *known, bucketed* legalization gap left except the `opptrdiff.*` follow-up above -- pick that first (it's small and already partially root-caused), then reassess whether `variablePointers`/`variablePointersStorageBuffer` can finally flip to `VK_TRUE` for real, or whether the L418 profiling next step (long overdue) is a better use of a fresh session.
