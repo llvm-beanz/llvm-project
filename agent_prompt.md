@@ -63,13 +63,24 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. `cd /home/dev/dev/llvm-project && mkdir -p build-hlsl && cd build-hlsl`
-2. `cmake -G Ninja -C ../clang/cmake/caches/HLSL.cmake ../llvm
-   -DCMAKE_BUILD_TYPE=Release` (or whatever flags `HLSL.cmake` needs -- read it
-   first, it may already set `CMAKE_BUILD_TYPE`).
-3. Budget several hours for the initial `ninja` build of clang+HLSL; this has
-   never completed in any prior session, so expect to hit unknown unknowns
-   (missing deps, config issues) -- treat the FIRST successful full build as the
-   session's whole deliverable if needed.
-4. Once built, wire up `/home/dev/dev/offload-test-suite`'s `feme` branch and
-   attempt `check-hlsl-feme-vk` for the first time ever.
+1. **(~half day)** `L429`: finish root-causing
+   `InterlockedAdd.resources.32.test`'s 3-arg/resource original-value
+   bug. Contrast `GroupShared.cpp`'s known-working groupshared atomic
+   original-value path against `ResourceCalls.cpp`/
+   `SPIRVResourceLowering.cpp`'s resource path to find the divergence.
+   Candidate hypothesis: `feme-cpu-simdize`'s resource-atomic widening
+   may misroute or collapse per-lane original values even though the
+   final RMW total is correct.
+2. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s new
+   92-case failure list. Start with one `_mat.test` case, compile via
+   both `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend
+   vs FeMe-backend scope before committing to a fix.
+3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, untouched for many sessions.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+5. **(standing, confirmed 3x now)** Always diff `offload-test-suite`'s
+   `feme` branch against `main` before trusting any `check-hlsl-feme-vk`
+   failure as new -- the VkBool32/WaveActiveMax/array_of_matrices drift
+   pattern keeps recurring on fresh checkouts.
