@@ -2937,3 +2937,88 @@ Discovered Tests passed, 7 unsupported, 0 failed) -- no regressions.
 `K6p`'s upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` gap, and
 `K6q`'s handle-level phi/select merge still block closing the bundled
 feature).
+
+## `K6q`: handle-level phi/select-merged resource handles lowered, 2/2 cases pass (roadmap K6q, closed)
+
+Picked `K6q` from the prior session's suggested next action (2 cases,
+handle-level `OpPhi`/`OpSelect` merge -- flagged as architecturally the
+hardest of the three small residual `variablePointers` buckets, but
+smallest case count, so tackled before `K6p`/`K6n`-proper).
+
+Reproduced both cases directly via `deqp-vk` (transient
+`variablePointers`/`variablePointersStorageBuffer` `VK_TRUE` feature-bit
+flip, measurement only, reverted before committing):
+`dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.
+complex_types_compute.opphi_outer_struct_two_buffers_{first,second}_input`,
+both failing pipeline creation with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1`'s `"unsupported raised operation:
+... is a register-bound resource handle the FeMe CPU target cannot
+normalize ..."` (the same signature class as `K6n`, but a different
+resource-level cause).
+
+Dumped the pre-normalization IR (`FEME_DUMP_IR_PRENORM=1`) to see the
+exact structural shape: a *nested* phi-of-phi merging two
+`handlefrombinding` calls (different bindings, same type) across a
+diamond nested inside another diamond, with one incoming edge of the
+inner phi being a literal `poison` handle-typed value -- a dead/
+never-taken-edge artifact from loop/control-flow linearization, not a
+real handle -- feeding a single `getpointer` call with a constant index.
+
+Root cause: `hasOnlySupportedUses` (the handle-level checker in
+`SPIRVResourceLowering.cpp`, distinct from the pointer-level
+`hasOnlySupportedPointerUses` `K6n` fixed) required every user of a raw
+resource `Handle` to be a `getpointer` call directly, with no
+phi/select recognition at the handle level at all -- so any shader that
+conditionally selects between two raw handles (same type, different
+bindings) before ever calling `getpointer` on the merge result was
+rejected outright, architecturally one level earlier than `K6n`'s
+already-fixed pointer-level merge (which operates on pointers already
+derived via `getpointer`).
+
+Fixed by mirroring `K6n`'s pointer-level merge design one level earlier,
+at the handle level: added `hasOnlySupportedHandleUse`/
+`hasOnlySupportedHandleMergeUses` (recursive validation of handle-level
+phi/select merges, with a `Visited` set guarding nested/cyclic merges),
+extracted `lowerAccesses`'s per-handle loop body into a new
+`lowerHandleAccesses(Value *Handle, ...)` parameterized by a generic
+handle value so it can be invoked either directly (from `lowerAccesses`)
+or recursively (from a merge continuation) with a synthesized
+`DescriptorIndex`, and added a `HandleMergeState`/`HandleMergeMap`
+(simpler than `K6n`'s `PointerMergeMap` -- only a single `i32`
+descriptor index needs merging, since no byte offset exists before
+`getpointer` is called) plus `mergeIntoHandlePhi`/`mergeIntoHandleSelect`.
+The real CTS case's `poison` dead edge is handled via
+`isa<UndefValue>(Phi->getIncomingValue(I))` (poison is a subclass of
+`UndefValue` in LLVM), filling the synthesized descriptor-index phi slot
+with the existing `nullPointerMergeDescIndex` sentinel (reused as-is,
+since its signature has no pointer-specific dependency). Because every
+phi/select operand must share the exact same LLVM type, two merged
+handles are guaranteed to classify identically (same
+`HandleKind`/`Stride`/`ElementStruct`/etc.) -- no defensive runtime
+check was needed for that invariant.
+
+Three new unit tests added (`SPIRVResourceLoweringTest.cpp`):
+`LowersPhiMergedHandleToSharedGetPointerAccess`,
+`LowersSelectMergedHandleToSharedGetPointerAccess`, and
+`LowersNestedPhiMergedHandleWithPoisonEdge` (matching the real CTS
+case's exact nested-phi-with-poison-edge shape). The full
+`FeMeTransformsCPUTests` suite (621 tests) passes with zero regressions.
+
+CTS: both target cases now pass individually. A full
+`dEQP-VK.spirv_assembly.instruction.*.variable_pointers.*` re-run (1637
+cases, transient `VK_TRUE` feature-bit flip for measurement only, not
+committed) shows 948 Pass/1 Fail/688 Not Supported -- up from the two
+sessions' earlier combined closures. The 1 remaining failure is
+`workgroup_two_buffers`, the pre-existing, already-documented, unrelated
+`feme-cpu-simdize` groupshared-pointer-chain limitation (see `K6n`
+above) -- not a new regression and not in this bucket's scope.
+
+`ninja check-feme`: full target rebuilt and rerun clean (3740/3747
+Discovered Tests passed, 7 unsupported, 0 failed) -- no regressions.
+
+`Roadmap.md`: `K6q` struck through (closed).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`
+(`K6p`'s upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` gap and
+`K6n`'s own 124ish-case CPU-backend resource-handle-normalization
+architectural limitation still block closing the bundled feature).
