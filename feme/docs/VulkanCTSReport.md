@@ -2848,3 +2848,92 @@ phi/select merge) cases -- a clean closure with zero new failures.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
 `variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`
 (`K6q`/`K6s` still block closing the bundled feature).
+
+## `K6s`: uniform-loop-in-divergent-diamond resource-call masking gap fixed, 5/5 cases pass (roadmap K6s, closed)
+
+Picked `K6s` from the prior session's suggested next steps (now the
+largest remaining `variablePointers` residual bucket, 5 cases, a genuine
+result-correctness bug rather than another legalization gap).
+
+Reproduced `dEQP-VK.spirv_assembly.instruction.graphics.variable_pointers.
+graphics.writes_single_buffer_frag` directly via `deqp-vk` (transient
+`variablePointers`/`variablePointersStorageBuffer` `VK_TRUE` feature-bit
+flip, measurement only): every one of the 100 output-buffer entries read
+back exactly `+2111.0` too high. Ruled out rasterizer-level
+over-enumeration first (temporary `FEME_K6S_DEBUG_COUNT_PIXEL00`-gated
+instrumentation in `Executor.cpp`, reverted before committing): the one
+pixel the test actually samples is enumerated exactly once across the
+whole draw; `Executor.cpp`'s fragment dispatch is tile-based (64 tiles,
+256x256 test), and summing each tile's own quad count gives 2112 total
+wave-calls for the draw -- exactly `2111` extra executions plus the one
+genuine execution.
+
+Dumped the actual compiled fragment IR (`FEME_DUMP_IR=1`, a pre-existing
+`Pipeline.cpp` debug aid): `WaveSize=4`/`QuadsPerWave=1`, so one wave-call
+processes exactly one quad, confirming total wave-calls = total quad
+count = 2112. The IR showed the shader's `isUniqueIdZero` divergence mask
+computed correctly (`%live.t.wide`/`%sideeffect.t.wide`/etc.) but used
+*only* at the final merge block -- the 100-iteration loop performing the
+actual `feme.cpu.resource.load.raw.f32`/`.store.raw.f32` calls is entered
+*unconditionally*, is itself fully scalar, and every one of its resource
+calls carries a hardcoded `i1 true` mask operand, never the real
+divergence condition. This loop therefore executes in full for every
+wave-call regardless of whether that quad's lane actually satisfies the
+shader's own `if` guard.
+
+Root-caused to `feme/lib/Transforms/CPU/Linearize.cpp`, not
+`feme/lib/Target/CPU` as originally guessed in the roadmap entry.
+`DiamondFlattener` deliberately stops its walk at a cycle boundary nested
+in a divergent diamond arm, deferring the loop's interior masking to
+`LoopLinearizer::linearizeCycle`. For a loop whose own header/latch exit
+check is itself uniform (this test's shape: `header != latch`, neither
+divergent), `linearizeCycle`'s `CycleHasMaskOps` scan is the sole gate for
+whether the pre-existing, already-correct entry-mask-threading machinery
+(`makeActivePNPair`/`applyStageMasks`/`DiamondFlattener::
+flattenLoopBodyRegion`) ever runs on the loop's blocks at all -- and that
+scan previously recognized only `feme::StageOpKind` calls (`Discard`/
+`Demote`/`OutputStore`/etc.), entirely missing plain `feme.cpu.resource.*`
+calls. Since this test's loop body contains *only* resource calls, the
+scan found nothing, and the function bailed via "no divergence, no mask
+ops: a real uniform loop, left alone" -- leaving every resource call's
+mask stuck at its original placeholder `true` forever, even though
+`applyStageMasks` itself already knows exactly how to mask such a call
+correctly (confirmed by reading its own `matchResourceCall`/`matchImageCall`
+handling) -- it just was never invoked for this shape.
+
+Fixed with a two-line extension to the `CycleHasMaskOps` detection loop:
+also set it `true` when `matchResourceCall`/`matchImageCall` (the exact
+matchers `applyStageMasks` itself uses) find a match anywhere in the
+cycle, letting the existing masking machinery actually run instead of
+bailing out early. No new masking logic was needed -- the gap was purely
+in *detecting* the need, not in applying it.
+
+New unit test added (`LinearizeTest.cpp`):
+`MasksResourceCallInUniformLoopNestedInDivergentDiamond`, a minimal
+header-distinct-from-latch uniform loop (matching the real bug's exact
+shape -- an initial single-block-loop version of this test did not
+reproduce the bug, since that shape takes an entirely different,
+already-correct early-return path) containing only a
+`feme.cpu.resource.store.raw.i32` call, nested inside a divergent `if`,
+confirming the store's trailing mask operand is no longer a compile-time
+constant after the pass runs.
+
+CTS: all 5 of `K6s`'s cases
+(`writes_single_buffer_frag`/`_tessc`/`_tesse`,
+`writes_two_buffers_frag`/`_tessc`) now pass individually. A full
+`dEQP-VK.spirv_assembly.instruction.graphics.variable_pointers.*` re-run
+(790 cases, this session's narrowed CTS data set) shows 790/790 Pass --
+0 Fail, 0 NotSupported -- the entire `variablePointers` instruction group
+is now completely clean (confirmed via the same transient `VK_TRUE`
+feature-bit flip for measurement only, not committed).
+
+`ninja check-feme`: full target rebuilt and rerun clean (3737/3744
+Discovered Tests passed, 7 unsupported, 0 failed) -- no regressions.
+
+`Roadmap.md`: `K6s` struck through (closed).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`
+(`K6n`'s residual resource-handle-normalization architectural bucket,
+`K6p`'s upstream-MLIR `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` gap, and
+`K6q`'s handle-level phi/select merge still block closing the bundled
+feature).
