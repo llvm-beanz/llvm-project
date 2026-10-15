@@ -4671,3 +4671,52 @@ for many sessions); `Basic/Mandelbrot.test`'s contention-dependent
 flake (low priority); the standing `backup-before-rebase-20261014` tag
 and `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decisions, neither
 revisited this session.
+
+## L428(a): `spirv-val` `OpTypeVectorIdEXT`-shuffle validation bug root-caused as external, not fixable in this repo
+
+Followed up on `L428`'s one remaining blocker for the `Feature/HLSLLib/
+*_mat.test` cluster. Built a hand-written minimal `.spvasm` repro
+(two 16-wide `OpTypeVectorIdEXT`-typed vectors shuffled together, no
+HLSL/Clang/FeMe involved) and validated directly with `spirv-as`/
+`spirv-val`.
+
+**Confirmed**: the generated SPIR-V is spec-conformant; the bug is
+entirely inside `spirv-val`. The validator reported `"combined
+(Vector1 + Vector2) size of 14"` for two genuinely-16-wide operands
+(should be 32) -- and `14` is exactly `7+7`, where `7` is the raw
+numeric SPIR-V id of the `OpTypeVectorIdEXT` length *operand*
+(`%uint_16`, itself a resolved `OpConstant 16`), not the integer `16`
+it points to. Verified this isn't coincidental by padding the module
+with 10 unrelated ids (id bound 14 -> 24, `%uint_16`'s own id held at
+`7`): the reported "combined size" stayed exactly `14` -- the
+validator's `OpVectorShuffle` dimension check reads the length
+operand's raw id number instead of resolving it to the pointed-to
+constant's value. This is specific to `OpTypeVectorIdEXT`
+(`SPV_EXT_long_vector`'s dynamically-sized vector type, whose length
+is an id operand, unlike classic `OpTypeVector`'s literal-word
+length).
+
+**Confirmed not fixable in this repo**: `llvm/tools/spirv-tools/
+CMakeLists.txt` is only a thin hook for optionally running
+SPIRV-Tools-dependent tests against an externally-built SPIRV-Tools;
+no SPIRV-Tools source is vendored here. The environment's `spirv-val`/
+`spirv-as` come from the separately-installed `spirv-tools` system
+package (`SPIRV-Tools v2026.1`, the upstream `KhronosGroup/
+SPIRV-Tools` project), and Clang's HLSL driver only shells out to
+whatever `spirv-val` it finds on the toolchain path. No code change in
+`llvm-project` can fix this.
+
+**Disposition**: documented as a genuine, precisely-isolated upstream
+bug (repro preserved at `/tmp/l428a/min.spvasm` for a future upstream
+issue report), `Roadmap.md`'s `L428(a)` updated accordingly (not
+struck through as "done" since the underlying CTS-visible failures
+remain, but marked as having no further in-repo action available).
+`L428`'s own two in-repo fixes (Vector16/Shader capability,
+poison-freeze default) stand as independently complete and correct.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- no code change, pure investigation/documentation.
+
+**Next steps**: pivot to `K6n`-proper (largest remaining
+`variablePointers` bucket, untouched for many sessions) since no
+further in-repo action is available for `L428(a)`.
