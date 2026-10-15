@@ -63,14 +63,13 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. Re-apply the reverted `isLinearChain` patch (described in roadmap row `L426`,
-   not re-typed here -- read that row, it has the exact shape).
-2. Repro: `/tmp/l425a/AllMemoryBarrierWithGroupSync/` --
-   `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json
-   ./bin/offloader -debug-layer src/pipeline.yaml shader.o`, crashes in under a
-   second.
-3. `gdb --args ./bin/offloader ...`, backtrace at the `DominatorTree` assertion,
-   find what `splitAtGroupSyncBarriers` assumes.
-4. Fix that assumption, rebuild `libfeme_vulkan.so` + `feme-opt` +
-   `FeMeTransformsCPUTests`, re-run the 4-case repro set and
-   `check-hlsl-feme-vk`.
+1. `cd /home/dev/dev/llvm-project && mkdir -p build-hlsl && cd build-hlsl`
+2. `cmake -G Ninja -C ../clang/cmake/caches/HLSL.cmake ../llvm
+   -DCMAKE_BUILD_TYPE=Release` (or whatever flags `HLSL.cmake` needs -- read it
+   first, it may already set `CMAKE_BUILD_TYPE`).
+3. Budget several hours for the initial `ninja` build of clang+HLSL; this has
+   never completed in any prior session, so expect to hit unknown unknowns
+   (missing deps, config issues) -- treat the FIRST successful full build as the
+   session's whole deliverable if needed.
+4. Once built, wire up `/home/dev/dev/offload-test-suite`'s `feme` branch and
+   attempt `check-hlsl-feme-vk` for the first time ever.
