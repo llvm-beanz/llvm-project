@@ -122292,3 +122292,41 @@ A tessellation-control shader with a group-sync barrier gets split by `splitTess
 6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6r`'s compiler fix).
 
 **Immediate next action for next session:** pick `K6s` (now the largest remaining `variablePointers` residual bucket, 5 cases, a genuine result-correctness bug rather than another legalization gap) and start with a minimal single-buffer `writes_single_buffer_frag`-style repro traced through `feme-render`, or pick `K6q` (2 cases, handle-level phi/select merge) if a smaller, more contained legalization-style fix is preferred first.
+
+# Session: K6s fixed (uniform loop in divergent diamond left resource-call masks at placeholder `true`)
+
+**Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` at session start, with `VK_ICD_FILENAMES` exported first.
+
+## What now works
+
+All 5 `K6s` cases pass: `writes_single_buffer_frag`/`_tessc`/`_tesse`, `writes_two_buffers_frag`/`_tessc`. The full `variable_pointers` instruction group (790 cases, this session's CTS data set) is now 790/790 Pass with the feature bits measured on transiently -- the entire group is clean. `check-feme`: 3737/3744 pass, 7 unsupported, 0 failed, no regressions. `FeMeTransformsCPUTests`: 618/618 pass.
+
+## The bug, in one paragraph
+
+A uniform-trip-count loop (its own exit check never diverges) nested inside a divergent `if`, whose body contains only plain `feme.cpu.resource.*` calls (no `Discard`/`Demote`/other `StageOpKind` op), had every one of those calls' mask operand stuck at the compile-time placeholder constant `true` forever. `LoopLinearizer::linearizeCycle`'s `CycleHasMaskOps` scan -- the sole gate deciding whether the already-correct entry-mask-threading machinery runs on such a loop at all -- only recognized `StageOpKind` calls as a reason to engage. Fix: two lines, extend that scan to also match `feme.cpu.resource.*`/`feme.cpu.image.*` calls via the same matchers `applyStageMasks` itself already uses to mask them correctly once reached.
+
+## What this session did, in order
+
+1. Reproduced `writes_single_buffer_frag` directly: every output-buffer entry off by `+2111.0`.
+2. Ruled out rasterizer duplicate-enumeration first (temporary `FEME_K6S_DEBUG_COUNT_PIXEL00` prints in `Executor.cpp`, reverted): the one real pixel is enumerated exactly once; summing per-tile quad counts across the draw gives 2112 -- exactly the extra-executions count plus one.
+3. Dumped the compiled fragment IR (`FEME_DUMP_IR=1`, pre-existing aid): `WaveSize=4`/`QuadsPerWave=1`, so wave-calls == quad count == 2112. The 100-iteration loop runs unconditionally, fully scalar, every resource call hardcoded `i1 true`.
+4. Traced `Linearize.cpp` to the exact gap: `CycleHasMaskOps`'s scan.
+5. Fixed it, verified via `feme-opt --llvm -passes=feme-cpu-linearize` on two synthetic reductions before touching the real CTS case.
+6. Added a unit test, ran full `check-feme` and the `variable_pointers` CTS group, reverted all debug instrumentation (own session's and leftover VK-GL-CTS instrumentation from a prior session), committed in 3 pieces.
+
+## The real lesson this session learned
+
+1. **A single-block-loop synthetic test and a header-distinct-from-latch synthetic test hit completely different code paths in the same function.** My first attempt at a unit test used a single-block loop (header == latch) and silently exercised an entirely different, already-correct early-return path (`return false; // No divergence: leave this real uniform loop alone.`) rather than the branch I'd just fixed. It built, ran, and failed its own assertion -- which looked at first like my fix didn't work, but was actually "my test doesn't test what I think it tests." **Lesson: when hand-writing a synthetic IR reduction of a real bug, match the real case's control-flow *shape* exactly (header vs. latch, which blocks are distinct), not just its semantic intent -- these passes branch on structural details, not just on "is there a loop with a resource call in it."**
+2. **A rebuilt static library does not mean the tool that links it got rebuilt too.** After fixing the first synthetic-test issue, the fix still silently failed to trigger when tested via `feme-opt` -- because I'd only run `ninja FeMeTransformsCPU`/`FeMeTransformsCPUTests`, never `ninja feme-opt` itself, so the standalone tool was still linking a stale copy of the pass. `feme-opt --llvm -passes=feme-cpu-linearize -S` turned out to be the fastest way to check a single pass's behavior on a hand-written `.ll` file, far faster than a full CTS round-trip -- but only once the binary itself was actually rebuilt.
+3. **A full broad CTS sweep with a feature flag flipped on is not a substitute for a narrow, targeted regression check against the shipped config.** The `variablePointers` feature bits stay `VK_FALSE` in the committed build; a 70337-case sweep with them flipped on (to exercise the new masking path broadly) surfaced ~332 failures, almost all `variablePointers`-feature-gated residuals from `K6n`/`K6p`/`K6q` that are expected to exist and irrelevant to this fix's safety. The one category worth double-checking (`opphi.*`, 2/20 failing, not `variablePointers`-gated at all) was confirmed pre-existing by `git stash`-ing just the `Linearize.cpp` change, rebuilding, and re-running that one group -- same 2/20 failure count before and after. **Lesson: for a broad-impact compiler-pass change, a stash-and-rebuild A/B on the one suspicious sub-group is cheaper and more conclusive than trying to read or diff an entire 70k-case log.**
+
+## Next steps
+
+1. **(~1-2 days)** `K6q`: 2 cases, handle-level `OpPhi`/`OpSelect` merge (merging raw resource *handles* before `getpointer` is called). Still not attempted -- likely the hardest of the three small buckets since the `DescriptorIndex` itself would need to become phi-mergeable.
+2. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: ~14-15 cases, `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely undefined in MLIR's SPIR-V dialect TableGen. Not attempted this session (scope stayed on `K6s`).
+3. **(~1-2 days)** `K6n`'s own 124ish-case CPU-backend resource-handle-normalization architectural limitation. Still the largest unattempted bucket of the whole `variablePointers` feature; deepest and hardest, likely needs a runtime-dispatch mechanism rather than a lowering-pattern fix.
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6s`'s compiler fix).
+
+**Immediate next action for next session:** pick `K6n` (the only remaining large, unattempted bucket -- `K6o`, `K6r`, and now `K6s` are all closed) and start by root-causing one representative `"unsupported raised operation"` case down to its specific resource-handle-normalization code path, or pick `K6q`/`K6p` first for a smaller, more contained fix.
