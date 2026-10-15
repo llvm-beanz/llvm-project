@@ -63,23 +63,20 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s 92-case
-   failure list. Start with one `_mat.test` case, compile via both
-   `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend vs
-   FeMe-backend scope before committing to a fix.
-2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, still untouched for many sessions now.
-3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
-   contention-dependent semaphore-wait flake under full-suite parallel
-   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
-   methodology if a lower-stakes task is wanted.
+1. **(~half day)** `L428(a)`: root-cause the `spirv-val`
+   `OpTypeVectorIdEXT`-shuffle validation gap. Start from
+   `/tmp/l428/asin_mat/min5.hlsl`, narrow to a minimal IR-level
+   `shufflevector` test. Determine LLVM-backend-bug vs.
+   SPIRV-Tools-upstream-limitation before committing to a fix location.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining
+   `variablePointers` bucket, untouched for many sessions.
+3. **(~2-4 hours, low priority, change of pace)**
+   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait flake.
 4. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
    `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-5. **(standing, confirmed 3x previously)** Always diff
-   `offload-test-suite`'s `feme` branch against `main` before trusting
-   any `check-hlsl-feme-vk` failure as new -- not re-checked this
-   session since no `offload-test-suite` work was done, but the
-   checkout was not re-cloned either so drift risk is unchanged from
-   last confirmed-clean state.
+5. **(standing)** Always diff `offload-test-suite`'s `feme` branch
+   against `main` before trusting any `check-hlsl-feme-vk` failure as
+   new -- not re-checked this session (no `offload-test-suite` work
+   done; checkout not re-cloned either, so drift risk unchanged).
