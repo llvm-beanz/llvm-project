@@ -123129,3 +123129,45 @@ catches it). No change needed there beyond threading the new parameter.
 small, bounded, directly continues this session's own momentum, and the
 diagnostic it targets already has substantial prior-fix precedent to
 draw technique from.
+
+# Session: `L425(a)` root-caused (not fixed) -- 2 deeper `feme-cpu-linearize` bugs found and fixed along the way, `L426` opened
+
+**Device check**: `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Task**: root-cause (and fix, if cheap) the 4 cases stuck on `feme-cpu-wrap-entry`'s "barrier inside non-linear control flow" diagnostic.
+
+## What shipped (3 commits, already pushed to this branch)
+
+1. `EntryWrapper.cpp` -- loop-invariant per-lane induction seeds now supported in `matchLoopShape` (was already done before this sub-session resumed, just committed now).
+2. `Linearize.cpp` -- two bugs fixed:
+   - `regionHasStageMaskOps` now catches resource/image *stores* (not just `feme.stage.*` ops), narrowly (only `StoredValue`/`Texel`/`AtomicValue`, not reads -- a broader first attempt regressed another test).
+   - `flattenLoopBodyDiamond`'s discarded trial `validate()` call no longer leaks into the shared `MergeVisited` set.
+3. Docs: `Roadmap.md` (`L425(a)` struck through, `L426` opened), `VulkanCTSReport.md` (new entry).
+
+## Numbers
+
+- `check-feme`: 3,759/3,766 Pass, 0 Fail, 0 regressions.
+- `check-hlsl-feme-vk`: 485 Pass / 6 Fail (was 472/19). 13 cases fixed by item 2 above, with zero `feme-cpu-wrap-entry` work.
+- `dEQP-VK.glsl.demote.*`: **30/30, up from 27/30** -- bonus fix from item 2.
+- `dEQP-VK.glsl.loops.*`: 606/624, unchanged, 0 regressions.
+
+## What did NOT ship: the actual `L425(a)` fix
+
+All 4 target cases now reach the identical `feme-cpu-wrap-entry` diagnostic -- confirmed one shared root cause. It's `EntryWrapper.cpp`'s `isLinearChain`: it can't recognize a barrier directly inside a `while`-loop's single-block body when the *header* (not the latch) owns the exit check. `walkBarrierFreeArm` hard-rejects any barrier in an arm it walks, by design (nested-arm barriers have no `outlineChain` representation).
+
+I patched `isLinearChain` to special-case this one trivial shape (body = single block, unconditional branch straight back to the header). It worked -- `isLinearChain` accepted the shape -- but `splitAtGroupSyncBarriers`'s region-splitting code crashes one layer further down: a stale-parent `DominatorTree` assertion (`GenericDomTree.h:400`). That code assumes an invariant the newly-admitted shape doesn't satisfy. **I reverted the patch.** A diagnosed "unsupported" is better than a crash; shipping a crash in place of a clean error is a worse regression than not fixing the bug at all.
+
+## Next action (pick this first, ~1-2 days): `L426`
+
+1. Re-apply the reverted `isLinearChain` patch (described in roadmap row `L426`, not re-typed here -- read that row, it has the exact shape).
+2. Repro: `/tmp/l425a/AllMemoryBarrierWithGroupSync/` -- `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json ./bin/offloader -debug-layer src/pipeline.yaml shader.o`, crashes in under a second.
+3. `gdb --args ./bin/offloader ...`, backtrace at the `DominatorTree` assertion, find what `splitAtGroupSyncBarriers` assumes.
+4. Fix that assumption, rebuild `libfeme_vulkan.so` + `feme-opt` + `FeMeTransformsCPUTests`, re-run the 4-case repro set and `check-hlsl-feme-vk`.
+
+## Other open items, unchanged this session
+
+- `K6n`-proper: largest remaining `variablePointers` bucket, untouched for many sessions. Still the single biggest thing in this file.
+- `Basic/Mandelbrot.test`: contention-dependent semaphore-wait flake under parallel load. Same class as `L421`'s race. Low priority, change-of-pace candidate.
+- `InterlockedAdd.resources.32.test`: genuine numeric mismatch (expected `0x1`, got `0x0`), not looked at beyond the raw buffer diff.
+- `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision: still unresolved, many sessions running.
+- `offload-test-suite` `VkBool32`/`WaveActiveMax` drop-on-rebase pattern: not hit this session (no fresh cherry-pick happened).
