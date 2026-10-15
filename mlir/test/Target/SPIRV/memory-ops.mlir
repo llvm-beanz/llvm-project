@@ -161,3 +161,32 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, Linkage], []> {
     spirv.Return
   }
 }
+
+// -----
+
+// spirv.PtrEqual and spirv.PtrNotEqual require SPIR-V 1.4 but, per the
+// core grammar, no additional capability beyond what the containing
+// module already needs for pointer types themselves.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, Linkage], []> {
+  // CHECK-LABEL: spirv.func @ptr_equal_not_equal
+  spirv.func @ptr_equal_not_equal(%arg0 : !spirv.ptr<f32, StorageBuffer>, %arg1 : !spirv.ptr<f32, StorageBuffer>) "None" {
+    // CHECK: {{%.*}} = spirv.PtrEqual %{{.*}}, %{{.*}} : !spirv.ptr<f32, StorageBuffer>
+    %0 = spirv.PtrEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+    // CHECK: {{%.*}} = spirv.PtrNotEqual %{{.*}}, %{{.*}} : !spirv.ptr<f32, StorageBuffer>
+    %1 = spirv.PtrNotEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+    spirv.Return
+  }
+}
+
+// -----
+
+// spirv.PtrDiff requires one of Addresses/VariablePointers/
+// VariablePointersStorageBuffer.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, VariablePointers, Linkage], [SPV_KHR_variable_pointers]> {
+  // CHECK-LABEL: spirv.func @ptr_diff
+  spirv.func @ptr_diff(%arg0 : !spirv.ptr<f32, StorageBuffer>, %arg1 : !spirv.ptr<f32, StorageBuffer>) "None" {
+    // CHECK: {{%.*}} = spirv.PtrDiff %{{.*}}, %{{.*}} : !spirv.ptr<f32, StorageBuffer> -> i32
+    %0 = spirv.PtrDiff %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer> -> i32
+    spirv.Return
+  }
+}

@@ -841,3 +841,64 @@ func.func @inbounds_ptr_access_chain1(%arg0: !spirv.ptr<f32, CrossWorkgroup>, %a
   %0 = spirv.InBoundsPtrAccessChain %arg0[%arg1] : !spirv.ptr<f32, CrossWorkgroup>, i64 -> !spirv.ptr<f32, CrossWorkgroup>
   return
 }
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.PtrEqual
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL:   func @ptr_equal(
+// CHECK-SAME:    %[[ARG0:.*]]: !spirv.ptr<f32, StorageBuffer>,
+// CHECK-SAME:    %[[ARG1:.*]]: !spirv.ptr<f32, StorageBuffer>)
+// CHECK: spirv.PtrEqual %[[ARG0]], %[[ARG1]] : !spirv.ptr<f32, StorageBuffer>
+func.func @ptr_equal(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) -> () {
+  %0 = spirv.PtrEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+  return
+}
+
+// -----
+
+func.func @ptr_equal_mismatched_types(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<i32, StorageBuffer>) -> () {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %0 = "spirv.PtrEqual"(%arg0, %arg1) : (!spirv.ptr<f32, StorageBuffer>, !spirv.ptr<i32, StorageBuffer>) -> i1
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.PtrNotEqual
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL:   func @ptr_not_equal(
+// CHECK-SAME:    %[[ARG0:.*]]: !spirv.ptr<f32, StorageBuffer>,
+// CHECK-SAME:    %[[ARG1:.*]]: !spirv.ptr<f32, StorageBuffer>)
+// CHECK: spirv.PtrNotEqual %[[ARG0]], %[[ARG1]] : !spirv.ptr<f32, StorageBuffer>
+func.func @ptr_not_equal(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) -> () {
+  %0 = spirv.PtrNotEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+  return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
+// spirv.PtrDiff
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL:   func @ptr_diff(
+// CHECK-SAME:    %[[ARG0:.*]]: !spirv.ptr<f32, CrossWorkgroup>,
+// CHECK-SAME:    %[[ARG1:.*]]: !spirv.ptr<f32, CrossWorkgroup>)
+// CHECK: spirv.PtrDiff %[[ARG0]], %[[ARG1]] : !spirv.ptr<f32, CrossWorkgroup> -> i64
+func.func @ptr_diff(%arg0: !spirv.ptr<f32, CrossWorkgroup>, %arg1: !spirv.ptr<f32, CrossWorkgroup>) -> () {
+  %0 = spirv.PtrDiff %arg0, %arg1 : !spirv.ptr<f32, CrossWorkgroup> -> i64
+  return
+}
+
+// -----
+
+func.func @ptr_diff_mismatched_types(%arg0: !spirv.ptr<f32, CrossWorkgroup>, %arg1: !spirv.ptr<i32, CrossWorkgroup>) -> () {
+  // expected-error @+1 {{requires all operands to have the same type}}
+  %0 = "spirv.PtrDiff"(%arg0, %arg1) : (!spirv.ptr<f32, CrossWorkgroup>, !spirv.ptr<i32, CrossWorkgroup>) -> i64
+  return
+}

@@ -4770,6 +4770,9 @@ def SPIRV_OC_OpGroupNonUniformLogicalOr       : I32EnumAttrCase<"OpGroupNonUnifo
 def SPIRV_OC_OpGroupNonUniformLogicalXor      : I32EnumAttrCase<"OpGroupNonUniformLogicalXor", 364>;
 def SPIRV_OC_OpGroupNonUniformQuadSwap        : I32EnumAttrCase<"OpGroupNonUniformQuadSwap", 366>;
 def SPIRV_OC_OpCopyLogical                    : I32EnumAttrCase<"OpCopyLogical", 400>;
+def SPIRV_OC_OpPtrEqual                       : I32EnumAttrCase<"OpPtrEqual", 401>;
+def SPIRV_OC_OpPtrNotEqual                    : I32EnumAttrCase<"OpPtrNotEqual", 402>;
+def SPIRV_OC_OpPtrDiff                        : I32EnumAttrCase<"OpPtrDiff", 403>;
 def SPIRV_OC_OpTypeTensorARM                  : I32EnumAttrCase<"OpTypeTensorARM", 4163>;
 def SPIRV_OC_OpGraphConstantARM               : I32EnumAttrCase<"OpGraphConstantARM", 4181>;
 def SPIRV_OC_OpGraphEntryPointARM             : I32EnumAttrCase<"OpGraphEntryPointARM", 4182>;
@@ -4932,6 +4935,7 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpGroupNonUniformLogicalAnd, SPIRV_OC_OpGroupNonUniformLogicalOr,
       SPIRV_OC_OpGroupNonUniformLogicalXor, SPIRV_OC_OpGroupNonUniformQuadSwap,
       SPIRV_OC_OpCopyLogical,
+      SPIRV_OC_OpPtrEqual, SPIRV_OC_OpPtrNotEqual, SPIRV_OC_OpPtrDiff,
       SPIRV_OC_OpTypeTensorARM,
       SPIRV_OC_OpGraphEntryPointARM, SPIRV_OC_OpGraphARM,
       SPIRV_OC_OpGraphInputARM, SPIRV_OC_OpGraphSetOutputARM, SPIRV_OC_OpGraphEndARM,

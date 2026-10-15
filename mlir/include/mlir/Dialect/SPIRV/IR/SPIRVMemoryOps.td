@@ -346,6 +346,150 @@ def SPIRV_PtrAccessChainOp : SPIRV_Op<"PtrAccessChain", [Pure]> {
 
 // -----
 
+def SPIRV_PtrEqualOp : SPIRV_Op<"PtrEqual", [Pure, SameTypeOperands]> {
+  let summary = "Returns whether two pointers are equal.";
+
+  let description = [{
+    Result Type must be a scalar Boolean type.
+
+    Operand 1 and Operand 2 must have the same type, and must be pointers.
+
+    Results in true if Operand 1 and Operand 2 point to the same object, and
+    false otherwise. Two pointers formed from distinct `spirv.AddressOf` or
+    `spirv.PtrAccessChain` results are considered equal exactly when they
+    would alias the same bytes of the same underlying object.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.PtrEqual %0, %1 : !spirv.ptr<f32, StorageBuffer>
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_4>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[]>
+  ];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$operand1,
+    SPIRV_AnyPtr:$operand2
+  );
+
+  let results = (outs
+    SPIRV_Bool:$result
+  );
+
+  let hasCustomAssemblyFormat = 0;
+  let hasVerifier = 0;
+
+  let assemblyFormat = "$operand1 `,` $operand2 `:` type($operand1) attr-dict";
+}
+
+// -----
+
+def SPIRV_PtrNotEqualOp : SPIRV_Op<"PtrNotEqual", [Pure, SameTypeOperands]> {
+  let summary = "Returns whether two pointers are not equal.";
+
+  let description = [{
+    Result Type must be a scalar Boolean type.
+
+    Operand 1 and Operand 2 must have the same type, and must be pointers.
+
+    Results in true if Operand 1 and Operand 2 point to different objects,
+    and false otherwise -- the logical negation of `spirv.PtrEqual`.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.PtrNotEqual %0, %1 : !spirv.ptr<f32, StorageBuffer>
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_4>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[]>
+  ];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$operand1,
+    SPIRV_AnyPtr:$operand2
+  );
+
+  let results = (outs
+    SPIRV_Bool:$result
+  );
+
+  let hasCustomAssemblyFormat = 0;
+  let hasVerifier = 0;
+
+  let assemblyFormat = "$operand1 `,` $operand2 `:` type($operand1) attr-dict";
+}
+
+// -----
+
+def SPIRV_PtrDiffOp : SPIRV_Op<"PtrDiff", [Pure, SameTypeOperands]> {
+  let summary = [{
+    Returns the difference, in elements, between two pointers into the
+    same object.
+  }];
+
+  let description = [{
+    Result Type must be a scalar integer type.
+
+    Operand 1 and Operand 2 must have the same type, and must be pointers
+    that point into the same aggregate object -- otherwise the result is
+    undefined. Their type's pointee must have a fixed size (it cannot be,
+    nor include, an `OpTypeRuntimeArray`-equivalent).
+
+    Results in the difference of Operand 1 minus Operand 2, as a signed
+    integer value counted in units of the pointee type's element size
+    (the same units `spirv.PtrAccessChain`'s own `Element` operand uses),
+    matching C's pointer-subtraction semantics.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    %2 = spirv.PtrDiff %0, %1 : !spirv.ptr<f32, StorageBuffer>
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_4>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[]>,
+    Capability<[
+      SPIRV_C_Addresses, SPIRV_C_VariablePointers,
+      SPIRV_C_VariablePointersStorageBuffer]>
+  ];
+
+  let arguments = (ins
+    SPIRV_AnyPtr:$operand1,
+    SPIRV_AnyPtr:$operand2
+  );
+
+  let results = (outs
+    SPIRV_Integer:$result
+  );
+
+  let hasCustomAssemblyFormat = 0;
+  let hasVerifier = 0;
+
+  let assemblyFormat = "$operand1 `,` $operand2 `:` type($operand1) `->` type($result) attr-dict";
+}
+
+// -----
+
 def SPIRV_StoreOp : SPIRV_Op<"Store", [DeclareOpInterfaceMethods<AlignmentAttrOpInterface>]> {
   let summary = "Store through a pointer.";
 
