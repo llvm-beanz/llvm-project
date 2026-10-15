@@ -63,34 +63,37 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `opptrdiff.*` remaining 4 cases: only 1 of the 5 was
-   confirmed this session to hit the exact pre-existing CFG-linearization error
-   text (`"reconvergence block '' does not have exactly two predecessors"`); the
-   other 4 fail pipeline creation without a printed diagnostic in a quick pass.
-   Root-cause each with `FEME_VULKAN_LOG_CREATION_ERRORS`/`FEME_DUMP_IR_PRENORM`
-   before assuming they're all the same bucket -- at least two
-   (`ssbo_comparisons_diff`, a `vars_ssbo_2_diff` case) are SSBO-only, not
-   workgroup-only, so don't assume they're groupshared-specific without
-   checking.
-2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+1. **(~1-2 days)** `K6u`: restructure `mergeIntoPhi` to resolve a
+   self-referential loop-carried-pointer backedge eagerly -- e.g. create the
+   `descidx`/`offset` phis up front (already done today) and recurse into a
+   backedge's own GEP using those in-progress phi nodes themselves as its
+   `Offset`/`DescriptorIndex` inputs (a legal forward SSA reference, since the
+   phis already exist as instructions even before every incoming value is
+   filled), rather than requiring every edge resolved before any recursion
+   happens. Needs careful design around ordering (the GEP's own resolved value
+   must be computed and fed back into the *same* phi's backedge slot without
+   re-entering the same merge state) and a new unit test exercising a genuine
+   2-block loop (not just the straight-line/cross-branch shapes every existing
+   phi-merge test uses).
+2. **(~1-2 days)** `K6n`-proper: the large majority CPU-backend
+   resource-handle-normalization architectural limitation. Still not root-caused
+   beyond signature-level bucketing -- unchanged from every prior session's
+   framing, not touched this session (scope stayed on `opptrdiff`).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6t`'s compiler fix).
-5. **(standing, profiling, ~2-4 hours)** The original "profile one L418
-   1024x1024x2 image-to-image MSAA case" next step from several sessions ago --
-   still not picked up; every session since has had an open compiler bucket that
-   took priority.
+   stayed scoped to the `opptrdiff` compiler fix).
+6. **(standing, profiling, ~2-4 hours)** The original "profile one L418
+   1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this
+   is now 7+ sessions overdue and worth prioritizing soon purely because it
+   keeps losing to compiler-bucket work every time.
 
-**Immediate next action for next session:** with `K6n`, `K6o`, `K6p`, `K6q`,
-`K6r`, `K6s`, and now `K6t` all closed, the `variablePointers` bundle (`K6a`)
-has no remaining *known, bucketed* legalization gap left except the
-`opptrdiff.*` follow-up above -- pick that first (it's small and already
-partially root-caused), then reassess whether
-`variablePointers`/`variablePointersStorageBuffer` can finally flip to `VK_TRUE`
-for real, or whether the L418 profiling next step (long overdue) is a better use
-of a fresh session.
+**Immediate next action for next session:** pick `K6u` (now the only remaining
+*known, bucketed* `opptrdiff`/`variablePointers` legalization gap -- smaller and
+more contained than `K6n`-proper) for a focused fix, or finally break the L418
+profiling task out of its 7-session backlog if a change of pace is preferred.
