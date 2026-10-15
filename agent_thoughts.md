@@ -123304,3 +123304,95 @@ Vulkan Device`, confirmed.
    `feme` branch against `main` before trusting any `check-hlsl-feme-vk`
    failure as new -- the VkBool32/WaveActiveMax/array_of_matrices drift
    pattern keeps recurring on fresh checkouts.
+
+# Session: `L429` fixed -- `EntryWrapperPass` `HeaderDerivedValues` poisoned by an already-erased `PersistentInduction` header phi
+
+**Next action**: pick `L428` -- triage `check-hlsl-clang-feme-vk`'s
+92-case failure list, starting with one `_mat.test` case. ~1-2 days.
+
+**Device check**: `vulkaninfo --summary | grep deviceName` (with
+`VK_ICD_FILENAMES` set to the build's `feme_icd.json`) -> `FeMe CPU
+Vulkan Device`, confirmed.
+
+## What got done
+
+1. **Root-caused `L429` all the way down**, not just re-confirmed the
+   symptom. Technique: `Pipeline.cpp`'s `FEME_DUMP_IR` dump point sits
+   immediately before `EntryWrapperPass` runs; running
+   `feme-opt --llvm -passes=feme-cpu-wrap-entry` standalone on that dump
+   reproduced the exact `undef`-mask bug outside the full pipeline, no
+   `ninja`+`offloader` round-trip needed per iteration.
+2. **Found the actual defect** (not the previously-hypothesized
+   `feme-cpu-simdize` resource-atomic-widening theory):
+   `EntryWrapperPass`'s `HeaderDerivedValues` mechanism clones a
+   header-local, non-phi instruction once into the wrapper's own scalar
+   `LoopHeaderBB`, valid only if its operand chain is loop-invariant or
+   `ScalarInduction`-driven. Here it instead read a `PersistentInduction`
+   header phi -- a genuinely per-wave value.
+   `spillValuesLiveAcrossBarriers`'s reload-rewriting never touches uses
+   still inside `Shape.Header` itself, so this use was never redirected
+   to a reload; the header phi was then replaced with `poison` and
+   erased, silently poisoning it, and the clone-once step baked that in
+   permanently.
+3. **Fixed it**: added `dependsOnPersistentInduction` +
+   `cloneHeaderChainAt` in `EntryWrapper.cpp`. For `HeaderDerivedValues`
+   entries that transitively depend on a `PersistentInduction`'s header
+   phi, recompute the value fresh at each of its original use sites
+   *before* `spillValuesLiveAcrossBarriers` runs, so the normal reload
+   machinery picks it up naturally. One verifier-dominance bug found and
+   fixed along the way (wrong clone-insertion order).
+4. **Added a regression unit test**
+   (`SplitsFlowMergeLoopWithHeaderDerivedValueFromWavePersistentRecurrence`)
+   -- confirmed it fails (3 assertions) with the fix reverted, passes
+   with it restored.
+5. **Verified broadly**: `FeMeTransformsCPUTests` 635/635 (was 634);
+   `check-hlsl-feme-vk` 791/792 (was 490 Passed/1 Failed in the same run
+   shape -- `InterlockedAdd.resources.32.test` now passes), sole
+   remaining failure the known `Mandelbrot.test` flake; both minimal and
+   full real-test repros pass via `offloader` directly.
+6. **Ran a targeted `VK-GL-CTS` check** (no prior `InterlockedAdd`-
+   adjacent case list existed, so picked compute-atomic + loop/barrier
+   groups): `opatomic*` 19/26 Pass (7 NotSupported, unrelated
+   `vulkanMemoryModel` gap), `glsl.loops.*` 606/624, `glsl.demote.*`
+   30/30 -- all unchanged from prior baselines, 0 regressions (expected:
+   this is a CPU-backend/compute fix, not a graphics-loop-shape one).
+7. Updated `Roadmap.md` (`L429` struck through, correct root cause
+   recorded) and `VulkanCTSReport.md`, each its own commit. No
+   feature/extension surface changed, so the two inventories needed no
+   edits -- confirmed, not skipped.
+
+## Wins now visible
+
+- `InterlockedAdd.resources.32.test` passes -- `check-hlsl-feme-vk` is
+  down to exactly 1 known failure (the pre-existing `Mandelbrot.test`
+  flake), from 2 at the start of this session.
+- The `L429` bug is fully understood and fixed at its true origin, not
+  patched at the symptom (`instcombine`'s fold was a red herring from
+  the earlier bisection -- the real bug was several passes upstream).
+- A fast, repeatable isolation recipe
+  (`feme-opt --llvm -passes=feme-cpu-wrap-entry` on a `FEME_DUMP_IR`
+  dump) is now demonstrated twice across sessions for this pass --
+  worth reaching for first on any future `EntryWrapperPass` bug.
+
+## Next steps, ranked
+
+1. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s 92-case
+   failure list. Start with one `_mat.test` case, compile via both
+   `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend vs
+   FeMe-backend scope before committing to a fix.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, still untouched for many sessions now.
+3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
+   contention-dependent semaphore-wait flake under full-suite parallel
+   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
+   methodology if a lower-stakes task is wanted.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+5. **(standing, confirmed 3x previously)** Always diff
+   `offload-test-suite`'s `feme` branch against `main` before trusting
+   any `check-hlsl-feme-vk` failure as new -- not re-checked this
+   session since no `offload-test-suite` work was done, but the
+   checkout was not re-cloned either so drift risk is unchanged from
+   last confirmed-clean state.
