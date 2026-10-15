@@ -122540,3 +122540,84 @@ Also found and fixed a real, previously-latent bug in `mergeIntoCompare` (missin
 6. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this is now 8+ sessions overdue.
 
 **Immediate next action for next session:** pick `K6n`-proper (now the only remaining large, unattempted `variablePointers` bucket -- `K6o`/`K6p`/`K6q`/`K6r`/`K6s`/`K6t`/`K6u` are all closed) and start by root-causing one representative case down to its specific resource-handle-normalization code path, or pick the newly-discovered `variable_pointers_vars_ssbo_2_diff` linearize gap (smaller, already has a printed error signature to start from) for a change of pace, or finally break the L418 profiling task out of its 8-session backlog.
+
+# Session: K6v closed (relocated uniform latch check), K6w found and root-caused
+
+Fixed `K6v`, root-caused a new deeper bug (`K6w`), both committed.
+
+## What's done
+
+1. **K6v fixed** (`feme/lib/Transforms/CPU/Linearize.cpp`): `StructurizeCFG`
+   can leave a loop's real uniform trip-count check one block upstream of
+   the nominal `Latch`, behind a trivial phi-less relay stub. Added a
+   structural pre-pass that promotes that predecessor into the `Latch`
+   role. Took 3 debugging rounds to get placement right: the pre-pass has
+   to run *after* the existing fold fixed-point loop
+   (`foldRedundantFlowBlocksInCycle` etc.), not before -- otherwise it
+   prematurely promotes a transient "shared Flow dispatch block" that the
+   folds would have simplified away on their own, corrupting the CFG.
+   Found this the hard way via two real regressions
+   (`loop-body-diamond.ll`, `CompiledStageTest.
+   LoopWithBarrierSurvivesCompiledStageCreation`).
+2. **New unit test**: `PromotesUniformLatchCheckBehindTrivialRelay`.
+3. **Verified**: all 632 `FeMeTransformsCPUTests`, all 103
+   `FeMeTargetCPUTests`, full `check-feme` (3752/3759, 7 expected-
+   unsupported) pass with feature flag at default `VK_FALSE`.
+4. **CTS**: `variable_pointers_vars_ssbo_2_diff` now builds and runs
+   (previously failed pipeline creation) but gives a wrong numeric
+   result at index 0. Root-caused this to a *different*, deeper bug --
+   `K6w` -- not a K6v regression.
+5. **K6w found and documented** (not fixed): the loop's resource pointer's
+   backedge routes through an if/else diamond (`+1`/`-1` offset select)
+   before looping back, one level deeper than `K6u`'s
+   `isPhiSelfReferentialBackedge` (which only strips a direct `GEP`
+   chain, not one through an intermediate `PHINode`) recognizes.
+   `mergeIntoPhi` waits forever for an "external" resolution that can
+   never come, leaving the pointer phi's entry edge `poison`, which a
+   first-iteration `ptrtoint` use then reads.
+6. Docs updated: `Roadmap.md` (K6v struck through, K6w added as new open
+   row), `VulkanCTSReport.md` (new K6v section with full CTS numbers).
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+   needed, flags stay `VK_FALSE`.
+7. Commits (3 total, this session): K6v fix + test; doc updates; this
+   entry.
+8. `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+   Device` at the top of this session.
+
+## Next steps
+
+1. **(~1-2 days)** `K6w`: fix the nested self-referential phi/GEP-through-
+   diamond backedge. Needs generalizing self-referential-backedge
+   detection (and the matching rewrite recursion) from a single phi to a
+   whole strongly-connected component of mutually-dependent
+   `PHINode`/`getelementptr` values -- synthesize a `descidx`/`offset` phi
+   pair for *every* intermediate phi in the component, not just the
+   outermost one. Bigger design change than `isPhiSelfReferentialBackedge`'s
+   current single-phi guard. New unit test needs a genuine GEP-diamond-
+   phi backedge shape (not the simpler direct-GEP shape `K6u`'s test
+   uses). Good next pick: directly blocks the one remaining
+   `opptrdiff.*` case.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation. Still not root-caused beyond signature-level bucketing --
+   unchanged from every prior session's framing, not touched this session
+   (scope stayed on `K6v`/`K6w`).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014`
+   tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision --
+   neither revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-
+   manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check -- not exercised this session either, no `check-hlsl-feme-vk`
+   work done (session stayed scoped to `K6v`/`K6w`'s compiler
+   investigation).
+6. **(standing, profiling, ~2-4 hours)** The original "profile one L418
+   1024x1024x2 image-to-image MSAA case" next step -- still not picked up;
+   this is now 9+ sessions overdue.
+
+**Immediate next action for next session:** pick `K6w` (directly blocks
+the one remaining `opptrdiff.*` case, already root-caused down to a
+specific function and the exact generalization needed) for a focused
+fix, or `K6n`-proper if a larger, harder investigation feels like the
+better use of a fresh session.
