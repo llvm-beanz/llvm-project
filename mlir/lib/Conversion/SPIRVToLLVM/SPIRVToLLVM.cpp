@@ -1429,6 +1429,54 @@ public:
   }
 };
 
+/// Converts `spirv.PtrDiff` to pointer-to-integer casts, a subtraction, and
+/// a division by the pointee's byte size -- the op's own spec defines the
+/// result as "the difference of Operand 1 minus Operand 2... in units of
+/// the pointee type", matching C's pointer-subtraction semantics.
+class PtrDiffPattern : public SPIRVToLLVMConversion<spirv::PtrDiffOp> {
+public:
+  using SPIRVToLLVMConversion<spirv::PtrDiffOp>::SPIRVToLLVMConversion;
+
+  LogicalResult
+  matchAndRewrite(spirv::PtrDiffOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto pointerType = cast<spirv::PointerType>(op.getOperand1().getType());
+    std::optional<int64_t> elementSize =
+        cast<spirv::SPIRVType>(pointerType.getPointeeType()).getSizeInBytes();
+    if (!elementSize)
+      return rewriter.notifyMatchFailure(
+          op, "pointee type has no statically known size");
+
+    Type resultType = getTypeConverter()->convertType(op.getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    Type indexType = static_cast<const LLVMTypeConverter *>(getTypeConverter())
+                          ->getIndexType();
+    Value lhs = LLVM::PtrToIntOp::create(rewriter, loc, indexType,
+                                          adaptor.getOperand1());
+    Value rhs = LLVM::PtrToIntOp::create(rewriter, loc, indexType,
+                                          adaptor.getOperand2());
+    Value diff = LLVM::SubOp::create(rewriter, loc, indexType, lhs, rhs);
+    Value elementSizeConst = LLVM::ConstantOp::create(
+        rewriter, loc, indexType,
+        rewriter.getIntegerAttr(indexType, *elementSize));
+    Value scaled = LLVM::SDivOp::create(rewriter, loc, indexType, diff,
+                                         elementSizeConst);
+
+    unsigned indexBitwidth = indexType.getIntOrFloatBitWidth();
+    unsigned resultBitwidth = resultType.getIntOrFloatBitWidth();
+    Value result = scaled;
+    if (resultBitwidth < indexBitwidth)
+      result = LLVM::TruncOp::create(rewriter, loc, resultType, scaled);
+    else if (resultBitwidth > indexBitwidth)
+      result = LLVM::SExtOp::create(rewriter, loc, resultType, scaled);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 /// Converts SPIR-V integer comparisons to llvm.icmp "predicate"
 template <typename SPIRVOp, LLVM::ICmpPredicate predicate>
 class IComparePattern : public SPIRVToLLVMConversion<SPIRVOp> {
@@ -2851,6 +2899,13 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       // Comparison ops
       IComparePattern<spirv::IEqualOp, LLVM::ICmpPredicate::eq>,
       IComparePattern<spirv::INotEqualOp, LLVM::ICmpPredicate::ne>,
+      // `spirv.PtrEqual`/`spirv.PtrNotEqual` compare pointer identity, not
+      // integer value, but lower identically to `IEqualOp`/`INotEqualOp`
+      // once both operands are converted LLVM pointers: a bare `llvm.icmp`
+      // on the (already pointer-typed) operands.
+      IComparePattern<spirv::PtrEqualOp, LLVM::ICmpPredicate::eq>,
+      IComparePattern<spirv::PtrNotEqualOp, LLVM::ICmpPredicate::ne>,
+      PtrDiffPattern,
       FComparePattern<spirv::FOrdEqualOp, LLVM::FCmpPredicate::oeq>,
       FComparePattern<spirv::FOrdGreaterThanOp, LLVM::FCmpPredicate::ogt>,
       FComparePattern<spirv::FOrdGreaterThanEqualOp, LLVM::FCmpPredicate::oge>,

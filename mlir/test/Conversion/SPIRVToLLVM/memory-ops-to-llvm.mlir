@@ -413,3 +413,52 @@ spirv.module Logical GLSL450 {
   // CHECK: llvm.mlir.global private @count(0 : i32) {addr_space = 0 : i32} : i32
   spirv.GlobalVariable @count initial_value(0 : i32) : !spirv.ptr<i32, Private>
 }
+
+//===----------------------------------------------------------------------===//
+// spirv.PtrEqual / spirv.PtrNotEqual
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @ptr_equal
+spirv.func @ptr_equal(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) "None" {
+  // CHECK: llvm.icmp "eq" %{{.*}}, %{{.*}} : !llvm.ptr
+  %0 = spirv.PtrEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+  spirv.Return
+}
+
+// CHECK-LABEL: @ptr_not_equal
+spirv.func @ptr_not_equal(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) "None" {
+  // CHECK: llvm.icmp "ne" %{{.*}}, %{{.*}} : !llvm.ptr
+  %0 = spirv.PtrNotEqual %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.PtrDiff
+//===----------------------------------------------------------------------===//
+
+// A scalar f32 pointee is 4 bytes -- the division by its element size is
+// what distinguishes a pointer difference (counted in whole pointee-sized
+// elements, matching C's pointer-subtraction semantics) from a bare byte
+// offset.
+// CHECK-LABEL: @ptr_diff_scalar
+spirv.func @ptr_diff_scalar(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) "None" {
+  // CHECK: %[[LHS:.*]] = llvm.ptrtoint %{{.*}} : !llvm.ptr to i64
+  // CHECK: %[[RHS:.*]] = llvm.ptrtoint %{{.*}} : !llvm.ptr to i64
+  // CHECK: %[[DIFF:.*]] = llvm.sub %[[LHS]], %[[RHS]] : i64
+  // CHECK: %[[SIZE:.*]] = llvm.mlir.constant(4 : i64) : i64
+  // CHECK: %[[SCALED:.*]] = llvm.sdiv %[[DIFF]], %[[SIZE]] : i64
+  // CHECK: llvm.trunc %[[SCALED]] : i64 to i32
+  %0 = spirv.PtrDiff %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer> -> i32
+  spirv.Return
+}
+
+// The (64-bit, by default) index type already matches a 64-bit result type,
+// so the scaled difference needs neither a further truncation nor a sign
+// extension.
+// CHECK-LABEL: @ptr_diff_wide_result
+spirv.func @ptr_diff_wide_result(%arg0: !spirv.ptr<f32, StorageBuffer>, %arg1: !spirv.ptr<f32, StorageBuffer>) "None" {
+  // CHECK: %[[SCALED:.*]] = llvm.sdiv %{{.*}}, %{{.*}} : i64
+  // CHECK-NEXT: llvm.return
+  %0 = spirv.PtrDiff %arg0, %arg1 : !spirv.ptr<f32, StorageBuffer> -> i64
+  spirv.Return
+}
