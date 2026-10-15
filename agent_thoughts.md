@@ -123502,3 +123502,116 @@ backend bug or an upstream SPIRV-Tools validator limitation. ~half day.
    against `main` before trusting any `check-hlsl-feme-vk` failure as
    new -- not re-checked this session (no `offload-test-suite` work
    done; checkout not re-cloned either, so drift risk unchanged).
+
+# Session: L428(a) root-cause + K6p/K6a closure
+
+## Start here
+
+Device check done first (standing rule): `VK_ICD_FILENAMES` set
+explicitly to the build's `feme_icd.json`, `vulkaninfo --summary`
+confirms `FeMe CPU Vulkan Device`. (Reminder for next session: this
+environment's default ICD is `llvmpipe`, not FeMe -- the env var must
+be set every single time, it is never already active.)
+
+## What got done, in order
+
+1. **`L428(a)` root-caused and closed out as external.** Regenerated
+   `min5.hlsl`'s LLVM IR (had to hand-build the `clang-24 -cc1`
+   invocation via `-###`, since `clang-dxc`'s driver has no
+   `-emit-llvm`/`-S`/`-o` passthrough). Found the real failing SPIR-V
+   shape: a `shufflevector` chain on `OpTypeVectorIdEXT` (16-wide,
+   `SPV_EXT_long_vector`) operands. Built a minimal, hand-written
+   `.spvasm` reproducer with no HLSL/Clang/FeMe involved at all, and
+   confirmed via `spirv-val` directly: the validator reports a
+   "combined (Vector1+Vector2) size of 14" for two genuinely 16-wide
+   operands. 14 = 7+7, where 7 is the raw SPIR-V *id number* of the
+   length operand (`%uint_16`), not the value 16 it resolves to.
+   Proved this isn't an id-bound coincidence: padded the module with
+   10 unrelated ids (bound 14->24, `%uint_16`'s own id held at 7) and
+   the bogus "14" didn't move.
+   - Confirmed no SPIRV-Tools source is vendored in llvm-project
+     (`llvm/tools/spirv-tools/CMakeLists.txt` is only a thin
+     test-harness hook); the real `spirv-val` is a separate system
+     package (`SPIRV-Tools v2026.1`, upstream `KhronosGroup/
+     SPIRV-Tools`). **Nothing in this repo can fix this.**
+   - Updated `Roadmap.md`'s `L428(a)` row and `VulkanCTSReport.md`
+     with the full finding, committed (`a316167156fc`). Repro
+     preserved at `/tmp/l428a/min.spvasm` for a future upstream bug
+     report against `KhronosGroup/SPIRV-Tools`.
+
+2. **`K6n` turned out already closed** -- re-checked the roadmap
+   before doing any new work (the prior next-steps text was stale).
+   `K6n` and all of `K6q`/`K6r`/`K6s`/`K6o`/`K6t`-`K6z` were already
+   struck through by earlier sessions. Only `K6p` (parent: `K6a`,
+   the whole `variablePointers` bundle) was still open, and its own
+   last update said "K6u is the only remaining residual" -- but K6u's
+   own children were by now also all closed.
+
+3. **Verified and closed `K6p`/`K6a`.** Generated the current
+   4464-case `*variable_pointer*` list correctly this time (the right
+   flag is `-n`/`--deqp-case=`, not `--deqp-case-filter=` -- wasted a
+   few minutes on the wrong flag name before checking `--help`).
+   Flipped both `EntryPoints.cpp` feature bits to `VK_TRUE`
+   (transiently, then made permanent once justified), rebuilt, ran
+   the full sweep via `run_vulkan_cts.py`.
+   - Result: **966 Pass / 3492 NotSupported / 6 Fail** (all verified
+     solo).
+   - All 6 failures: same `feme-cpu-simdize` "groupshared global ...
+     feeds an unsupported user ... (roadmap milestone 9 deviation)"
+     diagnostic -- the already-known, already out-of-scope
+     CFG-linearization/groupshared-canonicalization gap. Not new.
+   - **Closed `K6p` and `K6a`** in `Roadmap.md`. Made the feature-bit
+     flip permanent, fixed the one now-stale unit test
+     (`PhysicalDeviceInfoTest.cpp` asserted `VK_FALSE`), reconfirmed
+     `check-feme` at 3760/3768 (same 1 pre-existing unrelated
+     failure as always). Updated `Vulkan14FeatureInventory.md`'s two
+     `variablePointers*` rows to `yes`.
+
+## Wins now visible
+
+- `variablePointers`/`variablePointersStorageBuffer` are real,
+  advertised, CTS-verified features now -- not just a flipped bit,
+  a bundle whose entire multi-session chain of sub-bugs (K6n through
+  K6z) is confirmed fully closed, with the one remaining gap
+  correctly attributed to milestone-9, not K6.
+- `L428(a)` is fully understood and documented even though it can't
+  be fixed here -- the next session (or a human) can file the
+  upstream SPIRV-Tools bug directly from the preserved repro, no
+  re-investigation needed.
+
+## Mistakes worth flagging for next time
+
+- Spent time on `deqp-vk --deqp-case-filter=...` before checking
+  `--help`; the real flag is `-n`/`--deqp-case=`. Worth remembering
+  directly rather than re-discovering each session.
+- The roadmap's own "largest remaining bucket, untouched for many
+  sessions" framing in prior next-steps text was stale twice in a
+  row this session (`K6n`, then `K6p`'s own "K6u is the only
+  residual" line). **Always re-read the actual row text fresh before
+  trusting a prior session's framing of what's still open** -- this
+  roadmap changes quickly and next-steps lists lag behind it.
+
+## Next steps, ranked
+
+1. **(~2-4 hours)** File the upstream `KhronosGroup/SPIRV-Tools` bug
+   for `L428(a)`'s `OpTypeVectorIdEXT`-shuffle id/value confusion,
+   using the preserved `/tmp/l428a/min.spvasm` repro + the id-padding
+   control test as supporting evidence. Not urgent, but low-effort
+   and leaves no loose end.
+2. **(~1-2 days)** The milestone-9 CFG-linearization/
+   groupshared-canonicalization gap itself -- now the *sole* remaining
+   blocker on 6+ confirmed CTS cases across multiple K6 sub-buckets.
+   Worth promoting from "known, out of scope" to an actual scoped
+   roadmap item of its own if no such row already exists under
+   milestone 9 -- check before adding to avoid a duplicate.
+3. **(~2-4 hours, low priority, change of pace)**
+   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait
+   flake -- still not picked up in several sessions now.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session either.
+5. **(standing)** Always diff `offload-test-suite`'s `feme` branch
+   against `main` before trusting any `check-hlsl-feme-vk` failure as
+   new -- not re-checked this session (no `offload-test-suite` work
+   done, checkout not re-cloned).
