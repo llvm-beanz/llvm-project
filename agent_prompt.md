@@ -67,32 +67,32 @@ suggested the next steps:
 
 1. **(~1-2 days)** `K6q`: 2 cases, handle-level `OpPhi`/`OpSelect` merge
    (merging raw resource *handles* before `getpointer` is called, not pointers
-   already derived from one). Deeper and architecturally distinct from this
-   session's fix -- `hasOnlySupportedUses` (the handle-level checker) would need
-   the `DescriptorIndex` itself to become phi-mergeable before any GEP/offset is
-   known. Smallest case count of the three new buckets but possibly the hardest.
-2. **(~half day)** `K6r`: 2 cases, storing a handle-derived pointer as a store's
-   *value* operand (not its pointer operand) -- `hasOnlySupportedPointerUses`
-   only checks the pointer-operand position today. Likely the smallest, most
-   contained of the three new buckets -- good first pick for a fast win.
-3. **(~1 day)** `K6s`: 5 cases, frag/tessc/tesse result-correctness bug --
+   already derived from one). Still not attempted -- `hasOnlySupportedUses` (the
+   handle-level checker, distinct from the pointer-level checker this session
+   and K6n both touched) would need the `DescriptorIndex` itself to become
+   phi-mergeable before any GEP/offset is known. Likely the hardest of the three
+   remaining small buckets.
+2. **(~1 day)** `K6s`: 5 cases, frag/tessc/tesse result-correctness bug --
    pipeline builds and runs, output is wrong, zero normalization rejection.
-   Needs its own investigation (not a legalization gap at all); start with a
-   minimal single-buffer frag repro and CPU-backend tracing.
-4. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: 14-15 cases,
+   Needs its own investigation (not a legalization gap); start with a minimal
+   single-buffer frag repro and `feme-render`/CPU-backend tracing. Now the
+   largest remaining `variablePointers` residual bucket.
+3. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: ~14-15 cases,
    `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely
-   undefined in MLIR's SPIR-V dialect TableGen. Not attempted again this session
-   (scope stayed on `K6n`).
-5. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+   undefined in MLIR's SPIR-V dialect TableGen. Not attempted this session
+   (scope stayed on `K6r`).
+4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
-6. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-7. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6n`'s compiler fix).
+   stayed scoped to `K6r`'s compiler fix).
 
-**Immediate next action for next session:** pick `K6r` (2 cases, single-function
-fix in `hasOnlySupportedPointerUses`'s store-operand check -- smallest, most
-contained of the three new buckets) for a fast win, or `K6s` if a correctness
-bug feels more interesting than another legalization gap.
+**Immediate next action for next session:** pick `K6s` (now the largest
+remaining `variablePointers` residual bucket, 5 cases, a genuine
+result-correctness bug rather than another legalization gap) and start with a
+minimal single-buffer `writes_single_buffer_frag`-style repro traced through
+`feme-render`, or pick `K6q` (2 cases, handle-level phi/select merge) if a
+smaller, more contained legalization-style fix is preferred first.
