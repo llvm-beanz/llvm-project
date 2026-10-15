@@ -3692,3 +3692,73 @@ description and CTS results.
 -- `variablePointers`/`variablePointersStorageBuffer` remain
 unsupported/`VK_FALSE`; no feature bit flipped permanently this
 session.
+
+## `opptrdiff` residual: 2 of the remaining 3 cases root-caused and fixed (`K6x`/`K6y`)
+
+**Starting point:** 3 `opptrdiff.*` cases left cleanly bucketed only by
+error-signature class, not individually root-caused:
+`ssbo_comparisons_diff`/`wg_comparisons_diff` (CFG-linearization
+`"reconvergence block does not have exactly two predecessors"`) and
+`variable_pointers_vars_wg_diff` (`feme-cpu-simdize` groupshared-
+canonicalization limitation).
+
+- Root-caused the shared `ssbo_comparisons_diff`/`wg_comparisons_diff`
+  signature to a concrete CFG shape: a divergent if/else diamond
+  immediately upstream of a loop, with both arms merging directly into
+  the loop header itself (no dedicated preheader), giving the header 3
+  predecessors -- a shape `DiamondFlattener::validate`'s
+  `R->hasNPredecessors(2)` check rejects outright, with no special case
+  for "one of these 3 predecessors is really this same block's own loop
+  backedge."
+- **Fixed (`K6x`)** by adding `LoopSimplifyPass` to the CPU backend
+  pipeline (`Pipeline.cpp`) immediately before `LinearizePass`, rather
+  than teaching `DiamondFlattener` itself to special-case loop headers.
+  New test: `Linearize/diamond-merges-into-loop-header.ll`.
+- This fix let `wg_comparisons_diff` progress further and exposed a new,
+  previously-unreachable crash: an `"Invalid cast!"` assertion in
+  `CastInst::Create`, from `FunctionWidener::widenElementwise`'s generic
+  `CastInst` handling in `SIMDize.cpp`, reading a stale scalar value out
+  of the `Widened` cache where a `<W x T>` vector was expected.
+- Root-caused to two distinct bugs in `FunctionWidener::
+  widenGroupSharedGEP`: (1) a nested groupshared GEP's own base pointer
+  (itself another, already-widened GEP) was read directly from the old
+  function rather than substituted via the `Widened` cache, building an
+  illegal cross-function `Value*` reference; (2) even after fixing (1),
+  a GEP dispatched here because its *result* was judged divergent can
+  still have every entry of its own index list stay scalar, so the
+  rewritten GEP can legitimately come back scalar-typed -- caching that
+  directly into `Widened` (whose `getWidened` accessor documents an
+  always-vector-typed invariant) corrupted a later lookup.
+- **Fixed (`K6y`)**: substitute a widened base via the `Widened` cache
+  when present; route a still-scalar rewritten GEP through `getWidened`
+  itself before caching. New test:
+  `simdize-groupshared-nested-uniform-index-divergent-base.ll`,
+  confirmed to crash (`SIGABRT`) without the fix and pass cleanly with
+  it.
+- CTS (`opptrdiff.*` 5-case sweep, feature bits transiently flipped to
+  `VK_TRUE` for measurement only, not committed): **3/5 now pass**
+  (`ssbo_comparisons_diff`, `variable_pointers_vars_ssbo_diff`,
+  `variable_pointers_vars_ssbo_2_diff`), up from 2/5 before this
+  session. The remaining 2 (`wg_comparisons_diff`,
+  `variable_pointers_vars_wg_diff`) now fail cleanly -- no crashes -- on
+  a separate, pre-existing, already-tracked `rewriteGroupSharedGlobals`
+  groupshared-canonicalization diagnostic (milestone 9 scope), confirmed
+  via direct error-text inspection of both runs.
+
+**No regression:** `variablePointers`/`variablePointersStorageBuffer`
+remain `VK_FALSE` in the committed configuration; reverted the temporary
+flip (via `git checkout --`, confirmed zero outstanding diff in
+`EntryPoints.cpp`) and re-confirmed `check-feme` passes clean.
+
+Full `check-feme` target (both fixes in place, feature flags `VK_FALSE`):
+3755/3762 passed, 7 unsupported (expected), 0 failures.
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` this session, per the standing "every session, every time"
+instruction.
+
+`Roadmap.md`: new `K6x`/`K6y` rows added, both struck through (closed)
+with fix descriptions and CTS results, split off from `K6w`.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain
+unsupported/`VK_FALSE`; no feature bit flipped permanently this session.
