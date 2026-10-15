@@ -3977,3 +3977,129 @@ whether they share one single remaining shape or several distinct ones;
 `K6n`-proper (the largest remaining `variablePointers` bucket) remains
 entirely untouched for many sessions and is still the single largest
 open item in this file.
+
+## `L425` fixed: `MergeVisited`/`ResolvedBlocks` false-conflict bug in `DiamondFlattener`, 13 of the 17 remaining attributed `check-hlsl-feme-vk` failures resolved (roadmap `L425`, closed; `L425(a)` opened for the remaining 4)
+
+Root-caused via `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DEBUG_LINEARIZE_TRACE`
+instrumented tracing of `Feature/HLSLLib/AllMemoryBarrierWithGroupSync.test`'s
+standalone repro (captured in a prior session, confirmed to reproduce
+standalone via `feme-opt --llvm -passes=feme-cpu-linearize`). Despite
+sharing `K6z`'s own diagnostic text (`"loop at '' has an internal branch
+in a body shape this milestone does not yet lower"`), this is a genuinely
+different bug from `K6z`'s nested-sibling-cycle gap.
+
+**Root cause**: `LoopLinearizer::linearizeCycle` runs an early
+"ordinary nested diamond" fixed-point loop (via
+`DiamondFlattener::flattenLoopBodyDiamond`) *before* its own "fully
+uniform loop with body mask ops" handling (via
+`DiamondFlattener::flattenLoopBodyRegion`). In the repro, the fixed-point
+loop successfully flattens an inner, divergent diamond inside the loop
+body (`if (GTID.x == I)`, divergent because it compares a per-lane
+thread-ID value against the uniform loop induction variable), inserting
+that diamond's blocks into the shared, whole-function `MergeVisited` set
+as an unavoidable side effect of `validate()`'s walk. `MergeVisited` is
+deliberately never cleared and deliberately shared across sequentially-
+constructed `DiamondFlattener` instances (per `L375`'s own design) to
+catch genuine double-claim conflicts between still-pending candidates.
+The *later*, separate `flattenLoopBodyRegion` call -- needed because the
+loop's own exit check and backedge decision are fused into a single
+`StructurizeCFG`-style `Flow` dispatch block -- must walk the *entire*
+loop body region to reach its own `Latch`, which structurally still
+contains the diamond already resolved by the earlier call. `validate()`
+used to see those blocks already present in `MergeVisited` and spuriously
+diagnose the walk-through as a conflict, even though the diamond was
+never contested: it was already fully committed by an earlier,
+independent, already-*returned* call, with no risk of double-mutation.
+
+**Fix**: added a new `ResolvedBlocks` set (same whole-function lifetime
+and sharing pattern as `MergeVisited`) recording every block committed by
+a fully-successful top-level `flattenLoopBodyDiamond`/`flattenLoopBodyRegion`
+call. `validate()`'s conflict check becomes "fail only if a block is seen
+in `MergeVisited` but *not yet* in `ResolvedBlocks`" -- this preserves the
+original double-claim protection for any still-in-progress/uncommitted
+candidate (the genuine `L375` danger, e.g. two sibling diamond arms both
+reaching into the same shared relay block within one still-active
+`validate()` walk) while permitting safe pass-through of a diamond some
+*earlier*, already-finished call fully resolved. A per-call-local
+`LastRegionVisited` set tracks exactly which blocks that specific call
+newly visited, folded into `ResolvedBlocks` only once that call's own
+`flatten()` successfully commits.
+
+**New regression test**: `loop-fused-exit-backedge-flow-block-with-
+flattened-inner-diamond.ll`, reduced from the `AllMemoryBarrierWithGroupSync.test`
+repro down to its essential shape (a uniform loop whose exit/backedge
+decision is fused into one `Flow`-style dispatch block, with a divergent
+inner diamond in its body gating a `feme.cpu.resource.store.raw.i32`
+call). Confirmed to fail pre-fix (`git stash`) and pass post-fix. Unlike
+`K6z`'s own regression test (whose nested cycle had no masked operation
+of its own, so its assertions were purely structural), this test also
+exercises genuine mask narrowing through the already-resolved diamond
+(the resource-store call's mask is narrowed from `i1 true` to a real
+per-lane `%eq`-derived select chain), confirming the fix's pass-through
+correctly re-threads masking rather than silently skipping it.
+
+**Verification**:
+- `FeMeTransformsCPUTests`: 633/633 Pass (no regressions).
+- Full `ninja check-feme`: 3757/3757 Pass (7 Unsupported, as before), 0
+  Fail -- no regressions (1 net-new test).
+- `check-hlsl-feme-vk` re-swept (after `cmake .` reconfigure to pick up
+  current `offload-test-suite` `feme` branch state): 792 total, down to 7
+  Failed from 17 (`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` both exported;
+  `vulkaninfo --summary | grep deviceName` reconfirmed `FeMe CPU Vulkan
+  Device` with the ICD env var explicitly set). **13 of the 17 cases
+  previously attributed to this residual now Pass**: all 10 `WaveOps/
+  {WaveActiveMax,WaveActiveMin}.{fp16,fp32,int32}`/
+  `WaveReadLaneFirst.{fp16,fp32,int16,int32}` cases,
+  `Feature/ResourceControlFlow/licm-hoist-load`,
+  `Feature/Textures/SRVToUAV.array`, `UseCase/particle-life`.
+  - The remaining 4 (`Feature/HLSLLib/{AllMemoryBarrierWithGroupSync,
+    DeviceMemoryBarrierWithGroupSync,InterlockedCompareExchange.resources.32,
+    InterlockedExchange.resources.32}`) no longer hit this diagnostic at
+    all -- `feme-cpu-linearize` now succeeds on every one of them. They
+    instead now reach and fail at a later, separate,
+    already-extensively-tracked `feme-cpu-wrap-entry` "barrier inside
+    non-linear control flow (a surviving branch not part of a supported
+    loop); region splitting only supports a straight-line wave body or a
+    single uniform loop" milestone-9 diagnostic (prior history: `H72`,
+    `H94b`, `H124e`, `H154`, `H155`, `H161`, `L201(e)`). This is correctly
+    unblocked-but-not-fixed by this session's change -- tracked as new
+    roadmap row `L425(a)`, not yet individually root-caused.
+  - `InterlockedAdd.resources.32.test` (genuine numeric mismatch) and
+    `InterlockedCompareStore.resources.32.test` (itself now also hitting
+    the same `feme-cpu-wrap-entry` diagnostic as the 4 above, consistent
+    with its pre-existing `H154`/`H155`-family tracking) remain failing,
+    as expected -- both were already known, separately-tracked issues
+    predating `L425`, not part of this cluster's own 17.
+  - `Basic/Mandelbrot.test` failed once in the full-suite parallel run
+    with `gpu-exec: error: Failed to wait on Semaphore. (VkResult = 2)`
+    (a timeout, not a correctness failure); re-ran standalone 3/3 times
+    with 100% Pass -- a pre-existing, contention-dependent flake under
+    parallel load (same class of issue as `L421`'s own
+    `QueueExecutor`/`DeviceMemory` race), not a regression from this
+    session's fix and not investigated further this session.
+- Targeted `VK-GL-CTS` regression check (same groups `K6z`'s own session
+  sampled, since this fix touches the same `DiamondFlattener`/
+  `LoopLinearizer` code paths):
+  - `dEQP-VK.glsl.loops.*` (624 cases): 606/624 Pass, unchanged from
+    `K6z`'s own post-fix number -- 0 regressions, 0 newly-fixed (expected;
+    this fix's specific false-conflict shape doesn't happen to be hit by
+    this CTS group's own loop shapes).
+  - `dEQP-VK.glsl.demote.*` (30 cases): 27/30 Pass, unchanged -- 0
+    regressions (expected; no discard/demote involved in this fix's own
+    shape).
+
+**No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed** -- a pure internal `feme-cpu-linearize` compiler fix, no Vulkan
+feature or extension surface changed.
+
+`Roadmap.md`: `L425` struck through (done, with the precise 13/17 outcome
+recorded); new `L425(a)` row opened to scope the 4 cases now blocked on
+the separate, pre-existing `feme-cpu-wrap-entry` milestone-9 limitation.
+
+**Next steps**: `L425(a)` (root-cause the 4 `feme-cpu-wrap-entry`-blocked
+cases); `K6n`-proper (the largest remaining `variablePointers` bucket)
+remains entirely untouched for many sessions and is still the single
+largest open item in this file; the `Basic/Mandelbrot.test` contention
+flake noted above is a candidate for a future session's change of pace,
+following the same methodology `L421` used for its own
+`QueueExecutor`/`DeviceMemory` race.
