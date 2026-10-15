@@ -52,6 +52,7 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/Scalar/JumpThreading.h"
+#include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/Threading.h"
@@ -484,6 +485,34 @@ Expected<PipelineResult> runPipeline(Module &M,
       return Error::success();
     };
     if (Error E = runAndCheck("lowering resources for", ResourceLoweringPass()))
+      return std::move(E);
+    // Roadmap K6x: `DiamondFlattener` (inside `LinearizePass` below)
+    // assumes every one of a loop header's "entry" edges (i.e. every
+    // predecessor outside the loop's own cycle) has already been merged
+    // into a single preheader before it ever runs -- its own
+    // `R->hasNPredecessors(2)` check has no notion of "this reconvergence
+    // block is also a cycle header, so one of its predecessors is really
+    // a backedge, not a second divergent arm." `StructurizeCFG`/earlier
+    // `Normalize`-group passes do not guarantee this (an `if`/`else`
+    // immediately selecting a loop's initial per-iteration values, with
+    // no intervening relay block, merges its two arms directly into the
+    // loop header itself), so an otherwise-ordinary two-arm diamond whose
+    // reconvergence point happens to be a loop header is misdiagnosed as
+    // an unsupported three-predecessor merge
+    // (`dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrdiff.
+    // ssbo_comparisons_diff`/`wg_comparisons_diff`). Running the
+    // standard, battle-tested `LoopSimplifyPass` here restores loop-
+    // simplify form (in particular, a single dedicated preheader per
+    // loop) via `SplitBlockPredecessors`, which correctly reconstructs
+    // any `phi` in the header that disagreed across the redirected
+    // predecessors as a new, equivalent `phi` in the synthesized
+    // preheader -- turning this exact shape back into the plain
+    // two-predecessor diamond merge (at the new preheader, not the loop
+    // header) `DiamondFlattener` already handles, with no change to its
+    // own logic needed.
+    if (Error E = runAndCheck("simplifying loops for",
+                               createModuleToFunctionPassAdaptor(
+                                   LoopSimplifyPass())))
       return std::move(E);
     // Debug aid: with `FEME_DUMP_IR_PRELINEARIZE` set in the environment,
     // print the module right before `LinearizePass` runs. Roadmap L200
