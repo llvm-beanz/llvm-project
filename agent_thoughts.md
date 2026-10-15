@@ -122499,3 +122499,44 @@ Also found and fixed a real, previously-latent bug in `mergeIntoCompare` (missin
 6. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this is now 7+ sessions overdue and worth prioritizing soon purely because it keeps losing to compiler-bucket work every time.
 
 **Immediate next action for next session:** pick `K6u` (now the only remaining *known, bucketed* `opptrdiff`/`variablePointers` legalization gap -- smaller and more contained than `K6n`-proper) for a focused fix, or finally break the L418 profiling task out of its 7-session backlog if a change of pace is preferred.
+
+# Agent thoughts: K6u fix -- self-referential loop-carried pointer-PHI rewrite deadlock
+
+**Next action for the next session:** pick `K6n`-proper (the large, still-unattempted CPU-backend resource-handle-normalization bucket) or finally break the L418 profiling task out of its 8-session backlog.
+
+## What I did, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (standing check, start of session).
+2. Re-read the prior session's exact `K6u` root-cause writeup (`Roadmap.md` line 1406) and re-traced `mergeIntoPhi`/`PointerMergeState` in `SPIRVResourceLowering.cpp` by hand before writing any code, to confirm the deadlock mechanism and design a fix on paper first.
+3. Implemented the fix: `isPhiSelfReferentialBackedge` helper (walks a GEP chain back to its root, checks if that root is the phi itself), a `RewriteStarted` reentrancy-guard field on `PointerMergeState`, and changed `mergeIntoPhi`'s gating from "wait for every incoming slot" to "wait for every *non-self-referential* incoming slot," setting the guard immediately before the now-eager rewrite recursion.
+4. Wrote a new unit test, `LowersPtrDiffOnLoopCarriedPointerBackedgeToOffsetSubtraction`: a genuine 2-block loop (not the straight-line/cross-branch shapes every prior phi-merge test used) with a self-referential pointer-PHI backedge feeding `OpPtrDiff`, matching the real CTS shape.
+5. Built `FeMeTransformsCPUTests`: 631/631 pass (630 pre-existing + 1 new), including the existing non-cyclic multi-chain phi-merge test (`LowersPhiMergedPointerFromDifferentHandlesToSharedRawAccess`) that must not regress.
+6. Built `feme_vulkan`, temporarily flipped `variablePointers`/`variablePointersStorageBuffer` to `VK_TRUE` (standing session convention for CTS verification), ran both targeted CTS cases individually first (`variable_pointers_vars_ssbo_diff` passes; `_ssbo_2_diff` still fails but on a different, unrelated signature), then the full 5-case `opptrdiff.*` sweep to confirm no new undiagnosed residual.
+7. Reverted the temporary flag flip (`git checkout feme/lib/Vulkan/EntryPoints.cpp`), rebuilt, and re-ran all 5 cases to confirm clean revert: all 5 report `NotSupported` again, zero change from before this session.
+8. Ran the full `check-feme` target: 3751/3758 pass, 7 expected-unsupported, 0 failures -- zero regressions.
+9. Updated `Roadmap.md` (struck through `K6u`, closed) and appended a new `VulkanCTSReport.md` section with the fix description and CTS results. Checked `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` -- no change needed, feature bits stay unsupported.
+10. Committed in two pieces: code fix + test, then docs.
+
+## What actually shipped (visible win)
+
+- `variable_pointers_vars_ssbo_diff` now produces the **correct** result (`-33`) instead of garbage (`920402036`) when the feature is enabled -- a real correctness fix for a previously-silent miscompilation, not just a cleaner rejection.
+- `mergeIntoPhi` can now resolve any loop-carried pointer PHI whose backedge is a self-referential GEP chain, closing a whole class of latent bug (not just the two `opptrdiff` cases that happened to surface it) -- any future CTS case hitting this same shape is now handled for free.
+- Zero regressions: `check-feme` 3751/3758 pass, `FeMeTransformsCPUTests` 631/631 pass, all 5 `opptrdiff.*` cases still report `NotSupported` in the committed (default) configuration.
+- `variable_pointers_vars_ssbo_2_diff` surfaced a brand-new, previously-masked failure signature (`feme-cpu-linearize: ... has a mask-affecting operation in its body but no recognized uniform exit check`) once the phi-deadlock bug no longer hid it -- documented, not chased down this session.
+
+## The real lesson this session learned
+
+1. **Fixing a deadlock can expose a second bug underneath it, just like fixing a false rejection did last session.** This is the same pattern as the prior session's negative-GEP-offset fix uncovering the K6u deadlock itself: always re-run and check the *actual* new failure signature after a fix, since "still fails" can hide real progress.
+2. **The fix design from the prior session's trace-through was correct as written** -- no surprises during implementation, confirming that doing the full manual trace on paper *before* touching code (rather than iterating via trial-and-error edits) paid off here. The only wrinkle was realizing the reentrancy guard must be set *before* the recursive call, not after, since the recursion reaches the same call frame's own logic again before returning.
+3. **A genuine 2-block-loop unit test is a meaningfully different shape from every other phi-merge test in the file** -- all prior tests used diamond/branch merges, none had an actual backedge. Worth remembering as a category of shape to check for when writing tests for any future CFG-sensitive fix in this pass.
+
+## Next steps
+
+1. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers` bucket, CPU-backend resource-handle-normalization architectural limitation. Still not root-caused beyond signature-level bucketing -- unchanged from every prior session's framing, not touched this session (scope stayed on `K6u`).
+2. **(~half day, newly discovered)** `variable_pointers_vars_ssbo_2_diff`'s now-exposed `feme-cpu-linearize` failure (`"... has a mask-affecting operation in its body but no recognized uniform exit check"`) -- a milestone-9-scope CFG-linearization gap, distinct from the already-closed `reconvergence block` signature (`K6s`) and the `K6u` deadlock this session fixed. Not yet root-caused past the printed error text; worth a focused look since it's the only remaining undiagnosed residual in the `opptrdiff.*` bucket.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6u`'s compiler fix).
+6. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this is now 8+ sessions overdue.
+
+**Immediate next action for next session:** pick `K6n`-proper (now the only remaining large, unattempted `variablePointers` bucket -- `K6o`/`K6p`/`K6q`/`K6r`/`K6s`/`K6t`/`K6u` are all closed) and start by root-causing one representative case down to its specific resource-handle-normalization code path, or pick the newly-discovered `variable_pointers_vars_ssbo_2_diff` linearize gap (smaller, already has a printed error signature to start from) for a change of pace, or finally break the L418 profiling task out of its 8-session backlog.
