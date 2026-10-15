@@ -122457,3 +122457,45 @@ Also found and fixed a real, previously-latent bug in `mergeIntoCompare` (missin
 5. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step from several sessions ago -- still not picked up; every session since has had an open compiler bucket that took priority.
 
 **Immediate next action for next session:** with `K6n`, `K6o`, `K6p`, `K6q`, `K6r`, `K6s`, and now `K6t` all closed, the `variablePointers` bundle (`K6a`) has no remaining *known, bucketed* legalization gap left except the `opptrdiff.*` follow-up above -- pick that first (it's small and already partially root-caused), then reassess whether `variablePointers`/`variablePointersStorageBuffer` can finally flip to `VK_TRUE` for real, or whether the L418 profiling next step (long overdue) is a better use of a fresh session.
+
+# Agent thoughts: opptrdiff triage -- one false-rejection fixed, one new bug found (K6u)
+
+**Next action for the next session:** pick `K6u` (restructure `mergeIntoPhi` to resolve a self-referential loop-carried-pointer backedge eagerly) or `K6n`-proper (the deeper CPU-backend architectural bucket). Both are real, both are hard; `K6u` is smaller and more contained.
+
+## What I did, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (standing check, start of session).
+2. Took the prior session's exact follow-up: root-cause the 2 of 5 `opptrdiff.*` CTS cases that weren't yet attributable to a known bucket (`variable_pointers_vars_ssbo_diff`, `variable_pointers_vars_ssbo_2_diff`).
+3. Used `FEME_CPU_LOG_RESOURCE_NORMALIZATION=1` (a diagnostic flagged-but-untried by the prior session) -- got the exact rejection line in one shot instead of a manual IR trace: `"getelementptr with an unresolvable byte offset: %13 = getelementptr i32, ptr addrspace(11) %spirv_var_5.0, i32 -1"`.
+4. Read `hasResolvableGEPByteOffset`/`computePointerOffset`: the function rejected *any* negative constant GEP offset outright, not just an unresolvable negative *variable* one. A `-1` index GEP is fully resolvable at compile time regardless of sign.
+5. Fixed both functions: dropped the constant-offset negativity check, switched `computePointerOffset`'s constant-term materialization from `getZExtValue()` to a sign-extending `APInt::sextOrTrunc(64)` (zero-extension would have produced a huge garbage value for a true negative offset).
+6. Built `feme_vulkan`, reran both CTS cases: normalization now succeeds (no rejection logged) -- **but both still fail**, now with a wrong computed value, not a rejection.
+7. Didn't stop at "still fails, move on" -- dumped `FEME_DUMP_IR_PRENORM` again and traced why: both cases' shaders keep a forward and a backward SSBO-pointer iterator in `Private`-storage globals, each GEP'd by one element per loop iteration, feeding `OpPtrDiff`. `hasOnlySupportedPointerUses`'s *validation* phase has a `Visited`-set cycle breaker for exactly this self-referential phi/GEP loop shape, so it accepts it -- but `mergeIntoPhi`'s *rewrite* phase has no equivalent: it only recurses past a phi once every incoming edge's value is already resolved, and the loop backedge's own GEP can only resolve by first recursing into the phi. Permanent deadlock -- confirmed via the dump (the merged offset phi literally shows `undef` on the backedge).
+8. Split this into two roadmap-accurate pieces rather than filing one vague "still failing" note: the negative-offset bug is genuinely fixed (K6p row updated); the deadlock is a new, separate, not-yet-fixed bug (new row, `K6u`).
+9. Added an isolated (non-cyclic) unit test proving the negative-offset fix is correct on its own, independent of the separate loop-deadlock bug: `LowersPtrDiffThroughNegativeConstantGEPOffsetToOffsetSubtraction`.
+10. Ran `FeMeTransformsCPUTests` (630/630 pass), then `check-feme` -- first run failed 1 test (`PhysicalDeviceProperties2Test.PreVulkan11Promotion...`) because I'd forgotten the standing temporary `variablePointers=VK_TRUE` flag flip from measurement was still in place; reverted it (`git checkout feme/lib/Vulkan/EntryPoints.cpp`), rebuilt, reran: 3750/3757 pass, 0 failed, 7 expected-unsupported.
+11. Re-ran all 5 `opptrdiff.*` cases in the final (`VK_FALSE`) configuration: all 5 report `NotSupported`, confirming zero behavior change in the committed state.
+12. Committed the code fix + its test as one commit, docs as a separate commit.
+
+## What actually shipped (visible win)
+
+- `hasResolvableGEPByteOffset`/`computePointerOffset` in `SPIRVResourceLowering.cpp` now correctly accept and materialize a negative-constant GEP offset (e.g. `getelementptr i32, ptr %p, i32 -1`) instead of rejecting it outright -- a real, independently-useful correctness fix, verified by a new non-cyclic unit test.
+- Full 5-case `opptrdiff.*` bucket is now **completely triaged by individual root cause** (no more "fails without a printed diagnostic" unknowns): 2 CFG-linearization (pre-existing), 1 groupshared-simdize (pre-existing), 2 the new negative-offset bug (fixed) stacked with the new loop-phi-deadlock bug (not yet fixed, tracked as `K6u`).
+- Zero regressions: `check-feme` 3750/3757 pass, `FeMeTransformsCPUTests` 630/630 pass, all 5 CTS cases still `NotSupported` in the default (committed) configuration.
+
+## The real lesson this session learned
+
+1. **A "fails to build" diagnostic isn't the end of the investigation just because it goes away.** Fixing the surface rejection (`hasResolvableGEPByteOffset`) let the pipeline *execute* for the first time on these two cases -- which surfaced a second, deeper, previously entirely-latent bug (`mergeIntoPhi`'s rewrite-phase deadlock) that the rejection had been silently masking. Always re-run after a fix and check the *actual* outcome, not just "does it still fail the same way."
+2. **Validation-phase and rewrite-phase cycle-handling are not automatically symmetric.** `hasOnlySupportedPointerUses`'s `Visited`-set guard answers "is this structurally supported?" correctly for a self-referential loop-carried pointer PHI, but `mergeIntoPhi`'s rewrite logic (gate-until-all-edges-known, then recurse) has a completely different, incompatible control-flow shape that can't resolve the same cycle. A pass that both validates and rewrites needs to audit both halves for cycle-safety independently, not just reuse "the validator accepted it" as proof the rewriter will succeed.
+3. **The previously-untried `FEME_CPU_LOG_RESOURCE_NORMALIZATION` diagnostic (flagged by name but not used in the prior session) was strictly faster than the manual IR trace it replaced** -- reached for it first this time, got the exact answer in one run instead of reverse-engineering the accept/reject logic by hand.
+
+## Next steps
+
+1. **(~1-2 days)** `K6u`: restructure `mergeIntoPhi` to resolve a self-referential loop-carried-pointer backedge eagerly -- e.g. create the `descidx`/`offset` phis up front (already done today) and recurse into a backedge's own GEP using those in-progress phi nodes themselves as its `Offset`/`DescriptorIndex` inputs (a legal forward SSA reference, since the phis already exist as instructions even before every incoming value is filled), rather than requiring every edge resolved before any recursion happens. Needs careful design around ordering (the GEP's own resolved value must be computed and fed back into the *same* phi's backedge slot without re-entering the same merge state) and a new unit test exercising a genuine 2-block loop (not just the straight-line/cross-branch shapes every existing phi-merge test uses).
+2. **(~1-2 days)** `K6n`-proper: the large majority CPU-backend resource-handle-normalization architectural limitation. Still not root-caused beyond signature-level bucketing -- unchanged from every prior session's framing, not touched this session (scope stayed on `opptrdiff`).
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to the `opptrdiff` compiler fix).
+6. **(standing, profiling, ~2-4 hours)** The original "profile one L418 1024x1024x2 image-to-image MSAA case" next step -- still not picked up; this is now 7+ sessions overdue and worth prioritizing soon purely because it keeps losing to compiler-bucket work every time.
+
+**Immediate next action for next session:** pick `K6u` (now the only remaining *known, bucketed* `opptrdiff`/`variablePointers` legalization gap -- smaller and more contained than `K6n`-proper) for a focused fix, or finally break the L418 profiling task out of its 7-session backlog if a change of pace is preferred.
