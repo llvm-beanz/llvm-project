@@ -65,31 +65,33 @@ The last session stalled out. Any intermediate states are stoerd in a git stash.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6q`: 2 cases, handle-level `OpPhi`/`OpSelect` merge
-   (merging raw resource *handles* before `getpointer` is called). Still not
-   attempted -- likely the hardest of the three small buckets since the
-   `DescriptorIndex` itself would need to become phi-mergeable.
+1. **(~1-2 days)** `K6n`-proper: ~124 cases, the largest remaining
+   `variablePointers` bucket, CPU-backend resource-handle-normalization
+   architectural limitation. Still not root-caused beyond signature-level
+   bucketing -- `K6o`/`K6q`/`K6r`/`K6s` have all now been split off and closed,
+   leaving only the original core bucket. Likely the deepest, hardest-to-fix
+   piece of the whole feature; worth its own investigation session before
+   committing to an approach, possibly needing a runtime dispatch mechanism
+   rather than a lowering-pattern fix.
 2. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: ~14-15 cases,
    `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely
    undefined in MLIR's SPIR-V dialect TableGen. Not attempted this session
-   (scope stayed on `K6s`).
-3. **(~1-2 days)** `K6n`'s own 124ish-case CPU-backend
-   resource-handle-normalization architectural limitation. Still the largest
-   unattempted bucket of the whole `variablePointers` feature; deepest and
-   hardest, likely needs a runtime-dispatch mechanism rather than a
-   lowering-pattern fix.
-4. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+   (scope stayed on `K6q`). Needs new TableGen op definitions, deserializer
+   cases, and likely a `SPIRVToLLVMPatterns.cpp` lowering.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-5. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6s`'s compiler fix).
+   stayed scoped to `K6q`'s compiler fix).
 
-**Immediate next action for next session:** pick `K6n` (the only remaining
-large, unattempted bucket -- `K6o`, `K6r`, and now `K6s` are all closed) and
-start by root-causing one representative `"unsupported raised operation"` case
-down to its specific resource-handle-normalization code path, or pick
-`K6q`/`K6p` first for a smaller, more contained fix.
+**Immediate next action for next session:** pick `K6n`-proper (now the only
+remaining large, unattempted bucket -- `K6o`, `K6r`, `K6s`, and now `K6q` are
+all closed) and start by root-causing one representative `"unsupported raised
+operation"` case down to its specific resource-handle-normalization code path in
+`feme/lib/Target/CPU` (not yet located in any prior session) before guessing at
+a fix approach, or pick `K6p` first if the upstream-MLIR TableGen work feels
+like a better change of pace.
