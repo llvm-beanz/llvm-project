@@ -2700,3 +2700,84 @@ used consistently for both the pass/fail counts below).
 `Roadmap.md`: `K6o` struck through (closed). `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change -- this is a bug fix feeding a
 still-`VK_FALSE` feature bit, not a new feature-bit flip.
+
+## `K6n`: phi/select-merged resource pointers lowered, 116/140 of cached fail-list passes (roadmap K6n, large partial fix)
+
+This session resumed a prior session's stashed, partially-complete fix
+for `K6n` -- the CPU-backend "register-bound resource handle...cannot
+normalize" bucket (124 of the original 296 `variable_pointer` mustpass
+failures) -- completed the implementation, fixed a use-after-free crash
+discovered during verification, added unit tests, and measured the real
+CTS delta.
+
+**Fix**: `hasOnlySupportedPointerUses`/`lowerRawPointerUses`
+(`SPIRVResourceLowering.cpp`) now accept a pointer-valued `PHINode`/
+`SelectInst` as a valid continuation of a resource-handle pointer chain
+(previously only `GetElementPtrInst` was accepted, unconditionally
+rejecting the `OpPhi`/`OpSelect`-over-pointers shape common to
+`variablePointers` shaders). A new `PointerMergeMap`, shared per-function
+across every `BoundHandle`'s own `lowerAccesses` call, accumulates each
+incoming leg's `(DescriptorIndex, Offset)` pair and lazily synthesizes a
+matching side-car phi/select once every leg has reported in -- including
+the cross-handle case, where the two legs come from entirely different
+bound handles reached via two separate `lowerAccesses` calls. A
+`ConstantPointerNull` incoming edge (the common `variablePointers`
+null-check idiom) is filled with `computeClampedIndex`'s own
+out-of-range sentinel (`0xFFFFFFFF`/`0`) rather than left unresolved.
+
+**Use-after-free fix**: the first working version crashed
+(`UNREACHABLE executed at Value.cpp:99`, "Use still stuck around after
+Def is destroyed") on the very first real CTS case tried. Root cause:
+`mergeIntoPhi`/`mergeIntoSelect` recorded each leg's value into the new
+side-car phi/select's state but never cleared the *original* phi/select's
+own reference to that leg -- so when the caller later erased the
+consumed leg's instruction, the original (not-yet-fully-rewritten)
+phi/select still pointed at dead IR. Fixed by poisoning
+(`PoisonValue::get`) the original's own operand the moment each leg is
+consumed.
+
+**Unit tests**: 4 new tests added to `SPIRVResourceLoweringTest.cpp`:
+same-handle phi merge (two `getpointer` calls on one handle, different
+constant indices), cross-handle phi merge (two different bound
+handles), cross-handle select merge, and a phi with one
+`ConstantPointerNull` incoming edge verifying the sentinel fill. All
+pass; `ninja check-feme` is clean (3735 passed / 7 unsupported, same as
+session start -- no regressions) with the feature bits left at their
+committed `VK_FALSE`.
+
+CTS: re-ran the prior session's own cached 140-case fail-list (the
+original combined `K6n`+`K6o`+`K6p` set) from the correct CTS data
+directory (`/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/
+vulkan`, avoiding the prior session's `ResourceError`s caused by running
+from a scratch directory without `.amber` data), with
+`variablePointers`/`variablePointersStorageBuffer` transiently flipped
+to `VK_TRUE` for measurement only (reverted before every commit, not
+part of any commit):
+
+- **Before this session's fix (all 140 failing, per the cached list's
+  own provenance)**: 0/140 pass.
+- **After**: **116/140 pass (82.9%)**. Of the 24 remaining failures, 14
+  are `K6p`'s own out-of-scope `"unhandled opcode 401/402/403"` cases
+  (confirmed unaffected by this fix, as expected), and exactly 10 are
+  newly-isolated `K6n`-scope residuals, split by exact error signature
+  into three new roadmap rows: `K6q` (2 cases, a deeper handle-level
+  phi/select merge -- merging raw resource *handles* before `getpointer`
+  is ever called, architecturally distinct from the pointer-level merge
+  this fix addresses), `K6r` (2 cases, storing a handle-derived pointer
+  as a store's *value* operand rather than its pointer operand), and
+  `K6s` (5 cases, a stage-specific frag/tessc/tesse result-correctness
+  bug with zero normalization rejection -- the pipeline now builds and
+  runs, but produces the wrong output; a genuine downstream bug, not a
+  legalization gap). The remaining 1 case (`workgroup_two_buffers`)
+  fails in `feme-cpu-simdize` (an unrelated groupshared-pointer-chain
+  limitation), was always miscategorized as part of `K6n`'s bucket, and
+  is left as-is (not re-filed).
+
+`Roadmap.md`: `K6n` updated (not struck through -- `K6q`/`K6r`/`K6s`
+still block closing it) with this session's fix description and the
+three new split-off rows (`K6q`, `K6r`, `K6s`), each with its own exact
+case list and error signature.
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+-- `variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`,
+this is a bug fix feeding a still-closed feature bit, not a new
+feature-bit flip.
