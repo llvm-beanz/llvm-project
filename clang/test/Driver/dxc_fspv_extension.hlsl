@@ -1,6 +1,8 @@
-// If there is no `-fspv-extension`, enable all extensions.
+// If there is no `-fspv-extension`, enable all extensions except for those
+// known not to be safe as an implicit default (e.g. SPV_KHR_poison_freeze,
+// which no real-world SPIR-V consumer currently recognizes).
 // RUN: %clang_dxc -spirv -Tlib_6_7 -### %s 2>&1 | FileCheck %s -check-prefix=ALL
-// ALL: "-spirv-ext=all"
+// ALL: "-spirv-ext=all,-SPV_KHR_poison_freeze"
 
 // Convert the `-fspv-extension` into `spirv-ext`.
 // RUN: %clang_dxc -spirv -Tlib_6_7 -### %s -fspv-extension=SPV_TEST1 2>&1 | FileCheck %s -check-prefix=TEST1

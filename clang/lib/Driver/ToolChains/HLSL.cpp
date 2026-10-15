@@ -244,7 +244,14 @@ void getSpirvExtOperand(StringRef SpvExtensionArg, raw_ostream &out) {
 
 SmallString<1024> getSpirvExtArg(ArrayRef<std::string> SpvExtensionArgs) {
   if (SpvExtensionArgs.empty()) {
-    return StringRef("-spirv-ext=all");
+    // SPV_KHR_poison_freeze is excluded from the "enable everything" default:
+    // it is a recently added, still-provisional SPIR-V backend extension
+    // that no real-world SPIR-V consumer (e.g. SPIRV-Tools' spirv-val)
+    // currently recognizes, so sweeping it in by default would silently
+    // break codegen for any shader whose lowering happens to produce a
+    // poison value (e.g. HLSL's matrix-to-vector packing for elementwise
+    // library-function calls) without the user ever requesting it.
+    return StringRef("-spirv-ext=all,-SPV_KHR_poison_freeze");
   }
 
   llvm::SmallString<1024> LlvmOption;
