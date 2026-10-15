@@ -4505,3 +4505,91 @@ newly-discovered 92-case `check-hlsl-clang-feme-vk` failure list, starting
 with a quick Clang-vs-DXC SPIR-V diff on one `_mat.test` case to confirm
 scope before committing to a fix); `K6n`-proper (the largest remaining
 `variablePointers` bucket) remains entirely untouched for many sessions.
+
+## `L429` fixed: `EntryWrapperPass` `HeaderDerivedValues` poisoned by an already-erased `PersistentInduction` header phi, `InterlockedAdd.resources.32.test`'s 3-of-8 failure resolved (roadmap `L429`, closed)
+
+Root-caused and fixed the `InterlockedAdd.resources.32.test` failure
+isolated last session (`TestSlotsSBufI`/`TestSlotsBABuf`/`TestMono`, all
+sharing the 3-argument original-value-capturing `InterlockedAdd`-on-
+resource signature).
+
+**Root-cause technique**: `feme/lib/Target/CPU/Pipeline.cpp`'s own
+`FEME_DUMP_IR` dump point (immediately before `EntryWrapperPass` runs)
+plus standalone `feme-opt --llvm -passes=feme-cpu-wrap-entry` on that
+dump reproduced the exact defect outside the full pipeline, without a
+single `ninja`+`offloader` round-trip, confirming the bug was wholly
+contained within `EntryWrapperPass` itself (not an interaction with
+later generic LLVM passes, even though `instcombine` is what finally
+turns the symptom into a concrete wrong answer).
+
+**Actual root cause** (not the originally-hypothesized
+`feme-cpu-simdize` resource-atomic-widening theory): `EntryWrapperPass`'s
+`HeaderDerivedValues` mechanism clones a header-local, non-phi
+instruction (here, a wave-active-lane boolean mask splat) once into the
+wrapper's own scalar `LoopHeaderBB` and threads it through a `loopvarN`
+parameter to body/suffix regions -- valid only if the instruction's
+operand chain is loop-invariant or `ScalarInduction`-driven. Here it
+instead transitively read a `PersistentInduction`'s header phi, a
+genuinely per-wave value with no single scalar representation in
+`LoopHeaderBB`. `spillValuesLiveAcrossBarriers`'s reload-rewriting for
+persistent phis only rewrites uses already inside the outlined regions,
+never uses still inside `Shape.Header` itself, so this header-local use
+was never redirected to a reload; `buildWrapperForLoop` then immediately
+replaced every `PersistentInduction`'s `HeaderPhi` with `poison` and
+erased it, silently poisoning the still-unrewritten use. The
+clone-once-into-`LoopHeaderBB` step baked that `poison` in permanently,
+and `instcombine` later folded it to a hard-coded `false`, silently
+skipping the final masked resource store for every lane.
+
+**Fix**: detect (`dependsOnPersistentInduction`) which
+`HeaderDerivedValues` candidates transitively depend on a
+`PersistentInduction`'s header phi and, for those only, recompute the
+value fresh at each of its original use sites (`cloneHeaderChainAt`)
+before `spillValuesLiveAcrossBarriers` runs, so the newly-materialized
+in-region use is picked up and correctly reload-rewritten by the
+existing, unmodified reload logic. Entries with no persistent dependency
+are completely unaffected.
+
+**Verification**:
+- Added a regression unit test
+  (`SplitsFlowMergeLoopWithHeaderDerivedValueFromWavePersistentRecurrence`)
+  reproducing the minimal IR shape; confirmed it fails (3 assertion
+  failures) with the fix reverted and passes with it restored.
+- Full `FeMeTransformsCPUTests`: 635/635 Passed (up from 634; 1 net new
+  test), 0 regressions.
+- `check-hlsl-feme-vk`: 791/792 Passed (up from 490 Passed/1 Failed in
+  the same run shape -- i.e. `InterlockedAdd.resources.32.test` now
+  passes), sole remaining failure is the pre-existing
+  `Basic/Mandelbrot.test` contention-dependent semaphore-wait flake
+  under parallel load (unrelated, confirmed passing in isolation).
+- Both the minimal (`/tmp/l429/b9/`) and full 8-resource
+  (`/tmp/l429/full/t/`) repros now pass via `offloader` directly.
+- Targeted `VK-GL-CTS` regression check (compute-atomic and
+  loop/barrier groups most related to this fix's own code paths, since
+  no prior session had an `InterlockedAdd`-adjacent case list):
+  - `dEQP-VK.spirv_assembly.instruction.compute.opatomic*` (26 cases):
+    19/26 Pass, 7 NotSupported (`VulkanMemoryModel.vulkanMemoryModel`
+    not supported -- pre-existing, unrelated to this fix), 0 Fail.
+  - `dEQP-VK.glsl.loops.*` (624 cases): 606/624 Pass, unchanged from
+    `L425`'s own session baseline -- 0 regressions, 0 newly-fixed
+    (expected: this fix is CPU-backend/compute-wave-persistent-value
+    specific, not a graphics-loop-shape fix).
+  - `dEQP-VK.glsl.demote.*` (30 cases): 30/30 Pass, unchanged -- 0
+    regressions.
+
+**No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed** -- pure internal `feme-cpu-wrap-entry` compiler-correctness
+fix, no Vulkan feature or extension surface changed.
+
+`Roadmap.md`: `L429` struck through (done, root cause corrected from the
+original hypothesis to the actual `EntryWrapper.cpp` defect found this
+session).
+
+**Next steps**: `L428` (1-2 days -- triage `check-hlsl-clang-feme-vk`'s
+92-case failure list, starting with one `_mat.test` case's Clang-vs-DXC
+SPIR-V diff); `K6n`-proper (the largest remaining `variablePointers`
+bucket, untouched for many sessions); `Basic/Mandelbrot.test`'s
+contention-dependent flake (low priority, change-of-pace item); the
+standing `backup-before-rebase-20261014` tag and
+`CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decisions, neither
+revisited this session.
