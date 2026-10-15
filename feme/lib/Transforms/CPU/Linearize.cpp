@@ -3527,6 +3527,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
            << " Latch=" << Latch->getName()
            << " ExitBlock=" << ExitBlock->getName() << "\n";
 
+
   // Roadmap H19k: fold away any redundant "Flow" re-derivation of a
   // decision a predecessor already made at compile time, before looking
   // for this cycle's own single exit-check block below -- see
@@ -3578,6 +3579,96 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       foldRedundantFlowBlocksInCycle(CI, C, Header, Latch);
       peelConstantFlowPredecessorsInCycle(CI, C, Header, Latch, PeeledFrom,
                                           &RelayCandidates);
+    }
+  }
+
+  // Roadmap K6v: `StructurizeCFG` can leave a loop's own *real*, uniform
+  // trip-count check sitting one hop upstream of `Latch` -- in a genuine
+  // `CondBrInst` block whose only "stay in the loop" edge targets a
+  // trivial, phi-less relay stub (`Latch` itself, doing nothing but
+  // `br label %Header`) -- rather than making that check `Latch`'s own
+  // terminator directly. Neither `matchExitCheck` (requires `Latch`'s own
+  // terminator to be the check) nor `OtherCondBrBlocks`'s existing
+  // `matchExitCheckWithRelay`-based recovery below (reserved for a
+  // genuinely *divergent* relocated check -- see `DivergentCandidates`'s
+  // own comment) recognizes this uniform shape, so without this fold the
+  // cycle falls all the way through to the final "no recognized uniform
+  // exit check" diagnostic. Confirmed via a real, reproduced `dEQP-VK.
+  // spirv_assembly.instruction.compute.variable_pointers.
+  // vars_ssbo_2_diff` IR dump: its own real check, `icmp sge i32 %11,
+  // %1`, lives in exactly this shape, one block upstream of the trivial
+  // `._crit_edge2` relay `Latch` resolves to. Eliminate the trivial relay
+  // and let its own unique predecessor take over the `Latch` role
+  // directly -- afterwards, `matchExitCheck(*Latch, ExitBlock)` finds the
+  // check exactly where it now looks for it, with no further special
+  // casing required anywhere else in this function.
+  //
+  // Deliberately placed *after* the fixed-point
+  // `foldRedundantFlowBlocksInCycle`/`peelConstantFlowPredecessorsInCycle`/
+  // `collapseTriviallyRedundantPhisInCycle`/`mergeTrivialRelayBlocksInCycle`
+  // loop above, not before it: a `StructurizeCFG`-rotated "guard loop"
+  // shape (`CompiledStageTest.LoopWithBarrierSurvivesCompiledStageCreation`'s
+  // own shape) can have a shared `Flow`-style dispatch block -- a genuine
+  // `CondBr` on a fully compile-time-constant-per-edge `phi` -- sitting
+  // exactly where this fold looks for a relocated check, until
+  // `foldRedundantFlowBlocksInCycle` constant-folds it away into the
+  // plain pass-through it really is. Running this fold first would
+  // promote that spurious dispatch block instead, double-handling
+  // `Header`'s own, separately-and-already-correctly-recovered check (a
+  // real regression this ordering fixes).
+  //
+  // Restricted to:
+  //   * a *uniform* `Pred` branch (`!isDivergentBranch`) -- a genuinely
+  //     divergent one relocated the same way is already correctly
+  //     recognized and handled by the `OtherCondBrBlocks`/
+  //     `DivergentCandidates`/`RealExitCandidates` machinery below, with
+  //     its own, more involved "never really exit, defer to Latch"
+  //     narrowing semantics that this plain structural promotion must not
+  //     bypass (confirmed via a real regression against
+  //     `LinearizesCheckBlockChainedDivergentCheckBypassToStayInLoop`'s
+  //     own captured shape, whose own `Flow71`/`Flow71._crit_edge` pair
+  //     matches this fold's structural shape exactly but is genuinely
+  //     divergent and must keep taking that other path instead);
+  //   * a *direct* match (`Promoted->RelayBlock == Pred`, i.e. `Pred`'s
+  //     own exit arm reaches `ExitBlock` with no further relay of its
+  //     own) specifically so that guarantee continues to hold once
+  //     `Latch` is reassigned below; a still-relayed match is left for a
+  //     future milestone rather than risked here;
+  //   * `Header` itself having *no* recoverable check of its own (neither
+  //     a direct `matchExitCheck` nor a relayed `recoverRelayExitCheck`
+  //     match) -- belt-and-braces alongside the reordering above, so a
+  //     future fold inserted between the two continues to get the same
+  //     protection without relying solely on ordering.
+  //
+  // `LatchWasPromoted` (recorded below) distinguishes this promoted shape
+  // from the ordinary "`Latch` already naturally owns its own real check"
+  // shape (e.g. `loop-body-diamond.ll`'s `merge` block, needing no
+  // promotion at all) for the "uniform loop with mask ops" branch further
+  // down, which must keep treating that ordinary shape exactly as before
+  // (a real regression found against `loop-body-diamond.ll` when that
+  // branch's own guard did not yet distinguish the two).
+  bool LatchWasPromoted = false;
+  if (Latch->phis().empty() && isPureRelayBlock(Latch) &&
+      !matchExitCheck(*Header, ExitBlock) &&
+      !recoverRelayExitCheck(Header, C, ExitBlock)) {
+    if (BasicBlock *Pred = Latch->getUniquePredecessor()) {
+      auto *PredBr = dyn_cast<CondBrInst>(Pred->getTerminator());
+      if (PredBr && CI.contains(C, Pred) && Pred != Header &&
+          !isDivergentBranch(PredBr)) {
+        if (std::optional<ExitCheck> Promoted =
+                matchExitCheckWithRelay(*Pred, ExitBlock);
+            Promoted && Promoted->StayInLoop == Latch &&
+            Promoted->RelayBlock == Pred) {
+          for (PHINode &PN : Header->phis())
+            if (int Idx = PN.getBasicBlockIndex(Latch); Idx != -1)
+              PN.setIncomingBlock(Idx, Pred);
+          PredBr->setSuccessor(PredBr->getSuccessor(0) == Latch ? 0 : 1,
+                               Header);
+          Latch->eraseFromParent();
+          Latch = Pred;
+          LatchWasPromoted = true;
+        }
+      }
     }
   }
 
@@ -4403,7 +4494,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     } // end DivergentCandidates-non-empty handling (Roadmap L197)
   }
 
-  if (!HeaderDivergent && !LatchDivergent) {
+  // Roadmap K6v: this branch's own body-region flattening below
+  // (`collectUniformPassThroughRegion`/`DF.flattenLoopBodyRegion`) assumes
+  // `Latch` itself stays a plain, unconditional pass-through throughout --
+  // true whenever `Latch` already naturally owned its own real check (an
+  // ordinary, non-promoted `LatchExit`, e.g. `loop-body-diamond.ll`'s own
+  // `merge` block) just as much as when `Header` alone owns it, so this
+  // branch must still run for both those shapes exactly as before. Only
+  // the *promoted* shape (the fold above having just relocated `Latch` to
+  // a block that used to be one hop further upstream -- see its own
+  // comment) breaks that assumption: `Latch`'s own condition there still
+  // needs the "any lane still active" treatment `closeLatch` gives it
+  // below, which only the general combined handling further down
+  // (reached whenever `LatchDivergent` is true) provides. Skip this
+  // branch only for the promoted shape so it falls through to that
+  // handling instead, exactly as if the promoted check were a divergent
+  // one needing the same structural treatment (confirmed via a real
+  // regression against `loop-body-diamond.ll` when this guard was
+  // initially written as `!LatchExit` instead of `!LatchWasPromoted`,
+  // wrongly also catching the ordinary non-promoted "Latch already owns
+  // the check" shape).
+  if (!HeaderDivergent && !LatchDivergent && !LatchWasPromoted) {
     // Roadmap L292: a loop whose own header/latch exit check is itself
     // uniform is ordinarily left alone below (nothing to linearize about
     // its own *iteration* decision) -- but its body can still contain a

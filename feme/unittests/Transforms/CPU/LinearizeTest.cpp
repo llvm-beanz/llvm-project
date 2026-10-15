@@ -719,6 +719,80 @@ TEST(LinearizeTest, MasksResourceCallInUniformLoopNestedInDivergentDiamond) {
   EXPECT_TRUE(FoundResourceStore);
 }
 
+// Roadmap K6v: a uniform, top-level loop (no enclosing divergence at all)
+// whose own real trip-count check is neither its header's nor its latch's
+// own terminator -- `StructurizeCFG` instead left it one block upstream of
+// a trivial, phi-less relay ("%loop.latch", doing nothing but `br label
+// %loop.header`) that the header's/latch's own plain `matchExitCheck`
+// cannot see past. `%loop.header` itself ends in an unconditional branch
+// straight into the body, and `%loop.check`'s own exit arm reaches
+// `%loop.exit` directly. Nested inside a divergent `if` (exactly
+// `MasksResourceCallInUniformLoopNestedInDivergentDiamond`'s own shape
+// above, so a real, non-constant mask is actually expected on success),
+// to additionally confirm the cycle's own `feme.cpu.resource.*` call gets
+// masked by the *enclosing* diamond's narrowed mask once the relocated
+// uniform latch check is recognized, rather than only confirming the
+// diagnostic itself is gone. Before this fix, neither the direct
+// `HeaderExit`/`LatchExit` match nor `OtherCondBrBlocks`'s divergent-only
+// relocated-check recovery recognized `%loop.check` as the loop's real
+// (merely uniform) exit, so this cycle hit the "no recognized uniform
+// exit check" diagnostic. Reproduces the control-flow shape found while
+// root-causing `dEQP-VK.spirv_assembly.instruction.compute.
+// variable_pointers.vars_ssbo_2_diff`'s own `feme-cpu-linearize` failure.
+TEST(LinearizeTest, PromotesUniformLatchCheckBehindTrivialRelay) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf, i32 %desc) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %loop.ph, label %else
+    else:
+      br label %merge
+    loop.ph:
+      br label %loop.header
+    loop.header:
+      %i = phi i32 [0, %loop.ph], [%inc, %loop.latch]
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 1, i32 %desc, i64 0, i32 %i, i1 true)
+      %inc = add i32 %i, 1
+      br label %loop.check
+    loop.check:
+      %loop.cond = icmp slt i32 %inc, %n
+      br i1 %loop.cond, label %loop.latch, label %loop.exit
+    loop.latch:
+      br label %loop.header
+    loop.exit:
+      br label %merge
+    merge:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundResourceStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    if (std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI)) {
+      FoundResourceStore = true;
+      Value *Mask = CI->getArgOperand(CI->arg_size() - 1);
+      EXPECT_FALSE(isa<Constant>(Mask))
+          << "the loop's resource store should now be masked by the "
+             "enclosing divergent diamond's own narrowed mask, not left "
+             "at its placeholder constant `true`";
+    }
+  }
+  EXPECT_TRUE(FoundResourceStore);
+}
+
 // Roadmap H165: a divergent branch inside a loop body whose arms reconverge
 // strictly *inside* the loop body (not at the loop's own exit block) --
 // structurally the same "mid-body diamond" shape H158 taught the entry
