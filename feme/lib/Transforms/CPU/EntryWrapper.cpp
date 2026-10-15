@@ -1082,12 +1082,21 @@ struct WavePersistentValue {
   /// inside a per-wave region.
   PHINode *HeaderPhi;
   /// The value the phi starts at, stored into every wave's slot once
-  /// before the loop begins (at \c SeedInsertBefore).
-  Constant *InitialValue;
+  /// before the loop begins (at \c SeedInsertBefore). Usually a
+  /// compile-time constant, but roadmap L425(a): a loop-invariant
+  /// induction (\c NextValue is \c HeaderPhi itself) may instead carry a
+  /// genuine, wave-lane-specific \c Value -- safe here, unlike for an
+  /// ordinary \c LoopInduction cloned into the wrapper, because the seed
+  /// store this builds still runs as per-wave code, before any region is
+  /// outlined (see \c SeedInsertBefore).
+  Value *InitialValue;
   /// The phi's own backedge value, stored back into the wave's slot right
-  /// after it is computed. Every use of \c HeaderPhi is required either
-  /// to precede this or to share its barrier region (roadmap H163), so
-  /// the region-top reload each use gets can never observe the next
+  /// after it is computed -- unless it is \c HeaderPhi itself (roadmap
+  /// L425(a): a loop-invariant induction, which needs no store-back at
+  /// all, since the seeded value never changes). Every use of
+  /// \c HeaderPhi is required either to precede this or to share its
+  /// barrier region (roadmap H163), so the region-top reload each use
+  /// gets can never observe the next
   /// iteration's value.
   Instruction *NextValue;
   /// Where the once-per-wave seeding store goes -- the terminator of the
@@ -1290,6 +1299,16 @@ bool spillValuesLiveAcrossBarriers(
                                 P.HeaderPhi->getName() + ".reload.val"));
     }
 
+    // Roadmap L425(a): a loop-invariant induction's own recurrence is
+    // `HeaderPhi` itself -- the seeded value never changes, so no
+    // store-back is needed (or safe: `HeaderPhi` lives in the loop
+    // header, which is cloned into the wrapper rather than outlined into
+    // any per-wave region, so a store inserted there would be cloned
+    // into the wrapper too, referencing a per-wave spill pointer that
+    // does not exist there).
+    if (P.NextValue == P.HeaderPhi)
+      continue;
+
     Instruction *StoreAt =
         isa<PHINode>(P.NextValue)
             ? &*P.NextValue->getParent()->getFirstNonPHIOrDbg()
@@ -1463,20 +1482,29 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
 }
 
 /// One induction variable driving a "Barriers inside a uniform loop" shape
-/// (see the file comment above): \p Header's own phi node, and the
-/// constant value it starts at (the incoming value from outside the loop
-/// -- this milestone only supports a compile-time-constant initial value,
-/// e.g. a stride-halving reduction loop's `GroupSize / 2`).
+/// (see the file comment above): \p Header's own phi node, and the value
+/// it starts at (the incoming value from outside the loop). Ordinarily a
+/// compile-time constant, e.g. a stride-halving reduction loop's
+/// `GroupSize / 2` -- the only kind a genuine (non-invariant) induction
+/// supports, since it must be embeddable directly in the wrapper's own
+/// scalar loop, a separate function with no access to any per-wave value.
+/// Roadmap L425(a): a loop-invariant induction (one whose own recurrence
+/// feeds back itself unchanged, `IsWavePersistent` with no store-back --
+/// see `WavePersistentValue`) may instead carry a non-constant,
+/// wave-lane-specific `Value`, since its seed store still runs as
+/// per-wave code.
 struct LoopInduction {
   PHINode *HeaderPhi;
-  Constant *InitialValue;
+  Value *InitialValue;
   /// Roadmap H159(b): whether this induction is genuinely per-lane -- its
   /// recurrence is computed inside a per-wave region, so it cannot drive a
   /// cloned scalar phi in the wrapper and is threaded through the per-wave
   /// spill array across the loop's own backedge instead (see
   /// `WavePersistentValue`). Such an induction is never referenced by the
   /// header itself, and so never takes part in the loop's own uniform
-  /// trip-count condition.
+  /// trip-count condition. Roadmap L425(a): also set, with no
+  /// store-back, for a loop-invariant induction whose own recurrence is
+  /// `HeaderPhi` itself -- see `LoopInduction::InitialValue`.
   bool IsWavePersistent = false;
 };
 
@@ -1965,9 +1993,33 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     Value *Initial = Ind.HeaderPhi->getIncomingValueForBlock(
         Shape.PrefixOrder.empty() ? &F.getEntryBlock()
                                   : Shape.PrefixOrder.back());
-    Ind.InitialValue = dyn_cast<Constant>(Initial);
-    if (!Ind.InitialValue)
-      return std::nullopt; // Only a compile-time-constant start is supported.
+    if (auto *InitialConst = dyn_cast<Constant>(Initial)) {
+      Ind.InitialValue = InitialConst;
+      continue;
+    }
+    // Roadmap L425(a): a header phi whose own recurrence feeds back
+    // itself unchanged (`NextValue == HeaderPhi`) is loop-invariant, not
+    // a genuine per-iteration induction -- common for a per-lane
+    // divergence mask computed once ahead of the loop and held constant
+    // for its duration (e.g. `active.live.wide`/`active.sideeffect.wide`
+    // in a reduction loop whose own exit check never re-diverges). Such
+    // a value may legitimately be wave-lane-specific and non-constant,
+    // so it can never be cloned into the wrapper's own scalar loop like
+    // an ordinary induction is (that clone lives in a separate function
+    // with no access to any per-wave value) -- thread it through the
+    // per-wave spill array instead, exactly like a genuinely per-lane
+    // recurrence (`IsWavePersistent`, roadmap H159(b)), except with no
+    // store-back needed, since the seeded value provably never changes
+    // (`spillValuesLiveAcrossBarriers`'s own `NextValue == HeaderPhi`
+    // case skips it). A non-invariant, non-constant start remains
+    // unsupported: only a loop-invariant induction's seed can safely run
+    // as still-per-wave code this way.
+    if (Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch) != Ind.HeaderPhi)
+      return std::nullopt; // Only a compile-time-constant start is
+                           // supported for a genuine (non-invariant)
+                           // induction.
+    Ind.IsWavePersistent = true;
+    Ind.InitialValue = Initial;
   }
 
   // Every block of `F` must belong to exactly one region: otherwise some
@@ -2397,13 +2449,30 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
 
   SmallVector<WavePersistentValue, 2> Persistent;
   assert(PersistentInductions.empty() || !Shape.PrefixOrder.empty());
-  for (LoopInduction &Ind : PersistentInductions)
+  for (LoopInduction &Ind : PersistentInductions) {
+    // Roadmap L425(a): the seed store must land before any later
+    // group-sync barrier still ahead of it in the prefix chain (roadmap
+    // H155: a prefix may contain its own barriers, each outlined into
+    // its own separate `.prefixN` region) -- `spillValuesLiveAcrossBarriers`
+    // only spills values already live in \p F when it runs, not a new
+    // store this loop is about to insert, so a non-constant
+    // `InitialValue` (roadmap L425(a)'s own loop-invariant case; a
+    // constant needs no such care, since it is never a barrier-crossing
+    // SSA value at all) must be seeded immediately after its own
+    // definition instead of unconditionally at the prefix chain's very
+    // end, which could otherwise strand the seed store in a later
+    // `.prefixN` region than the value it reads.
+    Instruction *SeedInsertBefore = Shape.PrefixOrder.back()->getTerminator();
+    if (auto *InitialInst = dyn_cast<Instruction>(Ind.InitialValue))
+      SeedInsertBefore = isa<PHINode>(InitialInst)
+                             ? &*InitialInst->getParent()->getFirstNonPHIOrDbg()
+                             : InitialInst->getNextNode();
     Persistent.push_back(
         {Ind.HeaderPhi, Ind.InitialValue,
          cast<Instruction>(
              Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch)),
-         Shape.PrefixOrder.back()->getTerminator(), WaveRegionOrder,
-         Shape.SuffixOrder});
+         SeedInsertBefore, WaveRegionOrder, Shape.SuffixOrder});
+  }
 
   // Give the body chain's uses of each header induction phi their own
   // trailing `loopvarN` parameter (see the file comment's "Barriers inside
