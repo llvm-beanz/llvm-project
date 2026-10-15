@@ -3080,3 +3080,121 @@ the unrelated `workgroup_two_buffers` `feme-cpu-simdize` case.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
 feature bits remain `VK_FALSE`, no code was modified this session beyond
 the transient (reverted) measurement flip.
+
+## `K6p`: feme-local OpPtrEqual/OpPtrNotEqual/OpPtrDiff merge, 4/29 cases pass; segfault and invalid-IR bugs fixed; K6t split off (roadmap K6p, feme-local half closed; K6t opened)
+
+Picked up `K6p` from the prior session's suggested next action (the only
+remaining large unattempted bucket once `K6o`/`K6q`/`K6r`/`K6s` all
+closed and `K6n`-proper was re-confirmed as already architecturally
+closed). The upstream-MLIR TableGen/deserializer/lowering half of `K6p`
+had already been completed in the immediately-prior session (new
+`spirv.PtrEqual`/`spirv.PtrNotEqual`/`spirv.PtrDiff` ops, deserializer
+cases, and `IComparePattern`/`PtrDiffPattern` lowering to
+`icmp`/`ptrtoint`+`sub`); this session's own scope was the feme-local
+CPU-backend half, resuming uncommitted in-progress work left over from a
+stalled prior session (a known duplicate-parameter build error).
+
+Fixed the stalled build (duplicate `PointerCompareMap &Compares`
+forward-declaration parameter; a missing `Compares` argument at
+`lowerPointerMergeGlobalStore`'s own call site), then extended
+`hasOnlySupportedPointerUses` to accept an equality-only `icmp` (from
+`OpPtrEqual`/`OpPtrNotEqual`) and a single-use `ptrtoint` feeding exactly
+one `sub` (from `OpPtrDiff`), and added a new `PointerCompareMap`/
+`PointerCompareState` tracking structure plus `mergeIntoCompare`/
+`mergeIntoDiff` (mirroring `PointerMergeMap`'s existing phi/select
+"whichever chain arrives first waits for the other" design, but keyed on
+a binary op's own LHS/RHS operand position): once both operands' own
+(descriptor index, byte offset) pairs are independently resolved,
+`mergeIntoCompare` re-expresses the comparison as
+`(desc0 == desc1) & (off0 == off1)`, and `mergeIntoDiff` re-expresses the
+diff as a plain `sub` of the two offsets alone (per `OpPtrDiff`'s own
+same-buffer-object spec assumption, descriptor indices are never
+compared for a diff).
+
+Testing this surfaced two real, previously-latent bugs `K6p`'s new
+opcode support newly reached for the first time:
+
+1. **Infinite-recursion segfault** (`variable_pointers_vars_ssbo_diff`):
+   `hasOnlySupportedPointerUses`'s pre-existing `lowerPointerMergeGlobalStore`
+   -chasing recursion into a loaded global's own uses had no cycle-
+   detection. A loop-carried pointer threaded through a `Private`-storage
+   global (load, `+1` GEP, store back each iteration) is genuinely cyclic
+   in def-use terms; `OpPtrDiff` support let the checker recurse deep
+   enough to reach this shape for the first time (previously unreachable
+   since `OpPtrDiff` itself was unsupported, so nothing walked this far).
+   Fixed with the same `Visited`-set guard `hasOnlySupportedHandleMergeUses`
+   already uses (`K6q`'s own precedent), threaded through all 4 recursive
+   call sites. After the fix, this case fails cleanly with the expected
+   `K6n`-style "unsupported raised operation... cannot normalize" error
+   instead of segfaulting -- a correctness improvement, not a new pass.
+2. **Invalid LLVM IR** (`different_ssbos_equal`/`different_ssbos_not_equal`/
+   `null_comparisons_ssbo_equal`/`null_comparisons_ssbo_not_equal`):
+   these compare two *whole* resource handles directly (`OpPtrEqual`
+   with no intervening `OpAccessChain`), which upstream's generic,
+   pre-existing `IComparePattern` lowered straight to an `llvm.icmp` on
+   an opaque `!llvm.target<"spirv.VulkanBuffer"...>` operand -- rejected
+   outright by the LLVM dialect verifier (a hard crash, not a clean
+   legalization failure). Fixed upstream, as its own isolated
+   "issue outside FeMe" commit: `IComparePattern` now checks its operand
+   type is an LLVM pointer or signless integer (scalar or
+   vector-of-either) before matching, declining via `notifyMatchFailure`
+   otherwise. This is a no-op for every pre-existing `IComparePattern`
+   use (`OpIEqual` and friends always convert to real integers),
+   confirmed via the full `mlir/test/{Conversion/SPIRVToLLVM,Dialect/SPIRV,
+   Target/SPIRV}` lit sweep (149 tests, same 2 pre-existing unrelated
+   failures, zero new regressions). After the fix, `different_ssbos_equal`
+   fails cleanly with `"failed to legalize operation 'spirv.PtrEqual'...
+   explicitly marked illegal"` instead of crashing -- whole-handle
+   comparison itself is still unimplemented (split off as the new `K6t`
+   roadmap row below), but no longer crashes.
+
+CTS (29-case `dEQP-VK.spirv_assembly.instruction.spirv1p4.opptr{equal,
+notequal,diff}.*` set, generated via `deqp-vk --deqp-runmode=stdout-caselist`):
+**4/29 pass** (`simple_variable_pointers_ptr_equal`,
+`simple_variable_pointers_ptr_not_equal`, `different_wgs_equal`,
+`different_wgs_not_equal`). The remaining 25 are all cleanly attributable
+to three distinct, already-known-or-newly-split buckets: `K6n`'s
+CPU-backend resource-handle-normalization limitation, CFG-linearization/
+`groupshared`-canonicalization gaps (pre-existing, unrelated to `K6p`),
+and whole-handle comparison (at least the 4 cases above; split off as
+`K6t`). Full `*variable_pointer*` substring sweep (4464 cases, feature
+bits transiently flipped to `VK_TRUE` for measurement only, reverted
+afterward): **958 Pass, 3492 NotSupported, 14 Fail** -- 1 pre-existing
+unrelated case (`workgroup_two_buffers`) plus 13 of the new `opptr*`/
+`variable_pointers_*` cases, all already-known K6n/CFG-linearization/
+whole-handle shapes, zero new regressions. `variablePointers`/
+`variablePointersStorageBuffer` remain `VK_FALSE` -- `K6p`'s own
+opcode-support gap is now closed, but the bundled feature as a whole
+remains blocked on `K6n` (the large majority of the residual) and `K6t`.
+
+New unit tests (`feme/unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp`):
+`LowersPtrEqualOnTwoHandleChainsToDescriptorAndOffsetComparison` and
+`LowersPtrDiffOnTwoHandleChainsToOffsetSubtraction`. Both use
+literal-constant bindings/`getpointer` indices, which lets
+`mergeIntoCompare`/`mergeIntoDiff`'s own `IRBuilder<>` (`ConstantFolder`)
+constant-fold the synthesized compare/sub expressions away entirely to a
+literal answer (`ret i1 false` / `ret i64 -4`) rather than leaving a live
+`and`/`sub` instruction in the IR -- itself a correct and useful check
+(two statically-known-distinct bindings can never compare pointer-equal;
+a 0-vs-1-element byte-offset delta on a 4-byte-stride buffer is exactly
+`-4`), asserted directly against the folded return value rather than
+against an intermediate instruction shape. New lit test
+(`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-ptr-equal-whole-handle-invalid.mlir`):
+exercises the upstream `IComparePattern` fix using FeMe's own custom
+resource-handle type converter (the only way to construct the triggering
+non-pointer-operand shape), confirming whole-handle `OpPtrEqual` now
+declines legalization cleanly rather than crashing the LLVM dialect
+verifier.
+
+Full `check-feme` target: 3743/3750 passed (7 unsupported, 0 failed),
+confirming zero regressions across every phase of translation. Full 623
+`FeMeTransformsCPUTests` (621 pre-existing + 2 new) pass.
+
+`Roadmap.md`: `K6p` updated (not struck through -- its own opcode-support
+gap is closed, but `variablePointers` as a whole is still blocked on
+`K6n` and the newly-split-off `K6t`). New `K6t` row added for the
+whole-handle-comparison residual (at least 4 of the 25 remaining `K6p`
+CTS failures), not yet attempted. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- `variablePointers`/
+`variablePointersStorageBuffer` remain unsupported/`VK_FALSE`, no feature
+bit flipped permanently this session.
