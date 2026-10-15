@@ -1671,9 +1671,9 @@ void addInstrRequirements(const MachineInstr &MI,
   }
   case SPIRV::OpTypeVector: {
     unsigned NumComponents = MI.getOperand(2).getImm();
-    if (NumComponents == 8 || NumComponents == 16)
+    if ((NumComponents == 8 || NumComponents == 16) && ST.isKernel())
       Reqs.addCapability(SPIRV::Capability::Vector16);
-    else if (requiresLongVectorEXT(NumComponents))
+    else if (requiresLongVectorEXT(NumComponents, ST.isKernel()))
       // Such widths are only expressible as OpTypeVectorIdEXT.
       reportFatalUsageError(
           "OpTypeVector with " + Twine(NumComponents) +

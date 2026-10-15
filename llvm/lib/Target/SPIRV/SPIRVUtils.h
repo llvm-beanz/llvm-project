@@ -516,16 +516,26 @@ inline bool isVector1(Type *Ty) {
 bool isVectorType(SPIRVTypeInst SPVTy);
 
 // Per spec: "Vector types must be parameterized only with 2, 3, or
-// 4 components, plus any additional sizes enabled by capabilities.", and
-// we always enable the Vector16 capability.
-inline bool requiresLongVectorEXT(unsigned NumComponents) {
-  return NumComponents != 2 && NumComponents != 3 && NumComponents != 4 &&
-         NumComponents != 8 && NumComponents != 16;
+// 4 components, plus any additional sizes enabled by capabilities.".
+// Widths 8 and 16 are only reachable via the Vector16 capability, which
+// itself requires the Kernel capability and is therefore illegal under
+// the Shader execution model (e.g. Vulkan). CanUseVector16 must reflect
+// whether the current subtarget can legally use the Kernel capability
+// (i.e. is not a Shader-environment target); when it cannot, widths 8
+// and 16 must also go through SPV_EXT_long_vector like any other
+// non-native width.
+inline bool requiresLongVectorEXT(unsigned NumComponents,
+                                  bool CanUseVector16 = true) {
+  if (NumComponents == 2 || NumComponents == 3 || NumComponents == 4)
+    return false;
+  if (NumComponents == 8 || NumComponents == 16)
+    return !CanUseVector16;
+  return true;
 }
 
-inline bool isLongVectorEXT(const Type *Ty) {
+inline bool isLongVectorEXT(const Type *Ty, bool CanUseVector16 = true) {
   if (auto *FVTy = dyn_cast<FixedVectorType>(Ty))
-    return requiresLongVectorEXT(FVTy->getNumElements());
+    return requiresLongVectorEXT(FVTy->getNumElements(), CanUseVector16);
   return false;
 }
 

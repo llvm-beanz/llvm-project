@@ -360,9 +360,13 @@ SPIRVGlobalRegistry::getOpTypeVector(uint32_t NumElems, SPIRVTypeInst ElemType,
 
 SPIRVTypeInst SPIRVGlobalRegistry::getOpTypeVectorIdEXT(
     uint32_t NumElems, SPIRVTypeInst ElemType, MachineIRBuilder &MIRBuilder) {
-  assert((NumElems < 2 || NumElems > 16 ||
-          (NumElems != 3 && NumElems != 4 && NumElems != 8)) &&
-         "SPIR-V OpTypeVectorIdExt should only be used for extended vectors");
+  // OpTypeVectorIdEXT is used both for widths OpTypeVector cannot express at
+  // all (e.g. 1, or anything outside {2,3,4,8,16}) and, under the Shader
+  // execution model (e.g. Vulkan), for widths 8 and 16 too: those are only
+  // expressible without SPV_EXT_long_vector via the Vector16 capability,
+  // which requires Kernel and is therefore illegal for Shader targets.
+  assert(NumElems >= 1 &&
+         "SPIR-V OpTypeVectorIdExt requires at least 1 component");
   return getOpTypeVectorImpl(NumElems, ElemType, MIRBuilder, true);
 }
 
@@ -1259,7 +1263,7 @@ SPIRVTypeInst SPIRVGlobalRegistry::createSPIRVType(
                       AccQual, ExplicitLayoutRequired, EmitIR);
     unsigned NumElts = cast<FixedVectorType>(Ty)->getNumElements();
     const auto &STI = MIRBuilder.getMF().getSubtarget<SPIRVSubtarget>();
-    if (isLongVectorEXT(Ty) &&
+    if (isLongVectorEXT(Ty, STI.isKernel()) &&
         STI.canUseExtension(SPIRV::Extension::SPV_EXT_long_vector))
       return getOpTypeVectorIdEXT(NumElts, El, MIRBuilder);
     return getOpTypeVector(NumElts, El, MIRBuilder);
@@ -2048,7 +2052,8 @@ SPIRVTypeInst SPIRVGlobalRegistry::getOrCreateSPIRVVectorType(
         //       would remove the need for the gash casting here.
         return const_cast<MachineInstr *>(
             static_cast<const MachineInstr *>(getOpTypeVectorImpl(
-                NumElements, BaseType, MIRBuilder, isLongVectorEXT(Ty))));
+                NumElements, BaseType, MIRBuilder,
+                isLongVectorEXT(Ty, STI.isKernel()))));
       });
   add(Ty, false, NewMI);
   return finishCreatingSPIRVType(Ty, NewMI);

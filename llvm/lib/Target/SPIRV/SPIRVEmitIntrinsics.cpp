@@ -4080,7 +4080,7 @@ void SPIRVEmitIntrinsicsImpl::parseFunDeclarations(Module &M) {
         continue;
       if (!IsBuiltin) {
         ElemTy = normalizeType(ElemTy, AllowLongVectors);
-        if (!AllowLongVectors && isLongVectorEXT(ElemTy))
+        if (!AllowLongVectors && isLongVectorEXT(ElemTy, ST.isKernel()))
           continue;
       }
       FDeclPtrTys[&F].emplace_back(Idx, ElemTy);
