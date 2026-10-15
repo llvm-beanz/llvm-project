@@ -2781,3 +2781,70 @@ case list and error signature.
 -- `variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`,
 this is a bug fix feeding a still-closed feature bit, not a new
 feature-bit flip.
+
+## `K6r`: pointer stored through a private global and loaded in another function, both cases pass (roadmap K6r, closed)
+
+Picked `K6r` from the prior session's suggested next steps (smallest,
+most contained of `K6n`'s three split-off residual buckets -- 2 cases).
+
+Initial hypothesis (a quick relaxation of `hasOnlySupportedPointerUses`'s
+store-operand check) did not survive investigation: tracing the real
+failing case (`FEME_CPU_LOG_RESOURCE_NORMALIZATION`,
+`FEME_DUMP_IR_PRENORM`) showed the rejected global
+(`@spirv_var_101 = private global ptr addrspace(11) undef`) still present,
+unlocalized, at the point `SPIRVResourceLoweringPass` runs -- yet an
+isolated re-run of the exact same `feme-cpu-localize-private-globals,
+function(sroa<>,mem2reg)` pass sequence on IR extracted verbatim from the
+real failing case fully eliminated it. Added a temporary
+`FEME_DEBUG_LOCALIZE_PRIVATE_GLOBALS` diagnostic to
+`LocalizePrivateGlobalsPass` (reverted before committing) to find the real
+reason: the global is used by *two* functions, `main` (a `load`) and
+`main.patchconstant` (a `store`) -- `splitTessellationControlEntry`'s own
+barrierless split (`CanonicalizeStage.cpp`) legitimately produces this
+shape for a tessellation-control entry with a group-sync barrier, since a
+value computed before the barrier and read back after it, in what becomes
+a separately-dispatched `<entry>.patchconstant` function, has no SSA value
+that can cross that real function boundary -- so `LocalizePrivateGlobalsPass`
+correctly declines to localize it (`usedByOneFunctionOnly` is doing exactly
+its job), leaving `SPIRVResourceLoweringPass` to see the raw, un-localized
+global directly.
+
+Fixed in `SPIRVResourceLowering.cpp`: `hasOnlySupportedPointerUses` now
+recognizes this shape (a store whose value operand is a supported pointer,
+whose pointer operand is a global used by exactly that one store and
+otherwise only loads, each recursively validated); new
+`lowerPointerMergeGlobalStore` (mirroring `mergeIntoPhi`/`mergeIntoSelect`'s
+existing `PointerMergeMap` design, but with only one producer to wait for)
+replaces the original pointer global with two new scalar globals (`i32`
+descriptor index, `i64` byte offset), writing the resolved pair at the
+store's own site and reading it back -- continuing `lowerRawPointerUses`
+from each load's own result -- at every load, with no real cross-function
+pointer value ever materialized.
+
+New unit test added (`SPIRVResourceLoweringTest.cpp`):
+`LowersPointerStoredThroughPrivateGlobalAndLoadedInAnotherFunction`, a
+two-function module with a `select`-merged pointer stored through a
+private global in one function and loaded in another.
+
+CTS: both `dEQP-VK.spirv_assembly.instruction.graphics.variable_pointers.
+graphics.stores_private_single_buffer_tessc` and
+`...stores_private_two_buffers_tessc` now pass (confirmed via a transient
+`variablePointers`/`variablePointersStorageBuffer` `VK_TRUE` feature-bit
+flip for measurement only, not committed). A full re-run of the
+`dEQP-VK.spirv_assembly.instruction.*.variable_pointers.*` group (1637
+cases) shows 942 Pass / 7 Fail / rest NotSupported, with neither of this
+bucket's two cases among the 7 remaining failures -- which match `K6s`'s
+already-documented frag/tessc/tesse result-correctness bug
+(`writes_single_buffer_frag`, `writes_single_buffer_tessc`,
+`writes_single_buffer_tesse`, `writes_two_buffers_frag`) plus the
+already-known `workgroup_two_buffers` (`feme-cpu-simdize` limitation) and
+`opphi_outer_struct_two_buffers_{first,second}_input` (`K6q`, handle-level
+phi/select merge) cases -- a clean closure with zero new failures.
+
+`ninja check-feme`: full target rebuilt and rerun clean (3736/3743 passed,
+7 unsupported, same as before this change) -- no regressions.
+
+`Roadmap.md`: `K6r` struck through (closed).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change --
+`variablePointers`/`variablePointersStorageBuffer` remain `VK_FALSE`
+(`K6q`/`K6s` still block closing the bundled feature).
