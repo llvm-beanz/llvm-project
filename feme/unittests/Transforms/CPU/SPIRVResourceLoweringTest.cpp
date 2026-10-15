@@ -9106,6 +9106,61 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_FALSE(RetConst->getZExtValue());
 }
 
+// Roadmap K6t follow-up: a real handle-derived pointer compared against a
+// literal `ConstantPointerNull` (rather than another chain-derived
+// pointer, the only shape the test above exercises) -- found via a real
+// `null_comparisons_ssbo_not_equal` CTS reduction's own
+// `%real_ptr != %null_ptr` comparison once K6t's whole-handle pattern let
+// the rest of that shader legalize far enough to reach it for the first
+// time. Before this fix, `mergeIntoCompare` had no `ConstantPointerNull`
+// special case (unlike `mergeIntoPhi`/`mergeIntoSelect`/
+// `mergeIntoHandleCompare`, which all do): the real pointer's own
+// `setOperand(..., Poison...)` above went unresolved forever, since a
+// literal null operand never reaches this function through a recognized
+// chain -- `hasOnlySupportedPointerUses` accepts any equality `icmp`
+// regardless of whether its other operand is chain-derived. The `icmp`
+// was left behind as `icmp eq poison, null`, which silently folded to the
+// wrong constant answer instead of ever being rewritten.
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrNotEqualOnRealHandleVsNullPointerToTrue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptra = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %ha, i32 0)
+      %ne = icmp ne ptr %ptra, null
+      ret i1 %ne
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  bool FoundOrigICmp = false;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<ICmpInst>(&I))
+      if (CI->getOperand(0)->getType()->isPointerTy())
+        FoundOrigICmp = true;
+  EXPECT_FALSE(FoundOrigICmp);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  // A real, non-bindless-bound handle's own descriptor index is always
+  // in-range, so it can never equal `nullPointerMergeDescIndex`'s
+  // out-of-range sentinel -- the whole expression constant-folds away to
+  // the mathematically correct answer, `true` (a real handle's own
+  // pointer is never equal to null).
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_TRUE(RetConst->getZExtValue());
+}
+
 // Roadmap K6p: `spirv.PtrDiff` lowers (`PtrDiffPattern`, upstream
 // `SPIRVToLLVM.cpp`) to `ptrtoint`/`ptrtoint`/`sub` (plus an element-size
 // `sdiv` and/or trailing trunc/sext this test's `i64` result type doesn't

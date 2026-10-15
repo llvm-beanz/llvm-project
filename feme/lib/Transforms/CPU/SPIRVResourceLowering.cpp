@@ -3903,8 +3903,25 @@ void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
 /// `(desc0 == desc1) & (off0 == off1)` -- two pointers (even to
 /// completely different bindings, in the cross-handle merge case) are
 /// equal only if both halves of their resolved identity match.
+///
+/// Mirrors `mergeIntoPhi`/`mergeIntoSelect`/`mergeIntoHandleCompare`'s own
+/// `ConstantPointerNull` handling (roadmap K6t follow-up, found via a real
+/// `null_comparisons_ssbo_not_equal` reduction's own `%real_ptr` vs
+/// `%null_ptr` comparison): a literal null operand never reaches this
+/// function through a recognized chain (`hasOnlySupportedPointerUses`
+/// accepts *any* equality `icmp`, not only ones whose other operand is
+/// itself chain-derived), so without this, the non-null side's own
+/// `setOperand(..., Poison...)` above would go unresolved forever --
+/// `State.RHSDescIndex`/`State.LHSOffset` would never be set, leaving a
+/// real `icmp eq poison, null` behind that silently folds to a wrong
+/// constant answer instead of ever being rewritten. Resolved immediately
+/// to the same out-of-range `nullPointerMergeDescIndex`/
+/// `nullPointerMergeOffset` sentinels those three callers already use --
+/// guaranteed to never equal a real pointer's own resolved
+/// (descriptor index, offset) pair.
 void mergeIntoCompare(ICmpInst *ICmp, Value *Ptr, Value *DescriptorIndex,
                      Value *Offset, PointerCompareMap &Compares) {
+  LLVMContext &Ctx = ICmp->getContext();
   PointerCompareState &State = Compares[ICmp];
   if (ICmp->getOperand(0) == Ptr) {
     State.LHSDescIndex = DescriptorIndex;
@@ -3915,6 +3932,14 @@ void mergeIntoCompare(ICmpInst *ICmp, Value *Ptr, Value *DescriptorIndex,
     State.RHSDescIndex = DescriptorIndex;
     State.RHSOffset = Offset;
     ICmp->setOperand(1, PoisonValue::get(ICmp->getOperand(1)->getType()));
+  }
+  if (!State.LHSDescIndex && isa<ConstantPointerNull>(ICmp->getOperand(0))) {
+    State.LHSDescIndex = nullPointerMergeDescIndex(Ctx);
+    State.LHSOffset = nullPointerMergeOffset(Ctx);
+  }
+  if (!State.RHSDescIndex && isa<ConstantPointerNull>(ICmp->getOperand(1))) {
+    State.RHSDescIndex = nullPointerMergeDescIndex(Ctx);
+    State.RHSOffset = nullPointerMergeOffset(Ctx);
   }
   if (!State.LHSDescIndex || !State.RHSDescIndex)
     return; // The other operand's own chain hasn't reached this merge yet.
