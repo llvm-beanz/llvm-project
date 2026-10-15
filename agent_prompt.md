@@ -63,38 +63,33 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6w`: fix the nested self-referential phi/GEP-through-
-   diamond backedge. Needs generalizing self-referential-backedge
-   detection (and the matching rewrite recursion) from a single phi to a
-   whole strongly-connected component of mutually-dependent
-   `PHINode`/`getelementptr` values -- synthesize a `descidx`/`offset` phi
-   pair for *every* intermediate phi in the component, not just the
-   outermost one. Bigger design change than `isPhiSelfReferentialBackedge`'s
-   current single-phi guard. New unit test needs a genuine GEP-diamond-
-   phi backedge shape (not the simpler direct-GEP shape `K6u`'s test
-   uses). Good next pick: directly blocks the one remaining
-   `opptrdiff.*` case.
-2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, CPU-backend resource-handle-normalization architectural
-   limitation. Still not root-caused beyond signature-level bucketing --
-   unchanged from every prior session's framing, not touched this session
-   (scope stayed on `K6v`/`K6w`).
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014`
-   tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision --
-   neither revisited this session.
+1. **(~2-4 hours)** The original "profile one L418 1024x1024x2
+   image-to-image MSAA case" next step -- still not picked up; this is
+   now 10+ sessions overdue, every session since it was first suggested
+   has had an open compiler bucket take priority. Worth prioritizing
+   purely as a change of pace if no other compiler bucket feels urgent.
+2. **(~half day)** Root-cause the remaining 3 `opptrdiff.*` failures past
+   their current signature-level bucketing: `ssbo_comparisons_diff` and
+   `wg_comparisons_diff` both hit `"reconvergence block '' does not have
+   exactly two predecessors"` (CFG-linearization, milestone 9 scope);
+   `variable_pointers_vars_wg_diff` hits the `feme-cpu-simdize`
+   groupshared-canonicalization limitation. Both are pre-existing,
+   already-tracked limitations, not new -- this is about root-causing
+   them individually rather than leaving them bucketed.
+3. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
 4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-
    manifest regeneration.
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
    check -- not exercised this session either, no `check-hlsl-feme-vk`
-   work done (session stayed scoped to `K6v`/`K6w`'s compiler
-   investigation).
-6. **(standing, profiling, ~2-4 hours)** The original "profile one L418
-   1024x1024x2 image-to-image MSAA case" next step -- still not picked up;
-   this is now 9+ sessions overdue.
+   work done (session stayed scoped to `K6w`'s compiler fix).
 
-**Immediate next action for next session:** pick `K6w` (directly blocks
-the one remaining `opptrdiff.*` case, already root-caused down to a
-specific function and the exact generalization needed) for a focused
-fix, or `K6n`-proper if a larger, harder investigation feels like the
-better use of a fresh session.
+**Immediate next action for next session:** with `K6u` through `K6w` all
+closed, there is no remaining *known, bucketed* `variablePointers`/
+`opptrdiff` legalization gap left -- either root-cause one of the 3
+remaining `opptrdiff.*` CFG-linearization/groupshared cases for a change
+of pace (item 2 above), or finally break the L418 profiling task out of
+its 10-session backlog (item 1 above).
