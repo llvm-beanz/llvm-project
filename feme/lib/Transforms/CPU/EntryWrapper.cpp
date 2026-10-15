@@ -1700,8 +1700,20 @@ bool collectClonableScalarRecurrence(Instruction *I,
     Out.truncate(Mark);
     return false;
   };
+  // Roadmap L426: a genuinely per-lane (vector-typed) value can never be
+  // "simply cloned into the wrapper's own scalar loop" -- the wrapper has
+  // no per-lane representation of anything at all, only ordinary scalar
+  // `loopvarN`s -- regardless of whether every operand it transitively
+  // depends on is otherwise a header phi/constant. Without this check, a
+  // wave-persistent mask induction's own recurrence (e.g.
+  // `select i1 %narrow, <4 x i1> %mask, <4 x i1> zeroinitializer`, which
+  // depends on nothing but the mask's own header phi and a constant) was
+  // wrongly accepted here, producing a wrapper-side clone that referenced
+  // the mask header phi -- a value the wrapper never actually has, since
+  // it is threaded through the per-wave spill array instead
+  // (`IsWavePersistent`) rather than cloned.
   if (isa<PHINode>(I) || I->isTerminator() || I->mayHaveSideEffects() ||
-      I->mayReadFromMemory())
+      I->mayReadFromMemory() || I->getType()->isVectorTy())
     return Fail();
   for (Value *Op : I->operands()) {
     if (isa<Constant>(Op))
@@ -1710,9 +1722,9 @@ bool collectClonableScalarRecurrence(Instruction *I,
     if (!OpI)
       return Fail();
     if (auto *PN = dyn_cast<PHINode>(OpI)) {
-      if (is_contained(AllowedPhis, PN))
-        continue;
-      return Fail();
+      if (PN->getType()->isVectorTy() || !is_contained(AllowedPhis, PN))
+        return Fail();
+      continue;
     }
     if (!collectClonableScalarRecurrence(OpI, AllowedPhis, Out))
       return Fail();
@@ -2011,13 +2023,29 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
     // recurrence (`IsWavePersistent`, roadmap H159(b)), except with no
     // store-back needed, since the seeded value provably never changes
     // (`spillValuesLiveAcrossBarriers`'s own `NextValue == HeaderPhi`
-    // case skips it). A non-invariant, non-constant start remains
-    // unsupported: only a loop-invariant induction's seed can safely run
-    // as still-per-wave code this way.
-    if (Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch) != Ind.HeaderPhi)
-      return std::nullopt; // Only a compile-time-constant start is
-                           // supported for a genuine (non-invariant)
-                           // induction.
+    // case skips it).
+    //
+    // Roadmap L426: a *genuine* (non-invariant) per-lane induction may
+    // also carry a non-constant seed -- e.g. a per-lane divergence mask
+    // that both starts from a per-lane-computed value ahead of the loop
+    // *and* keeps narrowing every iteration (a collapsed body+latch
+    // block's own recurrence, not merely held constant). This needs no
+    // extra support beyond what `IsWavePersistent` already provides for
+    // a non-constant seed: `spillValuesLiveAcrossBarriers` seeds
+    // `Ind.InitialValue` immediately after its own definition rather than
+    // unconditionally at the prefix chain's end (so it is never stranded
+    // in the wrong `.prefixN` region, see the H155 comment there) and
+    // stores `NextValue` back after every recurrence regardless of
+    // whether it differs from `HeaderPhi` -- the only two cases that
+    // actually differ are whether a store-back is needed at all (skipped
+    // above when `NextValue == HeaderPhi`) and whether `NextValue` is
+    // itself an `Instruction` (required by `buildWrapperForLoop`'s own
+    // `cast<Instruction>`, since a constant or argument recurrence can
+    // never need a store-back in the first place).
+    Instruction *NextValue = dyn_cast<Instruction>(
+        Ind.HeaderPhi->getIncomingValueForBlock(Shape.Latch));
+    if (!NextValue)
+      return std::nullopt;
     Ind.IsWavePersistent = true;
     Ind.InitialValue = Initial;
   }
