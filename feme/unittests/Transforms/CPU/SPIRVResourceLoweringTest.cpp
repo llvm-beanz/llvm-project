@@ -9214,6 +9214,60 @@ TEST(SPIRVResourceLoweringTest,
   EXPECT_EQ(RetConst->getSExtValue(), -4);
 }
 
+// Roadmap K6p `opptrdiff` residual:
+// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrdiff.
+// variable_pointers_vars_ssbo_diff`/`_ssbo_2_diff` each walk a pointer
+// *backwards* one element (`OpPtrAccessChain %ptr_ssbo_int %backward_gep
+// %int_n1`, i.e. a `getelementptr i32, ptr %p, i32 -1`) before taking its
+// `OpPtrDiff`. `hasResolvableGEPByteOffset` previously rejected *any*
+// negative constant GEP offset outright -- not just an unresolvable
+// variable one -- so this perfectly ordinary "one element behind" shape
+// (which `computePointerOffset` below materializes as a signed, not
+// zero-extended, `i64`) was an unconditional, over-broad false rejection.
+// This straight-line (non-cyclic) reduction isolates just that: a
+// genuinely new case is the self-referential loop-carried-pointer-PHI
+// backedge the full CTS shape also has, which `mergeIntoPhi`'s rewrite
+// phase cannot yet resolve (tracked separately, not by this test).
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrDiffThroughNegativeConstantGEPOffsetToOffsetSubtraction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i64 @main() {
+      %h = call target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptra = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 4)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1) %h, i32 4)
+      %ptrb.back = getelementptr i32, ptr %ptrb, i32 -1
+      %ia = ptrtoint ptr %ptra to i64
+      %ib = ptrtoint ptr %ptrb.back to i64
+      %diff = sub i64 %ia, %ib
+      ret i64 %diff
+    }
+    declare target("spirv.VulkanBuffer", [0 x i32], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x i32], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  for (Instruction &I : instructions(*F))
+    EXPECT_FALSE(isa<PtrToIntInst>(&I) || isa<GetElementPtrInst>(&I));
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  // `%ptra` is element 4 (byte offset 16); `%ptrb.back` is one element
+  // behind element 4, i.e. element 3 (byte offset 12). `16 - 12 = 4`,
+  // the mathematically correct answer -- not some zero-extended-garbage
+  // value a naive treatment of the negative GEP offset would produce.
+  EXPECT_EQ(RetConst->getSExtValue(), 4);
+}
+
 // Roadmap K6t: `spirv.PtrEqual`/`spirv.PtrNotEqual` directly on two whole
 // resource handles (no `getpointer` on either side -- e.g. a real
 // `different_ssbos_equal` reduction's own `%v1_eq_v1 = OpPtrEqual %bool

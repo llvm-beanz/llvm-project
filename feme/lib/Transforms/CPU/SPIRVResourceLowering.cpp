@@ -2541,17 +2541,25 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
 }
 
 /// Returns whether \p GEP's byte offset relative to its pointer operand can
-/// be recovered as a non-negative constant plus zero or more
+/// be recovered as a (possibly negative) constant plus zero or more
 /// `index * constant` terms, the only form `lowerRawPointerUses` below
-/// materializes.
+/// materializes. The constant term's sign is unrestricted (roadmap K6p's
+/// `opptrdiff` residual: a `getelementptr i32, ptr %p, i32 -1` one element
+/// behind `%p` is a perfectly ordinary address-difference shape, e.g. two
+/// loop-carried pointers walking towards each other that are never
+/// dereferenced past either end, only `ptrtoint`/`sub`-ed against one
+/// another -- `computePointerOffset` already materializes this as a signed
+/// `i64`). Each variable `index * constant` term's own constant multiplier
+/// must still be non-negative: unlike the constant term above, a variable
+/// term's runtime index value is unknown here, so a negative multiplier
+/// could make the resulting byte offset swing arbitrarily (not just
+/// uniformly negative), which `lowerRawPointerUses`'s callers don't assume.
 bool hasResolvableGEPByteOffset(const GetElementPtrInst &GEP,
                                 const DataLayout &DL) {
   unsigned BitWidth = DL.getIndexSizeInBits(GEP.getPointerAddressSpace());
   SmallMapVector<Value *, APInt, 4> VariableOffsets;
   APInt ConstantOffset(BitWidth, 0);
   if (!GEP.collectOffset(DL, BitWidth, VariableOffsets, ConstantOffset))
-    return false;
-  if (ConstantOffset.isNegative())
     return false;
   return llvm::all_of(VariableOffsets, [](const auto &Entry) {
     return !Entry.second.isNegative();
@@ -3503,8 +3511,14 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 
 /// Materializes \p GEP's byte offset relative to its pointer operand as an
 /// i64 value. `hasOnlySupportedPointerUses` already guaranteed this is
-/// representable as a non-negative constant plus zero or more
-/// `index * constant` terms.
+/// representable as a (possibly negative) constant plus zero or more
+/// `index * constant` terms. The constant term is sign-extended (not
+/// zero-extended) to `i64` so a negative compile-time offset -- e.g. a
+/// `getelementptr i32, ptr %p, i32 -1` one element behind `%p`, which only
+/// ever feeds an address-difference computation
+/// (`hasOnlySupportedPointerUses`'s `ptrtoint`/`sub` pairing, never a real
+/// dereference past the handle's own bounds) -- still produces the correct
+/// negative `i64` rather than a huge unsigned value.
 Value *computePointerOffset(IRBuilderBase &Builder,
                             const GetElementPtrInst &GEP,
                             const DataLayout &DL) {
@@ -3516,11 +3530,9 @@ Value *computePointerOffset(IRBuilderBase &Builder,
   (void)Collected;
   assert(Collected &&
          "hasOnlySupportedPointerUses only accepts resolvable GEPs");
-  assert(!ConstantOffset.isNegative() &&
-         "hasOnlySupportedPointerUses only accepts non-negative GEP offsets");
 
-  Value *Offset =
-      ConstantInt::get(Builder.getInt64Ty(), ConstantOffset.getZExtValue());
+  Value *Offset = ConstantInt::get(Builder.getContext(),
+                                   ConstantOffset.sextOrTrunc(64));
   for (const auto &[Index, Multiplier] : VariableOffsets) {
     assert(!Multiplier.isNegative() &&
            "hasOnlySupportedPointerUses only accepts non-negative GEP offsets");
