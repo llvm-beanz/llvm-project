@@ -123171,3 +123171,54 @@ I patched `isLinearChain` to special-case this one trivial shape (body = single 
 - `InterlockedAdd.resources.32.test`: genuine numeric mismatch (expected `0x1`, got `0x0`), not looked at beyond the raw buffer diff.
 - `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision: still unresolved, many sessions running.
 - `offload-test-suite` `VkBool32`/`WaveActiveMax` drop-on-rebase pattern: not hit this session (no fresh cherry-pick happened).
+
+# Session: `L426` fixed -- `matchLoopShape` generalized, all 4 `L425(a)` cases now pass; `isLinearChain` path confirmed a dead end
+
+**Device check**: `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Task**: `L426` -- fix the 4 cases stuck on `feme-cpu-wrap-entry`'s diagnostic, following last session's planned path (re-apply reverted `isLinearChain` patch, debug the `DominatorTree` crash).
+
+## What shipped (2 commits, already committed to this branch)
+
+1. `EntryWrapper.cpp` -- two bugs fixed in `matchLoopShape`/`collectClonableScalarRecurrence`, plus new lit test `entry-wrapper-loop-wave-persistent-mask-recurrence.ll`.
+2. Docs: `Roadmap.md` (`L426` struck through, `L427` opened for the standing `offload-test-suite` build gap), `VulkanCTSReport.md` (new entry).
+
+## The planned path was a dead end -- pivoted mid-session
+
+Re-reproduced last session's `isLinearChain` patch + `DominatorTree` crash with `gdb`. The crash is inside `SROAPass` computing a fresh `DominatorTree` over a region function. Root cause: `splitAtGroupSyncBarriers`'s own region-calling code (`buildWrapper`) is a **strictly flat, call-each-region-once model with no looping construct at all**. No `isLinearChain` patch could ever make a loop backedge representable there. Abandoned this path entirely rather than sink more time into it.
+
+## Actual fix: `matchLoopShape`'s own wave-persistent-induction machinery
+
+`EntryWrapper.cpp` already has separate "barrier inside a uniform loop" machinery (`matchLoopShape`/`buildWrapperForLoop`) that structurally matches all 4 cases' shape. It still rejected them due to 2 bugs:
+
+1. `matchLoopShape`'s induction-seed check only allowed a non-constant seed when the recurrence was loop-invariant (`NextValue == HeaderPhi`). A genuine (narrowing) recurrence with a non-constant seed was unconditionally rejected, even though the seed/store-back machinery (`spillValuesLiveAcrossBarriers`) already handles both cases identically. Fixed: now requires only that `NextValue` be an `Instruction`.
+2. `collectClonableScalarRecurrence` never checked for vector types, so a per-lane mask recurrence got wrongly treated as "clonable into the wrapper's scalar loop" -- producing invalid IR (`select` with a `void <badref>` operand, caught via `FEME_OPT_DUMP_INVALID=1`). Fixed: reject any vector-typed instruction/phi-dependency.
+
+## Debugging near-miss worth remembering
+
+Early in this session I instrumented `matchLoopShape` with `errs()` traces before each `return std::nullopt;`, un-braced. This silently turned every instrumented `if` into an unconditional `return` (classic dangling-if-without-braces), making NONE of 12 traces fire while the function still returned `nullopt` -- a flatly contradictory signal that cost real time to run down. The compiler's own "misleading indentation" warning was the only tell. **Always brace an inserted statement when touching a single-statement `if` body.**
+
+## Numbers
+
+- `FeMeTransformsCPUTests`: 634/634 Pass (1 net new test).
+- `check-feme`: 3,760/3,767 Pass, 7 Unsupported, 0 Fail, 0 regressions.
+- All 4 target cases (`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`, `InterlockedCompareExchange.resources.32`, `InterlockedExchange.resources.32`): now compile, execute, `BufferExact` pass via standalone `offloader`.
+- `dEQP-VK.glsl.loops.*` (624 cases) + `dEQP-VK.glsl.demote.*` (30 cases): 636/654 Pass, exactly matching the pre-existing baseline -- 0 regressions, 0 newly fixed (expected: neither group exercises this exact shape).
+
+## Still not run: `check-hlsl-feme-vk`
+
+No `offload-test-suite` build exists in this environment (no `build/` dir). Building it needs a full `clang`+HLSL `cmake -C clang/cmake/caches/HLSL.cmake` configuration -- never completed across many sessions now. Opened roadmap row `L427` to track this explicitly instead of letting it stay an implicit, easy-to-forget assumption. **This is now the single most overdue standing item in the whole project.**
+
+## Next action (pick this first): `L427` -- actually build `offload-test-suite`
+
+1. `cd /home/dev/dev/llvm-project && mkdir -p build-hlsl && cd build-hlsl`
+2. `cmake -G Ninja -C ../clang/cmake/caches/HLSL.cmake ../llvm -DCMAKE_BUILD_TYPE=Release` (or whatever flags `HLSL.cmake` needs -- read it first, it may already set `CMAKE_BUILD_TYPE`).
+3. Budget several hours for the initial `ninja` build of clang+HLSL; this has never completed in any prior session, so expect to hit unknown unknowns (missing deps, config issues) -- treat the FIRST successful full build as the session's whole deliverable if needed.
+4. Once built, wire up `/home/dev/dev/offload-test-suite`'s `feme` branch and attempt `check-hlsl-feme-vk` for the first time ever.
+
+## Other open items, unchanged this session
+
+- `K6n`-proper: largest remaining `variablePointers` bucket, untouched for many sessions. Still the single biggest open *compiler* item.
+- `Basic/Mandelbrot.test`: contention-dependent semaphore-wait flake under parallel load. Same class as `L421`'s race. Low priority, change-of-pace candidate.
+- `InterlockedAdd.resources.32.test`: genuine numeric mismatch (expected `0x1`, got `0x0`), not looked at beyond the raw buffer diff.
+- `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision: still unresolved, many sessions running.
