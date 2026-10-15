@@ -122367,3 +122367,43 @@ Both `K6q` cases pass: `opphi_outer_struct_two_buffers_{first,second}_input`. Th
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6q`'s compiler fix).
 
 **Immediate next action for next session:** pick `K6n`-proper (now the only remaining large, unattempted bucket -- `K6o`, `K6r`, `K6s`, and now `K6q` are all closed) and start by root-causing one representative `"unsupported raised operation"` case down to its specific resource-handle-normalization code path in `feme/lib/Target/CPU` (not yet located in any prior session) before guessing at a fix approach, or pick `K6p` first if the upstream-MLIR TableGen work feels like a better change of pace.
+
+# Session: K6p feme-local half closed (merge for OpPtrEqual/OpPtrNotEqual/OpPtrDiff), 2 bugs fixed, K6t opened
+
+**Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` at session start, with `VK_ICD_FILENAMES` exported first.
+
+## What now works
+
+4 of `K6p`'s 29 CTS cases pass (`simple_variable_pointers_ptr_equal`, `simple_variable_pointers_ptr_not_equal`, `different_wgs_equal`, `different_wgs_not_equal`). Full `*variable_pointer*` sweep (4464 cases, feature bits measured on transiently): 958 Pass / 3492 NotSupported / 14 Fail, zero regressions. `check-feme`: 3743/3750 pass, 7 unsupported, 0 failed. `FeMeTransformsCPUTests`: 623/623 pass (2 new tests added). Also fixed a real segfault and a real invalid-IR-emission bug along the way -- both pre-existing, newly exposed rather than newly introduced.
+
+## The bug, in one paragraph
+
+Picked up a stalled prior session's in-progress, uncommitted `K6p` work (new `PointerCompareMap`/`mergeIntoCompare`/`mergeIntoDiff` machinery for `hasOnlySupportedPointerUses` to accept `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff`'s lowered `icmp`/`ptrtoint`+`sub` shapes) that had a duplicate-parameter build error. Fixing the build and exercising the new code paths against real CTS cases surfaced two latent bugs the new opcode support reached for the first time: an infinite-recursion segfault in the existing (unrelated) `lowerPointerMergeGlobalStore` recursion on a loop-carried pointer stored back into the same global each iteration (no cycle guard existed before), and an invalid `llvm.icmp`-on-opaque-resource-handle-type emission from upstream's generic `IComparePattern` when two *whole* resource handles are compared directly (no intervening `OpAccessChain`).
+
+## What this session did, in order
+
+1. Fixed the stalled build (duplicate `PointerCompareMap &Compares` parameter; missing `Compares` argument at one call site).
+2. Ran the full 621-test `FeMeTransformsCPUTests` suite to confirm the threading fix introduced no regressions.
+3. Spot-checked 2 CTS cases; found `variable_pointers_vars_ssbo_diff` segfaulting. Root-caused via `gdb` backtrace to an unbounded recursion in `hasOnlySupportedPointerUses`'s `GVLoad`-chasing path. Fixed with the same `Visited`-set guard pattern `K6q` already established, threaded through 4 recursive call sites.
+4. Ran the full 29-case `opptr*` CTS set: 4/29 pass. Found 4 more cases emitting invalid LLVM IR (whole-handle `OpPtrEqual`/`OpPtrNotEqual`). Root-caused to upstream's `IComparePattern` lacking an operand-type guard.
+5. Fixed `IComparePattern` in `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` (an "issue outside FeMe") with a new `isICmpComparable` check; reran the full 149-test MLIR SPIRVToLLVM/SPIRV lit sweep to confirm zero regressions.
+6. Ran the full `*variable_pointer*` CTS sweep (4464 cases): 958/3492/14, all 14 known, zero new regressions. Reverted the transient feature-bit flips.
+7. Wrote 2 new unit tests for `mergeIntoCompare`/`mergeIntoDiff`. Both initially failed because the test IR's all-literal-constant bindings/indices let `mergeIntoCompare`/`mergeIntoDiff`'s own `IRBuilder<>` constant-fold the whole expression away -- correct pass behavior, wrong test assumption. Rewrote both tests' assertions to check the folded return value instead of an intermediate instruction shape.
+8. Wrote a new FeMe-local lit test (`spirv-to-llvm-ptr-equal-whole-handle-invalid.mlir`) exercising the upstream `IComparePattern` fix using FeMe's own custom resource-handle type converter (the only way to construct the triggering shape -- no pure-upstream-MLIR reproducer exists).
+9. Ran the full `check-feme` target (3743/3750 pass, 0 failed) to confirm zero regressions end-to-end.
+10. Committed in 4 pieces: the isolated "outside FeMe" MLIR fix, the feme-local fix + both new tests, doc updates (`Roadmap.md`/`VulkanCTSReport.md`, including a new `K6t` row for the whole-handle-comparison residual), and this file.
+
+## The real lesson this session learned
+
+1. **A generic, shared, already-widely-used pattern (`IComparePattern`) can still have a type-safety gap that's only reachable through a downstream project's own custom type converter, not anything in-tree.** The fix itself (an operand-type guard) is fully general and belongs upstream since it protects every future caller, not just FeMe -- but the *test* proving it fires can only live where the triggering IR shape can actually be constructed. Don't force a reproducer into the "wrong" test tree just to satisfy a "tests live next to the fix" instinct; put the fix where it's general and the test where it's reproducible, and say so explicitly in the commit message.
+2. **"The merge instruction doesn't survive in the test's final IR" is not automatically a test bug to work around -- sometimes it's the pass correctly doing its job, and the fix is to assert on the right thing.** Both new unit tests used literal-constant resource bindings, which let aggressive (but entirely standard, `ConstantFolder`-default) constant folding collapse the entire synthesized expression down to its one correct literal answer. The lesson generalizes beyond this session: before "fixing" a test whose instruction-shape assertion fails, check whether the *value* is still correct -- if it is, the right fix is almost always to assert on the value, not to contort the input IR until an instruction survives that doesn't need to.
+
+## Next steps
+
+1. **(~1-2 days)** `K6t`: whole-handle `OpPtrEqual`/`OpPtrNotEqual` comparison (comparing two entire resource handles with no `OpAccessChain` between them). At least 4 cases. Needs a FeMe-CPU-backend-level resource-index comparison in `SPIRVResourceLowering.cpp` (compare two `DescriptorIndex` values directly, no offset component since neither side went through `getpointer`) -- not yet attempted. Good next pick: smaller and more contained than `K6n`-proper, and now the only unattempted `K6p`-family residual.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers` bucket (the large majority of the 25 `K6p` CTS cases still failing), CPU-backend resource-handle-normalization architectural limitation. Still not root-caused beyond signature-level bucketing. Likely needs a runtime-dispatch mechanism rather than a lowering-pattern fix; worth its own investigation session before committing to an approach.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6p`'s compiler fix).
+
+**Immediate next action for next session:** pick `K6t` (4+ cases, whole-handle comparison, smallest and most contained of the two remaining `variablePointers` buckets) for a focused fix, or `K6n`-proper if a larger, harder investigation feels like the better use of a fresh session.
