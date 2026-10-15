@@ -1033,8 +1033,10 @@ public:
         continue;
       for (Instruction &I : *BB) {
         auto *Call = dyn_cast<CallInst>(&I);
+        if (!Call)
+          continue;
         feme::StageOpKind Kind;
-        if (Call && feme::isStageOpCall(*Call, &Kind) &&
+        if (feme::isStageOpCall(*Call, &Kind) &&
             (Kind == feme::StageOpKind::Discard ||
              Kind == feme::StageOpKind::Demote ||
              Kind == feme::StageOpKind::IsHelper ||
@@ -1045,6 +1047,61 @@ public:
              Kind == feme::StageOpKind::SetMeshOutputs ||
              Kind == feme::StageOpKind::EmitMeshTasks))
           return true;
+        // Roadmap L425(a) (2nd bug): mirrors `LoopLinearizer::
+        // linearizeCycle`'s own identical `CycleHasMaskOps` check (see
+        // its comment, roadmap K6s) -- a `feme.cpu.resource.*`/`feme.cpu.
+        // image.*` call's own trailing mask operand starts out as the
+        // compile-time constant `true`, relying entirely on this pass's
+        // `applyStageMasks` to narrow it to the real per-iteration
+        // predicate. Without this check, `flattenLoopBodyDiamond` would
+        // "successfully" pre-flatten a loop-body diamond containing one
+        // of these calls using its own always-seeded `AllActive` guess
+        // (see its own comment) *before* `LoopLinearizer`'s real,
+        // loop-carried mask is ever computed -- stamping the call's mask
+        // operand with a value derived from that bogus guess. The call's
+        // enclosing block, now a plain straight-line block (its
+        // conditional branch already replaced with an unconditional one),
+        // is then walked right past a second time by `LoopLinearizer`'s
+        // own, correct `flattenLoopBodyRegion` pass, which blindly
+        // re-stamps the same call's mask operand again with the *real*
+        // per-iteration mask -- except `LoopLinearizer`'s own walk reaches
+        // it with the loop's single, backedge-independent outer `active.
+        // live`/`active.sideeffect` phi (not yet narrowed by this
+        // specific inner diamond), clobbering the correct, narrower mask
+        // the premature first pass had already (coincidentally, only for
+        // that one visit) computed correctly. Found reducing
+        // `AllMemoryBarrierWithGroupSync.test`'s `UavCounter[0]++` inside
+        // `for (uint I = 0; I < 512; ++I) { if (GTID.x == I) { ... } }`
+        // down to exactly this double-masking shape via targeted
+        // `errs()` tracing of every `applyStageMasks` resource-call
+        // rewrite.
+        //
+        // Deliberately narrower than `CycleHasMaskOps`'s own identical
+        // check: a *pure read* (`StoredValue`/`Texel`/`AtomicValue` all
+        // null -- `feme.cpu.resource.load.*`/`.getdimensions.*`,
+        // `feme.cpu.image.load.*`/`.sample.*`/`.querylod.*`) has no
+        // memory side effect for a wrong (too-early, always-active) mask
+        // to corrupt -- only a write (a store or an atomic) does. Gating
+        // on that distinction (rather than "any resource/image call at
+        // all", as first tried) matters because `flattenLoopBodyDiamond`
+        // pre-flattening a *read-only* diamond is not just harmless, it
+        // is sometimes *required*: `LinearizesCheckBlockChainedDivergent
+        // CheckBypassToStayInLoop`'s own `L377(a)` shape depends on a
+        // read-only loop-body diamond (`feme.cpu.resource.getdimensions.
+        // raw`/`.load.raw`) being pre-flattened here so its own divergent-
+        // branch-bypass fold can run against an already-simplified body;
+        // over-widening this check to every resource/image call regressed
+        // exactly that case (a `PHINode` with a mismatched predecessor
+        // count, caught by `verifyModule`) the first time this fix was
+        // tried.
+        if (std::optional<MatchedResourceCall> RC = matchResourceCall(*Call)) {
+          if (RC->StoredValue)
+            return true;
+        } else if (std::optional<MatchedImageCall> IC =
+                       matchImageCall(*Call)) {
+          if (IC->Texel || IC->AtomicValue)
+            return true;
+        }
       }
       for (BasicBlock *Succ : successors(BB))
         Worklist.push_back(Succ);
@@ -1748,8 +1805,28 @@ DiamondFlattener::flattenLoopBodyDiamond(BasicBlock *Start) {
   // the loop's real mask, silently baked in a wrong, always-"demote never
   // happened before this iteration" guess, corrupting every later
   // iteration's masked output.
-  if (regionHasStageMaskOps(Start, R))
+  if (regionHasStageMaskOps(Start, R)) {
+    // Roadmap L425(a) (3rd bug): the `validate` call just above has
+    // already inserted every block its walk visited into the *shared*
+    // `MergeVisited` set (tracked in `LastRegionVisited`), on the
+    // assumption that a clean `validate` here always leads straight to
+    // this diamond being committed via `flatten` below. That assumption
+    // just broke: this diamond is being deferred *whole* to
+    // `LoopLinearizer`'s own `flattenLoopBodyRegion`, which will call
+    // `validate` again over a region that still includes `[Start, R)` --
+    // and without rolling back these insertions first, that later, real
+    // call immediately (and incorrectly) conflicts against this
+    // discarded trial's own leftover entries (the exact
+    // `MergeVisited`-without-`ResolvedBlocks` shape `validate`'s L375
+    // check exists to catch, firing here as a false positive). Found via
+    // `AllMemoryBarrierWithGroupSync.test`'s `for (...) { if (GTID.x ==
+    // I) { ...; UavCounter[0]++; } ... }`, whose `UavCounter` store is
+    // exactly what makes `regionHasStageMaskOps` return true here, after
+    // the 2nd bug's own fix (above) added that check.
+    for (BasicBlock *BB : LastRegionVisited)
+      MergeVisited.erase(BB);
     return std::nullopt;
+  }
   MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
                      ConstantInt::getTrue(F.getContext())};
   flatten(Start, R, AllActive, /*RedirectTo=*/R);

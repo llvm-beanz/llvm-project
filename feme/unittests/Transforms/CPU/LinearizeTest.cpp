@@ -856,6 +856,96 @@ TEST(LinearizeTest, FlattensLoopBodyDiamond) {
   EXPECT_TRUE(FoundSelect);
 }
 
+// Roadmap L425(a) (2nd/3rd bugs): mirrors `FlattensLoopBodyDiamond` above,
+// but with the mid-body diamond's `then` arm containing a
+// `feme.cpu.resource.store.raw.i32` call instead of a plain `add` --
+// exactly the shape `AllMemoryBarrierWithGroupSync.test`'s own `for
+// (uint I = 0; I < 512; ++I) { if (GTID.x == I) { ...; UavCounter[0]++;
+// } }` reduces to. Unlike the plain-arithmetic diamond above, this one
+// must *not* be flattened by `DiamondFlattener::flattenLoopBodyDiamond`'s
+// own always-active `AllActive` guess (see `regionHasStageMaskOps`'s own
+// comment) -- that call's mask operand needs this loop's *real*,
+// loop-carried per-iteration mask, which only `LoopLinearizer::
+// linearizeCycle`'s own `flattenLoopBodyRegion` computes. Before the 2nd
+// bug's fix (teaching `regionHasStageMaskOps` to recognize a
+// `feme.cpu.resource.*`/`feme.cpu.image.*` *write* the same way it
+// already recognized `feme.stage.*` ops), the call's mask was left
+// wrong (first stamped with a bogus always-true guess, then clobbered by
+// the real pass's own outer, not-yet-diamond-narrowed mask). Before the
+// 3rd bug's own fix (rolling back `MergeVisited`'s insertions from this
+// method's own discarded `validate` trial once `regionHasStageMaskOps`
+// says to defer), the *discarded* trial's leftover `MergeVisited` entries
+// made the real, deferred-to `flattenLoopBodyRegion` call's own `validate`
+// immediately (and incorrectly) fail with a "reached by more than one
+// divergent root" diagnostic instead of ever running at all.
+TEST(LinearizeTest, MasksResourceStoreCallInLoopBodyDiamondViaLoopLinearizer) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf, i32 %desc) #0 {
+    entry:
+      br label %loop.header
+    loop.header:
+      %i = phi i32 [0, %entry], [%inc, %loop.latch]
+      %loop.cond = icmp slt i32 %i, %n
+      br i1 %loop.cond, label %loop.body, label %loop.exit
+    loop.body:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %then, label %else
+    then:
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 1, i32 %desc, i64 0, i32 %i, i1 true)
+      br label %diamond.merge
+    else:
+      br label %diamond.merge
+    diamond.merge:
+      br label %loop.latch
+    loop.latch:
+      %inc = add i32 %i, 1
+      br label %loop.header
+    loop.exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(SawError)
+      << "the loop's own mask-threading machinery should recognize this "
+         "shape's uniform exit check instead of diagnosing it as "
+         "unsupported";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundResourceStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    if (std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI)) {
+      FoundResourceStore = true;
+      Value *Mask = CI->getArgOperand(CI->arg_size() - 1);
+      EXPECT_FALSE(isa<Constant>(Mask))
+          << "the loop body diamond's resource store should be masked by "
+             "the real, loop-carried per-iteration mask, not left at its "
+             "placeholder constant `true`, and not left unresolved by a "
+             "spurious `MergeVisited` conflict";
+    }
+  }
+  EXPECT_TRUE(FoundResourceStore);
+}
+
 // Roadmap R27: `feme.stage.discard` narrows both the live and side-effect
 // masks going forward, even with no divergent branch at all in the
 // function -- see `hasStageMaskOps`'s comment for why an unconditional

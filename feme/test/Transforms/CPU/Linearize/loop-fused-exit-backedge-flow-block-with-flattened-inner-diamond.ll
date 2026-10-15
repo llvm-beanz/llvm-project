@@ -40,11 +40,30 @@
 ; narrowed from a bare `i1 true` to the inner diamond's own per-lane
 ; `%eq`-derived select chain, confirming the pass-through doesn't just
 ; silently skip re-threading the already-resolved diamond's own mask.
+;
+; Roadmap L425(a): a later session's `regionHasStageMaskOps` fix (see
+; `Linearize.cpp`'s own doc comment) narrowed `flattenLoopBodyDiamond`'s
+; own early pre-pass to *defer* any diamond containing a side-effecting
+; `feme.cpu.resource.*`/`feme.cpu.image.*` call -- like this test's own
+; `then` arm -- to the main cycle-masking machinery instead of flattening
+; it immediately with only a local, loop-mask-unaware baseline of `i1
+; true`. This test's diamond is reached by `LoopLinearizer::linearizeCycle`
+; itself (not the deferred `flattenLoopBodyDiamond` trial), so it was
+; already going through the full masking machinery before that fix and
+; is unaffected by *which* path defers to it -- but the resulting mask
+; expression changed anyway, from the literal constant `i1 true` to the
+; loop's own (here invariant, but in general genuinely per-iteration)
+; carried `%active.sideeffect` phi, i.e. `and i1 %active.sideeffect,
+; %eq` -- semantically identical for this specific uniform-trip-count
+; loop (whose `%active.sideeffect` recurrence is itself an unsimplified
+; identity, provably always `true`), but no longer hard-coded to that
+; constant the way a genuinely divergent enclosing loop's own real,
+; non-constant active mask requires.
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: body:
 ; CHECK: %eq = icmp eq i32 %gtid, %i
-; CHECK: %sideeffect.t = and i1 true, %eq
+; CHECK: %sideeffect.t = and i1 %active.sideeffect, %eq
 ; CHECK: then:
 ; CHECK: call void @feme.cpu.resource.store.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i32 1, i1 %sideeffect.t)
 ; CHECK: body.merge:
