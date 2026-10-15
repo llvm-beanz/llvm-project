@@ -4103,3 +4103,164 @@ largest open item in this file; the `Basic/Mandelbrot.test` contention
 flake noted above is a candidate for a future session's change of pace,
 following the same methodology `L421` used for its own
 `QueueExecutor`/`DeviceMemory` race.
+
+## `L425(a)` root-caused (not fixed): 4-case `feme-cpu-wrap-entry` cluster traced to a header-owned-check barrier-loop gap; two separate, deeper `feme-cpu-linearize` bugs found and fixed along the way (roadmap `L425(a)`, closed -- root-cause only; `L426` opened for the fix itself)
+
+**Standing device check** (every session, every time):
+`vulkaninfo --summary | grep deviceName` without an explicit
+`VK_ICD_FILENAMES` reports `llvmpipe (LLVM 21.1.8, 128 bits)` -- the
+system default, **not** this project's own ICD. With
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`
+explicitly set, it correctly reports `FeMe CPU Vulkan Device`, confirmed
+at the start of this session as required.
+
+**Task**: continue `L425(a)` -- root-cause the 4 `feme-cpu-wrap-entry`-
+blocked cases `L425`'s own fix newly unblocked reaching
+(`Feature/HLSLLib/{AllMemoryBarrierWithGroupSync,
+DeviceMemoryBarrierWithGroupSync,InterlockedCompareExchange.resources.32,
+InterlockedExchange.resources.32}.test`), confirm whether they share one
+shape or need individual triage, and fix it if the diagnostic's extensive
+prior-fix history (`H72`/`H94b`/`H124e`/`H154`/`H155`/`H161`/`L201(e)`)
+turns out to make this "one more shape to add."
+
+**Two prerequisite `feme-cpu-linearize` bugs found and fixed first**:
+reproducing `AllMemoryBarrierWithGroupSync.test` standalone initially
+failed *earlier* than the `feme-cpu-wrap-entry` diagnostic this task
+targets, at `feme-cpu-linearize` itself, with a `DiamondFlattener`
+`MergeVisited` conflict. Root-caused to two independent, compounding
+bugs:
+
+1. **`regionHasStageMaskOps` missing resource/image-store coverage.**
+   `DiamondFlattener::flattenLoopBodyDiamond`'s own early "flatten this
+   loop-body diamond before the real per-iteration mask is known"
+   pre-pass is gated by `regionHasStageMaskOps`, which checked only
+   `feme.stage.*` ops (discard/demote/etc.), never the sibling `K6s`
+   `CycleHasMaskOps` check for `feme.cpu.resource.*`/`feme.cpu.image.*`
+   calls -- letting a resource/image *store* inside such a diamond get
+   flattened early with its mask left at the placeholder constant `true`
+   forever, instead of the real loop-carried mask `LoopLinearizer` would
+   otherwise have threaded through. **Fixed**: `regionHasStageMaskOps`
+   now also checks `matchResourceCall`/`matchImageCall`, but narrower
+   than `CycleHasMaskOps` -- only a call with an actual memory side
+   effect (`MatchedResourceCall::StoredValue` set, or
+   `MatchedImageCall::Texel`/`AtomicValue` set) is flagged. A first
+   attempt mirroring `CycleHasMaskOps` exactly (flagging all
+   resource/image calls, loads included) regressed
+   `LinearizeTest.LinearizesCheckBlockChainedDivergentCheckBypassToStayInLoop`
+   (roadmap `L377(a)`), whose own fold specifically depends on a
+   *read-only* loop-body diamond being pre-flattened by this same
+   pre-pass -- confirming `regionHasStageMaskOps` and `CycleHasMaskOps`
+   are similar-looking but intentionally different-scoped checks going
+   forward, not candidates to be kept byte-for-byte identical.
+
+2. **Discarded trial `validate()` call never rolled back `MergeVisited`.**
+   `flattenLoopBodyDiamond` calls `validate(Start, R, /*Quiet=*/true)` as
+   an unconditional *trial* probe *before* checking
+   `regionHasStageMaskOps`. A successful trial always inserts every
+   visited block into the shared, whole-function `MergeVisited` set
+   (`L375`'s own design, deliberately never cleared, to catch genuine
+   double-claims). Once bug 1's fix makes `regionHasStageMaskOps` defer
+   far more often, those insertions were never undone on the bail path
+   -- so `LoopLinearizer`'s own later, real `flattenLoopBodyRegion` call
+   over the same (never actually flattened) region immediately, and
+   incorrectly, conflicted against the discarded trial's own leftover
+   entries. **Fixed**: erase `LastRegionVisited`'s blocks from
+   `MergeVisited` on that specific `regionHasStageMaskOps`-triggered bail
+   path only.
+
+**New regression test**:
+`LinearizeTest.MasksResourceStoreCallInLoopBodyDiamondViaLoopLinearizer`,
+exercising both fixes together end-to-end via the full `LinearizePass`.
+Installs a `DiagnosticHandler` to assert no `DS_Error` diagnostic fires,
+not merely that the pass returns `true` -- an earlier IR-shape attempt
+for this same test silently passed its other assertions while actually
+hitting an unrelated, pre-existing "no recognized uniform exit check"
+diagnostic (a `Latch`-owned, not `Header`-owned, exit check is not
+reachable by the `CycleHasMaskOps`-gated masking machinery this test
+needs; the final IR shape instead gives the loop a `Header`-owned exit
+check, matching every other passing test in this file). Also updated
+`L425`'s own regression test,
+`loop-fused-exit-backedge-flow-block-with-flattened-inner-diamond.ll`:
+its `then` arm's resource-store mask changed from the literal `i1 true`
+to `and i1 %active.sideeffect, %eq` -- semantically identical for that
+test's specific uniform-trip-count loop (whose `%active.sideeffect`
+recurrence is an unsimplified but provably-always-`true` identity), but
+no longer hard-coded to a constant the way a genuinely divergent
+enclosing loop's real mask now requires; manual trace confirmed the old
+constant was the latent bug these two fixes corrected, not a stricter or
+better expectation to preserve.
+
+**Verification**:
+- `FeMeTransformsCPUTests`: 634/634 Pass (1 net new test), 0 regressions.
+- Full `ninja check-feme`: 3,759/3,766 Passed, 7 Unsupported, 0 Failed, 0
+  regressions (1 net new test; required updating the one `L425`
+  regression test's own `CHECK` lines to match the corrected mask
+  expression above).
+- `check-hlsl-feme-vk`: 485 Passed/273 Unsupported/28 Expectedly
+  Failed/6 Failed (up from 472/273/28/19) -- confirms these two
+  `feme-cpu-linearize` fixes alone unblocked 13 of the 19 previously-
+  failing cases, all without touching `feme-cpu-wrap-entry` at all. The
+  remaining 6 Failed: this task's own 4-case cluster, plus 2
+  already-separately-tracked, pre-existing issues untouched this session
+  (`Basic/Mandelbrot.test`'s contention flake, `H154`/`H155`-family;
+  `InterlockedAdd.resources.32.test`'s genuine numeric mismatch).
+- Targeted `VK-GL-CTS` regression check (same groups `L425`'s own
+  session sampled, since these fixes touch the identical
+  `DiamondFlattener`/`LoopLinearizer` code paths):
+  - `dEQP-VK.glsl.loops.*` (624 cases): 606/624 Pass, unchanged -- 0
+    regressions, 0 newly-fixed (expected; no resource/image store inside
+    a loop-body diamond in this group's own shapes).
+  - `dEQP-VK.glsl.demote.*` (30 cases): **30/30 Pass, up from 27/30** --
+    3 newly fixed by this session's own two fixes (a `demote` loop body
+    commonly also contains a resource/image call sharing the same
+    diamond, exactly the shape bug 1/2 above corrected).
+
+**All 4 of this task's own cases confirmed to share one root cause**:
+with both prerequisite bugs fixed, every one of
+`AllMemoryBarrierWithGroupSync`/`DeviceMemoryBarrierWithGroupSync`/
+`InterlockedCompareExchange.resources.32`/`InterlockedExchange.resources.32`
+now reaches (not merely individually corroborates) the exact same
+`feme-cpu-wrap-entry` diagnostic text, root-caused to one specific CFG
+shape: `EntryWrapper.cpp`'s `isLinearChain` recognizes a `while`-style
+loop whose *header* (not its latch) owns the continue/exit test only via
+its "neither successor is a backedge yet" case, which requires the
+candidate body arm to be barrier-free (`walkBarrierFreeArm`'s own
+hard rule, by design -- a barrier inside an already-nested arm has no
+representation in this milestone's flat `outlineChain`). None of this
+milestone's recognized shapes support a barrier directly in a
+header-owned-check loop's own single-block self-looping body -- exactly
+what all 4 cases' shared `GroupCounter`-incrementing loop is (confirmed
+via `FEME_DUMP_IR` on the standalone repro).
+
+**Not fixed this session**: a targeted fix was prototyped (recognize
+this one trivial single-block self-loop-body shape directly in
+`isLinearChain`, bypassing `walkBarrierFreeArm`'s barrier-free
+restriction only for it). This did let `isLinearChain` accept the shape,
+but surfaced a *second*, deeper bug one layer down:
+`splitAtGroupSyncBarriers`'s own region-splitting/outlining code (fed by
+`isLinearChain`'s `Order`) assumes an invariant that only the
+already-supported loop shapes guarantee, and crashes with a stale-parent
+`DominatorTree` assertion (`GenericDomTree.h:400`) once that assumption
+no longer holds for this shape. Reverted the speculative fix rather than
+ship it -- a crash is strictly worse than this task's own pre-existing,
+clean diagnostic -- and opened new roadmap row `L426` to fix both layers
+together in a future session, rather than continuing to deepen this
+task's own letter-nesting.
+
+**No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed** -- pure internal `feme-cpu-linearize` compiler fixes, no Vulkan
+feature or extension surface changed.
+
+`Roadmap.md`: `L425(a)` struck through (done -- root-caused, as the task
+itself asked; not fixed, since the fix itself turned out to need a
+second, deeper bug addressed too); new `L426` row opened to scope that
+fix.
+
+**Next steps**: `L426` (fix the `isLinearChain`/`splitAtGroupSyncBarriers`
+pair for this exact shape, starting from the already-reverted prototype
+and the standalone repro at `/tmp/l425a/AllMemoryBarrierWithGroupSync/`);
+`K6n`-proper (the largest remaining `variablePointers` bucket) remains
+entirely untouched for many sessions and is still the single largest
+open item in this file; `Basic/Mandelbrot.test`'s contention flake and
+`InterlockedAdd.resources.32.test`'s numeric mismatch remain open,
+pre-existing, separately-tracked issues, neither touched this session.
