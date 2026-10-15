@@ -63,30 +63,34 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6t`: whole-handle `OpPtrEqual`/`OpPtrNotEqual` comparison
-   (comparing two entire resource handles with no `OpAccessChain` between them).
-   At least 4 cases. Needs a FeMe-CPU-backend-level resource-index comparison in
-   `SPIRVResourceLowering.cpp` (compare two `DescriptorIndex` values directly,
-   no offset component since neither side went through `getpointer`) -- not yet
-   attempted. Good next pick: smaller and more contained than `K6n`-proper, and
-   now the only unattempted `K6p`-family residual.
-2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers` bucket
-   (the large majority of the 25 `K6p` CTS cases still failing), CPU-backend
-   resource-handle-normalization architectural limitation. Still not root-caused
-   beyond signature-level bucketing. Likely needs a runtime-dispatch mechanism
-   rather than a lowering-pattern fix; worth its own investigation session
-   before committing to an approach.
-3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
+1. **(~half day)** `opptrdiff.*` remaining 4 cases: only 1 of the 5 was
+   confirmed this session to hit the exact pre-existing CFG-linearization error
+   text (`"reconvergence block '' does not have exactly two predecessors"`); the
+   other 4 fail pipeline creation without a printed diagnostic in a quick pass.
+   Root-cause each with `FEME_VULKAN_LOG_CREATION_ERRORS`/`FEME_DUMP_IR_PRENORM`
+   before assuming they're all the same bucket -- at least two
+   (`ssbo_comparisons_diff`, a `vars_ssbo_2_diff` case) are SSBO-only, not
+   workgroup-only, so don't assume they're groupshared-specific without
+   checking.
+2. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+3. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
    re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest
    regeneration.
-5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
+4. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6p`'s compiler fix).
+   stayed scoped to `K6t`'s compiler fix).
+5. **(standing, profiling, ~2-4 hours)** The original "profile one L418
+   1024x1024x2 image-to-image MSAA case" next step from several sessions ago --
+   still not picked up; every session since has had an open compiler bucket that
+   took priority.
 
-**Immediate next action for next session:** pick `K6t` (4+ cases, whole-handle
-comparison, smallest and most contained of the two remaining `variablePointers`
-buckets) for a focused fix, or `K6n`-proper if a larger, harder investigation
-feels like the better use of a fresh session.
+**Immediate next action for next session:** with `K6n`, `K6o`, `K6p`, `K6q`,
+`K6r`, `K6s`, and now `K6t` all closed, the `variablePointers` bundle (`K6a`)
+has no remaining *known, bucketed* legalization gap left except the
+`opptrdiff.*` follow-up above -- pick that first (it's small and already
+partially root-caused), then reassess whether
+`variablePointers`/`variablePointersStorageBuffer` can finally flip to `VK_TRUE`
+for real, or whether the L418 profiling next step (long overdue) is a better use
+of a fresh session.
