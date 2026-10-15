@@ -9045,3 +9045,116 @@ TEST(SPIRVResourceLoweringTest,
   ASSERT_TRUE(DescIdx);
   EXPECT_TRUE(isa<PHINode>(DescIdx));
 }
+
+// Roadmap K6p: `spirv.PtrEqual`/`spirv.PtrNotEqual` lower (`IComparePattern`,
+// upstream `SPIRVToLLVM.cpp`) directly to `icmp eq`/`icmp ne` on the two
+// pointer SSA values. Before `mergeIntoCompare`, `hasOnlySupportedPointerUses`
+// rejected any `icmp` use of a handle-derived pointer outright ("pointer
+// used by an unrecognized instruction"), the
+// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.
+// simple_variable_pointers_ptr_equal` failure. Exercises the two-separate-
+// handle case (mirroring `LowersPhiMergedPointerFromDifferentHandlesTo
+// SharedRawAccess` above): each side's own chain must resolve
+// independently before the comparison is rewritten to `(desc0 == desc1) &
+// (off0 == off1)`.
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrEqualOnTwoHandleChainsToDescriptorAndOffsetComparison) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main() {
+      %ha = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %hb = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptra = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %ha, i32 0)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %hb, i32 1)
+      %eq = icmp eq ptr %ptra, %ptrb
+      ret i1 %eq
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // The original pointer-typed `icmp` must be gone, replaced by
+  // `mergeIntoCompare`'s `(desc0 == desc1) & (off0 == off1)` rewrite.
+  // Both sides here resolve to compile-time-constant descriptor
+  // indices/byte offsets (two distinct, non-bindless bindings), so the
+  // whole expression constant-folds away entirely -- to the
+  // mathematically correct answer, `false`, since two pointers into two
+  // different buffer bindings can never compare equal -- rather than
+  // surviving as a live `and`/`icmp` the way the cross-control-flow phi/
+  // select merge tests above do (there, the merge's own condition is a
+  // runtime function argument, which blocks that same folding).
+  bool FoundOrigICmp = false;
+  for (Instruction &I : instructions(*F))
+    if (auto *CI = dyn_cast<ICmpInst>(&I))
+      if (CI->getOperand(0)->getType()->isPointerTy())
+        FoundOrigICmp = true;
+  EXPECT_FALSE(FoundOrigICmp);
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_FALSE(RetConst->getZExtValue());
+}
+
+// Roadmap K6p: `spirv.PtrDiff` lowers (`PtrDiffPattern`, upstream
+// `SPIRVToLLVM.cpp`) to `ptrtoint`/`ptrtoint`/`sub` (plus an element-size
+// `sdiv` and/or trailing trunc/sext this test's `i64` result type doesn't
+// need). Before `mergeIntoDiff`, `hasOnlySupportedPointerUses` rejected
+// any `ptrtoint` use of a handle-derived pointer outright, the
+// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrdiff.*` failures. Per
+// `OpPtrDiff`'s own same-buffer-object spec assumption, only the two
+// resolved byte offsets are combined -- the descriptor indices are never
+// compared -- so the result must be a direct `sub` of the two chains' own
+// synthesized offsets.
+TEST(SPIRVResourceLoweringTest,
+     LowersPtrDiffOnTwoHandleChainsToOffsetSubtraction) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i64 @main() {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptra = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 0)
+      %ptrb = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 1)
+      %ia = ptrtoint ptr %ptra to i64
+      %ib = ptrtoint ptr %ptrb to i64
+      %diff = sub i64 %ia, %ib
+      ret i64 %diff
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+  // The original `ptrtoint`/`ptrtoint`/`sub` chain must be gone entirely
+  // -- including both now-dead `ptrtoint`s -- replaced by
+  // `mergeIntoDiff`'s direct `sub` of the two chains' own synthesized
+  // byte offsets. Both offsets here are compile-time constants (indices
+  // 0 and 1 into a 4-byte-stride `float` buffer), so the whole expression
+  // constant-folds away entirely to the mathematically correct answer,
+  // `0 - 4 = -4`, rather than surviving as a live `sub` the way the
+  // cross-control-flow phi/select merge tests above do.
+  for (Instruction &I : instructions(*F))
+    EXPECT_FALSE(isa<PtrToIntInst>(&I));
+  auto *RI = dyn_cast<ReturnInst>(F->front().getTerminator());
+  ASSERT_TRUE(RI);
+  auto *RetConst = dyn_cast<ConstantInt>(RI->getReturnValue());
+  ASSERT_TRUE(RetConst);
+  EXPECT_EQ(RetConst->getSExtValue(), -4);
+}

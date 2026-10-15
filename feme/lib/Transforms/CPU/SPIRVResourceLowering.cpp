@@ -2593,7 +2593,24 @@ bool hasResolvableGEPByteOffset(const GetElementPtrInst &GEP,
 /// `SPIRVToLLVMPatterns.cpp`'s generic `Atomic*Pattern`s -- SPIR-V itself
 /// only guarantees a 32-bit integer atomic across every implementation).
 bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
-                                 bool AllowGEPs, const DataLayout &DL) {
+                                 bool AllowGEPs, const DataLayout &DL,
+                                 SmallPtrSetImpl<const Value *> *VisitedOpt =
+                                     nullptr) {
+  // The `lowerPointerMergeGlobalStore` shape below (a raw pointer threaded
+  // through a `Private`/`Function`-storage global via store+load, e.g. a
+  // loop-incremented pointer rewritten into the "stored into a global each
+  // iteration" idiom) is genuinely cyclic in def-use terms: the loaded
+  // pointer's own chain of GEPs eventually stores a new pointer back into
+  // the same global, whose other load is the very value this call started
+  // from. Mirror `hasOnlySupportedHandleMergeUses`'s own `Visited`-set
+  // guard (Roadmap K6q) so re-discovering a value already being verified
+  // higher up this same recursion is treated as already-accepted instead of
+  // recursing forever.
+  SmallPtrSet<const Value *, 8> LocalVisited;
+  SmallPtrSetImpl<const Value *> &Visited =
+      VisitedOpt ? *VisitedOpt : LocalVisited;
+  if (!Visited.insert(&Ptr).second)
+    return true;
   for (const User *U : Ptr.users()) {
     if (const auto *LI = dyn_cast<LoadInst>(U)) {
       if (IsTexel ? !isSupportedTexelElementType(LI->getType())
@@ -2644,7 +2661,7 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
                     break;
                   }
                   if (!hasOnlySupportedPointerUses(*GVLoad, Writable, IsTexel,
-                                                   AllowGEPs, DL)) {
+                                                   AllowGEPs, DL, &Visited)) {
                     AllUsesSupported = false; // Already logged.
                     break;
                   }
@@ -2728,7 +2745,7 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
           return false;
         }
         if (!hasOnlySupportedPointerUses(*GEP, Writable, IsTexel, AllowGEPs,
-                                         DL))
+                                         DL, &Visited))
           return false; // Already logged by the recursive call.
         continue;
       }
@@ -2750,7 +2767,7 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
     if (AllowGEPs)
       if (const auto *Phi = dyn_cast<PHINode>(U)) {
         if (!hasOnlySupportedPointerUses(*Phi, Writable, IsTexel, AllowGEPs,
-                                         DL))
+                                         DL, &Visited))
           return false; // Already logged by the recursive call.
         continue;
       }
@@ -2762,8 +2779,51 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
           return false;
         }
         if (!hasOnlySupportedPointerUses(*Sel, Writable, IsTexel, AllowGEPs,
-                                         DL))
+                                         DL, &Visited))
           return false; // Already logged by the recursive call.
+        continue;
+      }
+    // (Roadmap K6p) `spirv.PtrEqual`/`spirv.PtrNotEqual` lower directly to
+    // a bare `icmp eq`/`icmp ne` on the two SPIR-V pointer SSA values
+    // (`IComparePattern`, upstream `SPIRVToLLVM.cpp`) -- an equality-only
+    // predicate is the only shape either op's own lowering ever produces,
+    // so any other predicate here would mean this pointer somehow also
+    // feeds an ordinary integer/FP comparison, which is not a legal SPIR-V
+    // pointer use at all. The comparison's own result is a plain `i1`,
+    // not itself pointer-typed, so no further recursion is needed. Gated
+    // behind `AllowGEPs` like the GEP/phi/select cases above: only the
+    // buffer kinds that permit further pointer navigation can meaningfully
+    // produce a comparable pointer at all.
+    if (AllowGEPs)
+      if (const auto *ICmp = dyn_cast<ICmpInst>(U)) {
+        if (!ICmp->isEquality()) {
+          logNormalizationRejection(
+              "pointer compared with a non-equality predicate", ICmp);
+          return false;
+        }
+        continue;
+      }
+    // (Roadmap K6p) `spirv.PtrDiff` lowers to `ptrtoint`/`ptrtoint`/`sub`/
+    // `sdiv` (`PtrDiffPattern`, upstream `SPIRVToLLVM.cpp`) -- accept the
+    // `ptrtoint` here only when its one and only use is, in turn, exactly
+    // one `sub` (the other operand being the paired pointer's own
+    // `ptrtoint`, validated independently when that pointer's own chain
+    // is checked): once past the `sub`, the value is a plain integer byte
+    // difference, no longer pointer-derived, so nothing further needs
+    // checking here.
+    if (AllowGEPs)
+      if (const auto *PTI = dyn_cast<PtrToIntInst>(U)) {
+        if (!PTI->hasOneUse()) {
+          logNormalizationRejection("ptrtoint result used more than once",
+                                    PTI);
+          return false;
+        }
+        const auto *Sub = dyn_cast<BinaryOperator>(*PTI->user_begin());
+        if (!Sub || Sub->getOpcode() != Instruction::Sub) {
+          logNormalizationRejection(
+              "ptrtoint result used other than by a subtraction", PTI);
+          return false;
+        }
         continue;
       }
     logNormalizationRejection("pointer used by an unrecognized instruction", U);
@@ -3608,9 +3668,32 @@ struct PointerMergeState {
 };
 using PointerMergeMap = DenseMap<Instruction *, PointerMergeState>;
 
+/// (Roadmap K6p) `PointerMergeState`'s binary-pointer-operation
+/// counterpart: tracks the shared, in-progress record of one `icmp eq`/
+/// `icmp ne` (from `spirv.PtrEqual`/`spirv.PtrNotEqual`) or `sub`-of-two-
+/// `ptrtoint`s (from `spirv.PtrDiff`, lowered by upstream MLIR's
+/// `PtrDiffPattern` to `ptrtoint`/`ptrtoint`/`sub`/`sdiv`) whose two
+/// pointer operands are each resolved by this pass' own "lower each use
+/// in place" per-chain recursion independently -- the same "whichever
+/// chain reaches this merge point first waits for the other" design as
+/// `PointerMergeState`, but keyed on a binary op's own LHS/RHS operand
+/// position rather than a phi/select's incoming legs. Per `OpPtrDiff`'s
+/// own spec ("Pointer 1 and Pointer 2 must point into the same buffer
+/// object", undefined behavior otherwise), only the two offsets are ever
+/// combined for a diff -- the descriptor indices are assumed equal and
+/// never compared at runtime.
+struct PointerCompareState {
+  Value *LHSDescIndex = nullptr;
+  Value *LHSOffset = nullptr;
+  Value *RHSDescIndex = nullptr;
+  Value *RHSOffset = nullptr;
+};
+using PointerCompareMap = DenseMap<Instruction *, PointerCompareState>;
+
 void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
                          Value *DescriptorIndex, Value *Offset,
-                         const DataLayout &DL, PointerMergeMap &Merges);
+                         const DataLayout &DL, PointerMergeMap &Merges,
+                         PointerCompareMap &Compares);
 
 /// Out-of-range sentinel for a merge edge whose own original pointer value
 /// is a `ConstantPointerNull` rather than a recognized handle chain --
@@ -3635,7 +3718,8 @@ Value *nullPointerMergeOffset(LLVMContext &Ctx) {
 /// comment for the overall design.
 void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
                   Value *Offset, const ResourceCallEnv &Env,
-                  const DataLayout &DL, PointerMergeMap &Merges) {
+                  const DataLayout &DL, PointerMergeMap &Merges,
+                  PointerCompareMap &Compares) {
   LLVMContext &Ctx = Phi->getContext();
   PointerMergeState &State = Merges[Phi];
   unsigned N = Phi->getNumIncomingValues();
@@ -3678,7 +3762,7 @@ void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
   if (llvm::any_of(DescPhi->incoming_values(),
                    [](const Use &U) { return isa<UndefValue>(U.get()); }))
     return; // Some other incoming chain hasn't reached this merge yet.
-  lowerRawPointerUses(Phi, Env, DescPhi, OffPhi, DL, Merges);
+  lowerRawPointerUses(Phi, Env, DescPhi, OffPhi, DL, Merges, Compares);
   Phi->eraseFromParent();
 }
 
@@ -3690,7 +3774,8 @@ void mergeIntoPhi(PHINode *Phi, Value *Ptr, Value *DescriptorIndex,
 /// once both halves are known.
 void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
                      Value *Offset, const ResourceCallEnv &Env,
-                     const DataLayout &DL, PointerMergeMap &Merges) {
+                     const DataLayout &DL, PointerMergeMap &Merges,
+                     PointerCompareMap &Compares) {
   LLVMContext &Ctx = Sel->getContext();
   PointerMergeState &State = Merges[Sel];
   if (Sel->getTrueValue() == Ptr) {
@@ -3726,8 +3811,93 @@ void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
   Value *OffSel =
       Builder.CreateSelect(Sel->getCondition(), State.PendingTrueOffset,
                            State.PendingFalseOffset, Sel->getName() + ".offset");
-  lowerRawPointerUses(Sel, Env, DescSel, OffSel, DL, Merges);
+  lowerRawPointerUses(Sel, Env, DescSel, OffSel, DL, Merges, Compares);
   Sel->eraseFromParent();
+}
+
+/// `mergeIntoPhi`/`mergeIntoSelect`'s counterpart for `spirv.PtrEqual`/
+/// `spirv.PtrNotEqual`, lowered (`IComparePattern`, upstream
+/// `SPIRVToLLVM.cpp`) directly to an `icmp eq`/`icmp ne` on the two
+/// pointer SSA values -- `hasOnlySupportedPointerUses` already validated
+/// \p ICmp is an equality predicate. Once both operands' own (descriptor
+/// index, byte offset) pairs have been threaded through independently
+/// (same "whichever side arrives first waits" design as
+/// `PointerMergeState`), the comparison is re-expressed directly as
+/// `(desc0 == desc1) & (off0 == off1)` -- two pointers (even to
+/// completely different bindings, in the cross-handle merge case) are
+/// equal only if both halves of their resolved identity match.
+void mergeIntoCompare(ICmpInst *ICmp, Value *Ptr, Value *DescriptorIndex,
+                     Value *Offset, PointerCompareMap &Compares) {
+  PointerCompareState &State = Compares[ICmp];
+  if (ICmp->getOperand(0) == Ptr) {
+    State.LHSDescIndex = DescriptorIndex;
+    State.LHSOffset = Offset;
+    ICmp->setOperand(0, PoisonValue::get(ICmp->getOperand(0)->getType()));
+  }
+  if (ICmp->getOperand(1) == Ptr) {
+    State.RHSDescIndex = DescriptorIndex;
+    State.RHSOffset = Offset;
+    ICmp->setOperand(1, PoisonValue::get(ICmp->getOperand(1)->getType()));
+  }
+  if (!State.LHSDescIndex || !State.RHSDescIndex)
+    return; // The other operand's own chain hasn't reached this merge yet.
+  IRBuilder<> Builder(ICmp);
+  Value *DescEq = Builder.CreateICmpEQ(State.LHSDescIndex, State.RHSDescIndex);
+  Value *OffEq = Builder.CreateICmpEQ(State.LHSOffset, State.RHSOffset);
+  Value *BothEq = Builder.CreateAnd(DescEq, OffEq);
+  Value *Result = ICmp->getPredicate() == CmpInst::ICMP_EQ
+                      ? BothEq
+                      : Builder.CreateNot(BothEq);
+  Result->setName(ICmp->getName());
+  ICmp->replaceAllUsesWith(Result);
+  ICmp->eraseFromParent();
+}
+
+/// `mergeIntoCompare`'s `spirv.PtrDiff` counterpart. Upstream MLIR's
+/// `PtrDiffPattern` (`SPIRVToLLVM.cpp`) lowers the op to
+/// `ptrtoint`/`ptrtoint`/`sub`/`sdiv`-by-pointee-size(/trunc-or-sext);
+/// `hasOnlySupportedPointerUses` already validated \p Sub is each
+/// `ptrtoint`'s one and only user. Per `OpPtrDiff`'s own spec ("Pointer 1
+/// and Pointer 2 must point into the same buffer object" -- otherwise
+/// undefined behavior), only the two resolved byte offsets are ever
+/// combined here; the descriptor indices are never compared at runtime,
+/// matching that same assumption. Replacing \p Sub directly (rather than
+/// the `ptrtoint`s themselves) lets the existing `sdiv`-by-element-size
+/// and any trailing trunc/sext downstream of it keep operating on an
+/// ordinary integer unchanged.
+void mergeIntoDiff(BinaryOperator *Sub, Value *Ptr, Value *DescriptorIndex,
+                   Value *Offset, PointerCompareMap &Compares) {
+  PointerCompareState &State = Compares[Sub];
+  auto *LHSPtrToInt = cast<PtrToIntInst>(Sub->getOperand(0));
+  auto *RHSPtrToInt = cast<PtrToIntInst>(Sub->getOperand(1));
+  // Disconnect whichever `ptrtoint`'s own operand is `Ptr` immediately
+  // (same reason `mergeIntoCompare`/`mergeIntoPhi`/`mergeIntoSelect` all
+  // poison their own stale reference right away): the caller is about to
+  // erase `Ptr`'s entire chain once this call returns, regardless of
+  // whether the merge below is complete yet.
+  if (LHSPtrToInt->getOperand(0) == Ptr) {
+    State.LHSDescIndex = DescriptorIndex;
+    State.LHSOffset = Offset;
+    LHSPtrToInt->setOperand(0, PoisonValue::get(Ptr->getType()));
+  }
+  if (RHSPtrToInt->getOperand(0) == Ptr) {
+    State.RHSDescIndex = DescriptorIndex;
+    State.RHSOffset = Offset;
+    RHSPtrToInt->setOperand(0, PoisonValue::get(Ptr->getType()));
+  }
+  if (!State.LHSDescIndex || !State.RHSDescIndex)
+    return; // The other operand's own chain hasn't reached this merge yet.
+  IRBuilder<> Builder(Sub);
+  Value *Diff = Builder.CreateSub(State.LHSOffset, State.RHSOffset,
+                                  Sub->getName());
+  if (Diff->getType() != Sub->getType())
+    Diff = Builder.CreateIntCast(Diff, Sub->getType(), /*isSigned=*/true);
+  Sub->replaceAllUsesWith(Diff);
+  Sub->eraseFromParent();
+  // Both `ptrtoint`s are now unreachable (each `hasOnlySupportedPointerUses`
+  // guaranteed had exactly one use, `Sub`, just erased above).
+  LHSPtrToInt->eraseFromParent();
+  RHSPtrToInt->eraseFromParent();
 }
 
 /// (Roadmap K6q) `PointerMergeState`'s handle-level counterpart: shared,
@@ -3749,6 +3919,7 @@ using HandleMergeMap = DenseMap<Instruction *, HandleMergeState>;
 void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
                          const ResourceCallEnv &Env, Value *DescriptorIndex,
                          const DataLayout &DL, PointerMergeMap &Merges,
+                         PointerCompareMap &Compares,
                          HandleMergeMap &HandleMerges);
 
 /// `mergeIntoPhi`'s handle-level counterpart (roadmap K6q): merges \p
@@ -3768,6 +3939,7 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
 void mergeIntoHandlePhi(PHINode *Phi, Value *Handle, Value *DescriptorIndex,
                        const BoundHandle &BH, const ResourceCallEnv &Env,
                        const DataLayout &DL, PointerMergeMap &Merges,
+                       PointerCompareMap &Compares,
                        HandleMergeMap &HandleMerges) {
   LLVMContext &Ctx = Phi->getContext();
   HandleMergeState &State = HandleMerges[Phi];
@@ -3800,7 +3972,8 @@ void mergeIntoHandlePhi(PHINode *Phi, Value *Handle, Value *DescriptorIndex,
   if (llvm::any_of(DescPhi->incoming_values(),
                    [](const Use &U) { return isa<UndefValue>(U.get()); }))
     return; // Some other incoming handle chain hasn't reached this merge yet.
-  lowerHandleAccesses(Phi, BH, Env, DescPhi, DL, Merges, HandleMerges);
+  lowerHandleAccesses(Phi, BH, Env, DescPhi, DL, Merges, Compares,
+                      HandleMerges);
   Phi->eraseFromParent();
 }
 
@@ -3819,6 +3992,7 @@ void mergeIntoHandleSelect(SelectInst *Sel, Value *Handle,
                           Value *DescriptorIndex, const BoundHandle &BH,
                           const ResourceCallEnv &Env, const DataLayout &DL,
                           PointerMergeMap &Merges,
+                          PointerCompareMap &Compares,
                           HandleMergeMap &HandleMerges) {
   HandleMergeState &State = HandleMerges[Sel];
   if (Sel->getTrueValue() == Handle) {
@@ -3839,7 +4013,8 @@ void mergeIntoHandleSelect(SelectInst *Sel, Value *Handle,
       Builder.CreateSelect(Sel->getCondition(), State.PendingTrueDescIndex,
                           State.PendingFalseDescIndex,
                           Sel->getName() + ".descidx");
-  lowerHandleAccesses(Sel, BH, Env, DescSel, DL, Merges, HandleMerges);
+  lowerHandleAccesses(Sel, BH, Env, DescSel, DL, Merges, Compares,
+                      HandleMerges);
   Sel->eraseFromParent();
 }
 
@@ -3864,7 +4039,8 @@ void lowerPointerMergeGlobalStore(GlobalVariable *GV, StoreInst *SI,
                                   const ResourceCallEnv &Env,
                                   Value *DescriptorIndex, Value *Offset,
                                   const DataLayout &DL,
-                                  PointerMergeMap &Merges) {
+                                  PointerMergeMap &Merges,
+                                  PointerCompareMap &Compares) {
   LLVMContext &Ctx = GV->getContext();
   Module &M = *GV->getParent();
   Type *I32Ty = Type::getInt32Ty(Ctx);
@@ -3890,7 +4066,8 @@ void lowerPointerMergeGlobalStore(GlobalVariable *GV, StoreInst *SI,
         LoadBuilder.CreateLoad(I32Ty, DescGV, LI->getName() + ".descidx");
     Value *LoadedOffset =
         LoadBuilder.CreateLoad(I64Ty, OffGV, LI->getName() + ".offset");
-    lowerRawPointerUses(LI, Env, LoadedDescIndex, LoadedOffset, DL, Merges);
+    lowerRawPointerUses(LI, Env, LoadedDescIndex, LoadedOffset, DL, Merges,
+                        Compares);
     LI->eraseFromParent();
   }
   GV->eraseFromParent();
@@ -3917,7 +4094,8 @@ void lowerPointerMergeGlobalStore(GlobalVariable *GV, StoreInst *SI,
 /// every other case here, encountering one does not immediately recurse.
 void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
                          Value *DescriptorIndex, Value *Offset,
-                         const DataLayout &DL, PointerMergeMap &Merges) {
+                         const DataLayout &DL, PointerMergeMap &Merges,
+                         PointerCompareMap &Compares) {
   Value *Mask = ConstantInt::getTrue(Ptr->getContext());
   for (User *U : llvm::make_early_inc_range(Ptr->users())) {
     if (auto *LI = dyn_cast<LoadInst>(U)) {
@@ -3935,7 +4113,7 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
         // validated above, not an ordinary element store.
         lowerPointerMergeGlobalStore(cast<GlobalVariable>(SI->getPointerOperand()),
                                      SI, Env, DescriptorIndex, Offset, DL,
-                                     Merges);
+                                     Merges, Compares);
         continue;
       }
       IRBuilder<> Builder(SI);
@@ -4017,12 +4195,24 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
       continue;
     }
 
+    if (auto *ICmp = dyn_cast<ICmpInst>(U)) {
+      mergeIntoCompare(ICmp, Ptr, DescriptorIndex, Offset, Compares);
+      continue;
+    }
+    if (auto *PTI = dyn_cast<PtrToIntInst>(U)) {
+      auto *Sub = cast<BinaryOperator>(*PTI->user_begin());
+      mergeIntoDiff(Sub, Ptr, DescriptorIndex, Offset, Compares);
+      continue;
+    }
+
     if (auto *Phi = dyn_cast<PHINode>(U)) {
-      mergeIntoPhi(Phi, Ptr, DescriptorIndex, Offset, Env, DL, Merges);
+      mergeIntoPhi(Phi, Ptr, DescriptorIndex, Offset, Env, DL, Merges,
+                  Compares);
       continue;
     }
     if (auto *Sel = dyn_cast<SelectInst>(U)) {
-      mergeIntoSelect(Sel, Ptr, DescriptorIndex, Offset, Env, DL, Merges);
+      mergeIntoSelect(Sel, Ptr, DescriptorIndex, Offset, Env, DL, Merges,
+                     Compares);
       continue;
     }
 
@@ -4030,7 +4220,8 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
     IRBuilder<> Builder(GEP);
     Value *NestedOffset =
         Builder.CreateAdd(Offset, computePointerOffset(Builder, *GEP, DL));
-    lowerRawPointerUses(GEP, Env, DescriptorIndex, NestedOffset, DL, Merges);
+    lowerRawPointerUses(GEP, Env, DescriptorIndex, NestedOffset, DL, Merges,
+                        Compares);
     GEP->eraseFromParent();
   }
 }
@@ -4087,6 +4278,7 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
 void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
                          const ResourceCallEnv &Env, Value *DescriptorIndex,
                          const DataLayout &DL, PointerMergeMap &Merges,
+                         PointerCompareMap &Compares,
                          HandleMergeMap &HandleMerges) {
   LLVMContext &Ctx = Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
@@ -4166,11 +4358,13 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
     // through, so encountering one does not immediately recurse.
     if (auto *Phi = dyn_cast<PHINode>(U)) {
       mergeIntoHandlePhi(Phi, Handle, DescriptorIndex, BH, Env, DL, Merges,
+                         Compares,
                         HandleMerges);
       continue;
     }
     if (auto *Sel = dyn_cast<SelectInst>(U)) {
       mergeIntoHandleSelect(Sel, Handle, DescriptorIndex, BH, Env, DL, Merges,
+                            Compares,
                            HandleMerges);
       continue;
     }
@@ -4296,7 +4490,8 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
         CmpXchg->eraseFromParent();
       }
     } else {
-      lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL, Merges);
+      lowerRawPointerUses(GetPtr, Env, DescriptorIndex, Offset, DL, Merges,
+                          Compares);
     }
     GetPtr->eraseFromParent();
   }
@@ -4310,6 +4505,7 @@ void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
 /// first) has been rewritten.
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                    uint32_t HeapBase, PointerMergeMap &Merges,
+                   PointerCompareMap &Compares,
                    HandleMergeMap &HandleMerges) {
   IRBuilder<> IndexBuilder(BH.Handle);
   Value *Index = BH.Handle->getArgOperand(3);
@@ -4317,6 +4513,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
       computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
   const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
   lowerHandleAccesses(BH.Handle, BH, Env, DescriptorIndex, DL, Merges,
+                      Compares,
                       HandleMerges);
   BH.Handle->eraseFromParent();
 }
@@ -6935,6 +7132,10 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // `lowerAccesses` calls below, so the map recording each merge's own
     // progress must outlive any single one of those calls.
     PointerMergeMap Merges;
+    // (Roadmap K6p) Same per-function lifetime requirement as `Merges`
+    // above, for an `icmp`/`ptrtoint`-pair merge instead of a phi/select
+    // one -- see `PointerCompareState`'s own comment.
+    PointerCompareMap Compares;
     // (Roadmap K6q) `PointerMergeMap`'s handle-level counterpart --
     // `HandleMergeState`'s own comment explains why it is a distinct,
     // shallower map rather than reusing `Merges` above.
@@ -6948,7 +7149,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
         RewroteAny = true;
       }
       if (isBufferHandleKind(BH.Kind)) {
-        lowerAccesses(BH, Env, Entry.HeapBase, Merges, HandleMerges);
+        lowerAccesses(BH, Env, Entry.HeapBase, Merges, Compares, HandleMerges);
         continue;
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
