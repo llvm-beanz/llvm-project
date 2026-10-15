@@ -63,44 +63,27 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** The original "profile one L418 1024x1024x2
-   image-to-image MSAA case" next step -- **this item is now stale**:
-   `L418`/`L418(a)`/`L418(b)` are all already marked "done" in
-   `Roadmap.md` from an earlier session (the profiling, the rasterizer
-   fix, and the `QueueExecutor`/`DeviceMemory` race it uncovered are all
-   closed, see `L421`). Drop this from future next-steps lists -- it was
-   carried forward stale for several sessions.
-2. **(~half day)** Root-cause the single remaining undiagnosed
-   `opptrdiff.*` failure past its current signature-level bucketing:
-   `wg_comparisons_diff`/`variable_pointers_vars_wg_diff` both now hit
-   the same `rewriteGroupSharedGlobals` "groupshared global ... is used
-   in a way this milestone does not yet canonicalize" diagnostic
-   (milestone 9 scope) -- a pre-existing, correctly-functioning
-   limitation, not a bug, but still worth individually root-causing (the
-   `ptrtoint`-of-groupshared-global shape specifically) if milestone 9
-   scope is ever revisited.
-3. **(standing, unresolved many sessions)**
+**Next steps, ranked:**
+1. **(~1-2 days)** Fix `K6z`: generalize `validate`/`flatten`'s
+   nested-cycle-boundary handling to tolerate an already-linearized
+   child cycle anywhere in a uniform loop's body, not just at the exit
+   check. Highest-value pick available: closes 24 of 26 current
+   `check-hlsl-feme-vk` failures in one shot. Start from
+   `matrix_single_subscript_load.test`'s `FEME_DUMP_IR_PRELINEARIZE`
+   dump (already captured this session, see this session's own
+   `K6z` write-up for the exact block numbers) as the unit-test seed
+   shape.
+2. **(~half day)** Root-cause `InterlockedAdd.resources.32.test`'s
+   numeric mismatch (expected all `0x1`, actual all `0x0`) -- not yet
+   looked at past the raw buffer diff.
+3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, still not touched for many sessions.
+4. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
-   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session.
-4. **(standing)** `L419(j)` remaining untriaged items (rasterization line
-   continuity needs barrier-region splitting generalized to nested
-   control flow; mandatory-feature reporting needs 14 missing feature
-   bits, cross-referenced to `D1`), deferred full
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+5. **(standing)** `L419(j)` remaining untriaged items, deferred full
    `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
-5. **(standing)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, CPU-backend resource-handle-normalization architectural
-   limitation -- still not root-caused beyond signature-level bucketing,
-   unchanged from every prior session's framing. Not touched this
-   session either (scope stayed on the `opptrdiff.*` CFG/SIMDize bugs).
 
-**Immediate next action for next session:** with the diamond-into-loop-
-header CFG gap and the `widenGroupSharedGEP` crash both fixed, the only
-remaining `opptrdiff.*` residual is the single, already-tracked,
-*correctly-functioning* `rewriteGroupSharedGlobals` diagnostic shared by
-the last 2 cases (item 2 above) -- a narrow, optional root-causing task,
-not a bug fix. The much bigger, still-fully-open item is `K6n`-proper
-(item 5 above), unattempted for many sessions now and the largest
-remaining `variablePointers` bucket; that or `check-hlsl-feme-vk`
-exercise against offload-test-suite (never run yet, despite the standing
-requirement) are the two strongest candidates for a change of pace.
+**Immediate next action for next session:** pick `K6z` (item 1) --
+highest leverage available, already root-caused down to the exact code
+path and a concrete IR repro shape.
