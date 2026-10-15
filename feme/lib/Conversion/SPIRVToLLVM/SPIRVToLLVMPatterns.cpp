@@ -4267,6 +4267,60 @@ private:
   const feme::spirv::ResourceInfoMap &Resources;
 };
 
+/// (Roadmap K6t) `spirv.PtrEqual`/`spirv.PtrNotEqual` comparing two whole
+/// resource handles directly (no intervening `OpAccessChain` on either
+/// side, e.g. two `StorageBuffer`-class `OpVariable`s compared directly --
+/// a real `different_ssbos_equal` reduction's own shape) cannot lower to a
+/// plain `llvm.icmp` the way a pointer-derived comparison does: LLVM's
+/// `icmp` only accepts (vector-of-)signless-integer or pointer operands,
+/// not an opaque resource-handle target-extension type -- see upstream
+/// `IComparePattern`'s own `isICmpComparable` guard and its comment, which
+/// declines (rather than lowers) exactly this shape, deliberately leaving
+/// it for this FeMe-local pattern instead. Lowered to a call of the new
+/// `llvm.spv.resource.handleequal` intrinsic (an "outside FeMe" upstream
+/// addition, `llvm/include/llvm/IR/IntrinsicsSPIRV.td`), which
+/// `feme::cpu::SPIRVResourceLoweringPass`'s own `mergeIntoHandleCompare`
+/// recognizes and resolves into a plain descriptor-index comparison once
+/// each operand's own handle is known -- see that function's comment.
+/// `spirv.PtrNotEqualOp` negates the same intrinsic's result (`Negate`)
+/// rather than needing a second intrinsic: the FeMe CPU backend only ever
+/// needs to know "are these the same handle", the equal/not-equal
+/// distinction is exactly as cheap to recover with one `xor` here as it
+/// would be threading a predicate through the intrinsic itself. Registered
+/// at `FeMeBenefit`, above upstream's own `IComparePattern` (registered at
+/// the default benefit by `populateSPIRVToLLVMConversionPatterns`), so it
+/// is tried first for this op -- `IComparePattern`'s own match failure for
+/// every *other* operand type (a real pointer, not a handle) leaves every
+/// other `spirv.PtrEqual`/`spirv.PtrNotEqual` shape to upstream's pattern
+/// unchanged.
+template <typename SPIRVOp, bool Negate>
+class HandleCompareConversionPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type OperandType = Adaptor.getOperand1().getType();
+    if (!mlir::isa<mlir::LLVM::LLVMTargetExtType>(OperandType))
+      return Rewriter.notifyMatchFailure(
+          Op, "operand is not a resource-handle target-extension type");
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value IsEqual = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.handleequal", Rewriter.getI1Type(),
+        {Adaptor.getOperand1(), Adaptor.getOperand2()});
+    if (!Negate) {
+      Rewriter.replaceOp(Op, IsEqual);
+      return mlir::success();
+    }
+    mlir::Value True =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI1Type(), 1);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::XOrOp>(Op, IsEqual, True);
+    return mlir::success();
+  }
+};
+
 /// Returns the constant integer value of \p Index, an `spirv.AccessChain`
 /// index selecting a struct member -- always an `spirv.Constant` per the
 /// SPIR-V spec, unlike an array/vector/matrix-selecting index, which may be
@@ -16999,6 +17053,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceArrayAccessChainPattern,
                ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
+  Patterns.add<
+      HandleCompareConversionPattern<mlir::spirv::PtrEqualOp, false>,
+      HandleCompareConversionPattern<mlir::spirv::PtrNotEqualOp, true>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   // Higher benefit than the `FeMeBenefit`-registered `ImageReadPattern`
   // above, so this wins for a `Dim::SubpassData` image read (roadmap F8a);
   // `ImageReadPattern` still handles every other dimension.
