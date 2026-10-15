@@ -4378,3 +4378,130 @@ for many sessions and is still the single largest open *compiler* item in
 this file; `Basic/Mandelbrot.test`'s contention flake and
 `InterlockedAdd.resources.32.test`'s numeric mismatch remain open,
 pre-existing, separately-tracked issues, neither touched this session.
+
+## `L427` done: `check-hlsl-feme-vk`/`check-hlsl-clang-feme-vk` actually built (no multi-hour HLSL.cmake build needed), 3 more offload-test-suite drift fixes, `L426` confirmed closing all 4 of its own cases (roadmap `L427`, closed; `L428`/`L429` opened)
+
+**Standing device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed at the start of this segment.
+
+**The planned multi-hour `HLSL.cmake` from-scratch build was
+unnecessary.** The existing `build/` tree already has `clang`/`clang-dxc`
+built: `llvm/CMakeLists.txt` auto-appends `clang` to
+`LLVM_ENABLE_PROJECTS` as a feme dependency
+(`"Enabling clang as a dependency to feme"`), even though
+`CMakeCache.txt`'s literal `LLVM_ENABLE_PROJECTS` string only lists
+`feme;mlir`. Reconfigured the same tree in place:
+
+```
+cmake -G Ninja -DLLVM_EXTERNAL_PROJECTS=OffloadTest \
+  -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=/home/dev/dev/offload-test-suite .
+```
+
+`offload-test-suite`'s own `CMakeLists.txt`/`test/CMakeLists.txt` already
+auto-detect an in-tree `feme_vulkan` target
+(`if (TARGET feme_vulkan) set(OFFLOADTEST_ENABLE_FEME_VULKAN On)`) and
+generate both `check-hlsl-feme-vk` (DXC-compiled) and
+`check-hlsl-clang-feme-vk` (Clang-compiled) suites automatically, no
+further plumbing needed. Verified via `ninja -t targets | grep check-hlsl`.
+
+**Checked out `offload-test-suite`'s `feme` branch** (tracking
+`llvm-beanz/feme`, no local branch previously existed) and, per the
+standing "VkBool32/WaveActiveMax drift" instruction, diffed it against
+`main` *before* running anything. Found the pattern recurring **twice
+more** (3 total instances fixed this session, each its own isolated
+`offload-test-suite`-only commit, not pushed upstream):
+
+1. `lib/API/VK/Device.cpp`: `VkBool32` (4-byte) spec-constant override
+   had been downgraded back to `bool` (1-byte) by the `feme` branch's own
+   cherry-pick -- re-applied.
+2. `test/WaveOps/WaveActiveMax.test`: `XFAIL: FeMe && host-arm64` had
+   been dropped -- re-applied (this session's host is `aarch64`).
+3. **New this session**: `test/Feature/PushConstant/array_of_matrices.test`
+   had a stale re-added `XFAIL: DXC` for an already-upstream-fixed DXC bug
+   (`microsoft/DirectXShaderCompiler#8080`) that `main` had already
+   removed with its own comment confirming the currently-checked-out DXC
+   no longer reproduces it. Initially misdiagnosed this as a genuine
+   Clang-matrix-codegen win (edited the wrong, `Clang`-scoped directive)
+   before realizing via `-v --show-all` that the active compiler for this
+   suite is DXC, not Clang -- reverted that wrong edit and fixed the
+   actual stale `XFAIL: DXC` block instead.
+
+**First `check-hlsl-feme-vk` run, post-`L426`-fix + these 3 drift
+fixes**:
+
+```
+Total Discovered Tests: 792
+  Passed             : 488 (61.62%)
+  Unsupported        : 273 (34.47%)
+  Expectedly Failed  :  28 ( 3.54%)
+  Failed             :   2 ( 0.25%)
+  Unexpectedly Passed:   0 ( 0.00%)
+```
+
+Confirms `L426` unblocked all 4 of its own target cases
+(`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`,
+`InterlockedCompareExchange.resources.32`, `InterlockedExchange.resources.32`
+-- all now Pass). The 2 remaining failures:
+
+- `Basic/Mandelbrot.test`: re-ran in isolation, **passes** -- the
+  already-known, already-tracked contention-dependent semaphore-wait
+  flake under parallel load (same class as the `L421` race).
+- `Feature/HLSLLib/InterlockedAdd.resources.32.test`: re-ran in
+  isolation, **fails consistently** (not a flake). Isolated to 3 of 8
+  `Results:` checks (`TestSlotsSBufI`, `TestSlotsBABuf`, `TestMono`), all
+  sharing one precise signature: the 3-argument (original-value-
+  capturing) `InterlockedAdd` on a *resource* (not groupshared)
+  destination. Every 2-argument add on the same/sibling resources passes
+  with the correct final count; the groupshared-destination 3-arg
+  sibling (`InterlockedAdd.32.test`) also passes. Root-cause
+  investigation started (`ResourceCalls.cpp`/`AtomicRMWIdentity.cpp`/
+  `SPIRVResourceLowering.cpp`/`GroupShared.cpp`) but not concluded this
+  session -- tracked as new follow-up `L429`.
+
+**First-ever `check-hlsl-clang-feme-vk` run** (the Clang-compiled sibling
+suite, never previously attempted in this environment):
+
+```
+Total Discovered Tests: 792
+  Passed             : 285 (35.98%)
+  Unsupported        : 269 (33.96%)
+  Expectedly Failed  : 139 (17.55%)
+  Failed             :  92 (11.62%)
+  Unexpectedly Passed:   7 ( 0.88%)
+```
+
+A much larger, not-yet-triaged failure surface. Roughly 40 of the 92
+failures are `Feature/HLSLLib/*_mat.test` (HLSL-library functions applied
+to a matrix argument: `abs_mat`, `acos_mat`, `atan2_mat`, `ceil_mat`,
+`cos_mat`, `cross`, `max_mat`/`min_mat`, `pow_mat`, `sin_mat`, `sqrt_mat`,
+etc.), with smaller clusters in `Feature/Textures/*`,
+`Feature/LocalResources/*`, and `Feature/ResourceArrays/*`. The 7
+Unexpectedly-Passed cases (`and.test`, `or.test`, 4
+`WaveActiveAllEqual.*`, `WaveReadLaneAt.Bool.test`) are byte-identical to
+`main` (confirmed via `git diff main`, not drift) with a blanket
+`XFAIL: Clang` that this session's Clang+FeMe combination now satisfies
+-- a likely genuine (if narrow) improvement, deliberately left untouched
+since editing a non-drifted upstream test file is out of scope. The
+dominant matrix-function cluster is almost certainly a Clang-HLSL-
+frontend maturity gap (matrix-argument lowering through these
+intrinsics), not necessarily a FeMe backend bug -- not triaged further
+this session; tracked as new follow-up `L428`.
+
+**No targeted `VK-GL-CTS` run this session**: no FeMe compiler code
+changed (both this session's fixes are `offload-test-suite`-only test-
+expectation corrections), so no feature/extension-surface or compiler-
+behavior change exists to verify against CTS. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: confirmed no update needed, same reason.
+
+`Roadmap.md`: `L427` struck through (done, via a cheaper path than
+originally planned); new `L428` (triage `check-hlsl-clang-feme-vk`'s
+92-case failure list) and `L429` (`InterlockedAdd.resources.32.test`'s
+3-arg-on-resource original-value bug) rows opened.
+
+**Next steps**: `L429` (half day -- `InterlockedAdd.resources.32.test`'s
+original-value-capture bug, already isolated to the exact 3-arg/resource
+signature, candidate files identified); `L428` (1-2 days -- triage the
+newly-discovered 92-case `check-hlsl-clang-feme-vk` failure list, starting
+with a quick Clang-vs-DXC SPIR-V diff on one `_mat.test` case to confirm
+scope before committing to a fix); `K6n`-proper (the largest remaining
+`variablePointers` bucket) remains entirely untouched for many sessions.
