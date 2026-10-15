@@ -63,24 +63,23 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `L429`: finish root-causing
-   `InterlockedAdd.resources.32.test`'s 3-arg/resource original-value
-   bug. Contrast `GroupShared.cpp`'s known-working groupshared atomic
-   original-value path against `ResourceCalls.cpp`/
-   `SPIRVResourceLowering.cpp`'s resource path to find the divergence.
-   Candidate hypothesis: `feme-cpu-simdize`'s resource-atomic widening
-   may misroute or collapse per-lane original values even though the
-   final RMW total is correct.
-2. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s new
-   92-case failure list. Start with one `_mat.test` case, compile via
-   both `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend
-   vs FeMe-backend scope before committing to a fix.
-3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, untouched for many sessions.
+1. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s 92-case
+   failure list. Start with one `_mat.test` case, compile via both
+   `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend vs
+   FeMe-backend scope before committing to a fix.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, still untouched for many sessions now.
+3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
+   contention-dependent semaphore-wait flake under full-suite parallel
+   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
+   methodology if a lower-stakes task is wanted.
 4. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
-   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
-5. **(standing, confirmed 3x now)** Always diff `offload-test-suite`'s
-   `feme` branch against `main` before trusting any `check-hlsl-feme-vk`
-   failure as new -- the VkBool32/WaveActiveMax/array_of_matrices drift
-   pattern keeps recurring on fresh checkouts.
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+5. **(standing, confirmed 3x previously)** Always diff
+   `offload-test-suite`'s `feme` branch against `main` before trusting
+   any `check-hlsl-feme-vk` failure as new -- not re-checked this
+   session since no `offload-test-suite` work was done, but the
+   checkout was not re-cloned either so drift risk is unchanged from
+   last confirmed-clean state.
