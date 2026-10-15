@@ -2606,6 +2606,53 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
     if (Writable)
       if (const auto *SI = dyn_cast<StoreInst>(U)) {
         if (SI->getPointerOperand() != &Ptr) {
+          // (Roadmap K6r) `Ptr` is \p SI's own *value* operand, not its
+          // pointer operand -- normally unsupported (a handle-derived
+          // pointer value has no business being stored anywhere but an
+          // ordinary buffer element), but `splitTessellationControlEntry`
+          // (CanonicalizeStage.cpp) produces exactly this shape for a
+          // barrierless-split tessellation-control entry's own value
+          // computed before the one group-sync barrier and read back
+          // after it, in what becomes a separately-dispatched
+          // `<entry>.patchconstant` function: no SSA value can cross that
+          // real function boundary, so the value is threaded through an
+          // ordinary module-scope `Private`-storage global instead (the
+          // same reason roadmap H4c's own "Captured" mechanism routes an
+          // ordinary non-pointer SSA value the identical way). Accepted
+          // here, narrowly, only when \p SI is the *one* store to that
+          // global and every other user is a `load` whose own result
+          // recursively passes this same check -- `lowerRawPointerUses`'s
+          // matching `lowerPointerMergeGlobalStore` has no way to
+          // represent more than one producer the way `mergeIntoPhi`'s
+          // `PointerMergeState` otherwise would.
+          if (AllowGEPs)
+            if (const auto *GV =
+                    dyn_cast<GlobalVariable>(SI->getPointerOperand()))
+              if (!GV->isDeclaration() && !GV->isConstant() &&
+                  GV->getValueType() == Ptr.getType()) {
+                bool AllUsesSupported = true;
+                for (const User *GVUser : GV->users()) {
+                  if (GVUser == SI)
+                    continue;
+                  const auto *GVLoad = dyn_cast<LoadInst>(GVUser);
+                  if (!GVLoad) {
+                    logNormalizationRejection(
+                        "pointer-merge global used by something other than "
+                        "the one recognized store or a load",
+                        GVUser);
+                    AllUsesSupported = false;
+                    break;
+                  }
+                  if (!hasOnlySupportedPointerUses(*GVLoad, Writable, IsTexel,
+                                                   AllowGEPs, DL)) {
+                    AllUsesSupported = false; // Already logged.
+                    break;
+                  }
+                }
+                if (AllUsesSupported)
+                  continue;
+                return false;
+              }
           logNormalizationRejection("store where pointer is not the operand",
                                     SI);
           return false;
@@ -3632,6 +3679,59 @@ void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
   Sel->eraseFromParent();
 }
 
+/// (Roadmap K6r) `hasOnlySupportedPointerUses`'s own comment above
+/// explains the shape this handles: \p SI stores \p Ptr's already-
+/// resolved (\p DescriptorIndex, \p Offset) pair's *pointer value*
+/// through \p GV -- a module-scope global that is, by construction here,
+/// used by exactly this one store and otherwise only loads, each
+/// recursively validated already. Unlike `mergeIntoPhi`/`mergeIntoSelect`,
+/// there is only ever one producer to wait for (a `PHINode`/`SelectInst`
+/// merge's own multiple-incoming-edge shape has no equivalent here --
+/// `hasOnlySupportedPointerUses` rejects any second store to \p GV
+/// outright), so the pair can be materialized and every load resolved
+/// immediately, with no `PointerMergeState` entry needed. \p GV's own
+/// role is replaced by two new scalar globals -- `i32` descriptor index,
+/// `i64` byte offset -- mirroring the original pointer global's single
+/// slot, so a load reached from a separately-dispatched function (the
+/// tessellation-control patch-constant split's own shape) resolves the
+/// identical pair without ever materializing a real cross-function
+/// pointer value.
+void lowerPointerMergeGlobalStore(GlobalVariable *GV, StoreInst *SI,
+                                  const ResourceCallEnv &Env,
+                                  Value *DescriptorIndex, Value *Offset,
+                                  const DataLayout &DL,
+                                  PointerMergeMap &Merges) {
+  LLVMContext &Ctx = GV->getContext();
+  Module &M = *GV->getParent();
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+  Type *I64Ty = Type::getInt64Ty(Ctx);
+  auto *DescGV =
+      new GlobalVariable(M, I32Ty, /*isConstant=*/false,
+                         GlobalValue::PrivateLinkage, UndefValue::get(I32Ty),
+                         GV->getName() + ".k6r.descidx");
+  auto *OffGV =
+      new GlobalVariable(M, I64Ty, /*isConstant=*/false,
+                         GlobalValue::PrivateLinkage, UndefValue::get(I64Ty),
+                         GV->getName() + ".k6r.offset");
+
+  IRBuilder<> StoreBuilder(SI);
+  StoreBuilder.CreateStore(DescriptorIndex, DescGV);
+  StoreBuilder.CreateStore(Offset, OffGV);
+  SI->eraseFromParent();
+
+  for (User *U : llvm::make_early_inc_range(GV->users())) {
+    auto *LI = cast<LoadInst>(U);
+    IRBuilder<> LoadBuilder(LI);
+    Value *LoadedDescIndex =
+        LoadBuilder.CreateLoad(I32Ty, DescGV, LI->getName() + ".descidx");
+    Value *LoadedOffset =
+        LoadBuilder.CreateLoad(I64Ty, OffGV, LI->getName() + ".offset");
+    lowerRawPointerUses(LI, Env, LoadedDescIndex, LoadedOffset, DL, Merges);
+    LI->eraseFromParent();
+  }
+  GV->eraseFromParent();
+}
+
 /// Rewrites every raw-buffer load/store/atomic reachable from \p Ptr
 /// (either directly or, for a structured storage block, through a GEP
 /// chain) using the already-resolved descriptor index and byte offset. An
@@ -3665,6 +3765,15 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
       continue;
     }
     if (auto *SI = dyn_cast<StoreInst>(U)) {
+      if (SI->getPointerOperand() != Ptr) {
+        // (Roadmap K6r) `Ptr` is \p SI's own value operand -- the
+        // pointer-merge-global shape `hasOnlySupportedPointerUses`
+        // validated above, not an ordinary element store.
+        lowerPointerMergeGlobalStore(cast<GlobalVariable>(SI->getPointerOperand()),
+                                     SI, Env, DescriptorIndex, Offset, DL,
+                                     Merges);
+        continue;
+      }
       IRBuilder<> Builder(SI);
       lowerRawStore(Builder, Env, DescriptorIndex, Offset,
                     SI->getValueOperand(), Mask, DL);
