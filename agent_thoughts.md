@@ -122705,3 +122705,128 @@ closed, there is no remaining *known, bucketed* `variablePointers`/
 remaining `opptrdiff.*` CFG-linearization/groupshared cases for a change
 of pace (item 2 above), or finally break the L418 profiling task out of
 its 10-session backlog (item 1 above).
+
+# Session: K6x/K6y closed -- diamond-into-loop-header CFG gap + widenGroupSharedGEP crash, opptrdiff.* now 3/5
+
+**Next action:** none needed from this entry -- this session's work is
+committed. Pick up at "Next steps" below for the next session.
+
+## What happened
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` at
+   session start (standing requirement).
+2. Picked up where a prior session left off: 3 remaining `opptrdiff.*`
+   CTS failures left bucketed only by error-signature class, not
+   individually root-caused (`ssbo_comparisons_diff`/
+   `wg_comparisons_diff`: CFG-linearization `"reconvergence block does
+   not have exactly two predecessors"`; `variable_pointers_vars_wg_diff`:
+   `feme-cpu-simdize` groupshared-canonicalization limitation).
+3. **Root-caused `ssbo_comparisons_diff`/`wg_comparisons_diff` (K6x):** a
+   divergent if/else diamond immediately upstream of a loop, both arms
+   merging directly into the loop header (no dedicated preheader), gives
+   the header 3 predecessors -- `DiamondFlattener::validate`'s
+   `hasNPredecessors(2)` check has no notion of "the 3rd predecessor is
+   really this same block's own backedge."
+4. **Fixed K6x** by adding `LoopSimplifyPass` to the CPU pipeline
+   (`Pipeline.cpp`) right before `LinearizePass`, instead of teaching
+   `DiamondFlattener` itself a loop-header special case (bigger, riskier
+   change). `LoopSimplifyPass` guarantees a dedicated preheader per loop,
+   turning the 3-predecessor shape back into an ordinary 2-predecessor
+   diamond merge with zero `DiamondFlattener` changes needed.
+5. New test: `Linearize/diamond-merges-into-loop-header.ll` -- confirms
+   both that `feme-cpu-linearize` alone still conservatively rejects this
+   shape, and that `loop-simplify` first resolves it.
+6. **K6x's own fix exposed a new crash** in `wg_comparisons_diff`: an
+   `"Invalid cast!"` assertion in `CastInst::Create`, from
+   `FunctionWidener::widenElementwise`'s generic `CastInst` handling.
+   Debugged with a temporary `errs()` print (GDB couldn't reliably
+   evaluate inlined accessors on the optimized build) and traced to
+   `FunctionWidener::widenGroupSharedGEP`.
+7. **Root-caused two distinct bugs there (K6y):**
+   - A nested groupshared GEP's own base pointer (itself another,
+     already-widened GEP) was read directly from the old function
+     instead of substituted via the `Widened` cache -- building an
+     illegal cross-function `Value*` reference.
+   - Even after fixing that, a GEP dispatched here because its *result*
+     was judged divergent can still have every index stay scalar --
+     caching that scalar value directly into `Widened` (whose
+     `getWidened` accessor documents an always-vector-typed invariant)
+     corrupted a later lookup.
+8. **Fixed both:** substitute a widened base via the `Widened` cache when
+   present; route a still-scalar rewritten GEP through `getWidened`
+   itself before caching.
+9. New test: `simdize-groupshared-nested-uniform-index-divergent-base.ll`
+   -- confirmed to crash (`SIGABRT`, verified by temporarily reverting
+   the fix and re-running) without the fix, passes cleanly with it.
+10. **Full `check-feme`:** 3755/3762 passed, 7 unsupported (expected),
+    0 failures -- clean, no regressions from either fix.
+11. **CTS `opptrdiff.*` 5-case sweep** (feature bits transiently flipped
+    to `VK_TRUE` for measurement only, reverted after): **3/5 now pass**
+    (up from 2/5): `ssbo_comparisons_diff`,
+    `variable_pointers_vars_ssbo_diff`,
+    `variable_pointers_vars_ssbo_2_diff`. The other 2
+    (`wg_comparisons_diff`, `variable_pointers_vars_wg_diff`) now fail
+    cleanly -- no crashes -- on a separate, pre-existing, already-tracked
+    `rewriteGroupSharedGlobals` groupshared-canonicalization diagnostic
+    (milestone 9 scope), confirmed by direct error-text inspection.
+12. Reverted the temporary `variablePointers`/`variablePointersStorageBuffer`
+    flip (`git checkout --`, confirmed zero outstanding diff in
+    `EntryPoints.cpp`) and rebuilt once more to confirm `feme_vulkan` is
+    back to the committed `VK_FALSE` configuration.
+13. Checked the offload-test-suite `feme` branch for the standing
+    `VkBool32`/`WaveActiveMax` pattern: the fix commit
+    (`Fix VkBool32 specialization constant override size`) is present as
+    the current HEAD -- not dropped this time, nothing to redo.
+14. Docs updated: `Roadmap.md` (new `K6x`/`K6y` rows, both struck
+    through/closed, split off from `K6w`); `VulkanCTSReport.md` (new
+    session section). `Vulkan14FeatureInventory.md`/
+    `VulkanExtensionInventory.md`: no change needed, `variablePointers`
+    stays unsupported/`VK_FALSE`.
+15. Commits (4 total, this session): K6x fix + test; K6y fix + test;
+    doc updates; this entry.
+16. `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+    Device` at the top of this session.
+
+## Next steps
+
+1. **(~2-4 hours)** The original "profile one L418 1024x1024x2
+   image-to-image MSAA case" next step -- **this item is now stale**:
+   `L418`/`L418(a)`/`L418(b)` are all already marked "done" in
+   `Roadmap.md` from an earlier session (the profiling, the rasterizer
+   fix, and the `QueueExecutor`/`DeviceMemory` race it uncovered are all
+   closed, see `L421`). Drop this from future next-steps lists -- it was
+   carried forward stale for several sessions.
+2. **(~half day)** Root-cause the single remaining undiagnosed
+   `opptrdiff.*` failure past its current signature-level bucketing:
+   `wg_comparisons_diff`/`variable_pointers_vars_wg_diff` both now hit
+   the same `rewriteGroupSharedGlobals` "groupshared global ... is used
+   in a way this milestone does not yet canonicalize" diagnostic
+   (milestone 9 scope) -- a pre-existing, correctly-functioning
+   limitation, not a bug, but still worth individually root-causing (the
+   `ptrtoint`-of-groupshared-global shape specifically) if milestone 9
+   scope is ever revisited.
+3. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items (rasterization line
+   continuity needs barrier-region splitting generalized to nested
+   control flow; mandatory-feature reporting needs 14 missing feature
+   bits, cross-referenced to `D1`), deferred full
+   `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation -- still not root-caused beyond signature-level bucketing,
+   unchanged from every prior session's framing. Not touched this
+   session either (scope stayed on the `opptrdiff.*` CFG/SIMDize bugs).
+
+**Immediate next action for next session:** with the diamond-into-loop-
+header CFG gap and the `widenGroupSharedGEP` crash both fixed, the only
+remaining `opptrdiff.*` residual is the single, already-tracked,
+*correctly-functioning* `rewriteGroupSharedGlobals` diagnostic shared by
+the last 2 cases (item 2 above) -- a narrow, optional root-causing task,
+not a bug fix. The much bigger, still-fully-open item is `K6n`-proper
+(item 5 above), unattempted for many sessions now and the largest
+remaining `variablePointers` bucket; that or `check-hlsl-feme-vk`
+exercise against offload-test-suite (never run yet, despite the standing
+requirement) are the two strongest candidates for a change of pace.
