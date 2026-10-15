@@ -4422,8 +4422,10 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         continue;
       for (Instruction &I : BB) {
         auto *Call = dyn_cast<CallInst>(&I);
+        if (!Call)
+          continue;
         feme::StageOpKind Kind;
-        if (Call && feme::isStageOpCall(*Call, &Kind) &&
+        if (feme::isStageOpCall(*Call, &Kind) &&
             (Kind == feme::StageOpKind::Discard ||
              Kind == feme::StageOpKind::Demote ||
              Kind == feme::StageOpKind::IsHelper ||
@@ -4433,6 +4435,29 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
              Kind == feme::StageOpKind::TaskPayloadStore ||
              Kind == feme::StageOpKind::SetMeshOutputs ||
              Kind == feme::StageOpKind::EmitMeshTasks)) {
+          CycleHasMaskOps = true;
+          break;
+        }
+        // Roadmap K6s: a `feme.cpu.resource.*`/`feme.cpu.image.*` call's
+        // own trailing mask operand starts out as the compile-time
+        // constant `true` `SPIRVResourceLoweringPass`/`lowerImageAccesses`
+        // gives every such call, relying entirely on this pass (via
+        // `applyStageMasks`'s own `matchResourceCall`/`matchImageCall`
+        // handling) to narrow it to the real per-branch predicate. A
+        // *uniform* loop reached only through an enclosing divergent
+        // diamond's arm (that diamond's own `DiamondFlattener::flatten`
+        // stops at this cycle's boundary and defers to this pass -- see
+        // its own comment) previously fell through the "no divergence, no
+        // mask ops" bail below whenever its body's only mask-needing
+        // operations were plain resource/image calls, not one of the
+        // `StageOpKind`s above -- leaving every one of those calls'
+        // masks stuck at `true` and letting the whole loop body execute
+        // unconditionally for every invocation, not just the one(s) the
+        // enclosing diamond's condition actually selected (found reducing
+        // `dEQP-VK.spirv_assembly.instruction.graphics.variable_pointers.
+        // graphics.writes_single_buffer_frag`'s own uniformly-offset
+        // buffer-readback mismatch to this exact gap).
+        if (matchResourceCall(*Call) || matchImageCall(*Call)) {
           CycleHasMaskOps = true;
           break;
         }
