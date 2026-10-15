@@ -63,27 +63,32 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `L425`: dump `FEME_DUMP_IR_PRELINEARIZE` on one of the
-   17 remaining `check-hlsl-feme-vk` failures sharing `K6z`'s diagnostic
-   text -- `Feature/HLSLLib/AllMemoryBarrierWithGroupSync.test` looks
-   like the smallest/simplest repro to start with. Goal: confirm whether
-   all 17 share one remaining shape (e.g. a *divergent* nested sibling
-   cycle, a nested sibling *diamond* rather than a cycle, or a
-   doubly-nested cycle) or are several distinct bugs.
+1. **(~half day)** `L425(a)`: root-cause the 4 `feme-cpu-wrap-entry`-
+   blocked cases `L425`'s fix newly unblocked reaching
+   (`AllMemoryBarrierWithGroupSync`, `DeviceMemoryBarrierWithGroupSync`,
+   `InterlockedCompareExchange.resources.32`,
+   `InterlockedExchange.resources.32`). Not yet confirmed whether they
+   share one single still-unsupported barrier-splitting shape or need
+   individual triage the way `L425` itself did -- that diagnostic has a
+   long prior-fix history (`H72`/`H94b`/`H124e`/`H154`/`H155`/`H161`/
+   `L201(e)`) for *other* shapes, so this is likely "one more shape to
+   add," not a from-scratch investigation.
 2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, CPU-backend resource-handle-normalization architectural
-   limitation. Still not root-caused beyond signature-level bucketing --
-   unchanged for many sessions now, not touched this session either
-   (scope stayed on `K6z`).
-3. **(standing, unresolved many sessions)**
+   bucket, still not touched for many sessions.
+3. **(~2-4 hours, low priority, change of pace)** `Basic/Mandelbrot.test`'s
+   contention-dependent semaphore-wait flake under full-suite parallel
+   load -- follow `L421`'s own `QueueExecutor`/`DeviceMemory` race
+   methodology (isolate, stress, `gdb` backtrace under load) if a
+   lower-stakes task is wanted.
+4. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
    `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
-4. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
-   regeneration still deferred (not needed this session specifically --
-   pure compiler fix, no feature/extension surface change).
+5. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
+   regeneration still deferred (not needed this session -- pure compiler
+   fix, no feature/extension surface change).
 
-**Immediate next action for next session:** pick item 1 (`L425`'s
-root-cause dump) -- it's a small, bounded investigation with a concrete
-starting test file already identified, and directly continues this
-session's own momentum on the same diagnostic-text cluster.
+**Immediate next action for next session:** pick `L425(a)` (item 1) --
+small, bounded, directly continues this session's own momentum, and the
+diagnostic it targets already has substantial prior-fix precedent to
+draw technique from.
