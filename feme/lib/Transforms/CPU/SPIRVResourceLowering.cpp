@@ -2772,6 +2772,93 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
   return true;
 }
 
+/// Forward declaration: `hasOnlySupportedHandleUse` and
+/// `hasOnlySupportedHandleMergeUses` recurse into each other -- see the
+/// latter's own comment for why (roadmap K6q).
+bool hasOnlySupportedHandleMergeUses(const Instruction &Merge, HandleKind Kind,
+                                     bool Writable, bool IsTexel,
+                                     bool AllowGEPs, const DataLayout &DL,
+                                     SmallPtrSetImpl<const Instruction *> &Visited);
+
+/// Checks one use \p U of a handle (or, recursively, of a handle-merge
+/// instruction -- see `hasOnlySupportedHandleMergeUses`) against the
+/// shape `hasOnlySupportedUses` accepts: the two special-cased bare
+/// `getdimensions.x`/`getarraylength` calls, a `getpointer` call
+/// satisfying the same contract that function's own header comment
+/// documents, or (roadmap K6q) a `PHINode`/`SelectInst` merging this
+/// handle with another one before any `getpointer` call, validated by
+/// recursing into `hasOnlySupportedHandleMergeUses`. \p Owner is \p U's
+/// own operand -- the handle or merge instruction \p U uses -- purely for
+/// `logNormalizationRejection`'s diagnostic.
+bool hasOnlySupportedHandleUse(const User *U, const Instruction &Owner,
+                               HandleKind Kind, bool Writable, bool IsTexel,
+                               bool AllowGEPs, const DataLayout &DL,
+                               SmallPtrSetImpl<const Instruction *> &Visited) {
+  // (Roadmap H144) A typed buffer's own bare `getdimensions.x` call is
+  // not a `getpointer`-mediated access at all -- see `lowerHandleAccesses`'s
+  // matching special-case branch, which lowers it to
+  // `createGetDimensionsTyped` without ever computing an
+  // `ElementIndex`/`Offset`.
+  if (IsTexel) {
+    if (const auto *DimsCI = dyn_cast<CallInst>(U);
+        DimsCI && isGetDimensions1Intrinsic(*DimsCI))
+      return true;
+  }
+  // (Roadmap H160, extended by L124(a)) A storage buffer's own bare
+  // `getarraylength` call is likewise not a `getpointer`-mediated access
+  // -- see `isGetArrayLengthIntrinsic`'s comment and
+  // `lowerHandleAccesses`'s matching special-case branch.
+  if (Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct) {
+    if (const auto *LenCI = dyn_cast<CallInst>(U);
+        LenCI && isGetArrayLengthIntrinsic(*LenCI))
+      return true;
+  }
+  if (const auto *Phi = dyn_cast<PHINode>(U))
+    return hasOnlySupportedHandleMergeUses(*Phi, Kind, Writable, IsTexel,
+                                           AllowGEPs, DL, Visited);
+  if (const auto *Sel = dyn_cast<SelectInst>(U))
+    return hasOnlySupportedHandleMergeUses(*Sel, Kind, Writable, IsTexel,
+                                           AllowGEPs, DL, Visited);
+  const auto *GetPtr = dyn_cast<CallInst>(U);
+  if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
+    logNormalizationRejection("handle used other than by getpointer", &Owner);
+    return false;
+  }
+  if ((Kind == HandleKind::Uniform || Kind == HandleKind::StorageStruct) &&
+      !isa<ConstantInt>(GetPtr->getArgOperand(1))) {
+    logNormalizationRejection(
+        "getpointer index is not a compile-time constant", GetPtr);
+    return false;
+  }
+  return hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs, DL);
+}
+
+/// (Roadmap K6q) Whether \p Merge -- a `PHINode`/`SelectInst` reached from
+/// `hasOnlySupportedHandleUse` when a handle's (or another merge's) sole
+/// use is such a merge rather than a direct `getpointer` call -- has only
+/// supported downstream uses: recursively, every one of \p Merge's own
+/// users satisfies `hasOnlySupportedHandleUse` for the same \p Kind,
+/// including a further nested merge (a real `opphi_outer_struct_two_
+/// buffers_first_input` reduction showed a two-deep chain: an outer phi
+/// merging an inner phi with a direct handle, the inner phi itself
+/// merging two direct handles). \p Visited (shared across the whole
+/// top-level `hasOnlySupportedUses` call, not reset per leg) prevents
+/// both infinite recursion on a loop-carried cyclic merge and redundant
+/// re-validation of a merge point reached from more than one leg (as the
+/// real case above's inner phi is, from its own two direct-handle legs).
+bool hasOnlySupportedHandleMergeUses(const Instruction &Merge, HandleKind Kind,
+                                     bool Writable, bool IsTexel,
+                                     bool AllowGEPs, const DataLayout &DL,
+                                     SmallPtrSetImpl<const Instruction *> &Visited) {
+  if (!Visited.insert(&Merge).second)
+    return true; // Already validated (or being validated) via another leg.
+  for (const User *U : Merge.users())
+    if (!hasOnlySupportedHandleUse(U, Merge, Kind, Writable, IsTexel,
+                                   AllowGEPs, DL, Visited))
+      return false; // Already logged by hasOnlySupportedHandleUse.
+  return true;
+}
+
 /// Checks that every use of \p Handle is the access shape this pass models
 /// for \p Kind: a `llvm.spv.resource.getpointer` call whose own result is
 /// used by an ordinary `load` (every kind), a `store` it is the pointer
@@ -2796,6 +2883,12 @@ bool hasOnlySupportedPointerUses(const Value &Ptr, bool Writable, bool IsTexel,
 /// `feme::cpu::mangleResourceCallName`) can mangle a runtime call name for.
 /// Any GEP whose byte offset is not recoverable from its indices is still
 /// left unmodeled.
+///
+/// (Roadmap K6q) A `PHINode`/`SelectInst` merging \p Handle with another
+/// raw handle before any `getpointer` call -- rather than \p Handle being
+/// used by a `getpointer` call directly -- is also accepted here, via
+/// `hasOnlySupportedHandleUse`'s/`hasOnlySupportedHandleMergeUses`'s
+/// recursive validation: see those functions' own comments.
 bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   bool Writable = Kind == HandleKind::Storage ||
                   Kind == HandleKind::StorageStruct ||
@@ -2835,53 +2928,11 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
       Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct ||
       Kind == HandleKind::Uniform || Kind == HandleKind::UniformArray;
   const DataLayout &DL = Handle.getModule()->getDataLayout();
+  SmallPtrSet<const Instruction *, 8> Visited;
   for (const User *U : Handle.users()) {
-    // (Roadmap H144) A typed buffer's own bare `getdimensions.x` call is
-    // not a `getpointer`-mediated access at all -- it addresses no
-    // element, just reads the descriptor's own element count -- so it is
-    // modeled directly on the handle itself rather than requiring the
-    // usual `getpointer` indirection every other access shape goes
-    // through. `lowerAccesses` below has the matching special-case branch
-    // that lowers it to `createGetDimensionsTyped` without ever computing
-    // an `ElementIndex`/`Offset`.
-    if (IsTexel) {
-      if (const auto *DimsCI = dyn_cast<CallInst>(U);
-          DimsCI && isGetDimensions1Intrinsic(*DimsCI))
-        continue;
-    }
-    // (Roadmap H160, extended by L124(a)) A storage buffer's own bare
-    // `getarraylength` call is likewise not a `getpointer`-mediated access
-    // -- see `isGetArrayLengthIntrinsic`'s comment. Scoped to
-    // `HandleKind::Storage` (the one-member runtime-array wrapper
-    // `StructuredBuffer`/`ByteAddressBuffer` classify as) and
-    // `HandleKind::StorageStruct` (a real, multi-field storage-buffer
-    // block whose own last member is the runtime array, e.g. `struct
-    // SSBO_1 { vec4 data; uint not_set[]; }`, confirmed via `dEQP-VK.
-    // compute.pipeline.basic.read_unbound_ssbo`'s own real shader) --
-    // `lowerAccesses` below computes `StorageStruct`'s own element stride
-    // and byte-prefix directly from `BH.ElementStruct`'s own last member,
-    // rather than relying on a single, whole-handle `Stride` the way
-    // `Storage` already does.
-    if (Kind == HandleKind::Storage || Kind == HandleKind::StorageStruct) {
-      if (const auto *LenCI = dyn_cast<CallInst>(U);
-          LenCI && isGetArrayLengthIntrinsic(*LenCI))
-        continue;
-    }
-    const auto *GetPtr = dyn_cast<CallInst>(U);
-    if (!GetPtr ||
-        getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer) {
-      logNormalizationRejection("handle used other than by getpointer",
-                                &Handle);
-      return false;
-    }
-    if ((Kind == HandleKind::Uniform || Kind == HandleKind::StorageStruct) &&
-        !isa<ConstantInt>(GetPtr->getArgOperand(1))) {
-      logNormalizationRejection(
-          "getpointer index is not a compile-time constant", GetPtr);
-      return false;
-    }
-    if (!hasOnlySupportedPointerUses(*GetPtr, Writable, IsTexel, AllowGEPs, DL))
-      return false; // Already logged by hasOnlySupportedPointerUses.
+    if (!hasOnlySupportedHandleUse(U, Handle, Kind, Writable, IsTexel,
+                                   AllowGEPs, DL, Visited))
+      return false; // Already logged by hasOnlySupportedHandleUse.
   }
   return true;
 }
@@ -3679,6 +3730,119 @@ void mergeIntoSelect(SelectInst *Sel, Value *Ptr, Value *DescriptorIndex,
   Sel->eraseFromParent();
 }
 
+/// (Roadmap K6q) `PointerMergeState`'s handle-level counterpart: shared,
+/// in-progress record of one `PHINode`/`SelectInst` that merges two or
+/// more raw resource *handles* -- not pointers already derived via
+/// `getpointer` -- keyed by the original handle-typed merge instruction's
+/// address. Only a single `i32` descriptor index needs merging here
+/// (unlike `PointerMergeState`'s descriptor-index/byte-offset pair): no
+/// byte offset exists yet at this point, since no `getpointer` has been
+/// called on any leg.
+struct HandleMergeState {
+  Value *DescIndexMerge = nullptr;
+  // `SelectInst` only; see `PointerMergeState`'s identical comment.
+  Value *PendingTrueDescIndex = nullptr;
+  Value *PendingFalseDescIndex = nullptr;
+};
+using HandleMergeMap = DenseMap<Instruction *, HandleMergeState>;
+
+void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
+                         const ResourceCallEnv &Env, Value *DescriptorIndex,
+                         const DataLayout &DL, PointerMergeMap &Merges,
+                         HandleMergeMap &HandleMerges);
+
+/// `mergeIntoPhi`'s handle-level counterpart (roadmap K6q): merges \p
+/// Handle's own already-resolved descriptor index into \p Phi's shared
+/// `HandleMergeState`, creating the state's merged phi the first time any
+/// leg reaches \p Phi, and continuing the rewrite past \p Phi itself
+/// (via `lowerHandleAccesses`, as though it were just another handle with
+/// its own resolved index) only once every incoming slot has a real
+/// value. Unlike a pointer merge, a raw resource handle has no null
+/// sentinel representation the way a derived pointer does
+/// (`ConstantPointerNull`) -- the never-taken-edge shape this needs to
+/// tolerate instead presents as a literal `poison`/`undef` handle-typed
+/// incoming value (confirmed via a real `opphi_outer_struct_two_buffers_
+/// first_input` reduction), which is handled identically to
+/// `mergeIntoPhi`'s `ConstantPointerNull` case, reusing the same
+/// `nullPointerMergeDescIndex` sentinel.
+void mergeIntoHandlePhi(PHINode *Phi, Value *Handle, Value *DescriptorIndex,
+                       const BoundHandle &BH, const ResourceCallEnv &Env,
+                       const DataLayout &DL, PointerMergeMap &Merges,
+                       HandleMergeMap &HandleMerges) {
+  LLVMContext &Ctx = Phi->getContext();
+  HandleMergeState &State = HandleMerges[Phi];
+  unsigned N = Phi->getNumIncomingValues();
+  if (!State.DescIndexMerge) {
+    auto *DescPhi = PHINode::Create(Type::getInt32Ty(Ctx), N,
+                                    Phi->getName() + ".descidx");
+    DescPhi->insertBefore(Phi->getIterator());
+    for (unsigned I = 0; I != N; ++I)
+      DescPhi->addIncoming(UndefValue::get(DescPhi->getType()),
+                          Phi->getIncomingBlock(I));
+    State.DescIndexMerge = DescPhi;
+  }
+  auto *DescPhi = cast<PHINode>(State.DescIndexMerge);
+  for (unsigned I = 0; I != N; ++I) {
+    if (Phi->getIncomingValue(I) == Handle) {
+      DescPhi->setIncomingValue(I, DescriptorIndex);
+      // See `mergeIntoPhi`'s identical comment: drop the original phi's
+      // own reference to this leg's handle chain now that its descriptor
+      // index has been captured above, since the caller that invoked
+      // `lowerHandleAccesses` on `Handle` is about to erase it once this
+      // call returns, and `Phi` itself -- kept alive until every leg is
+      // filled -- must not still reference it when that happens.
+      Phi->setIncomingValue(I, PoisonValue::get(Phi->getType()));
+    } else if (isa<UndefValue>(DescPhi->getIncomingValue(I)) &&
+              isa<UndefValue>(Phi->getIncomingValue(I))) {
+      DescPhi->setIncomingValue(I, nullPointerMergeDescIndex(Ctx));
+    }
+  }
+  if (llvm::any_of(DescPhi->incoming_values(),
+                   [](const Use &U) { return isa<UndefValue>(U.get()); }))
+    return; // Some other incoming handle chain hasn't reached this merge yet.
+  lowerHandleAccesses(Phi, BH, Env, DescPhi, DL, Merges, HandleMerges);
+  Phi->eraseFromParent();
+}
+
+/// `mergeIntoHandlePhi`'s `SelectInst` counterpart, mirroring
+/// `mergeIntoSelect`'s own identical relationship to `mergeIntoPhi`: a
+/// select only ever has two operands, known up front, so no `undef`-filled
+/// placeholder phase is needed -- just record whichever half \p Handle
+/// matches, and synthesize the real `select` (continuing the rewrite past
+/// \p Sel) once both halves are known. No poison/undef sentinel handling
+/// is needed here the way `mergeIntoHandlePhi` needs: unlike a phi, which
+/// may carry a dead never-taken edge directly as an incoming value, a
+/// select's two operands are both always live (only its *condition*
+/// picks which one is read), so `hasOnlySupportedHandleMergeUses` already
+/// guarantees both are recognized handle chains.
+void mergeIntoHandleSelect(SelectInst *Sel, Value *Handle,
+                          Value *DescriptorIndex, const BoundHandle &BH,
+                          const ResourceCallEnv &Env, const DataLayout &DL,
+                          PointerMergeMap &Merges,
+                          HandleMergeMap &HandleMerges) {
+  HandleMergeState &State = HandleMerges[Sel];
+  if (Sel->getTrueValue() == Handle) {
+    State.PendingTrueDescIndex = DescriptorIndex;
+    // See `mergeIntoHandlePhi`'s identical comment: drop `Sel`'s own
+    // reference to this leg's handle chain now that its descriptor index
+    // has been captured, since the caller is about to erase it.
+    Sel->setTrueValue(PoisonValue::get(Sel->getTrueValue()->getType()));
+  }
+  if (Sel->getFalseValue() == Handle) {
+    State.PendingFalseDescIndex = DescriptorIndex;
+    Sel->setFalseValue(PoisonValue::get(Sel->getFalseValue()->getType()));
+  }
+  if (!State.PendingTrueDescIndex || !State.PendingFalseDescIndex)
+    return; // The other operand's own chain hasn't reached this merge yet.
+  IRBuilder<> Builder(Sel);
+  Value *DescSel =
+      Builder.CreateSelect(Sel->getCondition(), State.PendingTrueDescIndex,
+                          State.PendingFalseDescIndex,
+                          Sel->getName() + ".descidx");
+  lowerHandleAccesses(Sel, BH, Env, DescSel, DL, Merges, HandleMerges);
+  Sel->eraseFromParent();
+}
+
 /// (Roadmap K6r) `hasOnlySupportedPointerUses`'s own comment above
 /// explains the shape this handles: \p SI stores \p Ptr's already-
 /// resolved (\p DescriptorIndex, \p Offset) pair's *pointer value*
@@ -3901,19 +4065,35 @@ void lowerRawPointerUses(Value *Ptr, const ResourceCallEnv &Env,
 /// goes through `feme::cpu::createTypedLoad`/`createTypedStore` directly,
 /// letting the CPU runtime's format conversion (keyed off the bound
 /// `FemeDescriptor::Format`) do the rest.
-void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
-                   uint32_t HeapBase, PointerMergeMap &Merges) {
-  LLVMContext &Ctx = BH.Handle->getContext();
+///
+/// (Roadmap K6q) \p Handle is not always literally \p BH.Handle: when a
+/// `PHINode`/`SelectInst` merges two or more raw handles before any
+/// `getpointer` is ever called on the result (`hasOnlySupportedUses`'s own
+/// handle-merge recognition, mirroring `hasOnlySupportedPointerUses`'s
+/// pre-existing pointer-level merge), `mergeIntoHandlePhi`/
+/// `mergeIntoHandleSelect` call back into this same function with \p
+/// Handle set to the merge instruction itself and \p DescriptorIndex
+/// already synthesized as the corresponding merged index -- continuing
+/// the rewrite past the merge exactly as though it were just another
+/// handle with its own resolved index. \p BH's non-`Handle` fields
+/// (`Kind`/`Stride`/`ElementStruct`/...) are reused unchanged in that case:
+/// every merged leg shares the identical declared handle type (LLVM's own
+/// type system requires every phi/select operand to match), so they are
+/// guaranteed to classify identically. Unlike `lowerRawPointerUses`, \p
+/// Handle itself is never erased here -- the caller does that once this
+/// call returns, whether that caller is `lowerAccesses` (erasing \p
+/// BH.Handle) or `mergeIntoHandlePhi`/`mergeIntoHandleSelect` (erasing the
+/// merge instruction).
+void lowerHandleAccesses(Value *Handle, const BoundHandle &BH,
+                         const ResourceCallEnv &Env, Value *DescriptorIndex,
+                         const DataLayout &DL, PointerMergeMap &Merges,
+                         HandleMergeMap &HandleMerges) {
+  LLVMContext &Ctx = Handle->getContext();
   Type *I64Ty = Type::getInt64Ty(Ctx);
-  IRBuilder<> IndexBuilder(BH.Handle);
-  Value *Index = BH.Handle->getArgOperand(3);
-  Value *DescriptorIndex =
-      computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
   Value *Mask = ConstantInt::getTrue(Ctx);
-  const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
   bool IsTexel = isTexelHandleKind(BH.Kind);
 
-  for (User *U : llvm::make_early_inc_range(BH.Handle->users())) {
+  for (User *U : llvm::make_early_inc_range(Handle->users())) {
     // (Roadmap H144) A bare `getdimensions.x` call on the handle itself --
     // see `hasOnlySupportedUses`'s matching special-case comment -- reads
     // no element, so it bypasses the `getpointer`-mediated rewriting below
@@ -3974,6 +4154,25 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
         LenCI->eraseFromParent();
         continue;
       }
+    }
+    // (Roadmap K6q) A `PHINode`/`SelectInst` merging this handle (or
+    // another merge reached transitively) with another one --
+    // `hasOnlySupportedUses`'s handle-merge recognition already validated
+    // every downstream use beyond this point -- is handled by
+    // `mergeIntoHandlePhi`/`mergeIntoHandleSelect` instead of the direct
+    // `getpointer` dispatch below: those functions call back into this
+    // function (continuing the rewrite past the merge point) only once
+    // every incoming leg's own descriptor index has been threaded
+    // through, so encountering one does not immediately recurse.
+    if (auto *Phi = dyn_cast<PHINode>(U)) {
+      mergeIntoHandlePhi(Phi, Handle, DescriptorIndex, BH, Env, DL, Merges,
+                        HandleMerges);
+      continue;
+    }
+    if (auto *Sel = dyn_cast<SelectInst>(U)) {
+      mergeIntoHandleSelect(Sel, Handle, DescriptorIndex, BH, Env, DL, Merges,
+                           HandleMerges);
+      continue;
     }
     auto *GetPtr = cast<CallInst>(U);
     Value *ElementIndex = nullptr;
@@ -4101,6 +4300,24 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
     }
     GetPtr->eraseFromParent();
   }
+}
+
+/// Computes \p BH.Handle's own descriptor index from its runtime array
+/// index operand (see `BoundHandle`'s own comment for why that index is
+/// re-read here rather than cached) and continues the rewrite via
+/// `lowerHandleAccesses`, erasing \p BH.Handle itself once every access
+/// through it (direct or, per roadmap K6q, merged with another handle
+/// first) has been rewritten.
+void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
+                   uint32_t HeapBase, PointerMergeMap &Merges,
+                   HandleMergeMap &HandleMerges) {
+  IRBuilder<> IndexBuilder(BH.Handle);
+  Value *Index = BH.Handle->getArgOperand(3);
+  Value *DescriptorIndex =
+      computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
+  const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
+  lowerHandleAccesses(BH.Handle, BH, Env, DescriptorIndex, DL, Merges,
+                      HandleMerges);
   BH.Handle->eraseFromParent();
 }
 
@@ -6718,6 +6935,10 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     // `lowerAccesses` calls below, so the map recording each merge's own
     // progress must outlive any single one of those calls.
     PointerMergeMap Merges;
+    // (Roadmap K6q) `PointerMergeMap`'s handle-level counterpart --
+    // `HandleMergeState`'s own comment explains why it is a distinct,
+    // shallower map rather than reusing `Merges` above.
+    HandleMergeMap HandleMerges;
     for (const BoundHandle &BH : Handles) {
       const RangeEntry &Entry = Ranges.at(BH.Key);
       if (Entry.Conflicting)
@@ -6727,7 +6948,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
         RewroteAny = true;
       }
       if (isBufferHandleKind(BH.Kind)) {
-        lowerAccesses(BH, Env, Entry.HeapBase, Merges);
+        lowerAccesses(BH, Env, Entry.HeapBase, Merges, HandleMerges);
         continue;
       }
       UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
