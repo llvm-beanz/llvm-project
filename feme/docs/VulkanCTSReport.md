@@ -4593,3 +4593,81 @@ contention-dependent flake (low priority, change-of-pace item); the
 standing `backup-before-rebase-20261014` tag and
 `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decisions, neither
 revisited this session.
+
+## L428: `check-hlsl-clang-feme-vk` 92-case failure triage (SPIR-V backend + Clang HLSL driver, both outside FeMe)
+
+Triaged the dominant `Feature/HLSLLib/*_mat.test` cluster (~40 of the
+92 cases). Root cause is two independent, pre-existing bugs outside
+`feme/`, both triggered by HLSL's matrix-to-flat-vector packing for
+elementwise library calls (e.g. `asin(float4x4(...))` flattens to a
+16-wide vector):
+
+1. **Clang HLSL driver default**: `-spirv-ext=all` (the implicit
+   default when `-fspv-extension=` is unset) swept in the SPIR-V
+   backend's still-provisional `SPV_KHR_poison_freeze` extension, which
+   the installed `spirv-val` rejects outright. Fixed in
+   `clang/lib/Driver/ToolChains/HLSL.cpp`: excluded via
+   `-spirv-ext=all,-SPV_KHR_poison_freeze`.
+2. **SPIR-V backend `Vector16`/`Kernel` capability bug**: the backend
+   unconditionally assumed 8- and 16-wide vectors could use the native
+   `Vector16` capability, but that capability requires `Kernel`, which
+   is illegal under Vulkan's `Shader` execution model -- any Shader
+   module needing such a width hit a hard `report_fatal_error`. Fixed
+   in `llvm/lib/Target/SPIRV/{SPIRVUtils.h,SPIRVEmitIntrinsics.cpp,
+   SPIRVGlobalRegistry.cpp,SPIRVModuleAnalysis.cpp}`: made the
+   long-vector-requirement determination subtarget-aware so Shader
+   targets fall back to `SPV_EXT_long_vector` for widths 8/16, as they
+   already do for other non-native widths.
+
+**Verification**:
+- `llvm/test/CodeGen/SPIRV` (1356 tests): all pass; new targeted
+  regression test `vector8-16-shader-vs-kernel.ll` confirmed to fail
+  without the fix, pass with it.
+- `clang/test/Driver/*hlsl*`/`*dxc*` (39 tests): all pass; existing
+  `dxc_fspv_extension.hlsl`'s `ALL` check updated and confirmed.
+- `check-feme`: 3760/3768 Passed, same single pre-existing unrelated
+  failure as before this session
+  (`entry-wrapper-loop-header-derived-value-in-suffix.ll`, tracked to a
+  prior session's `L426`/`L429` work, not touched this session).
+- Targeted `VK-GL-CTS` regression subset (these fixes live in the
+  Clang/LLVM SPIR-V *producer* path, not FeMe's own Vulkan *consumer*
+  path that the CTS directly exercises, so no CTS change was expected
+  -- confirmed, not just assumed):
+  - `dEQP-VK.spirv_assembly.instruction.compute.opatomic*` (26 cases):
+    19/26 Pass, 7 NotSupported, 0 Fail -- byte-identical to the
+    `L429`-session baseline.
+  - `dEQP-VK.glsl.loops.*` (624 cases): 606/624 Pass -- byte-identical
+    to the `L429`-session baseline.
+- Both fixes are each their own isolated, self-contained commit per
+  the standing "issue outside FeMe" instructions; neither touches any
+  `feme/` file.
+
+**Net effect on the 92-case `check-hlsl-clang-feme-vk` list: unchanged
+(still 92, exact same test names)**, because every `_mat.test` file
+also exercises a `float4x4` (16-wide) shape that hits a *third*,
+distinct, not-yet-fixed blocker even with both fixes applied:
+`spirv-val` rejects the `OpVectorShuffle` sequence used to reassemble a
+16-wide `OpTypeVectorIdEXT` matrix row-by-row
+(`"Component index 16 is out of bounds for combined (Vector1 +
+Vector2) size of 16"`), even though the mask index is in-bounds for the
+true 32-element combined operand space -- looks like a `spirv-val`
+`OpTypeVectorIdEXT`-length-tracking gap rather than a new bug of its
+own, but not yet confirmed which side should carry the fix. Tracked as
+new roadmap row `L428(a)`.
+
+**No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed** -- pure Clang/LLVM SPIR-V-producer-side compiler fixes, no
+Vulkan feature or extension surface changed on the FeMe ICD side.
+
+`Roadmap.md`: `L428` struck through (triaged, 2 of 3 sub-bugs fixed);
+new follow-up row `L428(a)` added for the remaining `spirv-val`
+`OpTypeVectorIdEXT`-shuffle blocker.
+
+**Next steps**: `L428(a)` (root-cause the `spirv-val`
+`OpTypeVectorIdEXT`-shuffle validation gap -- determine if it's a
+genuine LLVM backend bug or an upstream SPIRV-Tools limitation);
+`K6n`-proper (largest remaining `variablePointers` bucket, untouched
+for many sessions); `Basic/Mandelbrot.test`'s contention-dependent
+flake (low priority); the standing `backup-before-rebase-20261014` tag
+and `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decisions, neither
+revisited this session.
