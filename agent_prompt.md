@@ -60,24 +60,22 @@ file.
 
 # Request
 
-The last session stalled out. Any intermediate states are stoerd in a git stash.
-
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** `K6n`-proper: ~124 cases, the largest remaining
-   `variablePointers` bucket, CPU-backend resource-handle-normalization
-   architectural limitation. Still not root-caused beyond signature-level
-   bucketing -- `K6o`/`K6q`/`K6r`/`K6s` have all now been split off and closed,
-   leaving only the original core bucket. Likely the deepest, hardest-to-fix
-   piece of the whole feature; worth its own investigation session before
-   committing to an approach, possibly needing a runtime dispatch mechanism
-   rather than a lowering-pattern fix.
-2. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: ~14-15 cases,
-   `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely
-   undefined in MLIR's SPIR-V dialect TableGen. Not attempted this session
-   (scope stayed on `K6q`). Needs new TableGen op definitions, deserializer
-   cases, and likely a `SPIRVToLLVMPatterns.cpp` lowering.
+1. **(~1-2 days)** `K6t`: whole-handle `OpPtrEqual`/`OpPtrNotEqual` comparison
+   (comparing two entire resource handles with no `OpAccessChain` between them).
+   At least 4 cases. Needs a FeMe-CPU-backend-level resource-index comparison in
+   `SPIRVResourceLowering.cpp` (compare two `DescriptorIndex` values directly,
+   no offset component since neither side went through `getpointer`) -- not yet
+   attempted. Good next pick: smaller and more contained than `K6n`-proper, and
+   now the only unattempted `K6p`-family residual.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers` bucket
+   (the large majority of the 25 `K6p` CTS cases still failing), CPU-backend
+   resource-handle-normalization architectural limitation. Still not root-caused
+   beyond signature-level bucketing. Likely needs a runtime-dispatch mechanism
+   rather than a lowering-pattern fix; worth its own investigation session
+   before committing to an approach.
 3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag
    decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session.
@@ -86,12 +84,9 @@ suggested the next steps:
    regeneration.
 5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check --
    not exercised this session either, no `check-hlsl-feme-vk` work done (session
-   stayed scoped to `K6q`'s compiler fix).
+   stayed scoped to `K6p`'s compiler fix).
 
-**Immediate next action for next session:** pick `K6n`-proper (now the only
-remaining large, unattempted bucket -- `K6o`, `K6r`, `K6s`, and now `K6q` are
-all closed) and start by root-causing one representative `"unsupported raised
-operation"` case down to its specific resource-handle-normalization code path in
-`feme/lib/Target/CPU` (not yet located in any prior session) before guessing at
-a fix approach, or pick `K6p` first if the upstream-MLIR TableGen work feels
-like a better change of pace.
+**Immediate next action for next session:** pick `K6t` (4+ cases, whole-handle
+comparison, smallest and most contained of the two remaining `variablePointers`
+buckets) for a focused fix, or `K6n`-proper if a larger, harder investigation
+feels like the better use of a fresh session.
