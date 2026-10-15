@@ -123222,3 +123222,85 @@ No `offload-test-suite` build exists in this environment (no `build/` dir). Buil
 - `Basic/Mandelbrot.test`: contention-dependent semaphore-wait flake under parallel load. Same class as `L421`'s race. Low priority, change-of-pace candidate.
 - `InterlockedAdd.resources.32.test`: genuine numeric mismatch (expected `0x1`, got `0x0`), not looked at beyond the raw buffer diff.
 - `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision: still unresolved, many sessions running.
+
+# Session: `check-hlsl-feme-vk` actually built -- no multi-hour HLSL.cmake build needed; L426 confirmed closing all 4 cases; L428/L429 opened
+
+**Next action**: pick `L429` -- `InterlockedAdd.resources.32.test`'s
+3-arg/resource original-value bug, already isolated to an exact
+signature, candidate files identified (see below). ~Half day.
+
+**Device check**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU
+Vulkan Device`, confirmed.
+
+## What got done
+
+1. **Skipped the planned multi-hour `HLSL.cmake` build.** The existing
+   `build/` tree already has `clang`/`clang-dxc` built -- feme
+   auto-appends clang to `LLVM_ENABLE_PROJECTS` as a dependency. Just
+   reconfigured in place:
+   ```
+   cmake -G Ninja -DLLVM_EXTERNAL_PROJECTS=OffloadTest \
+     -DLLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR=/home/dev/dev/offload-test-suite .
+   ```
+   `check-hlsl-feme-vk`/`check-hlsl-clang-feme-vk` now exist and build.
+   This persists in the build tree going forward -- no need to redo.
+2. **Checked out `offload-test-suite`'s `feme` branch, diffed vs `main`
+   first** (per the standing drift-check instruction). Found the
+   VkBool32/WaveActiveMax pattern **3 times**, not the expected 2:
+   `Device.cpp`'s `VkBool32` fix, `WaveActiveMax.test`'s `XFAIL`, and a
+   **new third instance**: `array_of_matrices.test` had a stale
+   `XFAIL: DXC` for an already-upstream-fixed DXC bug. Each fixed in its
+   own isolated, offload-test-suite-only commit.
+3. **Ran `check-hlsl-feme-vk` (792 tests)**: 488 Passed / 273 Unsupported
+   / 28 XFAIL / **2 Failed** (down from an initial 2 Failed + 1
+   Unexpectedly-Passed before fix #3 above). Confirms `L426` closed all 4
+   of its own target cases.
+4. **Ran `check-hlsl-clang-feme-vk` for the first time ever** (792
+   tests): 285 Passed / 269 Unsupported / 139 XFAIL / **92 Failed** / 7
+   Unexpectedly Passed. ~40 of the 92 are `Feature/HLSLLib/*_mat.test`
+   (matrix-argument HLSL-lib functions) -- likely Clang's own HLSL
+   frontend, not FeMe. Not triaged further this session (scope).
+5. **Triaged the 2 `check-hlsl-feme-vk` failures**:
+   - `Basic/Mandelbrot.test`: passes in isolation -- known flake.
+   - `InterlockedAdd.resources.32.test`: genuinely fails. Isolated to the
+     3-argument (original-value-capturing) form on *resource* (not
+     groupshared) destinations specifically. Started root-causing in
+     `ResourceCalls.cpp`/`AtomicRMWIdentity.cpp`/`GroupShared.cpp` but did
+     not conclude -- opened as `L429`.
+6. Updated `Roadmap.md` (`L427` struck through, `L428`/`L429` opened) and
+   `VulkanCTSReport.md`, each its own commit. No FeMe code changed this
+   session, so no `VK-GL-CTS` rerun or inventory update was needed.
+
+## Wins now visible
+
+- `check-hlsl-feme-vk`/`check-hlsl-clang-feme-vk` are real, buildable
+  targets in the existing tree -- a multi-session standing gap closed.
+- `check-hlsl-feme-vk` is down to 2 known, triaged failures (from 3
+  Failed + 1 Unexpectedly-Passed at the top of this session).
+- The VkBool32/WaveActiveMax drift pattern is now confirmed 3 separate
+  times across sessions -- strong enough to treat as a recurring
+  per-session hazard, not a one-off.
+
+## Next steps, ranked
+
+1. **(~half day)** `L429`: finish root-causing
+   `InterlockedAdd.resources.32.test`'s 3-arg/resource original-value
+   bug. Contrast `GroupShared.cpp`'s known-working groupshared atomic
+   original-value path against `ResourceCalls.cpp`/
+   `SPIRVResourceLowering.cpp`'s resource path to find the divergence.
+   Candidate hypothesis: `feme-cpu-simdize`'s resource-atomic widening
+   may misroute or collapse per-lane original values even though the
+   final RMW total is correct.
+2. **(~1-2 days)** `L428`: triage `check-hlsl-clang-feme-vk`'s new
+   92-case failure list. Start with one `_mat.test` case, compile via
+   both `clang-dxc` and `dxc`, diff the SPIR-V to confirm Clang-frontend
+   vs FeMe-backend scope before committing to a fix.
+3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, untouched for many sessions.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
+5. **(standing, confirmed 3x now)** Always diff `offload-test-suite`'s
+   `feme` branch against `main` before trusting any `check-hlsl-feme-vk`
+   failure as new -- the VkBool32/WaveActiveMax/array_of_matrices drift
+   pattern keeps recurring on fresh checkouts.
