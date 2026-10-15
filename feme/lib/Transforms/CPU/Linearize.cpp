@@ -57,6 +57,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
@@ -941,10 +942,52 @@ bool hasStageMaskOps(Function &F) {
 /// or a later run's problem, not this one's.
 class DiamondFlattener {
 public:
+  /// Roadmap K6z: optional, only ever supplied by `LoopLinearizer::
+  /// linearizeCycle`'s own call sites (never `DiamondFlattener::run`'s
+  /// whole-function pass, nor `flattenLoopBodyDiamond`'s single-diamond
+  /// callers) -- lets `validate`/`flatten` walk straight through a nested
+  /// child cycle's header that `linearizeCyclePostOrder`'s post-order
+  /// already fully linearized before this call, rather than always
+  /// stopping at it (the pre-K6z behavior every other cycle-boundary
+  /// shape still gets, see `CycleBoundaryBlocks`). \p GetAlreadyLinearized
+  /// CycleExit(Header) returns the single safe exit block to continue the
+  /// walk from if \p Header is such a cycle (its own already-finalized
+  /// interior is never touched, matching `HeaderActiveMasks`'s "was this
+  /// child linearized already" query one layer up), or `nullptr`
+  /// otherwise (not such a cycle at all, or one with more than one exit
+  /// block -- not yet supported here). Deliberately a callback instead of
+  /// a raw `CycleInfo::getExitBlocks` call: see `isLoopControlEdge`'s own
+  /// comment for the confirmed use-after-free/staleness crashes a live or
+  /// freshly-cached call of that would reintroduce here; the caller
+  /// already maintains its own mutation-safe `ExitBlocksByCycle` cache
+  /// precisely to avoid that, so this threads *that* answer through
+  /// instead of re-deriving an unsafe one.
+  using GetAlreadyLinearizedCycleExitFn =
+      llvm::function_ref<BasicBlock *(BasicBlock *)>;
+  /// Roadmap K6z: paired with `GetAlreadyLinearizedCycleExit` above --
+  /// called (only by `flatten`, never the read-only `validate`) on the
+  /// already-linearized child cycle's own header the first time this
+  /// walk reaches it, with the `MaskPair` this walk has accumulated at
+  /// that point, so the child's own entry can be retroactively narrowed
+  /// by it exactly the way `LoopLinearizer::rethreadNestedEntryMasks`
+  /// narrows any other already-linearized child cycle reached via
+  /// `applyStageMasks` -- see that method's own comment for why this
+  /// narrowing matters at all (a lane the enclosing walk already masked
+  /// off must not still enter the child "live"). A no-op default (never
+  /// supplied as null) when \p GetAlreadyLinearizedCycleExit is also null.
+  using NarrowChildEntryMasksFn =
+      llvm::function_ref<void(BasicBlock *, const MaskPair &)>;
+
   DiamondFlattener(Function &F, DominatorTree &DT, PostDominatorTree &PDT,
                    CycleInfo &CI, UniformityInfo &UI,
-                   SmallPtrSetImpl<BasicBlock *> &MergeVisited)
-      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI), MergeVisited(MergeVisited) {}
+                   SmallPtrSetImpl<BasicBlock *> &MergeVisited,
+                   GetAlreadyLinearizedCycleExitFn GetAlreadyLinearizedCycleExit =
+                       nullptr,
+                   NarrowChildEntryMasksFn NarrowChildEntryMasks = nullptr)
+      : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI),
+        GetAlreadyLinearizedCycleExit(GetAlreadyLinearizedCycleExit),
+        NarrowChildEntryMasks(NarrowChildEntryMasks),
+        MergeVisited(MergeVisited) {}
 
   /// Validates and then flattens every divergent diamond reachable from
   /// \p F's entry block, or from the exit block of any cycle reached along
@@ -1101,6 +1144,13 @@ private:
   PostDominatorTree &PDT;
   CycleInfo &CI;
   UniformityInfo &UI;
+
+  /// Roadmap K6z: see the constructor's own parameter comment. Null for
+  /// every `DiamondFlattener` except the two `LoopLinearizer::
+  /// linearizeCycle` constructs for its own "fully uniform loop with body
+  /// mask ops" case.
+  GetAlreadyLinearizedCycleExitFn GetAlreadyLinearizedCycleExit;
+  NarrowChildEntryMasksFn NarrowChildEntryMasks;
 
   /// Whether \p BB is a cycle header/member -- the boundary this pass never
   /// crosses (see the class comment).
@@ -1500,6 +1550,23 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
     if (Br && isInCycle(Cur) &&
         (isLoopControlOrHeaderRelayEdge(Cur, Br->getSuccessor(0)) ||
          isLoopControlOrHeaderRelayEdge(Cur, Br->getSuccessor(1)))) {
+      // Roadmap K6z: before treating this as an obstruction, check
+      // whether `Cur` is a nested sibling cycle's own header that
+      // `LoopLinearizer`'s post-order already fully linearized *before*
+      // this call (only ever possible when the caller supplied
+      // `GetAlreadyLinearizedCycleExit` -- see its own comment) -- the
+      // shape `matrix_single_subscript_load.test`'s own outer uniform
+      // `for` loop has, with a genuinely separate, already-closed nested
+      // `for` loop sitting earlier in its body rather than the loop's own
+      // exit check at the tail (the only shape the `CycleBoundaryBlocks`
+      // tolerance below was originally built for). Such a cycle's own
+      // already-finalized interior is never this walk's concern; treat
+      // it as fully transparent and keep validating from its one exit
+      // block onward to `End` instead of stopping here at all.
+      if (GetAlreadyLinearizedCycleExit) {
+        if (BasicBlock *ExitBB = GetAlreadyLinearizedCycleExit(Cur))
+          return validate(ExitBB, End, Quiet, Depth + 1);
+      }
       CycleBoundaryBlocks.insert(Cur);
       // Remember the reconvergence point (if any) this walk was headed for
       // when it stopped here, so `run` can seed this cycle's own
@@ -1795,6 +1862,26 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
       // local `Masks`, so a caller using this return value (e.g. as one
       // arm's `TExit`/`FExit` of an *enclosing* diamond) never observes a
       // different answer than a second walk reaching the same `Cur` would.
+      //
+      // Roadmap K6z: mirrors `validate`'s own identical check -- when
+      // `Cur` is a nested sibling cycle `LoopLinearizer`'s post-order
+      // already fully linearized before this call, do not stop here at
+      // all. Its own already-finalized interior is left completely
+      // untouched (never masked, never walked into); only its *entry* is
+      // retroactively narrowed by the mask this walk has accumulated so
+      // far (the same narrowing `LoopLinearizer::rethreadNestedEntryMasks`
+      // already applies wherever an enclosing cycle's own header/latch/
+      // exit reaches a previously linearized child), and the walk simply
+      // continues from that cycle's one exit block onward to `End`,
+      // exactly as `validate` already approved.
+      if (GetAlreadyLinearizedCycleExit) {
+        if (BasicBlock *ExitBB = GetAlreadyLinearizedCycleExit(Cur)) {
+          if (NarrowChildEntryMasks)
+            NarrowChildEntryMasks(Cur, Masks);
+          Cur = ExitBB;
+          continue;
+        }
+      }
       return CycleBoundaryMasks.try_emplace(Cur, Masks).first->second;
     }
 
@@ -4604,6 +4691,49 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // phi stranded, with no corresponding backedge value ever added (this
     // whole cycle is about to be diagnosed and left alone, never reaching
     // `addLatchIncoming` below), breaking module verification.
+    //
+    // Roadmap K6z: lets both the precheck below and the real
+    // `flattenLoopBodyRegion` call walk straight through a nested sibling
+    // cycle entirely contained in this cycle's own body -- see
+    // `DiamondFlattener`'s own constructor parameter comment. Any such
+    // child (`CI.contains(C, ChildHeader)`, and not `C` itself) is
+    // *always* already fully attempted by the time this cycle's own
+    // `linearizeCycle` call runs, regardless of whether it ended up
+    // actually masked (an entry in `HeaderActiveMasks`) or left
+    // completely alone (no mask-affecting op of its own anywhere in its
+    // body, `linearizeCycle` returning false for it, see the
+    // `!CycleHasMaskOps && !HasDeferredDivergentCandidates` bail above) --
+    // `linearizeCyclePostOrder`'s own post-order guarantees children are
+    // always visited before any parent, unconditionally, not just the
+    // ones that turned out to need masking (confirmed the hard way: an
+    // earlier version of this fix gated on `HeaderActiveMasks.count`
+    // instead, which silently still rejected `matrix_single_subscript_
+    // load.test`'s own nested `for` loop -- itself mask-op-free, only the
+    // *outer* loop's own diamond-chain body needs any masking at all).
+    // `rethreadNestedEntryMasks` (called by `flatten`, never `validate`,
+    // via `NarrowChildEntryMasks` below) is still always safe to call
+    // either way: it is already a no-op for a `ChildHeader` with no
+    // `HeaderActiveMasks` entry (nothing to narrow -- no entry-mask phi
+    // was ever created for a loop left alone), so this fix only *adds*
+    // the narrowing where there is anything to narrow at all, never
+    // narrows something that should not be. `getExitBlocks` is this
+    // class's own mutation-safe cache (see its own comment for the
+    // use-after-free/staleness crashes a live `CI.getExitBlocks` call, or
+    // a naively precomputed cache of it, caused here previously) -- never
+    // a fresh, unsafe call made directly against the (by now partially
+    // mutated) live `CI`.
+    auto GetAlreadyLinearizedCycleExit =
+        [&](BasicBlock *ChildHeader) -> BasicBlock * {
+      CycleRef ChildCycle = CI.getCycle(ChildHeader);
+      if (!ChildCycle.isValid() || ChildCycle == C ||
+          !CI.contains(C, ChildHeader))
+        return nullptr;
+      ArrayRef<BasicBlock *> Exits = getExitBlocks(ChildCycle);
+      SmallPtrSet<BasicBlock *, 2> UniqueExits(Exits.begin(), Exits.end());
+      if (UniqueExits.size() != 1)
+        return nullptr; // Multiple exits: not yet supported here.
+      return *UniqueExits.begin();
+    };
     {
       // Roadmap L375 (6th investigation): deliberately a fresh, local set,
       // not the real `MergeVisited` shared with the whole rest of this
@@ -4618,8 +4748,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       // cleanly -- no worse than this precheck not existing at all for
       // that one case.
       SmallPtrSet<BasicBlock *, 16> PrecheckMergeVisited;
-      DiamondFlattener Precheck(F, DT, PDT, CI, UI, PrecheckMergeVisited);
-      if (!Precheck.canFlattenLoopBodyRegion(HeaderStayInLoop, Latch)) {
+      DiamondFlattener Precheck(F, DT, PDT, CI, UI, PrecheckMergeVisited,
+                               GetAlreadyLinearizedCycleExit);
+      bool PrecheckResult =
+          Precheck.canFlattenLoopBodyRegion(HeaderStayInLoop, Latch);
+      if (!PrecheckResult) {
         diagnose(F, "loop at '" + Header->getName() +
                         "' has an internal branch in a body shape this "
                         "milestone does not yet lower (e.g. an empty "
@@ -4634,7 +4767,23 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     applyStageMasks(*Header, Masks);
     rethreadNestedEntryMasks(Header, Masks);
 
-    DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited);
+    // Roadmap K6z: this must be a named local, not an unnamed temporary
+    // passed directly as `DF`'s constructor argument below -- `DF` only
+    // stores a `function_ref` (a non-owning pointer to the callable), so
+    // an unnamed temporary lambda would be destroyed at the end of the
+    // constructor call's own full-expression, leaving `DF.
+    // NarrowChildEntryMasks` dangling the first time `flatten()` actually
+    // invokes it (confirmed the hard way: a SEGV inside
+    // `rethreadNestedEntryMasks` with a garbage `this`). Giving it the
+    // same name/scope as `DF` itself (both declared in this block, `DF`
+    // destroyed first since it is declared second) keeps it alive for the
+    // whole of `DF`'s lifetime.
+    auto NarrowChildEntryMasks = [&](BasicBlock *ChildHeader,
+                                      const MaskPair &ChildMasks) {
+      rethreadNestedEntryMasks(ChildHeader, ChildMasks);
+    };
+    DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited,
+                        GetAlreadyLinearizedCycleExit, NarrowChildEntryMasks);
     std::optional<MaskPair> MasksAtLatch =
         DF.flattenLoopBodyRegion(HeaderStayInLoop, Latch, Masks);
     if (!MasksAtLatch) {
