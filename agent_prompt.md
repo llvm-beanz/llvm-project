@@ -63,20 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** `L428(a)`: root-cause the `spirv-val`
-   `OpTypeVectorIdEXT`-shuffle validation gap. Start from
-   `/tmp/l428/asin_mat/min5.hlsl`, narrow to a minimal IR-level
-   `shufflevector` test. Determine LLVM-backend-bug vs.
-   SPIRV-Tools-upstream-limitation before committing to a fix location.
-2. **(~1-2 days)** `K6n`-proper: the largest remaining
-   `variablePointers` bucket, untouched for many sessions.
+1. **(~2-4 hours)** File the upstream `KhronosGroup/SPIRV-Tools` bug
+   for `L428(a)`'s `OpTypeVectorIdEXT`-shuffle id/value confusion,
+   using the preserved `/tmp/l428a/min.spvasm` repro + the id-padding
+   control test as supporting evidence. Not urgent, but low-effort
+   and leaves no loose end.
+2. **(~1-2 days)** The milestone-9 CFG-linearization/
+   groupshared-canonicalization gap itself -- now the *sole* remaining
+   blocker on 6+ confirmed CTS cases across multiple K6 sub-buckets.
+   Worth promoting from "known, out of scope" to an actual scoped
+   roadmap item of its own if no such row already exists under
+   milestone 9 -- check before adding to avoid a duplicate.
 3. **(~2-4 hours, low priority, change of pace)**
-   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait flake.
+   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait
+   flake -- still not picked up in several sessions now.
 4. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
    `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session.
+   revisited this session either.
 5. **(standing)** Always diff `offload-test-suite`'s `feme` branch
    against `main` before trusting any `check-hlsl-feme-vk` failure as
    new -- not re-checked this session (no `offload-test-suite` work
-   done; checkout not re-cloned either, so drift risk unchanged).
+   done, checkout not re-cloned).
