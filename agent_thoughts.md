@@ -123396,3 +123396,109 @@ Vulkan Device`, confirmed.
    session since no `offload-test-suite` work was done, but the
    checkout was not re-cloned either so drift risk is unchanged from
    last confirmed-clean state.
+
+# Session: `L428` triaged -- two real Clang/LLVM SPIR-V bugs fixed outside FeMe; a third blocker (`spirv-val` shuffle gap) found and split off as `L428(a)`
+
+**Next action**: pick `L428(a)` -- isolate a minimal 2-operand 16-wide
+`shufflevector` IR test to determine whether the remaining
+`spirv-val` `OpTypeVectorIdEXT`-shuffle rejection is a genuine LLVM
+backend bug or an upstream SPIRV-Tools validator limitation. ~half day.
+
+**Device check**: `vulkaninfo --summary | grep deviceName` returns
+`llvmpipe` by default in this environment -- must set
+`VK_ICD_FILENAMES` to the build's `feme_icd.json` first. With it set:
+`FeMe CPU Vulkan Device`, confirmed.
+
+## What got done
+
+1. **Picked up `L428`** (triage `check-hlsl-clang-feme-vk`'s 92-case
+   failure list) exactly where the prior session left off, starting
+   with `Feature/HLSLLib/asin_mat.test` as instructed.
+
+2. **Bisected the dominant `_mat.test` cluster (~40 of 92 cases) down
+   to two independent, pre-existing bugs, both outside `feme/`**:
+   - **Bug 1**: Clang's HLSL driver (`HLSL.cpp`) defaults to
+     `-spirv-ext=all` when `-fspv-extension=` is unset, sweeping in
+     the still-provisional `SPV_KHR_poison_freeze` extension, which
+     the installed `spirv-val` rejects. HLSL's matrix-to-flat-vector
+     packing (e.g. `asin(float4x4(...))`) produces a poison value,
+     triggering this on any matrix-library call.
+   - **Bug 2**: the SPIR-V backend's `requiresLongVectorEXT` assumed
+     widths 8/16 could always use the native `Vector16` capability --
+     but `Vector16` requires `Kernel`, illegal under Vulkan's `Shader`
+     model. Any Shader module needing an 8/16-wide vector hit a hard
+     `report_fatal_error`.
+
+3. **Fixed both, each its own isolated, self-contained, tested commit**
+   (per the standing "issue outside FeMe" instruction):
+   - `8e39ea0bc0bc`: made `requiresLongVectorEXT`/`isLongVectorEXT`
+     subtarget-aware (`CanUseVector16`); fixed a stale assertion in
+     `getOpTypeVectorIdEXT` it exposed; new regression test
+     `vector8-16-shader-vs-kernel.ll`. Full `llvm/test/CodeGen/SPIRV`
+     (1356 tests): clean.
+   - `49f6e56c765b`: excluded `SPV_KHR_poison_freeze` from the implicit
+     `-spirv-ext=all` default. Updated existing
+     `dxc_fspv_extension.hlsl`. Full `clang/test/Driver/*hlsl*`+`*dxc*`
+     (39 tests): clean.
+
+4. **Confirmed the real-world impact was zero on the 92-count** --
+   not glossed over. Exact before/after test-name diff (not just
+   counts) showed the identical 92 failures. Dug into *why*: every
+   `_mat.test` file in the suite also exercises a `float4x4` (16-wide)
+   shape, which hits a *third*, distinct, not-yet-fixed blocker even
+   with both fixes applied -- `spirv-val` rejects the
+   `OpVectorShuffle` sequence that reassembles a 16-wide
+   `OpTypeVectorIdEXT` matrix row-by-row (`"Component index 16 is out
+   of bounds for combined (Vector1 + Vector2) size of 16"`), even
+   though the index is in-bounds for the true 32-element combined
+   operand space. Looks like a `spirv-val` length-tracking gap for
+   `OpTypeVectorIdEXT`, not a new bug of its own -- not yet confirmed
+   which side should carry the fix. Split off as new roadmap row
+   `L428(a)` rather than guessed at.
+
+5. **Verified no regressions anywhere**: `check-feme` 3760/3768 (same
+   1 pre-existing unrelated failure as every prior session since
+   `L426`/`L429`, not touched); targeted `VK-GL-CTS` regression subset
+   (`opatomic*`: 19/26 Pass/7 NotSupported/0 Fail;
+   `dEQP-VK.glsl.loops.*`: 606/624 Pass) byte-identical to the
+   `L429`-session baseline, as expected (these fixes live in the
+   SPIR-V *producer* path, not FeMe's own Vulkan *consumer* path the
+   CTS exercises).
+
+6. **Updated `Roadmap.md`** (`L428` struck through with full findings;
+   new `L428(a)` row added, nested only one lowercase letter deep per
+   the standing instruction) and `VulkanCTSReport.md` (new section).
+   No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   update needed -- confirmed, not skipped: pure compiler-producer-side
+   fixes, no Vulkan feature/extension surface changed.
+
+## Wins now visible
+
+- Two real, independently-valuable, fully-tested bugs fixed in
+  upstream LLVM/Clang (not FeMe-local workarounds): a SPIR-V
+  capability-legality bug and a Clang driver extension-default bug.
+  Both are correct and complete on their own merits even though
+  neither alone flips a `check-hlsl-clang-feme-vk` case yet.
+- The `_mat.test` cluster's true blocking chain is now fully mapped:
+  3 bugs, 2 fixed, 1 isolated and ready for next session with a
+  concrete starting repro (`/tmp/l428/asin_mat/min5.hlsl`).
+
+## Next steps, ranked
+
+1. **(~half day)** `L428(a)`: root-cause the `spirv-val`
+   `OpTypeVectorIdEXT`-shuffle validation gap. Start from
+   `/tmp/l428/asin_mat/min5.hlsl`, narrow to a minimal IR-level
+   `shufflevector` test. Determine LLVM-backend-bug vs.
+   SPIRV-Tools-upstream-limitation before committing to a fix location.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining
+   `variablePointers` bucket, untouched for many sessions.
+3. **(~2-4 hours, low priority, change of pace)**
+   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait flake.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+5. **(standing)** Always diff `offload-test-suite`'s `feme` branch
+   against `main` before trusting any `check-hlsl-feme-vk` failure as
+   new -- not re-checked this session (no `offload-test-suite` work
+   done; checkout not re-cloned either, so drift risk unchanged).
