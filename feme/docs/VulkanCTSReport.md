@@ -3198,3 +3198,135 @@ CTS failures), not yet attempted. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change -- `variablePointers`/
 `variablePointersStorageBuffer` remain unsupported/`VK_FALSE`, no feature
 bit flipped permanently this session.
+
+## `K6t`: whole-handle `OpPtrEqual`/`OpPtrNotEqual` via a new LLVM intrinsic; `mergeIntoCompare` null-pointer bug found and fixed, 6/8 targeted cases pass (roadmap K6t, closed)
+
+`K6t` (split off from `K6p`'s own 25-case residual) covers comparing two
+*entire* resource handles directly (`spirv.PtrEqual`/`spirv.PtrNotEqual`
+with no intervening `OpAccessChain`/`getpointer` on either side). Unlike
+`K6p`'s pointer-derived-operand case, LLVM's `icmp` cannot operate on an
+opaque resource-handle target-extension type at all (e.g.
+`!llvm.target<"spirv.VulkanBuffer", ...>`) -- there is no legalization
+pattern that can ever make this shape well-formed as a plain `icmp`, so a
+single-layer `SPIRVToLLVMPatterns.cpp` fix (as used for `K6p`) was not an
+option.
+
+Implemented as a three-layer fix instead:
+
+1. **New upstream LLVM intrinsic** `llvm.spv.resource.handleequal`
+   (`llvm/include/llvm/IR/IntrinsicsSPIRV.td`), taking two resource-handle
+   values and returning `i1`. While adding this, found and fixed a real
+   TableGen correctness gap: the two operands were declared as
+   independent `llvm_any_ty` placeholders, which does *not* enforce they
+   share a type despite the doc comment's claim both must match. Changed
+   the second operand to `LLVMMatchType<0>` (same precedent as
+   `int_spv_distance`/`int_spv_faceforward` in the same file). Verified
+   via manual `llvm-as`/`opt -passes=verify` round-trip that a
+   mismatched-type declaration is now rejected
+   (`"intrinsic argument 1 type (matching overload type 0) expected i32,
+   but got ptr"`); this required rebuilding `llvm-as`/`opt` themselves --
+   stale binaries silently accept an invalid declaration without picking
+   up a newly-added TableGen `LLVMMatchType` constraint. This is the
+   standing "issue outside FeMe" piece: self-contained, isolated test
+   added at `llvm/test/Verifier/intrinsic-spv-resource-handleequal.ll`
+   (using the `split-file` idiom, precedented by
+   `llvm/test/Verifier/initializes-attr.ll`, with one valid same-type
+   round-trip sub-case and one verifier-rejected mismatched-type
+   sub-case). Full `llvm/test/Verifier/` suite (443 tests) passes with
+   zero regressions.
+2. **New FeMe-local `HandleCompareConversionPattern`**
+   (`SPIRVToLLVMPatterns.cpp`, registered at `FeMeBenefit` to run before
+   the declining upstream `IComparePattern`) recognizes `spirv.PtrEqual`/
+   `spirv.PtrNotEqual` on a resource-handle-typed operand and lowers to a
+   call of the new intrinsic, with `PtrNotEqual` expressed as a separate
+   `xor` negation of the same call rather than a second intrinsic. New
+   lit test `spirv-to-llvm-ptr-equal-whole-handle.mlir` (3
+   `--split-input-file` cases: `PtrEqual` on two distinct handles,
+   `PtrNotEqual`'s negation, and `PtrEqual` against a literal null
+   handle), replacing the now-obsolete
+   `spirv-to-llvm-ptr-equal-whole-handle-invalid.mlir` (which had
+   asserted legalization *failure* for exactly this shape -- no longer
+   true once this pattern exists). Full
+   `feme/test/Conversion/SPIRVToLLVM/` lit suite (138 tests) passes with
+   zero regressions.
+3. **`SPIRVResourceLowering.cpp` (CPU backend)** gained matching dispatch:
+   `hasOnlySupportedHandleUse`/`lowerHandleAccesses` recognize a call to
+   the new intrinsic as a valid handle use; `mergeIntoHandleCompare`
+   re-expresses the call as a direct `desc0 == desc1` comparison of the
+   two handles' own `DescriptorIndex` values (no byte-offset component,
+   since neither side has been through `getpointer`), with a literal-null
+   handle operand resolved immediately via the existing
+   `nullPointerMergeDescIndex` sentinel; `foldSameOperandHandleCompares`
+   folds a same-operand call (a real self-comparison, or `null` vs.
+   `null`) directly to a constant `true` before `collectHandles` runs at
+   all. Five new unit tests added to
+   `feme/unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp` covering
+   the equal/not-equal/null/self-compare shapes.
+
+**A genuine, previously-latent bug was found as a side effect of K6t**,
+not part of K6t's own scope: once the whole-handle fix let a
+`null_comparisons_ssbo_not_equal`-shaped shader legalize and execute for
+the first time, its separate *pointer-level* (post-`getpointer`)
+`%real_ptr != null` sub-comparison came back wrong. Root cause:
+`mergeIntoCompare` (the existing `K6p` pointer-level compare-merge
+function) had no `ConstantPointerNull` special case, unlike its siblings
+`mergeIntoPhi`/`mergeIntoSelect`/the new `mergeIntoHandleCompare` (all of
+which do). Because `hasOnlySupportedPointerUses` accepts any equality
+`icmp` regardless of the other operand's shape, a literal null operand
+never independently reaches `mergeIntoCompare` through the normal
+chain-walk, leaving the real side's own operand permanently replaced with
+`PoisonValue` and the comparison never rewritten -- producing
+`icmp eq poison, null`, which silently folds to a wrong constant. This
+bug was unobservable before `K6t`: the exact shader shape that exposes it
+previously failed whole-handle legalization entirely (a hard compile
+error), so the buggy downstream code path was simply never reached.
+Fixed by mirroring the same three callers' own sentinel-resolution
+pattern, reusing the existing `nullPointerMergeDescIndex`/
+`nullPointerMergeOffset` sentinels directly in `mergeIntoCompare`. New
+unit test `LowersPtrNotEqualOnRealHandleVsNullPointerToTrue`. Full
+`FeMeTransformsCPUTests` suite: 629/629 pass (up from 628).
+
+CTS (8-case targeted whole-handle set,
+`dEQP-VK.spirv_assembly.instruction.spirv1p4.{opptrequal,opptrnotequal}.
+{different,null_comparisons}_{ssbo,wg}_{equal,not_equal}`, feature bits
+transiently flipped to `VK_TRUE` for measurement only, reverted
+afterward): **6/8 pass** (up from 0/8 pre-`K6t`, which failed whole-handle
+legalization entirely). The 2 remaining failures
+(`null_comparisons_wg_equal`/`_not_equal`) are the pre-existing,
+already-documented, unrelated `feme-cpu-simdize` groupshared-
+canonicalization limitation (`"groupshared global ... is used in a way
+this milestone does not yet canonicalize"`), not a `K6t` gap. Broader
+29-case `opptr*` sweep: **8/29 pass** (up from `K6p`'s own prior 4/29),
+zero regressions -- the remaining 21 cleanly attributable to `K6n`
+(already closed, so this refers to re-confirmed-clean cases, not new
+failures), CFG-linearization/groupshared gaps, and `opptrdiff` (not yet
+individually root-caused past the CFG-linearization signature on at
+least one representative case; see below).
+
+While re-verifying `K6p`'s row this session, re-checked all 5
+`opptrdiff.*` cases (feature bits transiently re-flipped again, then
+reverted): one (`ssbo_comparisons_diff`) fails with the exact
+pre-existing CFG-linearization error text
+(`"feme-cpu-linearize: ... reconvergence block '' does not have exactly
+two predecessors"`), confirming it belongs to the already-documented,
+out-of-scope `groupshared`/CFG-linearization bucket rather than being a
+new `K6p`/`K6t`-adjacent gap; the other 4 fail pipeline creation without
+a printed diagnostic in this quick pass and were left as a follow-up
+investigation (not guessed at) rather than expanding this session's
+scope further.
+
+Full `check-feme` target (final run, all K6t changes in place):
+3749/3756 passed, 7 unsupported (expected), 0 failures. Zero regressions.
+
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+Device` at the start, middle, and end of this session, per the standing
+"every session, every time" instruction.
+
+`Roadmap.md`: `K6t` struck through/closed, with the `mergeIntoCompare`
+null-fix documented as a related-but-distinct discovery within the same
+row (it is not itself a new roadmap row, since it is a bug fix uncovered
+by `K6t` rather than a separate tracked feature gap). `K6p`'s own row
+updated to reflect `K6t`'s closure and this session's `opptrdiff`
+re-check. `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+change -- `variablePointers`/`variablePointersStorageBuffer` remain
+unsupported/`VK_FALSE`; no feature bit flipped permanently this session.
