@@ -122330,3 +122330,40 @@ A uniform-trip-count loop (its own exit check never diverges) nested inside a di
 6. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6s`'s compiler fix).
 
 **Immediate next action for next session:** pick `K6n` (the only remaining large, unattempted bucket -- `K6o`, `K6r`, and now `K6s` are all closed) and start by root-causing one representative `"unsupported raised operation"` case down to its specific resource-handle-normalization code path, or pick `K6q`/`K6p` first for a smaller, more contained fix.
+
+# Session: K6q fixed (handle-level phi/select merge of raw resource handles)
+
+**Confirmed `FeMe CPU Vulkan Device`** via `vulkaninfo --summary | grep deviceName` at session start, with `VK_ICD_FILENAMES` exported first.
+
+## What now works
+
+Both `K6q` cases pass: `opphi_outer_struct_two_buffers_{first,second}_input`. The full `dEQP-VK.spirv_assembly.instruction.*.variable_pointers.*` group (1637 cases, feature bits measured on transiently) is now 948 Pass/1 Fail/688 Not Supported -- the 1 remaining failure is the pre-existing, already-documented, unrelated `workgroup_two_buffers` `feme-cpu-simdize` case (K6n), not a new regression. `check-feme`: 3740/3747 pass, 7 unsupported, 0 failed. `FeMeTransformsCPUTests`: 621/621 pass (3 new tests added).
+
+## The bug, in one paragraph
+
+`hasOnlySupportedUses` (the handle-level checker in `SPIRVResourceLowering.cpp`) required every user of a raw resource handle to be a direct `getpointer` call, with zero phi/select recognition at that level -- one layer earlier than `K6n`'s already-fixed pointer-level merge. The real CTS case's IR is a nested phi-of-phi merging two `handlefrombinding` calls across a diamond nested inside another diamond, with one incoming edge being a literal `poison` handle (a dead-edge artifact from control-flow linearization). Fix: mirror K6n's `PointerMergeMap`/`mergeIntoPhi`/`mergeIntoSelect` design one level earlier -- new `hasOnlySupportedHandleUse`/`hasOnlySupportedHandleMergeUses`, a `lowerHandleAccesses` extracted from `lowerAccesses` and parameterized by a generic handle value, and a `HandleMergeMap`/`mergeIntoHandlePhi`/`mergeIntoHandleSelect` that reuses the existing null-sentinel for poison edges.
+
+## What this session did, in order
+
+1. Verified the "stalled session, stash exists" boilerplate claim was false -- no stash anywhere in any of the three repos, clean working tree.
+2. Selected `K6q` per the prior session's own suggested next action (smallest case count of the three remaining buckets).
+3. Found the real dEQP-VK test names via the mustpass case list (the short names from prior docs matched 8 near-duplicates; needed the full `complex_types_compute` group name to disambiguate).
+4. Reproduced both cases, dumped pre-normalization IR (`FEME_DUMP_IR_PRENORM=1`), found the nested-phi-with-poison-edge shape.
+5. Implemented the fix by mirroring K6n's design one level earlier (handle level, pre-`getpointer`), refactoring `lowerAccesses` into a generic `lowerHandleAccesses` so merge continuations can call back into it recursively.
+6. Added 3 unit tests (direct phi merge, direct select merge, the real case's nested-phi-with-poison shape), ran the full `FeMeTransformsCPUTests` suite, then the full `variable_pointers` CTS group.
+7. Reverted the transient feature-bit flip, ran full `check-feme`, updated `Roadmap.md`/`VulkanCTSReport.md`, committed in 4 pieces (fix, tests, docs, this file).
+
+## The real lesson this session learned
+
+1. **A handle-level merge and a pointer-level merge are structurally parallel but still need their own state type, even when one is a strict subset of the other.** `HandleMergeMap` only needs a single `i32` descriptor index per merge, versus `PointerMergeMap`'s `(DescriptorIndex, Offset)` pair -- reusing `PointerMergeMap` with a dummy offset field would have worked technically but would have muddied the type's contract (callers would need to know the offset field is meaningless at the handle level). **Lesson: when a new bug is "the same shape, one layer earlier/later" than an already-fixed one, resist collapsing the two into one generalized type unless the state really is identical -- a distinct, narrower type documents the actual invariant better than a shared one with an unused field.**
+2. **The "same user-facing error signature" can still split into several architecturally distinct fixable buckets, and splitting them early (as `K6n`'s own session did) pays off two sessions later.** This session's whole job was made tractable because a prior session had already bucketed `K6n`'s 10 residual cases into `K6q`/`K6r`/`K6s` by exact cause, rather than leaving them as one lumped "10 more cases of the same thing" entry. Picking up `K6q` here required zero re-triage -- the Roadmap.md row already had the exact root-cause hypothesis written down, which turned out to be correct on the first reproduction attempt.
+
+## Next steps
+
+1. **(~1-2 days)** `K6n`-proper: ~124 cases, the largest remaining `variablePointers` bucket, CPU-backend resource-handle-normalization architectural limitation. Still not root-caused beyond signature-level bucketing -- `K6o`/`K6q`/`K6r`/`K6s` have all now been split off and closed, leaving only the original core bucket. Likely the deepest, hardest-to-fix piece of the whole feature; worth its own investigation session before committing to an approach, possibly needing a runtime dispatch mechanism rather than a lowering-pattern fix.
+2. **(~1-2 days, "issue outside FeMe", standing)** `K6p`: ~14-15 cases, `OpPtrEqual`/`OpPtrNotEqual`/`OpPtrDiff` (opcodes 401/402/403) entirely undefined in MLIR's SPIR-V dialect TableGen. Not attempted this session (scope stayed on `K6q`). Needs new TableGen op definitions, deserializer cases, and likely a `SPIRVToLLVMPatterns.cpp` lowering.
+3. **(standing, unresolved many sessions)** `backup-before-rebase-20261014` tag decision, `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity re-check, deferred full `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern check -- not exercised this session either, no `check-hlsl-feme-vk` work done (session stayed scoped to `K6q`'s compiler fix).
+
+**Immediate next action for next session:** pick `K6n`-proper (now the only remaining large, unattempted bucket -- `K6o`, `K6r`, `K6s`, and now `K6q` are all closed) and start by root-causing one representative `"unsupported raised operation"` case down to its specific resource-handle-normalization code path in `feme/lib/Target/CPU` (not yet located in any prior session) before guessing at a fix approach, or pick `K6p` first if the upstream-MLIR TableGen work feels like a better change of pace.
