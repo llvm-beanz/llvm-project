@@ -63,27 +63,27 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-**Next steps, ranked:**
-1. **(~1-2 days)** Fix `K6z`: generalize `validate`/`flatten`'s
-   nested-cycle-boundary handling to tolerate an already-linearized
-   child cycle anywhere in a uniform loop's body, not just at the exit
-   check. Highest-value pick available: closes 24 of 26 current
-   `check-hlsl-feme-vk` failures in one shot. Start from
-   `matrix_single_subscript_load.test`'s `FEME_DUMP_IR_PRELINEARIZE`
-   dump (already captured this session, see this session's own
-   `K6z` write-up for the exact block numbers) as the unit-test seed
-   shape.
-2. **(~half day)** Root-cause `InterlockedAdd.resources.32.test`'s
-   numeric mismatch (expected all `0x1`, actual all `0x0`) -- not yet
-   looked at past the raw buffer diff.
-3. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
-   bucket, still not touched for many sessions.
-4. **(standing, unresolved many sessions)**
+1. **(~half day)** `L425`: dump `FEME_DUMP_IR_PRELINEARIZE` on one of the
+   17 remaining `check-hlsl-feme-vk` failures sharing `K6z`'s diagnostic
+   text -- `Feature/HLSLLib/AllMemoryBarrierWithGroupSync.test` looks
+   like the smallest/simplest repro to start with. Goal: confirm whether
+   all 17 share one remaining shape (e.g. a *divergent* nested sibling
+   cycle, a nested sibling *diamond* rather than a cycle, or a
+   doubly-nested cycle) or are several distinct bugs.
+2. **(~1-2 days)** `K6n`-proper: the largest remaining `variablePointers`
+   bucket, CPU-backend resource-handle-normalization architectural
+   limitation. Still not root-caused beyond signature-level bucketing --
+   unchanged for many sessions now, not touched this session either
+   (scope stayed on `K6z`).
+3. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
-   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision.
-5. **(standing)** `L419(j)` remaining untriaged items, deferred full
-   `Vulkan14FeatureInventory.md`/extension-manifest regeneration.
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+4. **(standing)** Full `Vulkan14FeatureInventory.md`/extension-manifest
+   regeneration still deferred (not needed this session specifically --
+   pure compiler fix, no feature/extension surface change).
 
-**Immediate next action for next session:** pick `K6z` (item 1) --
-highest leverage available, already root-caused down to the exact code
-path and a concrete IR repro shape.
+**Immediate next action for next session:** pick item 1 (`L425`'s
+root-cause dump) -- it's a small, bounded investigation with a concrete
+starting test file already identified, and directly continues this
+session's own momentum on the same diagnostic-text cluster.
