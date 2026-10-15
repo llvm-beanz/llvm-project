@@ -122621,3 +122621,87 @@ the one remaining `opptrdiff.*` case, already root-caused down to a
 specific function and the exact generalization needed) for a focused
 fix, or `K6n`-proper if a larger, harder investigation feels like the
 better use of a fresh session.
+
+# Session: K6w closed (nested self-referential phi/GEP-through-diamond backedge), use-after-free found and fixed
+
+Fixed `K6w`, found and fixed a second bug (use-after-free) the fix itself
+exposed, both committed.
+
+## What's done
+
+1. **K6w fixed** (`feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`):
+   confirmed the exact current IR shape via a fresh
+   `FEME_DUMP_IR_PRELINEARIZE` dump first (rather than trusting last
+   session's notes, which could have gone stale). Broadened
+   `isPhiSelfReferentialBackedge` to tolerate a GEP-stripped incoming
+   value landing on *any* `PHINode` (not only the same `Phi`) or a
+   `PoisonValue`/`UndefValue`.
+2. **Second bug found while verifying**: the broadened check alone
+   produced progress but not correctness -- `variable_pointers_vars_ssbo_2_diff`
+   went from total garbage to a precise sign inversion (`2 == -2`).
+   Traced via a fresh post-lowering IR dump to a use-after-free:
+   tolerating a slot landing on a *different* phi means that slot's real
+   value can arrive via a separate top-level walk, but `mergeIntoPhi`
+   unconditionally erased the phi right after its own recursion
+   returned, before that later value arrived.
+3. **Fix for the use-after-free**: deferred erasure via a new
+   `PointerMergeState::Erased` flag + `EraseIfComplete` check (run after
+   every slot-filling call, not just the first). That alone still
+   crashed (`Use still stuck around after Def is destroyed`) because a
+   mutually-recursive chain can reenter the same phi's merge *from
+   within* its own still-running top-level walk -- added a
+   `RecursionActive` flag to defer the check until that walk fully
+   returns. Both bugs caught by the new unit test, not by iterating on
+   full CTS runs (much faster feedback loop).
+4. **New unit test**:
+   `LowersPtrDiffOnLoopCarriedPointerBackedgeThroughIntermediateDiamondPhi`.
+   Full 633-test `FeMeTransformsCPUTests` suite passes, zero
+   regressions.
+5. **CTS**: `variable_pointers_vars_ssbo_2_diff` now **passes**. Full
+   `opptrdiff.*` sweep: 2/5 pass (up from 1/5); the other 3 are
+   unaffected, already-tracked, pre-existing limitations (CFG-
+   linearization, groupshared-canonicalization) -- every one of the 5
+   `opptrdiff.*` cases is now accounted for.
+6. **Verified clean**: full `check-feme` with flags reverted to
+   `VK_FALSE`: 3753/3760 pass, 7 expected-unsupported, zero regressions.
+7. Docs updated: `Roadmap.md` (K6w struck through, closed),
+   `VulkanCTSReport.md` (new K6w section including the use-after-free
+   story). `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+   no change needed, flags stay `VK_FALSE`.
+8. Commits (3 total, this session): K6w fix + test; doc updates; this
+   entry.
+9. `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan
+   Device` at the top of this session.
+
+## Next steps
+
+1. **(~2-4 hours)** The original "profile one L418 1024x1024x2
+   image-to-image MSAA case" next step -- still not picked up; this is
+   now 10+ sessions overdue, every session since it was first suggested
+   has had an open compiler bucket take priority. Worth prioritizing
+   purely as a change of pace if no other compiler bucket feels urgent.
+2. **(~half day)** Root-cause the remaining 3 `opptrdiff.*` failures past
+   their current signature-level bucketing: `ssbo_comparisons_diff` and
+   `wg_comparisons_diff` both hit `"reconvergence block '' does not have
+   exactly two predecessors"` (CFG-linearization, milestone 9 scope);
+   `variable_pointers_vars_wg_diff` hits the `feme-cpu-simdize`
+   groupshared-canonicalization limitation. Both are pre-existing,
+   already-tracked limitations, not new -- this is about root-causing
+   them individually rather than leaving them bucketed.
+3. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session.
+4. **(standing)** `L419(j)` remaining untriaged items, `L418(a)` sanity
+   re-check, deferred full `Vulkan14FeatureInventory.md`/extension-
+   manifest regeneration.
+5. **(standing)** offload-test-suite `VkBool32`/`WaveActiveMax` pattern
+   check -- not exercised this session either, no `check-hlsl-feme-vk`
+   work done (session stayed scoped to `K6w`'s compiler fix).
+
+**Immediate next action for next session:** with `K6u` through `K6w` all
+closed, there is no remaining *known, bucketed* `variablePointers`/
+`opptrdiff` legalization gap left -- either root-cause one of the 3
+remaining `opptrdiff.*` CFG-linearization/groupshared cases for a change
+of pace (item 2 above), or finally break the L418 profiling task out of
+its 10-session backlog (item 1 above).
