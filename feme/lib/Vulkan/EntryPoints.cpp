@@ -1627,8 +1627,8 @@ void fillFeatures2Chain(void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVariablePointersFeatures *>(Base);
-      Features->variablePointersStorageBuffer = VK_FALSE;
-      Features->variablePointers = VK_FALSE;
+      Features->variablePointersStorageBuffer = VK_TRUE;
+      Features->variablePointers = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES: {
@@ -1664,8 +1664,8 @@ void fillFeatures2Chain(void *pNext) {
       Features->multiview = VK_TRUE;
       Features->multiviewGeometryShader = VK_TRUE;
       Features->multiviewTessellationShader = VK_FALSE;
-      Features->variablePointersStorageBuffer = VK_FALSE;
-      Features->variablePointers = VK_FALSE;
+      Features->variablePointersStorageBuffer = VK_TRUE;
+      Features->variablePointers = VK_TRUE;
       Features->protectedMemory = VK_FALSE;
       Features->samplerYcbcrConversion = VK_FALSE;
       // (roadmap K6c) see the dedicated VK_PHYSICAL_DEVICE_SHADER_DRAW_

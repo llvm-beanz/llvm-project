@@ -2160,8 +2160,8 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Storage16.uniformAndStorageBuffer16BitAccess, VK_FALSE);
   EXPECT_EQ(Storage16.storagePushConstant16, VK_FALSE);
   EXPECT_EQ(Storage16.storageInputOutput16, VK_TRUE);
-  EXPECT_EQ(VariablePointers.variablePointersStorageBuffer, VK_FALSE);
-  EXPECT_EQ(VariablePointers.variablePointers, VK_FALSE);
+  EXPECT_EQ(VariablePointers.variablePointersStorageBuffer, VK_TRUE);
+  EXPECT_EQ(VariablePointers.variablePointers, VK_TRUE);
   EXPECT_EQ(ProtectedMemory.protectedMemory, VK_FALSE);
   EXPECT_EQ(SamplerYcbcr.samplerYcbcrConversion, VK_FALSE);
   EXPECT_EQ(ShaderDrawParams.shaderDrawParameters, VK_TRUE);
