@@ -66,21 +66,21 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days, highest leverage available)** `L432(a)`: implement the
-   `Linearize.cpp` fix. Start with a minimal, committed `.ll` regression
-   test from `/tmp/sync_op_prenorm.ll`'s shape (regenerable via
-   `FEME_DUMP_IR_PRENORM=1` + the `write_blit_image_read_image_compute.
-   image_128_r32_uint_concurrent` repro if `/tmp` has been cleared). Then
-   extend the check-recovery logic to (a) walk forward from `Header`
-   through trivial unconditional pass-through blocks to find a real check,
-   and (b) recognize a *uniform* phi-merged `Flow`-style dispatch block on
-   the exit side, not just a divergent one. Verify via
-   `FeMeTransformsCPUTests`/`check-feme`, then a real CTS re-run of
-   `synchronization.op` (expect most of the 9,795 to flip to Pass/
-   NotSupported).
-2. **(standing)** `Basic/Mandelbrot.test`'s flake -- confirmed still fixed
-   this session (492/492), not re-broken, but still not actively worked on
-   as its own item in several sessions now.
+1. **(~1-2 days)** The `K6z`/`L425` "internal branch in a body shape
+   this milestone does not yet lower" diagnostic family is now the
+   single largest remaining `synchronization.op` blocker (8,536 cases).
+   It covers multiple distinct CFG shapes per its own existing roadmap
+   rows -- scope one specific sub-shape first (the way `L432` itself was
+   split off from a vaguer predecessor) rather than attacking it as one
+   lump.
+2. **(standing)** `Basic/Mandelbrot.test`'s flake -- still not actively
+   worked on as its own item in several sessions now.
 3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
-   re-check -- not re-verified this session, no `offload-test-suite` work
-   was done and the checkout was not re-cloned, so drift risk is unchanged.
+   re-check -- not re-verified this session, no `offload-test-suite`
+   work was done.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision (already resolved,
+   deleted in `L431`) and `CMAKE_BUILD_TYPE` decision (already resolved
+   in `L431`, keeping `RelWithDebInfo`) -- no longer open, listing here
+   only to confirm they should stop being carried forward as "standing"
+   items in future session summaries.
