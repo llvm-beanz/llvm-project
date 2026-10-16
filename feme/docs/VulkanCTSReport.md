@@ -5934,3 +5934,105 @@ Standing `/tmp/l437_full_run2/` background CTS sweep check-in: still
 alive and progressing (42,404/57,809+ `qpa` files this session, up from
 26,108 last checked) -- not yet finished, no action needed beyond this
 check-in.
+
+## `L419(v)`: `collectUniformPassThroughRegion`'s stale-uniformity masking gap fully root-caused end-to-end (no fix landed)
+
+Follow-up session to `L419(u)`, picking up its own suggested next step:
+root-cause `L419(t)`'s "real, deeper, second bug" that blocks the
+poison-placeholder phi-completeness fix, using fresh
+`FEME_DEBUG_LINEARIZE_TRACE`/IR-diffing/a direct SIMDize-level
+reproduction rather than re-trusting prior sessions' vaguer
+`flattenLoopBodyDiamond` attribution (already disproven by `L419(u)`).
+
+**Mandatory device check**: `FeMe CPU Vulkan Device` confirmed via
+`vulkaninfo --summary | grep deviceName`.
+
+**Root cause, confirmed end-to-end on the real failing CTS case**:
+`LoopLinearizer::collectUniformPassThroughRegion` decides whether a
+cycle's `Header` (and other blocks in its `PreRegion`/`PostRegion`) is
+a safe "leave completely untouched" pass-through block using
+`isDivergentBranch`, which consults `UniformityInfo` computed **once**,
+at the very start of the whole Linearize pass -- before this same
+pass's own mask-narrowing (`applyStageMasks`) ever runs. For
+`select_iteration_count_fragment` (a `do_while_dynamic_iterations`
+loop, i.e. one with a genuinely per-lane-varying trip count), `Header`
+contains a resource-load call whose mask argument is, at that initial
+snapshot, still the pre-lowered constant `true` -- so `Header`'s own
+internal `if`/`else` (`%.not = icmp ne i32 %16, 0` /
+`br i1 %.not, label %27, label %._crit_edge`) is correctly judged
+uniform *at that moment* and accepted into the pass-through region,
+so its `CondBr` is never flattened into masked form.
+
+Later, in the very same `linearizeCycle` call, `applyStageMasks`
+(correctly, exactly as the poison-placeholder fix intends) narrows
+that same call's mask operand from `true` to the loop's own
+`active.live` phi -- for a `_dynamic_iterations` loop this is a real,
+non-constant, per-lane value. Confirmed directly via IR diff
+(`feme-opt --llvm -passes=feme-cpu-linearize` on a standalone repro,
+with vs. without the poison-placeholder fix reapplied experimentally):
+both resource-load calls' mask operands flip from literal `i1 true` to
+`i1 %active.live`. Once masked this way, the call's result is
+genuinely divergent across the full lane set (inactive lanes read an
+unrelated passthru value instead of the uniform content active lanes
+see), making `Header`'s surviving, never-flattened `CondBr` a real
+divergent branch.
+
+**Direct end-to-end confirmation on the real CTS case**: rebuilt
+`libfeme_vulkan.so` with the poison-placeholder fix reapplied
+experimentally, then ran
+`dEQP-VK.glsl.loops.special.do_while_dynamic_iterations.select_iteration_count_fragment`
+with `FEME_DUMP_DIVERGENT_BRANCH=1` set:
+
+```
+feme-cpu-simdize: divergent branch in block '':   br i1 %.not, label %27, label %._crit_edge
+error: feme-cpu-simdize: function 'main' has a divergent branch; the
+divergence transform (feme::cpu::LinearizePass) did not remove it, or
+produced a shape this pass cannot widen
+  Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)
+```
+
+This is precisely `Header`'s own branch -- confirming the hypothesis
+without any remaining ambiguity, and precisely explaining the known
+6-case `select_iteration_count_{fragment,vertex}` regression the
+poison-placeholder fix has caused in every prior session that tried it.
+
+**Why only `_dynamic_iterations` siblings are affected**: a loop whose
+own header/latch exit check is itself uniform (`_uniform_iterations`,
+e.g. `conditional_break_fragment`) takes an entirely separate, simpler
+fast path (`!HeaderDivergent && !LatchDivergent && !LatchWasPromoted`,
+Roadmap `L292`) that only builds an `active.live`/`active.sideeffect`
+phi pair if the loop body contains a `feme.stage.discard`/`.demote`/etc.
+op -- so there is no mask-narrowing event to go stale for that shape in
+the first place.
+
+**No fix implemented this session** -- confirmed this requires one of
+two architecturally non-trivial changes: (a) a two-phase restructuring
+so `collectUniformPassThroughRegion`'s region/branch-flattening
+decisions are made *after* this cycle's own mask-narrowing is fully
+known (a chicken-and-egg problem, since masking itself depends on which
+blocks are inside/outside the region), or (b) teaching
+`isDivergentBranch` (or a new helper `collectUniformPassThroughRegion`
+also consults) to recognize, ahead of its own decision, that a
+resource/image load inside cycle `C` with a currently-constant-`true`
+mask will be narrowed to a non-constant per-lane value by this very
+cycle's own masking machinery whenever the cycle needs a genuinely
+non-constant `active.live`/`active.sideeffect` phi -- and pessimistically
+treat such a load's result (and any branch depending on it) as
+divergent ahead of time. Both were judged too risky to attempt without
+a dedicated follow-up session.
+
+The experimental poison-placeholder code used to confirm this trace was
+reverted (`git checkout --`) before ending this session --
+`Linearize.cpp` is back to its committed `L419(u)` state. Rebuilt
+`libfeme_vulkan.so`/`feme-opt` and re-verified: `select_iteration_count_fragment`
+still Pass, 540/552 `dEQP-VK.glsl.loops.special.*` baseline unchanged
+(no CTS re-sweep needed since no functional change landed).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(read-only/root-cause-only session, no functional compiler change
+landed).
+
+Standing `/tmp/l437_full_run2/` background CTS sweep check-in: still
+alive and progressing (84,381 `qpa` files this session, up from 72,396
+last checked) -- not yet finished, no action needed beyond this
+check-in.
