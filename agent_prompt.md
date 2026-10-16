@@ -63,25 +63,25 @@ file.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** File the upstream `KhronosGroup/SPIRV-Tools` bug
-   for `L428(a)`'s `OpTypeVectorIdEXT`-shuffle id/value confusion,
-   using the preserved `/tmp/l428a/min.spvasm` repro + the id-padding
-   control test as supporting evidence. Not urgent, but low-effort
-   and leaves no loose end.
-2. **(~1-2 days)** The milestone-9 CFG-linearization/
-   groupshared-canonicalization gap itself -- now the *sole* remaining
-   blocker on 6+ confirmed CTS cases across multiple K6 sub-buckets.
-   Worth promoting from "known, out of scope" to an actual scoped
-   roadmap item of its own if no such row already exists under
-   milestone 9 -- check before adding to avoid a duplicate.
-3. **(~2-4 hours, low priority, change of pace)**
-   `Basic/Mandelbrot.test`'s contention-dependent semaphore-wait
-   flake -- still not picked up in several sessions now.
-4. **(standing, unresolved many sessions)**
+1. **(~2-4 hours)** Mandelbrot flake -- still not picked up, several
+   sessions running now. Low priority, change of pace.
+2. **(standing, unresolved many sessions)**
    `backup-before-rebase-20261014` tag decision,
    `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
    revisited this session either.
-5. **(standing)** Always diff `offload-test-suite`'s `feme` branch
-   against `main` before trusting any `check-hlsl-feme-vk` failure as
-   new -- not re-checked this session (no `offload-test-suite` work
-   done, checkout not re-cloned).
+3. **(new this session)** `offload-test-suite` checkout: local `feme`
+   branch is 7 commits ahead *and* 1 commit behind
+   `llvm-beanz/feme` (diverged, not just stale) -- the single
+   remote-only commit (`0cc94c2`, "Add FeMe test targets") only touches
+   `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`, and the 3
+   previously-found drift fixes (`VkBool32`, `WaveActiveMax` XFAIL,
+   `array_of_matrices` XFAIL) are all still present locally, so this is
+   not the standing drift pattern recurring -- but a future session
+   should decide whether to rebase/merge that one remote commit in, or
+   confirm it's already superseded locally in a different form, before
+   trusting the local checkout's CMake wiring indefinitely.
+4. No remaining roadmap item currently known to block anything in the
+   `variablePointers`/milestone-9 area -- `K6a`'s full tree (`K6n`
+   through `K6z`, `L430`) is now closed end to end. Next open item with
+   its own next-step text is whichever `L428`-family or standing item
+   the next session's own prior-session summary names.
