@@ -69,22 +69,19 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day)** Fix `DiamondFlattener::flattenLoopBodyDiamond`'s staleness bug:
-   make its uniform/divergent judgment for a loop-body diamond built from a
-   resource/image load result re-run (or defer) once `applyStageMasks` has
-   finalized that load's mask operand, rather than committing to a one-time,
-   pre-masking verdict. Then re-apply the poison-placeholder phi-completeness
-   fix (code is fully described in this session's history/Roadmap `L419(t)`
-   entry, small and reconstructable) and re-verify a full CTS sweep shows zero
-   regressions (specifically: `select_iteration_count_{fragment,vertex}` for
-   `do_while_dynamic`/`for_dynamic`/`while_dynamic` must still Pass) before
-   landing.
+1. **(~2-3 hours)** Re-apply the poison-placeholder fix alone (code is small,
+   described in `L419(t)`'s own entry and this session's diff history, fully
+   reconstructable) and use `FEME_DEBUG_FLATTEN_TRACE=1` to trace
+   `select_iteration_count_fragment` **with the poison fix applied**, comparing
+   against a trace **without** it. Find exactly which flatten/flatten-decision
+   differs between the two traces -- don't assume it's `flattenLoopBodyDiamond`
+   (confirmed not called for Header/Latch) or `DiamondFlattener::run()`'s walk
+   (this session's relay-chase fix already touches that path and didn't help)
+   without first looking.
 2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- same
    IR-dump-and-reduce methodology candidate, untouched.
-3. **(standing)** `L419(h)`'s remaining 12 special-loop residuals
-   (`{for_dynamic,while_dynamic}_iterations.{elseblock,ifblock}_{fragment,vertex}`,
-   `{for_uniform,while_uniform}_iterations.mixed_break_continue_{fragment,vertex}`)
-   -- distinct shapes from the one this session fixed, need their own reduction.
+3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4
+   loop-in-switch) -- distinct shapes, need their own reduction.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/`
    progress.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
