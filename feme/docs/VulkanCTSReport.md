@@ -4927,3 +4927,77 @@ RelWithDebInfo` vs `Release` decisions; the standing
 re-verified this session, no `offload-test-suite` work was done and the
 checkout was not re-cloned, so drift risk is unchanged from the last
 confirmed-clean state).
+
+## `L302` closed: remaining `api.*`/`synchronization.op`/`copy_and_blit`/`image_clearing` CTS sampling, one major CFG-linearization gap found and split off as `L432` (roadmap `L302`, closed; `L432` opened)
+
+Finished the `L302` sampling campaign's three remaining batches this
+session: the small/medium leftover `api.*` subgroups, the full
+`synchronization.op` group, and the two largest `api` subgroups
+(`copy_and_blit`/`image_clearing`).
+
+**Methodology bug caught before trusting any result**: `feme/utils/
+run_vulkan_cts.py` inherits the caller's shell environment rather than
+setting `VK_ICD_FILENAMES` itself. Two of the three batches were
+initially launched with no ICD env exported at all (each CLI tool
+invocation in this environment starts a fresh shell with no persisted
+state across calls), silently running against the system-default
+`llvmpipe` driver instead of FeMe. Caught via a cross-check: isolating
+one of the batch's own "Fail" cases and re-running it standalone with
+the correct `VK_ICD_FILENAMES` gave a *different* result
+(`NotSupported`, a real `llvmpipe`-side `VK_KHR_maintenance8` gap,
+irrelevant to FeMe) than the batch's own internal re-verification pass
+for that same case name (`Fail`) -- a contradiction only explainable by
+the batch never having touched FeMe at all. All three batches were
+re-run with `VK_ICD_FILENAMES` explicitly exported in the same shell
+invocation as the runner.
+
+**Results (all FeMe-verified)**:
+
+- Remaining small/medium `api.*` subgroups (13,865 cases): **7,041
+  Pass / 6,823 NotSupported / 1 Fail**. The one Fail is the already-known,
+  already-filed won't-fix `L412(g)`
+  (`dEQP-VK.api.driver_properties.conformance_version` -- FeMe
+  correctly declines to report a Khronos conformance version it has
+  never actually submitted for). Not a regression.
+- `synchronization.op` (20,131 cases): **4,899 Pass / 5,437 NotSupported
+  / 9,795 Fail**. All 9,795 failures trace to the exact same single
+  diagnostic: `feme-cpu-linearize: function 'main': loop at '' has a
+  mask-affecting operation in its body but no recognized uniform exit
+  check; unsupported (roadmap milestone 6 deviation)`. This is a
+  previously-known-but-never-independently-scoped `LoopLinearizer` gap
+  (only mentioned inside the already-closed `K6u`/`K6v` rows, for a
+  *different* specific CFG shape) -- now split off as its own dedicated
+  roadmap item, `L432` (see `Roadmap.md`; investigated and root-caused
+  this session via a real IR dump, but a live fix was deliberately
+  deferred -- see that row's own writeup for why, and `L432(a)` for the
+  concrete next-step breakdown).
+- `copy_and_blit`/`image_clearing` (55,122 cases, the two largest `api`
+  subgroups, previously skipped as "too large for a single batch"):
+  **23,108 Pass / 32,014 NotSupported / 0 Fail**. Clean.
+
+**Verification**: `ninja check-hlsl-feme-vk` 492/492 Passed, 0 Failed
+(confirms the Mandelbrot flake fix still holds under this session's
+additional load); `ninja check-feme` 3762/3770 Passed, 7 Unsupported, 1
+Failed (the same pre-existing, already-tracked
+`entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, not new
+-- no FeMe source changes were made this session, so no new regression
+risk existed in the first place).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed. No new missing feature or extension was found; `L432` is a
+compiler CFG-handling gap in already-advertised functionality, not a
+feature/extension gap.
+
+`L302` itself is now closed (struck through in `Roadmap.md`); `L432`
+carries its one real finding forward as a properly-scoped item.
+
+**Next steps**: `L432(a)`'s fix itself (a minimal regression test plus
+a forward-chain-walk extension to `LoopLinearizer`'s check-recovery
+logic -- see `Roadmap.md`'s own breakdown) is the clear highest-leverage
+next target, given its 9,795-case footprint in `synchronization.op`
+alone. The usual standing items remain untouched this session:
+`Basic/Mandelbrot.test`'s flake (confirmed still fixed, not re-broken);
+the `backup-before-rebase-20261014`/`CMAKE_BUILD_TYPE` decisions
+(already resolved in `L431`, not revisited); the standing
+`offload-test-suite` `feme`-branch-vs-`main` drift re-check (not
+re-verified this session, no `offload-test-suite` work was done).
