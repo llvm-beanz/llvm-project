@@ -69,30 +69,24 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(check-in, cheap)** The full-CTS re-triage (shellId from this session,
-   `/tmp/l437_full_run/`) is still running, ~190/1,800+ batches in. A future
-   session should check its progress first via `ls /tmp/l437_full_run/qpa/ | wc
-   -l` and the report file, and only replace `VulkanCTSReport.md`'s master table
-   once it's actually complete -- don't trust a partial count as final.
-2. **(standing, now explained, probably closeable as "standing")**
-   `Basic/Mandelbrot.test` -- no longer an open flake investigation. It was
-   deterministic under sufficient background load and is now fixed at the actual
-   root cause (lit env passthrough). A future session doesn't need to keep
-   "spot-checking" it as a standing item; if it ever fails again, check first
-   whether `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` is actually present in the
-   failing subprocess's own environment (e.g. via `/proc/<pid>/environ`) before
-   assuming a new regression.
+1. **(check-in, cheap, next session)** Check `/tmp/l437_full_run2/` progress the
+   same way this session checked `/tmp/l437_full_run/`: `ps aux | grep deqp-vk`
+   to confirm it's still alive (it should be now -- it's detached), and `ls
+   /tmp/l437_full_run2/qpa | wc -l` for a progress count. If it's somehow dead
+   anyway, repeat this session's recovery technique (extract completed cases
+   from **both** `l437_full_run` and `l437_full_run2`'s `qpa` output this time,
+   recompute the remainder, relaunch again detached).
+2. **(when the sweep eventually finishes, in either output dir or both)**
+   Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using
+   the **union** of completed cases from every `/tmp/l437_full_run*` directory,
+   not just the most recent one.
 3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- still
-   the same single commit (`0cc94c2`), unchanged. This session *did* touch
-   `offload-test-suite` (the lit.cfg.py fix), but that's a local,
-   uncommitted-upstream change on top of the existing drift, not a resolution of
-   the drift question itself -- still needs its own decision from a session that
-   wants to actually reconcile it.
-4. **(worth a quick look, ~15 min)** Grep
-   `offload-test-suite/test/CMakeLists.txt` and `lit.cfg.py` for any *other*
-   `FEME_*`-prefixed env vars set on the outer build command the same way
-   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` was -- if any exist, they likely have the
-   exact same silent-no-op bug and are worth checking/fixing in the same pass.
-5. **(when the full re-triage finally completes)** Replace
-   `VulkanCTSReport.md`'s entire master per-group table in one pass (per
-   `L436`'s own recommendation), rather than patching individual rows piecemeal.
+   the same single commit (`0cc94c2`), unchanged, still needs a decision from a
+   session actually touching that repo for its own sake (not just incidentally,
+   as both `L437` and this session did).
+4. **(no longer standing, confirmed resolved)** The `FEME_*` env var audit is
+   done -- only one existed, already fixed. Don't re-run this check unless a new
+   `FEME_*`-prefixed var is added to `gpu_suite_env` in the future.
+5. **(no longer standing, confirmed resolved)** `Basic/Mandelbrot.test` --
+   492/492 `check-hlsl-feme-vk` passed cleanly again this session with the sweep
+   running concurrently. Treat as fixed, not a flake to keep spot-checking.
