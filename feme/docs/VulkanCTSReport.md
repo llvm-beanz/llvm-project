@@ -5066,3 +5066,96 @@ this session: `Basic/Mandelbrot.test`'s flake; the
 resolved in `L431`); the standing `offload-test-suite`
 `feme`-branch-vs-`main` drift re-check (not re-verified this session,
 no `offload-test-suite` work was done).
+
+## `L433` closed: `synchronization.op`'s `DiamondFlattener::run()` commit-path `ResolvedBlocks` gap fixed, 2,512 more cases flipped
+
+Scoped, per the prior session's own handoff, exactly one sub-shape of
+the `K6z`/`L425` "internal branch in a body shape this milestone does
+not yet lower" diagnostic family (then the single largest remaining
+`synchronization.op` blocker, 8,536 cases):
+`dEQP-VK.synchronization.op.single_queue.fence.
+write_image_tess_eval_read_image_tess_control.image_128_r32_uint`,
+whose tessellation-domain-stage shader has a mask-affecting
+`feme.stage.output.store.f32` call before an otherwise-uniform `for`
+loop.
+
+Root-caused via `FEME_DUMP_IR_PRELINEARIZE=1` plus a progressively
+stripped-down standalone `feme-opt --llvm -passes=feme-cpu-linearize`
+reproduction (bypassing the real pipeline entirely for fast
+iteration): the real divergence was neither the loop's own CFG shape
+(a standalone copy of just the loop linearizes cleanly on its own) nor
+any metadata, but the mere *presence* of a mask-affecting
+`feme.stage.*` call anywhere else in the function. That flips
+`DiamondFlattener::run()`'s own
+`!HasDivergentBranch && !hasStageMaskOps(F)` gate away from its
+decline-and-roll-back path (the one `L432(b)` already fixed) onto its
+**commit** path instead -- a sibling bug to `L432(b)`, on the opposite
+side of the same gate. `run()`'s commit path's final per-root
+`flatten()` loop walks straight through this loop's own
+`header`/`check`/`Flow`-dispatch/`exit` chain while merely
+*discovering* (not flattening) the loop's own cycle boundary, but
+-- unlike its own sibling methods `flattenLoopBodyDiamond`/
+`flattenLoopBodyRegion`, both of which explicitly release their own
+visited blocks into `ResolvedBlocks` right after a successful commit
+-- `run()`'s commit path never did. Every block the whole-function
+walk merely passed through stayed permanently and incorrectly claimed
+in the shared `MergeVisited` set, so `LoopLinearizer`'s own later,
+entirely legitimate `flattenLoopBodyRegion` walk over that same loop
+spuriously hit the stale claim and failed with `validate`'s generic
+"reached by more than one divergent root" conflict.
+
+Fixed with a single
+`ResolvedBlocks.insert(LastRegionVisited.begin(), LastRegionVisited.end());`
+added to `DiamondFlattener::run()`'s commit path, immediately before
+its final `return true;`, mirroring the other two methods' own
+pattern exactly.
+
+**Results**:
+
+- New lit regression:
+  `feme/test/Transforms/CPU/Linearize/loop-body-resolved-blocks-after-mask-op.ll`,
+  isolating this exact shape through `feme-cpu-linearize` alone
+  (renamed from the real captured IR's numeric block names to
+  meaningful ones, topology preserved verbatim); confirmed via a
+  `git stash` bisection to fail without the fix and pass with it.
+- `FeMeTransformsCPUTests`: 638/638 Pass (no new unit test added --
+  the new lit regression above covers this bug end to end at the
+  `Linearize.cpp` pass level, matching the existing lit-test-only
+  coverage style for comparable `DiamondFlattener`/`LoopLinearizer`
+  CFG-shape fixes in this area).
+- `ninja check-feme`: 3763/3771 Passed, 7 Unsupported, 1 Failed -- the
+  same pre-existing, already-tracked
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure
+  (reconfirmed via a clean `git stash` baseline comparison to be
+  unrelated to this session's changes, not a new regression).
+- Target CTS repro: **Pass (OK)**, 1/1 100%.
+- `dEQP-VK.synchronization.op.*` full re-sweep (20,131 cases):
+  **8,670 Pass / 5,437 NotSupported / 6,024 Fail** (up from the
+  `L432(b)`/`L432(c)` baseline's 6,158 Pass / 5,437 NotSupported /
+  8,536 Fail -- **2,512 cases flipped to Pass**, NotSupported
+  unchanged -- more than double the single repro case's own weight,
+  confirming this one-line fix's blast radius covers many CFG shapes
+  sharing the same underlying `ResolvedBlocks` contract gap, not just
+  the domain-shader shape it was isolated from). The remaining 6,024
+  Fail cases all surface as the CTS-side generic
+  `vk.create{Graphics,Compute}Pipelines(...): VK_ERROR_INITIALIZATION_FAILED`
+  (3,400 graphics + 2,624 compute) -- consistent with the still-open,
+  broader `K6z`/`L425` diagnostic family covering other CFG shapes
+  this fix does not address.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure internal compiler CFG-handling fix, no feature/extension
+surface change).
+
+**Next steps**: a future session should re-cluster the residual 6,024
+`synchronization.op` failures' own real underlying diagnostics (via
+the same `FEME_DEBUG_LINEARIZE_TRACE`/temporary-`Quiet=false`-rerun
+bisection technique used this session) to scope the next specific
+`K6z`/`L425` sub-shape, per the same "one shape per session" approach
+that produced both `L432(b)` and this fix -- rather than attacking the
+whole remaining family as one lump. The usual standing items remain
+untouched this session: `Basic/Mandelbrot.test`'s flake; the
+`backup-before-rebase-20261014`/`CMAKE_BUILD_TYPE` decisions (already
+resolved in `L431`); the standing `offload-test-suite`
+`feme`-branch-vs-`main` drift re-check (not re-verified this session,
+no `offload-test-suite` work was done).
