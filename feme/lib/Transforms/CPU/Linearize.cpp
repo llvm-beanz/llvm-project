@@ -1265,11 +1265,96 @@ private:
   /// than any frozen snapshot, so a newly-inserted block is classified
   /// correctly the moment it exists (in or out of \p C, exactly as
   /// `LoopLinearizer` itself set it up).
+  ///
+  /// Roadmap L434: `CI.contains` above is *not* immune to every kind of
+  /// staleness -- only to the use-after-free/missing-new-block hazards
+  /// its own comment describes. `CI` itself (see `LinearizePass::run`) is
+  /// computed exactly once per function, before `LoopLinearizer` attempts
+  /// any cycle, and is never recomputed afterward (unlike `DT`/`PDT`,
+  /// recalculated before every single `linearizeCycle` call -- see its
+  /// own comment); a block `CI.contains` still reports as a member of a
+  /// *child* cycle `C` can, by the time an *enclosing* cycle's own later
+  /// `canFlattenLoopBodyRegion` precheck walks through it, have already
+  /// had its own successor edge rewired by that very child's own already-
+  /// committed `linearizeCycle` call -- specifically,
+  /// `foldRedundantFlowBlocksInCycle`'s own redundant-`Flow`-dispatch
+  /// elimination (safe and correct for a provably-uniform loop with no
+  /// mask-affecting op anywhere in it, needing no loop-carried mask at
+  /// all) redirects a `Flow` block's own predecessors (e.g. a `.Flow_
+  /// crit_edge`-style relay reached only from the loop's own exit check)
+  /// directly to their respective successors, bypassing `Flow` -- and, for
+  /// the exit-bound predecessor specifically, that successor is the
+  /// cycle's own exit block, reached *without* ever looping back to
+  /// `Header` again. `CI`'s frozen snapshot has no way to see that this
+  /// once-interior relay block can no longer reach `Header` -- it is
+  /// still exactly where `compute()` first found it, dominated by
+  /// `Header` just as before (dominance, built on reachability from the
+  /// entry, is unaffected by a successor edge changing further down), so
+  /// `CI.contains` still answers "yes, a member" even though the live
+  /// edge graph no longer agrees. Confirmed live-tracing
+  /// `dEQP-VK.synchronization.op.single_queue.barrier.write_image_
+  /// compute_read_image_compute`'s own two-deep nested uniform loop: the
+  /// *outer* loop's own body-region precheck walks straight into the
+  /// *already-linearized inner* loop's own now-Flow-collapsed exit check,
+  /// misreading its genuine (now even more directly expressed) exit edge
+  /// as an ordinary in-cycle edge and misclassifying the whole exit-check
+  /// block as an ordinary two-way diamond instead of a cycle boundary --
+  /// `validate`'s own diamond handling then computes that block's
+  /// immediate post-dominator as the exit edge's own target itself
+  /// (structurally correct: every path back through the loop must still
+  /// pass through it before reaching the function's single `ret`, exactly
+  /// the shape an ordinary loop's exit block always has relative to its
+  /// own exit check), tripping the "empty diamond arm" diagnostic the
+  /// moment one arm turns out to equal that reconvergence point.
+  /// `canReachBlock` below re-verifies reachability live, against the
+  /// *current* edge graph, exactly like `DT`/`PDT`'s own recompute already
+  /// does for dominance -- but only as a fallback, after `CI.contains`
+  /// already said "yes": every block genuinely still a cycle member can,
+  /// by that membership's own definition (reachable from `Header` *and*
+  /// able to reach `Header`, the same strongly-connected-component
+  /// criterion `GenericCycleInfo` itself builds from), still reach
+  /// `Header` again, so this fallback costs a bounded walk only for the
+  /// genuinely-exited case this comment describes, never misclassifies an
+  /// ordinary still-interior edge.
   bool isLoopControlEdge(BasicBlock *Cur, BasicBlock *Target) {
     CycleRef C = CI.getCycle(Cur);
     if (Target == CI.getHeader(C))
       return true;
-    return !CI.contains(C, Target);
+    if (!CI.contains(C, Target))
+      return true;
+    return !canReachBlock(Target, CI.getHeader(C), C);
+  }
+
+  /// Roadmap L434: a plain, visited-set-bounded forward walk over \p
+  /// From's successors, answering whether \p To is reachable at all --
+  /// see `isLoopControlEdge`'s own comment for the one, deliberately
+  /// narrow case this exists for (re-verifying a cycle membership answer
+  /// `CI`'s frozen snapshot can no longer be trusted for on its own).
+  /// Confined to blocks `CI.contains(C, ...)` still reports as members of
+  /// \p C -- without this, a block whose own exit edge was severed from
+  /// \p C's interior (the exact staleness this exists to re-detect) could
+  /// still reach \p C's header by a completely different route having
+  /// nothing to do with \p C at all (e.g. a sibling/enclosing loop's own
+  /// later iteration re-entering the same header block for an unrelated
+  /// reason), producing a false "still a member" answer right back.
+  bool canReachBlock(BasicBlock *From, BasicBlock *To, CycleRef C) {
+    if (From == To)
+      return true;
+    SmallPtrSet<BasicBlock *, 16> Visited;
+    SmallVector<BasicBlock *, 16> Worklist{From};
+    Visited.insert(From);
+    while (!Worklist.empty()) {
+      BasicBlock *BB = Worklist.pop_back_val();
+      for (BasicBlock *Succ : successors(BB)) {
+        if (Succ == To)
+          return true;
+        if (!CI.contains(C, Succ))
+          continue;
+        if (Visited.insert(Succ).second)
+          Worklist.push_back(Succ);
+      }
+    }
+    return false;
   }
 
   /// Roadmap L292: whether \p Cur is its own cycle's header -- gates
