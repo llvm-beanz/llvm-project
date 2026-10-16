@@ -2578,6 +2578,28 @@ private:
   std::optional<ExitCheck> recoverRelayExitCheck(BasicBlock *BB, CycleRef C,
                                                  BasicBlock *ExitBlock);
 
+  /// Roadmap L432(a): `Header`/`Latch` themselves are required to end in
+  /// a `CondBr` for `matchExitCheck`/`recoverRelayExitCheck` to recognize
+  /// anything at all -- but a `Header` that merely owns the loop's
+  /// induction `phi` can be a genuinely trivial, single-successor
+  /// pass-through block itself, with the loop's *real*, uniform trip-count
+  /// check sitting one or more pure-relay hops further forward
+  /// (`write_blit_image_read_image_compute.image_128_r32_uint_concurrent`'s
+  /// own shape: `Header`'s only instruction is the induction `phi`, its
+  /// terminator an unconditional branch to the real check block).
+  /// Walks forward from \p From through a bounded chain of blocks whose
+  /// own terminator is an `UncondBr` (stopping, same as
+  /// `recoverRelayExitCheck`'s own `IsTrivialExitStub`, the moment \p
+  /// Latch or \p ExitBlock is reached, or the chain leaves \p C, or the
+  /// bound is exceeded) and returns the first block found whose
+  /// terminator is a `CondBr`, or `nullptr` if none is found before the
+  /// walk terminates. The returned block is only a candidate -- still
+  /// passed through the ordinary `matchExitCheck`/`recoverRelayExitCheck`
+  /// checks by the caller, exactly as `Header`/`Latch` themselves are --
+  /// this helper only locates it.
+  BasicBlock *findForwardExitCheckBlock(BasicBlock *From, BasicBlock *Latch,
+                                        BasicBlock *ExitBlock, CycleRef C);
+
   /// Roadmap L42: generalizes the "pass-through" tolerance from a *chain*
   /// that tolerated at most one relayed pass-through block per step (an
   /// earlier, now-removed `chainToleratingUniformExits`) to a full uniform
@@ -3655,6 +3677,24 @@ LoopLinearizer::recoverRelayExitCheck(BasicBlock *BB, CycleRef C,
   return EC;
 }
 
+BasicBlock *LoopLinearizer::findForwardExitCheckBlock(BasicBlock *From,
+                                                      BasicBlock *Latch,
+                                                      BasicBlock *ExitBlock,
+                                                      CycleRef C) {
+  BasicBlock *Cur = From;
+  for (unsigned Depth = 0; Depth != 8; ++Depth) {
+    if (Cur == Latch || Cur == ExitBlock || !CI.contains(C, Cur))
+      return nullptr;
+    if (isa<CondBrInst>(Cur->getTerminator()))
+      return Cur == From ? nullptr : Cur;
+    auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+    if (!UBr)
+      return nullptr; // Not a shape this milestone understands.
+    Cur = UBr->getSuccessor(0);
+  }
+  return nullptr;
+}
+
 std::optional<SmallPtrSet<BasicBlock *, 8>>
 LoopLinearizer::collectUniformPassThroughRegion(
     BasicBlock *From, BasicBlock *To, BasicBlock *ExitBlock, CycleRef C,
@@ -4219,6 +4259,43 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
   if (!LatchExit)
     LatchExit = recoverRelayExitCheck(Latch, C, ExitBlock);
+  // Roadmap L432(a): neither of the two attempts above fire at all unless
+  // `Header`/`Latch` itself owns a `CondBr` terminator -- but `Header` can
+  // be a genuinely trivial, single-successor pass-through block owning
+  // only the loop's induction `phi`, with its real, uniform trip-count
+  // check sitting one or more pure-relay hops further forward (see
+  // `findForwardExitCheckBlock`'s own comment). Only tried once the two
+  // direct attempts above have already failed, and only for `Header`:
+  // `Latch`'s own terminator is already required elsewhere in this
+  // function to be the cycle's real backedge-deciding block, so a
+  // forward walk from it would only ever either immediately hit `Header`
+  // again (an unconditional single-block loop body, already handled
+  // directly above) or escape the cycle.
+  //
+  // Roadmap L432(c): restricted to a *non-divergent* match only --
+  // `loop-check-separate-carried-value.ll`'s own "check separate from
+  // header/latch" shape has a genuinely divergent check sitting forward
+  // of `Header` exactly like this, but that shape is already correctly
+  // (and more completely -- including its own mask-narrowing machinery)
+  // handled below by `OtherCondBrBlocks`/`DivergentCandidates`/
+  // `CheckBlock`. Accepting a divergent forward match here too let both
+  // code paths claim the very same block as their own exit check,
+  // crashing (a double mutation of the same, already-rewritten `CondBr`)
+  // the moment `linearizeCycle`'s `CheckBlock` handling ran right after
+  // this function's own `Header`-based handling had already rewritten
+  // it. The uniform case this helper actually exists for (see its own
+  // comment) never has a genuinely divergent forward match in the first
+  // place, so this restriction costs it nothing.
+  if (!HeaderExit) {
+    if (BasicBlock *Forward =
+            findForwardExitCheckBlock(Header, Latch, ExitBlock, C)) {
+      std::optional<ExitCheck> ForwardExit = matchExitCheck(*Forward, ExitBlock);
+      if (!ForwardExit)
+        ForwardExit = recoverRelayExitCheck(Forward, C, ExitBlock);
+      if (ForwardExit && !isDivergentBranch(ForwardExit->Br))
+        HeaderExit = ForwardExit;
+    }
+  }
   bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
   bool LatchDivergent = LatchExit && isDivergentBranch(LatchExit->Br);
 
