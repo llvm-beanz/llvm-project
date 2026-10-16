@@ -124101,10 +124101,14 @@ target_link_libraries(<target> PUBLIC /usr/lib/gcc/aarch64-linux-gnu/15/libasan.
 
 Order matters: use `target_link_libraries` (not `target_link_options`/`-l:libasan.a`), so CMake places it *after* the target's own static archive on the link line -- static archives only resolve symbols from libraries listed afterward. Getting this backwards produces a wall of `undefined reference to '__asan_report_load1'`-style errors that look unrelated to link ordering at first glance.
 
+## `api.*` sweep: done, this session
+
+Completed (267,512/267,512 cases, 0 unrun): **116,730 Pass / 150,781 NotSupported / 1 Fail**. The harness's crash-recovery transparently absorbed the `L435` race (plus one `copy_and_blit` case that raced the same way) -- both reconciled to Pass once re-verified alone, no manual work needed. The 1 remaining Fail (`dEQP-VK.api.driver_properties.conformance_version`) is **by design**, not a bug: `FeMeVulkanDesign.md`'s own "Initial Non-Goals" require a truthful zero `VkConformanceVersion` rather than a false conformance claim, and this exact CTS case checks that a driver's conformance version isn't older than its claimed `apiVersion` -- which a genuinely zero value always is. Documented in `VulkanCTSReport.md`; no roadmap row opened, no fix applied.
+
 ## Next steps
 
-1. **(in progress, check on it)** The `dEQP-VK.api.*` sweep (267,512 cases) launched via `feme/utils/run_vulkan_cts.py` in shellId 120 (background), output at `/tmp/l435_api_run2/`, report at `/tmp/l435_api_report.txt`. Read the report once it finishes; update `VulkanCTSReport.md`/`Roadmap.md` with the full before/after `api.*` Pass/Fail/NotSupported counts (there was no prior baseline for this specific family -- this run *is* the baseline). Triage any new failures the same way `L302` triaged `synchronization.op`/`copy_and_blit`/etc.
-2. **(~15 min, cheap)** Clean up `/tmp/l435_*`, `/tmp/asan_run_*`, `/tmp/asan_instr_*`, `/tmp/mt_device_*`, `/tmp/clean_rebuild_*`, `/tmp/t2*` once the sweep's results are captured -- all regenerable.
+1. **(~1 day, start fresh)** `api.*` is now at its intended design ceiling (1 expected-by-design Fail, 0 unexplained). Pick a *different*, not-yet-exhaustively-swept family next -- `copy_and_blit`/`image_clearing` (both only ever sampled by `L302`, same as `api.*` was before this session).
+2. **(~15 min, cheap)** Clean up `/tmp/l435_*`, `/tmp/asan_run_*`, `/tmp/asan_instr_*`, `/tmp/mt_device_*`, `/tmp/clean_rebuild_*`, `/tmp/t2*` -- all regenerable, not yet deleted as of this writing.
 3. **(standing, many sessions now)** `Basic/Mandelbrot.test` flake -- confirmed present again this session, still not picked up as its own item.
 4. **(standing)** `offload-test-suite` `feme`-branch drift -- same single commit (`0cc94c2`), unchanged, still needs a decision from a session actually touching `offload-test-suite`.
 5. **(low priority, future stress test)** If a future session touches multithreaded device lifecycle again and hits a similar crash, check this `L435` writeup first before re-deriving the ASan-no-runtime-archive workaround or re-reading the same FeMe object files -- they were already read clean this session.
