@@ -17,8 +17,8 @@ Current registry: VK-GL-CTS `c28b36293093`
 | Status | Count |
 |---|---:|
 | Advertised | 44 |
-| Implemented (core, not advertised by name) | 18 |
-| Planned (in scope, not implemented) | 46 |
+| Implemented (core, not advertised by name) | 19 |
+| Planned (in scope, not implemented) | 45 |
 | Not implemented | 194 |
 | **Total** | **302** |
 
@@ -314,7 +314,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_timeline_semaphore` | Implemented (core, not advertised by name) | V3: vkGetSemaphoreCounterValue/vkWaitSemaphores/vkSignalSemaphore plus the feature and limit cases (Sync.cpp, EntryPoints.cpp) |
 | `VK_KHR_unified_image_layouts` | Not implemented |  |
 | `VK_KHR_uniform_buffer_standard_layout` | Implemented (core, not advertised by name) | roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
-| `VK_KHR_variable_pointers` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_variable_pointers` | Implemented (core, not advertised by name) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series). `variablePointers`/`variablePointersStorageBuffer` feature bits VK_TRUE (`EntryPoints.cpp`, roadmap K6p/K6a); the milestone-9 groupshared pointer-merge/compare gap that was the sole remaining CTS residual (6 `_wg_`-storage-class cases) closed by roadmap L430 (`GroupShared.cpp`'s `retargetGroupSharedMergesAndCompares`) |
 | `VK_KHR_vertex_attribute_divisor` | Advertised |  |
 | `VK_KHR_video_decode_av1` | Not implemented |  |
 | `VK_KHR_video_decode_h264` | Not implemented |  |

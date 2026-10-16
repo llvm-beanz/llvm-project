@@ -4810,3 +4810,111 @@ contention-dependent flake; the standing
 `backup-before-rebase-20261014` tag and `CMAKE_BUILD_TYPE=
 RelWithDebInfo` vs `Release` decisions; the standing
 `offload-test-suite` `feme`-branch-vs-`main` drift re-check.
+
+## `L430` fixed: groupshared pointer-merge/compare support, all 6 `K6p`/`K6a` milestone-9 residual cases now pass
+
+**Device**: `FeMe CPU Vulkan Device` (confirmed via `vulkaninfo
+--summary` with `VK_ICD_FILENAMES` explicitly set to the build's
+`feme_icd.json`).
+
+Picked up the milestone-9 CFG-linearization/`groupshared`-
+canonicalization gap the prior session's `K6p`/`K6a` closure
+verification left open as the sole remaining blocker for all 6 of its
+own confirmed-failing cases. Resumed a prior session's in-progress,
+uncommitted `GroupShared.cpp` edit (threading a new `Layout` parameter
+through `isSupportedGroupSharedNestedGEPUser` for its new merge-
+acceptance branch) and completed it: added
+`isSupportedGroupSharedMergeUser`/`isSupportedGroupSharedCompareUser`
+validation and `retargetGroupSharedMergesAndCompares`/
+`flattenGroupSharedValue`/`retargetGroupSharedProducer` retargeting for
+a groupshared pointer merge (`PHINode`/`SelectInst`) and a direct
+pointer compare (`icmp eq`/`icmp ne`), the two shapes
+`rewriteGroupSharedGlobals` previously rejected outright.
+
+Debugging against the real CTS failures (all via `gdb --batch -ex run
+-ex bt` against the `offloader` binary) surfaced three further bugs
+beyond the inherited design, each found and fixed in turn:
+
+1. **Vector-of-pointers gap.** `rewriteGroupSharedGlobals` runs *after*
+   `FunctionWidener`'s widening pass, so a divergent merge/compare can be
+   `<WaveSize x ptr addrspace(3)>`-typed, not scalar -- the design had
+   been debugged exclusively against `FEME_DUMP_IR_PRESIMD=1` (always-
+   scalar, pre-widening) dumps. Made `IsGroupSharedPtr`,
+   `flattenGroupSharedValue`, and `isGroupSharedRootedPointer` vector-
+   aware (`Ty->getScalarType()`, vector-width-matched null/poison/undef
+   construction via `Constant::getNullValue`/`PoisonValue::get`/
+   `UndefValue::get`, `ConstantAggregateZero` recognized as vector-null's
+   own sentinel form alongside `ConstantPointerNull`).
+2. **Mutual-recursion cycle-guard gap.** `isSupportedGroupSharedNestedGEPUser`'s
+   merge-acceptance branch created a *fresh*
+   `SmallPtrSet<const Instruction *, 8> VisitedMerges` on every call
+   instead of threading the caller's set through, even though it and
+   `isSupportedGroupSharedMergeUser` are mutually recursive; a self-
+   referential loop-carried pointer iterator (`opptrdiff`'s own per-
+   iteration advance feeding back into the phi it was derived from)
+   alternated between the two functions indefinitely, causing genuine
+   infinite recursion -- observed at 269,000+ stack frames via gdb.
+   Fixed by threading `VisitedMerges` through the recursive call path
+   only (the two genuinely-new top-level validation call sites still
+   start fresh, correctly, since they are not themselves inside an
+   existing recursive chain).
+3. **Premature-erase-of-own-operand gap.** `retargetGroupSharedProducer`'s
+   `NestedGEP` forward-user handling unconditionally rebuilt-and-erased a
+   `getelementptr` even when that same GEP was *also* one of the merge's
+   own incoming operands (the classic loop-carried backedge shape:
+   `%next = getelementptr ..., %phi, ...` feeding back into `%phi`'s own
+   incoming-edge list) -- deleting it while the not-yet-erased old merge
+   still referenced it, crashing LLVM's use-list integrity assertion.
+   Fixed with an `IsOwnOperand` check that `continue`s (skips) this
+   specific shape instead, deferring to the existing `FlatCache` +
+   `RecursivelyDeleteTriviallyDeadInstructions` cleanup that already
+   handles ordinary merge-to-merge edges.
+
+**Verification**:
+
+- All 6 originally-failing cases now pass, confirmed individually (not
+  just via a filtered run, verified with explicit exit codes):
+
+  ```
+  dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.compute.workgroup_two_buffers
+  dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrdiff.variable_pointers_vars_wg_diff
+  dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.variable_pointers_vars_wg_equal
+  dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.variable_pointers_wg_equal
+  dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrnotequal.variable_pointers_vars_wg_not_equal
+  dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrnotequal.variable_pointers_wg_not_equal
+  ```
+
+- Broader regression sweep, `dEQP-VK.spirv_assembly.instruction.*.
+  variable_pointers*` (1650 cases): **962 Pass / 0 Fail / 688
+  NotSupported** (expected gating) -- identical pass count to the prior
+  session's own measurement before this fix (the 6 target cases simply
+  moved from the "would-be-6-failures-if-feature-bit-were-on" state into
+  "actually passing"; the feature bit was already flipped permanently by
+  the prior `K6p`/`K6a` closure session, so this sweep ran with it on
+  throughout).
+- `FeMeTransformsCPUTests`: **637/637** passed, including two new
+  `SIMDizeTest` cases added this session
+  (`RetargetsGroupSharedPointerSelectAcrossTwoGlobals`,
+  `RetargetsSelfReferentialGroupSharedPointerPhiWithCompare`).
+- `check-feme`: **3762/3770** passed (1 pre-existing, unrelated failure,
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll`, same baseline
+  as every prior session).
+- `check-hlsl-feme-vk`: 492/793 non-unsupported passing, 1 failure --
+  the same pre-existing, already-flagged `Basic/Mandelbrot.test`
+  contention-dependent semaphore-wait flake, not a regression.
+
+No further `Roadmap.md`/inventory change needed for the `variablePointers`
+feature bit itself (already flipped to `yes` by the prior session); this
+closes the milestone-9 residual gap that row's own note flagged as the
+only remaining blocker. `Roadmap.md`'s new `L430` row added and struck
+through (done).
+
+**Next steps**: the prior sessions' standing carried-forward items
+remain untouched this session too: `Basic/Mandelbrot.test`'s
+contention-dependent flake; the standing
+`backup-before-rebase-20261014` tag and `CMAKE_BUILD_TYPE=
+RelWithDebInfo` vs `Release` decisions; the standing
+`offload-test-suite` `feme`-branch-vs-`main` drift re-check (not
+re-verified this session, no `offload-test-suite` work was done and the
+checkout was not re-cloned, so drift risk is unchanged from the last
+confirmed-clean state).

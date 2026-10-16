@@ -1058,7 +1058,20 @@ the first two's own remaining narrowings):
   whole-`AtomicStruct`-field struct-copy pattern, once its per-member
   `CompositeExtract`/`CompositeInsert` further decomposes an array field
   into one access per element -- is now accepted too, alongside the
-  pre-existing divergent-row case.
+  pre-existing divergent-row case. Roadmap L430 closed a further gap in
+  the same validation: a groupshared pointer *merge* (`PHINode`/
+  `SelectInst`, e.g. a conditional `cond ? bufA : bufB` across two
+  different groupshared globals, or a loop-carried pointer iterator's own
+  self-referential backedge) and a direct pointer *compare* (`icmp eq`/
+  `icmp ne` of two groupshared pointers, `OpPtrEqual`/`OpPtrNotEqual`'s
+  own lowering) were previously rejected outright, even though both are
+  exactly as retargetable onto the flat groupshared buffer as any other
+  rooted pointer -- `isSupportedGroupSharedMergeUser`/
+  `isSupportedGroupSharedCompareUser` now validate them and
+  `retargetGroupSharedMergesAndCompares` resolves a merge's legs eagerly
+  against the already-known buffer layout, so a merge's two legs may even
+  come from two different globals without any per-global iteration-order
+  dependency.
 - **`Device` and `All` memory scope are not distinguished.** Both get a
   `fence` visible across host threads (`SyncScope::System`); the design
   only requires the CPU target's memory model, not DXIL's/SPIR-V's finer
