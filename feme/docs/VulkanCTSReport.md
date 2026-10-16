@@ -5406,10 +5406,53 @@ needed -- no code change, pure investigation/documentation, and no
 feature/extension surface is implicated (this is a process-lifetime
 bug in a dependency, not a missing/incorrect capability).
 
-**Next steps**: resume and complete the `dEQP-VK.api.*` sweep past
-this one known-crashing case (via the crash-tolerant harness) to get
-a full before/after count for this family, per `L302`'s original
-"pick a different CTS family" next step. The usual standing items
-remain untouched this session: `Basic/Mandelbrot.test`'s flake; the
-standing `offload-test-suite` `feme`-branch-vs-`main` drift
-re-check.
+**Update (same session): completed the full `dEQP-VK.api.*` sweep**
+past this crash, via `feme/utils/run_vulkan_cts.py`'s existing
+crash-tolerant batch/solo-reverify harness (267,512 cases, 6
+workers). Result: **116,730 Pass / 150,781 NotSupported / 1 Fail**,
+0 Unrun -- a full first-ever baseline for this family (`L302` only
+ever sampled from it, never swept it exhaustively). The harness's
+own recovery logic transparently handled `L435`'s crash: the one
+case that hit it (plus one `copy_and_blit` case that also raced
+under contention,
+`use_after_copy.a8b8g8r8_srgb_pack32.transfer_dst_optimal.
+1024x1024x2_color_att_flag_img2img_msaa`) both reconciled to Pass
+once re-verified alone -- no manual intervention needed, confirming
+`L435`'s root-cause (an allocator/loader-timing-gated race, not a
+deterministic bug) and the harness's own crash-recovery design in
+one pass.
+
+The one genuine, deterministic failure --
+`dEQP-VK.api.driver_properties.conformance_version` -- is **not a
+bug**: `FeMeVulkanDesign.md`'s own "Initial Non-Goals" and `D0`-era
+API-version writeup are explicit that this ICD deliberately reports
+a truthful zero `VkConformanceVersion` rather than falsely implying
+Khronos conformance it hasn't earned, and this exact CTS case exists
+specifically to check that a driver's claimed `conformanceVersion`
+is not older than its claimed `apiVersion` -- which a genuinely
+zero/unsubmitted conformance version, by definition, always is. This
+is the expected, by-design tradeoff of advertising `apiVersion = VK_
+API_VERSION_1_4` without having gone through a real Khronos
+conformance submission; it will remain a known, accepted CTS-visible
+failure until (and unless) this ICD actually pursues Khronos
+conformance (see `FeMeVulkanDesign.md`'s own submission-package note
+near its end). No fix applied; no roadmap row opened for it.
+
+**Final `api.*` family baseline**: 116,730 Pass / 150,781
+NotSupported / 1 Fail (the 1 Fail being the deliberate, by-design
+`conformance_version` case above). No `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md` update needed here either -- no
+feature/capability gap found, just the one already-documented
+design tradeoff.
+
+**Next steps**: `api.*` is now effectively closed at its intended
+design ceiling (1 expected-by-design Fail, 0 unexplained). A future
+session should pick a different, not-yet-exhaustively-swept family
+for its next raw sweep (e.g. `copy_and_blit`/`image_clearing`, which
+`L302` also only sampled from, same as `api.*` was before this
+session). The usual standing items remain untouched this session:
+`Basic/Mandelbrot.test`'s flake (confirmed still present, 1/3
+`check-hlsl-feme-vk` runs failed); the standing `offload-test-suite`
+`feme`-branch-vs-`main` drift re-check (re-verified this session,
+cheap `git fetch`/`git log` only: still the same single remote-only
+commit, `0cc94c2`, unchanged).
