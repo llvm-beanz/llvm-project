@@ -2664,8 +2664,33 @@ private:
   /// cycle, which `LoopLinearizer::run` skips entirely before any of
   /// this file's per-cycle logic runs -- see L188's own, corrected
   /// roadmap entry.)
+  ///
+  /// Roadmap L419(h): \p StopBlock, when non-null, is forwarded straight
+  /// to `uniformRelayChain` -- see that parameter's own comment there.
+  /// Every pre-existing call site leaves it `nullptr` (its own long-
+  /// standing behavior, unchanged); only the new `RealExitCandidates`
+  /// widening (the one caller that must distinguish a genuine second
+  /// exit from an ordinary internal diamond that merely funnels forward
+  /// into the cycle's own real exit check) supplies the cycle's `Latch`.
   std::optional<ExitCheck> matchExitCheckWithRelay(BasicBlock &BB,
-                                                   BasicBlock *ExitBlock);
+                                                   BasicBlock *ExitBlock,
+                                                   BasicBlock *StopBlock = nullptr);
+
+  /// Roadmap L419(h): whether any block in \p C contains a
+  /// mask-affecting operation -- a `feme.stage.*` call this pass must
+  /// narrow to a per-lane predicate (`Discard`/`Demote`/`IsHelper`/
+  /// `OutputStore`/`StreamEmit`/`StreamCut`/`TaskPayloadStore`/
+  /// `SetMeshOutputs`/`EmitMeshTasks`), or a plain `feme.cpu.resource.*`/
+  /// `feme.cpu.image.*` call whose own trailing mask operand this pass's
+  /// `applyStageMasks` must narrow from its as-lowered `true` default
+  /// (see `matchResourceCall`/`matchImageCall`). Factored out of two
+  /// call sites that each separately need it: the cycle-wide
+  /// "no divergence, no mask ops -> leave alone" bail further down in
+  /// `linearizeCycle`, and the `RealExitCandidates` widening just above
+  /// it (gating whether a uniform `OtherCondBrBlocks` member is even
+  /// worth treating as a candidate real exit check at all -- a loop with
+  /// no mask-affecting op has no reason to need one).
+  bool cycleHasMaskOps(CycleRef C) const;
 
   /// Roadmap L292: structural fallback for `HeaderExit`/`LatchExit` when
   /// `matchExitCheck` finds nothing because `StructurizeCFG` has routed
@@ -2976,7 +3001,8 @@ private:
 std::optional<BasicBlock *>
 uniformRelayChain(BasicBlock *From, BasicBlock *ExitBlock,
                   llvm::function_ref<bool(const CondBrInst *)>
-                      IsDivergentBranch) {
+                      IsDivergentBranch,
+                  BasicBlock *StopBlock = nullptr) {
   SmallPtrSet<BasicBlock *, 8> Visited;
   SmallVector<BasicBlock *, 8> Worklist{From};
   BasicBlock *LastHop = nullptr;
@@ -2994,6 +3020,21 @@ uniformRelayChain(BasicBlock *From, BasicBlock *ExitBlock,
     BasicBlock *Cur = Worklist.pop_back_val();
     if (!Visited.insert(Cur).second)
       continue; // Already visited via another arm, or a uniform backedge.
+    // Roadmap L419(h): a relay walk that only reaches `ExitBlock` by
+    // first passing through \p StopBlock (the cycle's own `Latch`, when
+    // the caller supplies one) has not found a genuine, independent
+    // second exit at all -- it has simply rediscovered the loop's own
+    // real exit check by walking all the way around the cycle's
+    // backedge (see this function's own comment above: this walk has no
+    // built-in notion of "this is the cycle's own backedge," so without
+    // this guard a uniform internal diamond that merely funnels forward
+    // into the loop's one real exit check -- e.g. a `switch`-lowered
+    // `continue`/`break` dispatch's own ordinary arms -- looks
+    // indistinguishable from a true second exit). Bail as soon as the
+    // walk would cross `StopBlock`, rather than letting it resolve to a
+    // (false) single `LastHop` further on.
+    if (StopBlock && Cur == StopBlock)
+      return std::nullopt;
     if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
       if (!ConsiderSuccessor(Cur, UBr->getSuccessor(0)))
         return std::nullopt;
@@ -3715,7 +3756,8 @@ LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
 
 std::optional<LoopLinearizer::ExitCheck>
 LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
-                                        BasicBlock *ExitBlock) {
+                                        BasicBlock *ExitBlock,
+                                        BasicBlock *StopBlock) {
   if (std::optional<ExitCheck> Direct = matchExitCheck(BB, ExitBlock))
     return Direct;
   auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
@@ -3727,7 +3769,8 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
     BasicBlock *Candidate = Br->getSuccessor(I);
     std::optional<BasicBlock *> Relay = uniformRelayChain(
         Candidate, ExitBlock,
-        [this](const CondBrInst *CBr) { return isDivergentBranch(CBr); });
+        [this](const CondBrInst *CBr) { return isDivergentBranch(CBr); },
+        StopBlock);
     if (!Relay)
       continue;
     if (Result)
@@ -3741,6 +3784,33 @@ LoopLinearizer::matchExitCheckWithRelay(BasicBlock &BB,
     Result = EC;
   }
   return Result;
+}
+
+bool LoopLinearizer::cycleHasMaskOps(CycleRef C) const {
+  for (BasicBlock &BB : F) {
+    if (!CI.contains(C, &BB))
+      continue;
+    for (const Instruction &I : BB) {
+      auto *Call = dyn_cast<CallInst>(&I);
+      if (!Call)
+        continue;
+      feme::StageOpKind Kind;
+      if (feme::isStageOpCall(*Call, &Kind) &&
+          (Kind == feme::StageOpKind::Discard ||
+           Kind == feme::StageOpKind::Demote ||
+           Kind == feme::StageOpKind::IsHelper ||
+           Kind == feme::StageOpKind::OutputStore ||
+           Kind == feme::StageOpKind::StreamEmit ||
+           Kind == feme::StageOpKind::StreamCut ||
+           Kind == feme::StageOpKind::TaskPayloadStore ||
+           Kind == feme::StageOpKind::SetMeshOutputs ||
+           Kind == feme::StageOpKind::EmitMeshTasks))
+        return true;
+      if (matchResourceCall(*Call) || matchImageCall(*Call))
+        return true;
+    }
+  }
+  return false;
 }
 
 std::optional<LoopLinearizer::ExitCheck>
@@ -4153,6 +4223,20 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
       }
     }
+    // Roadmap L419(h): `Latch`'s own incoming slot is left entirely
+    // absent here until `addLatchIncoming` fills it in far below (after
+    // the whole cycle's exit check(s) are linearized) -- see
+    // `addLatchIncoming`'s own comment for why a tempting poison-
+    // placeholder seed here (making a still-incomplete phi correctly
+    // *not* look like a known constant to `applyStageMasks`'s mask-
+    // narrowing checks) is not yet safe to add: it is independently
+    // correct in isolation, but exposes a second, deeper, not-yet-fixed
+    // bug in `DiamondFlattener::flattenLoopBodyDiamond`'s own early
+    // fixed-point pre-pass (see that method's comment) -- confirmed via
+    // `dEQP-VK.glsl.loops.special.*select_iteration_count*`, a full CTS
+    // sweep regression this exact combination reintroduces. Left as a
+    // known, still-open follow-on (not part of this change) -- see the
+    // roadmap entry this comment's own commit updates.
     return MaskPair{LivePN, SideEffectPN};
   };
   auto addLatchIncoming = [&](MaskPair &Masks, const MaskPair &AtLatch) {
@@ -4539,6 +4623,84 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                       "'); unsupported (roadmap milestone 6 deviation)");
       return false;
     }
+    if (RealExitCandidates.empty() && cycleHasMaskOps(C) &&
+        OtherCondBrBlocks.size() == 1) {
+      // Roadmap L419(h): a body-level break check whose own condition is
+      // *uniform* (not divergent) is invisible to `DivergentCandidates`
+      // above (filtered by `isDivergentBranch`), so it never reaches
+      // `RealExitCandidates`'s own `matchExitCheckWithRelay` scan at all
+      // -- yet the cycle still has a mask-affecting op in its body (a
+      // resource/image/`StageOpKind` call `cycleHasMaskOps` recognizes),
+      // meaning the loop-carried mask narrowing below (reached whenever
+      // `RealExitCandidates` is non-empty) is exactly the machinery this
+      // shape needs too, not the separate "fully uniform loop with body
+      // mask ops" `DiamondFlattener`-based path further down.
+      //
+      // Roadmap L419(h): an earlier version of this widening (gated only
+      // on `cycleHasMaskOps`, scanning every `OtherCondBrBlocks` member)
+      // regressed `dEQP-VK.glsl.loops.special.*.mixed_break_continue_*`
+      // -- a loop body lowering a `switch` into a `StructurizeCFG`-built
+      // `NodeBlock`/`LeafBlock`/`Flow`/`Flow3`/`Flow4` diamond chain, all
+      // uniform, whose `break`-leaf edge genuinely *does* bypass the
+      // loop's own uniform trip-count re-check and branch straight to
+      // `ExitBlock` (confirmed empirically via `FEME_DEBUG_L419H_TRACE=1`
+      // below, which dumps the function and every `OtherCondBrBlocks`
+      // candidate right before this scan runs: `Flow3.Flow4_crit_edge`'s
+      // own false arm reaches `ExitBlock` through a direct edge that
+      // bypasses `Latch` (`Flow5`) entirely, not by crossing it the way
+      // this milestone first suspected -- so passing `Latch` as
+      // `uniformRelayChain`'s `StopBlock` (still done below, as a
+      // genuine second line of defense against a *different* shape that
+      // really does loop back through `Latch`) does not reject it, and
+      // the match is not a false positive at the `matchExitCheckWithRelay`
+      // level at all). The actual problem is downstream: that shape's
+      // existing "fully uniform loop with body mask ops"
+      // `DiamondFlattener`-based fallback (further below) already
+      // handles it correctly today, and diverting it into this block's
+      // own `CheckBlock`-based handling instead (by giving
+      // `RealExitCandidates` a non-empty entry) hits a *different*,
+      // legitimate "peeled predecessor" diagnostic bailout this fix does
+      // not support -- a clean diagnosed failure, not a crash or silent
+      // miscompile, but still a regression from the previously-passing
+      // fallback path. `conditional_break_fragment` (this widening's
+      // actual target) has exactly *one* `OtherCondBrBlocks` member in
+      // its entire cycle (`Flow` itself, with no further internal
+      // diamonds at all); `mixed_break_continue_fragment`'s `switch`-
+      // lowered body always has more (three here: `NodeBlock`, `Flow3`,
+      // `Flow3.Flow4_crit_edge`), even though only one of them ends up
+      // matching `matchExitCheckWithRelay`. Restricting this widening to
+      // cycles whose *entire* `OtherCondBrBlocks` list has exactly one
+      // member (not just one *match*) is therefore the precise
+      // discriminator: it accepts the single-check shape this widening
+      // was built for, while leaving any cycle with further internal
+      // branching -- `switch`-lowered or otherwise -- to the fallback
+      // path that already handles it.
+      SmallVector<BasicBlock *, 2> WidenedCandidates;
+      if (::getenv("FEME_DEBUG_L419H_TRACE")) {
+        errs() << "L419HTRACE: scanning cycle Header='" << Header->getName()
+               << "' Latch='" << Latch->getName() << "' ExitBlock='"
+               << ExitBlock->getName() << "' in function '" << F.getName()
+               << "'\n";
+        for (BasicBlock *BB : OtherCondBrBlocks)
+          errs() << "L419HTRACE: candidate block '" << BB->getName()
+                 << "' terminator: " << *BB->getTerminator() << "\n";
+      }
+      for (BasicBlock *BB : OtherCondBrBlocks) {
+        if (llvm::is_contained(DivergentCandidates, BB))
+          continue;
+        if (matchExitCheckWithRelay(*BB, ExitBlock, Latch)) {
+          WidenedCandidates.push_back(BB);
+          if (::getenv("FEME_DEBUG_L419H_TRACE"))
+            errs() << "L419HTRACE: widened candidate match '"
+                   << BB->getName() << "' in function '" << F.getName()
+                   << "'\n";
+        }
+      }
+
+      if (WidenedCandidates.size() == 1)
+        RealExitCandidates.push_back(WidenedCandidates.front());
+    }
+
     if (RealExitCandidates.empty()) {
       // Roadmap L197/L292: nothing here is a genuine divergent *exit*
       // check -- either this cycle has no divergent exit check at all
@@ -4556,8 +4718,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       HasDeferredDivergentCandidates = !DivergentCandidates.empty();
     } else {
     BasicBlock *CheckBlock = RealExitCandidates.front();
+    // Roadmap L419(h): pass `Latch` as `StopBlock` here too, exactly as
+    // the widening scan above already does when it is the one that
+    // populated `RealExitCandidates` -- without this, a candidate whose
+    // only route to `ExitBlock` requires `StopBlock`'s pruning to stay
+    // unambiguous (see `uniformRelayChain`'s own comment) can re-resolve
+    // as *ambiguous* here (both arms "reach" `ExitBlock` once the
+    // backedge-through-`Latch` path is allowed again), turning this
+    // `CheckExit` into `std::nullopt` even though the exact same
+    // `CheckBlock` just matched uniquely above -- confirmed via a real
+    // assertion failure on `CheckExit->StayInLoop`
+    // (`loop-body-resolved-blocks-after-mask-op.ll`, a `DivergentCandidates`-
+    // sourced `CheckBlock` this time, not a widened one, showing the
+    // inconsistency is inherent to calling this same matcher two
+    // different ways on one candidate, not specific to the widening's
+    // own callers). Harmless for every pre-existing, non-widened
+    // `CheckBlock` too: `StopBlock` only ever makes a match *more*
+    // restrictive, and a genuine single real exit check never needs to
+    // relay through its own cycle's `Latch` to reach `ExitBlock` in the
+    // first place.
     std::optional<ExitCheck> CheckExit =
-        matchExitCheckWithRelay(*CheckBlock, ExitBlock);
+        matchExitCheckWithRelay(*CheckBlock, ExitBlock, Latch);
 
     // Roadmap L377: `CheckBlock` must be the sole gateway into its own
     // "stay in loop" continuation (`CheckExit->StayInLoop`) for the mask
