@@ -5001,3 +5001,68 @@ the `backup-before-rebase-20261014`/`CMAKE_BUILD_TYPE` decisions
 (already resolved in `L431`, not revisited); the standing
 `offload-test-suite` `feme`-branch-vs-`main` drift re-check (not
 re-verified this session, no `offload-test-suite` work was done).
+
+## `L432(b)`/`L432(c)` closed: `synchronization.op`'s 9,795-case `LoopLinearizer` gap fixed, 1,259 cases flipped, plus an inherited regression caught and fixed before commit
+
+Implemented `L432(a)`'s planned fix (forward-walk check recovery
+through trivial relay blocks, `findForwardExitCheckBlock`), but the
+real root cause of the targeted CTS repro
+(`dEQP-VK.synchronization.op.multi_queue.binary_semaphore.
+write_blit_image_read_image_compute.image_128_r32_uint_concurrent`)
+turned out to be a separate, narrower bug one level up:
+`DiamondFlattener::run()`'s own whole-function validation walk poisons
+the shared `MergeVisited` set with no rollback when it ultimately
+decides nothing needs flattening, permanently claiming blocks
+`LoopLinearizer` itself still needs. Fixed (`L432(b)`) by reusing the
+existing `LastRegionVisited` tracking member inside `run()` for the
+first time, with rollback at both of `run()`'s early-return paths.
+
+A mandatory `ninja check-feme` run (per standing instructions, before
+any commit) caught a real regression introduced by the forward-walk
+fix itself: it had no divergence gate, so a genuinely divergent
+separate check (`loop-check-separate-carried-value.ll`) got claimed
+and mutated by *both* the new path and the pre-existing
+`OtherCondBrBlocks` machinery, crashing. Fixed (`L432(c)`) by gating
+the forward-walk match to only populate `HeaderExit` when the match is
+non-divergent.
+
+**Results**:
+
+- `FeMeTransformsCPUTests`: 638/638 Pass (637 pre-existing + 1 new
+  regression test, `DoesNotPoisonMergeVisitedWhenWholeFunctionPassDeclines`).
+- `ninja check-feme`: 3763/3771 Passed, 7 Unsupported, 1 Failed -- the
+  same pre-existing, already-tracked
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure
+  (confirmed via a clean `git stash` baseline comparison to be
+  unrelated to this session's changes, not a new regression).
+  `loop-check-separate-carried-value.ll` (the regression this session
+  introduced then caught and fixed) passes again.
+- Target CTS repro: **Pass (OK)**, 1/1 100%.
+- `dEQP-VK.synchronization.op.*` full re-sweep (20,131 cases): **6,158
+  Pass / 5,437 NotSupported / 8,536 Fail** (up from the `L302`
+  baseline's 4,899 Pass / 5,437 NotSupported / 9,795 Fail -- **1,259
+  cases flipped to Pass**, NotSupported unchanged). The remaining 8,536
+  Fail all now trace to a single, different, already-separately-tracked
+  diagnostic (`"...has an internal branch in a body shape this
+  milestone does not yet lower (e.g. an empty diamond arm, or one
+  crossing another cycle's own boundary)"` -- the broader `K6z`/`L425`
+  CFG-linearization gap family, covering many distinct shapes `L432`
+  never claimed to cover).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure internal compiler CFG-handling fix, no feature/extension
+surface change).
+
+**Next steps**: the broader `K6z`/`L425` "internal branch in a body
+shape this milestone does not yet lower" diagnostic family is now the
+single largest remaining `synchronization.op` blocker (8,536 cases) --
+likely the next highest-leverage CFG-linearization target, though it
+covers multiple distinct shapes per its own existing roadmap rows, so
+scoping a specific sub-shape first (the way `L432` itself was split off
+from a vaguer predecessor) is probably the right next step rather than
+attacking it as one lump. The usual standing items remain untouched
+this session: `Basic/Mandelbrot.test`'s flake; the
+`backup-before-rebase-20261014`/`CMAKE_BUILD_TYPE` decisions (already
+resolved in `L431`); the standing `offload-test-suite`
+`feme`-branch-vs-`main` drift re-check (not re-verified this session,
+no `offload-test-suite` work was done).
