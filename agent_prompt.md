@@ -66,22 +66,21 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~15 min)** Drop the one-line "the prior session's work was lost"
-   friction going forward: consider ending every session with an explicit
-   `git commit` of `agent_thoughts.md`/doc changes as the very last action,
-   even if mid-investigation, so a hard stop never loses doc work again
-   (code-level WIP can stay stashed, but doc bookkeeping is cheap to commit
-   early and often).
-2. **(~2-4 hours)** Still-open from prior sessions: nothing new is blocking.
-   The `L428`-family and `K6n`-proper items referenced in earlier session
-   next-steps were already closed out per the `L430`/`L428(a)` entries --
-   re-check `Roadmap.md` for any remaining non-struck-through row before
-   assuming there's a specific next target; if none, the project may be at
-   a natural checkpoint for a fresh triage pass (e.g. a new raw CTS sweep
-   compared properly against Pass-count baselines this time) rather than
-   chasing a named item.
-3. **(standing)** Keep re-checking `offload-test-suite`'s `feme` branch for
-   the safety-net-timeout fix every session -- it lives outside this repo's
-   history and the every-session reset (`agent-setup.sh`) only restores it
-   via the cherry-pick + the 4 known drift-fix commits, which were all still
-   present and did not need redoing this session.
+1. **(~1-2 days, highest leverage available)** `L432(a)`: implement the
+   `Linearize.cpp` fix. Start with a minimal, committed `.ll` regression
+   test from `/tmp/sync_op_prenorm.ll`'s shape (regenerable via
+   `FEME_DUMP_IR_PRENORM=1` + the `write_blit_image_read_image_compute.
+   image_128_r32_uint_concurrent` repro if `/tmp` has been cleared). Then
+   extend the check-recovery logic to (a) walk forward from `Header`
+   through trivial unconditional pass-through blocks to find a real check,
+   and (b) recognize a *uniform* phi-merged `Flow`-style dispatch block on
+   the exit side, not just a divergent one. Verify via
+   `FeMeTransformsCPUTests`/`check-feme`, then a real CTS re-run of
+   `synchronization.op` (expect most of the 9,795 to flip to Pass/
+   NotSupported).
+2. **(standing)** `Basic/Mandelbrot.test`'s flake -- confirmed still fixed
+   this session (492/492), not re-broken, but still not actively worked on
+   as its own item in several sessions now.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
+   re-check -- not re-verified this session, no `offload-test-suite` work
+   was done and the checkout was not re-cloned, so drift risk is unchanged.
