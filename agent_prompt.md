@@ -66,21 +66,20 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 days)** The `K6z`/`L425` "internal branch in a body shape
-   this milestone does not yet lower" diagnostic family is now the
-   single largest remaining `synchronization.op` blocker (8,536 cases).
-   It covers multiple distinct CFG shapes per its own existing roadmap
-   rows -- scope one specific sub-shape first (the way `L432` itself was
-   split off from a vaguer predecessor) rather than attacking it as one
-   lump.
-2. **(standing)** `Basic/Mandelbrot.test`'s flake -- still not actively
-   worked on as its own item in several sessions now.
-3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
-   re-check -- not re-verified this session, no `offload-test-suite`
-   work was done.
-4. **(standing, unresolved many sessions)**
-   `backup-before-rebase-20261014` tag decision (already resolved,
-   deleted in `L431`) and `CMAKE_BUILD_TYPE` decision (already resolved
-   in `L431`, keeping `RelWithDebInfo`) -- no longer open, listing here
-   only to confirm they should stop being carried forward as "standing"
-   items in future session summaries.
+1. **(~1 day, highest-leverage item available)** Re-cluster the residual 6,024
+   `synchronization.op` failures' own real underlying diagnostics (same
+   `FEME_DEBUG_LINEARIZE_TRACE`/temporary-`Quiet=false`-rerun bisection
+   technique used this session) to scope the next specific `K6z`/`L425`
+   sub-shape. Both `L432(b)` and `L433` were one-line fixes once isolated --
+   there is a good chance more of this residual set shares a similarly small,
+   specific gap rather than needing one big rewrite. Scope one shape, not the
+   whole family, same as this session and last.
+2. **(standing, several sessions now)** `Basic/Mandelbrot.test`'s flake -- still
+   not picked up as its own item. Low priority, change-of-pace candidate if a
+   break from `Linearize.cpp` is wanted.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift re-check --
+   not re-verified this session, no `offload-test-suite` work was done.
+4. **(already resolved, stop carrying forward)** `backup-before-rebase-20261014`
+   tag and `CMAKE_BUILD_TYPE` decisions were both closed in `L431`. Confirmed
+   again this session they need no further action -- this is the last session
+   that should mention them at all.
