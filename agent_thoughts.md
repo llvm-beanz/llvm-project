@@ -124410,3 +124410,114 @@ Also: `L419(t)`'s own comment attributes the deeper bug to `flattenLoopBodyDiamo
 3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4 loop-in-switch) -- distinct shapes, need their own reduction.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
+
+# Session: L419(v) -- root-caused L419(t)'s "deeper masking bug" end-to-end, no fix landed yet
+
+**Next action for the next session**: read `feme/docs/Roadmap.md`'s `L419(v)`
+row, then open `feme/lib/Transforms/CPU/Linearize.cpp` at
+`LoopLinearizer::collectUniformPassThroughRegion` (~line 3896) and
+`isDivergentBranch` (~line 3938). That's the exact bug location now --
+no more tracing needed, only fix design + implementation.
+
+## What this session did (device check confirmed `FeMe CPU Vulkan Device`)
+
+1. Picked up prior session's #1 next step: find the real "second, deeper"
+   bug blocking `L419(t)`'s abandoned poison-placeholder phi-completeness
+   fix, since `L419(u)` already disproved its attribution to
+   `DiamondFlattener::flattenLoopBodyDiamond`.
+2. Reapplied the poison-placeholder fix experimentally in
+   `makeActivePNPair`/`addLatchIncoming`, rebuilt `feme-opt`.
+3. Diffed a standalone repro's Linearize output with/without the fix:
+   confirmed both resource-load calls' mask operands flip from literal
+   `i1 true` to the real `i1 %active.live` phi once the fix is applied --
+   exactly as predicted.
+4. Rebuilt `libfeme_vulkan.so` with the fix, ran the real failing case
+   (`dEQP-VK.glsl.loops.special.do_while_dynamic_iterations.select_iteration_count_fragment`)
+   with `FEME_DUMP_DIVERGENT_BRANCH=1`. Got the smoking gun:
+   ```
+   feme-cpu-simdize: divergent branch in block '':   br i1 %.not, label %27, label %._crit_edge
+   error: ... has a divergent branch; the divergence transform ... did not remove it
+   ```
+   That's `Header`'s own internal `if`/`else` -- confirmed as the exact
+   branch that goes divergent once the poison fix's masking is correct.
+5. Reverted the experimental poison-fix code (`git checkout --`), rebuilt
+   the clean baseline, re-verified `select_iteration_count_fragment` still
+   Passes (accidentally-safe baseline behavior, unchanged).
+
+## The actual root cause (confirmed, not a hypothesis anymore)
+
+`collectUniformPassThroughRegion` decides whether `Header` is safe to
+leave completely untouched using `isDivergentBranch`, which reads
+`UniformityInfo` computed **once**, before this pass's own masking runs.
+At that snapshot, `Header`'s resource-load call still has its original
+constant-`true` mask, so `Header`'s branch looks uniform and gets
+accepted into the pass-through region -- never flattened into masked
+form. Later in the *same* `linearizeCycle` call, `applyStageMasks`
+correctly narrows that same call's mask to the loop's real
+`active.live` phi (non-constant for `_dynamic_iterations` loops, since
+trip count is genuinely per-lane). The call's result is now genuinely
+divergent, but `Header`'s `CondBr` was never converted to masked form --
+so `feme-cpu-simdize`'s own later, independent uniformity check
+(correctly) flags it and bails.
+
+Why only `_dynamic_iterations` siblings break: `_uniform_iterations`
+loops (e.g. `conditional_break_fragment`) take a completely different,
+simpler fast path (`L292`) that skips building an `active.live` phi
+unless the loop body has a `discard`/`demote`/etc. op -- so there's no
+masking event to go stale for that shape.
+
+## Why no fix landed this session
+
+Two candidate fixes, both architecturally non-trivial:
+- **(a)** Two-phase restructuring: decide region membership *after*
+  masking is known. Chicken-and-egg -- masking depends on knowing which
+  blocks are in the region.
+- **(b)** Teach `isDivergentBranch`/`collectUniformPassThroughRegion` to
+  predict ahead of time that a load's constant-`true` mask *will* go
+  non-constant once this cycle's own masking runs, and pessimistically
+  treat it (and branches depending on it) as divergent up front.
+
+Both need careful design + testing across every loop shape that
+currently passes through this code path -- not a same-session fix given
+the risk of silently breaking the 540/552 currently-passing baseline.
+Full writeup is in `Roadmap.md`'s `L419(v)` row and
+`VulkanCTSReport.md`'s matching section (already committed).
+
+## State / no regressions
+
+- Working tree clean, `Linearize.cpp` back to its `L419(u)` committed
+  state. No functional change landed this session -- documentation only.
+- `select_iteration_count_fragment`: confirmed Pass on the committed
+  baseline (unaffected, no CTS re-sweep needed).
+- `/tmp/l437_full_run2/` background sweep: 84,381 qpa files this session
+  (up from 72,396) -- alive, healthy, not yet done, no action needed.
+
+## Suggested next steps
+
+1. **(~1 day, the real next step)** Implement fix option **(b)** above:
+   in `collectUniformPassThroughRegion`, before calling `isDivergentBranch`
+   on a candidate block's `CondBr`, also check whether the condition
+   transitively depends on a resource/image load *inside cycle `C`*
+   whose mask argument is currently constant `true` -- if so, predict
+   whether this cycle will need a genuinely non-constant
+   `active.live`/`active.sideeffect` phi (i.e., whether `HeaderDivergent`/
+   `LatchDivergent`/any `OtherCondBrBlocks` member is divergent, meaning
+   masking of this kind will actually happen), and if so, pessimistically
+   reject this block from the pass-through region (`return std::nullopt`)
+   so it falls through to proper divergent-diamond flattening instead.
+   Validate on `select_iteration_count_{fragment,vertex}` across
+   `do_while_dynamic`/`for_dynamic`/`while_dynamic` (the known 6 cases),
+   then a full `dEQP-VK.glsl.loops.special.*` (552 cases) sweep to
+   confirm zero regressions plus those 6 flipping if the normal
+   diamond-flattening path can actually handle Header's shape once
+   rejected -- it may not, which would need yet another follow-up.
+2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
+   untouched, same IR-dump-and-reduce methodology candidate.
+3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4
+   loop-in-switch) -- distinct shapes, need their own reduction.
+4. **(check-in, cheap, every session)** Keep checking
+   `/tmp/l437_full_run2/` progress (`ps aux | grep deqp-vk`,
+   `ls /tmp/l437_full_run2/qpa | wc -l`).
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s
+   whole master per-group table using the union of completed cases
+   across both `/tmp/l437_full_run*` directories.
