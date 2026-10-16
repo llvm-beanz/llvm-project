@@ -87,7 +87,7 @@ outcome. All omitted groups have only Pass and NotSupported results.
 
 | Group | Total | Pass | Fail | NotSupported | QualityWarning | DeviceLost | TimedOut |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| api | 267,512 | 116,698 | 21 | 150,781 | 0 | 0 | 16 |
+| api (see note below) | 267,512 | 116,698 | 21 | 150,781 | 0 | 0 | 16 |
 | draw | 29,475 | 3,264 | 2 | 26,209 | 0 | 0 | 0 |
 | fragment_operations | 151 | 118 | 0 | 30 | 3 | 0 | 0 |
 | geometry | 200 | 190 | 1 | 9 | 0 | 0 | 0 |
@@ -117,6 +117,24 @@ large case-count/baseline mismatch; re-checking `report.txt`'s per-case
 `Unrun -> <result>` transitions for the `compute` and `synchronization2`
 groups confirmed the parenthetical counts are exactly the `Pass` tallies and
 there is no discrepancy.)
+
+**Note on the `api` row (added a later session):** the `21` `Fail`/`16`
+`TimedOut` figures above reflect this file's original 2026-10-12 full-CTS
+snapshot. Many sessions since then (`L417`-`L435`) fixed individual `api.*`
+cases as part of other work without this specific master-table row being
+hand-edited each time. A dedicated, complete `dEQP-VK.api.*` re-sweep
+(267,512/267,512 cases, 0 Unrun, see the `L435` section below) found the
+*current* true count is **1 Fail** (the by-design `conformance_version`
+case, not a bug) and **0 TimedOut** -- i.e. 20 of the original 21 `Fail`
+cases and all 16 `TimedOut` cases have since been fixed by unrelated,
+individually-tracked sessions, but this row's own numbers were never
+updated to match. This is the same class of staleness risk for every other
+row above and in "Notable clean groups": each reflects its state as of
+2026-10-12 (or, for `synchronization`, as corrected post-`L434`), not
+necessarily today's. A full-CTS re-triage (not just a single-family
+re-sweep) is the only way to refresh every row at once; see this section's
+own "Next steps" for why that is out of scope for a single session and
+how to prioritize which rows to re-check first.
 
 The conformance-target groups that remain honestly unsupported also have a
 complete baseline:
@@ -5456,3 +5474,77 @@ session). The usual standing items remain untouched this session:
 `feme`-branch-vs-`main` drift re-check (re-verified this session,
 cheap `git fetch`/`git log` only: still the same single remote-only
 commit, `0cc94c2`, unchanged).
+
+## `L436`: full `synchronization` family re-swept (no regression); master per-group table found stale, `api` row corrected
+
+Per the prior session's next steps (pick a different, not-yet-fully-swept
+family after `api.*`), swept the complete `dEQP-VK.synchronization.*`
+family -- not just the `.op` subgroup `L432`-`L434` fixed -- via
+`feme/utils/run_vulkan_cts.py` (64,872 cases, 6 workers). Result:
+**18,420 Pass / 46,452 NotSupported, 0 Fail/DeviceLost/TimedOut, 0 Unrun**.
+
+This turned out to be a **re-confirmation, not new data**: these exact
+numbers (18,420 Pass) already appear in this file's master "Notable clean
+groups" line, which was last updated post-`L434`. The value of re-running
+it anyway: it's a direct, fresh confirmation that the `L432`/`L433`/`L434`
+`Linearize.cpp`/`DiamondFlattener` fixes hold with zero regressions across
+every `synchronization` subgroup (`basic`, `cross_instance`,
+`global_priority_transition`, `implicit`,
+`internally_synchronized_objects`, `op`, `signal_order`, `smoke`,
+`timeline_semaphore`, `win32_keyed_mutex`), not just the `op` subgroup
+those fixes directly targeted.
+
+**Larger finding, while cross-checking this against the master table**:
+`copy_and_blit`/`image_clearing` (the prior session's suggested "different
+family") are not actually separate top-level groups at all -- both are
+subgroups of `dEQP-VK.api.*` (confirmed via `--deqp-runmode=stdout-caselist`
+`GROUP:` enumeration), already fully covered by `L302`'s original sampling
+and this session's own full `api.*` re-sweep. More importantly, the
+master "Per-group accounting" table itself (the `## Current failure
+ownership`-preceding section) is a **frozen snapshot of the 2026-10-12 full
+3,253,584-case run**, not a continuously-updated live count: the `api`
+row's `21`/`16` historical Fail/TimedOut figures are stale relative to
+today's actual state (confirmed `1` Fail / `0` TimedOut by this session's
+complete `api.*` re-sweep). Added an explanatory note directly below the
+table (see above) rather than silently editing the historical figures, to
+preserve the `2026-10-12` snapshot's own internal consistency while making
+clear it needs reading with that caveat.
+
+**Implication for future sessions**: every other row in that table
+(`pipeline`, `image`, `spirv_assembly`, `transform_feedback`, etc.) carries
+the same staleness risk -- each has very likely had some of its own `Fail`
+count reduced by individually-tracked sessions since 2026-10-12 without the
+master row being updated to match, the same way `api` was. A full-CTS
+re-triage (all 3.25M+ cases, likely a multi-day background run given
+`api.*`'s 267,512 cases alone took a meaningful fraction of a session) is
+the only way to refresh every row at once and would also surface any
+*new* regressions across groups no session has touched directly. This is
+too large for a single session's remaining time today, but is now the
+clearest highest-value "fresh start" candidate for a future session with
+a full day or more to spend, rather than picking one more individual
+family at a time.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (no feature/extension-surface change, pure CTS measurement and
+documentation hygiene).
+
+**Standing items re-checked this session**: `Basic/Mandelbrot.test` --
+ran 12 additional times this session (6 in isolation, 6 under a 12-worker
+parallel `check-hlsl-feme-vk`-equivalent load), **0/12 failures** --
+still a low-frequency, non-reliably-reproducible flake, no regression,
+still not picked up as its own investigation item. `offload-test-suite`
+`feme`-branch drift -- re-fetched from `llvm-beanz/feme`, confirmed still
+the same single remote-only commit (`0cc94c2`, `CMakeLists.txt`/
+`test/CMakeLists.txt`/`test/lit.cfg.py` only), unchanged.
+
+**Next steps**: (1) a future session with a full day or more should
+consider a complete, from-scratch full-CTS re-triage (all ~3.25M cases)
+specifically to refresh the master per-group table's now-potentially-stale
+rows, rather than continuing to pick individual families one at a time;
+(2) `Basic/Mandelbrot.test`'s flake remains unreproduced after 18+
+cumulative spot-check runs across sessions -- likely needs either a much
+larger sample size (50-100+ runs) or direct instrumentation of the
+`offload-test-suite` test harness itself to catch it in the act, if it's
+ever going to be actively investigated rather than just monitored;
+(3) `offload-test-suite` drift still needs a decision from a session
+actually touching that repository.
