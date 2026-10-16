@@ -1787,8 +1787,28 @@ DiamondFlattener::flattenLoopBodyDiamond(BasicBlock *Start) {
   // treat it the same as an outright validation failure.
   CycleBoundaryBlocks.clear();
   LastRegionVisited.clear();
-  if (!validate(Start, R, /*Quiet=*/true) || !CycleBoundaryBlocks.empty())
+  if (!validate(Start, R, /*Quiet=*/true) || !CycleBoundaryBlocks.empty()) {
+    // Roadmap L432(a): a successful `validate` whose walk stopped at a
+    // cycle-boundary edge (the case just rejected above) still inserts
+    // every block it visited into the *shared* `MergeVisited` -- exactly
+    // the same bookkeeping hazard `regionHasStageMaskOps`'s own rollback
+    // further below exists to undo -- but, unlike that case, had no
+    // rollback of its own here: this declined trial's own leftover
+    // `MergeVisited` entries (tracked in `LastRegionVisited`) would
+    // otherwise permanently and incorrectly conflict against any later,
+    // *legitimate* walk over the same blocks (the `L375` "reached by more
+    // than one divergent root" diagnostic firing as a false positive) --
+    // found reproducing `dEQP-VK.synchronization.op.*.write_blit_image_
+    // read_image_compute.image_128_r32_uint_concurrent`'s own uniform
+    // loop, whose real exit check this fixed-point pre-pass tries (and
+    // correctly declines) to flatten as an ordinary diamond before
+    // `LoopLinearizer::linearizeCycle`'s own, later `flattenLoopBodyRegion`
+    // call legitimately needs to walk straight through the very same
+    // blocks.
+    for (BasicBlock *BB : LastRegionVisited)
+      MergeVisited.erase(BB);
     return std::nullopt;
+  }
   // Roadmap L292: this method always seeds its own walk with a bare,
   // unconditional "every lane active" pair (see below) -- correct for an
   // ordinary diamond with no mask-affecting op of its own (flattening it
@@ -2168,6 +2188,27 @@ bool DiamondFlattener::run() {
   // followed by a palette lookup branching on whether it converged) --
   // that diamond is just as much this pass's job as one before any loop,
   // even though the loop itself is `LoopLinearizer`'s.
+  // Roadmap L432(b): every block this whole-function validation phase
+  // below visits is recorded here (via `LastRegionVisited`, the same
+  // tracking `flattenLoopBodyDiamond`'s own rollback already relies on --
+  // see its comment) so it can be rolled back out of the *shared*
+  // `MergeVisited` set if this phase ends up deciding not to flatten
+  // anything at all. Without this, a function with no actual divergent
+  // branch (or one whose `validate` outright fails) still leaves every
+  // block this phase merely looked at permanently claimed in
+  // `MergeVisited`, with no matching `ResolvedBlocks` entry -- exactly
+  // the `L375` "reached by more than one divergent root" false positive,
+  // now firing against `LoopLinearizer`'s own, later, legitimate walk
+  // over the very same blocks instead of another `DiamondFlattener` call.
+  // Found reproducing `dEQP-VK.synchronization.op.*.write_blit_image_
+  // read_image_compute.image_128_r32_uint_concurrent`'s own uniform loop:
+  // this whole-function pass's entry-root walk passes straight through
+  // the loop's header, body, and latch chain (merely to discover the
+  // loop's own cycle-boundary exit, never to flatten anything inside it,
+  // since the loop's exit check is uniform, not a divergent diamond) and,
+  // finding no divergent branch anywhere else in the function either,
+  // bails out below with every one of those blocks still claimed.
+  LastRegionVisited.clear();
   SmallVector<BasicBlock *, 4> Roots{&F.getEntryBlock()};
   SmallPtrSet<BasicBlock *, 8> Considered{&F.getEntryBlock()};
   for (unsigned I = 0; I != Roots.size(); ++I) {
@@ -2181,8 +2222,12 @@ bool DiamondFlattener::run() {
     // and any cycle-exit root not nested in an enclosing diamond's arm,
     // simply get `nullptr` back (this map's default), unchanged from
     // before this map existed.
-    if (!validate(Roots[I], RootEnd.lookup(Roots[I])))
+    if (!validate(Roots[I], RootEnd.lookup(Roots[I]))) {
+      // Roadmap L432(b): see the rollback comment above this loop.
+      for (BasicBlock *BB : LastRegionVisited)
+        MergeVisited.erase(BB);
       return false;
+    }
     for (BasicBlock *CycleBlock : CycleBoundaryBlocks) {
       SmallVector<BasicBlock *, 2> Exits;
       CI.getExitBlocks(CI.getCycle(CycleBlock), Exits);
@@ -2224,8 +2269,14 @@ bool DiamondFlattener::run() {
     break;
   }
   if (!HasDivergentBranch && !hasStageMaskOps(F) &&
-      feme::getShaderStage(F) != feme::ShaderStage::Fragment)
+      feme::getShaderStage(F) != feme::ShaderStage::Fragment) {
+    // Roadmap L432(b): see the rollback comment above the validation loop
+    // -- this phase is about to decline the whole function, so undo every
+    // claim it made on `MergeVisited` along the way.
+    for (BasicBlock *BB : LastRegionVisited)
+      MergeVisited.erase(BB);
     return false;
+  }
 
   MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
                      ConstantInt::getTrue(F.getContext())};
