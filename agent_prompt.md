@@ -60,6 +60,9 @@ file.
 
 # Request
 
+The last session ended without committing results. Any intermediate results are
+stored in a git stash.
+
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
