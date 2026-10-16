@@ -5274,3 +5274,142 @@ family. The usual standing items remain untouched this session:
 `Basic/Mandelbrot.test`'s flake; the standing `offload-test-suite`
 `feme`-branch-vs-`main` drift re-check (not re-verified this session,
 no `offload-test-suite` work was done).
+
+## `L435`: `multithreaded_per_thread_resources.device` segfault root-caused as an external Vulkan-Loader race, not fixable in this repo
+
+Picked up `L302`'s own "start fresh with a different CTS family"
+next step: ran a new `dEQP-VK.api.*` sweep (`feme/utils/
+run_vulkan_cts.py`). It progressed cleanly (0 Fail so far, ~175k
+cases in) before segfaulting (exit 139) on
+`dEQP-VK.api.object_management.multithreaded_per_thread_resources.
+device`. Isolated standalone: reproduces at roughly 50-80% per run
+across repeated invocations of this one case alone (confirmed on a
+clean rebuild: 5/10 crashes in one batch), so this is a real,
+narrowly-scoped, racy crash, not sweep-harness interference (an
+earlier false start that looked like a hang was actually two
+competing `deqp-vk` processes launched by mistake contending for
+CPU, since corrected).
+
+**Core-dump analysis** (direct `ulimit -c unlimited` run, no
+`timeout` wrapper -- wrapping in `timeout` produces a core dump for
+`timeout` itself, not the monitored child, a dead end hit first):
+the crashing thread's backtrace is CTS's own
+`vk::DeviceDriver::DeviceDriver(...)` (populating its own
+per-device function-pointer table right after a successful
+`vkCreateDevice`) calling into the system Vulkan loader's own
+device-dispatch trampoline (`libvulkan.so.1`, no debug symbols),
+landing at a garbage address inside `libvulkan.so.1` itself. Several
+other threads were concurrently inside `vkDestroyDevice`/
+`~DeviceWrapper()` or idling in FeMe's own `QueueExecutor::run()`
+(`Sync.h`) -- consistent with the test's own documented shape (see
+below), not a hang or deadlock.
+
+**Code review of every FeMe object touched by this path**
+(`Icd.h`'s `DispatchableBase`/`Allocator`, `EntryPoints.cpp`'s
+`vkCreateDevice`/`vkDestroyDevice`/`vkGetDeviceQueue*`/
+`vkGetDeviceProcAddr`, `ProcAddr.cpp`'s static `kEntries` table,
+`Objects.h`'s `PhysicalDevice`/`Device`/`Queue`/`Instance`,
+`PipelineCache.cpp`'s constructor) found no shared *mutable* state
+across concurrently-created `Device` objects: each is an
+independent heap allocation with its own `PipelineCache`,
+`EnabledExtensions`, `Queues`, and `std::atomic<bool> Lost`; the one
+object every concurrently-created `Device` *does* share
+(`PhysicalDevice`/`PhysicalDeviceInfo`) is computed once in
+`PhysicalDevice`'s own constructor and never mutated again, so
+concurrent reads of it are safe by construction. `Allocator::
+create`/`destroy` are plain `malloc`/`free`-backed placement-new
+wrappers with no custom pooling, so FeMe's own allocation path adds
+no additional race beyond what glibc's thread-safe allocator already
+handles.
+
+**Confirmed the test genuinely exercises concurrent
+create/destroy against one shared physical device**: read
+`vktApiObjectManagementTests.cpp`'s `multithreadedCreatePerThreadResourcesTest`
+directly (VK-GL-CTS source, not this repo) -- one shared `VkInstance`/
+`VkPhysicalDevice` (`Environment`), `getDefaultTestThreadCount()`
+threads each running `CreateThread<Device>`, 20
+create-then-immediately-destroy iterations per thread with a
+`barrier()` every few iterations specifically to "make entering
+driver at the same time more likely". This is precisely the shape
+the externally-synchronized-per-object Vulkan spec does *not*
+protect against: `vkCreateDevice`/`vkDestroyDevice` only require
+external synchronization for the one `VkDevice`/`VkPhysicalDevice`
+instance involved in *that* call, not serialization against *other*,
+unrelated `vkCreateDevice`/`vkDestroyDevice`/`vkGetDeviceProcAddr`
+calls racing concurrently against different device handles in the
+same process -- exactly the gap a loader's own internal, shared
+dispatch-table bookkeeping must handle itself.
+
+**Dynamic verification, the decisive evidence**: an `LD_PRELOAD=
+libasan.so.8` probe against the unmodified binary (no recompile)
+caught the crash as a plain `SIGSEGV` with "AddressSanitizer can not
+provide additional info" -- ruling out a simple heap-buffer-overflow
+mediated through any malloc'd allocation FeMe itself made. Then
+built a mixed-instrumentation diagnostic (`FeMeVulkanCore`/
+`feme_vulkan` recompiled with `-fsanitize=address
+-fno-omit-frame-pointer`, linked against the system GCC package's
+own ABI-compatible static `libasan.a` since this environment's clang
+install has no bundled compiler-rt ASan runtime archive for this
+target triple -- `-fsanitize=address -fno-sanitize-link-runtime`
+suppresses clang's own runtime auto-link so the explicit
+`target_link_libraries` entry resolves instead). Result: **0 crashes
+and 0 ASan reports across 8 repeated runs** of the same case that
+crashes 50-80% of the time on an unmodified rebuild -- ASan's
+allocator (redzones + delayed-reuse quarantine) changes the heap
+*reuse timing* just enough to close the race window, without any
+FeMe-side code actually changing behavior. This is the classic
+signature of a UAF/address-reuse race the *allocator's own timing*
+gates, not a bug in any code ASan could instrument (since none of
+FeMe's own instrumented code ever faulted, and the fault site is
+inside the uninstrumented system loader either way).
+
+**Confirmed via public research**: this matches a well-documented
+class of Vulkan-Loader bugs (`KhronosGroup/Vulkan-Loader` issue
+`#200`, "Race condition in vkCreateDevice()+vkDestroyDevice()+
+vkGetDeviceProcAddr()" -- closed in 2022 by a mutex guarding
+`loader.instances`) -- the installed system loader here
+(`libvulkan1` 1.4.341.0-1) is years newer than that fix, so this is
+not literally the same already-patched race, but the same general
+"per-call external synchronization is not enough to protect the
+loader's own shared, process-wide dispatch bookkeeping from
+concurrent create/destroy against *different* devices" class of bug,
+in a location (`loader_get_dispatch`/device-dispatch-table lookup)
+the loader itself owns.
+
+**Confirmed not fixable in this repo**: the Vulkan loader
+(`/usr/lib/aarch64-linux-gnu/libvulkan.so.1`) is a separately
+installed system package (`libvulkan1`), not vendored or checked out
+anywhere under `llvm-project`. There is no file in this repository
+whose change could alter the loader's own internal dispatch-table
+bookkeeping. The temporary ASan CMake diagnostic
+(`feme/lib/Vulkan/CMakeLists.txt`/`feme/tools/feme-vulkan/
+CMakeLists.txt`) was reverted after use; no code change was made or
+is possible here.
+
+**Disposition**: documented as a genuine, precisely-isolated external
+Vulkan-Loader race, matching `L428(a)`'s own precedent for an
+upstream-but-not-vendored dependency bug. `Roadmap.md`'s new `L435`
+row is not struck through as "done" (the CTS-visible crash remains
+reproducible against the system loader) but is marked as having no
+further in-repo action available. The broader `dEQP-VK.api.*` sweep
+this crash interrupted was not yet resumed/completed this session --
+left for a future session, which should run it with this one case
+either skipped or expected to intermittently crash the whole batch
+(the crash takes down the entire `deqp-vk` process, not just the one
+test case, so a crash-tolerant harness invocation -- already
+available via `feme/utils/run_vulkan_cts.py`'s existing
+crash-recovery/solo-reverify logic -- is required to get a full
+`api.*` Pass/Fail/NotSupported count past this point).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed -- no code change, pure investigation/documentation, and no
+feature/extension surface is implicated (this is a process-lifetime
+bug in a dependency, not a missing/incorrect capability).
+
+**Next steps**: resume and complete the `dEQP-VK.api.*` sweep past
+this one known-crashing case (via the crash-tolerant harness) to get
+a full before/after count for this family, per `L302`'s original
+"pick a different CTS family" next step. The usual standing items
+remain untouched this session: `Basic/Mandelbrot.test`'s flake; the
+standing `offload-test-suite` `feme`-branch-vs-`main` drift
+re-check.
