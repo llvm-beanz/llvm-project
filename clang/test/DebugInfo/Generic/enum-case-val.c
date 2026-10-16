@@ -1,4 +1,5 @@
 // RUN: %clang_cc1 -emit-llvm -debug-info-kind=limited %s -o - | FileCheck %s
+// RUN: %clang_cc1 -fno-switch -emit-llvm -debug-info-kind=limited %s -o - | FileCheck %s
 
 enum { A = 1 };
 int func1(int a) {

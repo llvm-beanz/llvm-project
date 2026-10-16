@@ -1,6 +1,7 @@
 // Test instrumentation of general constructs in C.
 
 // RUN: %clang_cc1 -triple x86_64-apple-macosx10.9 -main-file-name c-general.c %s -o - -emit-llvm -fprofile-instrument=clang | FileCheck -allow-deprecated-dag-overlap  -check-prefix=PGOGEN %s
+// RUN: %clang_cc1 -fno-switch -triple x86_64-apple-macosx10.9 -main-file-name c-general.c %s -o - -emit-llvm -fprofile-instrument=clang | FileCheck -allow-deprecated-dag-overlap -check-prefix=PGOGEN %s
 
 // RUN: llvm-profdata merge %S/Inputs/c-general.proftext -o %t.profdata
 // RUN: %clang_cc1 -triple x86_64-apple-macosx10.9 -main-file-name c-general.c %s -o - -emit-llvm -fprofile-instrument-use=clang -fprofile-instrument-use-path=%t.profdata | FileCheck -allow-deprecated-dag-overlap  -check-prefix=PGOUSE %s
