@@ -1431,10 +1431,23 @@ private:
                                      BasicBlock *StopAt, unsigned Depth = 0) {
     if (isLoopControlEdge(Cur, Target))
       return true;
-    if (Depth >= 8 || !isPureRelayBlock(Target))
-      return false;
-    Instruction *Term = Target->getTerminator();
+    // Roadmap L419(u): `Target == StopAt` must be checked *before* the
+    // pure-relay gate below, not after it. `StopAt` is `Cur`'s own
+    // natural reconvergence point, not just another relay hop -- it is
+    // legitimately allowed to contain real instructions of its own (most
+    // commonly the loop's actual trip-count/exit-condition `icmp`) ahead
+    // of its branch, unlike every other hop this chase walks through.
+    // Gating on `isPureRelayBlock(Target)` first wrongly disqualified
+    // exactly that common shape (confirmed on
+    // `dEQP-VK.glsl.loops.special.do_while_dynamic_iterations.select_
+    // iteration_count_{fragment,vertex}`, whose Header-internal if/else
+    // reconverges at a block computing its own real `icmp` before
+    // branching to the loop's backedge/exit) -- silently treating the
+    // Header's own internal diamond as an ordinary, fully-flattenable
+    // one instead of a cycle boundary to defer to `LoopLinearizer`,
+    // which flattened it with the wrong (pre-masking) verdict.
     if (Target == StopAt) {
+      Instruction *Term = Target->getTerminator();
       if (auto *UBr = dyn_cast<UncondBrInst>(Term))
         return isLoopControlEdge(Cur, UBr->getSuccessor(0));
       if (auto *CBr = dyn_cast<CondBrInst>(Term))
@@ -1442,6 +1455,9 @@ private:
                isLoopControlEdge(Cur, CBr->getSuccessor(1));
       return false;
     }
+    if (Depth >= 8 || !isPureRelayBlock(Target))
+      return false;
+    Instruction *Term = Target->getTerminator();
     if (auto *UBr = dyn_cast<UncondBrInst>(Term))
       return isLoopControlEdgeThroughRelay(Cur, UBr->getSuccessor(0), StopAt,
                                            Depth + 1);
@@ -4231,12 +4247,13 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // *not* look like a known constant to `applyStageMasks`'s mask-
     // narrowing checks) is not yet safe to add: it is independently
     // correct in isolation, but exposes a second, deeper, not-yet-fixed
-    // bug in `DiamondFlattener::flattenLoopBodyDiamond`'s own early
-    // fixed-point pre-pass (see that method's comment) -- confirmed via
-    // `dEQP-VK.glsl.loops.special.*select_iteration_count*`, a full CTS
-    // sweep regression this exact combination reintroduces. Left as a
-    // known, still-open follow-on (not part of this change) -- see the
-    // roadmap entry this comment's own commit updates.
+    // bug, confirmed (this session, Roadmap L419(u)) to survive even
+    // with `isLoopControlEdgeThroughRelay`'s relay-chase ordering fixed
+    // -- `dEQP-VK.glsl.loops.special.*select_iteration_count*` still
+    // regresses by the same 6 cases with the poison seed applied alone
+    // or together with that fix. Left as a known, still-open follow-on
+    // (not part of this change) -- see the roadmap entry this comment's
+    // own commit updates.
     return MaskPair{LivePN, SideEffectPN};
   };
   auto addLatchIncoming = [&](MaskPair &Masks, const MaskPair &AtLatch) {
