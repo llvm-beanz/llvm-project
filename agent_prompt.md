@@ -69,21 +69,30 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-3 hours)** Re-apply the poison-placeholder fix alone (code is small,
-   described in `L419(t)`'s own entry and this session's diff history, fully
-   reconstructable) and use `FEME_DEBUG_FLATTEN_TRACE=1` to trace
-   `select_iteration_count_fragment` **with the poison fix applied**, comparing
-   against a trace **without** it. Find exactly which flatten/flatten-decision
-   differs between the two traces -- don't assume it's `flattenLoopBodyDiamond`
-   (confirmed not called for Header/Latch) or `DiamondFlattener::run()`'s walk
-   (this session's relay-chase fix already touches that path and didn't help)
-   without first looking.
-2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- same
-   IR-dump-and-reduce methodology candidate, untouched.
+1. **(~1 day, the real next step)** Implement fix option **(b)** above:
+   in `collectUniformPassThroughRegion`, before calling `isDivergentBranch`
+   on a candidate block's `CondBr`, also check whether the condition
+   transitively depends on a resource/image load *inside cycle `C`*
+   whose mask argument is currently constant `true` -- if so, predict
+   whether this cycle will need a genuinely non-constant
+   `active.live`/`active.sideeffect` phi (i.e., whether `HeaderDivergent`/
+   `LatchDivergent`/any `OtherCondBrBlocks` member is divergent, meaning
+   masking of this kind will actually happen), and if so, pessimistically
+   reject this block from the pass-through region (`return std::nullopt`)
+   so it falls through to proper divergent-diamond flattening instead.
+   Validate on `select_iteration_count_{fragment,vertex}` across
+   `do_while_dynamic`/`for_dynamic`/`while_dynamic` (the known 6 cases),
+   then a full `dEQP-VK.glsl.loops.special.*` (552 cases) sweep to
+   confirm zero regressions plus those 6 flipping if the normal
+   diamond-flattening path can actually handle Header's shape once
+   rejected -- it may not, which would need yet another follow-up.
+2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
+   untouched, same IR-dump-and-reduce methodology candidate.
 3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4
    loop-in-switch) -- distinct shapes, need their own reduction.
-4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/`
-   progress.
-5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
-   master per-group table in one pass using the union of completed cases across
-   both `/tmp/l437_full_run*` directories.
+4. **(check-in, cheap, every session)** Keep checking
+   `/tmp/l437_full_run2/` progress (`ps aux | grep deqp-vk`,
+   `ls /tmp/l437_full_run2/qpa | wc -l`).
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s
+   whole master per-group table using the union of completed cases
+   across both `/tmp/l437_full_run*` directories.
