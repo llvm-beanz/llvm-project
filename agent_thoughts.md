@@ -124142,3 +124142,43 @@ The "pick a different, not-yet-swept family" framing from several recent session
 2. **(standing, many sessions now, 12 more clean runs this session)** `Basic/Mandelbrot.test` flake -- 0/12 failures this session (6 isolated + 6 under 12-worker parallel load). Either needs a much bigger sample (50-100+ runs) or direct harness instrumentation to ever catch it in the act; passive spot-checking across sessions isn't converging on a repro.
 3. **(standing)** `offload-test-suite` `feme`-branch drift -- still the same single commit (`0cc94c2`), unchanged, still needs a decision from a session actually touching that repo.
 4. **(reminder for next session)** Before trusting any prior session's "family X hasn't been swept" claim, verify the group actually exists as a top-level `GROUP:` via a quick `--deqp-runmode=stdout-caselist` check first -- cheap, and would have saved the wasted `copy_and_blit`/`image_clearing` detour this session hit.
+
+# Session: L437 -- the Mandelbrot flake was never a flake: `lit` never passed the timeout env var through
+
+## TL;DR
+
+Confirmed device (`FeMe CPU Vulkan Device`), clean tree, `offload-test-suite` drift unchanged (`0cc94c2`). Launched the multi-day full-CTS re-triage (3.25M cases, background, still running, ~190/1,800+ batches done -- not finished, don't expect it to be). While that ran, found the real bug behind `Basic/Mandelbrot.test`'s years-long "rare flake": **it isn't rare, isn't contention-dependent, and isn't a FeMe bug.** `offload-test-suite/test/lit.cfg.py` never passed `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` through to the test subprocess, so every session's `30000` setting was silently ignored and the ICD always used its hardcoded 5-second default. Under light load, 5 seconds was always enough, so it looked fixed. Under this session's heavy background sweep, it wasn't. One-line fix, in `offload-test-suite`, verified 5/5 FAIL -> 13/13 PASS under identical load.
+
+## What actually happened, in order
+
+1. Confirmed device, clean tree, `offload-test-suite` drift unchanged.
+2. Generated the full `dEQP-VK.*` case list: 3,253,584 cases, matches the known 2026-10-12 baseline exactly.
+3. Launched the full re-triage correctly this time with `mode="async"` (learned last session: shell `&` inside a sync call gets killed the instant the call returns). Confirmed running: 8 processes, batches being produced.
+4. While it ran in the background, did the prior session's suggested "bigger Mandelbrot sample": 30 isolated runs. **Result: 30/30 FAIL.** Every prior session (most recently last session, 0/12) had seen this pass almost always. The one new variable: this session has the CTS sweep hammering 8 cores continuously (load average ~7.4/12).
+5. First hypothesis: just contention, needs more timeout budget. Tried `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=180000` (6x normal). **Still failed, in ~5.4 seconds** -- nowhere near 180s. That's the tell: whatever timeout is actually firing is not the one the env var controls.
+6. Read `feme/lib/Vulkan/Sync.cpp`'s `vkWaitSemaphores` (line 943) and `vkWaitForFences`: both correctly call `applyWaitSafetyNet(timeout)`, which correctly reads `getSafetyNetTimeoutNs()`, which correctly parses `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` from the environment. The FeMe code is fine. So the env var must not be reaching the process at all.
+7. Read `offload-test-suite/test/lit.cfg.py`: it calls `llvm_config.with_system_environment([...])` with a list of `VK_*` vars only -- `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` was never in it.
+8. Read `llvm/utils/lit/lit/TestingConfig.py` to confirm how lit actually builds a test's environment: it is **not** a copy of the invoking shell's environment. It's a fixed allowlist (`PATH`, `LD_LIBRARY_PATH`, sanitizer vars, a short fixed list) plus whatever `lit.cfg.py` explicitly adds. Anything not on that list is simply absent from the subprocess's env, no matter what's set outside lit.
+9. This means `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=30000`, set on the outer `ninja check-hlsl-feme-vk` command line since `L255` and re-confirmed as recently as `L431`, **has never once reached the actual test subprocess, in any session.** The ICD has always silently used its hardcoded `DefaultSafetyNetTimeoutNs` (5 seconds, `Sync.h`) instead.
+10. Fix: added `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` to the `with_system_environment` allowlist in `offload-test-suite/test/lit.cfg.py`. One line.
+11. Verified with a clean A/B, same heavy background load the whole time (load average ~7): reverted the fix via `git stash` -> **5/5 FAIL**. Restored it -> **10/10 PASS at the real `30000` build value, 3/3 PASS at `180000`.** 13/13 total.
+12. Committed the fix alone in `offload-test-suite` (outside `feme/`, as required).
+13. Ran `ninja check-hlsl-feme-vk`: **492/492 Passed, 0 Failed** -- while the CTS sweep was still running in the background the whole time. This is the test that would have failed before the fix.
+14. Ran `ninja check-feme`: **3765/3773 Passed, 7 Unsupported, 1 Failed** -- the same pre-existing, already-tracked `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, not new. No FeMe source was touched this session, so this is expected, not a regression check surprise.
+15. Updated `Roadmap.md` (`L437` row) and `VulkanCTSReport.md` (new section, plus noted the full re-triage is in-progress, not replacing the master table yet). Committed docs separately from the `offload-test-suite` fix, per the "small, separate commits" instruction.
+
+## Why this matters more than a normal bugfix
+
+This wasn't just "found and fixed one more bug." It silently invalidated the stated justification of several previous sessions' conclusions:
+- `L431` ran `check-hlsl-feme-vk` and reported "492/492 Passed... confirming the flake stays fixed under full parallel load." That 492/492 was real, but the *reason* given (the 30s override holding) was wrong -- it passed because 5 seconds happened to be enough that day, not because the override worked.
+- Every session that logged "Mandelbrot: N/M clean runs this session" as a standing low-priority item was, without knowing it, running an experiment gated on a variable (background system load) nobody had deliberately controlled for -- which is exactly why the failure rate looked random across sessions instead of settling to a stable low number.
+
+General lesson: when an env var is "set" via an outer build/CI command, that is not proof it reaches the thing that's supposed to read it, if there's a test harness layer (like `lit`) in between with its own environment-hermeticity rules. Worth remembering for any other `FEME_*`-style knobs this project adds in the future that get set the same way (outer `cmake -E env` on a ninja custom command, consumed inside a `lit`-run test).
+
+## Next steps
+
+1. **(check-in, cheap)** The full-CTS re-triage (shellId from this session, `/tmp/l437_full_run/`) is still running, ~190/1,800+ batches in. A future session should check its progress first via `ls /tmp/l437_full_run/qpa/ | wc -l` and the report file, and only replace `VulkanCTSReport.md`'s master table once it's actually complete -- don't trust a partial count as final.
+2. **(standing, now explained, probably closeable as "standing")** `Basic/Mandelbrot.test` -- no longer an open flake investigation. It was deterministic under sufficient background load and is now fixed at the actual root cause (lit env passthrough). A future session doesn't need to keep "spot-checking" it as a standing item; if it ever fails again, check first whether `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` is actually present in the failing subprocess's own environment (e.g. via `/proc/<pid>/environ`) before assuming a new regression.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- still the same single commit (`0cc94c2`), unchanged. This session *did* touch `offload-test-suite` (the lit.cfg.py fix), but that's a local, uncommitted-upstream change on top of the existing drift, not a resolution of the drift question itself -- still needs its own decision from a session that wants to actually reconcile it.
+4. **(worth a quick look, ~15 min)** Grep `offload-test-suite/test/CMakeLists.txt` and `lit.cfg.py` for any *other* `FEME_*`-prefixed env vars set on the outer build command the same way `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` was -- if any exist, they likely have the exact same silent-no-op bug and are worth checking/fixing in the same pass.
+5. **(when the full re-triage finally completes)** Replace `VulkanCTSReport.md`'s entire master per-group table in one pass (per `L436`'s own recommendation), rather than patching individual rows piecemeal.
