@@ -5548,3 +5548,72 @@ larger sample size (50-100+ runs) or direct instrumentation of the
 ever going to be actively investigated rather than just monitored;
 (3) `offload-test-suite` drift still needs a decision from a session
 actually touching that repository.
+
+## `L437`: full-CTS re-triage launched (in progress); `Basic/Mandelbrot.test` flake finally root-caused and fixed (outside FeMe)
+
+**Full re-triage status (in progress, not final)**: launched the
+`L436`-recommended from-scratch `dEQP-VK.*` re-triage this session
+(3,253,584 cases, `feme/utils/run_vulkan_cts.py --batch-size 1800
+--workers 6`, output under `/tmp/l437_full_run/`). This is a genuinely
+multi-day background job at this scale; as of this session's end it had
+produced roughly 190 of an eventual ~1,800+ batches. **The master
+"Per-group accounting" table above is still the 2026-10-12 snapshot** (plus
+the `L436`-added `api` staleness footnote) -- it is intentionally *not*
+being rewritten from this in-progress run, to avoid replacing one
+known-accurate historical snapshot with a partial, misleadingly-incomplete
+one. A future session should check `/tmp/l437_full_run/` (or wherever this
+job's state has been persisted/resumed) and, once it actually completes,
+replace the whole table in one pass per `L436`'s own recommendation.
+
+**`Basic/Mandelbrot.test` flake: root-caused, not a FeMe bug, fixed outside
+`feme/`.** A 30-isolated-run stress test (this session, following the
+prior session's own "needs 50-100+ runs" suggestion) reversed from
+near-zero failures (0/12 in the immediately preceding session) to **30/30
+failures**, with the only new variable being this session's own
+background CTS sweep running continuously (load average ~7.4 on a
+12-core host). The failure is `vkWaitSemaphores` returning `VK_TIMEOUT`.
+Critically, re-running with `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=180000`
+(6x the normal 30000) still failed in ~5.4 seconds -- ruling out "just
+needs a longer timeout budget under load" and proving the configured
+timeout was never actually controlling anything.
+
+Root cause: `lit`'s own `TestingConfig` (`llvm/utils/lit/lit/
+TestingConfig.py`) builds a **hermetic** environment for every test
+subprocess from a fixed allowlist (`PATH`, `LD_LIBRARY_PATH`, a handful of
+sanitizer/toolchain vars, etc.) plus whatever `lit.cfg.py` explicitly adds
+via `with_environment`/`with_system_environment` -- it does **not** by
+default inherit the full invoking shell's environment.
+`offload-test-suite/test/lit.cfg.py` only ever added the `VK_*` driver/
+loader variables to that allowlist, never `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`.
+This means the `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=30000` set on the outer
+`ninja check-hlsl-feme-vk` invocation (originally `L255`, re-confirmed as
+recently as `L431`) **has never once reached the actual Vulkan ICD test
+subprocess, in any session** -- `Sync.cpp`'s `getSafetyNetTimeoutNs()`
+always silently fell back to its hardcoded `DefaultSafetyNetTimeoutNs`
+(5 seconds, `Sync.h`). Under light load a real compute dispatch plus
+bookkeeping comfortably finishes within 5 seconds, which is why this
+looked like a rare, contention-only flake for many sessions; under this
+session's sustained heavy background load, it reliably does not.
+
+**Fix**: added `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` to the
+`with_system_environment` allowlist in `offload-test-suite/test/lit.cfg.py`.
+This is entirely outside the `feme/` subdirectory (a separate repository),
+so per the standing instruction it was committed there alone, as a
+self-contained, isolated fix. Verified with a clean before/after A/B under
+identical heavy background load (load average ~7): **5/5 FAIL before the
+fix, 13/13 PASS after** (10 runs at the real build-configured `30000`
+value, plus 3 more at an exaggerated `180000` to directly confirm the
+override itself now actually takes effect end-to-end). No FeMe source
+change was needed or made -- this was purely an `offload-test-suite`
+test-harness configuration gap, not a FeMe synchronization bug.
+
+This also means every prior session's "flake stays fixed"/"contention-only"
+conclusion (most explicitly `L431`'s `check-hlsl-feme-vk` 492/492 pass
+claim) was technically correct in its observed result but incorrect in
+its explanation: those runs passed because 5 seconds happened to be
+enough under each of those sessions' own lighter background load, not
+because the configured 30-second budget was actually in effect.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (no feature/extension-surface change; a test-harness environment-
+propagation fix, not a Vulkan behavior change).
