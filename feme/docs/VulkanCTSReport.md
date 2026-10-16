@@ -5667,3 +5667,77 @@ lessons in `feme/.instructions.md`.
 
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed (process/tooling fix only, no feature/extension-surface change).
+
+## `L439`: `offload-test-suite` "drift" closed as a false positive; `L419(h)`'s 18-case cluster root-caused to one exact internal-break shape, reduced to two new `.ll` tests
+
+Confirmed `FeMe CPU Vulkan Device` (mandatory check). Confirmed the
+detached full re-triage (`L438`'s `/tmp/l437_full_run2/`) survived this
+session's own boundary too -- still alive and progressing (9 workers,
+20 batches with `qpa` output by the end of this session, up from 14 at
+its start). Still far from complete; the master "Per-group accounting"
+table above remains untouched, same as `L437`/`L438` left it.
+
+Closed the standing `offload-test-suite`-vs-`llvm-beanz/feme` "drift"
+item for good: `git patch-id` proved the one "behind" commit (`0cc94c2`)
+is byte-identical in content to a commit already in this repo's own
+history (`b606d08`, a prior session's cherry-pick) -- `git log`'s
+hash-based ahead/behind count cannot see that, since `git cherry-pick`
+always produces a new commit object even for identical content. There
+was never any real drift; every prior session's "needs a decision"
+framing was a false positive. Documented in `feme/.instructions.md` and
+closed as roadmap `L439` (this item was actually resolved in the prior
+session and is only recorded here for completeness; this session
+re-confirmed it holds).
+
+With the standing items closed out and the sweep still mid-run, used
+the remaining session time on roadmap `L419(h)` (GLSL control-flow
+residuals), the largest still-open P1 cluster with a concrete reduction
+plan from an earlier handoff ("reduce one fragment and one vertex
+control-flow case before extending the linearizer"). Re-ran
+`dEQP-VK.glsl.loops.special.*` directly (552 cases) rather than trusting
+the roadmap row's un-re-verified sub-cluster counts: **534 Pass, 18
+Fail**, every failure the identical shape --
+`while(i++ < N) { if (i == N) break; ...; }`, i.e. a loop whose header
+holds the real uniform trip-count check with a *separate*, later body
+block holding its own divergent `break` check branching straight to the
+loop's exit block.
+
+Root-caused via a minimal IR reduction (`feme-opt --llvm
+-passes=feme-cpu-linearize`, not deqp-vk): this exact shape is **already
+supported** when the loop body has no mask-affecting operation of its
+own -- `LoopLinearizer::linearizeCycle`'s simpler, non-masked
+`collectUniformPassThroughRegion`/`exited.via.check` path already
+tracks a body-level break correctly. Every one of the 18 real CTS
+shader bodies reads a uniform buffer (a `feme.cpu.resource.*`-class
+call `CycleHasMaskOps` recognizes), which routes `linearizeCycle` into
+its separate "fully uniform loop with body mask ops" branch instead,
+built on `DiamondFlattener::canFlattenLoopBodyRegion`/
+`flattenLoopBodyRegion` -- and that path's own `validate` walk
+misclassifies the body block's branch to the loop's own exit as a
+cycle-boundary edge (`isLoopControlEdge`'s `!CI.contains(C, Target)`
+test is identically true for "this cycle's own real exit" and "a
+different, nested child cycle's own control edge", with no way for
+`validate` to tell the two apart), deferring it as "`LoopLinearizer`'s
+problem, not an error" -- except this call *is* `LoopLinearizer`,
+already mid-processing of this exact cycle.
+
+**Not fixed this session**: added two new, minimal standalone `.ll`
+tests pinning the exact boundary instead --
+`feme/test/Transforms/CPU/Linearize/loop-break-separate-from-header-check.ll`
+(the mask-op-free variant, confirmed already lowering cleanly) and
+`feme/test/Transforms/CPU/Linearize/unsupported-loop-internal-break-with-mask-op.ll`
+(the identical shape plus one resource-store call, confirmed still
+diagnosed). Generalizing the masked-loop path to handle this shape
+needs the same kind of sticky, loop-carried "this lane already decided
+not to continue" state `HeaderDivergent`'s own `stayInLoop` already
+gives the header's *own* check, generalized to however many separate
+body-level break points a loop can have -- a materially larger lift
+than this session's remaining time allowed, not a quick follow-on to
+the reduction itself. `ninja check-feme`: 3,767/3,775 Passed (+2 new
+tests), 7 Unsupported, 1 pre-existing unrelated Failed, 0 regressions.
+`check-hlsl-feme-vk`: 492/492 Passed, 0 Failed. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- investigation and test
+coverage only, no code change, no feature/extension-surface change.
+Updated roadmap `L419(h)` with the full root-cause finding and a
+scoped starting point (the two new tests) for whichever future session
+implements the actual generalization.
