@@ -107,7 +107,16 @@ outcome. All omitted groups have only Pass and NotSupported results.
 Notable clean groups include `binding_model` (87,703 Pass), `compute` (701),
 `subgroups` (1,223), `synchronization` (18,420), `synchronization2` (24,631),
 `texture` (9,810), `ubo` (5,687), and `query_pool` (16,587), each with zero
-Fail, DeviceLost, TimedOut, or process-abnormal outcomes.
+Fail, DeviceLost, TimedOut, or process-abnormal outcomes. (Note: each
+parenthetical number here is the group's **Pass** count, not its total case
+count -- e.g. `compute` has 67,554 total cases, of which 66,853 are
+`NotSupported` and 701 are `Pass`, with zero `Fail`/`DeviceLost`/`TimedOut`.
+A 2026-11 session's raw `deqp-vk -n 'dEQP-VK.compute.*'` sanity sweep
+initially misread "(701)" as the full case count and incorrectly suspected a
+large case-count/baseline mismatch; re-checking `report.txt`'s per-case
+`Unrun -> <result>` transitions for the `compute` and `synchronization2`
+groups confirmed the parenthetical counts are exactly the `Pass` tallies and
+there is no discrepancy.)
 
 The conformance-target groups that remain honestly unsupported also have a
 complete baseline:
