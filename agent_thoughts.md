@@ -124326,3 +124326,44 @@ Iterating to find the *actual* scoping bug in the widening's `OtherCondBrBlocks`
 3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- still untouched, same IR-dump-and-reduce methodology candidate.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
+
+# Session: L419(t) -- landed the scoped L419(h) widening fix (6 cases), deferred the deeper masking sequencing bug it exposed
+
+**Next action for a future session:** read "Next steps" item 1 below, then fix `DiamondFlattener::flattenLoopBodyDiamond`'s stale uniform/divergent judgment (it needs to re-run, or defer, once masking is known) before re-attempting the poison-placeholder fix.
+
+## What happened, in order
+
+1. Resumed with the full L419(h) fix (widening + `StopBlock` fix + poison-placeholder phi-completeness fix) stashed from a prior, now-summarized session. `git stash pop` and rebuilt.
+2. Root-caused the `select_iteration_count_{fragment,vertex}` regression the poison-placeholder half of the fix reintroduces (6 cases, the exact same regression `L419(h)`'s own prior attempt hit independently): `do_while_dynamic_iterations.select_iteration_count_fragment`'s loop *header itself* has its own internal if/else (reading a uniform buffer via `feme.cpu.resource.load.raw.i32`, reconverging later -- not a loop exit). `DiamondFlattener::flattenLoopBodyDiamond`'s own early fixed-point pre-pass judges this diamond's branch uniform *before* masking has run (the call's mask operand is still constant `true` at that point in both builds) and permanently declines to flatten it. In baseline, the original phi-completeness bug keeps that mask at `true` even *after* masking finishes, so the branch genuinely never becomes divergent -- accidentally safe. With the poison-placeholder fix, masking correctly narrows it to the real `active.live` value later, making the branch genuinely divergent for the first time -- but `flattenLoopBodyDiamond`'s one-time verdict has already stuck, so the real divergent branch survives untouched into `feme-cpu-simdize`'s own independent, later `UniformityInfo` computation, which correctly rejects it. A real, distinct sequencing bug, confirmed via `FEME_DUMP_IR_PRESIMD=1`/`FEME_DUMP_DIVERGENT_BRANCH=1` diffing baseline vs. fixed IR.
+3. **Decision: land only the widening, revert the poison-placeholder fix.** Reverted `makeActivePNPair`/`addLatchIncoming` back to plain `addIncoming` (no poison seeding), with a comment explaining why. Reverted `loop-body-resource-call-then-nested-uniform-loop.ll` fully (its CHECK lines depended on the poison fix). Updated `loop-internal-break-with-mask-op.ll`'s comment to document the `i1 true` masking gap as still-open and deferred (not silently hidden), CHECK lines reverted to match.
+4. Rebuilt, ran `ninja check-feme`: 2 failures, both confirmed pre-existing/unrelated (`H165`'s `entry-wrapper-loop-header-derived-value-in-suffix.ll`; `SyncTest.QueueSubmitReturnsPromptlyThenCompletesAfterHostSignal`, reconfirmed a load-induced flake via `--gtest_repeat=3` in isolation, 3/3 pass).
+5. Mandatory device check: `FeMe CPU Vulkan Device` confirmed.
+6. Full `dEQP-VK.glsl.loops.special.*` sweep (552 cases): **540 Pass/12 Fail**, up from the 534/18 baseline, **zero regressions** (confirmed by diffing full before/after failure-name lists, not just counts). All 6 `conditional_break_{fragment,vertex}` cases now Pass.
+7. Updated `Roadmap.md` (new `L419(t)` row + `L419(h)` addendum), `VulkanCTSReport.md` (new end-of-file section), confirmed `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no change (compiler-internal fix only, no feature/extension surface touched).
+8. Ran `check-hlsl-feme-vk` (`offload-test-suite`): 492/492 Passed (0 unexpected), 273 Unsupported, 28 Expectedly Failed -- clean.
+9. Checked standing background sweep: `/tmp/l437_full_run2/` still alive (6 `deqp-vk` workers running), now **5352** completed batches in `qpa/` (up from 20 at last check -- progressing fast now). Still far from the ~1,800+ batch target claimed in earlier session notes, but clearly not stalled. Not yet complete -- still not actionable for the master-table replacement.
+10. Committed in 4 separate commits: (1) the `Linearize.cpp` fix + renamed test, (2) `.instructions.md` doc update, (3) `Roadmap.md` update, (4) `VulkanCTSReport.md` update. This `agent_thoughts.md` entry is commit 5 (always last).
+
+## Why landed now, not iterated further to also fix the masking gap
+
+The `flattenLoopBodyDiamond` staleness bug is a distinct, deeper architectural issue (a one-time judgment made from a pre-masking snapshot, never revisited) -- not a quick follow-on fix. Landing the widening alone is a strict, CTS-verified improvement (+6, -0) with no known risk; attempting to also fix the masking gap in the same session risks landing something with a real regression under time pressure, as nearly happened with this exact combination across two separate sessions now (this one and an earlier, now-summarized one that hit the identical `select_iteration_count` regression independently).
+
+## Key technical finding worth keeping (don't re-discover this)
+
+`DiamondFlattener::flattenLoopBodyDiamond`'s uniform/divergent judgment on a loop-body diamond is made and cached *once*, before `applyStageMasks` has necessarily finished narrowing any resource/image load's mask operand away from its as-lowered constant `true`. If a future masking-completeness fix (like the poison-placeholder one, reverted here) makes a previously-constant mask genuinely non-constant *after* that one-time judgment already ran, the now-really-divergent branch is never re-flattened and survives into `feme-cpu-simdize`'s own later, independent `UniformityInfo` check, which rejects it. Fix needs to either re-run the judgment after masking is known, or defer committing to "uniform, leave it" until masking is finalized -- not just for `select_iteration_count`'s specific shape, but for any diamond built from a resource/image load result.
+
+## Standing items
+
+1. **(check-in, cheap, every session)** `/tmp/l437_full_run2/` sweep: alive, 5352 batches done this check (up from 20). Keep checking `ps aux | grep deqp-vk` + `ls /tmp/l437_full_run2/qpa | wc -l`. Recover via the `L438` union-of-both-directories technique if it ever dies.
+2. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
+3. **(standing, retired per `L439`)** `offload-test-suite` drift -- closed, not re-checked this session, no new evidence either way.
+4. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- still untouched.
+5. **(standing, new this session)** `L419(h)`'s remaining 16 cases (12 special-loop residuals unrelated to this fix's shape + 4 loop-in-switch) still need their own root-cause; the `OtherCondBrBlocks.size()==1` widening does not apply to them (confirmed: they're the same failures before and after).
+
+## Next steps (ranked)
+
+1. **(~1 day)** Fix `DiamondFlattener::flattenLoopBodyDiamond`'s staleness bug: make its uniform/divergent judgment for a loop-body diamond built from a resource/image load result re-run (or defer) once `applyStageMasks` has finalized that load's mask operand, rather than committing to a one-time, pre-masking verdict. Then re-apply the poison-placeholder phi-completeness fix (code is fully described in this session's history/Roadmap `L419(t)` entry, small and reconstructable) and re-verify a full CTS sweep shows zero regressions (specifically: `select_iteration_count_{fragment,vertex}` for `do_while_dynamic`/`for_dynamic`/`while_dynamic` must still Pass) before landing.
+2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- same IR-dump-and-reduce methodology candidate, untouched.
+3. **(standing)** `L419(h)`'s remaining 12 special-loop residuals (`{for_dynamic,while_dynamic}_iterations.{elseblock,ifblock}_{fragment,vertex}`, `{for_uniform,while_uniform}_iterations.mixed_break_continue_{fragment,vertex}`) -- distinct shapes from the one this session fixed, need their own reduction.
+4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
