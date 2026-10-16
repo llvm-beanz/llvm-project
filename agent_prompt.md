@@ -69,24 +69,29 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(check-in, cheap, next session)** Check `/tmp/l437_full_run2/` progress the
-   same way this session checked `/tmp/l437_full_run/`: `ps aux | grep deqp-vk`
-   to confirm it's still alive (it should be now -- it's detached), and `ls
-   /tmp/l437_full_run2/qpa | wc -l` for a progress count. If it's somehow dead
-   anyway, repeat this session's recovery technique (extract completed cases
-   from **both** `l437_full_run` and `l437_full_run2`'s `qpa` output this time,
-   recompute the remainder, relaunch again detached).
-2. **(when the sweep eventually finishes, in either output dir or both)**
-   Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using
-   the **union** of completed cases from every `/tmp/l437_full_run*` directory,
-   not just the most recent one.
-3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- still
-   the same single commit (`0cc94c2`), unchanged, still needs a decision from a
-   session actually touching that repo for its own sake (not just incidentally,
-   as both `L437` and this session did).
-4. **(no longer standing, confirmed resolved)** The `FEME_*` env var audit is
-   done -- only one existed, already fixed. Don't re-run this check unless a new
-   `FEME_*`-prefixed var is added to `gpu_suite_env` in the future.
-5. **(no longer standing, confirmed resolved)** `Basic/Mandelbrot.test` --
-   492/492 `check-hlsl-feme-vk` passed cleanly again this session with the sweep
-   running concurrently. Treat as fixed, not a flake to keep spot-checking.
+1. **(standing item retired)** `offload-test-suite` drift is now closed for good
+   -- don't re-flag "7 ahead / 1 behind llvm-beanz/feme" as a pending decision
+   in future sessions. If the ahead/behind counts change (e.g. a genuinely new
+   commit appears on `llvm-beanz/feme`), re-check with `git patch-id` the same
+   way before assuming it's unresolved drift.
+2. **(check-in, cheap)** Keep checking `/tmp/l437_full_run2/` progress each
+   session (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). It
+   went from 7 to 9 completed batches across this session alone -- healthy but
+   slow going given ~1,800+ total batches remain. If it ever dies, recover using
+   the union-of-both-directories technique from `L438` (`l437_full_run` +
+   `l437_full_run2`'s `qpa` output combined), not either one alone.
+3. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
+   master per-group table in one pass using the union of completed cases from
+   both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s own
+   recommendation -- still not actionable yet, sweep nowhere near done.
+4. **(standing, still open)** `Basic/Mandelbrot.test` -- confirmed fixed at the
+   actual root cause (`L437`), not a flake needing spot-checks; 492/492 clean
+   again this session. No further action needed unless it fails again, in which
+   case check `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` reachability first per
+   `L437`'s finding.
+5. **(idea for a future session with real wall-clock budget)** Once
+   `/tmp/l437_full_run2/` finishes, that's the highest-leverage next step
+   overall (a full fresh per-group baseline covering ~3.25M cases) -- worth
+   prioritizing over any single-family CTS triage pass, since individual-family
+   re-sweeps risk re-discovering already-fixed ground (as happened with
+   `synchronization` in an earlier session).
