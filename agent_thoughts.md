@@ -124367,3 +124367,46 @@ The `flattenLoopBodyDiamond` staleness bug is a distinct, deeper architectural i
 3. **(standing)** `L419(h)`'s remaining 12 special-loop residuals (`{for_dynamic,while_dynamic}_iterations.{elseblock,ifblock}_{fragment,vertex}`, `{for_uniform,while_uniform}_iterations.mixed_break_continue_{fragment,vertex}`) -- distinct shapes from the one this session fixed, need their own reduction.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
+
+# Session: L419(u) -- fixed a real relay-chase ordering bug, but it does NOT resolve L419(t)'s poison-fix regression (course correction on a wrong carried-over premise)
+
+**Next action for a future session:** re-run `FEME_DEBUG_FLATTEN_TRACE=1` with the poison-placeholder fix applied (vs. without) to find the real companion bug -- don't re-read `L419(t)`'s comment as settled fact, it's imprecise about where the bug lives.
+
+## What happened, in order
+
+1. Mandatory device check: `FeMe CPU Vulkan Device` confirmed (`VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` -- note: each bash call is a fresh shell, must set this env var explicitly every single time, forgetting it silently runs against system Mesa).
+2. Picked up the carried-over task: "fix `flattenLoopBodyDiamond`'s staleness bug, then re-apply the poison-placeholder fix." Built a faithful standalone repro from a prior session's `FEME_DUMP_IR_PRENORM` dump of `select_iteration_count_fragment`, traced it with `FEME_DEBUG_FLATTEN_TRACE=1` + `opt -passes=instnamer`.
+3. **Found a real bug, but a different one than expected**: `DiamondFlattener::isLoopControlEdgeThroughRelay` checks `!isPureRelayBlock(Target)` *before* checking `Target == StopAt`. `StopAt` (the diamond's own reconvergence point) is allowed to hold real instructions (the loop's trip-count `icmp`) -- gating on `isPureRelayBlock` first wrongly disqualifies that shape before ever checking `StopAt`. Fixed by reordering the checks.
+4. **Course correction, the important part of this session**: before declaring victory, verified the fix actually changes anything with a true `git stash` + full rebuild red/green test. Discovered: **`select_iteration_count` already passes on clean HEAD** (540/552, confirmed twice with `--deqp-shadercache=disable`) -- the carried-over premise that it currently regresses was wrong. Re-confirmed (by re-applying only the poison-placeholder fix in isolation) that the regression `L419(t)` describes **only appears when that abandoned fix is reapplied** (534/552, exactly the 6 cases `L419(t)` names).
+5. Combined this session's relay-chase fix with the poison-placeholder fix and re-swept: **still 534/552, identical 6 failures.** The relay-chase fix does not resolve the poison-fix regression -- it's a real, independently-correct bug, but a different bug from the one blocking the poison-placeholder fix.
+6. Reverted the poison-placeholder experiment out of the working tree (not landing it). Kept only the relay-chase fix.
+7. Built a properly red/green-validated regression test this time (`loop-header-diamond-reconvergence-has-real-check.ll`, using the verbatim vector-based repro, not a hand-reduced scalar version -- a hand-reduction attempt earlier in this session's history silently failed to reproduce the bug at all, identical output with/without the fix).
+8. Full validation: `check-feme` 3768/3776 (only the known pre-existing `H165` failure), `check-hlsl-feme-vk` 492/492, `dEQP-VK.glsl.loops.special.*` 540/552 bit-for-bit identical to true baseline (zero regressions, zero new passes -- this fix is currently inert on every real case).
+9. Committed in 2 commits: (1) the `Linearize.cpp` fix + new test, (2) `Roadmap.md`/`VulkanCTSReport.md` updates. This `agent_thoughts.md` entry is commit 3 (always last).
+10. Checked standing background sweep: `/tmp/l437_full_run2/` alive, 42,404 `qpa` files (up from 26,108 last checked) -- still progressing, not done.
+
+## Why land an "inert" fix at all
+
+It's a genuine, independently-verifiable correctness bug (confirmed via a real IR diff on the standalone repro), it has zero CTS/unit-test cost to land (bit-for-bit identical results everywhere), and leaving it in place while investigating the real poison-fix companion bug only adds noise to future tracing sessions. Landing it now, documented honestly as "found, fixed, currently inert," is strictly better than leaving it uncommitted or overclaiming it fixes `select_iteration_count`.
+
+## Key technical finding worth keeping (don't re-discover this)
+
+The carried-over summary from a prior, now-compacted session claimed "select_iteration_count currently regresses on HEAD due to a masking staleness bug" -- **this was subtly wrong**. The regression only exists in a *hypothetical* combined state (clean HEAD + the already-abandoned poison-placeholder fix reapplied), not on actual HEAD. Any future summary inheriting this thread should say: "HEAD passes cleanly; the regression is conditional on reapplying the still-abandoned poison-placeholder fix," not "HEAD currently regresses."
+
+Also: `L419(t)`'s own comment attributes the deeper bug to `flattenLoopBodyDiamond`'s "early fixed-point pre-pass" -- but `flattenLoopBodyDiamond`'s caller explicitly skips `Header`/`Latch` blocks, so it's never even invoked on the diamond in question. The real flattening of `Header`'s internal diamond happens in `DiamondFlattener::run()`'s separate whole-function walk. This attribution needs fresh verification, not reuse.
+
+## Standing items
+
+1. **(check-in, cheap, every session)** `/tmp/l437_full_run2/` sweep: alive, 42,404 `qpa` files this check (up from 26,108). Keep checking `ps aux | grep deqp-vk` + `ls /tmp/l437_full_run2/qpa | wc -l`. Recover via the `L438` union-of-both-directories technique if it ever dies.
+2. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
+3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- still untouched.
+4. **(standing, unchanged)** `L419(h)`'s remaining 16 cases (12 special-loop + 4 loop-in-switch) still need their own root-cause.
+5. **(standing, unchanged)** `L419(t)`'s deferred masking gap -- the poison-placeholder fix is still not safe to land; the real companion bug is still unidentified (see Next steps #1).
+
+## Next steps (ranked)
+
+1. **(~2-3 hours)** Re-apply the poison-placeholder fix alone (code is small, described in `L419(t)`'s own entry and this session's diff history, fully reconstructable) and use `FEME_DEBUG_FLATTEN_TRACE=1` to trace `select_iteration_count_fragment` **with the poison fix applied**, comparing against a trace **without** it. Find exactly which flatten/flatten-decision differs between the two traces -- don't assume it's `flattenLoopBodyDiamond` (confirmed not called for Header/Latch) or `DiamondFlattener::run()`'s walk (this session's relay-chase fix already touches that path and didn't help) without first looking.
+2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- same IR-dump-and-reduce methodology candidate, untouched.
+3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4 loop-in-switch) -- distinct shapes, need their own reduction.
+4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
