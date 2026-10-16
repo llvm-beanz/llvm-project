@@ -58,33 +58,30 @@ file.
 
 **Always**: Make sure you are not using precompiled headers in your build.
 
-# Request
+**Always**: End each session with a commit of the agent thoughts even if
+mid-investigation to avoid losing documentation.
 
-The last session ended without committing results. Any intermediate results are
-stored in a git stash.
+# Request
 
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~2-4 hours)** Mandelbrot flake -- still not picked up, several
-   sessions running now. Low priority, change of pace.
-2. **(standing, unresolved many sessions)**
-   `backup-before-rebase-20261014` tag decision,
-   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
-   revisited this session either.
-3. **(new this session)** `offload-test-suite` checkout: local `feme`
-   branch is 7 commits ahead *and* 1 commit behind
-   `llvm-beanz/feme` (diverged, not just stale) -- the single
-   remote-only commit (`0cc94c2`, "Add FeMe test targets") only touches
-   `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`, and the 3
-   previously-found drift fixes (`VkBool32`, `WaveActiveMax` XFAIL,
-   `array_of_matrices` XFAIL) are all still present locally, so this is
-   not the standing drift pattern recurring -- but a future session
-   should decide whether to rebase/merge that one remote commit in, or
-   confirm it's already superseded locally in a different form, before
-   trusting the local checkout's CMake wiring indefinitely.
-4. No remaining roadmap item currently known to block anything in the
-   `variablePointers`/milestone-9 area -- `K6a`'s full tree (`K6n`
-   through `K6z`, `L430`) is now closed end to end. Next open item with
-   its own next-step text is whichever `L428`-family or standing item
-   the next session's own prior-session summary names.
+1. **(~15 min)** Drop the one-line "the prior session's work was lost"
+   friction going forward: consider ending every session with an explicit
+   `git commit` of `agent_thoughts.md`/doc changes as the very last action,
+   even if mid-investigation, so a hard stop never loses doc work again
+   (code-level WIP can stay stashed, but doc bookkeeping is cheap to commit
+   early and often).
+2. **(~2-4 hours)** Still-open from prior sessions: nothing new is blocking.
+   The `L428`-family and `K6n`-proper items referenced in earlier session
+   next-steps were already closed out per the `L430`/`L428(a)` entries --
+   re-check `Roadmap.md` for any remaining non-struck-through row before
+   assuming there's a specific next target; if none, the project may be at
+   a natural checkpoint for a fresh triage pass (e.g. a new raw CTS sweep
+   compared properly against Pass-count baselines this time) rather than
+   chasing a named item.
+3. **(standing)** Keep re-checking `offload-test-suite`'s `feme` branch for
+   the safety-net-timeout fix every session -- it lives outside this repo's
+   history and the every-session reset (`agent-setup.sh`) only restores it
+   via the cherry-pick + the 4 known drift-fix commits, which were all still
+   present and did not need redoing this session.
