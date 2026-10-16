@@ -66,20 +66,24 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, start fresh)** `api.*` is now at its intended design ceiling (1
-   expected-by-design Fail, 0 unexplained). Pick a *different*,
-   not-yet-exhaustively-swept family next -- `copy_and_blit`/`image_clearing`
-   (both only ever sampled by `L302`, same as `api.*` was before this session).
-2. **(~15 min, cheap)** Clean up `/tmp/l435_*`, `/tmp/asan_run_*`,
-   `/tmp/asan_instr_*`, `/tmp/mt_device_*`, `/tmp/clean_rebuild_*`, `/tmp/t2*`
-   -- all regenerable, not yet deleted as of this writing.
-3. **(standing, many sessions now)** `Basic/Mandelbrot.test` flake -- confirmed
-   present again this session, still not picked up as its own item.
-4. **(standing)** `offload-test-suite` `feme`-branch drift -- same single commit
-   (`0cc94c2`), unchanged, still needs a decision from a session actually
-   touching `offload-test-suite`.
-5. **(low priority, future stress test)** If a future session touches
-   multithreaded device lifecycle again and hits a similar crash, check this
-   `L435` writeup first before re-deriving the ASan-no-runtime-archive
-   workaround or re-reading the same FeMe object files -- they were already read
-   clean this session.
+1. **(multi-day, highest-leverage available, needs a session that can dedicate
+   real wall-clock time)** A full from-scratch CTS re-triage (~3.25M cases) to
+   refresh the entire master per-group table at once. `api.*` alone (267,512
+   cases) took a meaningful chunk of a session; the full suite is ~12x that.
+   This is the real "start fresh" item now, not picking individual families one
+   at a time -- every individual-family re-sweep from here on risks
+   rediscovering already-fixed ground like this session did with
+   `synchronization`.
+2. **(standing, many sessions now, 12 more clean runs this session)**
+   `Basic/Mandelbrot.test` flake -- 0/12 failures this session (6 isolated + 6
+   under 12-worker parallel load). Either needs a much bigger sample (50-100+
+   runs) or direct harness instrumentation to ever catch it in the act; passive
+   spot-checking across sessions isn't converging on a repro.
+3. **(standing)** `offload-test-suite` `feme`-branch drift -- still the same
+   single commit (`0cc94c2`), unchanged, still needs a decision from a session
+   actually touching that repo.
+4. **(reminder for next session)** Before trusting any prior session's "family X
+   hasn't been swept" claim, verify the group actually exists as a top-level
+   `GROUP:` via a quick `--deqp-runmode=stdout-caselist` check first -- cheap,
+   and would have saved the wasted `copy_and_blit`/`image_clearing` detour this
+   session hit.
