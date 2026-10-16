@@ -53,6 +53,9 @@ and apply the fix in a commit that only touches files from outside the FeMe
 subdirectory. Ensure that fixes to other LLVM sub-projects are self-contained
 and tested.
 
+**When you find an issue with environment or process**: Codify it in Feme's
+.instructions.md file so future sessions don't lose it.
+
 **Always**: Add thoughts and next steps to the end of the agent_thoughts.md
 file.
 
@@ -66,24 +69,30 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(multi-day, highest-leverage available, needs a session that can dedicate
-   real wall-clock time)** A full from-scratch CTS re-triage (~3.25M cases) to
-   refresh the entire master per-group table at once. `api.*` alone (267,512
-   cases) took a meaningful chunk of a session; the full suite is ~12x that.
-   This is the real "start fresh" item now, not picking individual families one
-   at a time -- every individual-family re-sweep from here on risks
-   rediscovering already-fixed ground like this session did with
-   `synchronization`.
-2. **(standing, many sessions now, 12 more clean runs this session)**
-   `Basic/Mandelbrot.test` flake -- 0/12 failures this session (6 isolated + 6
-   under 12-worker parallel load). Either needs a much bigger sample (50-100+
-   runs) or direct harness instrumentation to ever catch it in the act; passive
-   spot-checking across sessions isn't converging on a repro.
-3. **(standing)** `offload-test-suite` `feme`-branch drift -- still the same
-   single commit (`0cc94c2`), unchanged, still needs a decision from a session
-   actually touching that repo.
-4. **(reminder for next session)** Before trusting any prior session's "family X
-   hasn't been swept" claim, verify the group actually exists as a top-level
-   `GROUP:` via a quick `--deqp-runmode=stdout-caselist` check first -- cheap,
-   and would have saved the wasted `copy_and_blit`/`image_clearing` detour this
-   session hit.
+1. **(check-in, cheap)** The full-CTS re-triage (shellId from this session,
+   `/tmp/l437_full_run/`) is still running, ~190/1,800+ batches in. A future
+   session should check its progress first via `ls /tmp/l437_full_run/qpa/ | wc
+   -l` and the report file, and only replace `VulkanCTSReport.md`'s master table
+   once it's actually complete -- don't trust a partial count as final.
+2. **(standing, now explained, probably closeable as "standing")**
+   `Basic/Mandelbrot.test` -- no longer an open flake investigation. It was
+   deterministic under sufficient background load and is now fixed at the actual
+   root cause (lit env passthrough). A future session doesn't need to keep
+   "spot-checking" it as a standing item; if it ever fails again, check first
+   whether `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` is actually present in the
+   failing subprocess's own environment (e.g. via `/proc/<pid>/environ`) before
+   assuming a new regression.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- still
+   the same single commit (`0cc94c2`), unchanged. This session *did* touch
+   `offload-test-suite` (the lit.cfg.py fix), but that's a local,
+   uncommitted-upstream change on top of the existing drift, not a resolution of
+   the drift question itself -- still needs its own decision from a session that
+   wants to actually reconcile it.
+4. **(worth a quick look, ~15 min)** Grep
+   `offload-test-suite/test/CMakeLists.txt` and `lit.cfg.py` for any *other*
+   `FEME_*`-prefixed env vars set on the outer build command the same way
+   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` was -- if any exist, they likely have the
+   exact same silent-no-op bug and are worth checking/fixing in the same pass.
+5. **(when the full re-triage finally completes)** Replace
+   `VulkanCTSReport.md`'s entire master per-group table in one pass (per
+   `L436`'s own recommendation), rather than patching individual rows piecemeal.
