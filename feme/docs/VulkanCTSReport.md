@@ -5159,3 +5159,118 @@ untouched this session: `Basic/Mandelbrot.test`'s flake; the
 resolved in `L431`); the standing `offload-test-suite`
 `feme`-branch-vs-`main` drift re-check (not re-verified this session,
 no `offload-test-suite` work was done).
+
+## `L434` closed: stale-`CycleInfo` membership in `isLoopControlEdge` fixed, all remaining 6,024 `synchronization.op` failures flipped to Pass
+
+Scoped, per the prior session's own handoff, a new, previously
+undiscovered CFG shape from the `K6z`/`L425` "internal branch in a
+body shape this milestone does not yet lower" diagnostic family: two
+nested *uniform* loops, each independently containing an image
+load/store pair, with no mask-affecting op anywhere in the function --
+isolated via `dEQP-VK.synchronization.op.single_queue.barrier.
+write_image_compute_read_image_compute.image_128x128_r16_uint`'s
+compiled compute-stage shader, which only fails when the two loops are
+nested together (either loop alone linearizes cleanly on its own).
+
+Root-caused via `FEME_DUMP_IR_PRENORM=1` plus
+`FEME_DEBUG_LINEARIZE_TRACE`-instrumented tracing of a standalone,
+`instnamer`-named reproduction -- after first fixing a latent bug in
+the debugging technique itself, inherited from the `L433` session: the
+`Quiet=false` re-run-on-failure probe did not roll back `validate`'s
+own `MergeVisited`/`LastRegionVisited` insertions left behind by the
+first, failed `Quiet=true` call, manufacturing a false "already
+visited" diagnostic that was an artifact of the probe itself, not the
+real bug (fixed by snapshotting both sets before the first call and
+restoring them before the second). With that fixed, the real
+diagnostic surfaced: `"an empty diamond arm (in 'bb15') is not yet
+supported"`.
+
+Root cause: `CycleInfo CI` is computed exactly once per function, in
+`LinearizePass::run()`, and -- unlike `DT`/`PDT`, which are
+recalculated before every single `linearizeCycle` call -- is never
+recomputed afterward, even though `linearizeCyclePostOrder` mutates
+the CFG extensively between cycles as it processes them post-order.
+Once the *inner* loop (provably uniform, no mask-affecting op) is
+linearized, its own redundant-`Flow`-dispatch-block collapse rewires
+its exit relay (a `.Flow_crit_edge`-style block) to branch straight
+past the now-deleted `Flow` block to the loop's real exit -- but `CI`'s
+frozen snapshot still reports that relay as a member of the inner
+cycle: `CI.contains` is a static membership query, unaffected by later
+edge rewiring, and dominance is unaffected too (the relay is still
+dominated by the header exactly as before; dominance only reasons
+forward from the entry). When the *outer* loop's own body-region
+precheck later walks through the inner loop's own (unmutated) exit
+check, `isLoopControlEdge` wrongly reports its exit edge as an
+ordinary interior edge rather than a cycle boundary, so `validate`
+tries to flatten the exit check as an ordinary two-way diamond --
+computing its immediate post-dominator as the exit relay itself
+(structurally correct: every remaining path must pass through it
+before the function's one `ret`), which then collides with that same
+relay also being one of the exit check's own two successors, tripping
+the "empty diamond arm" diagnostic.
+
+A wholesale `CI.compute(F)` recompute mid-traversal was considered and
+rejected as unsafe: `CycleRef` handles are documented valid only until
+the cycle forest's next recompute, and `linearizeCyclePostOrder` holds
+such handles across recursive stack frames while iterating
+`CI.children(C)`, so invalidating them mid-walk would corrupt an
+in-flight ancestor frame's own iteration.
+`GenericCycleInfo::addBlockToCycle` was also checked and found to only
+support a block *joining* a cycle, not leaving one, so it doesn't fit
+this case either.
+
+Fixed instead with a narrower, targeted change: `isLoopControlEdge`
+now falls back to a live, `CI`-membership-bounded reachability check
+(`canReachBlock`) whenever `CI.contains` claims a target is still a
+cycle member -- mirroring the freshness `DT`/`PDT`'s own recompute
+already provides for dominance, but scoped as a pure fallback (it
+never fires for the common, non-stale case, since any genuinely-still-
+member block can, by that membership's own strongly-connected-
+component definition, still reach the header). `canReachBlock`'s BFS
+is confined to only follow successors `CI.contains` *also* still
+reports as members of the same (stale) candidate cycle, so it cannot
+escape through some unrelated route -- an earlier, unconfined version
+of this same idea was tried first and found to produce a false "still
+reachable" answer via the *outer* loop's own backedge re-entering the
+inner loop's header on a later outer iteration, which is not evidence
+of interior-cycle reachability at all.
+
+**Results**:
+
+- New lit regression:
+  `feme/test/Transforms/CPU/Linearize/nested-uniform-loops-with-image-calls.ll`,
+  isolating this exact shape through `feme-cpu-linearize` alone
+  (renamed from the real captured IR's numeric block names to
+  meaningful ones, topology preserved verbatim); confirmed via a
+  `git stash` bisection to fail without the fix (same "empty diamond
+  arm" diagnostic) and pass with it.
+- `FeMeTransformsCPUTests`: 638/638 Pass.
+- `ninja check-feme`: 3765/3773 Passed, 7 Unsupported, 1 Failed -- the
+  same pre-existing, already-tracked
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, not
+  a new regression.
+- Target CTS repro: **Pass (OK)**, 1/1 100%.
+- `dEQP-VK.synchronization.op.*` full re-sweep (20,131 cases):
+  **14,694 Pass / 5,437 NotSupported / 0 Fail** (up from the `L433`
+  baseline's 8,670 Pass / 5,437 NotSupported / 6,024 Fail -- **all
+  6,024 remaining failures flipped to Pass**, closing out the entire
+  `synchronization.op` failure set in one fix, not just the single
+  nested-loop shape it was isolated from. Apparently every remaining
+  `K6z`/`L425`-family case reachable in this particular test family
+  shared this exact stale-`CycleInfo` root cause once reached --
+  unlike `L432(b)`/`L433`, where the blast radius was a large but
+  partial fraction of the then-remaining failures).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure internal compiler CFG-handling fix, no feature/extension
+surface change).
+
+**Next steps**: with `synchronization.op.*` now at 0 Fail, a future
+session should pick a different CTS test family for its next raw
+sweep-and-triage pass (e.g. the broader `api.*`/`copy_and_blit`/
+`image_clearing` families `L302` originally sampled from, or a fresh
+full mustpass run) rather than continuing to mine this now-closed
+family. The usual standing items remain untouched this session:
+`Basic/Mandelbrot.test`'s flake; the standing `offload-test-suite`
+`feme`-branch-vs-`main` drift re-check (not re-verified this session,
+no `offload-test-suite` work was done).
