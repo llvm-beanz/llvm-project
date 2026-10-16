@@ -123777,3 +123777,108 @@ state, so that one stuck).
    history and the every-session reset (`agent-setup.sh`) only restores it
    via the cherry-pick + the 4 known drift-fix commits, which were all still
    present and did not need redoing this session.
+
+# Session: L302 closed, L432 opened -- a 9,795-case CFG-linearization gap found, root-caused, deliberately not fixed yet
+
+## What happened
+
+1. Confirmed device: `FeMe CPU Vulkan Device` via `VK_ICD_FILENAMES` (plain
+   `vulkaninfo` still shows `llvmpipe` by default -- same every session).
+2. Scanned `Roadmap.md` for open rows. Found `L302` (CTS sampling of
+   `api.*`/`synchronization.*`, explicitly flagged "overdue many sessions")
+   still had three unsampled batches. Picked it up.
+3. **Hit a real methodology bug before trusting any result**: `run_vulkan_cts.py`
+   inherits the caller's env rather than setting `VK_ICD_FILENAMES` itself, and
+   each tool call is a fresh shell with no persisted state. Two batches ran
+   against system-default `llvmpipe`, not FeMe, completely silently. Caught it
+   by isolating one "Fail" case and re-running it standalone -- got a
+   *different* result than the batch's own internal re-check of the same case
+   name. That contradiction was the tell. Redid all three batches with
+   `VK_ICD_FILENAMES` explicitly exported in the same bash call as the runner.
+4. Results, all FeMe-verified this time:
+   - Small/medium `api.*` leftovers (13,865 cases): 7,041 Pass, 6,823
+     NotSupported, **1 Fail** -- already-known, already-filed won't-fix
+     `L412(g)`. Clean.
+   - `synchronization.op` (20,131 cases): 4,899 Pass, 5,437 NotSupported,
+     **9,795 Fail** -- all one root cause (see below).
+   - `copy_and_blit`/`image_clearing` (55,122 cases, previously skipped as
+     "too large"): 23,108 Pass, 32,014 NotSupported, **0 Fail**. Clean.
+5. The 9,795 sync.op failures all trace to one diagnostic:
+   `feme-cpu-linearize: ... loop ... has a mask-affecting operation in its
+   body but no recognized uniform exit check`. This was *known* (mentioned
+   inside the already-closed `K6u`/`K6v` rows) but never given its own
+   roadmap item. Dumped the real failing IR (`FEME_DUMP_IR_PRENORM=1`
+   against `deqp-vk` directly, since the failure is *inside* `LinearizePass`)
+   for `write_blit_image_read_image_compute.image_128_r32_uint_concurrent`:
+   a plain `for(i=0;i<128;++i){load;store;}` loop where the real uniform
+   check sits one *unconditional* hop past `Header`, and its exit routes
+   through a shared `Flow`-style dispatch block with **phi-merged boolean
+   operands** -- distinct from `K6v`'s already-fixed phi-less, one-hop-
+   upstream-of-`Latch` shape.
+6. Read `matchExitCheckWithRelay`/`recoverRelayExitCheck`/`isPureRelayBlock`/
+   `OtherCondBrBlocks`/`DivergentCandidates` in `Linearize.cpp` in detail.
+   Root cause confirmed: the existing "check lives somewhere other than
+   `Header`/`Latch`" recovery path is gated on `isDivergentBranch` --
+   it only ever promotes a non-`Header`/`Latch` block into the real-check
+   role when that block is genuinely divergent. This shape's check and its
+   merge block are both fully *uniform*, so neither is ever considered.
+7. **Decided not to attempt the fix this session.** A forward-walk
+   generalization of `K6v`'s promotion (mirroring `uniformRelayChain`'s
+   existing backward walk) looks tractable in principle, but
+   `OtherCondBrBlocks` has *two* members in this shape (not one), and
+   `K6u`/`K6v`/`K6w` each took a full dedicated session for one distinct
+   CFG sub-shape in this exact file. Filed it instead as `L432` (full
+   root-cause writeup) with `L432(a)` breaking down the concrete fix steps,
+   so a future session can start implementing immediately instead of
+   re-deriving the root cause.
+8. Closed `L302` in `Roadmap.md` (struck through); logged everything in
+   `VulkanCTSReport.md`. No FeMe source changes this session, so reran
+   `check-feme` (3762/3770, same pre-existing failure) and
+   `check-hlsl-feme-vk` (492/492) purely as a sanity check, not because
+   anything could have regressed.
+
+## A flake worth noting but NOT a real bug
+
+One single `vulkaninfo` call with `VK_ICD_FILENAMES`+`VK_DRIVER_FILES` both
+set returned `llvmpipe` instead of FeMe -- looked like a serious new
+both-vars-set loader bug at first. Retested 20+ times afterward (both vars,
+just one var) and got `FeMe CPU Vulkan Device` every single time. Could not
+reproduce. Treating it as a one-off transient (maybe a stray background
+process mid-init at that exact moment), not a real finding. Flagging here
+only so a future session doesn't waste time chasing it as a phantom "both
+vars breaks things" theory -- it doesn't, as far as 20 repeated trials show.
+
+## Wins
+
+- `L302` fully closed -- the last standing "overdue many sessions" sampling
+  gap is gone.
+- Found the single highest-leverage known compiler gap in the whole project
+  right now: one diagnostic, 9,795 cases in one CTS subgroup alone.
+- Root-caused it precisely enough that a future session can start coding
+  immediately (see `L432(a)`) instead of re-deriving any of this.
+- Caught a real methodology bug (env not persisting across tool calls) via
+  cross-checking rather than trusting a single run -- exactly the kind of
+  thing that could otherwise poison a whole session's conclusions.
+- `copy_and_blit`/`image_clearing`, the two biggest previously-"too large"
+  subgroups, are both now fully clean (0 Fail across 55,122 cases).
+
+## Next steps
+
+1. **(~1-2 days, highest leverage available)** `L432(a)`: implement the
+   `Linearize.cpp` fix. Start with a minimal, committed `.ll` regression
+   test from `/tmp/sync_op_prenorm.ll`'s shape (regenerable via
+   `FEME_DUMP_IR_PRENORM=1` + the `write_blit_image_read_image_compute.
+   image_128_r32_uint_concurrent` repro if `/tmp` has been cleared). Then
+   extend the check-recovery logic to (a) walk forward from `Header`
+   through trivial unconditional pass-through blocks to find a real check,
+   and (b) recognize a *uniform* phi-merged `Flow`-style dispatch block on
+   the exit side, not just a divergent one. Verify via
+   `FeMeTransformsCPUTests`/`check-feme`, then a real CTS re-run of
+   `synchronization.op` (expect most of the 9,795 to flip to Pass/
+   NotSupported).
+2. **(standing)** `Basic/Mandelbrot.test`'s flake -- confirmed still fixed
+   this session (492/492), not re-broken, but still not actively worked on
+   as its own item in several sessions now.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
+   re-check -- not re-verified this session, no `offload-test-suite` work
+   was done and the checkout was not re-cloned, so drift risk is unchanged.
