@@ -123706,3 +123706,74 @@ several rebuild cycles.
    through `K6z`, `L430`) is now closed end to end. Next open item with
    its own next-step text is whichever `L428`-family or standing item
    the next session's own prior-session summary names.
+
+# Session: L431 -- housekeeping redo after an uncommitted prior session, plus a CTS-report false alarm resolved
+
+## What happened
+
+The prior session ended without committing. Its real code fix (the
+`offload-test-suite` safety-net-timeout restoration, commit `17f2adb`)
+survived because it lives in a separate repo with its own commit. Everything
+that would have landed in `llvm-project` itself -- `Roadmap.md`,
+`VulkanCTSReport.md`, `agent_thoughts.md`, and the tag deletion -- did not
+survive, except the tag deletion (git tag deletions aren't stash/working-tree
+state, so that one stuck).
+
+1. Confirmed device: `FeMe CPU Vulkan Device` via `VK_ICD_FILENAMES`. Standard
+   every-session check, done.
+2. Checked `backup-before-rebase-20261014` tag -- already gone (prior
+   session's `git tag -d` wasn't lost). Nothing to redo here.
+3. Confirmed `CMAKE_BUILD_TYPE=RelWithDebInfo` still set. Re-affirmed keeping
+   it (heavy `gdb` use; assertions+`ccache` already give most of the speed
+   win `Release` would add).
+4. Re-ran `ninja check-hlsl-feme-vk`: **492/492 Passed, 0 Failed.**
+   `Basic/Mandelbrot.test` stays fixed -- the `offload-test-suite` fix
+   (`FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=30000`) is still wired into the build
+   (confirmed in `build.ninja`).
+5. Re-ran `ninja check-feme`: **3762/3770 Passed**, 7 Unsupported, 1 Failed
+   -- same pre-existing `entry-wrapper-loop-header-derived-value-in-suffix.ll`
+   failure tracked since `L426`/`L429`. Not new, not actionable this session.
+6. Chased down the CTS case-count concern flagged by the interrupted prior
+   session (raw `-n` enumeration finding 67,554 cases for
+   `dEQP-VK.compute.*` vs. the doc's "`compute` (701)"). **False alarm**: the
+   `(701)` in `VulkanCTSReport.md`'s "Notable clean groups" line was always
+   the group's **Pass** count, not its total case count. Re-reading the
+   original full run's `report.txt` `Unrun -> <result>` transitions confirms
+   it exactly: `compute` is 67,554 total (66,853 `NotSupported` + 701
+   `Pass` + 0 `Fail`/`DeviceLost`/`TimedOut`). Same story for
+   `synchronization2` (81,617 total, 56,986 `NotSupported`, 24,631 `Pass`).
+   Added a one-paragraph footnote to `VulkanCTSReport.md` so this doesn't
+   get re-flagged as a phantom regression in a future session.
+
+## Wins
+
+- `check-hlsl-feme-vk`: 492/492, confirming the Mandelbrot flake fix holds.
+- `check-feme`: 3762/3770, no regressions.
+- Closed out a standing methodology question that had been bouncing between
+  session summaries unresolved for at least one prior session -- it was a
+  misread, not a real gap. No code changes needed anywhere.
+- No FeMe source changes this session; this was entirely verification +
+  documentation (`Roadmap.md` `L431` row, `VulkanCTSReport.md` footnote,
+  this entry).
+
+## Next steps
+
+1. **(~15 min)** Drop the one-line "the prior session's work was lost"
+   friction going forward: consider ending every session with an explicit
+   `git commit` of `agent_thoughts.md`/doc changes as the very last action,
+   even if mid-investigation, so a hard stop never loses doc work again
+   (code-level WIP can stay stashed, but doc bookkeeping is cheap to commit
+   early and often).
+2. **(~2-4 hours)** Still-open from prior sessions: nothing new is blocking.
+   The `L428`-family and `K6n`-proper items referenced in earlier session
+   next-steps were already closed out per the `L430`/`L428(a)` entries --
+   re-check `Roadmap.md` for any remaining non-struck-through row before
+   assuming there's a specific next target; if none, the project may be at
+   a natural checkpoint for a fresh triage pass (e.g. a new raw CTS sweep
+   compared properly against Pass-count baselines this time) rather than
+   chasing a named item.
+3. **(standing)** Keep re-checking `offload-test-suite`'s `feme` branch for
+   the safety-net-timeout fix every session -- it lives outside this repo's
+   history and the every-session reset (`agent-setup.sh`) only restores it
+   via the cherry-pick + the 4 known drift-fix commits, which were all still
+   present and did not need redoing this session.
