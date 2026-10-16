@@ -2097,6 +2097,102 @@ TEST(SIMDizeTest, RetargetsNestedGroupSharedGetElementPtr) {
                  I.getType()->getPointerAddressSpace() == 3);
 }
 
+// Roadmap L430: a `select` merging two groupshared pointers rooted at
+// *different* globals, feeding a genuine `load` -- the
+// `dEQP-VK.spirv_assembly.instruction.compute.variable_pointers.compute.
+// workgroup_two_buffers` shape. Before L430, `rewriteGroupSharedGlobals`
+// rejected any `PHINode`/`SelectInst` use of a groupshared global
+// outright; verifies it is now retargeted onto the flat groupshared
+// buffer with no diagnostic, and that no groupshared-addrspace pointer
+// (nor the `select` itself) survives.
+TEST(SIMDizeTest, RetargetsGroupSharedPointerSelectAcrossTwoGlobals) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %c = call i1 @cond()
+      %p = select i1 %c, ptr addrspace(3) @bufA, ptr addrspace(3) @bufB
+      %val = load i32, ptr addrspace(3) %p
+      ret void
+    }
+    @bufA = internal addrspace(3) global i32 0
+    @bufB = internal addrspace(3) global i32 0
+    declare i1 @cond()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  LLVMContext &MCtx = M->getContext();
+  MCtx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        *static_cast<bool *>(Ctx) = DI->getSeverity() == DS_Error;
+      },
+      &SawError);
+  runPass(*M);
+  EXPECT_FALSE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+}
+
+// Roadmap L430: a self-referential, loop-carried groupshared pointer
+// `phi` (one incoming edge is a `getelementptr` derived from the very
+// phi it feeds back into -- the classic pointer-iterator loop shape),
+// compared with `icmp` (`OpPtrEqual`'s own lowering) -- the
+// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opptrequal.
+// variable_pointers_wg_equal` shape. Before L430's
+// `isSupportedGroupSharedNestedGEPUser`/`isSupportedGroupSharedMergeUser`
+// fix for this exact backedge, the nested GEP's own forward-user
+// validation did not know a merge was a supported destination, so this
+// was rejected; verifies it is now retargeted with no diagnostic and
+// that the loop-carried GEP/phi are fully flattened off the groupshared
+// addrspace.
+TEST(SIMDizeTest, RetargetsSelfReferentialGroupSharedPointerPhiWithCompare) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %loop
+    loop:
+      %iter = phi ptr addrspace(3) [ @shared, %entry ], [ %next, %loop ]
+      %eq = icmp eq ptr addrspace(3) %iter, @shared
+      %next = getelementptr i32, ptr addrspace(3) %iter, i32 1
+      %cond = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp ult i32 %cond, 4
+      br i1 %c, label %loop, label %exit
+    exit:
+      ret void
+    }
+    @shared = internal addrspace(3) global [8 x i32] undef
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  LLVMContext &MCtx = M->getContext();
+  MCtx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        *static_cast<bool *>(Ctx) = DI->getSeverity() == DS_Error;
+      },
+      &SawError);
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+  EXPECT_FALSE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+}
+
 // Roadmap H6g-b-a-i-a-i-b: a divergent vector comparison (`fcmp`/`icmp`)
 // producing a `<N x i1>` result must decompose into `N` per-component
 // `<W x i1>` comparisons instead of the illegal `<W x <N x i1>>` a naive

@@ -22,7 +22,9 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ReplaceConstant.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Alignment.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 using namespace llvm;
 
@@ -54,12 +56,16 @@ std::optional<unsigned> getGatherScatterPtrOperandNo(const CallInst *CI) {
 }
 
 /// Returns whether \p U is a groupshared access this pass knows how to
-/// retarget directly: a plain `load`/`store`/`atomicrmw`/`cmpxchg`, or a
+/// retarget directly: a plain `load`/`store`/`atomicrmw`/`cmpxchg`, a
+/// `ptrtoint` (roadmap L429(a)-adjacent `OpPtrDiff`/`OpConvertPtrToU`
+/// shape: the pointer's own address space never appears in a `ptrtoint`'s
+/// result type, so retargeting its sole pointer operand needs no rebuild,
+/// exactly like a `load`/`store`'s pointer operand below), or a
 /// gather/scatter call's pointer argument (see
 /// `getGatherScatterPtrOperandNo`).
 bool isSupportedGroupSharedLeafUser(const User *U) {
   if (isa<LoadInst>(U) || isa<StoreInst>(U) || isa<AtomicRMWInst>(U) ||
-      isa<AtomicCmpXchgInst>(U))
+      isa<AtomicCmpXchgInst>(U) || isa<PtrToIntInst>(U))
     return true;
   const auto *CI = dyn_cast<CallInst>(U);
   return CI && getGatherScatterPtrOperandNo(CI).has_value();
@@ -196,6 +202,33 @@ bool hasOnlySupportedBroadcasts(Value *V) {
          llvm::all_of(*Broadcasts, isSupportedGroupSharedRowUser);
 }
 
+/// (Roadmap L430) Returns whether \p V is a `PHINode` or `SelectInst`
+/// merging two or more groupshared-rooted pointers -- the canonical
+/// `variablePointers` shape of a conditional or loop-carried iterator
+/// selecting between addresses in the *same* groupshared global (a
+/// self-referential loop backedge, e.g. `opptrdiff`'s own per-iteration
+/// pointer advance) or, in the general case, two genuinely *different*
+/// groupshared globals (e.g. `workgroup_two_buffers`'s own `cond ? bufA
+/// : bufB` shape) -- that this pass additionally knows how to retarget,
+/// alongside the plain leaf/broadcast/nested-GEP shapes above.
+bool isGroupSharedMergeInst(const Value *V) {
+  return isa<PHINode>(V) || isa<SelectInst>(V);
+}
+
+// (Roadmap L430) Forward-declared so `isSupportedGroupSharedNestedGEPUser`
+// below can accept a nested `getelementptr` feeding a pointer-compare or a
+// further pointer-merge (e.g. `opptrdiff`'s own self-referential
+// loop-carried backedge, where the per-iteration advance GEP's *own* user
+// is the very phi it was derived from) -- these are defined further below,
+// alongside `isGroupSharedRootedPointer`, the backward-walk helper they both
+// share.
+bool isSupportedGroupSharedCompareUser(const ICmpInst *Cmp,
+                                       const GroupSharedLayout &Layout);
+bool isSupportedGroupSharedMergeUser(const Instruction *Merge,
+                                     const GroupSharedLayout &Layout,
+                                     SmallPtrSetImpl<const Instruction *>
+                                         &VisitedMerges);
+
 /// Returns whether every user of \p GEP (a `getelementptr` already
 /// reached from a groupshared global, directly or through zero or more
 /// earlier nested `getelementptr`s) is itself a supported leaf access
@@ -214,27 +247,43 @@ bool hasOnlySupportedBroadcasts(Value *V) {
 /// store's own pointer operand regardless of how deeply nested it is,
 /// broadcasting a uniform, deeply-nested field/array address exactly the
 /// same way it would a first-level one -- see `hasOnlySupportedBroadcasts`),
-/// or another nested `getelementptr` recursively satisfying this same
-/// condition, to any depth. Unlike `isSupportedGroupSharedRowUser` above
-/// (gated to a *divergent*, already-widened vector-of-pointers row
-/// address specifically, per roadmap L11/L7o), this helper places no
-/// requirement on \p GEP's own type at all -- it is exactly as applicable
-/// to a uniform scalar-pointer nested chain as the caller's own
-/// single-level check already was, just generalized to any depth instead
-/// of exactly one further level. `retargetGroupSharedProducer` already
-/// rewrites a chain like this correctly (it recurses through every
-/// nested `getelementptr` level unconditionally); this validation pass
-/// had simply never been widened to *accept* more than one further level,
-/// rejecting an otherwise perfectly retargetable access outright.
-bool isSupportedGroupSharedNestedGEPUser(const GetElementPtrInst *GEP) {
-  return llvm::all_of(GEP->users(), [GEP](const User *U) {
+/// another nested `getelementptr` recursively satisfying this same
+/// condition, to any depth, a pointer-compare
+/// (`isSupportedGroupSharedCompareUser`), or (roadmap L430) a pointer-merge
+/// (`isSupportedGroupSharedMergeUser`) -- the shape `opptrdiff`/
+/// `opptrequal`/`opptrnotequal`'s own loop-carried pointer iterator takes:
+/// each loop iteration's own per-element advance GEP feeds *back* into the
+/// very phi it was itself derived from, so that phi is one of *this* GEP's
+/// own forward users, not just an ancestor reached by walking backward from
+/// it. Unlike `isSupportedGroupSharedRowUser` above (gated to a
+/// *divergent*, already-widened vector-of-pointers row address
+/// specifically, per roadmap L11/L7o), this helper places no requirement
+/// on \p GEP's own type at all -- it is exactly as applicable to a uniform
+/// scalar-pointer nested chain as the caller's own single-level check
+/// already was, just generalized to any depth instead of exactly one
+/// further level. `retargetGroupSharedProducer` already rewrites a chain
+/// like this correctly (it recurses through every nested `getelementptr`
+/// level unconditionally); this validation pass had simply never been
+/// widened to *accept* more than one further level, rejecting an otherwise
+/// perfectly retargetable access outright.
+bool isSupportedGroupSharedNestedGEPUser(const GetElementPtrInst *GEP,
+                                        const GroupSharedLayout &Layout,
+                                        SmallPtrSetImpl<const Instruction *>
+                                            &VisitedMerges) {
+  return llvm::all_of(GEP->users(), [GEP, &Layout, &VisitedMerges](const User *U) {
     if (isSupportedGroupSharedLeafUser(U))
       return true;
     if (auto *IE = dyn_cast<InsertElementInst>(U);
         IE && IE->getOperand(1) == GEP)
       return hasOnlySupportedBroadcasts(const_cast<GetElementPtrInst *>(GEP));
+    if (const auto *Cmp = dyn_cast<ICmpInst>(U))
+      return isSupportedGroupSharedCompareUser(Cmp, Layout);
+    if (isGroupSharedMergeInst(U))
+      return isSupportedGroupSharedMergeUser(cast<Instruction>(U), Layout,
+                                             VisitedMerges);
     const auto *NestedGEP = dyn_cast<GetElementPtrInst>(U);
-    return NestedGEP && isSupportedGroupSharedNestedGEPUser(NestedGEP);
+    return NestedGEP && isSupportedGroupSharedNestedGEPUser(NestedGEP, Layout,
+                                                            VisitedMerges);
   });
 }
 
@@ -308,6 +357,116 @@ void coalesceIdenticalGroupSharedGEPs(GlobalVariable &GV, Function &F) {
       }
     }
   }
+}
+
+/// (Roadmap L430) Returns whether \p V -- an operand of some
+/// `isGroupSharedMergeInst` merge, or one of an `icmp`'s two pointer
+/// operands -- is itself something this pass can always resolve to a
+/// flat, address-space-0 pointer: a groupshared global (recognized via \p
+/// Layout, the same layout `rewriteGroupSharedGlobals`'s own caller
+/// already computed), a `getelementptr` chain rooted at one (to any
+/// depth), a further merge recursively satisfying this same condition
+/// (\p Visited guards a `PHINode`'s own loop-carried backedge -- see
+/// `isPhiSelfReferentialBackedge`'s analogous comment in
+/// `SPIRVResourceLowering.cpp` for why a cycle must be *tolerated*, not
+/// rejected, here: the cycle is resolved by `retargetGroupSharedMergesAndCompares`'s
+/// own pre-registration of a merge's flattened replacement before
+/// recursing into its incoming values, not by this validation pass), or
+/// a `variablePointers` null-check's own `ConstantPointerNull`/`poison`/
+/// `undef` placeholder (a structurally-dead edge no handle chain will
+/// ever resolve, matching `SPIRVResourceLowering.cpp`'s own identical
+/// treatment of the same shape for resource-handle pointers).
+bool isGroupSharedRootedPointer(const Value *V, const GroupSharedLayout &Layout,
+                                SmallPtrSetImpl<const Value *> &Visited) {
+  // (Roadmap L430) `ConstantAggregateZero` is a divergent (widened)
+  // vector-of-null-pointers' own sentinel form -- `ConstantPointerNull`
+  // only ever covers the scalar case -- see `flattenGroupSharedValue`'s
+  // identical pairing.
+  if (isa<ConstantPointerNull>(V) || isa<ConstantAggregateZero>(V) ||
+      isa<UndefValue>(V) || isa<PoisonValue>(V))
+    return true;
+  if (const auto *GV = dyn_cast<GlobalVariable>(V))
+    return Layout.Offsets.count(GV) != 0;
+  if (const auto *GEP = dyn_cast<GetElementPtrInst>(V))
+    return isGroupSharedRootedPointer(GEP->getPointerOperand(), Layout,
+                                      Visited);
+  if (isGroupSharedMergeInst(V)) {
+    if (!Visited.insert(V).second)
+      return true; // A cycle (self-referential backedge); trust it --
+                   // resolved by `retargetGroupSharedMergesAndCompares`'s
+                   // own pre-registration, not by this validation walk.
+    if (const auto *Phi = dyn_cast<PHINode>(V))
+      return llvm::all_of(Phi->incoming_values(), [&](const Use &U) {
+        return isGroupSharedRootedPointer(U.get(), Layout, Visited);
+      });
+    const auto *Sel = cast<SelectInst>(V);
+    return isGroupSharedRootedPointer(Sel->getTrueValue(), Layout, Visited) &&
+           isGroupSharedRootedPointer(Sel->getFalseValue(), Layout, Visited);
+  }
+  return false;
+}
+
+/// (Roadmap L430) Returns whether \p Cmp -- an `icmp eq`/`icmp ne`
+/// comparing two groupshared pointers (`OpPtrEqual`/`OpPtrNotEqual`'s own
+/// lowering) -- has both operands resolvable the same way
+/// `isGroupSharedRootedPointer` resolves a merge's own operands. Unlike a
+/// merge, `Cmp` itself produces an `i1`, not a pointer, so there is no
+/// further forward chain to validate past it.
+bool isSupportedGroupSharedCompareUser(const ICmpInst *Cmp,
+                                       const GroupSharedLayout &Layout) {
+  SmallPtrSet<const Value *, 8> Visited;
+  return isGroupSharedRootedPointer(Cmp->getOperand(0), Layout, Visited) &&
+         isGroupSharedRootedPointer(Cmp->getOperand(1), Layout, Visited);
+}
+
+/// (Roadmap L430) Returns whether \p Merge (already known to be an
+/// `isGroupSharedMergeInst`) is a groupshared pointer merge this pass
+/// fully supports: every incoming/operand slot is
+/// `isGroupSharedRootedPointer`, and every one of `Merge`'s own users is
+/// itself a supported leaf access, broadcast link, nested `getelementptr`
+/// chain, pointer-compare (`isSupportedGroupSharedCompareUser`), or
+/// another merge recursively satisfying this same condition (\p
+/// VisitedMerges guards both a direct self-loop and a longer
+/// mutually-recursive merge chain from being validated more than once).
+bool isSupportedGroupSharedMergeUser(const Instruction *Merge,
+                                     const GroupSharedLayout &Layout,
+                                     SmallPtrSetImpl<const Instruction *>
+                                         &VisitedMerges) {
+  if (!VisitedMerges.insert(Merge).second)
+    return true;
+
+  SmallPtrSet<const Value *, 8> RootVisited;
+  if (const auto *Phi = dyn_cast<PHINode>(Merge)) {
+    if (!llvm::all_of(Phi->incoming_values(), [&](const Use &U) {
+          return isGroupSharedRootedPointer(U.get(), Layout, RootVisited);
+        }))
+      return false;
+  } else {
+    const auto *Sel = cast<SelectInst>(Merge);
+    if (!isGroupSharedRootedPointer(Sel->getTrueValue(), Layout, RootVisited) ||
+        !isGroupSharedRootedPointer(Sel->getFalseValue(), Layout, RootVisited))
+      return false;
+  }
+
+  return llvm::all_of(Merge->users(), [&](const User *U) -> bool {
+    if (isSupportedGroupSharedLeafUser(U))
+      return true;
+    if (const auto *Cmp = dyn_cast<ICmpInst>(U))
+      return isSupportedGroupSharedCompareUser(Cmp, Layout);
+    if (const auto *IE = dyn_cast<InsertElementInst>(U);
+        IE && IE->getOperand(1) == Merge)
+      return hasOnlySupportedBroadcasts(const_cast<Instruction *>(Merge));
+    if (const auto *NestedGEP = dyn_cast<GetElementPtrInst>(U))
+      return isSupportedGroupSharedNestedGEPUser(NestedGEP, Layout,
+                                                 VisitedMerges);
+    if (const auto *EE = dyn_cast<ExtractElementInst>(U))
+      return Merge->getType()->isVectorTy() &&
+             llvm::all_of(EE->users(), isSupportedGroupSharedLeafUser);
+    if (isGroupSharedMergeInst(U))
+      return isSupportedGroupSharedMergeUser(cast<Instruction>(U), Layout,
+                                             VisitedMerges);
+    return false;
+  });
 }
 
 /// Rebuilds \p CI (a gather/scatter call whose `Ptrs` argument was \p
@@ -409,6 +568,32 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
     if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(Usr)) {
       if (isa<GlobalVariable>(OldProducer))
         continue; // Handled by rewriteGroupSharedGlobals's own GEPs loop.
+      // (Roadmap L430) A self-referential loop-carried backedge:
+      // `NestedGEP` is simultaneously a *user* of `OldProducer` (its own
+      // pointer operand) and one of `OldProducer`'s *own* incoming
+      // operands, when `OldProducer` is itself the merge whose own
+      // flattening drove this call -- e.g. `opptrdiff`'s own
+      // per-iteration pointer-advance GEP feeding back into the very phi
+      // it was derived from. Eagerly retargeting-and-erasing it here, the
+      // way an ordinary forward-only nested GEP chain is, would erase it
+      // while `OldProducer` (not erased until every leg of every
+      // top-level merge is retargeted -- see
+      // `retargetGroupSharedMergesAndCompares`'s own erase loop) still
+      // references it as a live incoming value. Leave it exactly where
+      // the `isGroupSharedMergeInst(Usr)` case below leaves a genuine
+      // merge-to-merge edge instead: `flattenGroupSharedValue` already
+      // built its flat replacement when resolving `OldProducer`'s own
+      // incoming slot, and `retargetGroupSharedMergesAndCompares`'s own
+      // `RecursivelyDeleteTriviallyDeadInstructions` sweep erases it once
+      // `OldProducer` itself is gone.
+      bool IsOwnOperand = false;
+      if (auto *Phi = dyn_cast<PHINode>(OldProducer))
+        IsOwnOperand = llvm::is_contained(Phi->incoming_values(), NestedGEP);
+      else if (auto *Sel = dyn_cast<SelectInst>(OldProducer))
+        IsOwnOperand = Sel->getTrueValue() == NestedGEP ||
+                       Sel->getFalseValue() == NestedGEP;
+      if (IsOwnOperand)
+        continue;
       IRBuilder<> NestedBuilder(NestedGEP);
       SmallVector<Value *, 4> Idxs(NestedGEP->indices());
       Value *NewNestedGEP = NestedBuilder.CreateGEP(
@@ -437,8 +622,21 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
       continue;
     }
     if (isa<LoadInst>(Usr) || isa<StoreInst>(Usr) || isa<AtomicRMWInst>(Usr) ||
-        isa<AtomicCmpXchgInst>(Usr)) {
+        isa<AtomicCmpXchgInst>(Usr) || isa<PtrToIntInst>(Usr)) {
       U.set(NewProducer);
+      continue;
+    }
+    if (isGroupSharedMergeInst(Usr)) {
+      // Roadmap L430: `Usr` (a `PHINode`/`SelectInst` merging two or more
+      // groupshared-rooted pointers, possibly rooted at *different*
+      // globals -- the canonical `variablePointers` cross-pointer-merge
+      // shape) is retargeted wholesale by its own, separate top-level
+      // call into `retargetGroupSharedMergesAndCompares`'s own
+      // `Flatten`/erase sequence, not by this per-use dispatch: every one
+      // of its own incoming/operand slots is resolved independently
+      // there (see that function's comment), so `OldProducer`'s own
+      // stale edge into it is simply left in place here and cleaned up
+      // once `Usr` itself is replaced and erased.
       continue;
     }
     auto &CI = *cast<CallInst>(Usr);
@@ -446,6 +644,211 @@ void retargetGroupSharedProducer(Value *OldProducer, Value *NewProducer) {
     IRBuilder<> CallBuilder(&CI);
     rebuildGatherScatterCall(CI, PtrOperandNo, NewProducer, CallBuilder);
   }
+}
+
+/// (Roadmap L430) Resolves \p V -- already validated as
+/// `isGroupSharedRootedPointer` -- to its own flat, address-space-0
+/// equivalent, building whatever new instructions are needed (memoized
+/// in \p FlatCache, shared across every call so e.g. two different
+/// merges rooted at the same global's same `getelementptr` reuse one
+/// flat rebuild, and so a merge referenced from more than one other
+/// merge's own operand -- a merge-of-merges chain -- is itself flattened
+/// only once):
+///
+///  - A `ConstantPointerNull`/`UndefValue`/`PoisonValue` resolves to the
+///    identically-kinded flat-pointer-typed constant.
+///  - A groupshared global resolves to a `getelementptr` off \p
+///    GroupSharedBase at its own `Layout`-assigned byte offset, built at
+///    \p F's entry block (so it dominates every one of the global's own
+///    uses, mirroring `rewriteGroupSharedGlobals`'s own `HasBroadcast`
+///    case for exactly the same reason: a global commonly feeds more
+///    than one independent merge).
+///  - A `getelementptr` resolves to a new `getelementptr` with the same
+///    indices, built at the old one's own position (which already
+///    dominates every one of its uses, including a merge consuming it),
+///    off its own pointer operand's own flattened resolution.
+///  - A `PHINode`/`SelectInst` (`isGroupSharedMergeInst`) resolves to a
+///    brand new phi/select of the same shape. The replacement phi is
+///    registered in \p FlatCache *before* its own incoming values are
+///    recursively resolved (mirroring `SPIRVResourceLowering.cpp`'s own
+///    `PointerMergeState` cycle-safety design, simplified here since this
+///    pass already knows every global's final flat offset up front and so
+///    never needs to *wait* for a value to arrive from a separate,
+///    later walk the way that resource-handle design does): a
+///    self-referential loop-carried backedge (`opptrdiff`/`opptrequal`'s
+///    own per-iteration pointer-advance shape, where one incoming value's
+///    own `getelementptr` chain walks back to the very phi being
+///    resolved) re-enters this function for that same phi mid-recursion,
+///    finds it already cached, and returns the new phi immediately
+///    instead of looping forever.
+Value *flattenGroupSharedValue(Value *V, Function &F, Value *GroupSharedBase,
+                               Type *I8Ty, const GroupSharedLayout &Layout,
+                               DenseMap<Value *, Value *> &FlatCache) {
+  if (Value *Cached = FlatCache.lookup(V))
+    return Cached;
+
+  // (Roadmap L430) `V` itself may be a *divergent* merge/sentinel --
+  // post-`FunctionWidener` widening left it `<WaveSize x ptr
+  // addrspace(3)>` rather than a plain scalar pointer (e.g. the
+  // loop-carried iterator `phi` in `opptrdiff.variable_pointers_wg_diff`
+  // is divergent once different lanes take different trip counts) -- so
+  // the flat replacement must match that same vector shape, not always
+  // `GroupSharedBase`'s own scalar type. A nested `getelementptr` needs
+  // no such widening here: `CreateGEP` below already widens its result
+  // to match whichever of its own operands (most commonly a vector
+  // index) is itself a vector, exactly mirroring the original GEP.
+  Type *FlatPtrTy = GroupSharedBase->getType();
+  if (auto *VecTy = dyn_cast<VectorType>(V->getType()))
+    FlatPtrTy = VectorType::get(FlatPtrTy, VecTy->getElementCount());
+  if (isa<ConstantPointerNull>(V) || isa<ConstantAggregateZero>(V))
+    return FlatCache[V] = Constant::getNullValue(FlatPtrTy);
+  if (isa<PoisonValue>(V))
+    return FlatCache[V] = PoisonValue::get(FlatPtrTy);
+  if (isa<UndefValue>(V))
+    return FlatCache[V] = UndefValue::get(FlatPtrTy);
+
+  if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+    IRBuilder<> Builder(&*F.getEntryBlock().getFirstInsertionPt());
+    Value *Flat = Builder.CreateGEP(I8Ty, GroupSharedBase,
+                                    Builder.getInt64(Layout.Offsets.lookup(GV)),
+                                    GV->getName() + ".flat");
+    return FlatCache[V] = Flat;
+  }
+
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+    Value *FlatBase = flattenGroupSharedValue(
+        GEP->getPointerOperand(), F, GroupSharedBase, I8Ty, Layout, FlatCache);
+    IRBuilder<> Builder(GEP);
+    SmallVector<Value *, 4> Idxs(GEP->indices());
+    Value *NewGEP =
+        Builder.CreateGEP(GEP->getSourceElementType(), FlatBase, Idxs,
+                          GEP->getName(), GEP->isInBounds());
+    return FlatCache[V] = NewGEP;
+  }
+
+  if (auto *Phi = dyn_cast<PHINode>(V)) {
+    IRBuilder<> Builder(Phi);
+    PHINode *NewPhi = Builder.CreatePHI(FlatPtrTy, Phi->getNumIncomingValues(),
+                                        Phi->getName());
+    FlatCache[V] = NewPhi; // Registered before recursing: see this
+                          // function's own comment on self-referential
+                          // backedges.
+    for (unsigned I = 0, E = Phi->getNumIncomingValues(); I != E; ++I)
+      NewPhi->addIncoming(
+          flattenGroupSharedValue(Phi->getIncomingValue(I), F, GroupSharedBase,
+                                  I8Ty, Layout, FlatCache),
+          Phi->getIncomingBlock(I));
+    return NewPhi;
+  }
+
+  auto *Sel = cast<SelectInst>(V);
+  Value *NewTrue = flattenGroupSharedValue(Sel->getTrueValue(), F,
+                                           GroupSharedBase, I8Ty, Layout,
+                                           FlatCache);
+  Value *NewFalse = flattenGroupSharedValue(Sel->getFalseValue(), F,
+                                            GroupSharedBase, I8Ty, Layout,
+                                            FlatCache);
+  IRBuilder<> Builder(Sel);
+  Value *NewSel = Builder.CreateSelect(Sel->getCondition(), NewTrue, NewFalse,
+                                       Sel->getName());
+  return FlatCache[V] = NewSel;
+}
+
+/// (Roadmap L430) Retargets every groupshared pointer-merge
+/// (`isGroupSharedMergeInst`) and pointer-compare (`icmp eq`/`icmp ne` on
+/// two groupshared pointers) in \p F onto flat, address-space-0
+/// equivalents, before `rewriteGroupSharedGlobals`'s own per-global
+/// `GEPs` rewrite loop runs: unlike that loop (which retargets one
+/// global's own GEPs/leaf-uses/broadcasts at a time, in whatever order
+/// \p Layout.Offsets happens to iterate), a merge may combine legs
+/// rooted at two *different* globals processed in two different
+/// iterations of that loop -- `flattenGroupSharedValue` resolves every
+/// leg eagerly instead, using \p Layout's already-fully-known offsets
+/// directly, so no per-global iteration order or multi-pass "wait for
+/// the other leg to arrive" bookkeeping (`SPIRVResourceLowering.cpp`'s
+/// own `PointerMergeMap`, built for resource handles with no such
+/// up-front layout available) is needed here.
+///
+/// Every `icmp`'s pointer operands are retargeted in place (an `icmp`
+/// needs no rebuild: its own result type never depends on its operands'
+/// address space, see `isSupportedGroupSharedLeafUser`'s `ptrtoint`
+/// comment for the identical reasoning). Every merge is instead replaced
+/// wholesale: `retargetGroupSharedProducer` redirects its own non-merge
+/// users (merge-to-merge edges are left to resolve themselves, as that
+/// function's own comment on `isGroupSharedMergeInst` describes), every
+/// old merge's remaining merge-only uses are then cleared with `poison`
+/// (safe, since the merge instructions still holding them are themselves
+/// about to be erased), and finally every old merge -- and any
+/// now-wholly-unused helper `getelementptr` `flattenGroupSharedValue`
+/// built only to feed one of its incoming slots (e.g. a loop-carried
+/// backedge GEP whose sole remaining use was the just-erased old phi) --
+/// is deleted.
+void retargetGroupSharedMergesAndCompares(Function &F, Value *GroupSharedBase,
+                                          const GroupSharedLayout &Layout) {
+  LLVMContext &Ctx = F.getContext();
+  Type *I8Ty = Type::getInt8Ty(Ctx);
+
+  SmallVector<Instruction *, 8> Merges;
+  SmallVector<ICmpInst *, 8> Compares;
+  SmallPtrSet<Instruction *, 8> Seen;
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      // (Roadmap L430) A merge/compare over a *divergent* groupshared
+      // pointer is left `<WaveSize x ptr addrspace(3)>` by
+      // `FunctionWidener`'s own widening, not a plain scalar pointer
+      // (see `flattenGroupSharedValue`'s identical vector-aware
+      // handling) -- `getScalarType()` strips any vector wrapper first
+      // so both shapes are recognized here.
+      auto IsGroupSharedPtr = [](Type *Ty) {
+        auto *PtrTy = dyn_cast<PointerType>(Ty->getScalarType());
+        return PtrTy && PtrTy->getAddressSpace() == GroupSharedAddressSpace;
+      };
+      if (isGroupSharedMergeInst(&I) && IsGroupSharedPtr(I.getType()) &&
+          Seen.insert(&I).second)
+        Merges.push_back(&I);
+      else if (auto *Cmp = dyn_cast<ICmpInst>(&I);
+              Cmp && IsGroupSharedPtr(Cmp->getOperand(0)->getType()))
+        Compares.push_back(Cmp);
+    }
+  }
+  if (Merges.empty() && Compares.empty())
+    return;
+
+  DenseMap<Value *, Value *> FlatCache;
+  for (ICmpInst *Cmp : Compares) {
+    Cmp->setOperand(0, flattenGroupSharedValue(Cmp->getOperand(0), F,
+                                               GroupSharedBase, I8Ty, Layout,
+                                               FlatCache));
+    Cmp->setOperand(1, flattenGroupSharedValue(Cmp->getOperand(1), F,
+                                               GroupSharedBase, I8Ty, Layout,
+                                               FlatCache));
+  }
+
+  for (Instruction *Merge : Merges) {
+    Value *NewMerge =
+        flattenGroupSharedValue(Merge, F, GroupSharedBase, I8Ty, Layout,
+                                FlatCache);
+    retargetGroupSharedProducer(Merge, NewMerge);
+  }
+  // Every merge's own forward uses are now fully retargeted above; clear
+  // any remaining stale merge-to-merge edge (one old merge still used as
+  // another, not-yet-erased old merge's own operand) before erasing, then
+  // erase every old merge -- order among themselves does not matter, since
+  // none still reference each other as a live use.
+  for (Instruction *Merge : Merges)
+    Merge->replaceAllUsesWith(PoisonValue::get(Merge->getType()));
+  for (Instruction *Merge : Merges)
+    Merge->eraseFromParent();
+
+  // Clean up any now-wholly-unused helper `getelementptr` built only to
+  // feed a merge's own incoming slot (see this function's own comment).
+  SmallVector<WeakTrackingVH, 8> DeadCandidates;
+  for (auto &[OldVal, NewVal] : FlatCache)
+    if (auto *OldInst = dyn_cast<Instruction>(OldVal); OldInst && !Seen.count(OldInst))
+      DeadCandidates.push_back(OldInst);
+  for (WeakTrackingVH &VH : DeadCandidates)
+    if (Value *V = VH)
+      RecursivelyDeleteTriviallyDeadInstructions(V);
 }
 
 } // namespace
@@ -518,16 +921,38 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
       bool IsBroadcastLink =
           UserInst && isa<InsertElementInst>(UserInst) &&
           cast<InsertElementInst>(UserInst)->getOperand(1) == GV;
+      // (Roadmap L430) `GV` may also feed a pointer-compare directly
+      // (`isSupportedGroupSharedCompareUser`), or a `PHINode`/`SelectInst`
+      // merge directly (`isGroupSharedRootedGEP`'s own GEP-chain walk
+      // treats a merge the same as any other rooted pointer, so `GV` used
+      // as one of its own legs with no intervening `getelementptr` -- a
+      // zero-offset access -- is exactly as valid a leg as a GEP off
+      // `GV`): see `opptrdiff`/`opptrequal`'s own self-referential
+      // loop-carried iterator shape, where `GV` itself is one of a phi's
+      // two incoming values.
+      bool IsSupportedCompare =
+          UserInst && isa<ICmpInst>(UserInst) &&
+          isSupportedGroupSharedCompareUser(cast<ICmpInst>(UserInst), Layout);
+      bool IsSupportedMerge = UserInst && isGroupSharedMergeInst(UserInst);
+      if (IsSupportedMerge) {
+        SmallPtrSet<const Instruction *, 8> VisitedMerges;
+        IsSupportedMerge = isSupportedGroupSharedMergeUser(
+            cast<Instruction>(UserInst), Layout, VisitedMerges);
+      }
       if (!UserInst ||
           (!isSupportedGroupSharedLeafUser(UserInst) &&
-           !isa<GetElementPtrInst>(UserInst) && !IsBroadcastLink)) {
+           !isa<GetElementPtrInst>(UserInst) && !IsBroadcastLink &&
+           !IsSupportedCompare && !IsSupportedMerge)) {
         Ctx.emitError(
             "feme-cpu-simdize: groupshared global '" + GV->getName() +
             "' is used in a way this milestone does not yet canonicalize; "
-            "only a getelementptr, load, store, atomicrmw, or masked "
-            "gather/scatter is supported (roadmap milestone 9 deviation)");
+            "only a getelementptr, load, store, atomicrmw, masked "
+            "gather/scatter, pointer compare, or pointer merge (select/phi) "
+            "is supported (roadmap milestone 9 deviation)");
         return false;
       }
+      if (IsSupportedCompare || IsSupportedMerge)
+        continue;
       if (IsBroadcastLink) {
         if (!hasOnlySupportedBroadcasts(GV)) {
           Ctx.emitError(
@@ -543,6 +968,15 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
         for (const User *GEPUser : GEP->users()) {
           if (isSupportedGroupSharedLeafUser(GEPUser))
             continue;
+          if (const auto *Cmp = dyn_cast<ICmpInst>(GEPUser);
+              Cmp && isSupportedGroupSharedCompareUser(Cmp, Layout))
+            continue;
+          if (isGroupSharedMergeInst(GEPUser)) {
+            SmallPtrSet<const Instruction *, 8> VisitedMerges;
+            if (isSupportedGroupSharedMergeUser(cast<Instruction>(GEPUser),
+                                                Layout, VisitedMerges))
+              continue;
+          }
           auto *IE = dyn_cast<InsertElementInst>(GEPUser);
           if (IE && IE->getOperand(1) == GEP && hasOnlySupportedBroadcasts(GEP))
             continue;
@@ -566,9 +1000,12 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           // second-level GEP is handled above instead, by
           // `hasOnlySupportedBroadcasts`'s own `isSupportedGroupSharedRowUser`
           // check on the broadcast link.
-          if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser);
-              NestedGEP && isSupportedGroupSharedNestedGEPUser(NestedGEP))
-            continue;
+          if (auto *NestedGEP = dyn_cast<GetElementPtrInst>(GEPUser)) {
+            SmallPtrSet<const Instruction *, 8> VisitedMerges;
+            if (isSupportedGroupSharedNestedGEPUser(NestedGEP, Layout,
+                                                    VisitedMerges))
+              continue;
+          }
           // A per-lane `extractelement` off `GEP` -- the scalar address
           // `FunctionWidener::widenGroupSharedAtomicRMW`/
           // `widenGroupSharedAtomicCmpXchg` extract, one per lane, out of
@@ -587,8 +1024,9 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
               "feme-cpu-simdize: groupshared global '" + GV->getName() +
               "' feeds an unsupported user; only a getelementptr chain "
               "(to any depth) feeding a direct load, store, atomicrmw, "
-              "masked gather/scatter, or (for a vector-typed row load, or "
-              "a uniform row address broadcast into one) an extractelement "
+              "masked gather/scatter, pointer compare, pointer merge "
+              "(select/phi), or (for a vector-typed row load, or a "
+              "uniform row address broadcast into one) an extractelement "
               "feeding its own scalar leaf access is supported (roadmap "
               "milestone 9 deviation)");
           return false;
@@ -596,6 +1034,15 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
       }
     }
   }
+
+  // (Roadmap L430) Validation above has already confirmed every merge/
+  // compare in `F` is supported; retarget them now, before the ordinary
+  // per-global rewrite loop below -- see
+  // `retargetGroupSharedMergesAndCompares`'s own comment for why this
+  // must run first (a merge may combine legs rooted at two different
+  // globals, each otherwise retargeted independently by a separate
+  // iteration of that loop).
+  retargetGroupSharedMergesAndCompares(F, GroupSharedBase, Layout);
 
   for (auto &[GVConst, Offset] : Layout.Offsets) {
     auto *GV = const_cast<GlobalVariable *>(GVConst);
