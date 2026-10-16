@@ -124286,3 +124286,43 @@ A real fix requires teaching the masked-loop path (`DiamondFlattener`) to recogn
 3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) is the other still-untouched `L419` sub-item -- a good second target for the same IR-dump-and-reduce methodology once `L419(h)` is actually fixed.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). 14 -> 20 batches this session; healthy but slow, ~1,800+ batches total remain. Recover via the `L438` union-of-both-directories technique if it ever dies.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s recommendation -- still not actionable yet.
+
+# Session: L419(h) widening + phi-completeness fix attempted, both reverted (no CTS improvement)
+
+**Next action for a future session:** read item 1 under "Next steps" below, then re-run `FEME_DUMP_IR_PRENORM=1` on `do_while_uniform_iterations.mixed_break_continue_fragment` to find why the widening regresses it.
+
+## What happened, in order
+
+1. Picked up mid-session with the L419(h) widening fix (`cycleHasMaskOps` + `RealExitCandidates` widening) and a `lookThroughTrivialPhi` completeness check already in the working tree from before compaction.
+2. Reverted the completeness check, replaced it with a poison-placeholder technique in `makeActivePNPair`/`addLatchIncoming` (seed the backedge slot with `poison`, have `addLatchIncoming` replace it via `setIncomingValueForBlock` instead of adding a new entry). Both unit tests (`loop-internal-break-with-mask-op.ll`, `loop-body-resource-call-then-nested-uniform-loop.ll`) still passed.
+3. Rebuilt `feme_vulkan`, ran `dEQP-VK.glsl.loops.special.*` (552 cases): **528/552, same 24 failures as the old blanket-completeness-check version.** Confirms the two mechanisms are behaviorally identical here -- not a bug in the poison-placeholder implementation, a real result.
+4. Tested the widening **alone** (no phi-completeness fix at all, reverted poison back to plain `addIncoming`): **534/552, 18 failures -- same count as baseline, but a DIFFERENT 18.** Fixes the 6 targeted `conditional_break_*` cases, but newly breaks 6 `mixed_break_continue_*` cases that were previously passing. This was a new finding -- prior-session debug tracing had only checked that the widening doesn't fire for `select_iteration_count_fragment`, not for `mixed_break_continue`.
+5. Re-established the true baseline via `git stash` (534/552, 18 Fail, real case names captured in `/tmp/true_baseline_fails.txt`) to diff against cleanly.
+6. **Decision: abandoned the fix entirely.** `git stash drop` after confirming a clean, exact-`HEAD` working tree. Rebuilt `feme-opt`/`feme_vulkan` from clean `HEAD`, reconfirmed 534/18 baseline, reconfirmed mandatory device check (`FeMe CPU Vulkan Device`).
+7. Documented the full attempt (both widening and both phi-completeness variants, with case names and counts) as a new `L419(h-attempt)` roadmap row rather than silently losing the investigation. Committed that doc-only change (`e6bd7b65076a`).
+
+## Why abandoned, not iterated further
+
+Neither mechanism in isolation is a net win:
+- Widening alone: 18 -> 18, but trades 6 fixed cases for 6 different new ones.
+- Widening + phi-completeness fix (either mechanism): 18 -> 24, strictly worse.
+
+Iterating to find the *actual* scoping bug in the widening's `OtherCondBrBlocks` matching, and separately the `feme-cpu-simdize` interaction with newly-correctly-masked loads, are each their own multi-hour investigations (same order of effort as this session's whole investigation so far). Landing either half-finished risks a real CTS regression if a future session trusts the "net 18" number without re-checking case names -- already nearly happened here (step 4 looked like a no-op until case-by-case diffing caught it).
+
+## Key technical finding worth keeping (don't re-discover this)
+
+`applyStageMasks` has ~14 call sites across `Linearize.cpp`, many of which call it on `Masks`/`EntryMasks` phis **before** `addLatchIncoming` has filled in the backedge value. This is not a bug by itself -- many of those call sites rely on the resulting premature fold for legitimate reasons not yet fully enumerated. The only call site where the premature fold is actually wrong is the one this session's widening newly exposes (a uniform body-level break reduced from `conditional_break_fragment`). Any future fix must be scoped to that one call site/shape, not change `lookThroughTrivialPhi`'s behavior globally.
+
+## Standing items (unchanged from last session, still true)
+
+1. **(standing)** `/tmp/l437_full_run2/` background CTS sweep: still alive, now **993** completed batches in `qpa/` (jumped a lot since last check -- verify this reflects real progress and not a batch-size change before trusting the ratio). `/tmp/l437_full_run/` unchanged at 199. Check again next session: `ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`.
+2. **(standing)** `offload-test-suite` drift: not touched this session, no new information.
+3. **(no longer standing)** `Basic/Mandelbrot.test`, `FEME_*` env var audit: both previously confirmed resolved, not re-checked this session (no new evidence either way).
+
+## Next steps (ranked)
+
+1. **(~2-3 hours)** Root-cause the widening's `mixed_break_continue` regression via `FEME_DUMP_IR_PRENORM=1` on `do_while_uniform_iterations.mixed_break_continue_fragment` (and the `for_dynamic`/`while_dynamic` siblings) -- compare its CFG shape against `conditional_break_fragment`'s to find the missing distinguishing check the widening's `OtherCondBrBlocks` scan needs.
+2. **(~2-3 hours, after #1)** Once the widening is scoped to introduce zero regressions on its own, re-apply the poison-placeholder phi-completeness fix (code is reconstructable from this file's description above, not preserved in any backup -- rewrite from scratch, it's small) and root-cause the `select_iteration_count` regression via the `feme-cpu-simdize` divergent-branch diagnostic.
+3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- still untouched, same IR-dump-and-reduce methodology candidate.
+4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/` progress.
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases across both `/tmp/l437_full_run*` directories.
