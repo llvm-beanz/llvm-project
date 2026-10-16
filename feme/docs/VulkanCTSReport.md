@@ -5741,3 +5741,106 @@ coverage only, no code change, no feature/extension-surface change.
 Updated roadmap `L419(h)` with the full root-cause finding and a
 scoped starting point (the two new tests) for whichever future session
 implements the actual generalization.
+
+## `L419(t)`: lands `L419(h)`'s widening fix for `conditional_break_*` (6 cases), scoped to avoid the prior session's `mixed_break_continue` regression; defers the deeper masking-sequencing bug it uncovered
+
+Picked up `L419(h-attempt)`'s fully-reverted widening/phi fix and
+re-attempted it with a narrower scope. Re-applied `cycleHasMaskOps`
+and the `RealExitCandidates` widening exactly as before, but gated the
+widening on `OtherCondBrBlocks.size() == 1` in addition to the existing
+"a uniform match exists" check -- `conditional_break_fragment`'s own
+cycle has exactly one `OtherCondBrBlocks` member, while
+`mixed_break_continue_fragment`'s `switch`-lowered body always has
+more (confirmed via a new, temporary `FEME_DEBUG_L419H_TRACE=1`
+env-var-gated trace rather than static/manual CFG reasoning, which had
+already failed once in the prior session). This one extra condition is
+the precise discriminator the prior attempt's regression needed and
+did not have. Also found and fixed a `StopBlock`-consistency crash
+verifying this: `matchExitCheckWithRelay` must be called with `Latch`
+as `StopBlock` both at the widening's own scan and again at
+`CheckBlock`'s later, separate call site -- calling it two different
+ways on the same candidate could otherwise make the second call's
+match ambiguous, asserting on `CheckExit->StayInLoop`.
+
+While verifying the widened shape's own output was not just
+non-crashing but semantically correct, found a genuine, separate,
+pre-existing latent masking bug: `LoopLinearizer::makeActivePNPair`'s
+`active.live`/`active.sideeffect` phis are left with only their
+non-cycle-predecessor incoming value populated until `addLatchIncoming`
+fills in the real `Latch` value much later; any `applyStageMasks` call
+that runs before that (specifically: a mask-affecting call sitting in
+the widened `CheckBlock`, exactly this widening's own new target shape)
+sees a single-incoming-value phi that `isKnownConstantMask`'s
+`lookThroughTrivialPhi` wrongly treats as the trivial constant `true`,
+silently skipping the mask rewrite a resource call there genuinely
+needs. A poison-placeholder fix (seed the `Latch` slot with
+`PoisonValue::get(I1Ty)` immediately, `setIncomingValueForBlock` once
+known) was implemented and confirmed correct in isolation -- but a
+full CTS sweep showed it reintroduces a *different* regression:
+`{do_while_dynamic,for_dynamic,while_dynamic}_iterations.
+select_iteration_count_{fragment,vertex}` (6 cases) flip to `Fail` --
+reconfirming an identical finding from an even earlier,
+now-summarized-away session that tried the same fix independently.
+
+Root-caused this time via `FEME_DUMP_IR_PRESIMD=1`/
+`FEME_DUMP_DIVERGENT_BRANCH=1` on
+`do_while_dynamic_iterations.select_iteration_count_fragment`: that
+shader's loop *header itself* contains its own internal `if`/`else`
+(reading a uniform buffer, reconverging a few blocks later -- not a
+loop exit at all), built from a `feme.cpu.resource.load.raw.i32` call.
+`DiamondFlattener::flattenLoopBodyDiamond`'s own early fixed-point
+pre-pass examines this diamond *before* any masking has happened (the
+call's trailing mask operand is still its as-lowered `true`), correctly
+judges the branch uniform at that point, and declines to flatten it --
+a permanent decision it never revisits. Once the poison-placeholder fix
+later lets `applyStageMasks` correctly narrow that same call's mask
+operand to the real, loop-carried `active.live` value (now genuinely
+non-constant), the header's surviving `CondBr` becomes *actually*
+divergent for the first time -- but `DiamondFlattener`'s one chance to
+flatten it has already passed, so it survives untouched into
+`feme-cpu-simdize`'s own, independent, later `UniformityInfo`
+computation, which (correctly, from its own perspective) rejects it as
+an unhandled divergent branch (`"function 'main' has a divergent
+branch; the divergence transform ... did not remove it"`). This is a
+distinct, deeper sequencing bug in `flattenLoopBodyDiamond` itself (a
+judgment made from a stale, pre-masking snapshot, never re-examined
+once real masking completes) -- not a flaw in the poison-placeholder
+technique, which remains independently correct. Reverted the
+poison-placeholder change (back to plain `addIncoming`) rather than
+risk landing it, keeping only the gated widening.
+
+**CTS-verified** (`dEQP-VK.glsl.loops.special.*`, full 552-case sweep):
+**534 Pass/18 Fail -> 540 Pass/12 Fail, zero regressions.** All 6
+`conditional_break_{fragment,vertex}` pairs (`do_while_uniform`/
+`for_uniform`/`while_uniform`) now Pass. The remaining 12
+(`{for_dynamic,while_dynamic}_iterations.{elseblock,ifblock}_
+{fragment,vertex}`, `{for_uniform,while_uniform}_iterations.
+mixed_break_continue_{fragment,vertex}`) are the exact same
+pre-existing, unrelated residuals present before this session's
+widening change, untouched by it -- confirmed by diffing the full
+before/after failure-name lists, not just comparing counts.
+
+`ninja check-feme`: 3,766/3,775 Passed, 7 Unsupported, 2 Failed on the
+first run under concurrent CTS-sweep background load
+(`entry-wrapper-loop-header-derived-value-in-suffix.ll`, the known,
+unrelated, pre-existing `H165` bug; and
+`SyncTest.QueueSubmitReturnsPromptlyThenCompletesAfterHostSignal`, a
+timing-sensitive unit test reconfirmed passing 3/3 in isolation with
+`--gtest_repeat=3`, i.e. a load-induced flake, not a real regression) --
+0 real regressions. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- a linearizer-internal
+compiler fix, no feature/extension-surface change.
+
+Renamed `unsupported-loop-internal-break-with-mask-op.ll` to
+`loop-internal-break-with-mask-op.ll` (it now passes) with `CHECK`
+lines documenting the still-literal `i1 true` mask (the deferred gap,
+not silently hidden). `loop-body-resource-call-then-nested-uniform-
+loop.ll` is unchanged (its own masking behavior never depended on the
+reverted poison-placeholder fix). Updated roadmap `L419(h)` to record
+the 6 newly-fixed cases and added `L419(t)` with the full landed-fix
+and deferred-gap writeup for the next session. A future session should
+start from this row's own root-cause finding: `flattenLoopBodyDiamond`'s
+pre-pass needs to either re-run, or defer its own uniform/divergent
+judgment, for any diamond built from a resource/image *load* result
+once real masking is known, instead of committing to a one-time,
+pre-masking verdict it never revisits.
