@@ -5844,3 +5844,93 @@ pre-pass needs to either re-run, or defer its own uniform/divergent
 judgment, for any diamond built from a resource/image *load* result
 once real masking is known, instead of committing to a one-time,
 pre-masking verdict it never revisits.
+
+## L419(u): isLoopControlEdgeThroughRelay check-ordering fix (correcting L419(t)'s carried-over premise)
+
+Follow-up session to `L419(t)`, re-investigating its deferred masking
+gap. Root-caused and fixed a genuine, independently-correct bug in
+`DiamondFlattener::isLoopControlEdgeThroughRelay`: it checked
+`Depth >= 8 || !isPureRelayBlock(Target)` *before* checking
+`Target == StopAt` (the diamond's own natural reconvergence point).
+`StopAt` is explicitly allowed to contain real instructions of its own
+(most commonly the loop's actual trip-count `icmp`), unlike every other
+hop this relay chase walks through -- so gating on `isPureRelayBlock`
+first wrongly disqualified that common shape before ever reaching the
+`Target == StopAt` check, letting `DiamondFlattener::run()`'s
+whole-function walk wrongly flatten a loop Header's internal if/else
+(which legitimately reconverges at the loop's own real exit-check
+block) as an ordinary diamond rather than deferring the cycle to
+`LoopLinearizer`.
+
+**Important correction to this session's own carried-over premise**:
+contrary to what the summary handed to this session implied,
+`select_iteration_count_{fragment,vertex}` does **not** currently fail
+or regress on clean `HEAD`. Confirmed twice (via `git stash` + full
+rebuild of `feme-opt` and `libfeme_vulkan.so`, `--deqp-shadercache=
+disable` to rule out stale cache results): `dEQP-VK.glsl.loops.
+special.*` is already 540/552 on true baseline, identical to this
+session's fixed build. The "regression" `L419(t)`'s own writeup
+describes only manifests when `L419(t)`'s *abandoned* poison-placeholder
+phi-completeness fix (seeding `makeActivePNPair`'s `Latch` incoming slot
+with `PoisonValue::get(I1Ty)`) is *also* reapplied on top of clean
+`HEAD` -- this session re-confirmed that in isolation (534/552, the
+same 6 `select_iteration_count` cases, exactly matching `L419(t)`'s
+description).
+
+**This session's fix does not resolve that poison-fix regression**:
+reapplying the poison-placeholder experiment on top of this session's
+relay-chase fix and re-sweeping still shows 534/552, the identical 6
+failures -- so the real "second, deeper, not-yet-fixed bug" `L419(t)`'s
+own code comment references remains open, and is a distinct bug from
+this session's fix. This session's fix produces a real, verified IR
+difference on a standalone repro (a `live.merge`/`sideeffect.merge`
+phi-of-two-identical-`true`-constants collapses to a plain `true`
+constant instead of staying symbolic through to the masked stores and
+`feme.cpu.stage.return.masks.i1` call) -- but that difference is purely
+cosmetic on every currently-passing or currently-failing CTS/unit case.
+
+`L419(t)`'s own attribution of the deeper bug to
+`DiamondFlattener::flattenLoopBodyDiamond`'s "early fixed-point
+pre-pass" may itself be imprecise: this session traced (via
+`FEME_DEBUG_FLATTEN_TRACE=1`, with `opt -passes=instnamer` for readable
+block names) that `flattenLoopBodyDiamond`'s per-cycle caller in
+`linearizeCycle` explicitly excludes `BB == Header || BB == Latch`, so
+that function is never even invoked on the Header's internal diamond
+this session's fix concerns -- the actual diamond-flattening of the
+Header is done by `DiamondFlattener::run()`'s separate, earlier,
+whole-function walk instead. A future session reapplying the
+poison-placeholder fix should start from fresh
+`FEME_DEBUG_FLATTEN_TRACE=1` tracing *with the poison fix applied*
+(comparing against without) to find the actual mechanism, rather than
+re-reading `L419(t)`'s comment as settled fact.
+
+**CTS-verified** (`dEQP-VK.glsl.loops.special.*`, full 552-case sweep,
+with only this session's relay-chase fix applied, poison-placeholder
+experiment reverted out of the working tree before commit): **540/552,
+bit-for-bit identical pass/fail set to true baseline** -- zero
+regressions, zero new passes (this fix is currently inert on every real
+CTS case). `ninja check-feme`: 3,768/3,776 Passed, 7 Unsupported, 1
+Failed (the one new regression test added this session now passes; the
+only failure is the known, unrelated, pre-existing `H165`
+`entry-wrapper-loop-header-derived-value-in-suffix.ll` bug). `ninja
+check-hlsl-feme-vk`: 492/492 passable tests Passed (273 Unsupported, 28
+Expectedly Failed), zero regressions. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change -- a linearizer-internal
+compiler fix, no feature/extension-surface change.
+
+New regression test `loop-header-diamond-reconvergence-has-real-check.
+ll` added and properly red/green-validated this time (confirmed via
+`git stash` + rebuild to fail on true baseline, pass with the fix) using
+a faithful, minimally-trimmed extraction from the original
+`FEME_DUMP_IR_PRENORM` dump that originally surfaced this shape --
+multiple attempts at a hand-written scalar reduction were tried first
+and silently failed to reproduce the bug (identical output with/without
+the fix, a trap worth remembering: a reduced `.ll` test can look
+structurally similar yet not actually exercise the bug it's meant to
+guard), so the committed test keeps the repro's original vector types
+(`<4 x float>`) rather than a hand-simplified scalar shape.
+
+Standing `/tmp/l437_full_run2/` background CTS sweep check-in: still
+alive and progressing (42,404/57,809+ `qpa` files this session, up from
+26,108 last checked) -- not yet finished, no action needed beyond this
+check-in.
