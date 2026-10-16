@@ -69,29 +69,29 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(standing item retired)** `offload-test-suite` drift is now closed for good
-   -- don't re-flag "7 ahead / 1 behind llvm-beanz/feme" as a pending decision
-   in future sessions. If the ahead/behind counts change (e.g. a genuinely new
-   commit appears on `llvm-beanz/feme`), re-check with `git patch-id` the same
-   way before assuming it's unresolved drift.
-2. **(check-in, cheap)** Keep checking `/tmp/l437_full_run2/` progress each
-   session (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). It
-   went from 7 to 9 completed batches across this session alone -- healthy but
-   slow going given ~1,800+ total batches remain. If it ever dies, recover using
-   the union-of-both-directories technique from `L438` (`l437_full_run` +
-   `l437_full_run2`'s `qpa` output combined), not either one alone.
-3. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
-   master per-group table in one pass using the union of completed cases from
-   both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s own
-   recommendation -- still not actionable yet, sweep nowhere near done.
-4. **(standing, still open)** `Basic/Mandelbrot.test` -- confirmed fixed at the
-   actual root cause (`L437`), not a flake needing spot-checks; 492/492 clean
-   again this session. No further action needed unless it fails again, in which
-   case check `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` reachability first per
-   `L437`'s finding.
-5. **(idea for a future session with real wall-clock budget)** Once
-   `/tmp/l437_full_run2/` finishes, that's the highest-leverage next step
-   overall (a full fresh per-group baseline covering ~3.25M cases) -- worth
-   prioritizing over any single-family CTS triage pass, since individual-family
-   re-sweeps risk re-discovering already-fixed ground (as happened with
-   `synchronization` in an earlier session).
+1. **(~1 day, the real next step for `L419(h)`)** Implement the masked-loop-path
+   break generalization described above, using this session's two new `.ll`
+   tests as the red/green target (`unsupported-...` should flip from `not
+   feme-opt | FileCheck` to a normal passing `feme-opt | FileCheck`, with new
+   `CHECK` lines for the correct mask/phi output --
+   `loop-break-separate-from-header-check.ll` should keep passing unchanged,
+   proving no regression to the already-working non-masked path). Re-run
+   `dEQP-VK.glsl.loops.special.*` after to confirm all 18 flip to Pass, then a
+   full `check-feme` + `check-hlsl-feme-vk` pass before commit.
+2. **(cheap, before starting #1)** Resolve the "8/3/3/4 vs flat 18" discrepancy
+   by re-sweeping the demote/derivative/loop-in-switch dEQP groups directly
+   (same `--deqp-runmode=stdout-caselist` technique) to see whether they're
+   already all-Pass (meaning the roadmap's old breakdown was simply stale) or
+   still have their own distinct residuals (meaning `L419(h)`'s "18" is actually
+   bigger than this session's `glsl.loops.special` sweep alone covers).
+3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) is the other
+   still-untouched `L419` sub-item -- a good second target for the same
+   IR-dump-and-reduce methodology once `L419(h)` is actually fixed.
+4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/`
+   progress (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). 14
+   -> 20 batches this session; healthy but slow, ~1,800+ batches total remain.
+   Recover via the `L438` union-of-both-directories technique if it ever dies.
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
+   master per-group table in one pass using the union of completed cases across
+   both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s recommendation --
+   still not actionable yet.
