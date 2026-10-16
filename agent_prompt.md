@@ -66,20 +66,25 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, highest-leverage item available)** Re-cluster the residual 6,024
-   `synchronization.op` failures' own real underlying diagnostics (same
-   `FEME_DEBUG_LINEARIZE_TRACE`/temporary-`Quiet=false`-rerun bisection
-   technique used this session) to scope the next specific `K6z`/`L425`
-   sub-shape. Both `L432(b)` and `L433` were one-line fixes once isolated --
-   there is a good chance more of this residual set shares a similarly small,
-   specific gap rather than needing one big rewrite. Scope one shape, not the
-   whole family, same as this session and last.
-2. **(standing, several sessions now)** `Basic/Mandelbrot.test`'s flake -- still
-   not picked up as its own item. Low priority, change-of-pace candidate if a
-   break from `Linearize.cpp` is wanted.
-3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift re-check --
-   not re-verified this session, no `offload-test-suite` work was done.
-4. **(already resolved, stop carrying forward)** `backup-before-rebase-20261014`
-   tag and `CMAKE_BUILD_TYPE` decisions were both closed in `L431`. Confirmed
-   again this session they need no further action -- this is the last session
-   that should mention them at all.
+1. **(~1 day, start fresh)** `synchronization.op.*` is now 0 Fail. Pick a
+   *different* CTS test family for the next raw sweep-and-triage pass -- e.g.
+   the broader `api.*`/`copy_and_blit`/`image_clearing` families `L302`
+   originally sampled from, or a fresh full mustpass run -- rather than
+   continuing to mine this now-closed family.
+2. **(standing, many sessions now)** `Basic/Mandelbrot.test`'s flake (in
+   `offload-test-suite`, exercised via `check-hlsl-feme-vk`) -- still not picked
+   up as its own item this session either. Low priority, change-of-pace
+   candidate.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift --
+   re-checked this session (cheap `git fetch`/`git log` only, no rebuild): still
+   7 ahead / 1 behind, same single remote-only commit (`0cc94c2`, touches only
+   `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`), unchanged from the
+   prior session's finding. Still needs a decision (rebase it in vs. confirm
+   superseded) from a session that's actually touching `offload-test-suite`.
+4. **(risk worth a stress test, not urgent)** The `canReachBlock` confined-BFS
+   fallback was validated against this one repro shape plus the
+   now-fully-passing `synchronization.op` sweep. A future session touching
+   `Linearize.cpp` again should keep an eye out for any case with multiple
+   nested *sibling* child cycles interacting with this same staleness mechanism
+   differently -- not hit in this session's testing, but not exhaustively
+   stress-tested either.
