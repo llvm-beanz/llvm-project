@@ -5617,3 +5617,53 @@ because the configured 30-second budget was actually in effect.
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed (no feature/extension-surface change; a test-harness environment-
 propagation fix, not a Vulkan behavior change).
+
+## `L438`: full re-triage recovered after a session-boundary kill, relaunched detached
+
+`L437`'s full re-triage did not survive to this session: it had been
+launched with the `bash` tool's plain `mode="async"` (attached to that
+session), which the harness terminates when the session itself ends --
+regardless of how long the underlying job was expected to run. Found
+dead on check-in, with `/tmp/l437_full_run/` containing partial `qpa`
+output (no `batches`/`report.txt`) for roughly 199 of 1,808 planned
+batches.
+
+Rather than restart from zero, extracted every actually-completed
+`CasePath="..."` from **all** `qpa/*.qpa` files in that directory (not
+just batches that looked numerically "early enough to be done" --
+spot-checks showed completion is not a clean prefix: with 6 concurrent
+workers, batches scattered across the whole numeric range, e.g. 194,
+195, 197, 198, were all simultaneously partial when the process died).
+This recovered 350,894 (10.8%) already-completed cases. Computed the
+true remaining case list (2,902,690 cases) as the full list minus that
+completed set, and relaunched against only the remainder in a new
+output directory, `/tmp/l437_full_run2`. This time launched with
+`detach: true`, confirmed via `ps aux` to be a genuinely orphaned
+process tree (`?` controlling TTY) that will survive this session's own
+end.
+
+**Status: still in progress, further from complete than `L437`'s own
+checkpoint in wall-clock terms** (restarted at the ~11% mark rather than
+continuing past it), but with none of the already-completed work lost.
+A future session should treat the eventual full result as the union of
+completed cases across **both** `/tmp/l437_full_run/` and
+`/tmp/l437_full_run2/` (plus any further recovery rounds, if this
+happens again), not either directory's `report.txt` alone. The master
+"Per-group accounting" table above is still untouched, same as `L437`
+left it.
+
+Also audited `offload-test-suite/test/CMakeLists.txt`'s `gpu_suite_env`
+for any other `FEME_*`-prefixed variable with the same lit-environment-
+passthrough gap `L437` found and fixed: only `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`
+exists, already fixed; `OFFLOADTEST_GPU_NAME` (read directly via
+`os.environ.get` inside `lit.cfg.py` itself, not via the test subprocess
+environment) and `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` (already in the
+`with_system_environment` allowlist) are both unaffected. No further
+fix needed here.
+
+Codified both the "launch multi-day sweeps detached" and "reconstruct
+remaining work from `qpa` output, since there's no `--resume` flag"
+lessons in `feme/.instructions.md`.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (process/tooling fix only, no feature/extension-surface change).
