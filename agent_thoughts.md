@@ -124017,3 +124017,53 @@ The residual `K6z`/`L425` family turned out to have (at least) two genuinely sep
 ## Cleanup note
 
 `/tmp/l425b/` still has the bisection artifacts from this session (`one_store.ll`, `full_domain.ll`, `repro.ll`, etc.) -- all regenerable via `FEME_DUMP_IR_PRELINEARIZE=1` against the same repro case, not committed, safe to delete any time.
+
+# Session: L434 -- nested-loop stale-CycleInfo bug (closes out synchronization.op entirely)
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (needed `VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json` -- bare `vulkaninfo` defaults to `llvmpipe` in this container since `VK_ICD_FILENAMES` isn't exported by default; this is expected per `feme/.instructions.md`, not a regression).
+
+## What got fixed
+
+Resumed mid-investigation from the prior session's checkpoint (root cause already found, candidate fix built but not yet re-tested). Picked up exactly there:
+
+1. Re-ran the refined (confined-BFS) fix against `/tmp/l434/nested_named.ll` -- **passed**. Also confirmed `/tmp/l434/nested.ll` (unnamed) and `/tmp/l434/inner_only.ll` (negative control) both still pass.
+2. Reverted all 4 temporary debug instrumentation blocks (trace prints in `validate()`, `DiamondFlattener::run()`, the live-IR dump in `linearizeCycle`, and the `canFlattenLoopBodyRegion` snapshot/restore re-run probe) -- confirmed only the real `isLoopControlEdge`/`canReachBlock` fix remains via `git diff`.
+3. Rebuilt `feme-opt`/`feme_vulkan`/`FeMeTransformsCPUTests`. `FeMeTransformsCPUTests`: 638/638 Pass.
+4. Wrote `nested-uniform-loops-with-image-calls.ll`, a cleaned-up lit regression (meaningful block names, exact topology preserved) from the real captured IR. Confirmed via `git stash` bisection: fails without the fix (same "empty diamond arm" diagnostic), passes with it.
+5. `ninja check-feme`: 3765/3773 Passed, 1 Failed -- the same pre-existing, already-tracked `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, unrelated.
+6. Target CTS repro (`dEQP-VK.synchronization.op.single_queue.barrier.write_image_compute_read_image_compute.image_128x128_r16_uint`): Pass.
+7. Full `dEQP-VK.synchronization.op.*` re-sweep: **14,694 Pass / 0 Fail / 5,437 NotSupported** (up from 8,670/6,024/5,437 -- **every single one of the 6,024 remaining failures flipped to Pass**). This closes out the entire `synchronization.op` failure set in one fix.
+8. Updated `Roadmap.md` (new `L434` row, struck through/done) and `VulkanCTSReport.md` (new section with before/after numbers and full root-cause writeup). No Vulkan inventory change needed -- pure compiler CFG-handling fix.
+9. Committed in 3 separate commits: fix (`isLoopControlEdge`/`canReachBlock`), regression test, docs.
+
+## Root cause, short version
+
+`CycleInfo CI` is computed once per function and never recomputed, even though `linearizeCyclePostOrder` mutates the CFG between cycles (unlike `DT`/`PDT`, recomputed before every `linearizeCycle` call). Once an inner uniform loop is linearized, its own redundant-`Flow`-block collapse can sever a relay block's path back to the header -- but `CI.contains` still reports it as a cycle member (static snapshot, dominance unaffected too). This fooled `isLoopControlEdge` into treating the inner loop's exit check as an ordinary diamond when the *outer* loop's precheck later walked through it, tripping "empty diamond arm." Fixed `isLoopControlEdge` to fall back to a live, cycle-membership-bounded BFS (`canReachBlock`) whenever `CI.contains` says "still a member," rather than trusting the stale snapshot outright. A full `CI.compute(F)` mid-traversal recompute was rejected: `CycleRef` handles are only valid until the next recompute, and the post-order traversal holds them across recursive stack frames.
+
+## Results at a glance
+
+| What | Before | After |
+|---|---|---|
+| `synchronization.op.*` Pass | 8,670 | 14,694 |
+| `synchronization.op.*` Fail | 6,024 | 0 |
+| Target repro case | Fail | Pass |
+| `check-feme` | 3763/3771 (1 pre-existing fail) | 3765/3773 (same 1 pre-existing fail) |
+
+## Debugging-technique note for future sessions
+
+The `L433`-session-inherited "re-run a failed `Quiet=true` `validate()`/`canFlattenLoopBodyRegion` call with `Quiet=false` to see the real diagnostic" trick is **not safe as-is**: `validate()` doesn't roll back its own `MergeVisited`/`LastRegionVisited` insertions on failure, so the second call starts from a dirtied state and can manufacture a false diagnostic. Fixed this session by snapshotting/restoring both sets around the probe (then reverted along with the rest of the debug instrumentation, since it was debugging-aid-only, not part of the shipped fix). If a future session reuses this re-run trick, reintroduce the snapshot/restore -- don't just re-call `validate()` naively.
+
+## Why this one closed the *entire* remaining failure set (not a partial fix like L432(b)/L433)
+
+Unlike `L432(b)`/`L433`, where the fix's blast radius was large-but-partial (1,259 and 2,512 of a larger remaining pool, respectively), this fix's 6,024-case blast radius was the *entire* remaining pool. Best guess: every CFG shape left in this diagnostic family's `synchronization.op` presence, by this point, happened to involve a since-collapsed child cycle's relay edge being misread by `isLoopControlEdge` -- i.e. the family had already been narrowed down (by `L432(b)`/`L433`) to cases that all shared this one specific staleness mechanism, even though the actual *surface* CFG shapes (single mask-op-adjacent loop vs. two nested loops) looked different.
+
+## Next steps
+
+1. **(~1 day, start fresh)** `synchronization.op.*` is now 0 Fail. Pick a *different* CTS test family for the next raw sweep-and-triage pass -- e.g. the broader `api.*`/`copy_and_blit`/`image_clearing` families `L302` originally sampled from, or a fresh full mustpass run -- rather than continuing to mine this now-closed family.
+2. **(standing, many sessions now)** `Basic/Mandelbrot.test`'s flake (in `offload-test-suite`, exercised via `check-hlsl-feme-vk`) -- still not picked up as its own item this session either. Low priority, change-of-pace candidate.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- re-checked this session (cheap `git fetch`/`git log` only, no rebuild): still 7 ahead / 1 behind, same single remote-only commit (`0cc94c2`, touches only `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`), unchanged from the prior session's finding. Still needs a decision (rebase it in vs. confirm superseded) from a session that's actually touching `offload-test-suite`.
+4. **(risk worth a stress test, not urgent)** The `canReachBlock` confined-BFS fallback was validated against this one repro shape plus the now-fully-passing `synchronization.op` sweep. A future session touching `Linearize.cpp` again should keep an eye out for any case with multiple nested *sibling* child cycles interacting with this same staleness mechanism differently -- not hit in this session's testing, but not exhaustively stress-tested either.
+
+## Cleanup note
+
+`/tmp/l434/` (`nested.ll`, `nested_named.ll`, `inner_only.ll`) and `/tmp/l434_fixed.ll`/`/tmp/l434_sync_op_after.qpa` are all regenerable (via `FEME_DUMP_IR_PRENORM=1` against the repro case, or re-running the CTS sweep) and not committed -- safe to delete any time.
