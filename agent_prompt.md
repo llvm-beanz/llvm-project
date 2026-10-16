@@ -69,29 +69,22 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, the real next step for `L419(h)`)** Implement the masked-loop-path
-   break generalization described above, using this session's two new `.ll`
-   tests as the red/green target (`unsupported-...` should flip from `not
-   feme-opt | FileCheck` to a normal passing `feme-opt | FileCheck`, with new
-   `CHECK` lines for the correct mask/phi output --
-   `loop-break-separate-from-header-check.ll` should keep passing unchanged,
-   proving no regression to the already-working non-masked path). Re-run
-   `dEQP-VK.glsl.loops.special.*` after to confirm all 18 flip to Pass, then a
-   full `check-feme` + `check-hlsl-feme-vk` pass before commit.
-2. **(cheap, before starting #1)** Resolve the "8/3/3/4 vs flat 18" discrepancy
-   by re-sweeping the demote/derivative/loop-in-switch dEQP groups directly
-   (same `--deqp-runmode=stdout-caselist` technique) to see whether they're
-   already all-Pass (meaning the roadmap's old breakdown was simply stale) or
-   still have their own distinct residuals (meaning `L419(h)`'s "18" is actually
-   bigger than this session's `glsl.loops.special` sweep alone covers).
-3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) is the other
-   still-untouched `L419` sub-item -- a good second target for the same
-   IR-dump-and-reduce methodology once `L419(h)` is actually fixed.
+1. **(~2-3 hours)** Root-cause the widening's `mixed_break_continue` regression
+   via `FEME_DUMP_IR_PRENORM=1` on
+   `do_while_uniform_iterations.mixed_break_continue_fragment` (and the
+   `for_dynamic`/`while_dynamic` siblings) -- compare its CFG shape against
+   `conditional_break_fragment`'s to find the missing distinguishing check the
+   widening's `OtherCondBrBlocks` scan needs.
+2. **(~2-3 hours, after #1)** Once the widening is scoped to introduce zero
+   regressions on its own, re-apply the poison-placeholder phi-completeness fix
+   (code is reconstructable from this file's description above, not preserved in
+   any backup -- rewrite from scratch, it's small) and root-cause the
+   `select_iteration_count` regression via the `feme-cpu-simdize`
+   divergent-branch diagnostic.
+3. **(standing)** `L419(g)` (tessellation residuals, 30 cases) -- still
+   untouched, same IR-dump-and-reduce methodology candidate.
 4. **(check-in, cheap, every session)** Keep checking `/tmp/l437_full_run2/`
-   progress (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). 14
-   -> 20 batches this session; healthy but slow, ~1,800+ batches total remain.
-   Recover via the `L438` union-of-both-directories technique if it ever dies.
+   progress.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
    master per-group table in one pass using the union of completed cases across
-   both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s recommendation --
-   still not actionable yet.
+   both `/tmp/l437_full_run*` directories.
