@@ -124067,3 +124067,44 @@ Unlike `L432(b)`/`L433`, where the fix's blast radius was large-but-partial (1,2
 ## Cleanup note
 
 `/tmp/l434/` (`nested.ll`, `nested_named.ll`, `inner_only.ll`) and `/tmp/l434_fixed.ll`/`/tmp/l434_sync_op_after.qpa` are all regenerable (via `FEME_DUMP_IR_PRENORM=1` against the repro case, or re-running the CTS sweep) and not committed -- safe to delete any time.
+
+# Session: L435 -- multithreaded device-create segfault root-caused as an external Vulkan-Loader race
+
+Run `vulkaninfo --summary | grep deviceName` first thing, every session -- confirmed `FeMe CPU Vulkan Device`. Repo tree was clean on start (summarized handoff said this session was mid-investigation, no edits applied yet).
+
+## Where this picked up
+
+Prior session (summarized) found a ~50-80%-reproducible segfault in `dEQP-VK.api.object_management.multithreaded_per_thread_resources.device` while running a fresh `api.*` sweep (`L302`'s own "start fresh with a different family" next step). Core-dump analysis had already pointed at the system Vulkan loader, not FeMe code, but hadn't confirmed it with a targeted ASan rebuild yet. This session's job: finish that.
+
+## What got done (in order)
+
+1. **Targeted mixed-instrumentation ASan build.** `FeMeVulkanCore`/`feme_vulkan` recompiled with `-fsanitize=address -fno-omit-frame-pointer`, everything else (LLVM/MLIR static libs, `deqp-vk`, the system loader) untouched. Hit a real environment gap first: this clang install has **no bundled compiler-rt ASan runtime archive** for `aarch64-unknown-linux-gnu` (`libclang_rt.asan_static.a` etc. don't exist, no apt package available either). Worked around it: `-fsanitize=address -fno-sanitize-link-runtime` (suppresses clang's own runtime auto-link) + explicitly `target_link_libraries(... /usr/lib/gcc/aarch64-linux-gnu/15/libasan.a)` (the system GCC package's own static ASan runtime, ABI-compatible since both toolchains target the same Itanium C++ ABI/libstdc++ here). Verified this mixing actually works correctly with a standalone 5-line heap-overflow repro before trusting it on the real build.
+2. **Ran the repro 8x against the instrumented build: 0 crashes, 0 ASan reports.** Same repro against a clean (reverted) rebuild: 5/10 crashes. This swing is the single most informative data point this session -- ASan's allocator (redzones + delayed-reuse quarantine) changes heap *reuse timing* enough to close the race window, without any FeMe code actually behaving differently. Classic signature of an allocator-timing-gated UAF/address-reuse race in code ASan never got to instrument (i.e., not in FeMe).
+3. **Read every FeMe object on the crash path start to finish** (`Icd.h`, `EntryPoints.cpp`, `ProcAddr.cpp`, `Objects.h`, `PipelineCache.cpp`) -- no shared mutable state across concurrently-created `Device`s found. The one shared object (`PhysicalDevice`/`PhysicalDeviceInfo`) is computed once, never mutated.
+4. **Read the actual CTS test source** (`vktApiObjectManagementTests.cpp` in VK-GL-CTS, not this repo) to confirm what the test actually does: many threads racing `vkCreateDevice`/`vkDestroyDevice` against one shared `VkPhysicalDevice`, with a `barrier()` specifically to force concurrent entry into the driver. This is exactly the gap the Vulkan spec's per-object external-synchronization rule doesn't cover -- it's the loader's own shared dispatch bookkeeping that has to handle it, not the ICD.
+5. **Confirmed via web/GitHub research**: `KhronosGroup/Vulkan-Loader` issue #200 is the same general class of bug (`vkCreateDevice`/`vkDestroyDevice`/`vkGetDeviceProcAddr` dispatch-table race), closed 2022 by a mutex around `loader.instances`. The installed loader here (`libvulkan1` 1.4.341.0-1) is years newer, so this isn't literally that unpatched bug -- but it's the same *family* of "per-call sync isn't enough" loader bug.
+6. **Confirmed not fixable here**: the loader (`/usr/lib/aarch64-linux-gnu/libvulkan.so.1`) is a separately-installed system package, not vendored anywhere in `llvm-project`. Reverted the temporary ASan CMake diagnostic changes (`feme/lib/Vulkan/CMakeLists.txt`) before doing anything else.
+7. **Documented it**: `Roadmap.md` new `L435` row (not struck through -- same precedent as `L428(a)`, a confirmed-external finding with no further in-repo action), `VulkanCTSReport.md` full write-up. Committed as a docs-only change (no code diff).
+8. **Rebuilt + ran `FeMeTransformsCPUTests`**: 638/638, matching the pre-session baseline exactly -- confirms this session made zero code changes and zero regressions.
+9. **Re-checked standing items**: `offload-test-suite` `feme`-branch drift still shows the same single remote-only commit (`0cc94c2`, unchanged) 1 behind / 8 ahead (ahead count grew by 1 vs. last session's "7 ahead" from ordinary local history, not new drift). `Basic/Mandelbrot.test` flake: confirmed still present (1 failure in 3 `check-hlsl-feme-vk` runs) -- still not picked up as its own item.
+10. **Resumed the interrupted broader `dEQP-VK.api.*` sweep** (267,512 cases) via `feme/utils/run_vulkan_cts.py`'s crash-tolerant batch harness (launched async, `--workers 6`, no `--deqp-vk-arg` env-var mistake this time -- `VK_ICD_FILENAMES` has to be a real env var on the invoking shell, not passed through `--deqp-vk-arg`, which only forwards CLI flags to `deqp-vk` itself). Still running as this entry is being written; results not in yet.
+
+## The ASan-no-runtime-archive gotcha (save future sessions the rediscovery)
+
+This environment's clang (`clang-21`, from apt) has **no compiler-rt sanitizer archives installed** for `aarch64-unknown-linux-gnu` -- `-fsanitize=address` alone fails to link (`cannot find .../libclang_rt.asan_static.a`). No `libclang-rt-21-dev`-style package is available via apt either (no candidate). The system **does** have the GCC package's own static ASan runtime (`/usr/lib/gcc/aarch64-linux-gnu/15/libasan.a`, matching `libasan8`'s shared counterpart already used for `LD_PRELOAD` probes in earlier sessions). Workaround, verified to work correctly end-to-end:
+
+```cmake
+target_compile_options(<target> PUBLIC -fsanitize=address -fno-omit-frame-pointer)
+target_link_options(<target> PUBLIC -fsanitize=address -fno-sanitize-link-runtime)
+target_link_libraries(<target> PUBLIC /usr/lib/gcc/aarch64-linux-gnu/15/libasan.a)
+```
+
+Order matters: use `target_link_libraries` (not `target_link_options`/`-l:libasan.a`), so CMake places it *after* the target's own static archive on the link line -- static archives only resolve symbols from libraries listed afterward. Getting this backwards produces a wall of `undefined reference to '__asan_report_load1'`-style errors that look unrelated to link ordering at first glance.
+
+## Next steps
+
+1. **(in progress, check on it)** The `dEQP-VK.api.*` sweep (267,512 cases) launched via `feme/utils/run_vulkan_cts.py` in shellId 120 (background), output at `/tmp/l435_api_run2/`, report at `/tmp/l435_api_report.txt`. Read the report once it finishes; update `VulkanCTSReport.md`/`Roadmap.md` with the full before/after `api.*` Pass/Fail/NotSupported counts (there was no prior baseline for this specific family -- this run *is* the baseline). Triage any new failures the same way `L302` triaged `synchronization.op`/`copy_and_blit`/etc.
+2. **(~15 min, cheap)** Clean up `/tmp/l435_*`, `/tmp/asan_run_*`, `/tmp/asan_instr_*`, `/tmp/mt_device_*`, `/tmp/clean_rebuild_*`, `/tmp/t2*` once the sweep's results are captured -- all regenerable.
+3. **(standing, many sessions now)** `Basic/Mandelbrot.test` flake -- confirmed present again this session, still not picked up as its own item.
+4. **(standing)** `offload-test-suite` `feme`-branch drift -- same single commit (`0cc94c2`), unchanged, still needs a decision from a session actually touching `offload-test-suite`.
+5. **(low priority, future stress test)** If a future session touches multithreaded device lifecycle again and hits a similar crash, check this `L435` writeup first before re-deriving the ASan-no-runtime-archive workaround or re-reading the same FeMe object files -- they were already read clean this session.
