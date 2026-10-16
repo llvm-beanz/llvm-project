@@ -124214,3 +124214,38 @@ This is the second session in a row where this exact sweep has hit a problem cau
 3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift -- still the same single commit (`0cc94c2`), unchanged, still needs a decision from a session actually touching that repo for its own sake (not just incidentally, as both `L437` and this session did).
 4. **(no longer standing, confirmed resolved)** The `FEME_*` env var audit is done -- only one existed, already fixed. Don't re-run this check unless a new `FEME_*`-prefixed var is added to `gpu_suite_env` in the future.
 5. **(no longer standing, confirmed resolved)** `Basic/Mandelbrot.test` -- 492/492 `check-hlsl-feme-vk` passed cleanly again this session with the sweep running concurrently. Treat as fixed, not a flake to keep spot-checking.
+
+# Session: L439 -- closed the `offload-test-suite` "drift" as a false positive, verified sweep health
+
+## TL;DR
+
+Confirmed device (`FeMe CPU Vulkan Device`). Confirmed `/tmp/l437_full_run2/`'s detached full-CTS re-triage survived the session boundary and is still progressing (7 workers alive at session start, 9 by session end, load average ~8-10). Instead of re-deferring the standing `offload-test-suite` drift item for the Nth consecutive session, actually resolved it: the "7 ahead / 1 behind" status against `llvm-beanz/feme` is **not real content drift**. `git patch-id` proves the one "behind" commit (`0cc94c2`) is byte-identical in content to a commit already in this repo's own history (`b606d08`, a prior session's cherry-pick) -- `git log`'s hash-based ancestry check can't see that because `git cherry-pick` always produces a new commit object, even for identical content. Re-ran `check-hlsl-feme-vk` (492/492 Passed) as the no-FeMe-changes sanity check.
+
+## What actually happened, in order
+
+1. `vulkaninfo --summary | grep deviceName` (with `VK_ICD_FILENAMES` exported) -> `FeMe CPU Vulkan Device`, confirmed.
+2. Checked both repos: `llvm-project` and `offload-test-suite` both clean, consistent with the last session's end state.
+3. Checked on `/tmp/l437_full_run2/`: `ps aux` showed the orchestrator plus 6-7 `deqp-vk` workers still alive, one full 1800/1800 batch already done, others mid-flight. The detached-launch fix from `L438` is confirmed working across a second session boundary now.
+4. Looked at the handoff's 5 items: #1 (check-in) done; #2 (replace master table) not yet actionable, sweep still far from complete; #4/#5 already closed in prior sessions. That left #3, the standing `offload-test-suite` drift item, flagged "needs a decision" for several sessions running without anyone actually investigating it properly -- decided to do that this session since the user's task explicitly asks for a decision from a session touching that repo.
+5. Re-fetched `llvm-beanz/feme`, re-ran `git log origin/main..llvm-beanz/feme` -- still just `0cc94c2`, touching only `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`.
+6. Diffed `0cc94c2`'s content against current HEAD for those same three files -- the only differences were this/prior sessions' own additive fixes (`FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` allowlist line, the `with_system_environment` fix, one unrelated `%api_query` substitution). That strongly suggested `0cc94c2`'s own content was already present somewhere in local history under a different commit hash.
+7. Scanned `git log` for a commit with the same author/date/message as `0cc94c2` -- found `b606d08`, a local cherry-pick from a prior session.
+8. Ran `git show 0cc94c2 | git patch-id` and `git show b606d08 | git patch-id` -- **identical patch-id** (`47914dcf...`). This is a content hash that ignores commit metadata (parent, committer date, tree ancestry), so an identical patch-id is conclusive proof the two commits apply the exact same change. Confirmed: no real drift, ever. Every prior session's "needs a decision" framing was a false positive caused by comparing commit hashes instead of commit content across a cherry-pick boundary.
+9. Documented the technique and the specific finding in `feme/.instructions.md` (new final section) so no future session re-flags this.
+10. Added `L439` to `Roadmap.md`, `done`, depending on `L437`/`L438` (the two sessions that most recently re-flagged this item).
+11. Committed `.instructions.md` + `Roadmap.md` together (`f5cee864169e`).
+12. Re-ran `check-hlsl-feme-vk`: 492/492 Passed, 0 Failed -- Mandelbrot fix still holding, no regressions, sweep running concurrently the whole time.
+13. Re-ran `check-feme`: 3765/3773 Passed, 7 Unsupported, 1 Failed (`entry-wrapper-loop-header-derived-value-in-suffix.ll`) -- exact same known baseline as every recent session, not a regression. No FeMe source was touched this session, consistent with this result.
+14. Final check-in on `/tmp/l437_full_run2/`: 9 `deqp-vk` workers still alive, 9 batches now have qpa output (up from 7 at session start) -- sweep is healthy and progressing at a similar rate to before.
+
+## Why this matters
+
+This is the fourth or fifth consecutive session to carry "`offload-test-suite` drift, needs a decision" as a standing item without anyone actually running the one diagnostic (`git patch-id`) that would settle it. The lesson generalizes beyond this one repo: whenever a workflow repeatedly resets a branch to upstream and re-applies the same local changes via cherry-pick (as documented already in `.instructions.md` for this exact branch), `git log A..B` ahead/behind counts are structurally unreliable as a drift signal, because cherry-pick is specifically designed to reproduce content under a new hash. Any future "N ahead / M behind" finding on a cherry-pick-based branch should be checked with `git patch-id` *before* being written up as unresolved, not after several sessions of re-deferral.
+
+## Next steps
+
+1. **(standing item retired)** `offload-test-suite` drift is now closed for good -- don't re-flag "7 ahead / 1 behind llvm-beanz/feme" as a pending decision in future sessions. If the ahead/behind counts change (e.g. a genuinely new commit appears on `llvm-beanz/feme`), re-check with `git patch-id` the same way before assuming it's unresolved drift.
+2. **(check-in, cheap)** Keep checking `/tmp/l437_full_run2/` progress each session (`ps aux | grep deqp-vk`, `ls /tmp/l437_full_run2/qpa | wc -l`). It went from 7 to 9 completed batches across this session alone -- healthy but slow going given ~1,800+ total batches remain. If it ever dies, recover using the union-of-both-directories technique from `L438` (`l437_full_run` + `l437_full_run2`'s `qpa` output combined), not either one alone.
+3. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the union of completed cases from both `/tmp/l437_full_run*` directories, per `L436`/`L438`'s own recommendation -- still not actionable yet, sweep nowhere near done.
+4. **(standing, still open)** `Basic/Mandelbrot.test` -- confirmed fixed at the actual root cause (`L437`), not a flake needing spot-checks; 492/492 clean again this session. No further action needed unless it fails again, in which case check `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` reachability first per `L437`'s finding.
+5. **(idea for a future session with real wall-clock budget)** Once `/tmp/l437_full_run2/` finishes, that's the highest-leverage next step overall (a full fresh per-group baseline covering ~3.25M cases) -- worth prioritizing over any single-family CTS triage pass, since individual-family re-sweeps risk re-discovering already-fixed ground (as happened with `synchronization` in an earlier session).
