@@ -123882,3 +123882,94 @@ vars breaks things" theory -- it doesn't, as far as 20 repeated trials show.
 3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
    re-check -- not re-verified this session, no `offload-test-suite` work
    was done and the checkout was not re-cloned, so drift risk is unchanged.
+
+# Session: L432(b)/L432(c) -- the `synchronization.op` CFG-linearization gap actually fixed, 1,259 cases flipped, one self-caught regression
+
+Confirmed device: `FeMe CPU Vulkan Device`. ✅
+
+## Do this first
+
+Nothing blocking -- this session's work is committed, `check-feme` is
+clean (modulo one pre-existing, unrelated failure), and the next open
+item has its own next-step text below.
+
+## What happened (in order)
+
+1. Picked up `L432(a)`'s plan: add a forward-walk check-recovery helper
+   (`findForwardExitCheckBlock`) to `Linearize.cpp` for the real CTS
+   repro (`write_blit_image_read_image_compute.
+   image_128_r32_uint_concurrent`).
+2. The forward-walk alone wasn't enough -- traced the remaining failure
+   to a *different*, narrower bug: `DiamondFlattener::run()`'s own
+   whole-function validation pass poisons the shared `MergeVisited` set
+   with zero rollback when it decides there's nothing to flatten,
+   permanently "claiming" blocks `LoopLinearizer` itself still needs.
+   Fixed that (`L432(b)`'s real fix) by reusing the existing
+   `LastRegionVisited` tracking member inside `run()` for the first
+   time, with rollback at both of its early-return paths.
+3. Wrote and validated a new regression test
+   (`DoesNotPoisonMergeVisitedWhenWholeFunctionPassDeclines`) --
+   deliberately confirmed it fails without the fix and passes with it,
+   not just that it passes.
+4. Ran the mandatory `ninja check-feme` before committing anything (per
+   standing instructions) -- caught a real regression this session's
+   own forward-walk fix introduced: no divergence gate, so a genuinely
+   divergent separate check (pre-existing test
+   `loop-check-separate-carried-value.ll`) got claimed by *both* the
+   new path and the pre-existing `OtherCondBrBlocks` machinery,
+   crashing. Fixed (`L432(c)`) with a one-line divergence gate.
+5. Confirmed (via `git stash` to a clean baseline) that the *other*
+   `check-feme` failure (`entry-wrapper-loop-header-derived-value-in-
+   suffix.ll`) is pre-existing and unrelated -- not something this
+   session touched or needs to fix.
+6. Re-verified everything: unit tests 638/638, `check-feme` 3763/3771
+   (1 pre-existing unrelated failure, 0 new), target CTS repro Pass,
+   full `synchronization.op` sweep 6,158 Pass (up 1,259) / 5,437
+   NotSupported / 8,536 Fail.
+
+## Why this took three distinct bug fixes, not one
+
+The original `L432(a)` plan assumed one gap (no forward-walk check
+recovery). The real system had three independent bugs stacked on top
+of each other for this one CTS case to actually pass:
+`findForwardExitCheckBlock` itself (new), the whole-function
+`MergeVisited` poisoning bug it exposed (pre-existing, never triggered
+before because nothing used to walk far enough to hit it), and the
+divergence-gate omission in the new helper (caused by the new helper
+itself, caught by `check-feme` before it ever reached a commit). This
+is exactly why the standing "run `check-feme` before any commit"
+instruction exists -- it caught a real crash that the targeted CTS case
+and the unit tests alone would never have surfaced.
+
+## Wins
+
+- The single highest-leverage known compiler gap from last session is
+  now actually fixed, not just scoped: 1,259 `synchronization.op` cases
+  flipped from Fail to Pass.
+- Caught and fixed a self-introduced regression *before* committing,
+  via the mandatory `check-feme` run -- exactly the safety net it's
+  there for.
+- The remaining 8,536 `synchronization.op` failures all now collapse to
+  one single different diagnostic (not this one), cleanly separating
+  "done" from "next".
+
+## Next steps
+
+1. **(~1-2 days)** The `K6z`/`L425` "internal branch in a body shape
+   this milestone does not yet lower" diagnostic family is now the
+   single largest remaining `synchronization.op` blocker (8,536 cases).
+   It covers multiple distinct CFG shapes per its own existing roadmap
+   rows -- scope one specific sub-shape first (the way `L432` itself was
+   split off from a vaguer predecessor) rather than attacking it as one
+   lump.
+2. **(standing)** `Basic/Mandelbrot.test`'s flake -- still not actively
+   worked on as its own item in several sessions now.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift
+   re-check -- not re-verified this session, no `offload-test-suite`
+   work was done.
+4. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision (already resolved,
+   deleted in `L431`) and `CMAKE_BUILD_TYPE` decision (already resolved
+   in `L431`, keeping `RelWithDebInfo`) -- no longer open, listing here
+   only to confirm they should stop being carried forward as "standing"
+   items in future session summaries.
