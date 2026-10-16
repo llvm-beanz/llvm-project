@@ -2479,4 +2479,86 @@ TEST(LinearizeTest,
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap L432(b): `DiamondFlattener::run()` -- the whole-function pass
+// that runs *before* `LoopLinearizer` -- shares its own `MergeVisited`/
+// `ResolvedBlocks` bookkeeping with `LoopLinearizer` for the rest of the
+// function's lifetime (see `MergeVisited`'s own comment). Its entry-root
+// validation walk passes straight through a uniform loop's header, body,
+// and latch purely to discover the loop's own cycle-boundary exit (never
+// to flatten anything inside it, since the loop's own exit check is
+// uniform here, not a divergent diamond). When that walk finds no
+// divergent branch anywhere else in the function either, `run()` used to
+// bail out (`return false`, "nothing to flatten") while still leaving
+// every one of those blocks claimed in the shared `MergeVisited` with no
+// matching `ResolvedBlocks` entry -- so `LoopLinearizer`'s own, later,
+// legitimate `flattenLoopBodyRegion` walk over the very same blocks (this
+// loop's body has a `feme.cpu.resource.store.raw.i32` call, so its mask
+// must be threaded through that call, not `DiamondFlattener`'s own
+// simpler per-diamond flattening) immediately hit the `L375` "reached by
+// more than one divergent root" diagnostic as a false positive. This
+// reproduces `dEQP-VK.synchronization.op.multi_queue.binary_semaphore.
+// write_blit_image_read_image_compute.image_128_r32_uint_concurrent`'s
+// own shape: a uniform `for` loop whose header holds only the induction
+// `phi` plus an unconditional branch to the real (uniform) trip-count
+// check, whose "exit" arm is routed through a trivial relay block before
+// reaching the function's single `ret`.
+TEST(LinearizeTest, DoesNotPoisonMergeVisitedWhenWholeFunctionPassDeclines) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf, i32 %desc) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      br label %check
+    check:
+      %cond = icmp slt i32 %i, %n
+      br i1 %cond, label %body, label %flowcritedge
+    body:
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 1, i32 %desc, i64 0, i32 %i, i1 true)
+      %inc = add i32 %i, 1
+      br label %flow
+    flowcritedge:
+      br label %flow
+    flow:
+      %i.next = phi i32 [ %inc, %body ], [ %i, %flowcritedge ]
+      %flowcond = phi i1 [ false, %body ], [ true, %flowcritedge ]
+      br i1 %flowcond, label %exit, label %latch
+    latch:
+      br label %header
+    exit:
+      ret void
+    }
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_FALSE(SawError)
+      << "roadmap L432(b): DiamondFlattener::run()'s own whole-function "
+         "validation walk must roll back its MergeVisited claims when it "
+         "declines to flatten anything, instead of permanently poisoning "
+         "LoopLinearizer's later, legitimate walk over the same blocks";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundResourceStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && matchResourceCall(*CI))
+      FoundResourceStore = true;
+  }
+  EXPECT_TRUE(FoundResourceStore);
+}
+
 } // namespace
