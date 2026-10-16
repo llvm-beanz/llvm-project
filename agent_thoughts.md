@@ -123615,3 +123615,94 @@ be set every single time, it is never already active.)
    against `main` before trusting any `check-hlsl-feme-vk` failure as
    new -- not re-checked this session (no `offload-test-suite` work
    done, checkout not re-cloned).
+
+# Session: L430 fixed -- groupshared pointer-merge/compare support, all 6 `K6p`/`K6a` milestone-9 residual cases now pass
+
+**Device confirmed**: `FeMe CPU Vulkan Device` (`VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary`).
+
+## What's done
+
+1. Finished a prior session's in-progress `GroupShared.cpp` edit (L430):
+   groupshared pointer merges (`select`/`phi`) and compares (`icmp`) are
+   now retargeted onto the flat buffer instead of rejected outright.
+2. Found and fixed 3 bugs while debugging against real CTS failures:
+   - Vector-of-pointers gap (widened divergent merges weren't handled).
+   - Mutual-recursion cycle-guard gap (269,000+ stack frames, fresh
+     `VisitedMerges` set defeated the cycle break).
+   - Premature-erase-of-own-operand gap (loop-carried backedge GEP
+     erased while still live, use-list assertion crash).
+3. Added 2 `SIMDizeTest` unit tests, debugged their IR shapes until both
+   genuinely exercised the fix (see "What went sideways" below).
+4. Verified: all 6 CTS repro cases pass; 962/1650 broader
+   `variable_pointers` sweep (0 fail, same as before -- these 6 just
+   moved into the passing bucket); `check-feme` 3762/3770 (1
+   pre-existing unrelated failure); `check-hlsl-feme-vk` 1 known-flaky
+   failure (`Mandelbrot.test`), not a regression.
+5. Committed in 2 commits: the fix+tests (`GroupShared.cpp`,
+   `SIMDizeTest.cpp`), then docs (`Roadmap.md` new `L430` row struck
+   through, `VulkanCTSReport.md` new section, `FeMeCPUDesign.md`
+   milestone-9 note updated, `Vulkan14FeatureInventory.md` rows
+   annotated, `VulkanExtensionInventory.md` + its driving
+   `PlannedExtensions.txt`/`CorePromotedNotAdvertisedExtensions.txt`
+   moved `VK_KHR_variable_pointers` to "Implemented").
+
+## What went sideways (useful if this recurs)
+
+Writing the 2 new unit tests was not a straight line -- 3 separate false
+starts, each informative:
+
+1. First attempt used `@llvm.dx.thread.id` to drive the `select`'s
+   condition (to make it genuinely divergent, matching the real CTS
+   shape). This made the raw *global* itself get widened/broadcast by
+   `FunctionWidener`'s own generic machinery *before* my code ever saw
+   it, tripping an unrelated pre-existing "unrecognized broadcast" error
+   (a raw global used directly as a `select` leg, with no intervening
+   `getelementptr`, isn't a shape `hasOnlySupportedBroadcasts` was ever
+   designed to accept). Fixed by using an opaque external `@cond()` call
+   instead -- keeps the whole function uniform, no widening at all,
+   still exercises the merge-retargeting logic directly.
+2. The self-referential-phi test's loop had a thread-id-derived branch
+   condition (needed, to match the real divergent-loop shape) but
+   `runPass()` alone doesn't run `LinearizePass` first, so the divergent
+   branch tripped SIMDize's own "divergent branch not removed" bail-out.
+   Fixed by calling `feme::cpu::LinearizePass().run(*M, MAM)` before
+   `runPass(*M)`, matching the existing pattern other loop/branch tests
+   in the same file already use.
+3. First test's final assertion (`isa<SelectInst>(&I) &&
+   I.getType()->isPointerTy()`) failed even on a *correct* run, because
+   the retargeted `select` legitimately still exists -- just now typed
+   as plain `ptr` (address space 0), not `ptr addrspace(3)`. The check
+   was testing the wrong thing; fixed to check address-space-3 pointer
+   type specifically, matching every other test in the file's own
+   convention.
+
+Lesson for next time: when hand-writing an IR unit test for a
+divergence-dependent code path, temporarily print the diagnostic handler's
+actual message (`DiagnosticPrinterRawOStream`) and/or dump the module
+after `runPass` -- guessing from `SawError`/bare assertions alone wastes
+several rebuild cycles.
+
+## Next steps
+
+1. **(~2-4 hours)** Mandelbrot flake -- still not picked up, several
+   sessions running now. Low priority, change of pace.
+2. **(standing, unresolved many sessions)**
+   `backup-before-rebase-20261014` tag decision,
+   `CMAKE_BUILD_TYPE=RelWithDebInfo` vs `Release` decision -- neither
+   revisited this session either.
+3. **(new this session)** `offload-test-suite` checkout: local `feme`
+   branch is 7 commits ahead *and* 1 commit behind
+   `llvm-beanz/feme` (diverged, not just stale) -- the single
+   remote-only commit (`0cc94c2`, "Add FeMe test targets") only touches
+   `CMakeLists.txt`/`test/CMakeLists.txt`/`test/lit.cfg.py`, and the 3
+   previously-found drift fixes (`VkBool32`, `WaveActiveMax` XFAIL,
+   `array_of_matrices` XFAIL) are all still present locally, so this is
+   not the standing drift pattern recurring -- but a future session
+   should decide whether to rebase/merge that one remote commit in, or
+   confirm it's already superseded locally in a different form, before
+   trusting the local checkout's CMake wiring indefinitely.
+4. No remaining roadmap item currently known to block anything in the
+   `variablePointers`/milestone-9 area -- `K6a`'s full tree (`K6n`
+   through `K6z`, `L430`) is now closed end to end. Next open item with
+   its own next-step text is whichever `L428`-family or standing item
+   the next session's own prior-session summary names.
