@@ -123973,3 +123973,47 @@ and the unit tests alone would never have surfaced.
    in `L431`, keeping `RelWithDebInfo`) -- no longer open, listing here
    only to confirm they should stop being carried forward as "standing"
    items in future session summaries.
+
+# Session: L433 fixed -- the `K6z`/`L425` sub-shape scoped last session flips 2,512 more `synchronization.op` cases
+
+**Device check:** `vulkaninfo --summary | grep deviceName` (with `VK_ICD_FILENAMES` exported to the build's `feme_icd.json`) → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Win: one-line fix, 2,512 CTS cases flipped Fail→Pass.**
+
+## What got done, in order
+
+1. Picked up the prior session's exact handoff (scope one `K6z`/`L425` sub-shape): used `dEQP-VK.synchronization.op.single_queue.fence.write_image_tess_eval_read_image_tess_control.image_128_r32_uint`, already isolated and captured via `FEME_DUMP_IR_PRELINEARIZE=1` at session start.
+2. Bisected a standalone `.ll` repro down to the smallest failing case via `feme-opt --llvm -passes=feme-cpu-linearize` (fast iteration, no CTS/Vulkan needed): a single `feme.stage.output.store.f32` call before an otherwise-uniform loop is enough to trigger the bug -- the loop shape alone does *not* reproduce it.
+3. Added temporary `Quiet=false` validate() re-runs (gated behind the existing `FEME_DEBUG_LINEARIZE_TRACE` env var) to surface the real diagnostic underneath the generic catch-all: `"reached by more than one divergent root"`.
+4. Root-caused: `DiamondFlattener::run()`'s commit path (taken when a mask-affecting op forces it, instead of the `L432(b)`-fixed decline path) never inserts its own visited blocks into `ResolvedBlocks` after committing -- unlike its sibling methods `flattenLoopBodyDiamond`/`flattenLoopBodyRegion`, which both do. Exact sibling bug to `L432(b)`, opposite side of the same gate.
+5. Fixed with one line: `ResolvedBlocks.insert(LastRegionVisited.begin(), LastRegionVisited.end());` before `run()`'s final `return true;`.
+6. Reverted all temporary debug instrumentation (4 spots) before committing -- none of it shipped.
+7. Wrote `loop-body-resolved-blocks-after-mask-op.ll`, a cleaned-up lit regression (meaningful block names, exact topology preserved) from the real captured IR. Confirmed via `git stash` bisection: fails without the fix, passes with it.
+8. `FeMeTransformsCPUTests`: 638/638 Pass. `ninja check-feme`: 3763/3771 Passed, 1 Failed -- confirmed via the same stash bisection that the 1 failure (`entry-wrapper-loop-header-derived-value-in-suffix.ll`) is pre-existing, unrelated, already tracked across many prior sessions.
+9. Target CTS repro: Pass. Full `dEQP-VK.synchronization.op.*` re-sweep: **8,670 Pass / 6,024 Fail / 5,437 NotSupported** (up from 6,158/8,536/5,437 -- 2,512 flipped, more than double the single repro case's own weight).
+10. Updated `Roadmap.md` (new `L433` row, done) and `VulkanCTSReport.md` (new section with before/after numbers). No Vulkan inventory change needed -- pure compiler CFG-handling fix.
+11. Committed in 3 separate commits: fix, regression test, docs.
+
+## Results at a glance
+
+| What | Before | After |
+|---|---|---|
+| `synchronization.op.*` Pass | 6,158 | 8,670 |
+| `synchronization.op.*` Fail | 8,536 | 6,024 |
+| Target repro case | Fail | Pass |
+| `check-feme` | 3763/3771 (1 pre-existing fail) | unchanged |
+
+## Why this one was fast (~1 session vs. the `K6u`-`K6z` multi-session slog)
+
+The residual `K6z`/`L425` family turned out to have (at least) two genuinely separate bugs hiding behind the same generic diagnostic: `L432(b)` fixed the decline-path half of the `MergeVisited`/`ResolvedBlocks` contract gap, this session found and fixed the commit-path half. Both were one-line fixes once root-caused -- the actual work was entirely in isolating a minimal repro and reading `DiamondFlattener::run()` carefully enough to see the asymmetry between it and its own sibling methods.
+
+## Next steps
+
+1. **(~1 day, highest-leverage item available)** Re-cluster the residual 6,024 `synchronization.op` failures' own real underlying diagnostics (same `FEME_DEBUG_LINEARIZE_TRACE`/temporary-`Quiet=false`-rerun bisection technique used this session) to scope the next specific `K6z`/`L425` sub-shape. Both `L432(b)` and `L433` were one-line fixes once isolated -- there is a good chance more of this residual set shares a similarly small, specific gap rather than needing one big rewrite. Scope one shape, not the whole family, same as this session and last.
+2. **(standing, several sessions now)** `Basic/Mandelbrot.test`'s flake -- still not picked up as its own item. Low priority, change-of-pace candidate if a break from `Linearize.cpp` is wanted.
+3. **(standing)** `offload-test-suite` `feme`-branch-vs-`main` drift re-check -- not re-verified this session, no `offload-test-suite` work was done.
+4. **(already resolved, stop carrying forward)** `backup-before-rebase-20261014` tag and `CMAKE_BUILD_TYPE` decisions were both closed in `L431`. Confirmed again this session they need no further action -- this is the last session that should mention them at all.
+
+## Cleanup note
+
+`/tmp/l425b/` still has the bisection artifacts from this session (`one_store.ll`, `full_domain.ll`, `repro.ll`, etc.) -- all regenerable via `FEME_DUMP_IR_PRELINEARIZE=1` against the same repro case, not committed, safe to delete any time.
