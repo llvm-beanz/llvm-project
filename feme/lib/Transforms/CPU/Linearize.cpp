@@ -2333,6 +2333,32 @@ bool DiamondFlattener::run() {
     BasicBlock *End = RootEnd.lookup(Root);
     flatten(Root, End, EntryMasks, /*RedirectTo=*/End);
   }
+  // Roadmap L433: this whole-function walk just committed every root above
+  // (mutating the IR for real, unlike the declined-and-rolled-back paths
+  // above that `return false` instead) -- every block its own validation
+  // phase visited (`LastRegionVisited`, the exact same tracking the
+  // declined paths already roll back out of `MergeVisited`) must be
+  // released into `ResolvedBlocks` too, exactly as `flattenLoopBodyDiamond`/
+  // `flattenLoopBodyRegion`'s own successful commits already do (see
+  // `ResolvedBlocks`'s own comment) -- otherwise a block this walk merely
+  // passed through on its way to a cycle boundary (never itself flattened,
+  // e.g. a uniform loop's own header/exit-check chain, left completely
+  // untouched since the loop's exit check is not a divergent diamond) stays
+  // claimed in `MergeVisited` with no matching release, so the very next,
+  // entirely legitimate walk over those same blocks (`LoopLinearizer`'s own
+  // later `flattenLoopBodyRegion` call for that same loop) spuriously hits
+  // the `L375` "reached by more than one divergent root" diagnostic.
+  // Reproduced by `dEQP-VK.synchronization.op.single_queue.fence.
+  // write_image_tess_eval_read_image_tess_control.image_128_r32_uint`: its
+  // domain-stage `main` has a mask-affecting `feme.stage.output.store.f32`
+  // call *before* its own uniform image-copy loop, so this pass's
+  // `!HasDivergentBranch && !hasStageMaskOps(F)` decline-and-roll-back
+  // guard above does not apply (there is a mask op to lower) and this
+  // commit path runs instead -- but it walked straight through the loop's
+  // header/check chain first, discovering (not flattening) the loop's own
+  // cycle boundary, with nothing to roll that back out of `MergeVisited`
+  // until now.
+  ResolvedBlocks.insert(LastRegionVisited.begin(), LastRegionVisited.end());
   return true;
 }
 
