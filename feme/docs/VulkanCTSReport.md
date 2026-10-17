@@ -6377,3 +6377,39 @@ feature/extension surface touched). `Vulkan CTS` (`dEQP-VK.glsl.loops.*`
 etc.) was not re-run this specific sub-session since no `Linearize.cpp`
 code change was made; the previously-reported `L419(x)`/`L419(y)` numbers
 stand unchanged.
+
+## L440(b): first `check-hlsl-clang-feme-vk` run (contention caveat)
+
+Ran `ninja -C build check-hlsl-clang-feme-vk` for the first time ever
+this session (the Clang-HLSL-driven sibling of `check-hlsl-feme-vk`,
+same FeMe ICD, different frontend -- `clang-dxc -spirv` instead of
+`dxc`): **92 Failed / 293 Passed / 269 Unsupported / 139 Expectedly
+Failed**, out of 793. Markedly worse than `check-hlsl-feme-vk`'s 1
+Failed/491 Passed on the same test corpus -- expected, since several
+`*.test` files in this suite carry `XFAIL: Clang && Vulkan` markers
+(e.g. referencing the open llvm/llvm-project#226608
+`SPIRVEmitIntrinsics` insertion-point bug, which is specific to Clang's
+direct-to-SPIR-V codegen path) that do not apply to the `dxc`-driven
+suite.
+
+**Caveat, found and codified this session (`feme/.instructions.md`):**
+re-running the exact same `llvm-lit` invocation moments later, while the
+standing `/tmp/l437_full_run3` CTS sweep was pegging a CPU core at
+~100%, gave a wildly different, clearly load-skewed result (385
+"Failed", effectively every non-Unsupported/non-XFail case) due to
+`FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=30000`'s hard wall-clock timeout
+being blown through under contention. The 92/293/269/139 figure above is
+the one measured via the project's own documented `ninja
+check-hlsl-clang-feme-vk` invocation and is treated as the trustworthy
+baseline; it has **not** been independently re-confirmed free of all
+contention this session (the background sweep was running throughout).
+A future session should re-measure once `/tmp/l437_full_run3` (or
+whatever standing sweep is active at the time) has finished, before
+treating 92 as a hard baseline to diff future changes against.
+
+No fix attempted this session (92 failures is too large a batch to
+triage in the time remaining); likely dominated by the known
+`SPIRVEmitIntrinsics` upstream bug class per the `XFAIL: Clang &&
+Vulkan` markers already present on many of these tests, but this has
+**not** been verified case-by-case. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change.
