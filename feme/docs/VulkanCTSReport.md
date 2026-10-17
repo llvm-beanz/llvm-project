@@ -7530,29 +7530,50 @@ checks to use it instead of the raw `sliceInstruction`.
   Pass (already passing beforehand, re-verified unaffected as a close
   sibling).
 
-**`out_of_order` investigated, found to be a separate, still-open
-bug** (not fixed this session): reduced one case each of
-`opphi.out_of_order_geom`, `selection_block_order.out_of_order_geom`,
-and `switch_block_order.out_of_order_geom` -- all three fail with a
-real rendering mismatch ("Upper right corner mismatch"), not a
+**`out_of_order` investigated and root-caused this session** (not yet
+fixed): reduced one case each of `opphi.out_of_order_geom`,
+`selection_block_order.out_of_order_geom`, and
+`switch_block_order.out_of_order_geom` -- all three fail with a real
+rendering mismatch ("Upper right corner mismatch"), not a
 deserialization or pipeline-creation error, immediately ruling out a
 shared cause with `opline`/`opnop`. Further isolated `opphi`'s own
 5-stage breakdown: `_frag`/`_tessc`/`_tesse` **Pass**, but `_geom`
 fails with "Upper right corner mismatch" and `_vert` fails with a
-*different* mismatch location, "Lower left corner mismatch". The
-shared shader shape across all 5 stages is a `for` loop containing an
-`OpSwitch` + an `OpPhi` whose operands are listed out of block order;
-the two stages that fail are exactly the two where each of the four
-input quad corners takes a genuinely different `OpSwitch` case
-per-invocation (vertex and geometry), while the three passing stages
-either interpolate (fragment) or have an otherwise-uniform switch
-argument (tessellation control/evaluation) -- a pattern matching this
-effort's earlier, already-fixed "Function-storage tightening" bug
-class (`matrix_3x3`, `H004`: un-privatized `OpVariable Function`storage
-locals leaking across SIMD-widened per-invocation lanes), not a
-block-ordering bug per se. Not reduced to a minimal repro or fixed
-this session -- see `Roadmap.md`'s `L452(a)` for the concrete next
-steps.
+*different* mismatch location, "Lower left corner mismatch".
+
+Got a real `FEME_DUMP_IR_PRESIMD` + `FEME_DUMP_IR` (post-widening)
+pair of dumps for `opphi.out_of_order_vert` to find the real mechanism,
+rather than stopping at the initial "Function-storage tightening"
+hypothesis (which turned out to be close but wrong in its specifics).
+The real bug: `feme::cpu::WaveUniformity`'s divergence analysis
+(`llvm::UniformityInfo`, standard SSA-only dataflow, no memory/alias
+model at all) has no way to see divergence carried *through memory*.
+This shader's `result[i] = result[i] + operand` round-trips a
+genuinely per-lane-divergent value (each lane's own vertex color)
+through a `store`-then-`load` pair on a **uniformly-indexed** alloca
+slot (`i` is the shared loop counter, same value every lane, every
+iteration) -- the load's *pointer* operand is uniform and has no
+divergent control dependency, so the analysis classifies the loaded
+*value* uniform too, even though the memory it reads back is
+genuinely different per lane. Confirmed directly in the post-widening
+dump: `FunctionWidener` correctly widens the load's address into 4
+real per-lane pointers and recombines 4 real per-lane loads into a
+genuinely-divergent `<4 x float>` vector -- but because the
+*consuming* `fadd`/`store` had already been judged uniform by the
+analysis, the widener's own "give a surviving scalar use its value
+back" fallback collapses that correctly-widened vector down to **one
+single lane's value** (`extractelement ..., i64 %active.lane`) and
+broadcasts it, unconditionally and unmasked, into every lane's own
+storage slot -- silently overwriting every other lane's independent
+per-lane state with lane 0's (or whichever lane is first-active) own
+value. Not the `matrix_3x3`/`H004` bug class recurring (that one was
+an under-widened aggregate *type*; this one is memory-carried
+divergence the analysis structurally cannot see at all) -- a new gap,
+likely affecting other not-yet-identified failures beyond this named
+cluster too. Not fixed this session (a divergence-analysis change is
+high-risk to land without a full dedicated session -- see
+`Roadmap.md`'s `L452(a)` for the concrete design sketch and next
+steps).
 
 No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
 needed for the landed fix (pure deserialization-layer fix, no
