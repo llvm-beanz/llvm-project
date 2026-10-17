@@ -125658,3 +125658,102 @@ a rushed tail end.
    not Linearize).
 7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+
+# Session: L452(d) fixed — peelConstantFlowPredecessors ancestor-reconvergence guard
+
+Fixed `L452(d)`. 15 CTS cases went Fail -> Pass, zero regressions,
+confirmed by a real before/after diff.
+
+## What shipped (3 commits)
+
+1. `peelWouldDestroyAncestorReconvergencePoint` in `Linearize.cpp`:
+   bails out of a peel that would destroy an ancestor diamond's own
+   reconvergence point. Plus a new lit test.
+2. Updated `checkblock-chained-divergent-check-bypass.ll` — its old
+   `L377(a)` fast path is now conservatively declined (output still
+   correct, just not maximally optimized).
+3. `Roadmap.md` + `VulkanCTSReport.md` updated with real numbers.
+
+## State restored from stash
+
+Picked up `stash@{0}` from the prior session: the two helper functions
+were already sketched but not wired in or tested. Wired them in,
+tested, found 6 regressions, fixed them, verified clean.
+
+## The two bugs in the first draft of the guard (both fixed)
+
+1. **Loop header/latch false-positive.** The guard's backward walk
+   found the loop header itself as "Origin" — loop headers legitimately
+   reconverge the same way a diamond does, and `LoopLinearizer` already
+   handles that downstream. Fix: exempt `Header`/`Latch` explicitly.
+2. **"Pure relay" was too loose.** A loop latch block ends in an
+   unconditional branch but does real work (`%inc`, trip-count check).
+   The original relay-chain walker treated any `UncondBr`-terminated
+   block as a pure pass-through. Fix: require `isPureRelayBlock` too.
+
+Found both via a temporary `FEME_DEBUG_L452D` env-var print inside the
+helper, rebuilding just `feme-opt` (fast via ccache) and re-running the
+one failing lit test each time. Removed the debug code before the
+final commit.
+
+## One known, accepted trade-off
+
+`checkblock-chained-divergent-check-bypass.ll` can't be told apart from
+the real bug by this purely structural check. The new guard declines
+its `%chain.merge` micro-optimization. Verified the output is still
+fully flattened and correct (`-passes=feme-cpu-linearize,verify`, no
+leftover `br i1`). Updated the test's CHECK lines rather than risk
+re-implementing full loop-exit-edge detection to recover the
+optimization.
+
+## Verification
+
+- `check-feme`: 3776/3776 passing, 0 failures (full rebuild).
+- `FeMeTransformsCPUTests`: 640/640 passing.
+- Real `deqp-vk` run, 78-case targeted list (all 6 `L452(c)` named
+  clusters + stages): baseline 14 pass / 28 fail -> after-fix 29 pass /
+  13 fail. Confirmed via set comparison of Fail-status cases (not a
+  spot check): **zero regressions**, 15 newly fixed.
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`
+  (confirmed both at session start and again before this writeup, with
+  `VK_ICD_FILENAMES` set explicitly both times — it is NOT the default
+  ICD in this environment, `llvmpipe` is, so this check needs the env
+  var set or it silently reports the wrong device).
+
+## New roadmap item: L452(e)
+
+13 cases in the targeted list still fail after this fix:
+- 4 are `*_tessc` variants of the now-fixed clusters — probably
+  `L419(g)`'s already-known tessellation-control residuals, not
+  re-confirmed this session.
+- 8 are `type.scalar.{i32,u32}.switch_{comp,geom,tessc,tesse}` — same
+  top-level diagnostic, NOT fixed by this session's change. Needs its
+  own standalone reduction before assuming it shares this root cause.
+  Logged as `L452(e)`, not started.
+
+## Next steps
+
+1. **(not started, next candidate)** `L452(e)`: reduce one
+   `type.scalar.i32.switch_comp` case standalone (same
+   `FEME_DUMP_IR_PRELINEARIZE` + hand-reduce technique used for
+   `L452(d)`) to find out whether it's the same ancestor-reconvergence
+   shape via a different front door, or a third bug entirely.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s
+   `out_of_order` fix — memory-carried divergence gap in
+   `WaveUniformity`, design already written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and
+   `L419(g)` (30 tessellation residuals) — worth confirming whether
+   this session's 4 `*_tessc` failures are the same bucket.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate
+   `spirv.GlobalVariable` legalization bug (8 cases) — different code
+   area (SPIRVToLLVM conversion), can run in parallel with anything
+   above.
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+8. **(low priority, carried forward)** 9 older git stashes
+   (`stash@{1}`–`stash@{9}` as of last session) remain uninspected —
+   low value now that the one likely-relevant stash has been recovered
+   and landed, but still open if a future session wants to check.
