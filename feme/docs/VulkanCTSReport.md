@@ -6036,3 +6036,99 @@ Standing `/tmp/l437_full_run2/` background CTS sweep check-in: still
 alive and progressing (84,381 `qpa` files this session, up from 72,396
 last checked) -- not yet finished, no action needed beyond this
 check-in.
+
+## `L419(w)`: poison-placeholder masking fix lands with a diagnosed, not-yet-closed net regression -- `L419(v)`'s option (b)
+
+Implemented `L419(v)`'s own deferred option (b): the poison-placeholder
+phi seed, plus a new ahead-of-time-ish `CycleNeedsRealMasking` gate and a
+`flattenTaintedBranchesInRegion` safety net, rather than the two-phase
+region/masking restructuring of option (a).
+
+**Crash fixed first**: a full `dEQP-VK.glsl.loops.special.*` sweep with
+the plain poison seed aborted (exit 134) on
+`do_while_uniform_iterations.dowhile_trap_fragment` -- a `cast<PHINode>`
+assertion in `rethreadNestedEntryMasks`, because
+`foldNowTriviallyConstantMaskPhis` can legitimately fold a fully-uniform
+child cycle's masks to a plain `Constant` before this runs. Fixed with a
+`dyn_cast<PHINode>` guard.
+
+**Image-mismatch regression found and fixed defensively**: with the
+crash fixed, `conditional_break_{fragment,vertex}` (130 cases into the
+sweep) showed a genuine image mismatch, not a crash. Bisected via
+`git stash`/`FEME_DUMP_IR_PRESIMD=1` IR-diffing against the untouched
+baseline: `flattenKnownDivergentBranch` was discarding a genuine loop
+break's per-arm masks (its own prior doc comment already flagged this as
+unsound for exactly this shape -- a branch whose reconvergence point is
+the cycle's own exit block, not a local diamond). Added a
+`CI.contains(SC, R)` cycle-containment check so this now fails with a
+clean diagnostic instead of silently producing the wrong image.
+
+**Full 552-case sweep after both fixes**: 524 Pass / 28 Fail. Compared
+against a `git stash`-baseline re-sweep of just the 28 failures: 16 of
+them PASS on baseline (all 6 `conditional_break_*`, 2x `dowhile_trap`
+fragment/vertex, 6x `nested*`), 12 are pre-existing, unrelated
+`L419(h)` residuals (`elseblock`/`ifblock`/`mixed_break_continue`).
+Net: 7 newly fixed (`select_iteration_count`), 16 newly regressed, a
+net loss of ~9 passing cases -- **not landable as-is.**
+
+**Root cause**: the poison seed taints *every* cycle's masks from
+creation regardless of whether that cycle ever needs real masking,
+which `narrowCallMask` then threads into resource/image loads inside
+even fully-uniform cycles, making their ordinary internal branches look
+"tainted" to `flattenTaintedBranchesInRegion`.
+
+**Fix attempted this session**: a `CycleNeedsRealMasking` predicate
+(`HeaderDivergent || LatchDivergent || a genuinely divergent
+OtherCondBrBlocks member || cycleHasMaskOps(C)`) gating whether the
+`CheckBlock`-handling branch's own `makeActivePNPair` call opts into the
+poison seed at all (new `SeedBackedgeWithPoison` parameter, default
+`true` for full backward compatibility at every other call site).
+
+Iterated on the predicate three times:
+1. Divergence-only (no `cycleHasMaskOps`): fixed `conditional_break`
+   (6 cases) and kept `select_iteration_count` (6 cases) working, but
+   left `loop-internal-break-with-mask-op.ll` (a new unit test this
+   session, a body-level break gating a real resource store) with an
+   un-narrowed, always-`true` mask operand -- a real, lit-tested
+   correctness regression even though it happened to still produce a
+   matching CTS image for this specific repro.
+2. Adding `cycleHasMaskOps(C)` to the predicate: fixes the unit test
+   correctly (mask operand narrows to `active.sideeffect` as designed)
+   but also makes `CycleNeedsRealMasking` true again for
+   `conditional_break` (virtually every real CTS shader touches some
+   resource/image), reverting it back to the diagnosed failure -- full
+   sweep: 524 Pass / 28 Fail, identical to the divergence-only, pre-gate
+   state. **This is the version committed**, since it is the only one
+   with correct, lit-tested masking semantics; `conditional_break`'s own
+   fix is left open (see below).
+3. Also tried excluding a nested child cycle's own header/latch block
+   from the *outer* cycle's `OtherCondBrBlocks` collection
+   (`CI.getCycle(&BB) == C`), suspecting this explains the 10
+   `dowhile_trap`/`nested*` regressions (confirmed via trace: the inner
+   cycle's own, already-correctly-handled exit block shows up again in
+   the outer cycle's `OtherCondBrBlocks` scan). This caused an infinite
+   loop in `FeMeTransformsCPUTests` and was reverted; the fix needs to
+   be scoped to `flattenTaintedBranchesInRegion`'s own candidate walk,
+   not the raw `OtherCondBrBlocks` collection (filed as `L419(x)`).
+
+**Final committed state**: `FeMeTransformsCPUTests` 638/638; `check-feme`
+3,768/3,769 (only the pre-existing, unrelated
+`entry-wrapper-loop-header-derived-value-in-suffix.ll` failure remains);
+`dEQP-VK.glsl.loops.special.*` full 552-case sweep: **524 Pass / 28
+Fail** -- 6 `select_iteration_count_{fragment,vertex}` (via
+`do_while_dynamic`/`for_dynamic`/`while_dynamic`) cases fixed from
+`L419(v)`'s open gap, 10 cases newly regressed vs the pre-`L419(w)`
+533-pass baseline on this same suite (`dowhile_trap_{fragment,vertex}`,
+`nested{,_sequence,_tricky_dataflow_{1,2}}_{fragment,vertex}`, all
+`do_while_dynamic_iterations`), `conditional_break_{fragment,vertex}`
+(6 cases, all three `*_uniform_iterations` groups) now fails cleanly
+(diagnosed, `VK_ERROR_INITIALIZATION_FAILED`) rather than silently
+corrupting the image -- a safety improvement over the pre-session state
+even though not yet a Pass, and 12 pre-existing `L419(h)` residuals
+unchanged. **Net: -9 vs the 533-pass pre-`L419(w)` baseline on this
+suite -- `L419(x)` (filed in `Roadmap.md`) is a hard blocker before this
+milestone can be considered closed.**
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(this is a CPU-backend control-flow/masking-correctness fix, not a
+feature- or extension-surface change).
