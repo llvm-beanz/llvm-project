@@ -66,15 +66,31 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-linearize-defer-loop-body-mask-op-diamond.ll crashes on macOS with the following
-errors:
+Can you please continue the work on the Vulkan FeMe ICD? A previous session
+suggested the next steps:
 
-Can you fix this?
-
-# .---command stderr------------
-# | /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/harness.c:7:10: fatal error: 'stdio.h' file not found
-# |     7 | #include <stdio.h>
-# |       |          ^~~~~~~~~
-# | 1 error generated.
-# `-----------------------------
-# error: command failed with exit status: 1
+1. **(half day, top candidate, unchanged from last session)**
+   `opline`/`opnop`/`out_of_order` cluster (30 cases, single suspected root
+   cause) — reduce one case (e.g. `opline_short_name`) first to confirm the
+   shared mechanism before assuming all 6 sub-clusters share one fix.
+2. **(half day)** Seven ~8-case struct/array composite-decomposition clusters
+   (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
+   `switch`) against the confirmed 229-failure baseline.
+3. **(standing, needs a full dedicated session)** `L419(ad)`
+   (`mixed_break_continue`, 4 cases) — root cause and fix designs written up in
+   `Roadmap.md`; still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+   tessellation residuals) — untouched across multiple sessions.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`) — deferred every session.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader
+   using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated
+   further.
+7. **(worth a one-line follow-up if this recurs)** If a *third* macOS-only
+   failure shows up in this exact test again, it's worth asking whether this
+   file should just get a `REQUIRES: system-linux` guard (or a genuine
+   cross-platform harness rewrite reviewed by someone with macOS CI access)
+   rather than continuing to whack-a-mole one platform-specific gap at a time —
+   two independent macOS-only bugs in the same ~80-line test in two consecutive
+   sessions is a mild signal this test's host-execution approach is inherently
+   fragile cross-platform, not just unlucky.
