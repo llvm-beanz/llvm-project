@@ -1117,10 +1117,24 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
 /// predecessor chain (the loop body) computed each such phi's incoming
 /// value -- i.e., whether this specific wide iteration was a real one for
 /// a given lane.
+///
+/// Roadmap L419(ac): \p RelayCaptured additionally force-includes any phi
+/// it lists as "used outside the loop" even when `InLoop` alone would
+/// disagree -- needed for a `Header` phi whose only real external use is
+/// being captured, via a relay-chain hop's own phi, by
+/// `freezeRelayChainExitValues` elsewhere (see that function's own
+/// comment for the full root-cause writeup): that hop lives *inside* the
+/// cycle (`InLoop` correctly says so), so this phi's literal direct users
+/// are indeed all in-loop, yet the value still needs the exact same
+/// sticky, self-referential freeze this function already applies to any
+/// other externally-read phi, since a relay-chain hop's own phi silently
+/// re-reads whatever `PN` currently holds on every subsequent iteration
+/// once that hop's own distinguishing predecessor edge is gone.
 static void
 freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
                         ArrayRef<PHINode *> MaskPhis,
-                        function_ref<bool(const BasicBlock *)> InLoop) {
+                        function_ref<bool(const BasicBlock *)> InLoop,
+                        ArrayRef<PHINode *> RelayCaptured = {}) {
   if (isKnownConstantMask(BodyMask))
     return; // All-active: the unmasked value is already correct.
   IRBuilder<> B(Latch->getTerminator());
@@ -1133,13 +1147,92 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
     Value *NewValue = PN.getIncomingValue(Idx);
     if (NewValue == &PN)
       continue; // Already trivially frozen; nothing this iteration changed.
-    bool UsedOutsideLoop = any_of(PN.users(), [&](User *U) {
-      return !InLoop(cast<Instruction>(U)->getParent());
-    });
+    bool UsedOutsideLoop =
+        llvm::is_contained(RelayCaptured, &PN) || any_of(PN.users(), [&](User *U) {
+          return !InLoop(cast<Instruction>(U)->getParent());
+        });
     if (!UsedOutsideLoop)
       continue; // Only ever read inside the loop: nothing to freeze.
     PN.setIncomingValue(
         Idx, B.CreateSelect(BodyMask, NewValue, &PN, PN.getName() + ".frozen"));
+  }
+}
+
+/// Roadmap L419(ac): repairs every relay-chain hop's own phi (see
+/// `ExitCheck::RelayChain`'s own comment) for the predecessor edge about
+/// to be orphaned once the caller erases \p Entry's own `CondBr` to it,
+/// *before* that happens -- called once per `HeaderExit`/`LatchExit`
+/// relay match, right before its own `->Br->eraseFromParent()`.
+///
+/// Root cause (`loop_in_switch`/`elseblock`/`ifblock`'s own shared shape,
+/// reduced from `dEQP-VK.glsl.switch.loop_in_switch`'s own
+/// `while_loop_in_switch_dynamic_fragment`): `recoverRelayExitCheck`'s own
+/// generalized chase (roadmap L419(ab)) now resolves `HeaderExit`/
+/// `LatchExit` through one or more relay hops that themselves still own
+/// real, multi-valued `PHINode`s distinguishing "arrived via this exit
+/// edge" from "arrived via the loop's own continue edge" (StructurizeCFG
+/// routinely shares a single dispatch block, like this repro's own
+/// `Flow`, between a loop's real `break` and its real `continue`, picking
+/// between them with exactly such a phi). Once the caller erases
+/// `Header`'s (or `Latch`'s) own `CondBr` and replaces it with an
+/// unconditional branch straight to `StayInLoop`, the first relay hop's
+/// only predecessor (`Header`/`Latch` itself) stops reaching it,
+/// orphaning every one of these phis' exit-edge contribution --
+/// eventually (once `EliminateUnreachableBlocks` runs, much later, at the
+/// very end of this whole pass) collapsing each such phi down to its
+/// *other*, surviving incoming value alone, discarding the correct
+/// already-exited value for every lane that logically took this exit
+/// edge, and replacing it with whatever the loop's *own, still actively
+/// re-executing* continue-edge computes instead -- silently corrupting
+/// exactly those lanes' own final result (confirmed, via direct IR
+/// inspection, to be the root cause of this shape's "Image mismatch" CTS
+/// failures, not a masking omission anywhere else).
+///
+/// Fixed by walking the chain (in order) and, for each phi with an
+/// incoming edge from the chain's previous hop (the soon-to-be-orphaned
+/// one), `select`-wrapping every one of its *other* (surviving) incoming
+/// values with \p GuardMask -- the same per-lane "is this iteration a
+/// real one for this lane" mask `freezeLoopCarriedValues` itself already
+/// uses for an ordinary `Header` phi, captured by the caller immediately
+/// after its own `stayInLoop` call -- choosing the orphaned edge's own
+/// value instead whenever a lane has already (this iteration or any
+/// earlier one) taken the exit edge instead. Whenever the orphaned
+/// value is itself one of \p Header's own loop-carried phis (this
+/// repro's own shape: the exit edge's value is `Header`'s raw running
+/// phi, unmodified), that phi is also recorded into \p RelayCaptured so
+/// the caller can forward it to `freezeLoopCarriedValues`'s own
+/// `RelayCaptured` parameter -- *that* phi itself needs the exact same
+/// sticky, self-referential freeze applied to its own backedge too
+/// (not just this function's one-shot `select` here), since otherwise
+/// its own value keeps being overwritten by the loop's still-executing
+/// body on every subsequent iteration, even once correctly selected here.
+static void
+freezeRelayChainExitValues(ArrayRef<BasicBlock *> Chain, BasicBlock *Entry,
+                           Value *GuardMask, BasicBlock *Header,
+                           SmallPtrSetImpl<PHINode *> &RelayCaptured) {
+  BasicBlock *Prev = Entry;
+  for (BasicBlock *RB : Chain) {
+    IRBuilder<> B(RB->getTerminator());
+    for (PHINode &PN : RB->phis()) {
+      int OrphanIdx = PN.getBasicBlockIndex(Prev);
+      if (OrphanIdx == -1)
+        continue;
+      Value *OrphanValue = PN.getIncomingValue(OrphanIdx);
+      if (auto *OrphanPN = dyn_cast<PHINode>(OrphanValue);
+          OrphanPN && OrphanPN->getParent() == Header)
+        RelayCaptured.insert(OrphanPN);
+      for (unsigned Idx = 0, E = PN.getNumIncomingValues(); Idx != E; ++Idx) {
+        if (static_cast<int>(Idx) == OrphanIdx)
+          continue;
+        Value *Kept = PN.getIncomingValue(Idx);
+        if (Kept == OrphanValue)
+          continue; // Already identical; no divergence to preserve.
+        PN.setIncomingValue(
+            Idx, B.CreateSelect(GuardMask, Kept, OrphanValue,
+                                PN.getName() + ".relay.frozen"));
+      }
+    }
+    Prev = RB;
   }
 }
 
@@ -3077,6 +3170,28 @@ private:
     // why the last (not first) hop is required whenever the chain has
     // more than one block.
     BasicBlock *RelayBlock = nullptr;
+    // Roadmap L419(ac): every relay-chain hop strictly between `Br`'s own
+    // exit successor and `ExitBlock` itself (`RelayBlock` included, as
+    // the chain's own last entry), in chain order, *only* ever populated
+    // by `recoverRelayExitCheck`'s own multi-hop recovery (a direct
+    // `matchExitCheck` match leaves this empty, since there is no chain
+    // to speak of -- `Br`'s own successor already *is* `ExitBlock`).
+    // Needed because a relay hop can itself own real, multi-valued
+    // `PHINode`s (not just the trivial pure-relay/constant-dispatch
+    // `CondBr`s `recoverRelayExitCheck` tolerates chasing *through*) --
+    // seeded, in this milestone's own `loop_in_switch` shape, with the
+    // loop's own genuinely runtime-varying carried value, captured by
+    // the exit edge specifically (as opposed to the loop's `continue`
+    // edge, which a *different*, remaining predecessor of that same hop
+    // supplies). Erasing `Br`'s own exit edge --this function's own
+    // caller always does, once a `HeaderExit`/`LatchExit` match is
+    // accepted -- orphans that predecessor, collapsing any such hop's
+    // phi down to its one remaining (`continue`-edge) value and silently
+    // discarding the correct, already-exited value for every lane that
+    // took this exit edge instead: exactly the root cause this
+    // milestone's own `freezeRelayChainExitValues` fixes, using this
+    // field to find every phi needing the fix before the edge is gone.
+    SmallVector<BasicBlock *, 4> RelayChain;
   };
 
   /// Recognizes \p BB's terminator as an `ExitCheck` targeting \p ExitBlock,
@@ -4310,31 +4425,76 @@ LoopLinearizer::recoverRelayExitCheck(BasicBlock *BB, CycleRef C,
   // *different*, still-in-loop divergent dispatch block shared with the
   // loop's own `break`/`continue` check (`OtherCondBrBlocks`'s own entry),
   // not on `ExitBlock` at all.
-  auto IsTrivialExitStub = [&](BasicBlock *Succ) {
+  //
+  // Roadmap L419(ab): returns the chain's actual *last* hop (the literal
+  // CFG predecessor that ultimately reaches `ExitBlock`), not merely
+  // whether one exists -- `ExitCheck::RelayBlock`'s own contract (see its
+  // comment) requires the last hop, since a `PHINode`'s incoming-block
+  // list only ever names a value's true immediate predecessor. Also
+  // tolerates one additional shape beyond a pure `UncondBr` relay chain:
+  // a `CondBr` whose condition is a `phi` defined in the block being
+  // chased, with a known `ConstantInt` incoming value specifically for
+  // the edge just walked -- i.e., a shared dispatch block whose own
+  // "decision" is really just a relabeling of which of `BB`'s two
+  // successors was taken, not a genuinely independent second divergent
+  // check. Folding that edge and continuing the chase down whichever
+  // successor the constant selects covers the `loop_in_switch`/
+  // `elseblock`/`ifblock` shapes, where `Header`'s own divergent
+  // trip-count check funnels through exactly such a block before
+  // reaching the loop's real continue/exit dispatch.
+  // Roadmap L419(ac): \p Chain, when non-null, collects every hop visited
+  // (`Succ` itself through the returned last hop, inclusive) in chain
+  // order -- see `ExitCheck::RelayChain`'s own comment for why the
+  // caller needs this.
+  auto IsTrivialExitStub =
+      [&](BasicBlock *Succ,
+          SmallVectorImpl<BasicBlock *> *Chain) -> BasicBlock * {
     if (!CI.contains(C, Succ) || !isPureRelayBlock(Succ) ||
         Succ->getUniquePredecessor() != BB)
-      return false;
+      return nullptr;
     BasicBlock *Cur = Succ;
+    BasicBlock *Prev = BB;
     for (unsigned Depth = 0; Depth != 8; ++Depth) {
       if (Cur == ExitBlock)
-        return true;
-      auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
-      if (!UBr || (Cur != Succ && !isPureRelayBlock(Cur)))
-        return false;
-      Cur = UBr->getSuccessor(0);
+        return Prev;
+      if (Chain)
+        Chain->push_back(Cur);
+      if (auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator())) {
+        if (Cur != Succ && !isPureRelayBlock(Cur))
+          return nullptr;
+        Prev = Cur;
+        Cur = UBr->getSuccessor(0);
+        continue;
+      }
+      auto *CondBr = dyn_cast<CondBrInst>(Cur->getTerminator());
+      if (!CondBr)
+        return nullptr;
+      auto *PN = dyn_cast<PHINode>(CondBr->getCondition());
+      if (!PN || PN->getParent() != Cur)
+        return nullptr;
+      int Idx = PN->getBasicBlockIndex(Prev);
+      if (Idx == -1)
+        return nullptr;
+      auto *ConstIncoming = dyn_cast<ConstantInt>(PN->getIncomingValue(Idx));
+      if (!ConstIncoming)
+        return nullptr;
+      Prev = Cur;
+      Cur = CondBr->getSuccessor(ConstIncoming->isOne() ? 0 : 1);
     }
-    return Cur == ExitBlock;
+    return Cur == ExitBlock ? Prev : nullptr;
   };
-  bool Succ0IsStub = IsTrivialExitStub(Br->getSuccessor(0));
-  bool Succ1IsStub = IsTrivialExitStub(Br->getSuccessor(1));
-  if (Succ0IsStub == Succ1IsStub)
+  SmallVector<BasicBlock *, 4> Chain0, Chain1;
+  BasicBlock *Succ0Relay = IsTrivialExitStub(Br->getSuccessor(0), &Chain0);
+  BasicBlock *Succ1Relay = IsTrivialExitStub(Br->getSuccessor(1), &Chain1);
+  if ((Succ0Relay != nullptr) == (Succ1Relay != nullptr))
     return std::nullopt; // Neither (or, ambiguously, both) match this shape.
   ExitCheck EC;
   EC.Br = Br;
   EC.Cond = Br->getCondition();
-  EC.ExitOnTrue = Succ0IsStub;
-  EC.StayInLoop = Succ0IsStub ? Br->getSuccessor(1) : Br->getSuccessor(0);
-  EC.RelayBlock = Succ0IsStub ? Br->getSuccessor(0) : Br->getSuccessor(1);
+  EC.ExitOnTrue = Succ0Relay != nullptr;
+  EC.StayInLoop = Succ0Relay ? Br->getSuccessor(1) : Br->getSuccessor(0);
+  EC.RelayBlock = Succ0Relay ? Succ0Relay : Succ1Relay;
+  EC.RelayChain = Succ0Relay ? std::move(Chain0) : std::move(Chain1);
   return EC;
 }
 
@@ -5590,6 +5750,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     enum class RelaySource { Header, Check };
     SmallVector<std::tuple<PHINode *, Value *, RelaySource>, 4>
         ExitBlockRelayValues;
+    // Roadmap L419(ac): accumulates every `Header` phi
+    // `freezeRelayChainExitValues` finds captured, raw, by a relay-chain
+    // hop's own phi (see that function's own comment) -- forwarded to
+    // this cycle's own `freezeLoopCarriedValues` call below so it also
+    // applies its usual sticky, self-referential freeze to each one.
+    SmallPtrSet<PHINode *, 4> RelayCapturedHeaderPhis;
     // Roadmap L419(w): see `CycleNeedsRealMasking`'s own comment -- a
     // cycle with a non-empty `OtherCondBrBlocks` but no genuine
     // divergence anywhere in it (this `CheckBlock` included, since it is
@@ -5645,6 +5811,15 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                  : HeaderExit->Cond;
       Masks = stayInLoop(HeaderCheckBuilder, Masks, HeaderStaying,
                          "active.header.check");
+      // Roadmap L419(ac): must run before `HeaderExit->Br` below is
+      // erased -- see `freezeRelayChainExitValues`'s own comment --
+      // using `Masks.Live` exactly as just narrowed by `Header`'s own
+      // check above (not any later, further-narrowed mask): it answers
+      // precisely "is this a genuine, still-looping iteration for this
+      // lane", which is exactly the question each relay-chain hop's own
+      // now-orphaned phi needs answered.
+      freezeRelayChainExitValues(HeaderExit->RelayChain, Header, Masks.Live,
+                                 Header, RelayCapturedHeaderPhis);
       // See the identical, more thoroughly-commented pattern just below
       // for `CheckExit`'s own predecessor/phi bookkeeping -- this is a
       // no-op (as expected) whenever `Header` was only ever reaching
@@ -5811,6 +5986,12 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // left dangling by the time the restore loop below dereferences them
     // (a real, reproduced use-after-free crash during this milestone's
     // own development).
+    // Roadmap L419(ac): see the identical call, and its own
+    // more-thoroughly-commented reasoning, at `HeaderExit`'s own erase
+    // just above.
+    freezeRelayChainExitValues(CheckExit->RelayChain, CheckBlock,
+                               MasksAfterCheck.Live, Header,
+                               RelayCapturedHeaderPhis);
     if (llvm::is_contained(predecessors(ExitBlock), CheckBlock))
       ExitBlock->removePredecessor(CheckBlock, /*KeepOneInputPHIs=*/true);
     UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
@@ -5867,7 +6048,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         Header, Latch, MasksAfterCheck.Live,
         {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect),
          ExitedViaCheck},
-        [&](const BasicBlock *BB) { return CI.contains(C, BB); });
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); },
+        SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
+                                  RelayCapturedHeaderPhis.end()));
     addLatchIncoming(EntryMasks, MasksAfterCheck);
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*
     // cycle (linearized afterward, post-order) can retroactively narrow
@@ -6146,6 +6329,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // making this a no-op change for that, previously-only-supported,
   // case).
   SmallVector<std::pair<PHINode *, Value *>, 4> HeaderExitRelayValues;
+  // Roadmap L419(ac): see the identical declaration's own comment in the
+  // `DivergentCandidates` branch above.
+  SmallPtrSet<PHINode *, 4> RelayCapturedHeaderPhis;
   // Roadmap L298: this shape's own region between `Header`'s own exit
   // check and `Latch` is required to be a uniform pass-through in the
   // *control-flow* sense `collectUniformPassThroughRegion` already
@@ -6240,6 +6426,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     for (PHINode &PN : ExitBlock->phis())
       if (int Idx = PN.getBasicBlockIndex(HeaderExit->RelayBlock); Idx != -1)
         HeaderExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+    // Roadmap L419(ac): see `freezeRelayChainExitValues`'s own comment;
+    // must run before `HeaderExit->Br` below is erased.
+    freezeRelayChainExitValues(HeaderExit->RelayChain, Header,
+                               MasksAtLatch.Live, Header,
+                               RelayCapturedHeaderPhis);
     if (llvm::is_contained(predecessors(ExitBlock), Header))
       ExitBlock->removePredecessor(Header, /*KeepOneInputPHIs=*/true);
     UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
@@ -6295,6 +6486,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     for (PHINode &PN : ExitBlock->phis())
       if (int Idx = PN.getBasicBlockIndex(LatchExit->RelayBlock); Idx != -1)
         LatchExitRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx));
+    // Roadmap L419(ac): see `freezeRelayChainExitValues`'s own comment;
+    // must run before `LatchExit->Br` below is erased.
+    freezeRelayChainExitValues(LatchExit->RelayChain, Latch,
+                               MasksAfterLatchCheck.Live, Header,
+                               RelayCapturedHeaderPhis);
     if (llvm::is_contained(predecessors(ExitBlock), Latch))
       ExitBlock->removePredecessor(Latch, /*KeepOneInputPHIs=*/true);
     CondBrInst::Create(Continue, Header, ExitBlock,
@@ -6328,7 +6524,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   freezeLoopCarriedValues(
       Header, Latch, MasksAtLatch.Live,
       {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
-      [&](const BasicBlock *BB) { return CI.contains(C, BB); });
+      [&](const BasicBlock *BB) { return CI.contains(C, BB); },
+      SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
+                                RelayCapturedHeaderPhis.end()));
   addLatchIncoming(Masks, MasksAfterLatchCheck);
   // Roadmap L282: see the identical comment at the `DivergentCandidates`
   // branch's own `return true` above.
