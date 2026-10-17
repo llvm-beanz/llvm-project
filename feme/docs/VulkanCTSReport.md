@@ -7629,3 +7629,56 @@ regression risk of a divergence-analysis change); `L419(ad)`
 unchanged standing items except `L452(a)`/`L452(b)`/`L452(c)`, all new
 this session.
 
+## L452(d): struct/array composite-decomposition clusters root-caused, not fixed
+
+Direct `deqp-vk` runs of all 7 `L452(c)`-named clusters found the
+`struct` leaf is a coincidental naming collision, not shared with the
+other six: it is actually `variable_init`/`opcopymemory` cases
+(8 total) failing on an unrelated `spirv.GlobalVariable` legalization
+error, not investigated further this session. The other 6 leaves --
+`f16arr3`/`struct16arr3`/`v3f16`/`v3f16arr5`/`v4f16arr3`/`switch`
+(48 cases) -- genuinely share one root cause in `feme-cpu-linearize`,
+confirmed via a minimal standalone `.ll` reduction run directly through
+`feme-opt --llvm -passes=feme-cpu-linearize` (far faster than the full
+CTS harness for iterating).
+
+**Mechanism** (full writeup in `Roadmap.md`'s own `L452(d)` entry):
+the switch-decode-inside-a-loop shape these clusters compile to
+contains a small nested diamond-of-diamonds (`Flow10`/`Flow11` in the
+reduced repro). Two independently-sound, already-intentional
+simplifications -- `peelConstantFlowPredecessors` bypassing a provably
+constant predecessor, then `mergeTrivialRelayBlocksInCycle` merging the
+now-single-predecessor `Flow11` into its sole remaining predecessor --
+combine to turn a cleanly-nested 2-level diamond into exactly the
+shape `DiamondFlattener::validate`'s own pre-existing `L375`/`L383(a)`
+commentary already documents as a known, deliberately-unsupported
+limitation ("an outer diamond arm directly reaches a nested sibling
+diamond's own target"). This is not a new regression -- `validate`
+correctly, by design, rejects a CFG shape it has never claimed to
+support -- the new finding is the exact mechanism by which two
+already-intentional folds can produce that shape from an input that
+was cleanly supported before they ran.
+
+Two candidate fixes written up in `Roadmap.md` (neither attempted,
+given this file's extensive prior scar tissue -- `L375`/`L383(a)`/
+`L425`/`L447`/`L442`): (a) teach `peelConstantFlowPredecessors` to
+detect and decline a peel that would destroy an ancestor diamond's own
+clean reconvergence point (narrower, safer, matches this file's
+existing conservative "bail out" philosophy); (b) generalize
+`validate`/`flatten` to tolerate a 3-way shared-descendant
+reconvergence directly (more powerful, much higher regression risk).
+Recommend (a) for the next dedicated session.
+
+No code changed this session -- investigation only, all temporary
+debug instrumentation reverted before this entry was written. No
+`check-feme`/CTS rerun performed since nothing was modified; the
+confirmed 192-case `L452(b)` baseline stands unchanged.
+
+**Next steps (updated)**: `L452(d)`'s own fix design (a), a half-day
+to a day once undertaken; `L452(a)`'s `out_of_order` fix (memory-carried
+divergence gap, needs its own dedicated session); `L419(ad)`
+(`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
+(tessellation residuals); `L440(c)`'s 39-case residual triage; the
+`struct` cluster's own separate `spirv.GlobalVariable` legalization
+bug (8 cases, smaller/independent, could run in parallel).
+
