@@ -7309,3 +7309,74 @@ a fresh re-discovery of the same bug -- worth double-checking the exact
 case-name prefix before starting); `L419(ad)` (`mixed_break_continue`);
 `L419(y)` (`conditional_break`); `L419(g)` (tessellation residuals);
 `L440(c)`'s 39-case residual triage. All unchanged standing items.
+
+### SPIR-V assembly `OpPtrAccessChain` lowering gap fix (L444/L450)
+
+`L444`'s second large compact cluster (13 cases) in the 275-case
+`dEQP-VK.spirv_assembly.*` baseline. **Naming correction**: this
+session's own prior `L449` entry's next-steps flagged a suspicion that
+`Roadmap.md`'s original `L444` prose label, "`opinboundsaccesschain`",
+was an echo of an *already-fixed*, differently-named cluster from an
+earlier session rather than a fresh discovery -- confirmed by directly
+re-parsing `/tmp/l440c_spirvasm.qpa`'s own 275 `Fail` entries and
+substring-matching: exactly 13 cases contain `opptraccesschain`
+(`OpPtrAccessChain`), zero contain `opinboundsaccesschain`. This
+report's entry corrects the name accordingly.
+
+Root cause: `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` had no
+conversion pattern at all for `spirv.PtrAccessChain`/`spirv.InBoundsP
+trAccessChain` -- `ConvertSPIRVToLLVMPass` rejected any module
+containing one outright with "failed to legalize operation
+'spirv.PtrAccessChain' that was explicitly marked illegal", confirmed
+directly via a minimal reproducer
+(`dEQP-VK.spirv_assembly.instruction.compute.indexing.input.struct.
+opptraccesschain_s32`'s pipeline-creation failure).
+
+Per `SPIRVMemoryOps.td`'s own description, `OpPtrAccessChain`/
+`OpInBoundsPtrAccessChain` are identical to `OpAccessChain`/
+`OpInBoundsAccessChain` except for one extra leading `Element` operand
+that "is used to do an initial dereference of Base ... to become the
+[plain]AccessChain Base to dereference" -- i.e. `Element` plays
+exactly the role the existing `AccessChainConversion` pattern's own
+synthesized leading *zero* GEP index already plays for the plain
+`AccessChain` ops (SPIR-V's plain access chain assumes a
+zero-displacement initial dereference; the pointer-arithmetic variant
+makes that displacement an explicit, arbitrary signed operand instead
+of hardcoding it to zero). Added a new `PtrAccessChainConversion`
+template class mirroring `AccessChainConversion`'s own structure,
+threading `Element` through as the GEP's leading index in place of the
+synthesized zero, with unmodified semantics for any subsequent
+`Indices`.
+
+**Verification**:
+- New lit test cases (`@ptr_access_chain`, `@ptr_access_chain_struct`,
+  `@in_bounds_ptr_access_chain`) added to `mlir/test/Conversion/
+  SPIRVToLLVM/memory-ops-to-llvm.mlir` alongside the existing plain
+  `AccessChain` ones; full `SPIRVToLLVM` lit directory: 23/23 passed.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported (no
+  regressions).
+- Real CTS: `dEQP-VK.spirv_assembly.instruction.*opptraccesschain*`
+  (343 cases): **193 Passed / 0 Failed / 150 NotSupported** (was 13
+  Failed among these before this fix -- all now pass, the other 180
+  already-passing cases this lowering also touches show zero
+  regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure compiler correctness fix, zero feature/extension-surface
+change). This fix lives entirely outside `feme/` (in `mlir/`), per the
+standing "issue outside FeMe" instruction: isolated, self-contained,
+with its own regression test, in its own commit, touching no `feme/`
+files.
+
+With both of `L444`'s two largest clusters now fixed (`opquantize` via
+`L449`, `opptraccesschain` via this entry), the 275-case baseline
+should now stand at 275 − 13 − 13 = 249 remaining failures, pending the
+background full re-sweep (`/tmp/l444_spirvasm_full_rerun.qpa`, launched
+earlier this session, still running) to confirm with a real measurement
+rather than arithmetic alone.
+
+**Next steps**: check on `/tmp/l444_spirvasm_full_rerun.qpa` and record
+the refreshed full baseline once complete; `L419(ad)`
+(`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
+(tessellation residuals); `L440(c)`'s 39-case residual triage. All
+unchanged standing items.
