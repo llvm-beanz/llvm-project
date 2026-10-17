@@ -7182,3 +7182,55 @@ in a dedicated session; `L444`'s `opquantize`/`opinboundsaccesschain`
 reduction; `L419(ad)` (`mixed_break_continue`), `L419(y)`
 (`conditional_break`), `L419(g)` (tessellation residuals); `L440(c)`'s
 39-case residual triage. All unchanged standing items.
+
+## Session: L442/L447 fixed (L448) -- DiamondFlattener::run() defers masked loop-body diamonds
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary |
+grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed first action.
+
+**What changed**: implemented `L447`'s own fix design (see `Roadmap.md`'s
+new `L448` entry for the full writeup): `DiamondFlattener::validate()`/
+`::flatten()`'s whole-function walk now defers any in-cycle divergent
+diamond containing a side-effecting resource/image call to
+`LoopLinearizer`, instead of flattening it prematurely with a blind
+`AllActive` mask. A first attempt regressed (the same defer check,
+applied unconditionally, made `LoopLinearizer`'s own recursive
+`validate`/`flatten` calls defer the diamond right back to themselves,
+leaving it permanently unflattened); fixed by adding a new
+`DiamondFlattener::IsWholeFunctionPass` constructor flag, `true` only at
+`run()`'s own top-level call site.
+
+**Verification methodology note**: the first regression-test draft
+(checking that `feme-cpu-linearize`'s own IR output no longer has a
+literal `i1 true` mask operand) was discarded after a `git stash`
+sanity check showed it was an unreliable signal -- the pre-fix code
+already produces a real, merely-wrong, non-constant mask. The committed
+regression test instead compiles `feme-opt`'s full lowered IR to a real
+object via `clang -O0`, links it against a small C harness providing
+`feme.cpu.resource.atomic.add.raw.i32`, executes it, and checks the
+output buffer directly (`feme/test/Transforms/CPU/linearize-defer-loop-
+body-mask-op-diamond.ll`) -- confirmed both ways via `git stash`.
+
+**Verification**:
+- Real CTS: `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.
+  max_workgroup_memory.*` now 6/6 Passed (was 0/6 every prior session back
+  through `L442`'s own discovery).
+- Full `dEQP-VK.compute.*` regression sweep (67,554 cases, same filtered
+  configuration as the prior `L447` session's own baseline at this
+  report's own earlier `max_workgroup_memory` entry): 701 Pass/0 Fail/
+  66,853 NotSupported (was 695 Pass/**6 Fail**/66,853 NotSupported) -- the
+  6 new passes are exactly the 6 `max_workgroup_memory` cases, zero new
+  failures elsewhere.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported (one more test
+  than the prior session's 3,773/3,780 baseline: the new lit test; no
+  regressions).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure compiler correctness fix, zero feature/extension-surface
+change).
+
+**Next steps**: `L444`'s `opquantize`/`opinboundsaccesschain` reduction
+(largest remaining `spirv_assembly.*` clusters); `L419(ad)`
+(`mixed_break_continue`), `L419(y)` (`conditional_break`), `L419(g)`
+(tessellation residuals); `L440(c)`'s 39-case residual triage. All
+unchanged standing items.
