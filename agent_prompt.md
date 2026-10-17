@@ -69,14 +69,16 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(dedicated session, the real open item — do this first)** Instrument
-   `feme/lib/Transforms/CPU/SIMDize.cpp`'s masked-loop/divergent-call-site
-   construction directly (not more IR-reading) to find exactly how many `call`
-   sites get built per masked resource call and whether some per-wave worklist
-   iterates the matching lane twice when a uniform-trip-count inner loop is
-   re-entered by an outer loop. Start from `/tmp/l442_min/shrink_postsimd.ll`
-   and the repro recipe above — it's a ~1-second iteration loop now, not
-   minutes.
+1. **(dedicated session, ~1-2 days, the real open item)** Implement `L447`'s
+   fix: (a) extend `DiamondFlattener::validate()`/`flatten()` to defer any
+   in-cycle divergent diamond containing a side-effecting resource/image call,
+   mirroring `regionHasStageMaskOps`; (b) design and build the new
+   `LoopLinearizer` mechanism needed to actually pick up and mask such a
+   deferred diamond using `MasksAfterCheck` as its seed (neither
+   `flattenTaintedBranchesInRegion` nor `flattenLoopBodyRegion` currently covers
+   this shape). Start from `Roadmap.md`'s `L447` entry and
+   `/tmp/l442_min/debug_instrumentation.patch` (reapply to re-trace if needed) —
+   don't re-derive the mechanism from scratch, it's fully written up.
 2. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*`
    baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the
    two largest) for the next compact-cluster reduction.
@@ -86,8 +88,8 @@ suggested the next steps:
    tessellation residuals) — both still completely untouched.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`) — still deferred every session.
-6. **(no longer standing)** Both `/tmp/l437_full_run3` and
-   `/tmp/l440c_spirvasm.qpa` are done and recorded this session — no background
-   sweep left to check in on. Consider launching a fresh detached
-   full-`dEQP-VK.*` sweep if a future session has idle background time, per the
-   "launch detached" lesson in `.instructions.md`.
+6. **(no standing background sweep)** `/tmp/l437_full_run3` and
+   `/tmp/l440c_spirvasm.qpa` are both done and already recorded — nothing to
+   check in on. A future session with idle background time could launch a fresh
+   detached full-`dEQP-VK.*` sweep per the "launch detached" lesson in
+   `.instructions.md`, but this is optional, not a blocker.
