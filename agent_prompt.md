@@ -71,28 +71,10 @@ errors:
 
 Can you fix this?
 
-# RUN: at line 3
-/Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
 # .---command stderr------------
-# | warning: overriding the module target triple with arm64-apple-macosx26.0.0 [-Woverride-module]
-# | fatal error: error in backend: Can't create a MachineFunction using a Module with a Target-incompatible DataLayout attached
-# |   Target DataLayout: e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32
-# |   Module DataLayout: e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32
-# |
-# | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and dumped files.
-# | Stack dump:
-# | 0.  Program arguments: /Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
-# | 1.  Code generation
-# | 2.  Running pass 'Function Pass Manager' on module '/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll'.
-# | 3.  Running pass 'Analysis containing CSE Info' on function '@main'
-# | Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
-# | 0  clang-24 0x0000000101f7c6e0 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 56
-# | 1  clang-24 0x0000000101f7a400 llvm::sys::RunSignalHandlers() + 204
-# | 2  clang-24 0x0000000101f7bcb8 llvm::sys::CleanupOnSignal(unsigned long) + 304
-# | 3  clang-24 0x0000000101ec3668 (anonymous namespace)::CrashRecoveryContextImpl::HandleCrash(int, unsigned long) + 88
-# | 4  clang-24 0x0000000101ec35d8 llvm::CrashRecoveryContext::HandleExit(int) + 24
-# | 5  clang-24 0x0000000101f778ac llvm::sys::Process::Exit(int, bool) + 48
-# | 6  clang-24 0x000000010037a434 llvm::DenseMapBase<llvm::densemap::detail::DenseMapStorage<llvm::detail::DenseMapPair<llvm::AssertingVH<llvm::GetElementPtrInst>, int>>, llvm::AssertingVH<llvm::GetElementPtrInst>, int, llvm::DenseMapInfo<llvm::AssertingVH<llvm::GetElementPtrInst>, void>, llvm::detail::DenseMapPair<llvm::AssertingVH<llvm::GetElementPtrInst>, int>>::~DenseMapBase() + 0
-# | 7  clang-24 0x0000000101ece2ac llvm::report_fatal_error(llvm::Twine const&, bool) + 256
-# | 8  clang-24 0x00000001012c7680 llvm::MachineFunction::init() + 1352
+# | /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/harness.c:7:10: fatal error: 'stdio.h' file not found
+# |     7 | #include <stdio.h>
+# |       |          ^~~~~~~~~
+# | 1 error generated.
+# `-----------------------------
+# error: command failed with exit status: 1
