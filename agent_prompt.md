@@ -66,6 +66,9 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
+The last session did not commit any results. Any intermediate results will be
+stored in a git stash.
+
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
