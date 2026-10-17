@@ -6569,3 +6569,85 @@ remaining special-loop residuals, `L419(y)` (`conditional_break_uniform`,
 6 cases), the `check-hlsl-clang-feme-vk` 92-failure triage, and the
 actual capability fix for `L419(z)`'s shape (flagged above) all remain
 open/deferred.
+
+## `L419(aa)`: `L419(h)`'s 18 `loops.special` residuals split into three distinct gaps (investigation only, no code change)
+
+Before attempting `L419(z)`'s own suggested capability fix (tolerate a
+relay successor chain through another block's own `CondBr`), reduced
+one case from each of the three remaining `loops.special` sub-shapes to
+check whether they share a root cause, using the standard
+`FEME_DUMP_IR_PRELINEARIZE=1` extraction + unused-global/metadata trim
+methodology.
+
+**Finding 1 (the big one): `elseblock`/`ifblock` (8 cases) are the
+exact same root cause as `L419(z)`'s 4 `loop_in_switch` cases.**
+Reduced `for_dynamic_iterations.elseblock_fragment` to a standalone
+repro; it hits the identical `L419(z)` diagnostic ("more than one
+divergent exit check"). The mechanism generalizes slightly: `Header`'s
+own divergent `CondBr` here isn't an exit check funneled through a
+shared relay -- it selects "run the loop body this iteration" vs. "skip
+straight to `Latch`", with the actual continue-vs-exit decision made
+entirely by `Latch` itself (a `Flow`-style block also reused as the
+loop's own exit-merge point for a sibling if/else's reconvergence)
+via a boolean phi that's just a relabeling of which `Header` successor
+fired. `HeaderExit` still comes back `std::nullopt` (neither successor
+reaches `ExitBlock` or a relay stub), so
+`collectUniformPassThroughRegion`'s `PreRegion` walk hits the identical
+wall `L419(z)` already diagnosed. **This triples the real value of the
+still-unimplemented capability fix: 12 of the 22 total `L419(h)`
+residuals (4 `loop_in_switch` + 8 `elseblock`/`ifblock`) share one root
+cause and one eventual fix, not 4.**
+
+**A concrete, narrower design for that fix** (not attempted this
+session): when `HeaderExit`/`LatchExit` is `std::nullopt` for a block
+with its own genuinely divergent `CondBr`, admit that block into the
+existing, already-battle-tested `OtherCondBrBlocks`/`DivergentCandidates`
+machinery (the same "first-stage mask-narrowing filter ahead of the
+loop's single genuine `CheckBlock`" role `L419(w)`/`L419(y)` already
+built), rather than inventing new relay-tolerant logic directly in
+`matchExitCheck`/`collectUniformPassThroughRegion`. **The real
+obstacle**: `OtherCondBrBlocks`/`DivergentCandidates` are deliberately
+computed *before* `HeaderExit`/`LatchExit` (so `recoverRelayExitCheck`'s
+own fallback can gate on `DivergentCandidates` being empty), but this
+fix needs the opposite ordering -- the same kind of inversion
+`L419(v)`/`L419(w)` each hit, in a code area that has already regressed
+twice from careless generalization. Needs its own dedicated session
+with the full 552-case sweep re-run after every incremental step.
+
+**Finding 2: `mixed_break_continue` (4 cases) is a genuinely separate,
+third gap.** Its reduced repro
+(`for_uniform_iterations.mixed_break_continue_fragment`) hits a
+completely different diagnostic ("internal branch in a body shape this
+milestone does not yet lower (e.g. an empty diamond arm...)"), from the
+`DiamondFlattener`-based masked-loop body path, not `linearizeCycle`'s
+own two-divergent-check diagnostic. Not yet root-caused to the same
+depth; left as its own standing item.
+
+**Finding 3 (re-confirmation): `conditional_break` (6 cases) is still
+failing**, with the same "mask-dependent after masking" diagnostic
+`L419(y)`'s own row already describes (the masking-sequencing gap that
+row left open). No new information here, just confirmed still
+reproducing identically.
+
+**Refined accounting for `L419(h)`'s 22 residuals**: 12 share
+`L419(z)`'s root cause (design above, not implemented), 6 are
+`L419(y)`'s own separate gap, 4 are `mixed_break_continue`'s own
+separate, not-yet-investigated gap.
+
+No code changed this session for this finding (investigation and
+documentation only, deliberately -- the capability fix carries real
+regression risk in a code area with two prior regressions, and needs a
+full dedicated session rather than a rushed attempt).
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed. Checked the standing `/tmp/l437_full_run3` sweep again: still
+running and growing (304MB, up from 294MB earlier this session), not
+stalled.
+
+**Next steps**: the `L419(z)`/`L419(aa)` capability fix (12 cases, the
+highest-value remaining item, but needs its own dedicated session given
+the regression history and ordering-inversion obstacle identified
+above), `mixed_break_continue`'s own root-cause investigation (4
+cases), `L419(y)`'s masking-sequencing gap (6 cases), `L419(g)` (30
+tessellation residuals, untouched), and the
+`check-hlsl-clang-feme-vk` 92-failure triage (still deferred every
+session).
