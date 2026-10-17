@@ -4038,9 +4038,103 @@ bool isSyntheticRelayBlockName(StringRef Name) {
 /// so, like `foldRedundantFlowBlock`, it can never mistake a genuine
 /// divergent decision for a redundant one, only bypass a compile-time-
 /// provable one.
-bool peelConstantFlowPredecessors(BasicBlock *BB,
-                                  SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
-                                  SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr) {
+///
+/// Returns whether every block in the straight-line, single-successor
+/// `UncondBr` chain starting at \p From (which may be \p From itself)
+/// eventually reaches \p Target, with every hop *strictly before*
+/// \p Target itself (\p Target may legitimately carry real computation
+/// of its own, exactly like `isLoopControlEdgeThroughRelay`'s own
+/// `StopAt` special-case) a genuine `isPureRelayBlock` -- never a block
+/// doing real work of its own, like a loop's own latch trip-count
+/// re-check (confirmed necessary on `loop-break-structurized.ll`'s own
+/// `latch` block, which is `UncondBr`-terminated but computes a real
+/// `%inc`/`%loop.cond` first; without this gate,
+/// `peelWouldDestroyAncestorReconvergencePoint` below wrongly treated
+/// the loop header's own entirely-legitimate, `LoopLinearizer`-recovered
+/// exit-check reconvergence as the dangerous nested-diamond-of-diamonds
+/// shape it exists to catch). Used by
+/// `peelWouldDestroyAncestorReconvergencePoint` below to check whether an
+/// ancestor diamond's *other* arm still reaches the same merge block a
+/// peel is about to leave with only one real predecessor.
+static bool reachesThroughRelayChain(BasicBlock *From, BasicBlock *Target) {
+  BasicBlock *Cur = From;
+  while (Cur != Target) {
+    if (!isPureRelayBlock(Cur))
+      return false;
+    auto *Br = dyn_cast<UncondBrInst>(Cur->getTerminator());
+    if (!Br)
+      return false;
+    Cur = Br->getSuccessor(0);
+  }
+  return true;
+}
+
+/// Roadmap L452(d): `peelConstantFlowPredecessors` below (and the
+/// `mergeTrivialRelayBlocksInCycle` fold that follows it) can leave \p BB
+/// with only one real predecessor once every provably-constant one is
+/// bypassed, at which point `mergeTrivialRelayBlocksInCycle` fully merges
+/// \p BB away. That is always sound for \p BB's own *values* (exactly
+/// what `peelConstantFlowPredecessors`'s own `SSAUpdater` reconciliation
+/// handles), but if \p BB is currently serving as some *ancestor*
+/// `CondBrInst` diamond's own clean, two-predecessor reconvergence point,
+/// eliminating it destroys that shape: the ancestor's bypassed arm now
+/// reaches one of \p BB's own former successors directly, while its
+/// *other* arm's own merged-in diamond independently reaches that same
+/// successor too -- exactly the "outer diamond arm directly reaches a
+/// nested sibling diamond's own target" shape
+/// `DiamondFlattener::validate`'s own `L375`/`L383(a)` commentary already
+/// documents as a genuine, deliberately-unsupported limitation. Reduced
+/// from a real `dEQP-VK.spirv_assembly.instruction.compute.
+/// opcompositeextract.f16arr3` switch-decode-inside-a-loop shape; see
+/// `Roadmap.md`'s own `L452(d)` entry for the full writeup.
+///
+/// Detects this structurally rather than via a (possibly stale mid-fold,
+/// see `linearizeCycle`'s own `L198` comment on why `PDT` cannot be
+/// trusted here) dominator-tree query: walks back from \p SoleSurvivor
+/// (the one predecessor of \p BB that would remain once every candidate
+/// in this call's own `PeelIndices` is bypassed) through single-
+/// predecessor relay hops to the real `CondBrInst` it ultimately descends
+/// from -- mirroring the same backward walk `peelConstantFlowPredecessors`
+/// already performs (for a different reason) to compute its own `Origin`
+/// -- then checks whether *both* of that block's successors reach \p BB
+/// through nothing but further pure relay hops, i.e. whether \p BB is
+/// already that block's own private two-arm reconvergence point.
+///
+/// \p Header and \p Latch (the enclosing cycle's own, from
+/// `peelConstantFlowPredecessorsInCycle`'s own caller) are deliberately
+/// exempted from being treated as a dangerous `Origin`: a cycle's own
+/// header legitimately, by design, reconverges at a `Flow`-style dispatch
+/// block the exact same way an ordinary diamond does (confirmed on
+/// `loop-break-structurized.ll`'s own early-`break` header, whose
+/// `Flow` dispatch block is both the header's own clean two-arm
+/// reconvergence point *and* the one `peelConstantFlowPredecessorsInCycle`
+/// is specifically, correctly designed to bypass one arm of) --
+/// `LoopLinearizer`'s own later `recoverRelayExitCheck` fallback is built
+/// to recover exactly that shape, unlike `DiamondFlattener::validate`'s
+/// stricter non-cycle-boundary check this guard otherwise protects.
+static bool peelWouldDestroyAncestorReconvergencePoint(BasicBlock *BB,
+                                                       BasicBlock *SoleSurvivor,
+                                                       BasicBlock *Header,
+                                                       BasicBlock *Latch) {
+  BasicBlock *Origin = SoleSurvivor;
+  while (BasicBlock *Unique = Origin->getUniquePredecessor()) {
+    if (isa<CondBrInst>(Origin->getTerminator()))
+      break;
+    Origin = Unique;
+  }
+  if (Origin == Header || Origin == Latch)
+    return false;
+  auto *OriginBr = dyn_cast<CondBrInst>(Origin->getTerminator());
+  if (!OriginBr)
+    return false;
+  return reachesThroughRelayChain(OriginBr->getSuccessor(0), BB) &&
+         reachesThroughRelayChain(OriginBr->getSuccessor(1), BB);
+}
+
+bool peelConstantFlowPredecessors(
+    BasicBlock *BB, SmallPtrSetImpl<BasicBlock *> &PeeledFrom,
+    SmallPtrSetImpl<BasicBlock *> *RelayTargets = nullptr,
+    BasicBlock *CycleHeader = nullptr, BasicBlock *CycleLatch = nullptr) {
   auto *Br = dyn_cast<CondBrInst>(BB->getTerminator());
   if (!Br)
     return false;
@@ -4088,8 +4182,34 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
   for (unsigned I = 0, E = CondPN->getNumIncomingValues(); I != E; ++I)
     if (isa<ConstantInt>(CondPN->getIncomingValue(I)))
       PeelIndices.push_back(I);
-  if (PeelIndices.empty() || PeelIndices.size() == CondPN->getNumIncomingValues())
+  if (PeelIndices.empty() ||
+      PeelIndices.size() == CondPN->getNumIncomingValues())
     return false;
+
+  // Roadmap L452(d): if peeling every candidate above would leave `BB`
+  // with exactly one real predecessor remaining, check whether `BB` is
+  // currently serving as some ancestor diamond's own clean reconvergence
+  // point before touching anything -- see
+  // `peelWouldDestroyAncestorReconvergencePoint`'s own comment for the
+  // exact shape this guards against. Bail out entirely (leaving `BB`,
+  // and the harmless-but-redundant constant re-derivation it still
+  // performs, standing) rather than risk it.
+  if (CondPN->getNumIncomingValues() - PeelIndices.size() == 1) {
+    unsigned SurvivorIdx = CondPN->getNumIncomingValues();
+    for (unsigned Idx = 0, E = CondPN->getNumIncomingValues(); Idx != E;
+         ++Idx) {
+      if (!llvm::is_contained(PeelIndices, Idx)) {
+        SurvivorIdx = Idx;
+        break;
+      }
+    }
+    assert(SurvivorIdx != CondPN->getNumIncomingValues() &&
+           "exactly one incoming index must survive peeling here");
+    BasicBlock *SoleSurvivor = CondPN->getIncomingBlock(SurvivorIdx);
+    if (peelWouldDestroyAncestorReconvergencePoint(BB, SoleSurvivor,
+                                                   CycleHeader, CycleLatch))
+      return false;
+  }
 
   bool Changed = false;
   // Walk in reverse so removing an incoming value along the way never
@@ -4102,7 +4222,8 @@ bool peelConstantFlowPredecessors(BasicBlock *BB,
 
     auto *K = cast<ConstantInt>(CondPN->getIncomingValue(I));
     bool ExitOnSucc0 = Negated ? !K->isOne() : K->isOne();
-    BasicBlock *Target = ExitOnSucc0 ? Br->getSuccessor(0) : Br->getSuccessor(1);
+    BasicBlock *Target =
+        ExitOnSucc0 ? Br->getSuccessor(0) : Br->getSuccessor(1);
 
     // Capture every one of `BB`'s own phi values along this predecessor's
     // edge before retargeting it, so `SSAUpdater` still has both the
@@ -4292,7 +4413,8 @@ bool peelConstantFlowPredecessorsInCycle(CycleInfo &CI, CycleRef C,
     for (BasicBlock &BB : *Header->getParent()) {
       if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
         continue;
-      if (peelConstantFlowPredecessors(&BB, PeeledFrom, RelayTargets)) {
+      if (peelConstantFlowPredecessors(&BB, PeeledFrom, RelayTargets, Header,
+                                       Latch)) {
         Changed = PeeledThisPass = true;
         break; // A predecessor edge changed; restart the scan to be safe.
       }
