@@ -567,6 +567,22 @@ private:
   sliceInstruction(spirv::Opcode &opcode, ArrayRef<uint32_t> &operands,
                    std::optional<spirv::Opcode> expectedOpcode = std::nullopt);
 
+  /// Like `sliceInstruction`, but first consumes and processes (or discards,
+  /// for `OpNop`) any leading `OpLine`/`OpNoLine`/`OpNop` instructions before
+  /// slicing the first non-debug, non-nop instruction out of `binary`. Per
+  /// the SPIR-V specification, `OpLine`/`OpNoLine` debug-location markers and
+  /// `OpNop` (which "has no semantics... It performs the function of a line
+  /// of code") are valid anywhere a non-terminator instruction may appear --
+  /// including between `OpFunction` and its first `OpFunctionParameter`, and
+  /// between the last `OpFunctionParameter` and the entry block's `OpLabel`
+  /// -- but callers that need to pattern-match a specific following opcode
+  /// (e.g. `processFunction`'s own argument-parsing and entry-block-label
+  /// checks) would otherwise see one of these harmless instructions instead
+  /// of the opcode they are actually looking for.
+  LogicalResult sliceNonDebugInstruction(
+      spirv::Opcode &opcode, ArrayRef<uint32_t> &operands,
+      std::optional<spirv::Opcode> expectedOpcode = std::nullopt);
+
   /// If `opcode` is a SPV_INTEL_long_composites splittable opcode and the
   /// next binary instruction(s) are matching `*ContinuedINTEL` ops, consumes
   /// them and rebinds `operands` to a buffer (held in `mergedStorage`)

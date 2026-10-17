@@ -134,6 +134,29 @@ LogicalResult spirv::Deserializer::sliceInstruction(
   return success();
 }
 
+LogicalResult spirv::Deserializer::sliceNonDebugInstruction(
+    spirv::Opcode &opcode, ArrayRef<uint32_t> &operands,
+    std::optional<spirv::Opcode> expectedOpcode) {
+  while (true) {
+    if (failed(sliceInstruction(opcode, operands, expectedOpcode)))
+      return failure();
+
+    switch (opcode) {
+    case spirv::Opcode::OpLine:
+      if (failed(processDebugLine(operands)))
+        return failure();
+      continue;
+    case spirv::Opcode::OpNoLine:
+      clearDebugLine();
+      continue;
+    case spirv::Opcode::OpNop:
+      continue;
+    default:
+      return success();
+    }
+  }
+}
+
 void spirv::Deserializer::mergeLongCompositeContinuations(
     spirv::Opcode opcode, ArrayRef<uint32_t> &operands,
     SmallVectorImpl<uint32_t> &mergedStorage) {
@@ -211,6 +234,11 @@ LogicalResult spirv::Deserializer::processInstruction(
     return processDebugLine(operands);
   case spirv::Opcode::OpNoLine:
     clearDebugLine();
+    return success();
+  case spirv::Opcode::OpNop:
+    // "OpNop: ... has no semantics. It performs the function of a line of
+    // code." (SPIR-V spec 3.42.2) -- intentionally discarded rather than
+    // mirrored into the SPIR-V dialect.
     return success();
   case spirv::Opcode::OpName:
     return processName(operands);

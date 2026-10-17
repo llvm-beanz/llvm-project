@@ -718,8 +718,8 @@ spirv::Deserializer::processFunction(ArrayRef<uint32_t> operands) {
       auto argType = functionType.getInput(i);
       spirv::Opcode opcode = spirv::Opcode::OpNop;
       ArrayRef<uint32_t> operands;
-      if (failed(sliceInstruction(opcode, operands,
-                                  spirv::Opcode::OpFunctionParameter))) {
+      if (failed(sliceNonDebugInstruction(opcode, operands,
+                                         spirv::Opcode::OpFunctionParameter))) {
         return failure();
       }
       if (opcode != spirv::Opcode::OpFunctionParameter) {
@@ -782,8 +782,8 @@ spirv::Deserializer::processFunction(ArrayRef<uint32_t> operands) {
   // function. All other blocks do not take any parameter. We have already
   // created the entry block, here we need to register it to the correct label
   // <id>.
-  if (failed(sliceInstruction(opcode, instOperands,
-                              spirv::Opcode::OpFunctionEnd))) {
+  if (failed(sliceNonDebugInstruction(opcode, instOperands,
+                                     spirv::Opcode::OpFunctionEnd))) {
     return failure();
   }
   if (opcode == spirv::Opcode::OpFunctionEnd) {

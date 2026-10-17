@@ -514,3 +514,46 @@ TEST_F(DeserializationTest, FunctionMalformedLabelFailure) {
   ASSERT_FALSE(deserialize());
   expectDiagnostic("OpLabel should only have result <id>");
 }
+
+// Regression tests for a bug where `OpLine`/`OpNoLine`/`OpNop` instructions
+// interspersed between `OpFunction` and its first `OpFunctionParameter`, or
+// between the last `OpFunctionParameter` and the entry block's `OpLabel`,
+// made deserialization fail outright (`missing OpFunctionParameter
+// instruction for argument 0` / `a basic block must start with OpLabel`)
+// even though the SPIR-V specification allows both debug-location markers
+// and `OpNop` anywhere a non-terminator instruction may appear. See
+// `dEQP-VK.spirv_assembly.instruction.graphics.opline.*` in the Vulkan CTS,
+// which places `OpLine` in exactly these two gaps.
+TEST_F(DeserializationTest,
+      FunctionParameterWithInterspersedDebugAndNopInstructionsSuccess) {
+  addHeader();
+  auto voidType = addVoidType();
+  auto i32Type = addIntType(32);
+  auto fnType = addFunctionType(voidType, {i32Type});
+  addFunction(voidType, fnType);
+  addInstruction(spirv::Opcode::OpNop, {});
+  addInstruction(spirv::Opcode::OpLine, {/*file=*/1, /*line=*/1, /*col=*/1});
+  auto argID = nextID++;
+  addInstruction(spirv::Opcode::OpFunctionParameter, {i32Type, argID});
+  addInstruction(spirv::Opcode::OpLine, {/*file=*/1, /*line=*/2, /*col=*/1});
+  addInstruction(spirv::Opcode::OpNoLine, {});
+  addInstruction(spirv::Opcode::OpNop, {});
+  addInstruction(spirv::Opcode::OpLabel, {nextID++});
+  addReturn();
+  addFunctionEnd();
+
+  EXPECT_TRUE(deserialize());
+}
+
+TEST_F(DeserializationTest, OpNopInFunctionBodySuccess) {
+  addHeader();
+  auto voidType = addVoidType();
+  auto fnType = addFunctionType(voidType, {});
+  addFunction(voidType, fnType);
+  addInstruction(spirv::Opcode::OpLabel, {nextID++});
+  addInstruction(spirv::Opcode::OpNop, {});
+  addReturn();
+  addFunctionEnd();
+
+  EXPECT_TRUE(deserialize());
+}
