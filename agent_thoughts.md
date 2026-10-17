@@ -125246,3 +125246,37 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 5. **(worth filing, low priority, carried forward)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
 6. **(L444's own remaining clusters)** With `opquantize` and `opptraccesschain` both now fixed, the next-largest remaining clusters in the original 275-case baseline (per this session's own cluster breakdown) are `frexpstruct` (12 cases), and several ~8-case struct/array composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`, `switch`) — worth re-clustering against the fresh completed sweep (item 1) before picking the next target, since some of these may already be fixed as side effects of the two fixes landed this session (unlikely, but cheap to confirm once the real data is in).
+
+# Session: L444's `frexpstruct` cluster fixed (L451) — missing aggregate-intrinsic producer in SIMDize
+
+**First, the mandatory check**: `vulkaninfo --summary | grep deviceName` → `deviceName = FeMe CPU Vulkan Device`. Confirmed.
+
+**Win this session**: `L444`'s third compact cluster (`frexpstruct`, 20 cases) is fixed and CTS-verified. `dEQP-VK.spirv_assembly.instruction.*frexpstruct*` wildcard: 72/72 Passed (was 20 Failed). `check-feme`: 3,775/3,782 Passed, 0 Failed.
+
+## What happened, in order
+
+1. Caught a real process bug on arrival: the previous session's background `/tmp/l444_spirvasm_full_rerun.qpa` sweep had started (18:16:58) *before* the `opptraccesschain` fix finished rebuilding `libfeme_vulkan.so` (18:24) — the sweep was running stale code the whole time. Killed it, relaunched fresh (`/tmp/l444_spirvasm_rerun2.qpa`).
+2. Codified this as a new lesson in `feme/.instructions.md`: a running `deqp-vk` process keeps its library loaded in memory for its whole lifetime; a later rebuild does not reach it. Check `ps -o lstart=` against the `.so`'s mtime before trusting a sweep's results. Committed alone (`8e1433ac0bfe`).
+3. Reproduced one `frexpstruct` failure directly (`dEQP-VK.spirv_assembly.instruction.graphics.float32.comparison_1.frexpstruct_frag`): `feme-cpu-simdize: ... has a divergent value '' of aggregate type; component decomposition is not yet supported for this producer`.
+4. Dumped pre-SIMDize IR (`FEME_DUMP_IR_PRESIMD`): the real shape is `call { float, i32 } @llvm.frexp.f32.i32(float %x)` — GLSL's `frexp` out-param builtin, lowered by MLIR's `DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>` straight to the `llvm.frexp` intrinsic. SIMDize's `checkAggregateValueSupported` only recognized one aggregate-result `CallInst` shape (the four overflow-arithmetic intrinsics) — `llvm.frexp` wasn't in the list at all.
+5. Added `isFrexpIntrinsic` + `widenFrexpIntrinsic` to `feme/lib/Transforms/CPU/SIMDize.cpp`, mirroring `widenOverflowArithIntrinsic`'s structure but handling frexp's real difference: one operand (not two), and two *independently*-overloaded result fields (not one shared type) — the exponent's wide type comes from the result struct's own second field, not the operand.
+6. Added `SIMDizeTest.WidensDivergentFrexpCall` (new unit test), confirmed it passes standalone, then ran full `check-feme`: 3,775/3,782, 0 Failed, clean.
+7. Rebuilt `libfeme_vulkan.so`, ran the real CTS `*frexpstruct*` wildcard: 72/72 Passed.
+8. Committed the fix + test together (`f46e201ca0ae`) — this one lives *inside* `feme/` (not upstream `mlir/`), since the gap is in FeMe's own CPU wave-widening pass, not SPIR-V→LLVM opcode lowering.
+9. Checked the background sweep again before trusting it — caught **the exact same stale-library bug a second time**: `/tmp/l444_spirvasm_rerun2.qpa`'s process (started 18:32) predated this session's own `frexpstruct` rebuild (18:36). Killed it, relaunched again (`/tmp/l444_spirvasm_rerun3.qpa`, PID 21755) — this one really is correctly timed now, no more fixes pending this session.
+10. Updated `Roadmap.md` (new `L451` entry, `L444`'s running total updated to 46/275 fixed) and `VulkanCTSReport.md` (new dated section). Committed (`3e06255374f1`).
+
+## State right now
+
+- 3 of `L444`'s original 275 failures' clusters fixed and CTS-verified this multi-session arc: `opquantize` (13, `L449`), `opptraccesschain` (13, `L450`), `frexpstruct` (20, `L451`). 46 total.
+- `/tmp/l444_spirvasm_rerun3.qpa` (fresh, correctly-timed full `dEQP-VK.spirv_assembly.*` sweep, 70,337 cases) is running in the background, started after this session's final rebuild. Not yet complete.
+- The stale-sweep gotcha is now documented in `feme/.instructions.md` — hit it twice in one session (once inherited, once self-inflicted by my own mid-session rebuild), caught both times by the same mtime-vs-start-time check.
+
+## Next steps
+
+1. **(cheap, first thing next session)** Check `/tmp/l444_spirvasm_rerun3.qpa`/`.log` — verify its process start time (`ps -o lstart= -p <pid>`) still predates `libfeme_vulkan.so`'s mtime before trusting it (nothing should have rebuilt it since 18:36 this session, but confirm). Once complete, record the real baseline in `VulkanCTSReport.md`/`Roadmap.md`'s `L444` entry (expect ~229 remaining, replacing the arithmetic estimate), and re-cluster remaining failures.
+2. **(standing, needs a full dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and fix designs written up in `Roadmap.md`; still not attempted, due to documented regression history in this code area.
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both untouched across multiple sessions.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
+5. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
+6. **(once fresh sweep completes)** Re-cluster `L444`'s remaining ~229 failures against real data before picking the next target — stale-baseline candidates (`floatarray`, `matrix`, `nested_struct`/`undef_nested_struct`, `mip_1`, several ~8-case struct/array composite-decomposition clusters) should be re-verified, not assumed.
