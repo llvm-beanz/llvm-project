@@ -124858,3 +124858,30 @@ Earlier session summaries assumed `offload-test-suite`'s own cmake build was nev
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running and growing (294MB as of this session's end, up from 253MB) — just check progress, don't restart.
 7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
+
+# Session: L419(aa) — splitting L419(h)'s 18 residuals into 3 root causes
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**What's done**: No code changed this session — deliberate call. Investigated the suggested `L419(z)` capability fix (tolerate a relay successor chain through another block's own `CondBr`) before touching code, and found it's bigger and riskier than the next-steps estimate suggested.
+
+**The big find**: `elseblock`/`ifblock` (8 of the 18 `loops.special` residuals) hit the *exact same* diagnostic as `L419(z)`'s `loop_in_switch` cases. Reduced one (`for_dynamic_iterations.elseblock_fragment`) to confirm. This means the capability fix is worth **12 cases, not 4** — a much bigger prize than last session knew about.
+
+**Why I didn't implement it anyway**: the fix needs `OtherCondBrBlocks`/`DivergentCandidates` to be computed *after* `HeaderExit`/`LatchExit` (so Header can be conditionally admitted into that machinery when its own exit check isn't recognized) — but today's code deliberately computes them in the opposite order, specifically so `recoverRelayExitCheck` can gate on `DivergentCandidates` being empty. Flipping this ordering is exactly the kind of change that regressed things twice before (`L419(v)`, `L419(w)`) in this same code area. This needs a dedicated session with the full 552-case sweep re-run after every incremental step, not a bolt-on to an already-long session.
+
+**Bonus find**: `mixed_break_continue` (4 cases) is a genuinely different, third bug — hits a `DiamondFlattener` body-shape diagnostic, not `linearizeCycle`'s two-divergent-check one. Not investigated further.
+
+**Commit** (1, documentation only):
+- `feme: document L419(aa) - L419(h)'s 18 residuals split into 3 root causes`
+
+**Standing sweep**: `/tmp/l437_full_run3/` still running and growing (305MB as of session end, up from 294MB at start) — don't restart it.
+
+## Next steps
+
+1. **(~1 day, dedicated session, the real prize — 12 cases)** Implement the `L419(z)`/`L419(aa)` capability fix: when `HeaderExit`/`LatchExit` is `std::nullopt` for a block with its own divergent `CondBr`, admit it into the existing `OtherCondBrBlocks`/`DivergentCandidates` machinery instead of letting it fall through to the diagnostic. Needs reordering `OtherCondBrBlocks`/`DivergentCandidates` computation relative to `HeaderExit`/`LatchExit` — the exact kind of change that's regressed twice before here. Validate against: the 4 `loop_in_switch` + 8 `elseblock`/`ifblock` target cases, PLUS the full 552-case `loops.special` sweep (zero regressions), PLUS the already-fixed `L419(w)`/`L419(x)`/`L419(z)` cases, after every incremental step — not just at the end.
+2. **(~half day)** `mixed_break_continue` (4 cases) — separate `DiamondFlattener` body-shape gap, needs its own reduction starting from `/tmp/mbc_frag_mod2.ll` (already extracted and in `/tmp`, not committed).
+3. **(standing)** `L419(y)`'s masking-sequencing gap (`conditional_break`, 6 cases) — re-confirmed still failing this session, unchanged.
+4. **(standing)** `L419(g)` — 30 tessellation residuals, still untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (305MB) — just check progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
