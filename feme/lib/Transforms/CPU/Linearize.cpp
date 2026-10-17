@@ -667,9 +667,10 @@ static bool createMaskedStoreRecursive(IRBuilderBase &Builder, Value *Val,
 /// `DiamondFlattener::flatten`, which calls this function block by block as
 /// it walks, can. See `dependsOnTaintedValue` and its use in `flatten`'s own
 /// divergent-vs-uniform branch classification.
-void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
+void applyStageMasks(BasicBlock::iterator Begin, BasicBlock::iterator End,
+                     MaskPair &Masks,
                      SmallPtrSetImpl<Value *> *MaskedLoads = nullptr) {
-  for (Instruction &I : make_early_inc_range(BB)) {
+  for (Instruction &I : make_early_inc_range(make_range(Begin, End))) {
     if (auto *Call = dyn_cast<CallInst>(&I)) {
       feme::StageOpKind Kind;
       if (feme::isStageOpCall(*Call, &Kind)) {
@@ -986,7 +987,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
         // Erase any such stale call already sitting here first, so this
         // block never ends up with two -- only the final, most accurate one
         // should ever remain.
-        for (Instruction &Existing : make_early_inc_range(BB))
+        for (Instruction &Existing : make_early_inc_range(*RI->getParent()))
           if (auto *ExistingCall = dyn_cast<CallInst>(&Existing);
               ExistingCall && feme::cpu::isReturnMasksCall(*ExistingCall))
             ExistingCall->eraseFromParent();
@@ -1075,6 +1076,16 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
       continue;
     }
   }
+}
+
+/// Convenience overload for the common case of narrowing a whole block at
+/// once (every caller except `LoopLinearizer::linearizeCycle`'s own
+/// `CheckBlock` handling, which -- roadmap L442 -- needs to narrow two
+/// sub-ranges of one block with two different masks; see that call site's
+/// own comment for why).
+void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
+                     SmallPtrSetImpl<Value *> *MaskedLoads = nullptr) {
+  applyStageMasks(BB.begin(), BB.end(), Masks, MaskedLoads);
 }
 
 /// (Roadmap H125) After if-converting a loop with a divergent exit, an
@@ -5913,8 +5924,98 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // comment for the full root-cause writeup).
     if (!flattenTaintedBranchesInRegion(*PreRegion, Masks, C))
       return false;
-    applyStageMasks(*CheckBlock, Masks);
-    rethreadNestedEntryMasks(CheckBlock, Masks);
+
+    // Roadmap L442: `CheckBlock` is not purely "before" its own check --
+    // any resource/image call or memory access physically sharing this
+    // same block *at or after* `CheckExit->Cond`'s own instruction is
+    // part of the iteration that check is deciding the validity of,
+    // exactly like a bounded, uniform-looking trip-count check (`j < N`)
+    // whose own `UniformityInfo` classification is still "divergent"
+    // only because some other, genuinely divergent exit exists elsewhere
+    // in this same cycle (see `isDivergentBranch`'s own roadmap L40
+    // comment above). Compute `Staying`/`MasksAfterCheck` right after
+    // `Cond`'s own instruction (not at `CheckExit->Br`, the block's
+    // terminator, far below it) and narrow only the
+    // `[Cond's-next-instruction, Br)` sub-range with it: a resource/
+    // atomic call *there* picks up this check's own condition the same
+    // way a masked load in the same sub-range already does (a masked
+    // load is a fresh `createMaskedLoad` call every time `applyStageMasks`
+    // walks past a still-raw `LoadInst`, so it always reflects whichever
+    // mask is current *then*; a resource/image call's own mask operand,
+    // once narrowed away from `SPIRVResourceLoweringPass`'s original
+    // constant-`true` placeholder, is permanently stuck there by
+    // `narrowCallMask`'s own "only if still constant" guard -- see its
+    // comment -- so which mask is current the *first* time
+    // `applyStageMasks` reaches it is the only one that will ever
+    // stick). A call *before* `Cond` must still keep using the raw,
+    // not-yet-check-narrowed `Masks` exactly as before: `Cond` itself can
+    // depend on a value that same call just produced (e.g. a shared
+    // counter's own break check, see `loop-internal-break-with-mask-op.
+    // ll`), so `MasksAfterCheck`'s own defining instructions -- inserted
+    // right after `Cond` -- would not yet dominate a use any earlier.
+    //
+    // Without this split, a real, reproduced `dEQP-VK.compute.pipeline.
+    // zero_initialize_workgroup_memory.max_workgroup_memory` miscount: a
+    // degenerate, single-block cycle whose `Header`/`Latch`/`CheckBlock`
+    // all coincide (so this is the *only* `applyStageMasks` call that
+    // ever sees a resource call here still carrying that constant
+    // placeholder) ran one wasted, out-of-trip-count iteration's own
+    // atomic add for every lane that was merely still live *entering*
+    // the check, regardless of whether that lane's own iteration was
+    // actually in range, double-counting exactly one lane per wave.
+    Instruction *CheckCondInst = dyn_cast<Instruction>(CheckExit->Cond);
+    BasicBlock::iterator CheckSplitPt =
+        (CheckCondInst && CheckCondInst->getParent() == CheckBlock)
+            ? std::next(CheckCondInst->getIterator())
+            : CheckBlock->getFirstNonPHIIt();
+    // Roadmap L442: `freezeRelayChainExitValues` (called earlier, for
+    // `HeaderExit`'s own relay chain, when this degenerate single-block
+    // cycle collapses `Header`==`CheckBlock`) may have already inserted
+    // its own `select`s for this very block's phis right after
+    // `CheckCondInst` (its own `IRBuilder` anchor is "this block's
+    // current terminator", which at that earlier point in time was
+    // exactly this position). Those selects are later relied upon
+    // (by this cycle's own further restructuring, once `Header`'s own
+    // relay-chain phi collapses down to a single remaining value) to
+    // dominate *every* other use of `CheckExit->Cond` -- including any
+    // the vanilla "insert right after `Cond`" placement below would add.
+    // Walk forward past any such pre-existing `select`s (never anything
+    // `applyStageMasks` itself would ever touch, so skipping them here
+    // changes nothing about which calls/loads get re-masked) before
+    // settling on the final split point, so `MasksAfterCheck`'s own
+    // defining instructions always land *after* them instead of
+    // squeezing in between the phis and that earlier freeze (confirmed,
+    // via a real reproduced `Instruction does not dominate all uses!`
+    // verifier failure on `loop-in-switch-divergent-header-and-relay.
+    // ll`, otherwise).
+    while (CheckSplitPt != CheckBlock->end() && isa<SelectInst>(*CheckSplitPt))
+      ++CheckSplitPt;
+    applyStageMasks(CheckBlock->begin(), CheckSplitPt, Masks);
+
+    IRBuilder<> CheckBuilder(CheckSplitPt);
+    Value *Staying = CheckExit->ExitOnTrue
+                         ? CheckBuilder.CreateNot(CheckExit->Cond)
+                         : CheckExit->Cond;
+    // Roadmap L297: a lane transitions from live to masked-off right
+    // here, specifically because of `CheckBlock`'s own condition (as
+    // opposed to `Header`'s, already applied earlier into `Masks`),
+    // precisely when it was still live entering this check and
+    // `Staying` says to leave -- fold that into `ExitedViaCheck`'s own
+    // running flag (monotonic, like `Masks.Live` itself: once true for a
+    // lane, it stays true, since a lane that already exited never
+    // re-enters this check again) so the restore loop below can tell
+    // which of `Header`'s or `CheckBlock`'s own captured value is the
+    // semantically correct one to use for this lane.
+    Value *DivergedViaCheckThisIter = CheckBuilder.CreateAnd(
+        Masks.Live, CheckBuilder.CreateNot(Staying),
+        "exited.via.check.this.iter");
+    Value *ExitedViaCheckNext = CheckBuilder.CreateOr(
+        DivergedViaCheckThisIter, ExitedViaCheck, "exited.via.check.next");
+    MaskPair MasksAfterCheck =
+        stayInLoop(CheckBuilder, Masks, Staying, "active.check");
+
+    applyStageMasks(CheckSplitPt, CheckBlock->end(), MasksAfterCheck);
+    rethreadNestedEntryMasks(CheckBlock, MasksAfterCheck);
 
     // Roadmap H94a: capture, for every one of `ExitBlock`'s own phis
     // (besides the live/side-effect masks -- see `addLatchIncoming`
@@ -5938,27 +6039,6 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         ExitBlockRelayValues.emplace_back(&PN, PN.getIncomingValue(Idx),
                                           RelaySource::Check);
 
-    IRBuilder<> CheckBuilder(CheckExit->Br);
-    Value *Staying = CheckExit->ExitOnTrue
-                         ? CheckBuilder.CreateNot(CheckExit->Cond)
-                         : CheckExit->Cond;
-    // Roadmap L297: a lane transitions from live to masked-off right
-    // here, specifically because of `CheckBlock`'s own condition (as
-    // opposed to `Header`'s, already applied earlier into `Masks`),
-    // precisely when it was still live entering this check and
-    // `Staying` says to leave -- fold that into `ExitedViaCheck`'s own
-    // running flag (monotonic, like `Masks.Live` itself: once true for a
-    // lane, it stays true, since a lane that already exited never
-    // re-enters this check again) so the restore loop below can tell
-    // which of `Header`'s or `CheckBlock`'s own captured value is the
-    // semantically correct one to use for this lane.
-    Value *DivergedViaCheckThisIter = CheckBuilder.CreateAnd(
-        Masks.Live, CheckBuilder.CreateNot(Staying),
-        "exited.via.check.this.iter");
-    Value *ExitedViaCheckNext = CheckBuilder.CreateOr(
-        DivergedViaCheckThisIter, ExitedViaCheck, "exited.via.check.next");
-    MaskPair MasksAfterCheck =
-        stayInLoop(CheckBuilder, Masks, Staying, "active.check");
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see "Loops with a
     // divergent exit" below).
