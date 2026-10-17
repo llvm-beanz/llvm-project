@@ -2181,15 +2181,42 @@ spirv::Deserializer::processConstantComposite(ArrayRef<uint32_t> operands) {
            << operands[0];
   }
 
+  // Per the SPIR-V spec, a constituent of OpConstantComposite may be the
+  // <id> of either a normal (non-specialization) constant or an OpUndef
+  // instruction. The deserializer's constant map only tracks the former;
+  // OpUndef <id>s are tracked separately in undefMap (they carry a type
+  // but, by definition, no fixed value). Model such a constituent as a
+  // concrete zero-valued attribute of the expected element type: this is
+  // a legal (if arbitrary) choice of the constituent's genuinely
+  // unspecified value, and avoids rejecting otherwise-valid SPIR-V.
+  auto getElementTypeForOperand = [&](unsigned operandIndex) -> Type {
+    if (auto shapedType = dyn_cast<ShapedType>(resultType))
+      return shapedType.getElementType();
+    if (auto arrayType = dyn_cast<spirv::ArrayType>(resultType))
+      return arrayType.getElementType();
+    if (auto structType = dyn_cast<spirv::StructType>(resultType))
+      return structType.getElementType(operandIndex - 2);
+    return Type();
+  };
+
   SmallVector<Attribute, 4> elements;
   elements.reserve(operands.size() - 2);
   for (unsigned i = 2, e = operands.size(); i < e; ++i) {
     auto elementInfo = getConstant(operands[i]);
-    if (!elementInfo) {
-      return emitError(unknownLoc, "OpConstantComposite component <id> ")
-             << operands[i] << " must come from a normal constant";
+    if (elementInfo) {
+      elements.push_back(elementInfo->first);
+      continue;
     }
-    elements.push_back(elementInfo->first);
+    if (getUndefType(operands[i])) {
+      if (Type elementType = getElementTypeForOperand(i)) {
+        if (TypedAttr zeroAttr = opBuilder.getZeroAttr(elementType)) {
+          elements.push_back(zeroAttr);
+          continue;
+        }
+      }
+    }
+    return emitError(unknownLoc, "OpConstantComposite component <id> ")
+           << operands[i] << " must come from a normal constant";
   }
 
   auto resultID = operands[1];

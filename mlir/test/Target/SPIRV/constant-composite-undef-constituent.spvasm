@@ -1,0 +1,33 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: Per the SPIR-V spec, an `OpConstantComposite`'s constituents may each be
+; COM: the <id> of either a normal (non-specialization) constant or an
+; COM: `OpUndef` -- `spirv-val` accepts this. The deserializer used to reject
+; COM: an `OpUndef` constituent with "must come from a normal constant" because
+; COM: it only consulted the normal-constant map, not the separate undef-id
+; COM: map; this is a case HLSL's own `f32tof16()`/scalar-to-vector lowering
+; COM: produces in practice (a <2 x float> whose first lane is never read).
+; COM: Fixed by substituting a zero-valued attribute of the expected element
+; COM: type for an undef constituent (one legal choice among the constituent's
+; COM: genuinely unspecified value).
+
+; CHECK: spirv.Constant dense<[0.000000e+00, 1.000000e+00]> : vector<2xf32>
+
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+      %void = OpTypeVoid
+      %fnty = OpTypeFunction %void
+     %float = OpTypeFloat 32
+   %v2float = OpTypeVector %float 2
+   %float_1 = OpConstant %float 1
+     %undef = OpUndef %float
+       %vec = OpConstantComposite %v2float %undef %float_1
+     %ptrty = OpTypePointer Function %v2float
+      %main = OpFunction %void None %fnty
+     %entry = OpLabel
+       %var = OpVariable %ptrty Function %vec
+               OpReturn
+               OpFunctionEnd
