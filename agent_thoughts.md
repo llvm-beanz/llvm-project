@@ -125169,3 +125169,43 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 5. **(worth filing, low priority)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target. Discovered this session while looking for an HLSL/`feme-run`-based regression test for `L448` before falling back to the compile-and-execute `.ll`-based approach above. Not investigated further; worth a dedicated look if execution-based HLSL testing of resource atomics becomes a recurring need.
 6. **(no standing background sweep)** Nothing currently running in the background to check in on.
+
+# Session: L444's `opquantize` flush-to-zero fix (L449) — self-inflicted bug, found and fixed
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (late this session — flagging the process miss below).
+
+**What's done**: Picked up `L444`'s handoff (the `opquantize`/`opinboundsaccesschain` 275-case cluster triage). Fixed the `opquantize` cluster (13 of 275 cases) — root cause was a bug *this agent's own prior session* introduced.
+
+**1. The bug**: `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s `QuantizeToF16Pattern` (added last session, commit `bdcd8d8b5ea7`) lowered `spirv.QuantizeToF16` as a bare `fptrunc`-to-`f16`-then-`fpext`-back round trip, claiming this "matches the op's semantics exactly." Wrong: `OpQuantizeToF16` must flush `f16`-subnormal results to a same-signed zero; plain `fptrunc` preserves denormals. Confirmed against the actual CTS source (`compareZeros` in `vktSpvAsmInstructionTests.cpp` — an exact-zero check, not tolerance-based).
+
+**2. First fix attempt regressed something else**: used `llvm.is.fpclass`+`llvm.copysign`+`select` to detect/flush the subnormal case. Fixed all 13 target cases — but broke 4 *previously-passing* `opquantize_vec4.*` cases with a new `feme-cpu-simdize` "divergent vector value ... component decomposition is not yet supported" error. Root cause: `SIMDize.cpp` has two separate vector-widening paths (wave-widening and vector-component-decomposition); only the former already special-cases `is.fpclass`-shaped "operand type ≠ result type" intrinsics. Caught this via the standard full-wildcard-sweep-after-fix habit, not luck — would have shipped a silent regression otherwise.
+
+**3. Final fix**: rewrote the flush using only integer bit manipulation (`bitcast`→`i16`, `and` sign/abs masks, `icmp` subnormal-range check, `select`, `bitcast` back) — every op here is already a supported vector-component-decomposition producer shape, so it hits no SIMDize gap. 175/175 `opquantize*` CTS cases now pass, zero regressions.
+
+**4. Found two unrelated, pre-existing test-file bugs along the way**: `mlir/test/Conversion/SPIRVToLLVM/arithmetic-ops-to-llvm.mlir` had a duplicate `UMulExtended`/`SMulExtended` scalar block (made the file fail to even parse) and two stale `CHECK` lines (expected a `dense<N>` splat constant; actual codegen builds it via scalar-constant + `insertelement`s). Fixed these in their own, separate commit per the "self-contained fix to another subproject" instruction, since they're unrelated to the quantize bug and were only hit because validating the quantize fix required running this test file.
+
+**5. Process miss, flagging honestly**: the mandatory session-start `vulkaninfo --summary` check was **not done at the start of this session** — it only got done partway through, after most of the investigation/fix work, once this gap was noticed during work on the remaining next-steps. No indication the wrong ICD was in use (the fix's own CTS runs all used the correct `VK_ICD_FILENAMES`), but the check itself was late. Flagging so a future session doesn't repeat the miss.
+
+**Verification**:
+- `mlir/test/Conversion/SPIRVToLLVM/` lit tests: 23/23 passed.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported — unchanged, no regressions.
+- Real CTS: `dEQP-VK.spirv_assembly.instruction.*opquantize*` (175 cases): **175/175 Passed** (was 162/175 — the 13 originally-reported failures all fixed, zero new failures from either the final fix or the abandoned intrinsic-based attempt, which was caught and corrected before commit).
+- A fresh full `dEQP-VK.spirv_assembly.*` re-sweep (70,337 cases) was launched in the background near session end to refresh `L444`'s complete baseline (expect 262 remaining failures = 275 − 13) — **still running as this entry is written, not yet complete**. Next session: check `/tmp/l444_spirvasm_full_rerun.qpa`/`.log` first, before starting new work.
+
+**Commits** (3, each independently buildable):
+1. `[mlir][test] Fix stale/duplicate SPIRVToLLVM arithmetic-ops lit checks` — the two unrelated, pre-existing test bugs, committed alone (touches only `mlir/`, self-contained, tested).
+2. `[mlir][spirv] Fix OpQuantizeToF16 to flush subnormal f16 results to zero` — the actual fix (`SPIRVToLLVM.cpp` + the quantize-specific `arithmetic-ops-to-llvm.mlir` CHECK updates), touches only `mlir/`.
+3. `[feme] Record L449: opquantize flush-to-zero fix in Roadmap/CTS report` — `Roadmap.md`'s new `L449` entry (depends on `L444`) + `VulkanCTSReport.md`'s new dated section.
+4. This `agent_thoughts.md` entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — pure compiler correctness fix, zero feature/extension-surface change.
+
+## Next steps
+
+1. **(cheap, first thing)** Check on `/tmp/l444_spirvasm_full_rerun.qpa`/`.log` (background `dEQP-VK.spirv_assembly.*` full sweep, 70,337 cases, launched this session, not yet complete) — once done, record the refreshed baseline in `VulkanCTSReport.md` and `Roadmap.md`'s `L444` entry (expect 262 remaining failures).
+2. **(half day)** `L444`'s other large cluster — **double-check its exact case-name prefix before starting**: `Roadmap.md`'s "`opinboundsaccesschain`" label for this specific 275-case-baseline cluster looks like it may be an echo of the *already-fixed*, differently-named `opinboundsaccesschain` cluster documented earlier in `VulkanCTSReport.md` (a `BlockAccessChainPattern`/struct-of-vec3/`matrix_3x3` fix from a much earlier session) rather than a fresh discovery — the case names in this session's own 275-case sweep read more like `OpPtrAccessChain`/`opptraccesschain`. Confirm which opcode is actually failing before reduction work starts.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases, root cause known, fix design sketched) — still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+6. **(worth filing, low priority, carried forward)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target. Not investigated further.
+7. **(process reminder for next session)** Run `vulkaninfo --summary | grep deviceName` **as the literal first action**, before any other work — this session did it late. Worth adding extra emphasis/an explicit first-line habit cue if this recurs.
