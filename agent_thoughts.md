@@ -125498,3 +125498,90 @@ is now a well-scoped, clearly-written-up item — `L452(a)` in
 `Roadmap.md` has the full mechanism and a concrete design. Worth
 treating as its own "half day to a day" item, separate from the
 struct/array composite clusters and the other standing items below.
+
+## Correction: real full-sweep numbers vs. initial spot-checks
+
+**Device check**: `vulkaninfo --summary | grep deviceName` →
+`FeMe CPU Vulkan Device` (confirmed, with `VK_ICD_FILENAMES` set
+explicitly — the container's system default is `lavapipe`, not this
+project's ICD; see `feme/.instructions.md`).
+
+The background `dEQP-VK.spirv_assembly.*` re-sweep launched at the end
+of the `opline`/`opnop` fix finished. Wrote a small one-off Python
+script to diff the before/after `.qpa`/log files by exact case name
+(not group-level counts) — this needed two different parsers, since
+the old baseline was a `.qpa` (`#beginTestCaseResult`/
+`<Result StatusCode="...">`) and the new sweep was a plain captured
+stdout log (`Test case '...'..` / `Pass`/`Fail`/`NotSupported` lines).
+My first attempt at this script mismatched the two formats and
+produced nonsense (0 old fails, "192 regressions") — worth remembering
+that a diff script silently producing an absurd result is itself a
+signal to go re-check the input format assumptions, not the diff
+logic.
+
+The real diff: **37 cases fixed, 0 regressions**, not the 23 this
+session's own direct `--deqp-case=...` spot-checks had concluded. Two
+things were wrong in the spot-check-based count:
+
+1. **`opnoline` was wrongly written up as "already passing,
+   unaffected".** A quick direct run of `opnoline.*` sampled 6/6 Pass
+   and I concluded, without checking against the *old* baseline, that
+   these were pre-existing passes unrelated to the fix. The real sweep
+   shows all 5 `opnoline*` cases were actually failing before the fix
+   and are genuinely fixed by it (unsurprising in hindsight — `OpNoLine`
+   goes through the exact same `sliceNonDebugInstruction` code path as
+   `OpLine`).
+2. **Two entirely new clusters weren't checked at all**, because
+   nothing in the original cluster table named them:
+   `spirv_version.*_compute` (7 cases, SPIR-V 1.0 through 1.6) and
+   `float_controls_extensionless*` (4 cases) — both fixed as a side
+   effect, presumably incidental `OpLine`/`OpNop` in shared
+   compute-shader boilerplate.
+
+**Lesson for future sessions**: a representative-case spot-check is
+fine for a quick sanity check that a fix works at all, but it is *not*
+a substitute for a real before/after full-sweep diff when writing final
+counts into `Roadmap.md`/`VulkanCTSReport.md`. Any fix that touches a
+sufficiently generic/structural code path (a deserializer, a shared
+helper, an analysis) can have fixed-as-a-side-effect cases in clusters
+that were never suspected, and representative sampling of a *named*
+cluster can also miss that some of its own cases were already passing
+and others weren't (the exact opposite kind of error also happened —
+"opline" was undercounted in a stale early estimate before this
+session even started).
+
+**Re-clustered the real 192-case baseline** (same case-family-prefix
+methodology as the prior session's table) while the data was already
+parsed: the seven ~8-case struct/array composite-decomposition clusters
+(`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
+`switch`, 56 cases total) are completely unchanged from the prior
+session's own count — this fix didn't touch that area — and are now
+unambiguously the single largest remaining compact cluster, since
+`opline`/`opnop`/`opnoline`/`spirv_version`/`float_controls_extensionless`
+have all dropped out of the failure list. Recorded this as `L452(b)`
+(confirmed baseline) and `L452(c)` (re-cluster) in `Roadmap.md`, and
+brought `VulkanCTSReport.md` into sync with the same real numbers.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+was needed — this is a pure compiler/deserializer fix, doesn't touch
+feature/extension support surface.
+
+## Next steps (carried forward, re-prioritized with real data)
+
+1. **(half day, new top candidate with real data behind it)** The seven
+   ~8-case struct/array composite-decomposition clusters (`f16arr3`,
+   `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
+   `switch`) — 56 cases, now the clearest largest remaining compact
+   cluster in the confirmed 192-case `L444` baseline.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s
+   `out_of_order` fix (5 cases) — root cause and a concrete fix design
+   (alloca-divergence side-table) are both fully written up in
+   `Roadmap.md`; deliberately not attempted due to regression risk.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases) — design
+   written up, still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
+   (30 tessellation residuals) — untouched across multiple sessions.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`) — deferred every session.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
