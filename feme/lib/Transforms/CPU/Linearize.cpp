@@ -76,6 +76,7 @@
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
@@ -111,6 +112,42 @@ void diagnose(Function &F, const Twine &Message) {
 struct MaskPair {
   Value *Live;
   Value *SideEffect;
+};
+
+/// Roadmap L440: a `WeakTrackingVH`-backed counterpart to `MaskPair`, used
+/// only for caches whose entries must outlive the mutation of unrelated
+/// IR between the point they are recorded and the point they are read
+/// back (`DiamondFlattener::CycleBoundaryMasks`/`LoopLinearizer::
+/// DiamondFlattenedEntryMasks`). A plain `MaskPair` stored in such a
+/// cache is a raw, untracked `Value *`: if anything erases the
+/// instruction it refers to in between (e.g. `LoopLinearizer::run()`
+/// linearizing one cycle can erase blocks/values referenced by a
+/// `MaskPair` recorded for a *different*, not-yet-processed cycle), the
+/// cached pointer silently dangles, and the read site threads that
+/// dangling pointer straight into a new `PHINode`'s incoming-value list
+/// as a real `Use` -- a genuine use-after-free (confirmed to reproduce,
+/// non-deterministically under ASLR, via `WaveReadLaneFirst.fp16.test`).
+/// `WeakTrackingVH` participates in LLVM's `ValueHandleBase` tracking:
+/// it auto-updates across a RAUW (so it never goes stale that way) and
+/// auto-nulls (rather than dangling) once the value it tracks is really
+/// erased, so a consumer can safely detect and gracefully fall back
+/// instead of reading freed memory.
+struct WeakMaskPair {
+  WeakTrackingVH Live;
+  WeakTrackingVH SideEffect;
+
+  WeakMaskPair() = default;
+  WeakMaskPair(const MaskPair &MP) : Live(MP.Live), SideEffect(MP.SideEffect) {}
+
+  /// Whether both tracked values are still present, i.e. neither has been
+  /// erased since this entry was recorded. A RAUW'd-but-still-live value
+  /// is fine (the handle follows it); only an erasure nulls it out.
+  bool isValid() const { return Live && SideEffect; }
+
+  /// Materializes the currently-tracked values back into a plain
+  /// `MaskPair`. Only meaningful when `isValid()` -- a caller that cannot
+  /// guarantee the entry is still fresh must check that first.
+  MaskPair get() const { return {Live, SideEffect}; }
 };
 
 /// Rewrites every memory access and every `feme.stage.discard`/`.demote`/
@@ -1423,7 +1460,7 @@ public:
   /// never make outer-loop progress), the whole wave's `mask.any`
   /// reduction spins forever. See `LoopLinearizer`'s own
   /// `DiamondFlattenedEntryMasks` member for the consuming side.
-  const DenseMap<BasicBlock *, MaskPair> &getCycleBoundaryMasks() const {
+  const DenseMap<BasicBlock *, WeakMaskPair> &getCycleBoundaryMasks() const {
     return CycleBoundaryMasks;
   }
 
@@ -1892,7 +1929,14 @@ private:
   /// from inside some still-divergent enclosing region (e.g. a loop nested
   /// in `if (laneId == 0) { ... }`) can be seeded with that real mask
   /// instead of unconditionally assuming every lane reaches it (see `run`).
-  DenseMap<BasicBlock *, MaskPair> CycleBoundaryMasks;
+  /// Roadmap L440: `WeakMaskPair`-valued (not plain `MaskPair`) because
+  /// entries here are read back well after they are recorded -- both
+  /// later in this same pass's own `Roots` walk, and, via
+  /// `getCycleBoundaryMasks()`, by a wholly separate `LoopLinearizer` run
+  /// afterward -- by which point unrelated IR mutation may have erased
+  /// the instruction a stale raw `Value *` would otherwise still (and
+  /// incorrectly) point at.
+  DenseMap<BasicBlock *, WeakMaskPair> CycleBoundaryMasks;
 
   /// Roadmap H95a: the reverse of the mapping `run` builds from
   /// `CycleBoundaryBlocks` to each cycle's exit block(s) -- for a given
@@ -2472,7 +2516,7 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
           continue;
         }
       }
-      return CycleBoundaryMasks.try_emplace(Cur, Masks).first->second;
+      return CycleBoundaryMasks.try_emplace(Cur, Masks).first->second.get();
     }
 
     applyStageMasks(*Cur, Masks, &MaskedLoadResults);
@@ -2743,10 +2787,15 @@ bool DiamondFlattener::run() {
       MaskPair Candidate = AllActive;
       for (BasicBlock *BoundaryBlock : BoundaryIt->second) {
         auto MaskIt = CycleBoundaryMasks.find(BoundaryBlock);
-        if (MaskIt == CycleBoundaryMasks.end())
+        // Roadmap L440: a found-but-invalid (nulled) entry means the
+        // instruction(s) it referred to have since been erased by this
+        // same walk's own processing of an earlier root -- treat it
+        // identically to "never recorded" rather than reading a stale
+        // value back.
+        if (MaskIt == CycleBoundaryMasks.end() || !MaskIt->second.isValid())
           continue;
         if (!Seen) {
-          Candidate = MaskIt->second;
+          Candidate = MaskIt->second.get();
           Seen = true;
         } else if (Candidate.Live != MaskIt->second.Live ||
                    Candidate.SideEffect != MaskIt->second.SideEffect) {
@@ -2813,7 +2862,7 @@ public:
   LoopLinearizer(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
       UniformityInfo &UI,
-      const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks,
+      const DenseMap<BasicBlock *, WeakMaskPair> &DiamondFlattenedEntryMasks,
       SmallPtrSetImpl<BasicBlock *> &MergeVisited,
       SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks)
       : F(F), DT(DT), PDT(PDT), CI(CI), MergeVisited(MergeVisited),
@@ -3232,7 +3281,20 @@ private:
   /// can consult it) and discovers that one of the blocks it is about to
   /// thread its own freshly computed `MaskPair` through is itself a
   /// previously linearized child's header.
-  DenseMap<BasicBlock *, MaskPair> HeaderActiveMasks;
+  ///
+  /// Roadmap L440: `WeakMaskPair`-valued. `foldNowTriviallyConstantMaskPhis`
+  /// (see its own doc comment) can erase a mask phi as collateral damage
+  /// of folding some *other*, enclosing cycle's own masks -- its closure
+  /// walk is scoped to that enclosing cycle's own `CycleInfo` membership,
+  /// which also includes every nested child cycle's blocks, so a child's
+  /// own already-recorded `HeaderActiveMasks` entry can be silently
+  /// erased well after it was cached here, with nothing at that erasure
+  /// site aware this map even holds a reference to it. Confirmed as the
+  /// real root cause of a reproduced, ASLR-dependent use-after-free (see
+  /// `rethreadNestedEntryMasks`'s own `dyn_cast<PHINode>(Child.Live)`
+  /// read of this map's entries): a plain `MaskPair` here is a raw,
+  /// untracked `Value *` with no visibility into that later erasure.
+  DenseMap<BasicBlock *, WeakMaskPair> HeaderActiveMasks;
 
   /// Roadmap L286: `feme::cpu::DiamondFlattener`'s own, separately-run,
   /// earlier pass's record of every not-yet-linearized cycle header it
@@ -3252,7 +3314,14 @@ private:
   /// enclosing diamond around this cycle (the overwhelmingly common
   /// case), in which case lookups simply miss and this pass's original,
   /// unconditional-`true` behavior is preserved exactly.
-  const DenseMap<BasicBlock *, MaskPair> &DiamondFlattenedEntryMasks;
+  ///
+  /// Roadmap L440: `WeakMaskPair`-valued for the same reason as
+  /// `DiamondFlattener::CycleBoundaryMasks` -- this cache is read by
+  /// `makeActivePNPair` across this whole pass's own cycle-by-cycle
+  /// processing, potentially long after some *other*, earlier-processed
+  /// cycle's own mutation has erased the instruction(s) a plain `MaskPair`
+  /// here would otherwise still (incorrectly) point at.
+  const DenseMap<BasicBlock *, WeakMaskPair> &DiamondFlattenedEntryMasks;
 
   /// Roadmap L282/L283: \p BB was just handed \p Masks by the caller's own
   /// `applyStageMasks(*BB, Masks)` (an enclosing, currently-being-
@@ -3315,7 +3384,16 @@ private:
     auto It = HeaderActiveMasks.find(BB);
     if (It == HeaderActiveMasks.end())
       return;
-    MaskPair &Child = It->second;
+    // Roadmap L440: `.get()` reads back whatever `Child.Live`/
+    // `.SideEffect` currently track -- possibly `nullptr`, if either has
+    // since been erased by, specifically, some *other* enclosing cycle's
+    // own `foldNowTriviallyConstantMaskPhis` call sweeping it up as part
+    // of its own closure walk (see this map's own comment). `dyn_cast_
+    // if_present` below treats that exactly like the pre-existing "folded
+    // down to a plain constant, not a phi" case just below it: nothing
+    // left here to narrow, because every real use of the erased value was
+    // already replaced before it was erased.
+    MaskPair Child = It->second.get();
     CycleRef ChildCycle = CI.getCycle(BB);
     auto Narrow = [&](PHINode *PN, Value *NewMask) {
       for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I) {
@@ -3346,9 +3424,9 @@ private:
     // masks genuinely folded away (found running
     // `dEQP-VK.glsl.loops.special.do_while_uniform_iterations.
     // dowhile_trap_fragment` through the real compiler pipeline).
-    if (auto *PN = dyn_cast<PHINode>(Child.Live))
+    if (auto *PN = dyn_cast_if_present<PHINode>(Child.Live))
       Narrow(PN, Masks.Live);
-    if (auto *PN = dyn_cast<PHINode>(Child.SideEffect))
+    if (auto *PN = dyn_cast_if_present<PHINode>(Child.SideEffect))
       Narrow(PN, Masks.SideEffect);
   }
 };
@@ -4670,14 +4748,24 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // all -- see `DiamondFlattenedEntryMasks`'s own comment. Prefer that
     // recorded mask over the bare, unconditional `true` this pass would
     // otherwise always seed a non-backedge predecessor with.
+    //
+    // Roadmap L440: a found-but-invalid entry means whatever this pass's
+    // own processing of some other, earlier-linearized cycle did since
+    // has erased the instruction(s) it referred to -- fall back to the
+    // unconditional-`true` seeding exactly as if nothing had ever been
+    // recorded, rather than threading a dangling `Value *` into a brand
+    // new `PHINode`'s incoming-value list.
     auto It = DiamondFlattenedEntryMasks.find(Header);
-    bool HasFlattenedMask = It != DiamondFlattenedEntryMasks.end();
+    bool HasFlattenedMask =
+        It != DiamondFlattenedEntryMasks.end() && It->second.isValid();
+    MaskPair FlattenedMask =
+        HasFlattenedMask ? It->second.get() : MaskPair{nullptr, nullptr};
     for (BasicBlock *Pred : predecessors(Header)) {
       if (CI.contains(C, Pred))
         continue;
       if (HasFlattenedMask) {
-        LivePN->addIncoming(It->second.Live, Pred);
-        SideEffectPN->addIncoming(It->second.SideEffect, Pred);
+        LivePN->addIncoming(FlattenedMask.Live, Pred);
+        SideEffectPN->addIncoming(FlattenedMask.SideEffect, Pred);
       } else {
         LivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
         SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
@@ -6424,7 +6512,7 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CI.compute(F);
     UniformityInfo UI = computeWaveUniformity(F, DT, CI);
 
-    DenseMap<BasicBlock *, MaskPair> DiamondFlattenedEntryMasks;
+    DenseMap<BasicBlock *, WeakMaskPair> DiamondFlattenedEntryMasks;
     // Roadmap L375 (6th investigation): see `DiamondFlattener::MergeVisited`
     // for why this lives here -- one set per `Function`, outliving every
     // individual `DiamondFlattener`/`LoopLinearizer` instance constructed
