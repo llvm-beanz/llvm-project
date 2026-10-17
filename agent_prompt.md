@@ -69,39 +69,19 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, the real next step)** Bisect `L440`'s UAF: wrap the
-   `gdb`-under-ASLR repro loop (already captured, ~1-in-20-to-75 hit
-   rate) to retry automatically until it catches the crash, then set a
-   watchpoint on the specific `Masks.Live` `Value*` once its address is
-   known, to find exactly where it gets freed. Read every
-   `Masks.Live`/`Masks.SideEffect`-caching site in `Linearize.cpp` (not
-   just the `ballot.pred.masked` call site) for a place that RAUWs or
-   erases the underlying instruction without invalidating the cache.
-   Fix by refreshing the cache at the right point, or switch to a
-   `WeakVH`/`AssertingVH`-backed handle so any *other* similar staleness
-   bug fails loudly instead of silently corrupting memory. Write a
-   deterministic `LinearizeTest.cpp` unit test (construct the exact IR
-   mutation sequence directly, don't rely on ASLR luck). Re-verify
-   `check-hlsl-feme-vk` (expect 492+/793, 0 crashes), `check-feme`, and
-   the `dEQP-VK.glsl.loops.special.*` 552-case sweep (zero regressions
-   to the 16 already-fixed `L419` cases -- this file's masking code is
-   shared).
-2. **(~2-3 hours, after #1 closes cleanly)** Revisit `L419(y)`
-   (`conditional_break_uniform`, 6 cases) now with a working
-   `L440`-style memory-safety fix in place in case the two interact --
-   otherwise same careful-regression-testing approach as before.
-3. **(half day, needs a quiet machine)** Re-measure
-   `check-hlsl-clang-feme-vk` (`L440(b)`'s 92/293/269/139 figure) once
-   no standing CTS sweep is running, to get a contention-free baseline,
-   then triage the 92 failures -- likely dominated by the known
-   upstream `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608)
-   per existing `XFAIL: Clang && Vulkan` markers, but not yet verified
-   case-by-case.
-4. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
-   untouched, same IR-dump-and-reduce methodology candidate.
-5. **(standing)** `L419(h)`'s 12 remaining special-loop residuals
-   (`elseblock`/`ifblock`/`mixed_break_continue`) -- distinct shapes,
-   need their own reduction.
-6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is
-   running and growing (not stalled) -- just check progress
-   (`ps aux | grep deqp-vk`, file size of `results.qpa`), don't restart.
+1. **(standing)** `L419(g)` -- 30 tessellation residuals, same
+   IR-dump-and-reduce methodology candidate, untouched.
+2. **(standing)** `L419(h)`'s remaining residuals
+   (`elseblock`/`ifblock`/`mixed_break_continue` special-loop shapes, plus
+   loop-in-switch cases) -- distinct shapes, need their own reduction.
+3. **(standing)** `L419(y)` (`conditional_break_uniform`, 6 cases) -- untouched.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline (`L440(b)`)
+   needs re-measuring on a quiet machine (no standing CTS sweep running) and
+   case-by-case triage -- likely dominated by the known upstream
+   `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608) per existing
+   `XFAIL` markers, but not yet verified.
+5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running
+   and growing (253MB+ as of this session's end) -- just check progress, don't
+   restart.
+6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
+   master per-group table in one pass using the completed results.
