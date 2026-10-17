@@ -6132,3 +6132,70 @@ milestone can be considered closed.**
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
 (this is a CPU-backend control-flow/masking-correctness fix, not a
 feature- or extension-surface change).
+
+## `L419(x)`: `flattenTaintedBranchesInRegion` nested-cycle leak fixed -- `L419(w)`'s regression closed, net +1 over the pre-`L419(w)` baseline
+
+Implemented the fix `L419(w)` filed and deferred: threaded the cycle
+currently being linearized (`CycleRef C`) into
+`flattenTaintedBranchesInRegion`, and skip any `Region` candidate block
+whose own innermost cycle (`CI.getCycle(BB)`) is valid and differs from
+`C`. Such a block is a *different*, nested child cycle's own header or
+latch, already linearized (and, if genuinely divergent, already
+correctly masked) when that child cycle was processed in its own right
+-- re-examining it as a fresh tainted-branch candidate for the *outer*
+cycle double-counts the same masking taint and incorrectly routes an
+already-resolved, genuinely uniform exit check into
+`flattenKnownDivergentBranch`'s cycle-containment safety rejection.
+
+This time the fix was scoped narrowly to
+`flattenTaintedBranchesInRegion`'s own candidate walk (not
+`OtherCondBrBlocks`'s raw collection, which `L419(w)`'s own earlier,
+reverted attempt at the same idea touched and which hung
+`FeMeTransformsCPUTests`) -- `FeMeTransformsCPUTests` stayed green at
+638/638, no infinite loop this time.
+
+**Targeted 66-case sweep** (`conditional_break`/`dowhile_trap`/
+`infinite_with_*`/`nested*`/`select_iteration_count`/
+`unconditional_break` across `do_while_dynamic`/`for_dynamic`/
+`while_dynamic`): **66/66 Pass**, including every one of the 10 cases
+`L419(w)` regressed and the 6 `select_iteration_count` cases it fixed.
+
+**Full `dEQP-VK.glsl.loops.special.*` sweep (552 cases)**: **534 Pass /
+18 Fail** -- up from `L419(w)`'s own 524/552, and +1 over the
+pre-`L419(w)` 533-pass baseline. `L419(w)` can now be considered a
+genuine net-positive milestone close-out.
+
+**Remaining 18 failures**, all pre-existing and unrelated to this fix:
+- 12 special-loop residuals already tracked under `L419(h)`
+  (`{for_dynamic,while_dynamic}_iterations.{elseblock,ifblock}_
+  {fragment,vertex}`, `{for_uniform,while_uniform}_iterations.
+  mixed_break_continue_{fragment,vertex}`).
+- 6 `conditional_break_{fragment,vertex}` cases across all three
+  `*_uniform_iterations` groups (`do_while_uniform`/`for_uniform`/
+  `while_uniform`) -- these were the ones `L419(t)` originally fixed,
+  then `L419(w)`'s `flattenKnownDivergentBranch` cycle-containment
+  safety check re-regressed them into a clean, diagnosed failure
+  (`VK_ERROR_INITIALIZATION_FAILED`, "does not have the simple shape
+  this pass can flatten") rather than silent corruption -- a deliberate
+  trade-off `L419(w)`'s own writeup called out as worth a closer look
+  (filed as this session's next-step #2, not yet investigated).
+
+`ninja check-feme`: 3,774/3,776 Passed -- the same 2 pre-existing,
+unrelated failures as every recent session
+(`entry-wrapper-loop-header-derived-value-in-suffix.ll`, confirmed via
+`git stash` to reproduce identically with this fix reverted; a
+timing-sensitive Vulkan `SyncTest.QueueSubmitReturnsPromptlyThen
+CompletesAfterHostSignal` unrelated to `Linearize.cpp`).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+(this is a CPU-backend control-flow/masking-correctness fix, not a
+feature- or extension-surface change).
+
+A synthetic, minimal unit-test reproducer for this exact nested-cycle
+leak (an outer dynamic-iteration cycle's `PreRegion`/`PostRegion` walk
+reaching into an inner cycle's own header/latch after masking narrows a
+load both cycles share) was not constructed this session, given the
+multi-relay-hop `CheckBlock`/`CheckExit` machinery required to trigger
+it; correctness is validated here via the real CTS sweep (66/66
+targeted, 534/552 full) plus the unchanged 638/638
+`FeMeTransformsCPUTests` baseline instead.
