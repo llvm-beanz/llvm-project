@@ -125935,3 +125935,33 @@ rushed. Not safe to start with under two hours left in the session.
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 8. **(low priority, carried forward)** 9 older git stashes remain
    uninspected — low value, still open if a future session wants to check.
+
+# Session: L452(g)/(h) — root-caused the switch_comp collision to its exact mechanism, still no fix
+
+**Next action if you pick this up**: open `feme/docs/Roadmap.md`, search `L452(h)`, read that one entry. It names the exact condition the fix needs to check. Then go implement design (b) (see step 1 below) — do not re-derive the mechanism a fifth time, it's fully written up now.
+
+## What I did this session (no code landed, investigation only)
+
+1. Checked `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Had to set `VK_ICD_FILENAMES` explicitly each bash call (fresh shell per call, doesn't persist) — this is already documented in `feme/.instructions.md`, not a new finding.
+2. Found and fixed two factual errors in the prior session's `L452(g)` write-up:
+   - The "must-pass" unit test (`LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`) fires **four** separate guard calls, not one. Only `BB=Flow9` is actually comparable to `switch_comp`'s dangerous call. The other three take a different code path entirely (null `OriginBr`).
+   - The collision in `switch_comp` is **not** two separately-processed top-level diamond candidates racing (what `L452(g)` said) — it's **one** top-level `validate()` call visiting the same block twice via its own two arms, because the surviving block (`Flow18`) stays standing as a real `CondBr` after the peel, and `validate`'s own recursion into it revisits a block its sibling arm already claimed.
+3. Verified this with real instrumentation (`FEME_DEBUG_L452G`, added to `peelWouldDestroyAncestorReconvergencePoint`/`reachesThroughRelayChain`), not hand-tracing — ran both repros, got exact trace output, confirmed the mechanism matches node-by-node.
+4. Tried several cheap static CFG checks to distinguish the dangerous case from the safe one (do BB's two successors immediately converge? is Target reachable from BB's other successor? etc.) — **every one failed**: each either didn't hold in the dangerous case, or held identically in the safe case too. The safe case's immunity turned out to depend on an earlier, iteration-order-dependent merge fold that happened *before* this guard ever ran — not visible from the guard's own call site at all.
+5. Reverted all instrumentation (`diff` clean against baseline, confirmed). Rebuilt, reran all 34 `LinearizeTest` cases — still pass.
+6. Wrote up the full, precise mechanism as `L452(h)` in `Roadmap.md` and committed it (`6d7c3a77c75d`). No functional change, so no CTS run, no inventory updates this session.
+
+## Why no fix this session
+
+Every static heuristic I tried is provably insufficient — confirmed from first principles, not just by testing. The real check requires replicating what `DiamondFlattener::validate`'s own `MergeVisited` tracking already does (would this peel's `Target` get visited twice within one top-level validate call). That's design (b) from `L452(g)`, now confirmed as the *only* sound option, not just the safer of two choices. Forcing a hand-rolled heuristic here risks a silent miscompile in shader code that currently just gets a conservative "unsupported" diagnostic instead — not an acceptable trade for finishing this session on a checkbox.
+
+## Next steps
+
+1. **(~1 day, the actual next step)** Implement design (b): give `peelWouldDestroyAncestorReconvergencePoint` a scoped dry-run that reuses `DiamondFlattener::validate`'s own `MergeVisited`/rollback machinery (the same pattern `flattenLoopBodyDiamond` already uses for its own dry-run-and-rollback via `LastRegionVisited`). Must-pass cases: `switch_comp.ll` (regenerate via `FEME_DUMP_IR_PRELINEARIZE` if `/tmp` was cleared — the file may still be at `/tmp/switch_comp.ll`) must now report the diagnostic; `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`'s `BB=Flow9` call specifically must keep behaving exactly as today.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order` fix — memory-carried divergence gap in `WaveUniformity`, design already written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals).
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate `spirv.GlobalVariable` legalization bug (8 cases) — different code area (SPIRVToLLVM conversion), can run in parallel with item 1.
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+8. **(low priority, carried forward)** 9 older git stashes remain uninspected — low value, still open if a future session wants to check.
