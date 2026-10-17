@@ -1,4 +1,4 @@
-; RUN: not feme-opt --llvm -passes=feme-cpu-linearize -S %s 2>&1 | FileCheck %s
+; RUN: feme-opt --llvm -passes=feme-cpu-linearize,verify -S %s | FileCheck %s
 
 ; Roadmap L419(h): reduced (dropping only unused globals/metadata, not any
 ; block/instruction that actually affects this pass's analysis) from
@@ -42,16 +42,38 @@
 ; rather than relying on `HeaderExit`/`LatchExit`) and emit that same,
 ; more accurate message instead.
 ;
-; Not yet fixed: actually *lowering* this shape (masking `41`'s own
-; divergent trip-count check as a first-stage filter ahead of `Flow`'s
-; own check, the same way the `DivergentCandidates`-non-empty handling
-; already does for `HeaderExit`/`LatchExit` when they *are* recognized)
-; remains unimplemented -- see this change's own roadmap entry for why
-; that generalization was judged too large a risk to attempt in the same
-; change as this diagnostic-clarity fix, given this code area's history of
-; regressions.
+; Not yet fixed when this comment was first written: actually *lowering*
+; this shape (masking `41`'s own divergent trip-count check as a
+; first-stage filter ahead of `Flow`'s own check) remained unimplemented,
+; and a prior version of this test asserted the diagnostic above instead.
+;
+; Roadmap L419(ac): now fixed. `recoverRelayExitCheck`'s generalized chase
+; (roadmap L419(ab)) resolves `41`'s own divergent branch through `Flow`
+; (a genuine relay hop, recorded into `ExitCheck::RelayChain`) to the real
+; `ExitBlock`, admitting `41` into the usual `HeaderDivergent` handling.
+; But masking `41`'s check alone is not sufficient for correctness: `Flow`
+; still owns real, multi-valued phis (`%13`/`%14`/`%15`) distinguishing
+; "arrived via `41`'s own exit" from "arrived via the loop's continue
+; edge" -- once `41`'s `CondBr` is erased and replaced with an
+; unconditional branch, `Flow`'s only predecessor from `41` vanishes,
+; silently orphaning that distinction once `EliminateUnreachableBlocks`
+; eventually collapses it (confirmed, via direct IR inspection, to
+; corrupt already-exited lanes' final pixel value -- the "Image mismatch"
+; CTS failure this exact shape produces). `freezeRelayChainExitValues`
+; fixes this by `select`-wrapping `Flow`'s own phis on the same per-lane
+; "still looping" guard mask `41`'s own masking already computed, picking
+; the orphaned exit edge's value for any lane that already left; and
+; because the orphaned value here is `41`'s own raw loop-carried `%.010`
+; phi (not a derived instruction), `freezeLoopCarriedValues` additionally
+; applies its usual sticky, self-referential freeze to `%.010`'s own
+; backedge too (via the new `RelayCaptured` parameter), so a lane that
+; already exited keeps its own frozen value forever, not whatever the
+; loop's still-executing body recomputes for later iterations.
 
-; CHECK: feme-cpu-linearize: function 'main': loop at '' has more than one divergent exit check ('' and 'Flow'); unsupported (roadmap milestone 6 deviation)
+; CHECK: Flow:
+; CHECK:   %.relay.frozen{{[0-9]*}} = select i1 %active.header.check.live, <3 x float> %{{[0-9]+}}, <3 x float> %.010
+; CHECK: Flow._crit_edge:
+; CHECK:   %.010.frozen = select i1 %active.check.live, <3 x float> %.relay.frozen{{[0-9]*}}, <3 x float> %.010
 define void @main() #0 {
   %1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
   %2 = insertelement <4 x float> poison, float %1, i64 0
