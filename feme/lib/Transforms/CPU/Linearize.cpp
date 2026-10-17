@@ -1324,16 +1324,34 @@ public:
   using NarrowChildEntryMasksFn =
       llvm::function_ref<void(BasicBlock *, const MaskPair &)>;
 
+  /// Roadmap L447: true only for the single instance `run()`'s own
+  /// whole-function-pass caller constructs (see that call site's own
+  /// comment), never for an instance built for `flattenLoopBodyDiamond`'s
+  /// or `flattenLoopBodyRegion`'s own `LoopLinearizer::linearizeCycle`
+  /// call sites. Gates the "defer an in-cycle mask-op diamond entirely to
+  /// `LoopLinearizer`" check in `validate`/`flatten` (see their own
+  /// comments): that check is correct, and needed, only for `run()`'s own
+  /// walk, which executes before `LoopLinearizer` even starts and so has
+  /// no way yet to compute the diamond's real per-iteration mask -- but
+  /// `flattenLoopBodyDiamond`/`flattenLoopBodyRegion` are themselves part
+  /// of `LoopLinearizer`'s own masking machinery, called only after a
+  /// cycle's real mask is known (or being computed); unconditionally
+  /// applying the same defer inside *their* recursive `validate`/`flatten`
+  /// calls would make them defer the very diamond they exist to flatten,
+  /// leaving it permanently unflattened (confirmed live: `feme-cpu-
+  /// simdize` then rejects the untouched divergent branch outright).
   DiamondFlattener(
       Function &F, DominatorTree &DT, PostDominatorTree &PDT, CycleInfo &CI,
       UniformityInfo &UI, SmallPtrSetImpl<BasicBlock *> &MergeVisited,
       SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks,
       GetAlreadyLinearizedCycleExitFn GetAlreadyLinearizedCycleExit = nullptr,
-      NarrowChildEntryMasksFn NarrowChildEntryMasks = nullptr)
+      NarrowChildEntryMasksFn NarrowChildEntryMasks = nullptr,
+      bool IsWholeFunctionPass = false)
       : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI),
         GetAlreadyLinearizedCycleExit(GetAlreadyLinearizedCycleExit),
         NarrowChildEntryMasks(NarrowChildEntryMasks),
-        MergeVisited(MergeVisited), ResolvedBlocks(ResolvedBlocks) {}
+        MergeVisited(MergeVisited), ResolvedBlocks(ResolvedBlocks),
+        IsWholeFunctionPass(IsWholeFunctionPass) {}
 
   /// Validates and then flattens every divergent diamond reachable from
   /// \p F's entry block, or from the exit block of any cycle reached along
@@ -2015,6 +2033,12 @@ private:
   /// shape outright.
   SmallPtrSetImpl<BasicBlock *> &ResolvedBlocks;
 
+  /// Roadmap L447: see the constructor parameter's own comment -- true
+  /// only for the single instance `run()`'s whole-function-pass caller
+  /// builds, gating the "defer an in-cycle mask-op diamond to
+  /// `LoopLinearizer`" check in `validate`/`flatten`.
+  bool IsWholeFunctionPass;
+
   /// Roadmap L425: every block the *current*, still-in-progress top-level
   /// `flattenLoopBodyDiamond`/`flattenLoopBodyRegion` call has freshly
   /// added to `MergeVisited` so far -- local to this one call (cleared at
@@ -2156,6 +2180,54 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
       // masked it correctly.
       CycleBoundaryEnd.try_emplace(Cur, End);
       return true; // Stop here; LoopLinearizer's problem, not an error.
+    }
+
+    // Roadmap L447: a divergent branch strictly inside a cycle that is
+    // *not* itself that cycle's own loop-control edge (the case just
+    // above) can still be a genuine loop-body diamond --
+    // `LoopLinearizer::linearizeCycle`'s own fixed-point
+    // `flattenLoopBodyDiamond` loop already knows how to flatten exactly
+    // this shape safely, deferring (via `regionHasStageMaskOps`, the same
+    // gate `flattenLoopBodyDiamond` itself already uses) whenever the
+    // diamond contains a side-effecting resource/image call or a
+    // `feme.stage.*` mask op, so the real per-iteration "active" mask
+    // (not yet known this early) can narrow it instead of a placeholder.
+    // Without this check, this whole-function walk -- which runs before
+    // `LoopLinearizer` even starts, and has no other check of this kind --
+    // reaches (and incorrectly flattens) such a diamond first, baking in
+    // a mask derived only from this walk's own `AllActive` seed with zero
+    // contribution from the loop's own iteration bound. Confirmed via
+    // roadmap `L447`'s own writeup to be the exact root cause of `L442`'s
+    // `max_workgroup_memory` exact-2x doubling: an inner loop's own
+    // out-of-bounds ghost iteration's atomic fired ungated by the loop's
+    // bound because this diamond (containing the atomic) was flattened
+    // here, before `LoopLinearizer` ever computed that bound's mask.
+    // Deliberately conservative: only takes this path when `R` is a valid
+    // reconvergence point, so a malformed diamond here still falls
+    // through to the ordinary validation below and gets a real
+    // diagnostic rather than being silently skipped. A diamond that does
+    // *not* contain a mask op is left to this pass's own ordinary
+    // flattening immediately below, exactly as `run()`'s own doc comment
+    // says it should be -- this check only narrows that behavior for the
+    // specific shape that needs deferring.
+    //
+    // Gated on `IsWholeFunctionPass` (see its own comment): this
+    // `validate` method is also called recursively by
+    // `flattenLoopBodyDiamond`'s and `flattenLoopBodyRegion`'s own
+    // `LoopLinearizer::linearizeCycle` call sites -- i.e. by the very
+    // mechanism this check exists to defer *to*. Applying this same
+    // defer unconditionally inside those recursive calls would make them
+    // defer the diamond right back to themselves, so it would never
+    // actually get flattened at all (confirmed live: `feme-cpu-simdize`
+    // then rejects the still-untouched divergent branch outright, rather
+    // than `L442`'s CTS case actually being fixed).
+    if (IsWholeFunctionPass && Br && isInCycle(Cur)) {
+      if (BasicBlock *R = immediatePostDom(Cur)) {
+        if (regionHasStageMaskOps(Cur, R)) {
+          Cur = R;
+          continue;
+        }
+      }
     }
 
     // Roadmap L375/L383(a): see `MergeVisited`'s own comment for the exact
@@ -2621,6 +2693,31 @@ MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
         }
       }
       return CycleBoundaryMasks.try_emplace(Cur, Masks).first->second.get();
+    }
+
+    // Roadmap L447: mirrors `validate`'s own identical new check above --
+    // see its comment for the full rationale, and `IsWholeFunctionPass`'s
+    // own comment for why this is gated on it (only `run()`'s own
+    // whole-function walk defers; `flattenLoopBodyDiamond`'s/
+    // `flattenLoopBodyRegion`'s own recursive `flatten` calls through
+    // this same method must not). Must stay in exact lockstep with
+    // whatever `validate` already approved: that walk treats this
+    // exact shape (a divergent branch inside a cycle, not the cycle's own
+    // control edge, whose diamond contains a mask op) as a no-op
+    // pass-through from `Cur` straight to its reconvergence point, so
+    // this walk must do the same -- leaving the diamond itself (and
+    // anything inside it `applyStageMasks` would otherwise touch)
+    // completely untouched for `LoopLinearizer::linearizeCycle`'s own
+    // `flattenLoopBodyDiamond` fixed-point loop to pick up later, once
+    // the cycle's real per-iteration mask is known.
+    if (auto *DeferBr = dyn_cast<CondBrInst>(Term);
+        IsWholeFunctionPass && DeferBr && isInCycle(Cur)) {
+      if (BasicBlock *R = immediatePostDom(Cur)) {
+        if (regionHasStageMaskOps(Cur, R)) {
+          Cur = R;
+          continue;
+        }
+      }
     }
 
     applyStageMasks(*Cur, Masks, &MaskedLoadResults);
@@ -6845,7 +6942,12 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     SmallPtrSet<BasicBlock *, 16> ResolvedBlocks;
     {
       PostDominatorTree PDT(F);
-      DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks);
+      // Roadmap L447: `IsWholeFunctionPass=true` here, and only here --
+      // see `DiamondFlattener::IsWholeFunctionPass`'s own comment.
+      DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks,
+                          /*GetAlreadyLinearizedCycleExit=*/nullptr,
+                          /*NarrowChildEntryMasks=*/nullptr,
+                          /*IsWholeFunctionPass=*/true);
       Changed |= DF.run();
       // Roadmap L286: captured *before* `DF` (and the `PDT` it holds a
       // reference to) goes out of scope -- see `LoopLinearizer`'s own
