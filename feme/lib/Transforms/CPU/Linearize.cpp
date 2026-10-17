@@ -61,6 +61,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -204,6 +205,193 @@ static Value *lookThroughTrivialPhi(Value *V) {
 /// `lookThroughTrivialPhi`'s own comment for why that distinction matters.
 static bool isKnownConstantMask(Value *V) {
   return isa<Constant>(lookThroughTrivialPhi(V));
+}
+
+/// (Roadmap L419(w)) Narrows a `feme.cpu.resource.*`/`feme.cpu.image.*`
+/// call's trailing mask operand (at \p MaskArgIdx) to \p Mask, but only
+/// when doing so can only ever *narrow* (never *widen* or otherwise
+/// discard) whatever masking the call already carries: skips the
+/// overwrite when \p Call's own current mask operand is already known
+/// non-constant (i.e. some earlier pass -- typically an enclosing
+/// `DiamondFlattener::flatten()` walk that ran over this same call
+/// before `LoopLinearizer` ever began processing its own cycle -- has
+/// already narrowed it to something genuinely branch/iteration-
+/// dependent), regardless of whether \p Mask itself is currently known
+/// constant. An earlier version of this check only ever looked at
+/// \p Mask's own constant-ness (unconditionally overwriting the call's
+/// existing operand whenever \p Mask looked non-constant) -- correct as
+/// long as every call this ever ran on still carried
+/// `SPIRVResourceLoweringPass`'s own original, universally-constant
+/// `true` placeholder at that point, but not once `LoopLinearizer`'s own
+/// `poison`-seeded `active.live`/`active.sideeffect` phis (see
+/// `LoopLinearizer::linearizeCycle`'s own `makeActivePNPair` comment)
+/// made \p Mask *look* non-constant -- via `isKnownConstantMask`'s
+/// `lookThroughTrivialPhi`, which (correctly) cannot yet tell a
+/// `poison` placeholder's eventual real value apart from a genuinely
+/// divergent one -- for a cycle whose masking will, once fully resolved,
+/// actually turn out trivially uniform after all. That premature "looks
+/// non-constant" state let this function clobber a call's already-
+/// correct, `DiamondFlattener`-narrowed mask (e.g. an outer divergent
+/// diamond's own `%sideeffect.t`) with the cycle's own, structurally
+/// different (if ultimately equivalent) `active.sideeffect` phi --
+/// discarding the outer diamond's own condition dependency outright, a
+/// real regression caught by `PromotesUniformLatchCheckBehindTrivialRelay`.
+/// Requiring the call's own *current* operand to itself be a known
+/// constant before ever overwriting it keeps this function's original,
+/// still-necessary behavior (narrowing a still-untouched `true`
+/// placeholder once `Mask` genuinely becomes non-constant) while never
+/// discarding a narrower mask some earlier walk already installed.
+static void narrowCallMask(CallInst *Call, unsigned MaskArgIdx, Value *Mask) {
+  if (!isKnownConstantMask(Mask) &&
+      isKnownConstantMask(Call->getArgOperand(MaskArgIdx)))
+    Call->setArgOperand(MaskArgIdx, Mask);
+}
+
+/// (Roadmap L419(w)) Folds each of \p MaskPhis -- `LoopLinearizer::
+/// makeActivePNPair`'s own `active.live`/`active.sideeffect` phis, just
+/// after `addLatchIncoming` has filled in their real backedge values --
+/// back down to a single shared value if every incoming edge (now that
+/// all of them are finally known) genuinely agrees, propagating that
+/// fold through any instruction it makes foldable in turn (an `and`/
+/// `xor`/`select` one of whose operands just became that shared value,
+/// or a downstream "merge" phi some uniform diamond's own mask-threading
+/// built purely to carry a mask phi through unchanged). Unlike
+/// `isKnownConstantMask`'s own `lookThroughTrivialPhi` helper -- which
+/// must run *before* `addLatchIncoming` for cases that need it (see the
+/// poison-placeholder seed's own comment) and so can only ever see these
+/// phis in their still-incomplete state -- this runs once they are known
+/// complete, so it can tell a genuinely still-divergent cycle (whose
+/// backedge value differs from its entry value, e.g.
+/// `select_iteration_count`'s own masking) apart from one whose masking
+/// turned out never to need to become non-constant at all (e.g. a loop
+/// with no internal break/discard/demote at all, whose backedge value is
+/// trivially the same `true` its entry value already was) -- safely,
+/// without the false-positive risk `lookThroughTrivialPhi` has on an
+/// incomplete phi.
+///
+/// Deliberately scoped to exactly \p MaskPhis' own transitive operand
+/// closure (restricted to \p C's own blocks, via \p CI's membership
+/// test) -- *not* every phi/instruction in the cycle. An earlier version
+/// of this swept the whole cycle and, while it correctly folded the mask
+/// machinery, also collapsed unrelated single-input "relay" phis other
+/// code elsewhere in `LoopLinearizer`/`DiamondFlattener` depends on
+/// keeping as genuine phis for its own structural reasons (see
+/// `loop-uniform-check-fused-with-divergent-exit-inblock-use.ll`'s own
+/// `%cond` phi, corrupted that way during this fix's own development) --
+/// a mask phi's backedge value is often not literally the same `Value`
+/// as its non-backedge one directly, but some other "merge" phi a
+/// uniform diamond's own mask-threading built in between purely to carry
+/// it through unchanged (e.g. `DiamondFlattener::flatten`'s own uniform-
+/// diamond merge code, which unconditionally builds `phi [%active.live,
+/// Then], [%active.live, Else]` regardless of whether that merge is
+/// actually needed) -- that intermediate phi must itself be seen to
+/// trivially collapse to the mask phi (both its own incoming edges
+/// already, always, agree, independent of the outer phi's own fold)
+/// *before* the outer phi's own remaining, now-self-referential backedge
+/// can be recognized as safe to ignore; walking the closure once up
+/// front (rather than scanning every instruction in the cycle) is what
+/// keeps this fix from reaching values with no real connection to
+/// \p MaskPhis at all. Runs to a local fixed point for the same reason:
+/// one fold can expose another not reachable by a simple one-directional
+/// worklist starting from a mask phi's own users alone (the
+/// intermediate-merge-phi case above is discovered the *other*
+/// direction, from the phi's own incoming values, not its users).
+/// (Roadmap L419(w)) \p MaskPhis itself may be among the instructions
+/// this function folds away (e.g. when a cycle's masking turns out never
+/// to need to become non-constant at all, `Masks.Live`'s own phi is
+/// exactly as foldable as everything else in its closure) -- every
+/// caller's own `Masks.Live`/`Masks.SideEffect` raw `Value *` fields
+/// still point at that now-`eraseFromParent`'d `PHINode` once this
+/// function returns unless corrected, a real, reproduced dangling-
+/// pointer crash (nondeterministic by nature -- the freed `PHINode`'s
+/// memory is simply reused by whatever the optimizer allocates next,
+/// surfacing as a segfault anywhere from a later `verifyModule` call to
+/// `feme::cpu::SIMDizePass` several stages later, depending entirely on
+/// allocator reuse timing) found running `dEQP-VK.glsl.loops.special.
+/// do_while_constant_iterations.select_iteration_count_fragment`
+/// through the real compiler pipeline -- `check-feme`'s own lit/unit
+/// tests never actually exercise a shape where `Masks.Live`'s own phi
+/// gets folded here, only ones where some *other* instruction in its
+/// closure does. Returns, for each of \p MaskPhis (same order), the
+/// final value it was folded to (chasing through any further fold that
+/// final value itself was also subject to -- see this function's own
+/// "fixed point" comment below), or that same `PHINode *` unchanged if
+/// it was never folded at all -- every caller must use *this* function's
+/// return value in place of its own prior raw pointer to \p MaskPhis'
+/// members from this point on, precisely because that prior pointer may
+/// no longer be safe to dereference.
+static SmallVector<Value *, 2>
+foldNowTriviallyConstantMaskPhis(CycleInfo &CI, CycleRef C,
+                                 const DataLayout &DL,
+                                 ArrayRef<PHINode *> MaskPhis) {
+  SmallPtrSet<Instruction *, 16> InScope;
+  SmallVector<Instruction *, 16> Worklist;
+  for (PHINode *PN : MaskPhis)
+    if (InScope.insert(PN).second)
+      Worklist.push_back(PN);
+  for (unsigned Idx = 0; Idx < Worklist.size(); ++Idx) {
+    for (Value *Op : Worklist[Idx]->operands())
+      if (auto *OpI = dyn_cast<Instruction>(Op))
+        if (CI.contains(C, OpI->getParent()) &&
+            // Roadmap L419(w): a single-incoming-edge phi is *not* the
+            // "transparent merge" shape this fold exists to chase
+            // through (e.g. `%live.merge = phi [%active.live, Then],
+            // [%active.live, Else]`, always exactly 2+ incoming edges,
+            // all structurally the same value) -- it is some other,
+            // unrelated phi this cycle's own masking arithmetic happens
+            // to route through, created by an *earlier*, unrelated step
+            // for its own reasons (e.g. a divergent diamond's own
+            // condition phi, which `peelConstantFlowPredecessors`
+            // deliberately keeps as a genuine single-incoming phi, even
+            // though it is trivially foldable in isolation, to sidestep
+            // an unrelated `SSAUpdater` correctness issue -- see
+            // `loop-uniform-check-fused-with-divergent-exit-inblock-use.ll`,
+            // corrupted by an earlier, unscoped version of this fold).
+            // Treating any such phi as an opaque closure boundary avoids
+            // reaching into values that were never genuinely part of
+            // this cycle's own mask-threading plumbing.
+            !(isa<PHINode>(OpI) &&
+              cast<PHINode>(OpI)->getNumIncomingValues() < 2) &&
+            InScope.insert(OpI).second)
+          Worklist.push_back(OpI);
+  }
+  // Roadmap L419(w): records, for every instruction this loop folds away,
+  // exactly what it was folded to -- so that once the loop reaches a
+  // fixed point, any of \p MaskPhis itself that got folded can still be
+  // recovered (chasing one or more further replacements, since the value
+  // an earlier fold produced may *itself* go on to be folded again before
+  // the loop finishes) without ever dereferencing the now-freed
+  // `PHINode`.
+  DenseMap<Instruction *, Value *> Replacements;
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (Instruction *I : Worklist) {
+      if (!InScope.contains(I))
+        continue;
+      Value *S = isa<PHINode>(I) ? cast<PHINode>(I)->hasConstantValue()
+                                  : simplifyInstruction(I, SimplifyQuery(DL));
+      if (!S || S == I)
+        continue;
+      I->replaceAllUsesWith(S);
+      InScope.erase(I);
+      Replacements[I] = S;
+      I->eraseFromParent();
+      Changed = true;
+    }
+  }
+  SmallVector<Value *, 2> Result;
+  for (PHINode *PN : MaskPhis) {
+    Value *V = PN;
+    while (auto *I = dyn_cast<Instruction>(V)) {
+      auto It = Replacements.find(I);
+      if (It == Replacements.end())
+        break;
+      V = It->second;
+    }
+    Result.push_back(V);
+  }
+  return Result;
 }
 
 /// (Roadmap H167) Whether \p CI is a call already carrying a per-lane
@@ -544,8 +732,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
       if (std::optional<MatchedResourceCall> Matched =
               matchResourceCall(*Call)) {
         Value *Mask = isLoad(Matched->Kind) ? Masks.Live : Masks.SideEffect;
-        if (!isKnownConstantMask(Mask))
-          Call->setArgOperand(Call->arg_size() - 1, Mask);
+        narrowCallMask(Call, Call->arg_size() - 1, Mask);
       }
       // A `feme.cpu.image.*` call's own trailing mask operand needs the
       // exact same divergent-region threading a `feme.cpu.resource.*`
@@ -578,8 +765,7 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
           Value *Mask = (Matched->Texel || Matched->AtomicValue)
                             ? Masks.SideEffect
                             : Masks.Live;
-          if (!isKnownConstantMask(Mask))
-            Call->setArgOperand(Call->arg_size() - 1, Mask);
+          narrowCallMask(Call, Call->arg_size() - 1, Mask);
         }
       }
       // (roadmap L85) `WaveActiveBallot`/`subgroupBallot`'s own predicate
@@ -1144,6 +1330,33 @@ public:
                                                 BasicBlock *End,
                                                 MaskPair Masks);
 
+  /// (Roadmap L419(w)) Flattens exactly \p Start's own two-way branch into
+  /// masked, unconditional form, given \p Masks as the mask already in
+  /// effect entering \p Start -- unlike `flattenLoopBodyDiamond`/
+  /// `flattenLoopBodyRegion`, does *not* itself reclassify or validate
+  /// `Start`'s own cycle-boundary status the way `validate`'s top-level
+  /// walk always does (see its own `isLoopControlOrHeaderRelayEdge`
+  /// check): the caller has already independently confirmed `Start`'s own
+  /// branch genuinely needs flattening despite sitting at a cycle's own
+  /// header -- exactly `LoopLinearizer::flattenTaintedBranchesInRegion`'s
+  /// own use, for a `PreRegion`/`PostRegion` block whose condition only
+  /// became mask-dependent *after* this very call's own `Masks` narrowed
+  /// a resource/image load inside it (see that function's own comment for
+  /// the full root-cause writeup) -- a shape `flattenLoopBodyRegion`
+  /// itself cannot reach did it start exactly at `Start`, since `validate`
+  /// would immediately (and, for every *other* caller, correctly) treat
+  /// any cycle header's own branch as "`LoopLinearizer`'s problem, not an
+  /// error" and refuse to flatten it. Each arm's own *interior* is still
+  /// fully subject to the ordinary `validate`/`flatten` rules (an arm may
+  /// itself contain a nested diamond, or reach a nested child cycle
+  /// boundary) -- only this one, outermost step bypasses the check.
+  /// Returns `std::nullopt`, emitting no diagnostic, when \p Start does
+  /// not have the simple shape this requires (no two-way branch, no
+  /// immediate post-dominator, an empty arm, a reconvergence point without
+  /// exactly two predecessors, or either arm's own interior fails to
+  /// validate) -- the caller is expected to diagnose that itself.
+  std::optional<BasicBlock *> flattenKnownDivergentBranch(BasicBlock *Start,
+                                                           MaskPair Masks);
   /// Roadmap L292: a read-only, structure-only pre-check for whether a
   /// later `flattenLoopBodyRegion(Start, End, ...)` call will succeed --
   /// mirrors that method's own `validate` precondition exactly, without
@@ -2040,6 +2253,110 @@ DiamondFlattener::flattenLoopBodyRegion(BasicBlock *Start, BasicBlock *End,
   return flatten(Start, End, Masks, /*RedirectTo=*/End);
 }
 
+std::optional<BasicBlock *>
+DiamondFlattener::flattenKnownDivergentBranch(BasicBlock *Start,
+                                              MaskPair Masks) {
+  auto *Br = dyn_cast<CondBrInst>(Start->getTerminator());
+  if (!Br)
+    return std::nullopt;
+  BasicBlock *T = Br->getSuccessor(0);
+  BasicBlock *Fsucc = Br->getSuccessor(1);
+  BasicBlock *R = immediatePostDom(Start);
+  if (!R || T == R || Fsucc == R || !R->hasNPredecessors(2))
+    return std::nullopt;
+  // Roadmap L419(w): if `Start` sits inside some cycle `SC` but `R` does
+  // not (i.e. `R` is that cycle's own exit block, or further out still),
+  // this is not the short, locally-reconverging diamond this method's own
+  // per-arm `TMasks`/`FMasks` are later *discarded* for (see this
+  // method's own comment on that) -- one of `Start`'s two arms has
+  // genuinely escaped the cycle's own iteration structure (e.g. a
+  // divergent `break`), so the narrower mask each arm computes needs to
+  // keep propagating forward through the rest of that cycle's own
+  // linearization (its backedge phis, any later `PreRegion`/`PostRegion`
+  // block, its own exit check) rather than being thrown away the moment
+  // this call returns. Silently flattening it anyway produces a
+  // plausible-looking but *wrong* CFG: the divergent arm's own real
+  // control-flow target is simply replaced by an unconditional branch to
+  // the other (masked) arm, permanently discarding the break/early-exit
+  // path -- found reducing `dEQP-VK.glsl.loops.special.
+  // do_while_uniform_iterations.conditional_break_{fragment,vertex}`'s own
+  // image-mismatch regression. Bailing out here instead routes the
+  // caller (`LoopLinearizer::flattenTaintedBranchesInRegion`) to its own
+  // "does not have the simple shape this pass can flatten" diagnostic,
+  // which is the honest, correct outcome until this shape gets its own,
+  // mask-propagating support.
+  if (CycleRef SC = CI.getCycle(Start); SC.isValid() && !CI.contains(SC, R))
+    return std::nullopt;
+
+  // Each arm's own *interior* is still fully subject to the ordinary
+  // `validate`/`CycleBoundaryBlocks` rules -- only `Start` itself (never
+  // itself part of this walk, see this method's own comment) bypasses
+  // them.
+  CycleBoundaryBlocks.clear();
+  LastRegionVisited.clear();
+  if (!validate(T, R, /*Quiet=*/true) || !validate(Fsucc, R, /*Quiet=*/true))
+    return std::nullopt;
+  for (BasicBlock *BB : CycleBoundaryBlocks) {
+    auto *BBr = dyn_cast<CondBrInst>(BB->getTerminator());
+    bool Tolerable = BBr && CycleBoundaryEnd.lookup(BB) == R &&
+                      (BBr->getSuccessor(0) == R || BBr->getSuccessor(1) == R);
+    if (!Tolerable)
+      return std::nullopt;
+  }
+  ResolvedBlocks.insert(LastRegionVisited.begin(), LastRegionVisited.end());
+
+  // Mirrors `flatten`'s own divergent-branch case exactly (see its
+  // comment) -- `TPred`/`FPred` identified by dominance before either arm
+  // is mutated.
+  auto PredIt = pred_begin(R);
+  BasicBlock *Pred0 = *PredIt++;
+  BasicBlock *Pred1 = *PredIt;
+  BasicBlock *TPred = DT.dominates(T, Pred0) ? Pred0 : Pred1;
+  BasicBlock *FPred = TPred == Pred0 ? Pred1 : Pred0;
+
+  Value *Cond = Br->getCondition();
+  IRBuilder<> SelBuilder(&*R->getFirstInsertionPt());
+  for (PHINode &PN : make_early_inc_range(R->phis())) {
+    Value *ValT = PN.getIncomingValueForBlock(TPred);
+    Value *ValF = PN.getIncomingValueForBlock(FPred);
+    Value *Sel;
+    if (isa<PoisonValue>(ValF) || isa<UndefValue>(ValF))
+      Sel = ValT;
+    else if (isa<PoisonValue>(ValT) || isa<UndefValue>(ValT))
+      Sel = ValF;
+    else
+      Sel = SelBuilder.CreateSelect(Cond, ValT, ValF,
+                                    PN.getName() + ".linearized");
+    PN.replaceAllUsesWith(Sel);
+    PN.eraseFromParent();
+  }
+
+  IRBuilder<> CondBuilder(Br);
+  Value *NotCond = CondBuilder.CreateNot(Cond, "not." + Cond->getName());
+  MaskPair TMasks{CondBuilder.CreateAnd(Masks.Live, Cond, "live.t"),
+                  CondBuilder.CreateAnd(Masks.SideEffect, Cond, "sideeffect.t")};
+  MaskPair FMasks{CondBuilder.CreateAnd(Masks.Live, NotCond, "live.f"),
+                  CondBuilder.CreateAnd(Masks.SideEffect, NotCond, "sideeffect.f")};
+
+  UncondBrInst::Create(T, Br->getIterator());
+  Br->eraseFromParent();
+
+  // Each arm's own exit `MaskPair` is intentionally discarded here: unlike
+  // `flatten`'s own divergent-branch case, this method's only caller
+  // (`LoopLinearizer::flattenTaintedBranchesInRegion`) already ran
+  // `applyStageMasks` over this whole region with one fixed `Masks` value
+  // *before* this call, and is not currently set up to propagate a
+  // narrower merged mask back out to the rest of its own region walk --
+  // see this method's own doc comment for why that is a known, accepted,
+  // scoped limitation for now (safe only because none of this method's
+  // current callers' shapes have a `feme.stage.discard`/`.demote` inside
+  // such a header-level diamond; a future shape that does would need this
+  // revisited).
+  flatten(T, R, TMasks, /*RedirectTo=*/Fsucc);
+  flatten(Fsucc, R, FMasks, /*RedirectTo=*/R);
+  return R;
+}
+
 MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
                                    MaskPair Masks, BasicBlock *RedirectTo) {
   for (;;) {
@@ -2603,6 +2920,36 @@ private:
   /// `OtherCondBrBlocks` scan reaches it.
   bool isDivergentBranch(const CondBrInst *Br) const;
 
+  /// (Roadmap L419(w)) `collectUniformPassThroughRegion`'s own `CondBr`
+  /// classification (`isDivergentBranch` above) only sees `UniformityInfo`
+  /// computed once, before this very `linearizeCycle` call's own
+  /// `applyStageMasks` narrows any resource/image load's mask operand
+  /// inside the region it just accepted -- a `CondBr` that looks uniform
+  /// *now* only because it depends on such a load's result, but whose
+  /// mask is still a pre-lowering constant `true` at the time
+  /// `collectUniformPassThroughRegion` ran, is exactly what
+  /// `isMaskDependentLoadResult`/`dependsOnTaintedValue` already know to
+  /// distrust -- just too late for `collectUniformPassThroughRegion`'s own
+  /// one-time verdict. Rather than rejecting such a region outright (no
+  /// fallback existed for that -- see Roadmap `L419(v)`'s own writeup of
+  /// the regression that caused), this instead re-examines every block in
+  /// \p Region *after* \p Masks has already been applied to it (so any
+  /// such load's mask operand is now genuinely narrowed), and physically
+  /// flattens -- via `DiamondFlattener::flattenLoopBodyRegion`, the same
+  /// taint-aware mechanism the `HeaderDivergent`/`LatchDivergent`
+  /// "`BodyRegionStart`" branch of `linearizeCycle` already relies on --
+  /// any block whose `CondBr` has become tainted this way. Diagnoses and
+  /// returns `false` if a tainted block's own diamond does not have the
+  /// simple, single-reconvergence shape `flattenLoopBodyRegion` requires
+  /// (should not happen for the shapes this milestone supports, but see
+  /// that function's own comment for the precise precondition). Returns
+  /// `true` on success (whether or not any block actually needed
+  /// flattening). Found reducing `select_iteration_count_
+  /// {fragment,vertex}`'s own `do_while_dynamic`/`for_dynamic`/
+  /// `while_dynamic_iterations` residual.
+  bool flattenTaintedBranchesInRegion(const SmallPtrSetImpl<BasicBlock *> &Region,
+                                      MaskPair Masks);
+
   /// Returns whether a value has the `.linearized` suffix, indicating it was
   /// created by DiamondFlattener when collapsing a divergent branch. Such
   /// values represent the result of linearizing formerly-divergent decisions
@@ -2962,8 +3309,23 @@ private:
         PN->setIncomingValue(I, B.CreateAnd(Incoming, NewMask));
       }
     };
-    Narrow(cast<PHINode>(Child.Live), Masks.Live);
-    Narrow(cast<PHINode>(Child.SideEffect), Masks.SideEffect);
+    // Roadmap L419(w): `Child.Live`/`Child.SideEffect` are no longer
+    // guaranteed to still be their original `PHINode`s --
+    // `foldNowTriviallyConstantMaskPhis` (see its own comment) may have
+    // since folded either one down to a plain constant, for a child
+    // cycle whose masking turned out never to need to become
+    // non-constant at all. A constant has no "entry edges" of its own
+    // left to narrow in the first place (every lane trivially already
+    // agrees), so skipping `Narrow` for it is correct, not merely
+    // tolerated -- unlike the `cast<PHINode>` this replaces, which
+    // unconditionally assumed a phi and crashed once one of these two
+    // masks genuinely folded away (found running
+    // `dEQP-VK.glsl.loops.special.do_while_uniform_iterations.
+    // dowhile_trap_fragment` through the real compiler pipeline).
+    if (auto *PN = dyn_cast<PHINode>(Child.Live))
+      Narrow(PN, Masks.Live);
+    if (auto *PN = dyn_cast<PHINode>(Child.SideEffect))
+      Narrow(PN, Masks.SideEffect);
   }
 };
 
@@ -3948,6 +4310,40 @@ bool LoopLinearizer::isDivergentBranch(const CondBrInst *Br) const {
   return isDivergentValue(Cond);
 }
 
+bool LoopLinearizer::flattenTaintedBranchesInRegion(
+    const SmallPtrSetImpl<BasicBlock *> &Region, MaskPair Masks) {
+  // Collect candidates up front: `Region` is a `SmallPtrSet` with no
+  // control-flow order, and flattening one block's diamond can delete
+  // its own arms -- iterating a fixed snapshot avoids re-examining (or
+  // dereferencing) anything a sibling candidate's own flatten already
+  // removed.
+  SmallVector<BasicBlock *, 4> Candidates;
+  SmallPtrSet<Value *, 1> EmptyTainted;
+  for (BasicBlock *BB : Region) {
+    auto *CBr = dyn_cast<CondBrInst>(BB->getTerminator());
+    if (!CBr)
+      continue;
+    SmallPtrSet<Value *, 8> Visited;
+    if (dependsOnTaintedValue(CBr->getCondition(), EmptyTainted, Visited))
+      Candidates.push_back(BB);
+  }
+  for (BasicBlock *BB : Candidates) {
+    // A sibling candidate's own flatten may have already folded this one
+    // away as one of its own arms.
+    if (!isa<CondBrInst>(BB->getTerminator()))
+      continue;
+    DiamondFlattener DF(F, DT, PDT, CI, UI, MergeVisited, ResolvedBlocks);
+    if (!DF.flattenKnownDivergentBranch(BB, Masks)) {
+      diagnose(F, "loop has a branch in '" + BB->getName() +
+                      "' that became mask-dependent after masking but "
+                      "does not have the simple shape this pass can "
+                      "flatten (roadmap milestone 6 deviation)");
+      return false;
+    }
+  }
+  return true;
+}
+
 Value *LoopLinearizer::markUniformIfOperandsAreUniform(Value *V,
                                                        ArrayRef<Value *> Ops) {
   if (llvm::all_of(Ops,
@@ -4213,7 +4609,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // discard`/`.demote` inside this loop's body narrows one or both of them
   // per iteration, exactly as `DiamondFlattener::applyStageMasks` does for
   // a divergent diamond.
-  auto makeActivePNPair = [&] {
+  auto makeActivePNPair = [&](bool SeedBackedgeWithPoison = true) {
     PHINode *LivePN =
         PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active.live");
     LivePN->insertBefore(Header->getFirstNonPHIIt());
@@ -4239,26 +4635,83 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
       }
     }
-    // Roadmap L419(h): `Latch`'s own incoming slot is left entirely
-    // absent here until `addLatchIncoming` fills it in far below (after
-    // the whole cycle's exit check(s) are linearized) -- see
-    // `addLatchIncoming`'s own comment for why a tempting poison-
-    // placeholder seed here (making a still-incomplete phi correctly
-    // *not* look like a known constant to `applyStageMasks`'s mask-
-    // narrowing checks) is not yet safe to add: it is independently
-    // correct in isolation, but exposes a second, deeper, not-yet-fixed
-    // bug, confirmed (this session, Roadmap L419(u)) to survive even
-    // with `isLoopControlEdgeThroughRelay`'s relay-chase ordering fixed
-    // -- `dEQP-VK.glsl.loops.special.*select_iteration_count*` still
-    // regresses by the same 6 cases with the poison seed applied alone
-    // or together with that fix. Left as a known, still-open follow-on
-    // (not part of this change) -- see the roadmap entry this comment's
-    // own commit updates.
+    // Roadmap L419(w): seed `Latch`'s own incoming slot with a `poison`
+    // placeholder right away, rather than leaving it entirely absent
+    // until `addLatchIncoming` fills it in far below (after the whole
+    // cycle's exit check(s) are linearized) -- `isKnownConstantMask`'s
+    // `lookThroughTrivialPhi` helper otherwise sees this phi as having
+    // only a single, constant-`true` incoming value (every non-backedge
+    // predecessor above) while it is in this still-incomplete state, and
+    // folds it to that constant -- exactly as if every lane really were
+    // unconditionally active -- for any `applyStageMasks`/
+    // `collectUniformPassThroughRegion` use of it that runs before
+    // `addLatchIncoming` ever does (every "`PreRegion`"/"`PostRegion`"
+    // masking loop in `linearizeCycle` below). A `poison` placeholder
+    // breaks that false "all-same" classification immediately: it is not
+    // itself an incoming value `applyStageMasks`/`collectUniformPass
+    // ThroughRegion` ever observes directly (every use of `Masks.Live`
+    // they narrow a call's mask operand *to* reads the phi's own result,
+    // never one specific incoming edge), and `addLatchIncoming` below
+    // overwrites it with the real, computed per-iteration value before
+    // this function returns, so no use ever actually sees the poison
+    // itself. Roadmap `L419(u)`'s own prior attempt at this same seed
+    // regressed `select_iteration_count_{fragment,vertex}` because
+    // nothing yet re-examined a `PreRegion`/`PostRegion` block whose own
+    // internal branch turned out to be mask-dependent once narrowed this
+    // way -- `flattenTaintedBranchesInRegion` (see its own comment) is
+    // the fix for that other half; this seed alone is unsound without it.
+    //
+    // Roadmap L419(w): \p SeedBackedgeWithPoison lets a caller that has
+    // already independently established (via `CycleNeedsRealMasking`,
+    // see its own comment) that *this* cycle has no genuinely divergent
+    // exit check anywhere -- neither `Header`/`Latch` nor any
+    // `OtherCondBrBlocks` member -- opt back out of the poison seed
+    // entirely, in favor of the plain constant `true` this function
+    // always used pre-`L419(w)`. Skipping the poison seed for exactly
+    // such a cycle avoids tainting any resource/image load inside it
+    // with a syntactically non-constant (even though semantically
+    // always-true) mask, which otherwise makes an ordinary, always-
+    // uniform internal branch elsewhere in the loop body (a
+    // `conditional_break`/`dowhile_trap`/nested loop's own break check,
+    // none of which ever needed masking in the first place) look like a
+    // flatten candidate to `flattenTaintedBranchesInRegion` for no
+    // actual reason.
+    Value *BackedgeSeed = SeedBackedgeWithPoison
+                              ? static_cast<Value *>(PoisonValue::get(I1Ty))
+                              : static_cast<Value *>(ConstantInt::getTrue(Ctx));
+    LivePN->addIncoming(BackedgeSeed, Latch);
+    SideEffectPN->addIncoming(BackedgeSeed, Latch);
     return MaskPair{LivePN, SideEffectPN};
   };
+  const DataLayout &DL = F.getDataLayout();
   auto addLatchIncoming = [&](MaskPair &Masks, const MaskPair &AtLatch) {
-    cast<PHINode>(Masks.Live)->addIncoming(AtLatch.Live, Latch);
-    cast<PHINode>(Masks.SideEffect)->addIncoming(AtLatch.SideEffect, Latch);
+    cast<PHINode>(Masks.Live)->setIncomingValueForBlock(Latch, AtLatch.Live);
+    cast<PHINode>(Masks.SideEffect)
+        ->setIncomingValueForBlock(Latch, AtLatch.SideEffect);
+    // Roadmap L419(w): now that both of this phi's incoming edges are
+    // genuinely known (unlike `isKnownConstantMask`'s own early check,
+    // which only ever saw the still-poison-seeded placeholder above), see
+    // whether it turned out this cycle's masking never actually needed to
+    // become non-constant at all (e.g. a real exit check that itself
+    // never narrows `active.live`/`active.sideeffect`, as opposed to
+    // `select_iteration_count`'s genuinely divergent one) -- and if so,
+    // fold it (and anything that becomes foldable as a direct result)
+    // back down, so the poison seed's broadened non-constant-ness never
+    // leaks into IR that never actually needed it.
+    PHINode *MaskPhis[] = {cast<PHINode>(Masks.Live),
+                           cast<PHINode>(Masks.SideEffect)};
+    {
+      // Roadmap L419(w): `Masks` is held by reference specifically so
+      // this fold's own replacement values (if any of `MaskPhis` itself
+      // gets folded away -- see this function's own doc comment for the
+      // dangling-pointer bug this fixes) propagate back to every one of
+      // `linearizeCycle`'s own later uses of `Masks.Live`/
+      // `Masks.SideEffect`, not just the two local copies above.
+      SmallVector<Value *, 2> Folded =
+          foldNowTriviallyConstantMaskPhis(CI, C, DL, MaskPhis);
+      Masks.Live = Folded[0];
+      Masks.SideEffect = Folded[1];
+    }
   };
   // Conjoins \p Masks with \p Staying (a uniform "this lane wants to keep
   // looping" condition, not a `feme.stage.discard`/`.demote` narrowing), the
@@ -4522,6 +4975,58 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
     errs() << "]\n";
   }
+
+  // Roadmap L419(w): whether this cycle will need any genuinely
+  // non-constant `active.live`/`active.sideeffect` masking at all --
+  // true iff `Header`'s/`Latch`'s own exit check, or any
+  // `OtherCondBrBlocks` member (`DivergentCandidates`'s own, already-
+  // filtered subset), is itself divergent. Gating entry into the whole
+  // `DivergentCandidates`-non-empty branch below on this (rather than
+  // merely `!OtherCondBrBlocks.empty()`) matters now that `Masks` is
+  // seeded with a `poison` placeholder (see `makeActivePNPair`'s own
+  // comment) rather than a plain constant `true`: that placeholder makes
+  // `isKnownConstantMask` treat `Masks.Live`/`.SideEffect` as non-constant
+  // from the moment they are created, which `applyStageMasks`'s
+  // `narrowCallMask` then threads into *any* resource/image load inside
+  // this cycle regardless of whether the cycle turns out divergent at
+  // all -- tainting a load's mask operand even for a cycle every member
+  // of which is already known, right here, to be genuinely uniform. That
+  // taint then makes `flattenTaintedBranchesInRegion` (see its own
+  // comment) treat an ordinary, already-correctly-left-alone uniform
+  // internal branch (e.g. a `conditional_break`/`dowhile_trap`/nested
+  // loop's own break check, none of which ever needed any masking in the
+  // first place) as a flatten candidate, which --- once
+  // `flattenKnownDivergentBranch`'s own cycle-containment check (see its
+  // comment) correctly refuses to unsoundly flatten a branch whose taken
+  // arm escapes the cycle --- surfaces as a brand new "does not have the
+  // simple shape this pass can flatten" diagnostic for a shader that
+  // always compiled and rendered correctly before any of this masking
+  // infrastructure existed. Skipping the whole branch below for a
+  // cycle with no genuine divergence anywhere routes it to the same
+  // plain, poison-free `DivergentCandidates`-empty handling at the
+  // bottom of this function instead -- exactly the code path it always
+  // took pre-`L419(w)` and should keep taking. Found reducing the net
+  // regression `dEQP-VK.glsl.loops.special.*`'s own
+  // `{do_while,for,while}_uniform_iterations.conditional_break_
+  // {fragment,vertex}`, `do_while_dynamic_iterations.{dowhile_trap,
+  // nested,nested_sequence,nested_tricky_dataflow_{1,2}}_{fragment,
+  // vertex}` cases newly introduced by this session's own poison-seed
+  // widening.
+  //
+  // Also true whenever `cycleHasMaskOps(C)` -- a resource/image/
+  // `StageOpKind` call that itself needs masking sits somewhere in this
+  // cycle's body -- even if every branch above reports non-divergent:
+  // `loop-internal-break-with-mask-op.ll`'s own shape is a body-level
+  // break keyed off an ordinary (not cross-lane-divergent) value, yet
+  // still requires the break to narrow `active.sideeffect` so a lane
+  // that already broke out on an earlier iteration does not keep
+  // re-executing this call's side effect on every later iteration --
+  // masking correctness here does not depend on the break's condition
+  // being *provably* divergent, only on there being a side effect to
+  // mask at all.
+  bool CycleNeedsRealMasking = HeaderDivergent || LatchDivergent ||
+                               !DivergentCandidates.empty() ||
+                               cycleHasMaskOps(C);
 
   if (!OtherCondBrBlocks.empty()) {
     // Roadmap L40: a real, uniform exit check already sitting in the
@@ -4949,7 +5454,16 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     enum class RelaySource { Header, Check };
     SmallVector<std::tuple<PHINode *, Value *, RelaySource>, 4>
         ExitBlockRelayValues;
-    MaskPair EntryMasks = makeActivePNPair();
+    // Roadmap L419(w): see `CycleNeedsRealMasking`'s own comment -- a
+    // cycle with a non-empty `OtherCondBrBlocks` but no genuine
+    // divergence anywhere in it (this `CheckBlock` included, since it is
+    // exactly `HeaderExit`/`LatchExit`'s own recovered relay check, not a
+    // member of `OtherCondBrBlocks` itself) still reaches this handling
+    // (it is gated on `OtherCondBrBlocks` being non-empty, not on
+    // `CycleNeedsRealMasking`), so must still opt out of the poison seed
+    // here explicitly.
+    MaskPair EntryMasks = makeActivePNPair(/*SeedBackedgeWithPoison=*/
+                                            CycleNeedsRealMasking);
     MaskPair Masks = EntryMasks;
     // Roadmap L297: a loop-carried flag, frozen like `EntryMasks` itself,
     // recording whether *this lane* has, by the current iteration,
@@ -4965,6 +5479,22 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     for (BasicBlock *Pred : predecessors(Header))
       if (!CI.contains(C, Pred))
         ExitedViaCheck->addIncoming(ConstantInt::getFalse(Ctx), Pred);
+    // Roadmap L419(w): seed a placeholder for `Latch`'s own backedge
+    // value right away, mirroring `makeActivePNPair`'s identical poison
+    // seed just below (see its own comment for the full root-cause
+    // writeup) -- `ExitedViaCheck`'s real backedge value is only known,
+    // and only added, much later (see `setIncomingValueForBlock` below),
+    // but this phi must already list every one of `Header`'s real
+    // predecessors (`Latch` included) the moment it is created: several
+    // `return false` paths between here and the real backedge update
+    // (e.g. `flattenTaintedBranchesInRegion`'s own) leave whatever
+    // mutations already happened permanently in place, and a `Header`
+    // phi with a missing `Latch` entry at that point is malformed IR
+    // forever after, not merely temporarily incomplete. Found reducing
+    // `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`'s
+    // own shape, whose `PreRegion` includes a branch this milestone
+    // cannot yet flatten.
+    ExitedViaCheck->addIncoming(PoisonValue::get(I1Ty), Latch);
     if (HeaderDivergent) {
       applyStageMasks(*Header, Masks);
       rethreadNestedEntryMasks(Header, Masks);
@@ -5023,6 +5553,13 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       applyStageMasks(*BB, Masks);
       rethreadNestedEntryMasks(BB, Masks);
     }
+    // Roadmap L419(w): now that masking above may have narrowed a
+    // resource/image load's mask inside `PreRegion`, re-examine every
+    // block there for a `CondBr` that only *looked* uniform before that
+    // narrowing happened (see `flattenTaintedBranchesInRegion`'s own
+    // comment for the full root-cause writeup).
+    if (!flattenTaintedBranchesInRegion(*PreRegion, Masks))
+      return false;
     applyStageMasks(*CheckBlock, Masks);
     rethreadNestedEntryMasks(CheckBlock, Masks);
 
@@ -5105,6 +5642,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       applyStageMasks(*BB, MasksAfterCheck);
       rethreadNestedEntryMasks(BB, MasksAfterCheck);
     }
+    // Roadmap L419(w): see the identical `PreRegion` call above.
+    if (!flattenTaintedBranchesInRegion(*PostRegion, MasksAfterCheck))
+      return false;
     applyStageMasks(*Latch, MasksAfterCheck);
     rethreadNestedEntryMasks(Latch, MasksAfterCheck);
 
@@ -5142,7 +5682,9 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         Restored = CheckValue ? CheckValue : HeaderValue;
       PN->addIncoming(Restored, Latch);
     }
-    ExitedViaCheck->addIncoming(ExitedViaCheckNext, Latch);
+    // Replace (not add to) `Latch`'s already-seeded poison placeholder
+    // (see `ExitedViaCheck`'s own creation comment above).
+    ExitedViaCheck->setIncomingValueForBlock(Latch, ExitedViaCheckNext);
     freezeLoopCarriedValues(
         Header, Latch, MasksAfterCheck.Live,
         {cast<PHINode>(EntryMasks.Live), cast<PHINode>(EntryMasks.SideEffect),
