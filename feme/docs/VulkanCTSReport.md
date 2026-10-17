@@ -7234,3 +7234,78 @@ change).
 (`mixed_break_continue`), `L419(y)` (`conditional_break`), `L419(g)`
 (tessellation residuals); `L440(c)`'s 39-case residual triage. All
 unchanged standing items.
+
+### SPIR-V assembly `opquantize` flush-to-zero fix (L444/L449)
+
+`L444`'s freshly-completed 275-case `dEQP-VK.spirv_assembly.*` baseline
+clustered its failures, with `opquantize`/`opquantize_vec4`/
+`opspecconstantop_opquantize` (13 cases) as one of the two largest
+compact clusters. Root-caused to `mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp`'s `QuantizeToF16Pattern`: an earlier session (`bdcd8d8
+b5ea7`) lowered `spirv.QuantizeToF16` as a bare `fptrunc`-to-`f16`-then-
+`fpext`-back-to-`f32` round trip, reasoning (incorrectly) that this
+"matches the op's semantics exactly." It does not: `OpQuantizeToF16`
+must flush any `f16`-subnormal result to a same-signed zero, which a
+plain `fptrunc` does not do (it faithfully preserves `f16` denormals).
+All 13 failing cases are exactly the CTS's `flush_to_zero` (plus a few
+adjacent `exact`/`rounded`-family) sub-cases that exercise this.
+
+Fixed via integer bit manipulation on the truncated `f16`'s `i16` bit
+pattern (`bitcast`/`and`/`icmp`/`select`) rather than the more obvious
+`llvm.is.fpclass`/`llvm.copysign` float-intrinsic approach. The
+intrinsic-based first attempt passed the targeted 13 cases but
+regressed 4 *previously-passing* `opquantize_vec4.*` cases (`exact`,
+`infinities`, `propagated_nans`, `rounded`) with a new `feme-cpu-
+simdize: ... divergent vector value ... component decomposition is not
+yet supported` error: FeMe's CPU `feme-cpu-simdize` pass has two
+distinct widening mechanisms (wave-widening and vector-component-
+decomposition), and only the former already special-cases `is.fpclass`/
+`ldexp`-shaped "almost-homogeneous" intrinsics (operand/result types
+that don't exactly match); the latter's `checkVectorDecompositionSupp
+orted` does not yet recognize this shape. The final bit-twiddling
+lowering uses only already-supported elementwise producer shapes
+(arithmetic/cast/comparison/select/same-element-count-bitcast), so it
+hits no such gap.
+
+While validating the fix, also found and fixed (in a separate,
+self-contained commit) two pre-existing, unrelated bugs in `mlir/test/
+Conversion/SPIRVToLLVM/arithmetic-ops-to-llvm.mlir`: a complete
+duplicate `spirv.UMulExtended`/`spirv.SMulExtended` scalar-test block
+that made the whole file fail to parse (`mlir-opt` "redefinition of
+symbol"), and two stale `CHECK` lines expecting a `dense<N>` splat
+shift-amount vector constant where the real lowering actually builds it
+via a scalar constant plus two `insertelement`s.
+
+**Verification**:
+- `mlir/test/Conversion/SPIRVToLLVM/` lit tests: 23/23 passed.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported (no
+  regressions).
+- Real CTS: `dEQP-VK.spirv_assembly.instruction.*opquantize*` (175
+  cases, covering both the 13 originally-failing cases and the 162
+  other `opquantize*` cases this lowering also touches): 175/175 Passed
+  (was 162/175) -- the 13 originally-reported failures now all pass,
+  and the fix's own abandoned intrinsic-based first attempt's 4-case
+  vec4 regression was caught and avoided before landing, so the final
+  committed fix introduces zero new failures.
+- A full `dEQP-VK.spirv_assembly.*` re-sweep (70,337 cases) was started
+  in the background at session end to refresh `L444`'s own full
+  baseline (expect 262 remaining failures, i.e. 275 minus these 13); not
+  yet complete as of this entry -- see `agent_thoughts.md`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure compiler correctness fix, zero feature/extension-surface
+change). This fix lives entirely outside `feme/` (in `mlir/`), per the
+standing "issue outside FeMe" instruction: isolated, self-contained,
+with its own regression test, in its own commit, touching no `feme/`
+files.
+
+**Next steps**: the other `L444` large cluster (`opinboundsaccesschain`
+-adjacent access-chain cases, actually `OpPtrAccessChain`/
+`opptraccesschain` per a closer read of the case names -- `Roadmap.md`'s
+"opinboundsaccesschain" naming for this specific cluster looks like a
+copy-paste echo of the *already-fixed*, differently-named
+`opinboundsaccesschain` cluster referenced earlier in this report, not
+a fresh re-discovery of the same bug -- worth double-checking the exact
+case-name prefix before starting); `L419(ad)` (`mixed_break_continue`);
+`L419(y)` (`conditional_break`); `L419(g)` (tessellation residuals);
+`L440(c)`'s 39-case residual triage. All unchanged standing items.
