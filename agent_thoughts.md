@@ -124521,3 +124521,156 @@ Full writeup is in `Roadmap.md`'s `L419(v)` row and
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s
    whole master per-group table using the union of completed cases
    across both `/tmp/l437_full_run*` directories.
+
+# Session: L419(w) lands with a diagnosed, documented net regression (L419(x) filed to close it)
+
+**Start here next session:** implement `L419(x)` -- scope
+`flattenTaintedBranchesInRegion`'s own `PreRegion`/`PostRegion`
+candidate walk (NOT the raw `OtherCondBrBlocks` collection -- that
+caused an infinite loop, see below) to skip a candidate block whose
+innermost cycle differs from the one `linearizeCycle` is currently
+processing.
+
+Device check this session: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed.
+
+## What shipped (3 commits, all landed)
+
+1. `75ad2a2123b3` -- `rethreadNestedEntryMasks` crash fix (`cast<PHINode>`
+   assertion), `flattenKnownDivergentBranch` cycle-containment check
+   (converts a silent image-corruption bug into a clean diagnostic), and
+   the `CycleNeedsRealMasking`/`SeedBackedgeWithPoison` gate.
+2. `e0d34528cb11` -- lit test updates matching the new, correct masking
+   output.
+3. `1a60829be00f` -- `Roadmap.md` `L419(w)`/`L419(x)` rows,
+   `VulkanCTSReport.md` `L419(w)` section.
+
+## The crash (fixed, no caveats)
+
+`dEQP-VK.glsl.loops.special.do_while_uniform_iterations.dowhile_trap_fragment`
+crashed the whole sweep (exit 134) via `cast<PHINode>` in
+`rethreadNestedEntryMasks`. Cause: `foldNowTriviallyConstantMaskPhis`
+can legitimately fold a fully-uniform child cycle's masks to a plain
+`Constant`, and this function assumed they were always still a
+`PHINode`. Fixed with `dyn_cast`. Verified: crash gone, 638/638 unit
+tests, this specific case passes in isolation.
+
+## The image-corruption bug (fixed, no caveats)
+
+`conditional_break_{fragment,vertex}` produced a wrong rendered image
+(not a crash, not a clean failure -- silently wrong). Bisected via
+`git stash` + `FEME_DUMP_IR_PRESIMD=1` diffing: `flattenKnownDivergentBranch`
+was discarding a genuine loop break's per-arm masks because its
+reconvergence point is the cycle's own exit block, not a local diamond
+-- its own prior doc comment already flagged this exact shape as
+unsound. Added a `CI.contains(SC, R)` containment check. Now fails with
+a clean diagnostic instead of corrupting the image -- a real safety
+improvement even though it is not yet a Pass.
+
+## The net-regression problem (NOT fully fixed -- this is the blocker)
+
+Full `dEQP-VK.glsl.loops.special.*` sweep (552 cases) with both fixes
+above: **524 Pass / 28 Fail**. Compared the 28 failures against an
+untouched `git stash` baseline re-sweep: **16 of them PASS on
+baseline** (all 6 `conditional_break_*`, 2x `dowhile_trap`
+fragment/vertex, 6x `nested*`), 12 are pre-existing, unrelated
+`L419(h)` residuals. So this session's starting point (poison-seed +
+crash/corruption fixes, no gating) was **-9 net** vs the pre-poison-seed
+baseline of 533 Pass.
+
+Root cause: the poison seed taints *every* cycle's masks from creation,
+regardless of whether that cycle ever needs real masking. Tried to fix
+with a `CycleNeedsRealMasking` predicate gating whether the poison seed
+is even used, through three iterations:
+
+1. **Divergence-only** (`HeaderDivergent || LatchDivergent || a
+   genuinely divergent OtherCondBrBlocks member`): fixed
+   `conditional_break` (6 cases) AND kept `select_iteration_count`
+   (6 cases) working -- 530/552. But broke the brand-new unit test
+   `loop-internal-break-with-mask-op.ll` (a body-level break gating a
+   real resource store) -- its mask operand stayed `true` instead of
+   narrowing to `active.sideeffect`. A real correctness regression, just
+   one this specific CTS repro happened not to expose.
+2. **Added `cycleHasMaskOps(C)`** to the predicate: fixes the unit test
+   correctly, but also re-enables the poison seed for
+   `conditional_break` (any real shader touches *some* resource), which
+   reverts it back to the diagnosed failure -- 524/552, identical to no
+   gating at all. **This is the version committed** -- it is the only
+   one with correct, lit-tested masking semantics. `conditional_break`'s
+   own fix (letting its widened `CheckBlock` path actually flatten
+   correctly) is separate, unstarted work, not yet filed as its own
+   roadmap row.
+3. **Tried excluding a nested child cycle's own header/latch from the
+   *outer* cycle's `OtherCondBrBlocks` collection**
+   (`CI.getCycle(&BB) == C`), suspecting this explains the 10
+   `dowhile_trap`/`nested*` regressions (confirmed via trace: the inner
+   cycle's own exit block shows up again in the outer cycle's
+   `OtherCondBrBlocks` scan). **This caused an infinite loop in
+   `FeMeTransformsCPUTests`** -- reverted immediately, did not
+   investigate why (budget ran out). The fix needs to happen in
+   `flattenTaintedBranchesInRegion`'s own candidate walk instead, where
+   it can't affect anything else `OtherCondBrBlocks` is used for.
+
+## Final committed numbers
+
+- `FeMeTransformsCPUTests`: 638/638.
+- `check-feme`: 3,768/3,769 (only the pre-existing, unrelated
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure).
+- `dEQP-VK.glsl.loops.special.*` (552 cases): 524 Pass / 28 Fail.
+  - Fixed vs pre-`L419(w)`: 6 `select_iteration_count_*`.
+  - Regressed vs pre-`L419(w)`: 10 (`dowhile_trap_{fragment,vertex}`,
+    `nested{,_sequence,_tricky_dataflow_{1,2}}_{fragment,vertex}`).
+  - Safety-improved but still failing: 6 `conditional_break_*` (silent
+    corruption -> clean diagnostic).
+  - Unchanged pre-existing residuals: 12 (`L419(h)`).
+
+**This is a net -9 vs the pre-`L419(w)` baseline and is explicitly
+flagged in `Roadmap.md`/`VulkanCTSReport.md` as not landable as a
+milestone close-out.** The commits still landed (per the
+break-into-small-commits instruction and because the crash fix + the
+corruption-to-diagnostic conversion are independently real wins), but
+`L419(w)` the milestone stays open, continued as `L419(x)`.
+
+## Not done this session
+
+- `check-hlsl-feme-vk`: no build directory exists yet at
+  `/home/dev/dev/offload-test-suite/build` -- this has been deferred
+  across every session so far in this thread's history, not just this
+  one. A future session should actually set up the cmake configure +
+  build (the repo is already checked out on the right `feme` branch)
+  rather than deferring again.
+- `L419(g)` (tessellation residuals, 30 cases) -- still untouched.
+- `/tmp/l437_full_run2/` standing sweep -- confirmed **stalled**, not
+  progressing: 301,301 `.qpa` files, identical count to last session's
+  check, no live `deqp-vk` process (`ps aux | grep deqp-vk` empty).
+  Needs an actual restart investigation next session, not just another
+  check-in.
+
+## Suggested next steps
+
+1. **(~2-3 hours, the real next step, hard blocker for L419(w)/L419(x))**
+   Fix `flattenTaintedBranchesInRegion`'s `PreRegion`/`PostRegion`
+   candidate walk to skip a block whose `CI.getCycle(BB)` differs from
+   the cycle currently being linearized. Rebuild, re-run the targeted
+   10 cases (`conditional_break_*`, `dowhile_trap_*`,
+   `select_iteration_count_*`), then the full 552-case sweep -- target
+   the 10 regressed cases back to Pass with zero new regressions to the
+   already-fixed 6.
+2. **(~1 day, after #1 if `L419(x)` closes cleanly)** Take a second look
+   at `conditional_break_{fragment,vertex}`'s own still-open diagnosed
+   failure -- its widened `CheckBlock` path is supposed to mask it
+   correctly per the `L419(t)`/`L419(w)` widening comment, so the
+   cycle-containment check's rejection is itself likely masking a
+   separate, more specific shape gap in `flattenKnownDivergentBranch`
+   that's worth understanding rather than permanently routing around.
+3. **(~half day)** Set up `offload-test-suite`'s cmake build (branch
+   `feme` already checked out) and get `check-hlsl-feme-vk` actually
+   running at least once -- every session so far has deferred this.
+4. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
+   untouched, same IR-dump-and-reduce methodology candidate.
+5. **(standing)** `L419(h)`'s 12 remaining special-loop residuals
+   (`elseblock`/`ifblock`/`mixed_break_continue`) -- distinct shapes,
+   need their own reduction.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run2/` is
+   stalled -- either restart it fresh or abandon it and start a new
+   sweep; don't just re-check the same dead directory again.
