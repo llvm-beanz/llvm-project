@@ -124957,3 +124957,45 @@ Wired into all 4 call sites that can erase a `HeaderExit`/`LatchExit` check's ow
 4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
 5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (433MB) — just check progress, don't restart.
 6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
+
+# Session: L440(c) — found and fixed a real MLIR deserializer bug, 92→39 failures
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed (though late — should have been the literal first action, noting this for next session).
+
+**What's done**: Fixed a real, previously-undiagnosed bug in MLIR's own SPIR-V deserializer. `check-hlsl-clang-feme-vk`: 92 Failed → 39 Failed (53 fixed, 0 regressions).
+
+**Why this target, not the next-steps list**: the top 2 standing items (`mixed_break_continue`, `L419(y)`) have both been explicitly flagged "too risky without a dedicated session" across 5+ prior sessions (same code area regressed twice before). Machine was quiet enough (load 1.43/12 cores, just the standing sweep) to re-attempt the deferred `check-hlsl-clang-feme-vk` 92-failure re-triage instead — a genuinely different, lower-risk, higher-payoff target this time.
+
+**The bug, in one sentence**: MLIR's `Deserializer::processConstantComposite` only checked its `constantMap` when resolving a constituent `<id>`, never the separate `undefMap` — so any `OpConstantComposite` with a legal `OpUndef` constituent (a very common HLSL codegen shape, e.g. `f32tof16`'s `<2 x float> {undef, 0.0}`) got rejected outright, aborting pipeline creation.
+
+**How I avoided the obvious wrong turn**: the error text ("must come from a normal constant") reads exactly like a validator diagnostic, and the prior session's `L428(a)` finding (a confirmed-external `spirv-val` bug) primed the assumption this was another one. Tested directly against `spirv-val --target-env vulkan1.3` first — passes cleanly. Grepped the error string across the whole repo instead of assuming — found it's MLIR's own deserializer, not an external tool at all. **Lesson: test the "it's someone else's bug" hypothesis before writing it down, even when the previous finding primes you to believe it.**
+
+**Fix**: substitute a zero-valued attribute of the right element type when a constituent resolves as `OpUndef` instead of a normal constant. New `.spvasm` regression test, modeled on an existing one in the same directory. Committed as its own `mlir/`-only commit (`fb72a78c2bb8`) — correctly isolated per the "fixes outside FeMe get their own commit" rule.
+
+**Verification**:
+- New `.spvasm` test: red before, green after.
+- `mlir/test/Target/SPIRV/` full suite: 72/73 (1 pre-existing, unrelated, confirmed via `git stash` bisection).
+- `check-hlsl-clang-feme-vk`: 92→39, Python set-diff confirms 53 fixed / 0 regressions.
+- `check-feme`: 3,771/3,772 (same pre-existing `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, confirmed unrelated).
+- `dEQP-VK.compute.*` (67,554 cases): 695 Pass/6 Fail — **the 6 failures are a different, pre-existing bug**, not caused by this fix. Proved this by reverting just the `Deserializer.cpp` diff in place, rebuilding, re-running the 6 cases on the pre-fix binary, getting the identical 6/6 Fail, then restoring the fix. Filed as new roadmap item `L442` (not yet triaged further).
+- `dEQP-VK.spirv_assembly.*` (70,337 cases): still running at session end, result to check in on next session.
+
+**Residual 39 failures**: clustered but not individually triaged. One spot-check (`mad.32.test`) shows a genuine numeric mismatch (expected 0, actual a tiny denormal), likely FMA-rounding related — a different bug class from the fixed cluster, not yet root-caused.
+
+**Commits** (3, each independently buildable):
+1. `[mlir][spirv] Accept OpUndef constituents in OpConstantComposite` — the core fix + test, `mlir/`-only.
+2. `feme/docs: update Roadmap for L440(b)/(c) fix and L419(ad) root cause` — roadmap entries for both this fix and the `mixed_break_continue` root-cause finding below.
+3. `feme/docs: record L440(c) MLIR OpUndef/OpConstantComposite CTS results` — CTS report update.
+4. `feme/docs: file L442 for newly discovered zero_initialize_workgroup_memory bug` — new roadmap entry for the unrelated compute bug found during CTS verification.
+
+**Bonus: root-caused (but did not fix) `mixed_break_continue`** while re-reading `DiamondFlattener` for context. It's a diamond-arm post-dominator-escape bug: when one arm of an ordinary interior diamond itself contains a further nested divergent break that escapes the cycle, `validate`'s `R = immediatePostDom(Cur)` walk steps into a block entirely outside the region being validated, producing the generic "internal branch in a body shape" diagnostic. Filed as `L419(ad)` with a concrete design sketch for a future session — deliberately **not fixed** this session (same code area has regressed twice before when generalized carelessly; a real fix needs new freeze/select machinery beyond what `L419(ac)` built, too large for the time remaining). All temporary debug instrumentation used to find this was fully reverted before any commit.
+
+**Standing sweep**: `/tmp/l437_full_run3/` still running and growing (526MB as of this session's end, up from 496MB at start) — don't restart it.
+
+## Next steps
+
+1. **(cheap, every session)** Check in on `dEQP-VK.spirv_assembly.*` (started this session, 70,337 cases, still running at session end) — record the result in `VulkanCTSReport.md` once done. Also re-check `/tmp/l437_full_run3/` (526MB and growing, don't restart).
+2. **(immediate, half day)** Triage `L442` (the 6-case `zero_initialize_workgroup_memory.max_workgroup_memory` compute failure, confirmed pre-existing, newly discovered this session) — likely a compact single-root-cause cluster given every other `compute.*` case passes.
+3. **(immediate, half day)** Continue `L440(c)`'s remaining-39-failure triage: confirm the `mad.32.test` FMA-rounding hypothesis, spot-check a few more of the other 38 (`Feature/Textures`'s 6-case cluster looks like the next most promising compact group per `Roadmap.md`'s breakdown).
+4. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause now known (see above + `Roadmap.md`), fix design sketched, not yet attempted. `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) both still completely untouched.
+5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed `/tmp/l437_full_run3` results.
