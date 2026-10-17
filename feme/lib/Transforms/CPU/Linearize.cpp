@@ -383,8 +383,27 @@ foldNowTriviallyConstantMaskPhis(CycleInfo &CI, CycleRef C,
   SmallVector<Value *, 2> Result;
   for (PHINode *PN : MaskPhis) {
     Value *V = PN;
-    while (auto *I = dyn_cast<Instruction>(V)) {
-      auto It = Replacements.find(I);
+    // Roadmap L440: chase through `Replacements` using `V`'s raw pointer
+    // *value* alone -- deliberately never `dyn_cast<Instruction>(V)` (the
+    // form this replaced) first. Every instruction the fold loop above
+    // erases is erased *immediately* after being recorded as a
+    // `Replacements` key (`InScope.erase(I); Replacements[I] = S;
+    // I->eraseFromParent();`), so by the time this loop runs, any `V`
+    // that is itself a `Replacements` key is already a dangling pointer
+    // to freed memory -- `dyn_cast`'s `getValueID()` read is a genuine,
+    // reproduced (via `WaveReadLaneFirst.fp16.test`, nondeterministically
+    // under ASLR) use-after-free the instant `V == PN` and `PN` itself
+    // was folded away. `DenseMap<Instruction *, Value *>::find` only
+    // ever hashes/compares the pointer *bit pattern* it is given, never
+    // dereferencing it, so reinterpreting `V` as an `Instruction *`
+    // purely for that lookup is safe regardless of whether the memory it
+    // points to is still live: a "hit" can only occur when `V`'s bit
+    // pattern exactly matches one of the (already-erased, but validly
+    // recorded at insertion time) keys, which is exactly as precise as
+    // the `dyn_cast` guard it replaces, without ever reading through a
+    // potentially-freed pointer to get there.
+    while (true) {
+      auto It = Replacements.find(reinterpret_cast<Instruction *>(V));
       if (It == Replacements.end())
         break;
       V = It->second;
