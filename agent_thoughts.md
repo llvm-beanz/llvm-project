@@ -125209,3 +125209,40 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 6. **(worth filing, low priority, carried forward)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target. Not investigated further.
 7. **(process reminder for next session)** Run `vulkaninfo --summary | grep deviceName` **as the literal first action**, before any other work — this session did it late. Worth adding extra emphasis/an explicit first-line habit cue if this recurs.
+
+# Session: L444's `opptraccesschain` cluster fixed (L450) — missing OpPtrAccessChain lowering
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed as the literal first action this time.
+
+**What's done**: Checked the still-running `/tmp/l444_spirvasm_full_rerun.qpa` sweep (not yet complete — still running at session end, see below). Then confirmed and fixed the prior session's flagged naming suspicion, and fixed the actual second large `L444` cluster.
+
+**1. Naming correction confirmed**: directly re-parsed `/tmp/l440c_spirvasm.qpa`'s own 275 `Fail` entries and substring-matched — exactly 13 cases contain `opptraccesschain`, zero contain `opinboundsaccesschain`. `Roadmap.md`'s original `L444` label was indeed an echo of an already-fixed, differently-named earlier cluster, not a fresh discovery. Corrected in `L450`'s own entry.
+
+**2. The bug**: `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` had *no* conversion pattern at all for `spirv.PtrAccessChain`/`spirv.InBoundsPtrAccessChain` — confirmed via a direct repro (`opptraccesschain_s32`'s pipeline-creation failure: "failed to legalize operation 'spirv.PtrAccessChain' that was explicitly marked illegal"). Per the op's own spec, it's identical to plain `AccessChain` except for an extra leading `Element` operand that plays exactly the role the existing `AccessChainConversion` pattern's own synthesized leading-zero GEP index already plays — so the fix was a small, mechanical new `PtrAccessChainConversion` template class mirroring the existing one, just threading `Element` through as the real leading index instead of a hardcoded zero.
+
+**3. Hit the pretty-assembly-format syntax on the first test-writing attempt** (worth remembering): the op's `assemblyFormat` has no comma between `$element` and the first `$indices` entry (`$element ($indices^)?` — space-separated, only subsequent indices get commas), unlike the colon-separated types list which does use commas throughout. Caught immediately by the lit test itself failing to parse; not a design issue, just syntax, fixed in the test file.
+
+**Verification**:
+- New lit test cases added to `mlir/test/Conversion/SPIRVToLLVM/memory-ops-to-llvm.mlir` (scalar, struct-indexing, and in-bounds variants) alongside the existing plain-`AccessChain` tests in the same file. Full `SPIRVToLLVM` lit directory: 23/23 passed.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported — unchanged, no regressions.
+- Real CTS: `dEQP-VK.spirv_assembly.instruction.*opptraccesschain*` (343 cases): **193 Passed / 0 Failed / 150 NotSupported** (was 13 Failed among these — all now pass, zero new failures among the other 180 already-passing cases this lowering also touches).
+
+**Commits** (2, each independently buildable):
+1. `[mlir][spirv] Add SPIRVToLLVM lowering for OpPtrAccessChain` — the fix + new tests, touches only `mlir/`.
+2. `[feme] Record L450: OpPtrAccessChain lowering fix in Roadmap/CTS report` — `Roadmap.md`'s new `L450` entry (depends on `L444`, `L449`) + `VulkanCTSReport.md`'s new dated section, with the naming correction documented inline.
+3. This `agent_thoughts.md` entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — pure compiler correctness fix, zero feature/extension-surface change.
+
+**Not attempted this session**: `L419(ad)` (`mixed_break_continue`). Re-read its existing root-cause/design writeup in detail — it's explicitly flagged as "a materially bigger, more architecturally risky change than a half-day timebox allows," in the same code area (`DiamondFlattener`/`LoopLinearizer`) that "regressed twice before when generalized carelessly." Given this session's remaining time budget after landing two solid, independently-verified cluster fixes, judged it better to leave this for a session that can dedicate its *entire* budget to it rather than rush a change in an area with this specific prior-regression history. The existing design sketch (two options: region-restricted post-dominator vs. a new pre-`validate` detection+freeze mechanism) is unchanged and still the right starting point.
+
+**Background sweep status at session end**: `/tmp/l444_spirvasm_full_rerun.qpa` (the fresh full `dEQP-VK.spirv_assembly.*` re-sweep launched last session to refresh `L444`'s complete baseline) is **still running**, now ~166MB and growing, ~13+ minutes of CPU time. Not restarted. Given both of `L444`'s two largest clusters are now fixed, the eventual completed baseline should land at roughly 275 − 13 (`opquantize`) − 13 (`opptraccesschain`) = 249 remaining failures, but this is arithmetic, not yet a real measurement — next session should check the actual completed sweep before trusting that number.
+
+## Next steps
+
+1. **(cheap, first thing)** Check on `/tmp/l444_spirvasm_full_rerun.qpa`/`.log` (still running, not restarted across two sessions now) — once done, record the refreshed baseline in `VulkanCTSReport.md` and `Roadmap.md`'s `L444` entry (expect ~249 remaining failures, pending the real measurement).
+2. **(standing, needs a full dedicated session, not a half-day slice)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and both candidate fix designs are fully written up in `Roadmap.md`'s own entry; this needs a session that can give it full, undivided attention given its prior-regression history in this exact code area.
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+5. **(worth filing, low priority, carried forward)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
+6. **(L444's own remaining clusters)** With `opquantize` and `opptraccesschain` both now fixed, the next-largest remaining clusters in the original 275-case baseline (per this session's own cluster breakdown) are `frexpstruct` (12 cases), and several ~8-case struct/array composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`, `switch`) — worth re-clustering against the fresh completed sweep (item 1) before picking the next target, since some of these may already be fixed as side effects of the two fixes landed this session (unlikely, but cheap to confirm once the real data is in).
