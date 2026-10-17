@@ -125324,3 +125324,41 @@ This reproduces exactly what the real pipeline's own retargeting would have done
 4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — untouched across multiple sessions.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
 6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
+
+# Session: Fixed second macOS crash in the same test (harness.c `stdio.h` not found)
+
+**Before anything else**: `vulkaninfo --summary | grep deviceName` → confirmed `FeMe CPU Vulkan Device`. ✅
+
+**The ask**: same test as the previous session's datalayout fix (`linearize-defer-loop-body-mask-op-diamond.ll`), but a second, unrelated macOS crash: `clang -O0 %t/lowered.o %t/harness.c -o %t/run` fails with `fatal error: 'stdio.h' file not found`. Does not reproduce on this Linux host.
+
+## Root cause
+
+1. `harness.c`'s only RUN line is a bare `clang` invocation — no `-isysroot`, no `%clang` lit substitution, nothing SDK-aware.
+2. On Linux the in-tree `clang` binary's default header search already covers the system libc, so this is invisible.
+3. On macOS it is not: a freshly built, non-Xcode-wrapped `clang-24` doesn't auto-discover the active Xcode/Command Line Tools SDK the way Apple's own `/usr/bin/clang` driver does (that's Apple-clang-specific `xcrun`/`SDKROOT` behavior, not something upstream LLVM replicates by default).
+4. This is unrelated to the prior session's datalayout fix — that was the **first** `clang -c` invocation (compiling the FeMe-lowered IR); this is the **second**, independent invocation (compiling a plain hand-written C file).
+
+## Fix
+
+Can't reproduce or directly verify an `-isysroot` fix from this Linux host, so instead made `harness.c` not depend on the host's SDK/system headers at all:
+1. `<stdint.h>`'s `int32_t`/`int64_t`/`int8_t` → Clang's always-predefined `__INT32_TYPE__`/`__INT64_TYPE__`/`__INT8_TYPE__` builtin macros (no header needed, any target).
+2. `<string.h>`'s `memset`/`memcpy` → hand-rolled loops (`-O0` keeps them as plain loops, not re-recognized libcalls, so no new libc dependency either way).
+3. `<stdio.h>`'s `printf`/`fprintf(stderr, ...)` → a local `extern int printf(const char *, ...);` prototype, used for **both** the pass/fail message and the mismatch diagnostics (dropped `stderr` entirely — it's not a portable global symbol to declare without its real header; Apple's libc only exports it as `__stderrp` under the `stderr` macro, so a bare `extern void *stderr;` would've compiled but failed to *link* on macOS specifically).
+
+## Verification
+
+- `llvm-lit` on the single test: PASS (`ALL-160-CORRECT`).
+- `ninja check-feme`: 3,775/3,782 Passed, 0 Failed, 7 Unsupported — identical baseline, no regression.
+- Committed the test fix alone (`9d8fde400202`).
+- Codified the lesson in `feme/.instructions.md` (`81fa41308837`) — same precedent as the datalayout lesson: any future lit test compiling a plain C/C++ harness this way is exposed to the identical macOS SDK-detection gap, and the preferred fix is a self-contained harness (builtin type macros, hand-rolled memset/memcpy) rather than a host-specific `-isysroot` patch, unless a future harness genuinely needs a real SDK header, in which case fix it once at the `lit.cfg.py` level instead.
+- No Vulkan CTS rerun / `VulkanCTSReport.md` entry: pure lit-test portability fix, zero functional source-code change (same precedent as the datalayout fix and the earlier `arithmetic-ops-to-llvm.mlir` stale-CHECK fix).
+
+## Next steps
+
+1. **(half day, top candidate, unchanged from last session)** `opline`/`opnop`/`out_of_order` cluster (30 cases, single suspected root cause) — reduce one case (e.g. `opline_short_name`) first to confirm the shared mechanism before assuming all 6 sub-clusters share one fix.
+2. **(half day)** Seven ~8-case struct/array composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`, `switch`) against the confirmed 229-failure baseline.
+3. **(standing, needs a full dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and fix designs written up in `Roadmap.md`; still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — untouched across multiple sessions.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
+7. **(worth a one-line follow-up if this recurs)** If a *third* macOS-only failure shows up in this exact test again, it's worth asking whether this file should just get a `REQUIRES: system-linux` guard (or a genuine cross-platform harness rewrite reviewed by someone with macOS CI access) rather than continuing to whack-a-mole one platform-specific gap at a time — two independent macOS-only bugs in the same ~80-line test in two consecutive sessions is a mild signal this test's host-execution approach is inherently fragile cross-platform, not just unlucky.
