@@ -124885,3 +124885,34 @@ Earlier session summaries assumed `offload-test-suite`'s own cmake build was nev
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (305MB) — just check progress, don't restart.
 7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
+
+# Session: L419(ab) — attempted the L419(z)/L419(aa) capability fix, found a deeper gap, reverted
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**What's done**: Implemented the fix, watched real CTS catch a correctness bug the unit tests missed, root-caused it two layers deep, and reverted all code (docs-only commit landed).
+
+**The fix that almost worked**: generalized `recoverRelayExitCheck`'s `IsTrivialExitStub` to fold a `CondBr` gated by a constant-phi during its relay chase — the narrow design, no risky `OtherCondBrBlocks` reordering needed. This made `HeaderExit` resolve for all 12 target cases. Unit tests (638/638), lit suite (53/53), `check-feme` (3,770/3,778, same 1 pre-existing failure) — all green.
+
+**What caught it**: real Vulkan CTS. All 12 cases went from a clean "unsupported" diagnostic to **"Image mismatch"** — same Pass/Fail count, but now silently wrong pixels instead of a safe rejection. The unit/lit suites structurally couldn't catch this because nothing in them checks actual pixel output.
+
+**Root cause, 2 layers**:
+1. Found a real pre-existing bug: `EC.RelayBlock` was set to the relay chain's *first* hop instead of the documented-correct *last* hop. Fixed it. **Did not change the CTS result at all** — same "Image mismatch." Real bug, wrong culprit.
+2. Dumped the fully-lowered IR by hand and found the actual gap: once Header's divergent check is masked, the loop body runs unconditionally every iteration for every lane (correct — that's how SIMD masking works). But because this shape's exit decision happens *later*, at a shared dispatch block, not directly at Header, nothing freezes a lane's loop-carried value (the running color/iteration-count phis) once that lane should have "exited" at Header. It keeps recomputing through extra iterations it shouldn't be in, silently corrupting the final merged output. Side-effect masking is fine (no wrong *writes*); it's the carried *value* that's unprotected.
+
+**Why I reverted instead of continuing**: a correct fix needs per-lane freeze/select logic threaded through the whole loop body for every loop-carried value — reusing `DiamondFlattener`'s existing select-merge machinery rather than `recoverRelayExitCheck`'s "just narrow the mask" model. That's a materially bigger change than either prior session scoped, in a code area with two already-documented regressions (`L419(v)`/`L419(w)`). Landing a silent wrong-pixel bug is worse than today's existing clean diagnostic. `git checkout --` on both the code and the test file, rebuilt, reconfirmed exact pre-session baseline (118/122 `switch.*`, original `VK_ERROR_INITIALIZATION_FAILED` diagnostic, not Image mismatch).
+
+**Commit** (1, documentation only, no code):
+- `docs(feme): record L419(ab) capability-fix attempt and revert`
+
+**Standing sweep**: `/tmp/l437_full_run3/` still running and growing (375MB as of this session's end, up from 318MB at start) — don't restart it.
+
+## Next steps
+
+1. **(~1-2 days, dedicated session, needed before any further L419(z)/(aa)/(ab) attempt)** Design the per-lane loop-carried-value freeze mechanism first, in isolation: when `HeaderDivergent` is set but Header's own divergent exit funnels back into the loop body rather than leaving the cycle directly, every loop-carried phi value needs a `select`/freeze gated on `active.header.check.live`, analogous to `DiamondFlattener`'s existing in-body diamond merges. Prove this with a standalone unit test (assert the expected `select` appears) before touching `recoverRelayExitCheck` again. Then re-apply the `IsTrivialExitStub`/`RelayBlock` fixes from this session (they're correct and still needed, just not sufficient alone) and re-validate the full 552-case sweep plus the 4+8 target cases plus all previously-fixed `L419` cases.
+2. **(standing)** `mixed_break_continue` (4 cases) — separate `DiamondFlattener` body-shape gap, untouched, repro at `/tmp/mbc_frag_mod2.ll`.
+3. **(standing)** `L419(y)`'s masking-sequencing gap (`conditional_break`, 6 cases) — untouched.
+4. **(standing)** `L419(g)` — 30 tessellation residuals, untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (375MB) — just check progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
