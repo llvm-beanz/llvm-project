@@ -124771,3 +124771,61 @@ the bug completely.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is
    running and growing (not stalled) -- just check progress
    (`ps aux | grep deqp-vk`, file size of `results.qpa`), don't restart.
+
+# Session: L440/L441 UAF root-caused and fixed, check-hlsl-feme-vk back to 0 Failed
+
+**Device check**: confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`, as required every session.
+
+**Bottom line up front**: the `L440` crash is fixed. Root cause found, fix landed in 2 commits, validated with 1500+ crash-free iterations plus a clean `check-hlsl-feme-vk` run (492 Passed/0 Failed/0 crashes). Nothing left mid-investigation.
+
+## What was wrong
+
+`foldNowTriviallyConstantMaskPhis` in `Linearize.cpp` had a genuine use-after-free:
+1. Its first loop folds mask phis to a fixed point, **erasing** each folded instruction immediately after recording it in a `Replacements` map.
+2. Its second loop then chased each original phi through that map via `dyn_cast<Instruction>(V)` -- but if the phi itself had already been erased by step 1, `V` was a dangling pointer, and `dyn_cast` read freed memory to get its type ID.
+
+This single bug explained every crash signature seen this session and in prior sessions (a `doRAUW` type mismatch, verifier-print garbage, a `WeakTrackingVH` construction around pointer `0x20`, a bitcode-writer `SIGSEGV`) -- all downstream symptoms of the same corrupted read, varying only with what had overwritten the freed memory by read time. That's also why it was ASLR-dependent (1-in-20-to-75 reproduction rate).
+
+## How it was found
+
+1. Two earlier sessions' defensive `WeakTrackingVH`-based hardening (for unrelated long-lived mask caches) didn't fix the crash rate -- just changed its *signature*. That mismatch was the clue the real bug was somewhere else.
+2. A/B'd three code states (300 iterations each) to confirm which hardening attempt changed the signature, without assuming it was the fix.
+3. Captured a plain `bt` (not `bt full` -- see gotcha below) on the new signature, pinpointing a `WeakTrackingVH` construction around garbage pointer `0x20`.
+4. Traced one level further back from that construction site to `foldNowTriviallyConstantMaskPhis`'s own `Result`-building loop -- the actual root cause.
+
+## The fix
+
+Replaced `dyn_cast<Instruction>(V)` + `Replacements.find(I)` with a direct `Replacements.find(reinterpret_cast<Instruction*>(V))`. `DenseMap::find` only hashes/compares the pointer bit pattern, never dereferences it -- so this is exactly as precise as the `dyn_cast` guard, without ever reading through a possibly-freed pointer.
+
+## Commits (3, this session)
+
+1. `[FeMe] Fix use-after-free in foldNowTriviallyConstantMaskPhis (L440)` -- the actual fix + new lit regression test (`nested-loops-outer-mask-phi-fold-uaf.ll`).
+2. `[FeMe] Harden Linearize mask caches against cross-cycle staleness` -- the pre-existing `WeakMaskPair` work from before this session, kept as independent defense-in-depth for a different (legitimate) risk, confirmed via isolated testing to be *not* required for the `L440` fix itself.
+3. `[FeMe] Update Roadmap/VulkanCTSReport for L440/L441 UAF fix` -- docs.
+4. `[FeMe] Codify L440/L441's bt-full and FEME_DUMP_IR_PRELINEARIZE gotchas` -- `.instructions.md` update.
+
+## Validation performed
+
+- Isolated the root-cause fix alone (no `WeakMaskPair` at all): 300 crash-loop iterations, **0 crashes** -- confirms it's sufficient by itself.
+- Combined state (both fixes): 500+300+200+300 = 1300 more crash-loop iterations across both the real `offloader` pipeline and a faster standalone `feme-opt` repro -- **0 crashes**.
+- `FeMeTransformsCPUTests`: 638/638.
+- `check-feme`: 3769/3777 (1 pre-existing unrelated failure, confirmed via `git stash` to predate this session).
+- **`check-hlsl-feme-vk` (the suite that originally found this bug): 492 Passed/273 Unsupported/28 Expectedly Failed out of 793, 0 Failed, 0 crashes.** This is the original symptom, now confirmed fixed end-to-end.
+
+## Two reusable gotchas codified in `.instructions.md`
+
+- `gdb -ex "bt full"` can **hide** a timing-sensitive race entirely (1900 iterations with it enabled: 0 crashes; same loop with plain `-ex bt`: reliable 23/300). Use plain `bt`, or targeted `frame N` + `info locals` if more detail is needed.
+- `FEME_DUMP_IR_PRELINEARIZE=1` turns a slow Vulkan-pipeline crash repro into a fast standalone `feme-opt --llvm -passes=feme-cpu-linearize` repro. Big time-saver for any future `Linearize.cpp` UAF/staleness hunt.
+
+## Correction to a stale assumption
+
+Earlier session summaries assumed `offload-test-suite`'s own cmake build was never configured, so `check-hlsl-feme-vk` had never run. That's wrong -- `check-hlsl-feme-vk`/`check-hlsl-clang-feme-vk` are targets wired into `llvm-project`'s **own** build tree (`LLVM_EXTERNAL_PROJECTS=OffloadTest`), confirmed present via `ninja -t targets`, and have in fact been run multiple times across past sessions (see `VulkanCTSReport.md`'s `L424`/`L427` entries, 791/792 and 492/793 etc.). No further offload-test-suite build setup is needed -- drop this from future next-steps lists.
+
+## Next steps (all pre-existing, deferred again -- none touched this session)
+
+1. **(standing)** `L419(g)` -- 30 tessellation residuals, same IR-dump-and-reduce methodology candidate, untouched.
+2. **(standing)** `L419(h)`'s remaining residuals (`elseblock`/`ifblock`/`mixed_break_continue` special-loop shapes, plus loop-in-switch cases) -- distinct shapes, need their own reduction.
+3. **(standing)** `L419(y)` (`conditional_break_uniform`, 6 cases) -- untouched.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline (`L440(b)`) needs re-measuring on a quiet machine (no standing CTS sweep running) and case-by-case triage -- likely dominated by the known upstream `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608) per existing `XFAIL` markers, but not yet verified.
+5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running and growing (253MB+ as of this session's end) -- just check progress, don't restart.
+6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
