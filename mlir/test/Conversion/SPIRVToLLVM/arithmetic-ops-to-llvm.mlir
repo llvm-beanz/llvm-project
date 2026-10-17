@@ -305,7 +305,19 @@ spirv.func @fneg_vector(%arg: vector<2xf32>) "None" {
 // CHECK-LABEL: @quantize_scalar
 spirv.func @quantize_scalar(%arg: f32) "None" {
   // CHECK: %[[T:.*]] = llvm.fptrunc %{{.*}} : f32 to f16
-  // CHECK: llvm.fpext %[[T]] : f16 to f32
+  // CHECK: %[[BITS:.*]] = llvm.bitcast %[[T]] : f16 to i16
+  // CHECK: %[[SIGNMASK:.*]] = llvm.mlir.constant(-32768 : i16) : i16
+  // CHECK: %[[ABSMASK:.*]] = llvm.mlir.constant(32767 : i16) : i16
+  // CHECK: %[[SMALLESTNORMAL:.*]] = llvm.mlir.constant(1024 : i16) : i16
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(0 : i16) : i16
+  // CHECK: %[[SIGNBITS:.*]] = llvm.and %[[BITS]], %[[SIGNMASK]] : i16
+  // CHECK: %[[ABSBITS:.*]] = llvm.and %[[BITS]], %[[ABSMASK]] : i16
+  // CHECK: %[[ISSMALL:.*]] = llvm.icmp "ult" %[[ABSBITS]], %[[SMALLESTNORMAL]] : i16
+  // CHECK: %[[ISNONZERO:.*]] = llvm.icmp "ne" %[[ABSBITS]], %[[ZERO]] : i16
+  // CHECK: %[[ISSUBNORMAL:.*]] = llvm.and %[[ISSMALL]], %[[ISNONZERO]] : i1
+  // CHECK: %[[FLUSHEDBITS:.*]] = llvm.select %[[ISSUBNORMAL]], %[[SIGNBITS]], %[[BITS]] : i1, i16
+  // CHECK: %[[FLUSHED:.*]] = llvm.bitcast %[[FLUSHEDBITS]] : i16 to f16
+  // CHECK: llvm.fpext %[[FLUSHED]] : f16 to f32
   %0 = spirv.QuantizeToF16 %arg : f32
   spirv.Return
 }
@@ -313,7 +325,19 @@ spirv.func @quantize_scalar(%arg: f32) "None" {
 // CHECK-LABEL: @quantize_vector
 spirv.func @quantize_vector(%arg: vector<4xf32>) "None" {
   // CHECK: %[[T:.*]] = llvm.fptrunc %{{.*}} : vector<4xf32> to vector<4xf16>
-  // CHECK: llvm.fpext %[[T]] : vector<4xf16> to vector<4xf32>
+  // CHECK: %[[BITS:.*]] = llvm.bitcast %[[T]] : vector<4xf16> to vector<4xi16>
+  // CHECK: %[[SIGNMASK:.*]] = llvm.mlir.constant(dense<-32768> : vector<4xi16>) : vector<4xi16>
+  // CHECK: %[[ABSMASK:.*]] = llvm.mlir.constant(dense<32767> : vector<4xi16>) : vector<4xi16>
+  // CHECK: %[[SMALLESTNORMAL:.*]] = llvm.mlir.constant(dense<1024> : vector<4xi16>) : vector<4xi16>
+  // CHECK: %[[ZERO:.*]] = llvm.mlir.constant(dense<0> : vector<4xi16>) : vector<4xi16>
+  // CHECK: %[[SIGNBITS:.*]] = llvm.and %[[BITS]], %[[SIGNMASK]] : vector<4xi16>
+  // CHECK: %[[ABSBITS:.*]] = llvm.and %[[BITS]], %[[ABSMASK]] : vector<4xi16>
+  // CHECK: %[[ISSMALL:.*]] = llvm.icmp "ult" %[[ABSBITS]], %[[SMALLESTNORMAL]] : vector<4xi16>
+  // CHECK: %[[ISNONZERO:.*]] = llvm.icmp "ne" %[[ABSBITS]], %[[ZERO]] : vector<4xi16>
+  // CHECK: %[[ISSUBNORMAL:.*]] = llvm.and %[[ISSMALL]], %[[ISNONZERO]] : vector<4xi1>
+  // CHECK: %[[FLUSHEDBITS:.*]] = llvm.select %[[ISSUBNORMAL]], %[[SIGNBITS]], %[[BITS]] : vector<4xi1>, vector<4xi16>
+  // CHECK: %[[FLUSHED:.*]] = llvm.bitcast %[[FLUSHEDBITS]] : vector<4xi16> to vector<4xf16>
+  // CHECK: llvm.fpext %[[FLUSHED]] : vector<4xf16> to vector<4xf32>
   %0 = spirv.QuantizeToF16 %arg : vector<4xf32>
   spirv.Return
 }

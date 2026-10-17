@@ -1590,10 +1590,28 @@ public:
 
 /// Converts `spirv.QuantizeToF16`, which has no single-instruction LLVM
 /// equivalent, into a round trip through `f16`: `fptrunc` to `f16` followed
-/// by `fpext` back to the original (always `f32`) type. This matches the op's
-/// semantics exactly, since `fptrunc`/`fpext` already implement IEEE-754
-/// round-to-nearest-even and preserve infinities/NaNs the same way the SPIR-V
-/// spec requires.
+/// by `fpext` back to the original (always `f32`) type. `fptrunc`/`fpext`
+/// already implement the IEEE-754 round-to-nearest-even and infinity/NaN
+/// handling the SPIR-V spec requires, but unlike `fptrunc`, OpQuantizeToF16
+/// must additionally flush any `f16`-subnormal result to a same-signed zero
+/// (the SPIR-V spec permits an implementation to retain the `f16` denormal
+/// instead, but the Vulkan CTS's `flush_to_zero` conformance tests require
+/// the flushed behavior).
+///
+/// The flush is done with plain integer bit twiddling on the truncated
+/// `f16`'s `i16` bit pattern -- `and`/`icmp`/`select`/`bitcast` -- rather
+/// than with `llvm.is.fpclass`/`llvm.copysign` float intrinsics: on a
+/// vector-typed operand (the SPIR-V `OpQuantizeToF16 %fvec4` overload),
+/// FeMe's CPU `feme-cpu-simdize` pass can only decompose a divergent vector
+/// value into per-component scalars when every producer along the way is
+/// one of a fixed set of shapes (elementwise arithmetic/casts,
+/// comparisons, `select`, a same-element-count `bitcast`, ...); it does not
+/// yet recognize those two intrinsics' non-"homogeneous" operand/result
+/// type shapes there (`llvm.is.fpclass`'s result is `<N x i1>` while its
+/// operand is `<N x f16>`), even though FeMe's separate *wave*-widening
+/// path does. Confirmed by reducing a real
+/// `dEQP-VK.spirv_assembly.instruction.compute.opquantize_vec4.*` failure
+/// down to this exact shape (roadmap `L444`).
 class QuantizeToF16Pattern
     : public SPIRVToLLVMConversion<spirv::QuantizeToF16Op> {
 public:
@@ -1610,12 +1628,49 @@ public:
 
     Location loc = op.getLoc();
     Type f16Type = rewriter.getF16Type();
-    if (auto vecType = dyn_cast<VectorType>(dstType))
+    Type i16Type = rewriter.getI16Type();
+    Type i1Type = rewriter.getI1Type();
+    if (auto vecType = dyn_cast<VectorType>(dstType)) {
       f16Type = VectorType::get(vecType.getShape(), f16Type);
+      i16Type = VectorType::get(vecType.getShape(), i16Type);
+      i1Type = VectorType::get(vecType.getShape(), i1Type);
+    }
 
     Value truncated = LLVM::FPTruncOp::create(rewriter, loc, f16Type,
                                                adaptor.getOperand());
-    rewriter.replaceOpWithNewOp<LLVM::FPExtOp>(op, dstType, truncated);
+    Value bits = LLVM::BitcastOp::create(rewriter, loc, i16Type, truncated);
+
+    // `f16`'s sign bit is bit 15; its smallest normalized magnitude
+    // (0x0400, i.e. 2^-14) is the dividing line between "subnormal" and
+    // "normal" once the sign bit is masked off.
+    IntegerAttr signMaskAttr = rewriter.getIntegerAttr(
+        cast<IntegerType>(getElementTypeOrSelf(i16Type)), 0x8000);
+    IntegerAttr absMaskAttr = rewriter.getIntegerAttr(
+        cast<IntegerType>(getElementTypeOrSelf(i16Type)), 0x7fff);
+    IntegerAttr smallestNormalAttr = rewriter.getIntegerAttr(
+        cast<IntegerType>(getElementTypeOrSelf(i16Type)), 0x0400);
+    IntegerAttr zeroAttr = rewriter.getIntegerAttr(
+        cast<IntegerType>(getElementTypeOrSelf(i16Type)), 0);
+    Value signMask = createIntegerConstant(loc, i16Type, rewriter, signMaskAttr);
+    Value absMask = createIntegerConstant(loc, i16Type, rewriter, absMaskAttr);
+    Value smallestNormal =
+        createIntegerConstant(loc, i16Type, rewriter, smallestNormalAttr);
+    Value zero = createIntegerConstant(loc, i16Type, rewriter, zeroAttr);
+
+    Value signBits = LLVM::AndOp::create(rewriter, loc, i16Type, bits, signMask);
+    Value absBits = LLVM::AndOp::create(rewriter, loc, i16Type, bits, absMask);
+    Value isSmall = LLVM::ICmpOp::create(
+        rewriter, loc, i1Type, LLVM::ICmpPredicate::ult, absBits,
+        smallestNormal);
+    Value isNonzero = LLVM::ICmpOp::create(
+        rewriter, loc, i1Type, LLVM::ICmpPredicate::ne, absBits, zero);
+    Value isSubnormal =
+        LLVM::AndOp::create(rewriter, loc, i1Type, isSmall, isNonzero);
+    Value flushedBits = LLVM::SelectOp::create(rewriter, loc, isSubnormal,
+                                               signBits, bits);
+    Value flushed =
+        LLVM::BitcastOp::create(rewriter, loc, f16Type, flushedBits);
+    rewriter.replaceOpWithNewOp<LLVM::FPExtOp>(op, dstType, flushed);
     return success();
   }
 };
