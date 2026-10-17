@@ -7473,3 +7473,109 @@ root cause) or one of the seven ~8-case struct/array
 composite-decomposition clusters; `L419(ad)` (`mixed_break_continue`);
 `L419(y)` (`conditional_break`); `L419(g)` (tessellation residuals);
 `L440(c)`'s 39-case residual triage. All unchanged standing items.
+
+## L452: `opline`/`opnop` deserialization gaps fixed; `out_of_order` found to be a separate bug
+
+**Issue**: the previous entry's `opline`/`opnop`/`out_of_order` 30-case
+group was speculated to share one root cause purely from its naming
+pattern. Per this item's own stated plan, reduced one case first
+(`dEQP-VK.spirv_assembly.instruction.graphics.opline.opline_short_name_frag`)
+before assuming the whole group shared a fix.
+
+**Root cause (two distinct bugs, both in upstream
+`mlir/lib/Target/SPIRV/Deserialization`)**:
+1. `OpNop` had no deserialization handler at all in
+   `Deserializer::processInstruction`'s dispatch switch -- it fell
+   through to `dispatchToAutogenDeserialization`, which has no
+   SPIR-V-dialect counterpart for it, and errored with "unhandled
+   deserialization of OpNop". Per the SPIR-V spec, `OpNop` has no
+   semantics and should simply be discarded.
+2. `Deserializer::processFunction`'s two strict-opcode checks (the
+   `OpFunctionParameter`-matching loop, and the "entry block starts
+   with OpLabel" check) both called `sliceInstruction` directly and
+   failed immediately if the very next instruction wasn't exactly the
+   expected opcode -- with zero tolerance for an interspersed
+   `OpLine`/`OpNoLine`/`OpNop`, even though the SPIR-V spec permits
+   debug-location markers and no-ops anywhere a non-terminator
+   instruction may appear. Confirmed directly against the CTS's own
+   `opline` test fixture (`vktSpvAsmInstructionTests.cpp`'s
+   `createOpLineTests`): it places `OpLine` in exactly both of these
+   gaps.
+
+**Fix**: added an explicit `OpNop` case (returns success, discarding
+the instruction) to `processInstruction`'s dispatch; added a new
+`Deserializer::sliceNonDebugInstruction` helper (processes/discards a
+leading run of `OpLine`/`OpNoLine`/`OpNop`, then slices the first real
+instruction) and switched both of `processFunction`'s strict-opcode
+checks to use it instead of the raw `sliceInstruction`.
+
+**Tested**:
+- Two new regression tests in
+  `mlir/unittests/Dialect/SPIRV/DeserializationTest.cpp`
+  (`FunctionParameterWithInterspersedDebugAndNopInstructionsSuccess`,
+  `OpNopInFunctionBodySuccess`); `MLIRSPIRVImportExportTests` 45/45
+  Passed.
+- `mlir/test/Target/SPIRV/` lit suite: 72/73 Passed (the one failure,
+  `memory-ops.mlir`, confirmed pre-existing on an unmodified tree via
+  `git stash`, unrelated to this change).
+- `check-feme`: 3,775/3,782 Passed, 0 Failed, 7 Unsupported -- no
+  regressions.
+- Real CTS (rebuilt `libfeme_vulkan.so` first): full `opline` group
+  17/17 Pass (was 15 Fail among them -- the prior entry's per-stage-group
+  "5" count for each of `opline_empty_name`/`opline_long_name`/
+  `opline_short_name` undercounted by not summing across all 3 names'
+  own 5-stage breakdown correctly; the real number directly
+  re-confirmed from this session's own `.qpa` re-parse is 17, not 15);
+  full `opnop` group 6/6 Pass (was 6 Fail); full `opnoline` group 6/6
+  Pass (already passing beforehand, re-verified unaffected as a close
+  sibling).
+
+**`out_of_order` investigated, found to be a separate, still-open
+bug** (not fixed this session): reduced one case each of
+`opphi.out_of_order_geom`, `selection_block_order.out_of_order_geom`,
+and `switch_block_order.out_of_order_geom` -- all three fail with a
+real rendering mismatch ("Upper right corner mismatch"), not a
+deserialization or pipeline-creation error, immediately ruling out a
+shared cause with `opline`/`opnop`. Further isolated `opphi`'s own
+5-stage breakdown: `_frag`/`_tessc`/`_tesse` **Pass**, but `_geom`
+fails with "Upper right corner mismatch" and `_vert` fails with a
+*different* mismatch location, "Lower left corner mismatch". The
+shared shader shape across all 5 stages is a `for` loop containing an
+`OpSwitch` + an `OpPhi` whose operands are listed out of block order;
+the two stages that fail are exactly the two where each of the four
+input quad corners takes a genuinely different `OpSwitch` case
+per-invocation (vertex and geometry), while the three passing stages
+either interpolate (fragment) or have an otherwise-uniform switch
+argument (tessellation control/evaluation) -- a pattern matching this
+effort's earlier, already-fixed "Function-storage tightening" bug
+class (`matrix_3x3`, `H004`: un-privatized `OpVariable Function`storage
+locals leaking across SIMD-widened per-invocation lanes), not a
+block-ordering bug per se. Not reduced to a minimal repro or fixed
+this session -- see `Roadmap.md`'s `L452(a)` for the concrete next
+steps.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+needed for the landed fix (pure deserialization-layer fix, no
+feature/extension-surface change). This fix lives entirely outside
+`feme/` (in upstream `mlir/`), per the standing "issue outside FeMe"
+handling: isolated, self-contained, with its own regression tests, in
+its own commit.
+
+A full `dEQP-VK.spirv_assembly.*` re-sweep was launched in the
+background at session end
+(`/tmp/l444_opline_opnop_full_rerun.qpa`/`.log`) to refresh `L444`'s
+baseline; expected new total: 229 − 17 − 6 = 206 remaining failures,
+pending the real measurement once it completes (it was still running,
+mid-alphabet, at the time this entry was written -- a future session
+should check it before trusting any number here beyond the two
+directly re-verified group counts above).
+
+**Next steps**: confirm the refreshed full-sweep baseline (expect 206);
+`L452(a)`'s `out_of_order` breakdown (needs a real `FEME_DUMP_IR_PRESIMD`
+dump of `opphi.out_of_order_vert` to confirm/refute the
+Function-storage-leak hypothesis); the seven ~8-case struct/array
+composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`,
+`v3f16arr5`, `v4f16arr3`, `struct`, `switch`); `L419(ad)`
+(`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
+(tessellation residuals); `L440(c)`'s 39-case residual triage. All
+unchanged standing items.
