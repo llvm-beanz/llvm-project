@@ -125847,3 +125847,91 @@ back it up.
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 8. **(low priority, carried forward)** 9 older git stashes remain
    uninspected — low value, still open if a future session wants to check.
+
+# Session: L452(g) — PDT redesign tried, didn't work, real mechanism now precisely known
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**Stash check**: 9 pre-existing stashes, all old, all already documented as low-value (`stash@{0}` is just a stray `shadercache.bin`). Nothing lost. No action needed.
+
+## What happened
+
+Tried the exact next step from last session: thread `PostDominatorTree` into
+`peelWouldDestroyAncestorReconvergencePoint` and check real postdominance instead
+of the hand-rolled purity walk. **It doesn't work.** `Flow18` postdominates
+`Flow17` in `switch_comp` (must-block) exactly the same way `Flow9` postdominates
+block `39` in the must-allow unit test. Postdominance alone can't tell these
+apart — confirmed by direct comparison, not guesswork.
+
+Kept digging and found the **actual** mechanism (not documented precisely until
+now, despite 3 prior sessions touching this bug):
+
+- `linearizeCycle` tries every `CondBr` block in a cycle as an independent
+  top-level diamond candidate, in one shared sweep.
+- In `switch_comp`, `Flow17` and block `20` are BOTH such candidates, in the
+  same cycle, same depth.
+- `peelConstantFlowPredecessorsInCycle` runs BEFORE that sweep. If it peels
+  `Flow18` away first, `Flow17`'s candidate walk no longer stops at `Flow18` —
+  it bleeds into `20`'s already-claimed territory → `L375` conflict.
+- The unit test's analogous block (`Flow9`) is immune because it's inside a
+  *nested inner cycle* that gets fully resolved by its own earlier
+  `linearizeCycle` call before the outer sweep ever sees it. No second
+  candidate = no collision = no bug.
+
+Tried relaxing `reachesThroughRelayChain`'s final-hop purity check as a
+shortcut fix — confirmed it fixes `switch_comp` AND crashes the unit test
+(`validate`/`canFlattenLoopBodyRegion`), reproducing a regression a prior
+session already hit. Confirms: any CFG-shape-only heuristic (purity-based OR
+postdominance-based) cannot distinguish these two cases. **Reverted
+everything.** `git status --short` clean. `check-feme`: 3,776/3,783 Passed,
+0 Failed, 7 Unsupported — unchanged baseline.
+
+## Why no fix landed this session
+
+A correct fix needs to know about the *other* independent top-level candidate
+(block `20`), not just look at `BB`/`Origin` in isolation. That's either:
+(a) reorder `linearizeCycle` so diamond-flattening commits before peeling —
+risky, touches fold ordering many other cases depend on, or (b) give the
+guard a scoped dry-run of `validate`'s own conflict detection — more
+surgical but needs new `MergeVisited`-style dry-run machinery that doesn't
+permanently commit state.
+
+Both are a half-day-to-a-day of careful work with high regression risk if
+rushed. Not safe to start with under two hours left in the session.
+
+## Documentation updated
+
+- `Roadmap.md`: added `L452(g)` entry with the full precise mechanism above,
+  both candidate fix designs, and an explicit flag that this is now the 3rd
+  session to re-root-cause this bug without landing a fix.
+- `VulkanCTSReport.md`/inventories: **not touched** — zero functional code
+  change this session, so no CTS delta to record. (All instrumentation was
+  added and fully reverted before this writeup.)
+
+## Next steps
+
+1. **(next candidate, half day to a day, most concrete write-up yet)**
+   Implement design (b) from `L452(g)`: give
+   `peelWouldDestroyAncestorReconvergencePoint` a scoped dry-run check against
+   `validate`'s own `MergeVisited` conflict logic — "would any *other*
+   `CondBr` candidate in this cycle already claim `BB` or something
+   downstream of it". Must-pass cases:
+   `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`
+   and `/tmp/switch_comp.ll` (regenerate via `FEME_DUMP_IR_PRELINEARIZE` if
+   `/tmp` was cleared). Don't attempt design (a) (fold-sequence reordering)
+   without first trying (b) — (a) touches far more currently-passing shapes.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order`
+   fix — memory-carried divergence gap in `WaveUniformity`, design already
+   written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
+   (30 tessellation residuals).
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate
+   `spirv.GlobalVariable` legalization bug (8 cases) — different code area
+   (SPIRVToLLVM conversion), can run in parallel with item 1.
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+8. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected — low value, still open if a future session wants to check.
