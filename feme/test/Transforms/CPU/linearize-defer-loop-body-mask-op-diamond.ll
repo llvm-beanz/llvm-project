@@ -230,9 +230,46 @@ attributes #2 = { nounwind willreturn memory(argmem: readwrite) }
 // for the authoritative definition this duplicates; there is no public C
 // header for it since it is codegen-internal to the CPU target's JIT/AOT
 // dispatch path).
-#include <stdio.h>
-#include <string.h>
-#include <stdint.h>
+//
+// Deliberately avoids `#include <stdio.h>`/`<string.h>`/`<stdint.h>`: this
+// file is compiled with a bare `clang` invocation (no `-isysroot`/SDK
+// setup), which on a host whose C library headers live outside the
+// compiler's own default search path (confirmed on macOS: a freshly
+// built, non-Xcode-wrapped `clang` can't locate the platform SDK's
+// `stdio.h` at all, `fatal error: 'stdio.h' file not found`) fails before
+// ever reaching this file's own logic. `int32_t`/`int64_t` are replaced
+// with Clang's always-predefined `__INT32_TYPE__`/`__INT64_TYPE__`
+// builtin macros (no header needed at all, on every target this harness
+// runs on); `memset`/`memcpy` are replaced with equivalent hand-rolled
+// loops (at `-O0` these compile to plain loops, not re-recognized libcall
+// idioms, so no libc symbol/header dependency is introduced either way);
+// and `printf` is replaced with an `extern` prototype declared directly
+// here (and used for both the pass/fail message and the mismatch
+// diagnostics, rather than `fprintf(stderr, ...)`: unlike `printf`,
+// `stderr` isn't a portable global symbol to declare without its real
+// header -- e.g. Apple's libc only exports it as `__stderrp` under the
+// `stderr` macro) -- the platform's C library still provides the actual
+// symbol at link/run time (unaffected by this), only the header lookup
+// that would otherwise declare its signature is avoided.
+typedef __INT32_TYPE__ int32_t;
+typedef __INT64_TYPE__ int64_t;
+typedef __INT8_TYPE__ int8_t;
+typedef __SIZE_TYPE__ size_t;
+
+extern int printf(const char *, ...);
+
+static void harness_memset(void *dst, int value, size_t n) {
+  unsigned char *d = (unsigned char *)dst;
+  for (size_t i = 0; i < n; ++i)
+    d[i] = (unsigned char)value;
+}
+
+static void harness_memcpy(void *dst, const void *src, size_t n) {
+  unsigned char *d = (unsigned char *)dst;
+  const unsigned char *s = (const unsigned char *)src;
+  for (size_t i = 0; i < n; ++i)
+    d[i] = s[i];
+}
 
 typedef struct {
   void *resource_heap;
@@ -280,9 +317,9 @@ int32_t feme_atomic_add(void *heap, int32_t heap_count, int32_t binding,
 
 int main(void) {
   char heap[1024];
-  memset(heap, 0, sizeof(heap));
+  harness_memset(heap, 0, sizeof(heap));
   Args args;
-  memset(&args, 0, sizeof(args));
+  harness_memset(&args, 0, sizeof(args));
   args.inner.resource_heap = heap;
   args.inner.resource_heap_count = sizeof(heap);
   args.group_id[0] = args.group_id[1] = args.group_id[2] = 0;
@@ -299,9 +336,9 @@ int main(void) {
   int bad = 0;
   for (int i = 0; i < 160; i++) {
     int32_t v;
-    memcpy(&v, heap + i * 4, 4);
+    harness_memcpy(&v, heap + i * 4, 4);
     if (v != 1) {
-      fprintf(stderr, "MISMATCH offset=%d value=%d\n", i, v);
+      printf("MISMATCH offset=%d value=%d\n", i, v);
       bad++;
     }
   }
