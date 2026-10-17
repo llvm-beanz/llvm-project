@@ -6744,3 +6744,106 @@ tessellation residuals, untouched), and the `check-hlsl-clang-feme-vk`
 92-failure triage (still deferred every session). `/tmp/l437_full_run3`
 still running and growing (375MB as of this session's end) -- just
 check progress next session, don't restart.
+
+## `L419(ac)`: `L419(z)`/`L419(aa)`/`L419(ab)`'s capability fix, completed
+
+`L419(ab)`'s Layer 2 finding was exactly right: once `recoverRelayExitCheck`'s
+generalized chase (re-implemented this session; `L419(ab)`'s two reverted
+sub-fixes -- the `IsTrivialExitStub` `bool`->`BasicBlock*` generalization and
+the last-hop `RelayBlock` fix -- carried forward unchanged) admits
+`Header`/`Latch`'s own divergent check into `HeaderDivergent`/`LatchDivergent`
+handling even when it only reaches `ExitBlock` through a relay hop owning its
+own real, multi-valued phis (e.g. `StructurizeCFG`'s shared `break`/`continue`
+dispatch block), erasing that check's own `CondBr` orphans the relay hop's
+only predecessor. Nothing explicitly preserves the orphaned edge's semantic
+contribution before `EliminateUnreachableBlocks` (called once, at the very
+end of the whole pass) eventually collapses that hop's phis down to their
+sole surviving incoming value -- silently discarding the value correctly
+captured "at the moment of exit" for already-exited lanes and replacing it
+with whatever the loop's own still-executing body recomputes on later
+iterations. Confirmed via direct IR inspection (`/tmp/clean_test.ll`'s
+`loop_in_switch` reduction, both pre- and post-fix) to be the actual root
+cause of this shape's "Image mismatch" CTS failures.
+
+**Fix, two cooperating pieces, both required**:
+
+1. **(A) `freezeRelayChainExitValues`**, a new function called once per
+   `HeaderExit`/`LatchExit` match, right before that check's own
+   `->Br->eraseFromParent()` (4 call sites total). Walks the newly-tracked
+   `ExitCheck::RelayChain` field (every hop `IsTrivialExitStub`'s chase
+   passed through en route to `ExitBlock`, populated alongside its existing
+   `RelayBlock` resolution) and, for each hop's own phi with an incoming
+   edge from the chain's previous hop (the edge about to be orphaned),
+   `select`-wraps every other (surviving) incoming value with the per-lane
+   "is this iteration still a real one" guard mask just computed by the
+   caller's own `stayInLoop` call -- picking the orphaned edge's value
+   instead for any lane that has already exited.
+2. **(B) Extended `freezeLoopCarriedValues`** with a new, optional
+   `RelayCaptured` parameter. Whenever (A) finds the orphaned value is
+   itself one of `Header`'s own raw loop-carried phis (not a derived
+   instruction -- this repro's exact shape), it records that phi into a
+   `RelayCaptured` set threaded through to this call. `freezeLoopCarriedValues`'s
+   `UsedOutsideLoop` check now also fires for a phi found there, even
+   though its own literal users are all inside the loop (the relay hop that
+   captures it lives inside the cycle) -- applying the same sticky,
+   self-referential freeze this function already gives any other
+   externally-read phi. This is required because fix (A) alone is
+   unsound: referencing a non-frozen, continuously-mutating raw phi as a
+   `select`'s "else" value doesn't stop that phi's own value from still
+   being overwritten by the loop's body for all lanes on every subsequent
+   iteration.
+
+Confirmed via direct IR dump against both `/tmp/clean_test.ll` and the
+committed `loop-in-switch-divergent-header-and-relay.ll` lit test: `Flow`'s
+own data phi became a `select` on `active.header.check.live` between the
+loop body's freshly-computed value and `Header`'s own raw phi; `Header`'s
+own phi backedge itself became a self-referential `select` on
+`active.check.live` -- exactly the two-select chain (A)+(B) predicts, and
+`-passes=feme-cpu-linearize,verify` confirms the result is verifier-clean.
+
+New focused unit test `LinearizeTest.FreezesRelayChainExitValueThroughSharedDispatchBlock`
+(a hand-written minimal two-phi relay-through-shared-dispatch-block repro,
+*not* a CTS extraction, per the standing "prove it with a deterministic unit
+test" guidance) asserts both selects appear structurally. Updated
+`loop-in-switch-divergent-header-and-relay.ll`'s `RUN`/`CHECK` lines to
+expect success (with the same structural select pattern) instead of the old
+"more than one divergent exit check" diagnostic it previously asserted.
+
+**Build/test verification**: `FeMeTransformsCPUTests` 639/639 (+1 new test,
+0 regressions). Full `Linearize` lit suite and full `ninja check-feme` both
+clean except the single already-confirmed pre-existing, unrelated
+`entry-wrapper-loop-header-derived-value-in-suffix.ll` failure (re-confirmed
+present on the pre-session tree via `git stash`, unrelated to this change,
+same `wave_group_count`-area struct-field-ordering issue this report has
+flagged before) -- `check-feme`: 3,771/3,772 Passed (excluding that one
+pre-existing failure), 0 regressions.
+
+**CTS verification** (`VK_ICD_FILENAMES` pointed at the FeMe ICD,
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+before running):
+- `dEQP-VK.glsl.switch.*loop_in_switch*` (18 cases, all variants, including
+  the 4 originally-targeted `*_dynamic_{fragment,vertex}` cases): **18/18
+  Pass** (was 14/18 before this session).
+- Combined `dEQP-VK.glsl.switch.*` (122 cases) + `dEQP-VK.glsl.loops.special.*`
+  (552 cases) sweep, 674 cases total -- covers all 12 of `L419(aa)`'s target
+  cases (4 `loop_in_switch` + 8 `elseblock`/`ifblock`) plus the 16
+  already-fixed `L419(w)`/`L419(x)` cases in the same two groups: **664/674
+  Pass**. The remaining 10 failures are exactly the already-tracked,
+  still-open `L419(y)` (`conditional_break`, 6 cases: `do_while_uniform`,
+  `for_uniform`, `while_uniform` x fragment/vertex) and `mixed_break_continue`
+  (4 cases: `for_uniform`, `while_uniform` x fragment/vertex) -- zero
+  regressions anywhere, and all 12 of this fix's own target cases are
+  confirmed genuinely fixed (not just compiling cleanly -- real `Pass`
+  results against the reference image).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- an internal compiler correctness fix inside `Linearize.cpp`, no
+feature/extension-surface change.
+
+**Next steps**: standing items unchanged: `mixed_break_continue` (4 cases,
+a separate `DiamondFlattener` body-shape gap, repro at
+`/tmp/mbc_frag_mod2.ll`), `L419(y)`'s masking-sequencing gap (`conditional_break`,
+6 cases), `L419(g)` (30 tessellation residuals, untouched), and the
+`check-hlsl-clang-feme-vk` 92-failure triage (still deferred every session).
+`/tmp/l437_full_run3` still running and growing (428MB as of this session's
+end, up from 375MB) -- just check progress next session, don't restart.
