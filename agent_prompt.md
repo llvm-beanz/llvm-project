@@ -69,30 +69,29 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, the real next step)** Implement fix option **(b)** above:
-   in `collectUniformPassThroughRegion`, before calling `isDivergentBranch`
-   on a candidate block's `CondBr`, also check whether the condition
-   transitively depends on a resource/image load *inside cycle `C`*
-   whose mask argument is currently constant `true` -- if so, predict
-   whether this cycle will need a genuinely non-constant
-   `active.live`/`active.sideeffect` phi (i.e., whether `HeaderDivergent`/
-   `LatchDivergent`/any `OtherCondBrBlocks` member is divergent, meaning
-   masking of this kind will actually happen), and if so, pessimistically
-   reject this block from the pass-through region (`return std::nullopt`)
-   so it falls through to proper divergent-diamond flattening instead.
-   Validate on `select_iteration_count_{fragment,vertex}` across
-   `do_while_dynamic`/`for_dynamic`/`while_dynamic` (the known 6 cases),
-   then a full `dEQP-VK.glsl.loops.special.*` (552 cases) sweep to
-   confirm zero regressions plus those 6 flipping if the normal
-   diamond-flattening path can actually handle Header's shape once
-   rejected -- it may not, which would need yet another follow-up.
-2. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
+1. **(~2-3 hours, the real next step, hard blocker for L419(w)/L419(x))**
+   Fix `flattenTaintedBranchesInRegion`'s `PreRegion`/`PostRegion`
+   candidate walk to skip a block whose `CI.getCycle(BB)` differs from
+   the cycle currently being linearized. Rebuild, re-run the targeted
+   10 cases (`conditional_break_*`, `dowhile_trap_*`,
+   `select_iteration_count_*`), then the full 552-case sweep -- target
+   the 10 regressed cases back to Pass with zero new regressions to the
+   already-fixed 6.
+2. **(~1 day, after #1 if `L419(x)` closes cleanly)** Take a second look
+   at `conditional_break_{fragment,vertex}`'s own still-open diagnosed
+   failure -- its widened `CheckBlock` path is supposed to mask it
+   correctly per the `L419(t)`/`L419(w)` widening comment, so the
+   cycle-containment check's rejection is itself likely masking a
+   separate, more specific shape gap in `flattenKnownDivergentBranch`
+   that's worth understanding rather than permanently routing around.
+3. **(~half day)** Set up `offload-test-suite`'s cmake build (branch
+   `feme` already checked out) and get `check-hlsl-feme-vk` actually
+   running at least once -- every session so far has deferred this.
+4. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
    untouched, same IR-dump-and-reduce methodology candidate.
-3. **(standing)** `L419(h)`'s remaining 16 cases (12 special-loop + 4
-   loop-in-switch) -- distinct shapes, need their own reduction.
-4. **(check-in, cheap, every session)** Keep checking
-   `/tmp/l437_full_run2/` progress (`ps aux | grep deqp-vk`,
-   `ls /tmp/l437_full_run2/qpa | wc -l`).
-5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s
-   whole master per-group table using the union of completed cases
-   across both `/tmp/l437_full_run*` directories.
+5. **(standing)** `L419(h)`'s 12 remaining special-loop residuals
+   (`elseblock`/`ifblock`/`mixed_break_continue`) -- distinct shapes,
+   need their own reduction.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run2/` is
+   stalled -- either restart it fresh or abandon it and start a new
+   sweep; don't just re-check the same dead directory again.
