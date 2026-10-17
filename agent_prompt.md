@@ -69,24 +69,25 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(dedicated session, the real open item)** `L442`'s exact-2x
-   `max_workgroup_memory` doubling. Start from `FEME_DUMP_IR` on
-   `max_workgroup_memory.1` and check the
-   compute-dispatch/workgroup-invocation-count path and `shared ... = {}`'s
-   zero-init codegen — NOT `Linearize.cpp` masking, that avenue is now closed
-   off by this session's differential test.
-2. **(half day)** `L444`'s newly-completed 275-case `spirv_assembly.*` baseline:
-   pick the `opquantize` or `opinboundsaccesschain` cluster (the two largest,
-   ~confirmed again this session) for the next compact-cluster reduction.
+1. **(dedicated session, the real open item — do this first)** Instrument
+   `feme/lib/Transforms/CPU/SIMDize.cpp`'s masked-loop/divergent-call-site
+   construction directly (not more IR-reading) to find exactly how many `call`
+   sites get built per masked resource call and whether some per-wave worklist
+   iterates the matching lane twice when a uniform-trip-count inner loop is
+   re-entered by an outer loop. Start from `/tmp/l442_min/shrink_postsimd.ll`
+   and the repro recipe above — it's a ~1-second iteration loop now, not
+   minutes.
+2. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*`
+   baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the
+   two largest) for the next compact-cluster reduction.
 3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
-   4 cases, root cause known, fix design sketched in a prior session) — still
-   not attempted.
+   4 cases, root cause known, fix design sketched) — still not attempted.
 4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
    tessellation residuals) — both still completely untouched.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`) — still deferred every session.
-6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and
-   growing (598MB) — just check progress, don't restart.
-7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
-   master per-group table in one pass using the completed `/tmp/l437_full_run3`
-   results.
+6. **(no longer standing)** Both `/tmp/l437_full_run3` and
+   `/tmp/l440c_spirvasm.qpa` are done and recorded this session — no background
+   sweep left to check in on. Consider launching a fresh detached
+   full-`dEQP-VK.*` sweep if a future session has idle background time, per the
+   "launch detached" lesson in `.instructions.md`.
