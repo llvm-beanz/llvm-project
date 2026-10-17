@@ -6290,3 +6290,90 @@ or corruption, so lower urgency than `L419(x)` was).
 No code change this session for this investigation; `Linearize.cpp` is
 unchanged from the `L419(x)` commit. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change.
+
+## L440: first `check-hlsl-feme-vk` run; WaveReadLaneFirst.fp16 UAF found
+
+Ran `ninja -C build check-hlsl-feme-vk` for the first time ever this
+session (build infra -- `LLVM_EXTERNAL_OFFLOADTEST_SOURCE_DIR`,
+`LLVM_EXTERNAL_PROJECTS=OffloadTest`, the `check-hlsl-feme-vk` ninja target
+itself -- was already fully configured in the existing `build` tree from
+an earlier, unlogged session; it had simply never been invoked):
+
+```
+Total Discovered Tests: 793
+  Passed      : 491 (61.92%)
+  Unsupported : 273 (34.43%)
+  Expectedly Failed: 28 (3.53%)
+  Failed      : 1 (0.13%)
+```
+
+The one failure: `WaveOps/WaveReadLaneFirst.fp16.test`, which aborts with:
+
+```
+offloader: llvm/lib/IR/Value.cpp:524: void llvm::Value::doRAUW(Value *, ReplaceMetadataUses):
+Assertion `New->getType() == getType() && "replaceAllUses of value with new value of different type!"' failed.
+```
+
+Backtrace: `EarlyCSE::processNode` -> `EarlyCSEPass::run` ->
+`feme::OptimizerPipeline::run` -> `feme::cpu::CompiledStage::create` ->
+`feme::vulkan::compileComputePipeline`/`vkCreateComputePipelines` ->
+offload-test-suite's own `VulkanDevice::createPipelineCs`.
+
+**Ruled out as llvm/llvm-project#226608** (a real, open, still-unfixed
+upstream bug in `SPIRVEmitIntrinsics::buildLogicalAccessChainFromGEP`,
+which that issue's own report says reproduces on this exact test name):
+read the issue in full -- it is specifically about `clang-dxc -spirv`'s
+*direct-to-SPIR-V Clang codegen path* (`SPIRVEmitIntrinsics` leaving an
+insertion point stale after `insertAssignTypeIntrs`, producing an
+`llvm.spv.gep` that's inserted before its own resource-pointer operand).
+`check-hlsl-feme-vk` instead uses `dxc` (Microsoft's DirectXShaderCompiler)
+to produce the `.spv`, then FeMe's own CPU ICD ingests and recompiles
+that SPIR-V through an entirely separate pipeline (`feme::OptimizerPipeline`
+-> CPU JIT). Same test name, different toolchain, different bug.
+
+**Root-caused as a genuine use-after-free, not a logic bug.** Standalone
+repro (bypassing `llvm-lit`'s parallelism): extracted the test's `RUN`
+line via `split-file`, then looped bare `dxc`+`offloader` invocations.
+The crash is **non-deterministic** -- it reproduced only ~1-in-20-to-75
+runs of byte-identical inputs, and required `gdb -batch` with
+`set disable-randomization off` to keep reproducing at all (`gdb`'s
+default ASLR-disabling hid the bug completely in ~100 otherwise-identical
+iterations). Caught the race live under `gdb` and found **two distinct
+crash signatures from the same inputs**, varying by heap layout:
+
+1. The originally-reported `doRAUW` type-mismatch assertion (`SubclassID`
+   59 vs. 87 -- two structurally different `Value` subclasses).
+2. A `Value::getValueName` assertion reached from inside the IR
+   verifier's own error-printing code, which gave a **different**
+   diagnostic message each time it was hit ("Cannot take the address of
+   an inline asm!" on one capture, "Referring to a basic block in another
+   function!" on another) while printing the exact same source line:
+   `%ballot.pred.masked6 = and i1 true, <garbage>`.
+
+Multiple different, nonsensical reinterpretations of the same operand's
+content, varying only by heap layout, is a textbook use-after-free
+signature. `ballot.pred.masked` is created by `Linearize.cpp`'s
+`WaveActiveBallot`/`subgroupBallot` predicate-narrowing code (roadmap
+`L85`): `Call->setArgOperand(0, B.CreateAnd(Call->getArgOperand(0),
+Masks.Live, "ballot.pred.masked"))`. The operand going stale is almost
+certainly `Masks.Live` itself -- a cached mask `Value*` that outlives the
+instruction it refers to, because something later in the same
+`Linearize` pass run RAUWs or erases that instruction without
+invalidating the cache. This is the same general *class* of bug as the
+whole `L419` series (a cached verdict/value going stale without being
+refreshed), but here it is a genuine dangling-pointer memory-safety bug
+rather than a stale-divergence-verdict logic bug.
+
+**Not fixed this session.** Filed as `L440`/`L440(a)` in `Roadmap.md`
+with a concrete breakdown (watchpoint-based `gdb` bisection once a
+cheaper repro exists; audit every `Masks.Live`-caching site in
+`Linearize.cpp`; consider a `WeakVH`/`AssertingVH`-backed cache instead of
+a raw `Value*` to fail loudly instead of silently dangling). No
+`check-hlsl-clang-feme-vk` run yet this session (deferred).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+needed (pure compiler/runtime memory-safety investigation, no new
+feature/extension surface touched). `Vulkan CTS` (`dEQP-VK.glsl.loops.*`
+etc.) was not re-run this specific sub-session since no `Linearize.cpp`
+code change was made; the previously-reported `L419(x)`/`L419(y)` numbers
+stand unchanged.
