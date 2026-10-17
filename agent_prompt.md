@@ -69,27 +69,22 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(dedicated session, ~1-2 days, the real open item)** Implement `L447`'s
-   fix: (a) extend `DiamondFlattener::validate()`/`flatten()` to defer any
-   in-cycle divergent diamond containing a side-effecting resource/image call,
-   mirroring `regionHasStageMaskOps`; (b) design and build the new
-   `LoopLinearizer` mechanism needed to actually pick up and mask such a
-   deferred diamond using `MasksAfterCheck` as its seed (neither
-   `flattenTaintedBranchesInRegion` nor `flattenLoopBodyRegion` currently covers
-   this shape). Start from `Roadmap.md`'s `L447` entry and
-   `/tmp/l442_min/debug_instrumentation.patch` (reapply to re-trace if needed) —
-   don't re-derive the mechanism from scratch, it's fully written up.
-2. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*`
+1. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*`
    baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the
    two largest) for the next compact-cluster reduction.
-3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
-   4 cases, root cause known, fix design sketched) — still not attempted.
-4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+2. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
+   4 cases, root cause known, fix design sketched in a prior session) — still
+   not attempted.
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
    tessellation residuals) — both still completely untouched.
-5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`) — still deferred every session.
-6. **(no standing background sweep)** `/tmp/l437_full_run3` and
-   `/tmp/l440c_spirvasm.qpa` are both done and already recorded — nothing to
-   check in on. A future session with idle background time could launch a fresh
-   detached full-`dEQP-VK.*` sweep per the "launch detached" lesson in
-   `.instructions.md`, but this is optional, not a blocker.
+5. **(worth filing, low priority)** `feme-run` cannot currently execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic —
+   `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target.
+   Discovered this session while looking for an HLSL/`feme-run`-based regression
+   test for `L448` before falling back to the compile-and-execute `.ll`-based
+   approach above. Not investigated further; worth a dedicated look if
+   execution-based HLSL testing of resource atomics becomes a recurring need.
+6. **(no standing background sweep)** Nothing currently running in the
+   background to check in on.
