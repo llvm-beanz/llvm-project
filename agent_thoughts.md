@@ -125465,3 +125465,36 @@ item (`L452(a)`) rather than rushed.
    `linearize-defer-loop-body-mask-op-diamond.ll`, consider a
    `REQUIRES: system-linux` guard or a real cross-platform harness
    rewrite rather than continued incremental fixes.
+
+## Update: `out_of_order` root cause refined (same session, after initial write-up above)
+
+The "Function-storage tightening" hypothesis above was plausible but
+wrong in its specifics. Took the extra step of actually dumping IR
+(`FEME_DUMP_IR_PRESIMD` + `FEME_DUMP_IR`) for `opphi.out_of_order_vert`
+rather than stopping at a guess, and found the real mechanism: it's a
+**memory-carried divergence gap** in `feme::cpu::WaveUniformity`'s
+divergence analysis, not a privatization bug. `llvm::UniformityInfo`
+(plain SSA dataflow, no memory/alias model) can't see that a `load`
+through a *uniform* pointer can still read back a genuinely per-lane-
+divergent *value*, if an earlier `store` to that same uniform address
+wrote something divergent (this shader's `result[i] = result[i] +
+operand` loop does exactly that). The widener actually does widen the
+load's address and value correctly — the bug is downstream, in the
+"give a surviving scalar use back its value" fallback, which collapses
+the already-correctly-widened vector down to one lane and broadcasts
+it unmasked into every lane's storage.
+
+This is now a full root-cause with a concrete fix sketch, written up
+in `Roadmap.md`'s `L452(a)` (an alloca-divergence side-table, mirroring
+the existing `MaskedAllocas` pattern, consulted alongside
+`UI.isDivergentAtDef`). Deliberately **not attempted this session** —
+a divergence-analysis change is high-risk to land without a full
+dedicated session to verify no regressions across the whole CTS
+surface, and this session's own `opline`/`opnop` work already used the
+item's full time budget.
+
+**Updated next action for next session, if this is picked up**: this
+is now a well-scoped, clearly-written-up item — `L452(a)` in
+`Roadmap.md` has the full mechanism and a concrete design. Worth
+treating as its own "half day to a day" item, separate from the
+struct/array composite clusters and the other standing items below.
