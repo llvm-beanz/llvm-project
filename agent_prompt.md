@@ -72,25 +72,27 @@ stored in a git stash.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(half day to a day, top candidate, root cause already written up)**
-   Implement `L452(d)`'s fix design (a): teach `peelConstantFlowPredecessors`
-   to detect — before peeling — whether doing so would destroy an ancestor
-   diamond's own clean reconvergence point, and bail out if so (safer than
-   design (b), which needs a riskier `validate`/`flatten` generalization).
-   Needs `PDT` threaded into `peelConstantFlowPredecessors`'s signature.
-   Write a lit regression test from the existing `/tmp/repro_f16arr3.ll`
-   reduction before touching the fold.
-2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order`
-   fix (5 cases) — memory-carried divergence gap in `WaveUniformity`,
-   design already written up.
+1. **(not started, next candidate)** `L452(e)`: reduce one
+   `type.scalar.i32.switch_comp` case standalone (same
+   `FEME_DUMP_IR_PRELINEARIZE` + hand-reduce technique used for
+   `L452(d)`) to find out whether it's the same ancestor-reconvergence
+   shape via a different front door, or a third bug entirely.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s
+   `out_of_order` fix — memory-carried divergence gap in
+   `WaveUniformity`, design already written up.
 3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
-4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
-   (30 tessellation residuals).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and
+   `L419(g)` (30 tessellation residuals) — worth confirming whether
+   this session's 4 `*_tessc` failures are the same bucket.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`).
 6. **(smaller, independent)** The `struct` cluster's own separate
-   `spirv.GlobalVariable` legalization bug (8 cases) — could run in
-   parallel with item 1, different code area (SPIRVToLLVM conversion,
-   not Linearize).
+   `spirv.GlobalVariable` legalization bug (8 cases) — different code
+   area (SPIRVToLLVM conversion), can run in parallel with anything
+   above.
 7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+8. **(low priority, carried forward)** 9 older git stashes
+   (`stash@{1}`–`stash@{9}` as of last session) remain uninspected —
+   low value now that the one likely-relevant stash has been recovered
+   and landed, but still open if a future session wants to check.
