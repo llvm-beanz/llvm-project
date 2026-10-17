@@ -7025,3 +7025,103 @@ and `L419(g)` (30 tessellation residuals) all remain untouched standing
 items; `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) also
 remains deferred; `/tmp/l437_full_run3` still running and growing -- just
 check progress next session, don't restart.
+
+## Session: L442 isolated to feme-cpu-simdize; L437 full sweep completed
+
+**The long-running `/tmp/l437_full_run3` full-`dEQP-VK.*` re-triage sweep
+(checked in on every session since it was launched, never restarted)
+finally completed this session**: 67,043/67,234 Passed (99.7%), 1/67,234
+Failed (0.0%), 190/67,234 NotSupported (0.3%). The sole failure is `L442`'s
+own `zero_initialize_workgroup_memory.max_workgroup_memory` cluster,
+confirming it is the *only* outstanding `dEQP-VK.*` failure cluster across
+this entire 67k-case sweep. `deqp-vk`'s own log printed "Test run was
+ABORTED!" immediately after a complete `DONE!`/totals block; this reads as a
+reporting artifact of this specific invocation (the totals match a fully
+completed run) rather than a genuine early termination, but is worth
+re-confirming with a fresh full sweep in a future session if time allows.
+
+**`L442`'s exact-2x `max_workgroup_memory` doubling, root-cause narrowed
+further this session, now isolated specifically to `feme-cpu-simdize`'s
+masked-loop re-entry handling** (not `Linearize.cpp`, already ruled out by
+`L443`'s own A/B test and independently reconfirmed here via a manual
+scalar trace):
+
+- Built a fast, faithful, small-scale repro by patching the real
+  `MaxWorkgroupMemoryInstance::queuePass` in the third-party `VK-GL-CTS`
+  checkout (env-var-gated `FEME_DEBUG_L442_SHRINK`, never committed, reverted
+  before session end) to shrink the dispatch to `wgx=16, numElems=40` while
+  reusing the exact same `glslang`-compiled GLSL shader and compilation path
+  as the real failing case. This reproduces the identical doubling pattern
+  in roughly a second instead of minutes, and is now documented in
+  `feme/.instructions.md` as the standard technique for any future
+  "needs a fast repro of a CTS-only failure" investigation.
+- Captured `FEME_DUMP_IR_PRELINEARIZE` for the shrunk case and ran it
+  through `feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize`
+  standalone. Manually traced a single matching scalar invocation (global
+  idx=4, outer loop `i=1,j=0`) through the post-`feme-cpu-linearize`
+  (pre-SIMDize) IR's `live.t`/`sideeffect.t`/`.linearized`/`live.merge`
+  predicate-merging logic and confirmed exactly one atomic fires with
+  `Mask=true` -- `Linearize.cpp`'s masked-loop lowering is correct at the
+  scalar level, confirming (independently of `L443`'s own differential
+  test) that the bug lives downstream, in vectorization.
+- Added temporary `FEME_DEBUG_L442_TRACE_ATOMIC` instrumentation to
+  `femeCpuResourceAtomicAddRaw` (reverted before session end, not
+  committed) and confirmed on real FeMe hardware: within one `runCompute`
+  call, per-lane atomic byte-offsets fire in order `0,4,8,12` (wave 0's
+  four lanes, each once, correct), then `16,16,20` (wave 1: lane 0 fires
+  **twice**, lane 1 fires once) -- this is the clearest possible evidence
+  the duplication is a literal duplicate call specific to lane 0 of
+  non-first waves, since the shader's `elseif` branch (the only other
+  candidate source of a second call) is provably false at this exact
+  iteration (`shared_idx=4 < wg_size=16`).
+- Inspected `/tmp/l442_min/shrink_postsimd.ll`'s per-lane unrolled
+  atomic-call sequences for both the shader's `if` (own-match) and
+  `elseif` branches; both read as individually clean (one
+  `extractelement`+`call` per lane, 0-3, no textual duplication in either
+  block) -- so the bug is not a simple literal-duplicate-instruction in
+  the already-emitted unrolled sequence itself, but something in how the
+  masked inner loop's per-(i,j) predicate state threads across repeated
+  re-entries of that inner loop from the outer, uniform-trip-count loop.
+  Not yet pinned to an exact line in `SIMDize.cpp`; next session should add
+  instrumentation directly to that pass's masked-loop/divergent-call-site
+  construction rather than continuing to eyeball the emitted IR text.
+- Confirmed (separately, a dead end worth recording) that `dxc`'s codegen
+  for HLSL's analogue of the shader's dynamic `wg_mem[i][j]`
+  vector-component indexing does not match `glslang`'s shape (it instead
+  trips a different, unrelated, already-known `feme-cpu-linearize`
+  diagnostic) -- an HLSL/`dxc`-based repro of this exact bug shape is not
+  viable; neither `glslangValidator` nor `glslc` are built standalone in
+  this environment, making the "shrink the real CTS test" technique above
+  the only fast way to iterate on this specific codegen shape.
+- As session cleanup, found and fixed a real (if minor) lit-test
+  regression unrelated to `L442` itself: `check-feme`'s
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll` had been failing
+  since `L429`'s own commit (which reported `FeMeTransformsCPUTests` and
+  `check-hlsl-feme-vk` results, but not a full lit-suite run) -- the
+  test's `CHECK` lines were simply stale against `L429`'s own correct,
+  intentional behavior change (`HeaderDerivedValues` depending on a
+  `PersistentInduction` phi are now recomputed fresh at each use site
+  instead of threaded through a dedicated `loopvarN` parameter). Fixed by
+  updating the test's expectations, not the compiler; `check-feme` is now
+  3,773/3,780 Passed, 0 Failed, 7 Unsupported.
+
+Re-confirmed the `L442` CTS baseline is unchanged on a pristine checkout
+after all instrumentation was reverted:
+`dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory.*`
+still 0/6 Passed, 6/6 Failed. Also re-ran `check-hlsl-feme-vk` (492/793
+Passed, 273 Unsupported, 28 Expectedly Failed, 0 unexpected failures) to
+confirm the lit-test fix introduces no regressions there either.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (this session's `check-feme` lit-test fix is a test-expectations-only
+change with no behavior difference; `L442` itself remains unfixed; the two
+completed sweeps are measurements only).
+
+**Next steps**: instrument `SIMDize.cpp`'s masked-loop construction directly
+to find the exact duplicate-lane-0-call mechanism (see `L446`); a future
+`opquantize`/`opinboundsaccesschain` reduction session using the
+already-completed 275-case `spirv_assembly.*` baseline (`L444`); `L419(ad)`
+(`mixed_break_continue`, 4 cases), `L419(y)` (`conditional_break`, 6 cases),
+and `L419(g)` (30 tessellation residuals) all remain untouched standing
+items; `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) also
+remains deferred.
