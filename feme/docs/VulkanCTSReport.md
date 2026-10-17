@@ -6413,3 +6413,73 @@ triage in the time remaining); likely dominated by the known
 Vulkan` markers already present on many of these tests, but this has
 **not** been verified case-by-case. `Vulkan14FeatureInventory.md`/
 `VulkanExtensionInventory.md`: no change.
+
+## `L441`: `L440`'s use-after-free root-caused and fixed, `check-hlsl-feme-vk` back to 0 Failed
+
+Root-caused and fixed the `L440` memory-corruption bug left open by the
+prior sub-session. The actual bug: `foldNowTriviallyConstantMaskPhis`
+(`Linearize.cpp`, called from `addLatchIncoming` while linearizing a
+cycle) chases each of its `MaskPhis` through a `Replacements` map to find
+its ultimate folded value, via `dyn_cast<Instruction>(V)` -- but the
+function's own preceding fold loop erases every folded instruction
+*immediately* after recording it as a `Replacements` key, so whenever
+`V == PN` and `PN` itself had already been folded earlier in the same
+call, `V` is a dangling pointer to freed memory and `dyn_cast`'s internal
+type-ID read is a genuine use-after-free. This single bug explains every
+previously-seen crash signature (`doRAUW` type mismatch, verifier-print
+garbage, a `WeakTrackingVH` construction around pointer `0x20`, a
+bitcode-writer `SIGSEGV`) as different downstream symptoms of the same
+corrupted read, depending only on what had overwritten the freed memory
+by the time it was read (hence the ASLR-dependent reproduction rate).
+
+Found via careful A/B isolation across three code states (none of which
+alone explained the full crash-rate picture) and a plain `bt` backtrace
+(`bt full` was found to perturb timing enough to hide the race entirely
+-- 1900 iterations with it enabled produced zero crashes) that pinned
+down the exact construction site, traced one level further back to the
+true root cause. Fixed by looking the pointer value up in `Replacements`
+directly via `reinterpret_cast`, never dereferencing `V` to get there --
+`DenseMap::find` only hashes/compares the pointer bit pattern, so this
+is exactly as precise as the `dyn_cast` guard it replaces, without ever
+reading through a possibly-freed pointer.
+
+Landed as two commits: the root-cause fix plus a new lit regression test
+(`nested-loops-outer-mask-phi-fold-uaf.ll`, asserting the structural
+precondition that triggers the bug -- it cannot assert on the
+nondeterministic crash itself), then the pre-existing `WeakMaskPair`
+(`WeakTrackingVH`-backed) hardening for three *other* long-lived mask
+caches, kept as independent defense-in-depth after confirming (via an
+isolated 300-iteration run with only the root-cause fix, no
+`WeakMaskPair` at all) that the root-cause fix alone is already
+sufficient and necessary.
+
+**Validation this session**:
+- `FeMeTransformsCPUTests`: 638/638 passed.
+- `check-feme`: 3,769 passed, 7 unsupported, 1 failed (pre-existing,
+  confirmed via `git stash` to predate this session's changes --
+  `entry-wrapper-loop-header-derived-value-in-suffix.ll`).
+- Crash-loop (gdb + ASLR against the real pipeline, plus a faster
+  standalone `feme-opt --llvm -passes=feme-cpu-linearize` repro found
+  via the existing `FEME_DUMP_IR_PRELINEARIZE=1` dump): well over 1,500
+  combined crash-free iterations across all tested configurations with
+  the fix in place (vs. nonzero crash rates of 5-23/300 at every stage
+  without it).
+- **`check-hlsl-feme-vk` re-run end to end: 492 Passed/273
+  Unsupported/28 Expectedly Failed out of 793, 0 Failed, 0 crashes** --
+  confirms the original symptom that started this whole investigation
+  (`WaveOps/WaveReadLaneFirst.fp16.test` crashing nondeterministically)
+  is fully resolved. This matches/slightly exceeds the best
+  previously-recorded passing count for this suite.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure compiler memory-safety fix, no feature/extension surface
+touched). Full `dEQP-VK.glsl.loops.special.*` 552-case sweep not
+re-run this specific sub-session (no `L419`-relevant masking-logic
+change was made, only the orthogonal UAF fix); the standing
+`/tmp/l437_full_run3` full sweep continues unaffected in the
+background and will exercise this code path regardless.
+
+**Next steps**: `L419(g)` (30 tessellation residuals), `L419(h)`'s
+remaining residuals, `L419(y)` (`conditional_break_uniform`), and the
+`check-hlsl-clang-feme-vk` 92-failure triage all remain open/deferred,
+unchanged by this session's work.
