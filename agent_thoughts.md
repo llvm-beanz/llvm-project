@@ -124829,3 +124829,32 @@ Earlier session summaries assumed `offload-test-suite`'s own cmake build was nev
 4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline (`L440(b)`) needs re-measuring on a quiet machine (no standing CTS sweep running) and case-by-case triage -- likely dominated by the known upstream `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608) per existing `XFAIL` markers, but not yet verified.
 5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running and growing (253MB+ as of this session's end) -- just check progress, don't restart.
 6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
+
+# Session: L419(h) loop-in-switch diagnostic fix (L419z)
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**What's done**: Fixed the misleading diagnostic on `L419(h)`'s last 4 loop-in-switch CTS failures. Root cause: `Header`'s own divergent trip-count check funnels through a shared `Flow` relay (reused by the switch's own scaffolding) before reaching the real exit block, so `HeaderExit` never gets recognized and the pass blamed `Flow` instead of `Header`. Same "two divergent exit checks" shape already handled elsewhere, just reached via a worse path. Fix only improves the error message — the 4 cases are still genuinely unsupported.
+
+**Commits** (2, both pushed to working tree, not yet to remote):
+1. `feme: clarify diagnostic for loop-in-switch two-divergent-check shape (L419h)` — `Linearize.cpp` fix + new regression test `loop-in-switch-divergent-header-and-relay.ll`.
+2. `feme: document L419(z) loop-in-switch diagnostic fix in Roadmap/CTSReport` — doc updates.
+
+**Validation, all green**:
+- `FeMeTransformsCPUTests`: 638/638.
+- `Linearize` lit suite: 53/53 (new test included).
+- `check-feme`: 3,770/3,778 — the 1 failure (`entry-wrapper-loop-header-derived-value-in-suffix.ll`) is pre-existing, confirmed via `git stash` on the pre-change tree too.
+- Real CTS through the actual ICD: `loop_in_switch` group 14/18 unchanged (new diagnostic text confirmed firing), `glsl.switch.*` 118/122 unchanged, `glsl.loops.special.*` 534/552 unchanged. Zero regressions anywhere.
+- No feature/extension inventory changes needed — diagnostic-only, no capability surface touched.
+
+**The annoying part**: building a minimal hand-written regression test for this took way longer than the actual fix. A clean synthetic repro of "divergent header funneled through a shared relay" gets silently eliminated by `foldRedundantFlowBlocksInCycle` before it ever reaches the buggy code path — that fold is more aggressive than I expected (it tolerates extra loop-carried data phis coexisting with the exit-check phi, as long as their uses can all be forwarded). Two separate synthetic attempts got folded away. Ended up just trimming the real CTS-extracted IR (removed two unused globals + their SPIR-V decoration metadata, nothing else) and using that directly — it survives the fold for reasons I never fully pinned down (manual precondition tracing suggested it *should* also qualify for the fold, but empirically doesn't). Flagging this as an open question, not blocking, but worth understanding before anyone else tries to write a small test in this code area.
+
+## Next steps
+
+1. **(~1 day)** The actual capability fix for `L419(z)`'s shape: make `collectUniformPassThroughRegion` (or `matchExitCheck`'s relay-recovery) tolerate a successor chain that passes through another block with its own `CondBr` before reaching `ExitBlock`, by recursively masking that intermediate block's divergent split too. This is materially riskier than today's fix — this exact code area (`L419(v)`/`L419(w)`) has regressed twice before when generalized carelessly. Validate against the 4 loop-in-switch cases plus the full 552-case `loops.special` sweep and the already-fixed `L419(w)`/`L419(x)` cases (16 total) before considering it safe.
+2. **(standing)** `L419(g)` — 30 tessellation residuals, untouched.
+3. **(standing)** `L419(h)`'s other remaining residuals (`elseblock`/`ifblock`/`mixed_break_continue`, 12 cases) — distinct shapes, need their own reduction.
+4. **(standing)** `L419(y)` (`conditional_break_uniform`, 6 cases) — untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running and growing (294MB as of this session's end, up from 253MB) — just check progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
