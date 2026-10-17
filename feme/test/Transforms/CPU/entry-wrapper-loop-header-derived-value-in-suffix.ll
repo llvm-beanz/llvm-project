@@ -16,17 +16,33 @@
 ; `%doubled` must instead get the same trailing-parameter treatment as any
 ; genuine induction, threaded into the suffix region exactly like it
 ; already was for the loop body.
+;
+; L429 (feme/docs/Roadmap.md) subsequently taught `HeaderDerivedValues` to
+; special-case values (like `%doubled` here) that transitively depend on a
+; `PersistentInduction` header phi (`%sum`): since such a phi has no single
+; scalar value in `LoopHeaderBB` (it is wave-persistent, reload-rewritten
+; from `barrier_spill` instead), the dependent value can no longer be
+; cloned once into the header and threaded through a `loopvarN` parameter.
+; Instead it is recomputed fresh at its original use site
+; (`cloneHeaderChainAt`) once `%sum`'s own reload is in scope, so
+; `@main.suffix0` now only takes the loop's own `loopvar0` induction and
+; recomputes `%doubled` itself from the reloaded `%sum`.
 
-; The post-loop suffix region takes `%doubled` as its own trailing
-; `loopvarN` parameter (one slot past the loop's own `loopvar0`
-; induction) rather than referencing the (by then erased) header
+; The post-loop suffix region reloads `%sum` from `barrier_spill` and
+; recomputes `%doubled` in place, rather than taking it as its own
+; trailing `loopvarN` parameter or referencing the (by then erased) header
 ; instruction directly.
 ; CHECK-LABEL: define internal void @main.suffix0(
-; CHECK-SAME: i32 %loopvar0, i32 %loopvar1
-; CHECK: store i32 %loopvar1, ptr @out
+; CHECK-SAME: i32 %loopvar0, ptr %barrier_spill)
+; CHECK: %[[RELOAD:.*]] = load i32, ptr %sum.reload{{.*}}
+; CHECK: %[[DOUBLED:[0-9]+]] = mul i32 %[[RELOAD]], 2
+; CHECK: store i32 %[[DOUBLED]], ptr @out
 
-; The loop header clones `%doubled` once per iteration, same as any
-; other header-local value.
+; The loop header's own clone of `%doubled` (never used, since nothing in
+; the header itself or the loop body reads it) is left dead, now computed
+; from `poison` because the `PersistentInduction` header phi it depended
+; on has already been erased by the time the header's one-shot clone
+; happens.
 ; CHECK-LABEL: define void @feme_cpu_entry_main(
 ; CHECK: loop.header:
 ; CHECK: %{{[0-9]+}} = mul i32 poison, 2
