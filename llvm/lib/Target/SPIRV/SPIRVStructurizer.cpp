@@ -953,8 +953,6 @@ class SPIRVStructurizerImpl {
 
     DomTreeBuilder::BBDomTree DT;
     DomTreeBuilder::BBPostDomTree PDT;
-    PDT.recalculate(F);
-    DT.recalculate(F);
 
     for (BasicBlock &BB : F) {
       if (HeaderBlocks.count(&BB) != 0)
@@ -967,52 +965,50 @@ class SPIRVStructurizerImpl {
         if (MergeBlocks.count(Successor) != 0 ||
             ContinueBlocks.count(Successor) != 0)
           continue;
-        if (HeaderBlocks.count(Successor) != 0)
-          continue;
         CandidateEdges += 1;
       }
 
-      if (CandidateEdges <= 1)
+      if (CandidateEdges <= 1 && !isa<SwitchInst>(BB.getTerminator()))
         continue;
 
+      DT.recalculate(F);
+      PDT.recalculate(F);
       BasicBlock *Header = &BB;
       BasicBlock *Merge = PDT.getNode(&BB)->getIDom()->getBlock();
-
-      bool HasBadBlock = false;
-      visit(*Header, [&](const BasicBlock *Node) {
-        if (DT.dominates(Header, Node))
-          return false;
-        if (PDT.dominates(Merge, Node))
-          return false;
-        if (Node == Header || Node == Merge)
-          return true;
-
-        HasBadBlock |= MergeBlocks.count(Node) != 0 ||
-                       ContinueBlocks.count(Node) != 0 ||
-                       HeaderBlocks.count(Node) != 0;
-        return !HasBadBlock;
-      });
-
-      if (HasBadBlock)
-        continue;
-
-      Modified = true;
-
-      if (Merge == nullptr) {
-        Merge = *successors(Header).begin();
-        IRBuilder<> Builder(Header);
-        Builder.SetInsertPoint(Header->getTerminator());
-
-        auto MergeAddress = BlockAddress::get(Merge->getParent(), Merge);
-        createOpSelectMerge(&Builder, MergeAddress);
+      if (!Merge) {
+        IRBuilder<> Builder(Header->getTerminator());
+        createOpSelectMerge(&Builder,
+                            BlockAddress::get(&F, *successors(Header).begin()));
+        Modified = true;
         continue;
       }
-
-      Instruction *SplitInstruction = Merge->getTerminator();
-      if (isMergeInstruction(SplitInstruction->getPrevNode()))
-        SplitInstruction = SplitInstruction->getPrevNode();
+      if (DT.dominates(Header, Merge)) {
+        Instruction *SplitInstruction = Merge->getTerminator();
+        if (isMergeInstruction(SplitInstruction->getPrevNode()))
+          SplitInstruction = SplitInstruction->getPrevNode();
+        BasicBlock *NewMerge =
+            Merge->splitBasicBlockBefore(SplitInstruction, "new.merge");
+        IRBuilder<> Builder(Header->getTerminator());
+        createOpSelectMerge(&Builder,
+                            BlockAddress::get(NewMerge->getParent(), NewMerge));
+        Modified = true;
+        continue;
+      }
+      // Other paths may reach the post-dominator without passing through this
+      // header. Give this selection its own merge, redirecting only its edges.
+      SmallVector<BasicBlock *> Preds;
+      for (BasicBlock *Pred : predecessors(Merge))
+        if (DT.dominates(Header, Pred))
+          Preds.push_back(Pred);
+      if (Preds.empty())
+        continue;
+      Modified = true;
       BasicBlock *NewMerge =
-          Merge->splitBasicBlockBefore(SplitInstruction, "new.merge");
+          BasicBlock::Create(F.getContext(), "new.merge", &F);
+      IRBuilder<> MergeBuilder(NewMerge);
+      MergeBuilder.CreateBr(Merge);
+      for (BasicBlock *Pred : Preds)
+        replaceBranchTargets(Pred, Merge, NewMerge);
 
       IRBuilder<> Builder(Header);
       Builder.SetInsertPoint(Header->getTerminator());

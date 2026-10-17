@@ -3187,10 +3187,23 @@ static bool prepareModuleAnalysis(MachineFunction &MF) {
   collectFPFastMathDefaults(*F.getParent(), FPFastMathDefaultInfoMap, ST, &F);
   // Add decorations related to MI flags.
   bool Changed = false;
-  for (auto &MBB : MF)
+  for (auto &MBB : MF) {
     for (auto &MI : make_early_inc_range(MBB))
       Changed |= handleMIFlagDecoration(MI, ST, TII, Reqs, GR,
                                         FPFastMathDefaultInfoMap[&F]);
+    // Machine optimizations can insert computations between a merge and its
+    // branch. SPIR-V requires them to be adjacent in the final instruction
+    // stream.
+    for (auto &MI : make_early_inc_range(MBB))
+      if (MI.getOpcode() == SPIRV::OpSelectionMerge ||
+          MI.getOpcode() == SPIRV::OpLoopMerge) {
+        auto Term = MBB.getFirstTerminator();
+        if (std::next(MI.getIterator()) != Term) {
+          MBB.splice(Term, &MBB, MI.getIterator());
+          Changed = true;
+        }
+      }
+  }
   return Changed;
 }
 

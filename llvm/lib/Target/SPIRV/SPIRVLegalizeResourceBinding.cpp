@@ -13,16 +13,22 @@
 // It also replaces any @llvm.spv.resource.counterhandlefromimplicitbinding and
 // @llvm.spv.resource.counterhandlefromheap intrinsics with calls to
 // @llvm.spv.resource.counterhandlefrombinding.
+// Global resource handle loads are forwarded from their initialization stores.
 //
 //===----------------------------------------------------------------------===//
 
 #include "SPIRV.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstVisitor.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
@@ -434,6 +440,103 @@ bool SPIRVLegalizeResourceBindingImpl::replaceHeapBindingCalls(Module &M) {
   return Changed;
 }
 
+// At -O0 resource handles can remain in fields of global resource objects.
+// Forward their initialization only when every access is known and each load
+// is dominated by the unique store to the same field.
+static bool forwardResourceHandles(GlobalVariable &GV) {
+  if (!GV.hasLocalLinkage())
+    return false;
+
+  SmallVector<Value *> Worklist{&GV};
+  SmallPtrSet<Value *, 16> Visited;
+  SmallVector<LoadInst *> Loads;
+  DenseMap<int64_t, StoreInst *> Stores;
+  const DataLayout &DL = GV.getDataLayout();
+  while (!Worklist.empty()) {
+    Value *Ptr = Worklist.pop_back_val();
+    if (!Visited.insert(Ptr).second)
+      continue;
+    for (User *U : Ptr->users()) {
+      if (auto *GEP = dyn_cast<GEPOperator>(U)) {
+        if (!GEP->hasAllConstantIndices())
+          return false;
+        Worklist.push_back(GEP);
+        continue;
+      }
+      if (auto *LI = dyn_cast<LoadInst>(U)) {
+        if (!LI->isSimple())
+          return false;
+        Loads.push_back(LI);
+        continue;
+      }
+      auto *SI = dyn_cast<StoreInst>(U);
+      if (!SI || !SI->isSimple() || SI->getPointerOperand() != Ptr)
+        return false;
+      auto *II = dyn_cast<IntrinsicInst>(SI->getValueOperand());
+      if (!II ||
+          II->getIntrinsicID() != Intrinsic::spv_resource_handlefrombinding)
+        return false;
+      int64_t Offset;
+      if (GetPointerBaseWithConstantOffset(Ptr, Offset, DL) != &GV ||
+          !Stores.try_emplace(Offset, SI).second)
+        return false;
+    }
+  }
+  if (Stores.empty())
+    return false;
+
+  for (auto [Offset, SI] : Stores) {
+    if (Offset < 0)
+      return false;
+    uint64_t Size =
+        DL.getTypeStoreSize(SI->getValueOperand()->getType()).getFixedValue();
+    for (auto [OtherOffset, OtherSI] : Stores)
+      if (OtherOffset > Offset && uint64_t(OtherOffset - Offset) < Size)
+        return false;
+  }
+
+  DenseMap<Function *, std::unique_ptr<DominatorTree>> DomTrees;
+  SmallVector<std::pair<LoadInst *, Value *>> Replacements;
+  for (LoadInst *LI : Loads) {
+    int64_t Offset;
+    if (GetPointerBaseWithConstantOffset(LI->getPointerOperand(), Offset, DL) !=
+        &GV)
+      return false;
+    StoreInst *SI = Stores.lookup(Offset);
+    if (!SI || SI->getValueOperand()->getType() != LI->getType() ||
+        SI->getFunction() != LI->getFunction())
+      return false;
+    auto &DT = DomTrees[LI->getFunction()];
+    if (!DT)
+      DT = std::make_unique<DominatorTree>(*LI->getFunction());
+    if (!DT->dominates(SI, LI))
+      return false;
+    Replacements.emplace_back(LI, SI->getValueOperand());
+  }
+
+  for (auto [LI, Handle] : Replacements) {
+    LI->replaceAllUsesWith(Handle);
+    LI->eraseFromParent();
+  }
+  for (auto [Offset, SI] : Stores)
+    SI->eraseFromParent();
+  SmallVector<Instruction *> GEPs;
+  for (Value *Ptr : Visited)
+    if (auto *I = dyn_cast<Instruction>(Ptr))
+      GEPs.push_back(I);
+  while (!GEPs.empty()) {
+    auto It =
+        llvm::find_if(GEPs, [](Instruction *I) { return I->use_empty(); });
+    assert(It != GEPs.end() && "resource pointer use cycle");
+    (*It)->eraseFromParent();
+    GEPs.erase(It);
+  }
+  GV.removeDeadConstantUsers();
+  assert(GV.use_empty());
+  GV.eraseFromParent();
+  return true;
+}
+
 bool SPIRVLegalizeResourceBindingImpl::runOnModule(Module &M) {
   collectBindingInfo(M);
 
@@ -442,6 +545,9 @@ bool SPIRVLegalizeResourceBindingImpl::runOnModule(Module &M) {
     Changed |= replaceImplicitBindingCalls(M);
   if (MayHaveHeapBindings)
     Changed |= replaceHeapBindingCalls(M);
+
+  for (GlobalVariable &GV : make_early_inc_range(M.globals()))
+    Changed |= forwardResourceHandles(GV);
 
   return Changed;
 }
