@@ -7437,15 +7437,39 @@ before a later fix in the same session rebuilt the library they were
 meant to measure) and discarded/relaunched; see the new
 `feme/.instructions.md` lesson on checking a sweep process's start
 time against the binary's rebuild time before trusting its results.
-The current sweep, `/tmp/l444_spirvasm_rerun3.qpa`, was launched after
-this session's final rebuild and should be valid when it completes.
+The sweep, `/tmp/l444_spirvasm_rerun3.qpa`, was launched after
+`L451`'s own final rebuild and has now completed.
 
-**Next steps**: check on `/tmp/l444_spirvasm_rerun3.qpa` and record the
-refreshed full baseline once complete; re-cluster the remaining
-failures against the fresh data before picking the next target (prior
-candidates per the stale baseline: several ~8-case struct/array
-composite-decomposition clusters, `floatarray`, `matrix`,
-`nested_struct`/`undef_nested_struct`, `mip_1`); `L419(ad)`
-(`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
-(tessellation residuals); `L440(c)`'s 39-case residual triage. All
-unchanged standing items.
+## L444 refreshed baseline (confirmed, real measurement)
+
+`/tmp/l444_spirvasm_rerun3.qpa`: 12,306 Passed / **229 Failed** / 57,802
+NotSupported out of 70,337 (17.5% Pass, 0.3% Fail, 82.2% NotSupported).
+This exactly matches the 275 − 13 (`L449`) − 13 (`L450`) − 20 (`L451`) =
+229 arithmetic prediction -- confirms the three landed fixes did not
+shift any other cluster as a side effect.
+
+Re-clustered the 229 remaining failures by case-family prefix (stage
+suffix normalized away, e.g. `_frag`/`_vert`/...):
+
+| Cluster | Count |
+|---|---|
+| `f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`, `switch` | 8 each (56 total) |
+| `floatarray`, `matrix` | 7 each (14 total) |
+| `nested_struct`, `undef_nested_struct`, `mip_1`, `fconvert16` | 6 each (24 total) |
+| `opline_empty_name`, `opline_long_name`, `opline_short_name`, `opnoline`, `opnop`, `out_of_order` | 5 each (30 total) |
+| `same_module` | 4 |
+| `mip_0`, `switch_continue` | 3 each (6 total) |
+| remaining (smaller clusters) | ~2-1 each |
+
+The `opline`/`opnop`/`out_of_order` group (30 cases total) looks like a
+single shared root cause given the naming pattern (SPIR-V debug-info
+instructions, `OpLine`/`OpNoLine`/`OpNop`, likely a line-info-adjacent
+legalization or ordering gap) rather than six independent one-off bugs
+-- worth investigating together as the next compact-cluster candidate.
+
+**Next steps**: pick the next cluster for reduction -- either the
+`opline`/`opnop` debug-instruction group (30 cases, single suspected
+root cause) or one of the seven ~8-case struct/array
+composite-decomposition clusters; `L419(ad)` (`mixed_break_continue`);
+`L419(y)` (`conditional_break`); `L419(g)` (tessellation residuals);
+`L440(c)`'s 39-case residual triage. All unchanged standing items.
