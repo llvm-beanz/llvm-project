@@ -69,27 +69,26 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, dedicated session, the real prize — 12 cases)** Implement the
-   `L419(z)`/`L419(aa)` capability fix: when `HeaderExit`/`LatchExit` is
-   `std::nullopt` for a block with its own divergent `CondBr`, admit it into the
-   existing `OtherCondBrBlocks`/`DivergentCandidates` machinery instead of
-   letting it fall through to the diagnostic. Needs reordering
-   `OtherCondBrBlocks`/`DivergentCandidates` computation relative to
-   `HeaderExit`/`LatchExit` — the exact kind of change that's regressed twice
-   before here. Validate against: the 4 `loop_in_switch` + 8
-   `elseblock`/`ifblock` target cases, PLUS the full 552-case `loops.special`
-   sweep (zero regressions), PLUS the already-fixed
-   `L419(w)`/`L419(x)`/`L419(z)` cases, after every incremental step — not just
-   at the end.
-2. **(~half day)** `mixed_break_continue` (4 cases) — separate
-   `DiamondFlattener` body-shape gap, needs its own reduction starting from
-   `/tmp/mbc_frag_mod2.ll` (already extracted and in `/tmp`, not committed).
+1. **(~1-2 days, dedicated session, needed before any further L419(z)/(aa)/(ab)
+   attempt)** Design the per-lane loop-carried-value freeze mechanism first, in
+   isolation: when `HeaderDivergent` is set but Header's own divergent exit
+   funnels back into the loop body rather than leaving the cycle directly, every
+   loop-carried phi value needs a `select`/freeze gated on
+   `active.header.check.live`, analogous to `DiamondFlattener`'s existing
+   in-body diamond merges. Prove this with a standalone unit test (assert the
+   expected `select` appears) before touching `recoverRelayExitCheck` again.
+   Then re-apply the `IsTrivialExitStub`/`RelayBlock` fixes from this session
+   (they're correct and still needed, just not sufficient alone) and re-validate
+   the full 552-case sweep plus the 4+8 target cases plus all previously-fixed
+   `L419` cases.
+2. **(standing)** `mixed_break_continue` (4 cases) — separate `DiamondFlattener`
+   body-shape gap, untouched, repro at `/tmp/mbc_frag_mod2.ll`.
 3. **(standing)** `L419(y)`'s masking-sequencing gap (`conditional_break`, 6
-   cases) — re-confirmed still failing this session, unchanged.
-4. **(standing)** `L419(g)` — 30 tessellation residuals, still untouched.
+   cases) — untouched.
+4. **(standing)** `L419(g)` — 30 tessellation residuals, untouched.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage,
    still deferred every session.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and
-   growing (305MB) — just check progress, don't restart.
+   growing (375MB) — just check progress, don't restart.
 7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
    master per-group table in one pass using the completed results.
