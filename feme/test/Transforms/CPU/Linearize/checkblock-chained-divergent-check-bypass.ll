@@ -41,9 +41,28 @@
 ; without the underlying IR shape changing at all. Match the structural
 ; pattern instead of hardcoding those suffixes so this test does not
 ; depend on numbering that was never meant to be stable.
-; CHECK: %chain.merge = select i1 {{%[A-Za-z0-9_.]+}}, i1 true, i1 {{%[A-Za-z0-9_.]+}}
-; CHECK-NEXT: br label %Flow72.Flow74_crit_edge
-; CHECK-NOT: label %76
+;
+; Roadmap L452(d): `peelWouldDestroyAncestorReconvergencePoint` now
+; (correctly, conservatively) also recognizes *this* shape -- `Flow72`'s
+; two successors (the bypass block and `Flow72.Flow74_crit_edge`) both
+; reach `Flow74` through nothing but pure relay hops, i.e. `Flow74` is
+; `Flow72`'s own clean two-arm reconvergence point -- as one it cannot
+; prove safe to collapse without the specific `L377(a)` reasoning above
+; (which is itself a narrower, shape-specific exception the generic
+; guard cannot see), so `peelConstantFlowPredecessors` now declines this
+; one bypass-and-elide micro-optimization and leaves `Flow72` standing
+; for `DiamondFlattener::flatten`'s own ordinary, always-safe path to
+; handle instead. The `%chain.merge`/bypass-elision shape this comment
+; block describes no longer appears; `Flow72` itself is fully flattened
+; (no divergent `CondBr` survives for `feme-cpu-simdize` to reject) via
+; plain `select`s instead -- still correct, just reached without the
+; now-declined fast path. See `peelWouldDestroyAncestorReconvergencePoint`'s
+; own comment in `Linearize.cpp` and this file's git history for the
+; original `L377(a)`-era shape this test used to assert.
+; CHECK-LABEL: define void @main(
+; CHECK: Flow72:
+; CHECK-NOT: br i1
+; CHECK: Flow72.Flow74_crit_edge:
 
 define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #4 {
   %1 = call i32 @llvm.spv.thread.id.i32(i32 0)
