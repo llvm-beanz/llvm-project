@@ -124916,3 +124916,44 @@ Earlier session summaries assumed `offload-test-suite`'s own cmake build was nev
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (375MB) — just check progress, don't restart.
 7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
+
+# Session: L419(ac) — the capability fix finally lands, 12/12 cases fixed
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `llvmpipe` (wrong!). Fixed: `VK_ICD_FILENAMES` env var was pointed at `lvp_icd.json`, not the FeMe ICD. With `VK_ICD_FILENAMES=.../tools/feme-vulkan/feme_icd.json` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**What's done**: Implemented, tested, and landed the fix `L419(ab)` designed but couldn't build in time: a per-lane freeze for loop-carried values orphaned by a relay-chain phi collapse. All 12 target cases (4 `loop_in_switch` + 8 `elseblock`/`ifblock`) now genuinely pass CTS, not just compile cleanly.
+
+**The fix, 2 pieces**:
+1. `freezeRelayChainExitValues` (new function): walks `ExitCheck::RelayChain` (new field, populated by `IsTrivialExitStub`'s chase) and `select`-wraps each relay hop's own phi on the per-lane "still looping" guard mask, right before the orphaning `->Br->eraseFromParent()`. Preserves the exit edge's value for already-exited lanes instead of letting it get silently discarded once `EliminateUnreachableBlocks` collapses the phi later.
+2. `freezeLoopCarriedValues` gets a new `RelayCaptured` parameter: when the orphaned value is itself `Header`'s own raw loop-carried phi, its backedge also needs the usual sticky self-referential freeze — a one-shot select alone doesn't stop the raw phi from still mutating under already-exited lanes every iteration.
+
+Wired into all 4 call sites that can erase a `HeaderExit`/`LatchExit` check's own `CondBr`.
+
+**Proof before CTS**: new unit test `LinearizeTest.FreezesRelayChainExitValueThroughSharedDispatchBlock` — hand-written minimal repro (not a CTS extraction), asserts both selects appear structurally. This is exactly the "prove it in isolation first" step last session's reverted attempt skipped.
+
+**Verification**:
+- `FeMeTransformsCPUTests`: 639/639.
+- `check-feme`: 3,771/3,772 (the 1 remaining failure is the already-confirmed pre-existing, unrelated `entry-wrapper-loop-header-derived-value-in-suffix.ll` — re-confirmed via `git stash` that it fails identically pre-change).
+- `dEQP-VK.glsl.switch.*loop_in_switch*` (18 cases): **18/18 Pass** (was 14/18).
+- Combined `dEQP-VK.glsl.switch.*` + `dEQP-VK.glsl.loops.special.*` (674 cases): **664/674 Pass**. The 10 remaining failures are exactly `L419(y)`'s `conditional_break` (6) and `mixed_break_continue` (4) — both already-tracked, both untouched by this fix. Zero regressions.
+
+**Why this one stuck where `L419(ab)` didn't**: `L419(ab)` masked Header's own check but left the relay-chain's merge phis completely unprotected — the loop body kept recomputing through them for already-exited lanes. This session's fix specifically targets that gap: freeze the relay-hop phi *and* (when needed) the raw phi it captures, both before the orphaning erase, not after.
+
+**Commits** (4, each independently buildable):
+1. `feme: fix L419(ac) relay-chain phi collapse in loop linearization` — the core fix.
+2. `feme: add LinearizeTest for L419(ac) relay-chain exit-value freeze` — the unit test.
+3. `feme: update loop-in-switch-divergent-header-and-relay.ll for L419(ac)` — lit test now expects success.
+4. `feme: document L419(ac) capability fix in Roadmap/VulkanCTSReport` — docs.
+
+**Roadmap**: `L419(ac)` struck through as done — **12/12 target cases fixed**, all of `L419(z)`/`L419(aa)`/`L419(ab)`'s groundwork now paid off.
+
+**Standing sweep**: `/tmp/l437_full_run3/` still running and growing (433MB as of this session's end, up from 375MB at start) — don't restart it.
+
+## Next steps
+
+1. **(standing)** `mixed_break_continue` (4 cases) — separate `DiamondFlattener` body-shape gap, untouched, repro at `/tmp/mbc_frag_mod2.ll`. Now the clear next target: same freeze-before-erase technique this session proved out may apply, but the diagnostic is different (`DiamondFlattener`'s "internal branch in a body shape" message, not `linearizeCycle`'s own), so needs its own reduction first.
+2. **(standing)** `L419(y)`'s masking-sequencing gap (`conditional_break`, 6 cases) — untouched.
+3. **(standing)** `L419(g)` — 30 tessellation residuals, untouched.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage, still deferred every session.
+5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (433MB) — just check progress, don't restart.
+6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed results.
