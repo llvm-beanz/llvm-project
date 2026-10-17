@@ -125089,3 +125089,44 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 6. **(no longer standing)** Both `/tmp/l437_full_run3` and `/tmp/l440c_spirvasm.qpa` are done and recorded this session — no background sweep left to check in on. Consider launching a fresh detached full-`dEQP-VK.*` sweep if a future session has idle background time, per the "launch detached" lesson in `.instructions.md`.
+
+# Session: L442 root cause conclusively pinned (DiamondFlattener::run, not SIMDize.cpp)
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed first action, as required.
+
+**What's done**: `L442`'s root cause is now fully, conclusively identified — and it corrects the prior session's lead. `L446` (last session) pointed at `feme-cpu-simdize`. That was wrong. The bug is in `Linearize.cpp` after all, just not in `LoopLinearizer` (which `L443` already ruled out) — it's in `DiamondFlattener::run()`'s separate, whole-function entry walk, which runs *before* `LoopLinearizer` even starts.
+
+**1. The mechanism, in one pass**:
+- `DiamondFlattener::run()` walks the whole function once, flattening any in-body divergent diamond that isn't itself a recognized loop-control edge — by design, documented in its own comment.
+- `StructurizeCFG` puts this loop's real recognized header/exit-check (`Flow21`/`Flow22`) at the *bottom* of the loop body, not the top.
+- So the walk reaches the shader's `if`/`elseif` diamond (containing both resource atomics) *before* it ever reaches that recognized boundary — baking in a mask from `AllActive` + the diamond's own condition only, zero contribution from the loop's own per-iteration bound.
+- `LoopLinearizer` runs later and computes the *correct* mask, but `narrowCallMask`'s one-shot "only overwrite while still constant" guard (added for a different, real, already-fixed regression) refuses to touch the atomic calls' mask operands again, since they're no longer the placeholder constant.
+- Net: one extra out-of-bounds loop iteration's atomic fires ungated by the loop bound, for the one lane whose index collides with the next wave's lane 0 — the exact 2x doubling.
+
+**2. How I found it this session**: built a fast, fully isolated native-code repro — `feme-opt`'s own `.ll` output compiled directly with `clang -O0` against a small C harness that intercepts the atomic call via `asm()` symbol labeling. Reproduces in ~1 second, zero Vulkan/CTS involved. Then added temporary `FEME_DEBUG_L442_TRACE`/reused `FEME_DEBUG_FLATTEN_TRACE` instrumentation to `Linearize.cpp` (6 call sites, all reverted before committing — diff saved at `/tmp/l442_min/debug_instrumentation.patch`) and hand-traced the block-visit order against the raw IR text to confirm exactly which pass touches the diamond first and why.
+
+**3. Why this wasn't caught by `L425(a)`'s own similar-sounding fix**: that session fixed `regionHasStageMaskOps` — but only for `LoopLinearizer`'s own explicit `flattenLoopBodyDiamond` helper call sites. `DiamondFlattener::run()`'s generic whole-function walk has no equivalent check at all, and reaches this diamond via a completely different code path first.
+
+**4. Not fixed this session — on purpose**: the real fix needs new plumbing, not a quick patch:
+- Extend `validate()`/`flatten()`'s cycle-boundary check to also stop at a `CondBr` whose candidate diamond contains a side-effecting resource/image call (mirroring `regionHasStageMaskOps`, just wired into `DiamondFlattener::run()` instead of only `flattenLoopBodyDiamond`).
+- That alone isn't enough: once `DiamondFlattener::run()` defers, *nothing* currently picks the diamond back up. `flattenTaintedBranchesInRegion` requires a masked-load-derived condition (this one is pure thread-ID arithmetic). `flattenLoopBodyRegion` only runs once per cycle, for the outer loop, confirmed via trace.
+- A genuinely new `LoopLinearizer` helper is needed: something that catches a still-unresolved divergent branch inside `PostRegion` and masks it using the cycle's own `MasksAfterCheck` as the seed instead of `AllActive`. This is real design work, not a quick fix — hence no code change this session.
+
+**Verification**:
+- `check-feme`: 3,773/3,780 Passed, 0 Failed, 7 Unsupported — unchanged from last session's clean baseline, confirming the reverted instrumentation left no trace.
+- `L442`'s own 6-case CTS baseline re-confirmed unchanged: 0/6 Passed, 6/6 Failed (expected, no functional fix made).
+- `/tmp/l437_full_run3`'s sweep (67,043/67,234 Passed, 1 Failed) was already fully recorded last session; checked in, confirmed complete and no longer growing — nothing new to record.
+
+**Commits** (1, documentation only — no functional change this session):
+1. `feme: document L442 root cause (DiamondFlattener::run vs LoopLinearizer masking)` — `Roadmap.md`'s new `L447` entry (supersedes `L446`'s now-incorrect `feme-cpu-simdize` attribution, with a cross-link added to `L446` itself so the contradiction reads cleanly) + `VulkanCTSReport.md`.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — pure investigation and documentation, zero compiler/runtime behavior change.
+
+## Next steps
+
+1. **(dedicated session, ~1-2 days, the real open item)** Implement `L447`'s fix: (a) extend `DiamondFlattener::validate()`/`flatten()` to defer any in-cycle divergent diamond containing a side-effecting resource/image call, mirroring `regionHasStageMaskOps`; (b) design and build the new `LoopLinearizer` mechanism needed to actually pick up and mask such a deferred diamond using `MasksAfterCheck` as its seed (neither `flattenTaintedBranchesInRegion` nor `flattenLoopBodyRegion` currently covers this shape). Start from `Roadmap.md`'s `L447` entry and `/tmp/l442_min/debug_instrumentation.patch` (reapply to re-trace if needed) — don't re-derive the mechanism from scratch, it's fully written up.
+2. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*` baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the two largest) for the next compact-cluster reduction.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases, root cause known, fix design sketched) — still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+6. **(no standing background sweep)** `/tmp/l437_full_run3` and `/tmp/l440c_spirvasm.qpa` are both done and already recorded — nothing to check in on. A future session with idle background time could launch a fresh detached full-`dEQP-VK.*` sweep per the "launch detached" lesson in `.instructions.md`, but this is optional, not a blocker.
