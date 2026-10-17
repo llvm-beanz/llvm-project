@@ -231,26 +231,8 @@ attributes #2 = { nounwind willreturn memory(argmem: readwrite) }
 // header for it since it is codegen-internal to the CPU target's JIT/AOT
 // dispatch path).
 //
-// Deliberately avoids `#include <stdio.h>`/`<string.h>`/`<stdint.h>`: this
-// file is compiled with a bare `clang` invocation (no `-isysroot`/SDK
-// setup), which on a host whose C library headers live outside the
-// compiler's own default search path (confirmed on macOS: a freshly
-// built, non-Xcode-wrapped `clang` can't locate the platform SDK's
-// `stdio.h` at all, `fatal error: 'stdio.h' file not found`) fails before
-// ever reaching this file's own logic. `int32_t`/`int64_t` are replaced
-// with Clang's always-predefined `__INT32_TYPE__`/`__INT64_TYPE__`
-// builtin macros (no header needed at all, on every target this harness
-// runs on); `memset`/`memcpy` are replaced with equivalent hand-rolled
-// loops (at `-O0` these compile to plain loops, not re-recognized libcall
-// idioms, so no libc symbol/header dependency is introduced either way);
-// and `printf` is replaced with an `extern` prototype declared directly
-// here (and used for both the pass/fail message and the mismatch
-// diagnostics, rather than `fprintf(stderr, ...)`: unlike `printf`,
-// `stderr` isn't a portable global symbol to declare without its real
-// header -- e.g. Apple's libc only exports it as `__stderrp` under the
-// `stderr` macro) -- the platform's C library still provides the actual
-// symbol at link/run time (unaffected by this), only the header lookup
-// that would otherwise declare its signature is avoided.
+// Keep the harness independent of platform C library headers using
+// compiler-provided integer types and local memory helpers.
 typedef __INT32_TYPE__ int32_t;
 typedef __INT64_TYPE__ int64_t;
 typedef __INT8_TYPE__ int8_t;
@@ -299,9 +281,12 @@ extern void feme_cpu_entry_main(Args *args);
 // SIMDized IR still issues per-lane (see `simdize-scalarize-atomic.ll` for
 // why an `atomicrmw`-shaped op always scalarizes): a real heap write,
 // masked by the lowered call's own trailing `i1` lane-mask operand.
+// Explicit asm labels bypass the target's usual symbol prefix.
+#define STRINGIFY_IMPL(x) #x
+#define STRINGIFY(x) STRINGIFY_IMPL(x)
 int32_t feme_atomic_add(void *heap, int32_t heap_count, int32_t binding,
                          int64_t offset, int32_t value, int8_t mask)
-    asm("feme.cpu.resource.atomic.add.raw.i32");
+    asm(STRINGIFY(__USER_LABEL_PREFIX__) "feme.cpu.resource.atomic.add.raw.i32");
 int32_t feme_atomic_add(void *heap, int32_t heap_count, int32_t binding,
                          int64_t offset, int32_t value, int8_t mask) {
   (void)heap_count;

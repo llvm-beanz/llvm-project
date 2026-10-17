@@ -5,6 +5,7 @@ import shutil
 import subprocess
 
 import lit.formats
+import lit.util
 from lit.llvm import llvm_config
 
 # Configuration file for the 'lit' test runner.
@@ -32,6 +33,7 @@ for arch in config.targets_to_build.split():
     config.available_features.add(arch.lower() + "-registered-target")
 
 llvm_config.use_default_substitutions()
+lit.util.usePlatformSdkOnDarwin(config, lit_config)
 
 # Tweak the PATH to include the tools dir, mirroring llvm/test/lit.cfg.py --
 # needed so `RUN: not --crash ...` (unlike plain `RUN: not ...`, which lit's
