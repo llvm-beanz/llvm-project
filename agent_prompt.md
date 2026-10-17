@@ -70,30 +70,27 @@ Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
 1. **(cheap, first thing)** Check on `/tmp/l444_spirvasm_full_rerun.qpa`/`.log`
-   (background `dEQP-VK.spirv_assembly.*` full sweep, 70,337 cases, launched
-   this session, not yet complete) — once done, record the refreshed baseline in
-   `VulkanCTSReport.md` and `Roadmap.md`'s `L444` entry (expect 262 remaining
-   failures).
-2. **(half day)** `L444`'s other large cluster — **double-check its exact
-   case-name prefix before starting**: `Roadmap.md`'s "`opinboundsaccesschain`"
-   label for this specific 275-case-baseline cluster looks like it may be an
-   echo of the *already-fixed*, differently-named `opinboundsaccesschain`
-   cluster documented earlier in `VulkanCTSReport.md` (a
-   `BlockAccessChainPattern`/struct-of-vec3/`matrix_3x3` fix from a much earlier
-   session) rather than a fresh discovery — the case names in this session's own
-   275-case sweep read more like `OpPtrAccessChain`/`opptraccesschain`. Confirm
-   which opcode is actually failing before reduction work starts.
-3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
-   4 cases, root cause known, fix design sketched) — still not attempted.
-4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+   (still running, not restarted across two sessions now) — once done, record
+   the refreshed baseline in `VulkanCTSReport.md` and `Roadmap.md`'s `L444`
+   entry (expect ~249 remaining failures, pending the real measurement).
+2. **(standing, needs a full dedicated session, not a half-day slice)**
+   `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and both candidate
+   fix designs are fully written up in `Roadmap.md`'s own entry; this needs a
+   session that can give it full, undivided attention given its prior-regression
+   history in this exact code area.
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
    tessellation residuals) — both still completely untouched.
-5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`) — still deferred every session.
-6. **(worth filing, low priority, carried forward)** `feme-run` cannot currently
+5. **(worth filing, low priority, carried forward)** `feme-run` cannot currently
    execute a DXIL shader using a resource (not groupshared)
-   `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before
-   reaching the FeMe CPU target. Not investigated further.
-7. **(process reminder for next session)** Run `vulkaninfo --summary | grep
-   deviceName` **as the literal first action**, before any other work — this
-   session did it late. Worth adding extra emphasis/an explicit first-line habit
-   cue if this recurs.
+   `InterlockedAdd`/atomic. Not investigated further.
+6. **(L444's own remaining clusters)** With `opquantize` and `opptraccesschain`
+   both now fixed, the next-largest remaining clusters in the original 275-case
+   baseline (per this session's own cluster breakdown) are `frexpstruct` (12
+   cases), and several ~8-case struct/array composite-decomposition clusters
+   (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
+   `switch`) — worth re-clustering against the fresh completed sweep (item 1)
+   before picking the next target, since some of these may already be fixed as
+   side effects of the two fixes landed this session (unlikely, but cheap to
+   confirm once the real data is in).
