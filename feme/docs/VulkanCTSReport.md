@@ -6942,3 +6942,86 @@ too (a `DiamondFlattener` diamond-arm post-dominator-escape bug, see
 dedicated session; `L419(y)` and `L419(g)` remain untouched standing items;
 `/tmp/l437_full_run3` still running and growing (524MB as of this session's
 end, up from 428MB) -- just check progress next session, don't restart.
+
+## `L442`/`L443`: `max_workgroup_memory` doubling stays open; a real but unrelated `Linearize.cpp` `CheckBlock` masking gap found, fixed, and CTS-verified not to be the cause; `dEQP-VK.spirv_assembly.*` sweep finally completed
+
+Continued the still-open `zero_initialize_workgroup_memory.max_workgroup_memory`
+compute failure (`L442`, 6 cases) from a prior session. While reading
+`Linearize.cpp`'s `LoopLinearizer::linearizeCycle` looking for a masking
+explanation, found and fixed a real, distinct bug (`L443`): resource/atomic
+calls sharing a cycle's `CheckBlock` were narrowed with the stale, pre-check
+mask rather than the check's own narrowed mask, because `narrowCallMask`'s
+one-shot "only overwrite a still-constant mask" guard locks in whichever mask
+a call sees on its first visit, and the pre-existing code applied the
+check-narrowed mask to the whole block only *after* already widely masking it
+with the stale one. Fixed via a position-sensitive split (stale mask at/before
+the check condition's own instruction, check-narrowed mask strictly after),
+with a `SelectInst`-skipping walk to avoid landing between a degenerate
+(`Header == CheckBlock`) block's phis and an earlier
+`freezeRelayChainExitValues` call's own selects for the same block -- the
+third time this exact code area has needed a careful, incremental fix (see
+`L419(h)`/`L419(w)` for the first two). New regression test
+`loop-internal-break-with-mask-op-after-check.ll` (the complement of the
+existing before-the-check test); full `check-feme`: 3,772/3,780 Passed (only
+the pre-existing, unrelated `entry-wrapper-loop-header-derived-value-in-suffix.ll`
+failure remains), 7 Unsupported, 0 regressions.
+
+**Confirmed, via a `git stash`/rebuild/re-run A-B differential test, that this
+fix has zero effect on `max_workgroup_memory`**: ran case `.1` alone against
+both the pre-fix and post-fix `libfeme_vulkan.so`/`feme-opt`, got the
+byte-identical `"failure at index 4: expected 1, got: 2"` result both times.
+The fix's own shape (an off-by-one/"phantom iteration" class of bug) doesn't
+match the actual symptom anyway: every one of the 6 sizes fails with an
+*exact* 2x count (`1`->`2`, `2`->`4`, `4`->`8`, `16`->`32`, `64`->`128`,
+`128`->`256`), not a "+1" pattern. This is the key new diagnostic clue this
+session adds: a clean doubling across every tested size points more toward
+the workgroup/dispatch invocation count itself being doubled somewhere in
+FeMe's compute-dispatch path, or `shared ... = {}`'s own zero-initialization
+logic running twice, rather than any masking-narrowness gap (which would be
+expected to scale with wave width or loop iteration count, not land on a
+clean doubling for every size tested). Still not triaged further this
+session -- needs a dedicated reduction starting from an `FEME_DUMP_IR` dump of
+one case's dispatch/workgroup-count machinery, not more `Linearize.cpp`
+masking work.
+
+Also ran a full `dEQP-VK.compute.*` regression check (67,554 cases) to confirm
+the `L443` fix introduces no regressions across the whole compute group:
+695/67,554 Passed, 6/67,554 Failed (exactly the 6 `max_workgroup_memory`
+cases, unchanged), 66,853/67,554 NotSupported -- byte-identical to the
+pre-fix baseline recorded in the prior session's `L442` entry, confirming the
+fix is safe as well as real.
+
+**The long-running `/tmp/l440c_spirvasm.qpa` `dEQP-VK.spirv_assembly.*` sweep
+(checked in on every session since it was launched, never restarted) finally
+completed this session**: 12,260/70,337 Passed (17.4%), 275/70,337 Failed
+(0.4%), 57,802/70,337 NotSupported (82.2%). Clustered the 275 failures by
+case-family prefix; by far the two largest compact clusters are
+`opquantize`/`opspecconstantop_opquantize`/`opquantize_vec4` (spanning every
+shader stage in `instruction.graphics.opquantize.*` plus
+`instruction.compute.opquantize*`) and the `opinboundsaccesschain`-adjacent
+access-chain cases -- both previously flagged (several sessions ago) as the
+two largest compact SPIR-V-assembly compiler clusters, now confirmed against
+this session's completed, much larger 275-case baseline. Not triaged further
+this session (recording the completed sweep result consumed the remaining
+time); this is the natural next target for a future dedicated reduction
+session.
+
+`/tmp/l437_full_run3`'s own separate, still-running full-`dEQP-VK.*`
+re-triage sweep was checked in on again (591MB, up from 524MB) -- still
+running, growing, not restarted, per standing instructions.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed for either the `L443` masking fix (a pure compiler correctness fix,
+no new feature/extension surface) or the `spirv_assembly.*` sweep completion
+(a CTS measurement only).
+
+**Next steps**: a dedicated reduction session for `max_workgroup_memory`'s
+exact-2x doubling, starting from `FEME_DUMP_IR` on one case and checking the
+compute-dispatch/workgroup-count path rather than `Linearize.cpp`; a future
+`opquantize`/`opinboundsaccesschain` reduction session using the
+newly-completed 275-case `spirv_assembly.*` baseline; `L419(ad)`
+(`mixed_break_continue`, 4 cases), `L419(y)` (`conditional_break`, 6 cases),
+and `L419(g)` (30 tessellation residuals) all remain untouched standing
+items; `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) also
+remains deferred; `/tmp/l437_full_run3` still running and growing -- just
+check progress next session, don't restart.
