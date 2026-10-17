@@ -72,32 +72,28 @@ stored in a git stash.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(next candidate, now with a concrete design target)** `L452(f)`:
-   implement the `PDT`-based redesign the prior two sessions flagged but
-   deferred — thread a `PostDominatorTree` into
-   `peelConstantFlowPredecessors`/`peelWouldDestroyAncestorReconvergencePoint`
-   and check real postdominance of `BB` over `Origin`'s two successors,
-   rather than the current backward-walk-plus-purity-heuristic. This is
-   the "needs a full dedicated session" item from two sessions back —
-   estimate a day, given the risk of a dominance-based change touching
-   a lot of currently-passing shapes. Use
+1. **(next candidate, half day to a day, most concrete write-up yet)**
+   Implement design (b) from `L452(g)`: give
+   `peelWouldDestroyAncestorReconvergencePoint` a scoped dry-run check against
+   `validate`'s own `MergeVisited` conflict logic — "would any *other*
+   `CondBr` candidate in this cycle already claim `BB` or something
+   downstream of it". Must-pass cases:
    `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`
-   and the `/tmp/switch_comp.ll` repro as the two must-pass cases that
-   distinguish a correct fix from a plausible-looking one.
-2. **(standing, needs a full dedicated session)** `L452(a)`'s
-   `out_of_order` fix — memory-carried divergence gap in
-   `WaveUniformity`, design already written up.
+   and `/tmp/switch_comp.ll` (regenerate via `FEME_DUMP_IR_PRELINEARIZE` if
+   `/tmp` was cleared). Don't attempt design (a) (fold-sequence reordering)
+   without first trying (b) — (a) touches far more currently-passing shapes.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order`
+   fix — memory-carried divergence gap in `WaveUniformity`, design already
+   written up.
 3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
-4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and
-   `L419(g)` (30 tessellation residuals) — still worth confirming
-   whether `L452(e)`'s 4 `*_tessc` failures are the same bucket.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
+   (30 tessellation residuals).
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`).
 6. **(smaller, independent)** The `struct` cluster's own separate
-   `spirv.GlobalVariable` legalization bug (8 cases) — different code
-   area (SPIRVToLLVM conversion), can run in parallel with item 1.
+   `spirv.GlobalVariable` legalization bug (8 cases) — different code area
+   (SPIRVToLLVM conversion), can run in parallel with item 1.
 7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 8. **(low priority, carried forward)** 9 older git stashes remain
    uninspected — low value, still open if a future session wants to check.
-
