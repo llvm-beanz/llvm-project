@@ -6483,3 +6483,89 @@ background and will exercise this code path regardless.
 remaining residuals, `L419(y)` (`conditional_break_uniform`), and the
 `check-hlsl-clang-feme-vk` 92-failure triage all remain open/deferred,
 unchanged by this session's work.
+
+## `L419(z)`: loop-in-switch misleading-diagnostic fix (4 cases, diagnostic-only)
+
+Picked up `L419(h)`'s remaining 4 `dEQP-VK.glsl.switch.*loop_in_switch*`
+cases (`for_loop_in_switch_dynamic_{fragment,vertex}`,
+`while_loop_in_switch_dynamic_{fragment,vertex}`), all hitting a single,
+unhelpful `"loop at '' has an internal branch in 'Flow'; only a uniform
+pass-through region ..."` diagnostic.
+
+**Root cause**: the loop's `Header` holds a genuinely divergent,
+per-fragment trip-count check, but both of its successors funnel
+through a single shared `Flow`-style relay block (reused by
+`StructurizeCFG` as the enclosing `switch`'s own case-merge scaffolding)
+before ever reaching the loop's real exit block -- not directly, and
+not via a *pure* relay chain. `matchExitCheck`/`recoverRelayExitCheck`/
+`findForwardExitCheckBlock` all require one of those two shapes, so
+`HeaderExit` stays `std::nullopt` and `HeaderDivergent` silently reads
+`false`, not because `Header`'s check is actually uniform, but because
+there is no `HeaderExit` object to query. The pass instead picks `Flow`
+as `CheckBlock` (it *does* reach `ExitBlock` directly) and only
+discovers the real problem much later, when
+`collectUniformPassThroughRegion`'s `PreRegion` walk (`Header` to
+`CheckBlock`) hits `Header`'s own still-divergent `CondBr` and bails --
+at which point the diagnostic incorrectly blamed `Flow` (`CheckBlock`)
+itself, rather than correctly naming `Header` as a second, independent
+divergent exit check.
+
+This is architecturally the exact same "two genuinely divergent exit
+checks" shape the codebase already explicitly refuses to support
+elsewhere (diagnosed clearly via `RealExitCandidates.size() > 1`) --
+just reached via a different path with a worse diagnostic.
+
+**Fix (diagnostic-clarity only, not a capability fix)**: at the
+`PreRegion`/`PostRegion`-failure site, directly check whether `Header`
+or `Latch` has its own unrecognized divergent terminator (not already
+covered by `HeaderExit`/`LatchExit`, not peeled, not `CheckBlock`
+itself); if so, emit the same, clearer "more than one divergent exit
+check" message naming both blocks, instead of the generic "internal
+branch" message. All 4 cases still fail -- this is a real, currently
+unsupported shape -- but the failure is now attributed correctly.
+
+A hand-written minimal repro of this shape is eliminated by the
+existing `foldRedundantFlowBlocksInCycle` fixed-point pre-pass before
+it ever reaches the new code path (confirmed via two separate attempts
+and direct instrumentation of `OtherCondBrBlocks` construction); the
+committed regression test (`loop-in-switch-divergent-header-and-relay.ll`)
+is instead a trim of the real extracted CTS-failure IR (only unused
+globals/metadata removed, no block/instruction that affects the
+analysis touched).
+
+**CTS validation**:
+- `dEQP-VK.glsl.switch.*loop_in_switch*` (18 cases): 14 Pass/4 Fail,
+  unchanged -- confirmed the new, clearer diagnostic text now fires
+  through the real ICD for all 4 failing cases.
+- `dEQP-VK.glsl.switch.*` (122 cases): 118 Pass/4 Fail, unchanged.
+- `dEQP-VK.glsl.loops.special.*` (552 cases): 534 Pass/18 Fail,
+  unchanged -- zero regressions.
+
+**Other validation**:
+- `FeMeTransformsCPUTests`: 638/638 passed.
+- Full `feme/test/Transforms/CPU/Linearize/` lit suite: 53/53 passed
+  (including the new test).
+- `check-feme`: 3,770 passed, 7 unsupported, 1 failed -- the same
+  pre-existing, unrelated `entry-wrapper-loop-header-derived-value-in-suffix.ll`
+  failure, confirmed via `git stash` to reproduce identically on the
+  pre-change tree. No new failures.
+- Mandatory device check: `vulkaninfo --summary | grep deviceName` ->
+  `FeMe CPU Vulkan Device`, confirmed.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (diagnostic-only compiler fix, no feature/extension surface
+touched). Updated `Roadmap.md` with a new `L419(z)` entry documenting
+the root cause and explicitly flagging the actual capability fix
+(recognizing/masking `Header`'s own divergent check even when it only
+indirectly, via a shared non-pure relay, reaches `ExitBlock`) as
+unimplemented future work -- not attempted this session given this code
+area's documented regression history (`L419(v)`/`L419(w)`).
+
+Checked on the standing `/tmp/l437_full_run3` sweep: still running,
+growing, not stalled.
+
+**Next steps**: `L419(g)` (30 tessellation residuals), `L419(h)`'s
+remaining special-loop residuals, `L419(y)` (`conditional_break_uniform`,
+6 cases), the `check-hlsl-clang-feme-vk` 92-failure triage, and the
+actual capability fix for `L419(z)`'s shape (flagged above) all remain
+open/deferred.
