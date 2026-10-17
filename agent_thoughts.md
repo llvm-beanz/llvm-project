@@ -124674,3 +124674,100 @@ corruption-to-diagnostic conversion are independently real wins), but
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run2/` is
    stalled -- either restart it fresh or abandon it and start a new
    sweep; don't just re-check the same dead directory again.
+
+# Session: L419(x) lands (net CTS improvement), check-hlsl-feme-vk run for the first time, L440 UAF root-caused
+
+Confirmed `FeMe CPU Vulkan Device` (via the documented
+`VK_ICD_FILENAMES=build/.../feme_icd.json` override -- the bare
+`vulkaninfo` without it reports Mesa `lvp` by default in this
+container, as `.instructions.md` already warns).
+
+## What's done
+
+1. **`L419(x)` landed, committed, net-positive.** Added a `CycleRef C`
+   parameter to `flattenTaintedBranchesInRegion` and skip any candidate
+   block whose innermost cycle differs from `C` (a different, nested
+   child cycle's own header/latch, already handled when that child
+   cycle linearized itself). 638/638 unit tests, 66/66 targeted CTS,
+   534/552 full `dEQP-VK.glsl.loops.special.*` sweep (up from the
+   regressed 524/552, beating the pre-`L419(w)` 533/552 baseline by 1),
+   3774/3776 `check-feme` (2 pre-existing unrelated failures). Roadmap
+   row struck through.
+2. **`L419(y)` root-caused, not fixed.** `conditional_break_uniform`'s 6
+   residual cases: the loop's `Header` itself holds the break check,
+   judged uniform at `UniformityInfo`'s one-time pre-masking snapshot,
+   only becoming divergent after `applyStageMasks` narrows a resource
+   load -- same staleness-bug class as `L419(v)`, different decision
+   point (`Header`'s own branch-acceptance). Filed as P2; the "predict
+   divergence ahead of masking" fix shape has regressed things twice
+   before, so this needs careful, dedicated treatment.
+3. **`check-hlsl-feme-vk` run for the first time ever.** 491/793 Pass, 1
+   crash. Root-caused the crash as a genuine, ASLR-dependent
+   **use-after-free** in `Linearize.cpp`'s `WaveActiveBallot` mask
+   narrowing (`Masks.Live` going stale) -- confirmed via two different
+   crash signatures (a `doRAUW` type mismatch vs. a verifier
+   `getValueName` assertion) from byte-identical inputs, varying only by
+   heap layout. Filed as `L440`/`L440(a)`.
+4. **`check-hlsl-clang-feme-vk` run for the first time ever.** 92
+   Failed/293 Passed/269 Unsupported/139 XFail. Filed as `L440(b)`, not
+   triaged.
+5. **Found and codified a real environmental gotcha**: `check-hlsl-*-vk`
+   Pass/Fail counts are sensitive to concurrent CPU load -- a background
+   CTS sweep competing for cores can blow through
+   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS=30000` and turn real passes into
+   spurious fails. Added to `feme/.instructions.md` so a future session
+   doesn't misread a load-induced skew as a regression.
+6. Restarted the stalled `/tmp/l437_full_run2/` sweep fresh as
+   `/tmp/l437_full_run3/` (2.9M remaining cases); still running,
+   growing steadily, not stalled.
+
+All 6 code/docs changes landed in 7 separate commits (one code fix, six
+docs/instructions commits), each with the required trailer.
+
+## Next action
+
+Resume `L440`'s use-after-free bisection: the repro is cheap to
+trigger (a bare shell loop of `dxc`+`offloader` on the extracted
+`WaveReadLaneFirst.fp16.test` `RUN` line, `split-file`'d out) but only
+fires ~1-in-20-to-75 runs, and **requires `gdb -batch -ex "set
+disable-randomization off"`** -- `gdb`'s default ASLR-disabling hides
+the bug completely.
+
+## Suggested next steps
+
+1. **(~1 day, the real next step)** Bisect `L440`'s UAF: wrap the
+   `gdb`-under-ASLR repro loop (already captured, ~1-in-20-to-75 hit
+   rate) to retry automatically until it catches the crash, then set a
+   watchpoint on the specific `Masks.Live` `Value*` once its address is
+   known, to find exactly where it gets freed. Read every
+   `Masks.Live`/`Masks.SideEffect`-caching site in `Linearize.cpp` (not
+   just the `ballot.pred.masked` call site) for a place that RAUWs or
+   erases the underlying instruction without invalidating the cache.
+   Fix by refreshing the cache at the right point, or switch to a
+   `WeakVH`/`AssertingVH`-backed handle so any *other* similar staleness
+   bug fails loudly instead of silently corrupting memory. Write a
+   deterministic `LinearizeTest.cpp` unit test (construct the exact IR
+   mutation sequence directly, don't rely on ASLR luck). Re-verify
+   `check-hlsl-feme-vk` (expect 492+/793, 0 crashes), `check-feme`, and
+   the `dEQP-VK.glsl.loops.special.*` 552-case sweep (zero regressions
+   to the 16 already-fixed `L419` cases -- this file's masking code is
+   shared).
+2. **(~2-3 hours, after #1 closes cleanly)** Revisit `L419(y)`
+   (`conditional_break_uniform`, 6 cases) now with a working
+   `L440`-style memory-safety fix in place in case the two interact --
+   otherwise same careful-regression-testing approach as before.
+3. **(half day, needs a quiet machine)** Re-measure
+   `check-hlsl-clang-feme-vk` (`L440(b)`'s 92/293/269/139 figure) once
+   no standing CTS sweep is running, to get a contention-free baseline,
+   then triage the 92 failures -- likely dominated by the known
+   upstream `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608)
+   per existing `XFAIL: Clang && Vulkan` markers, but not yet verified
+   case-by-case.
+4. **(standing)** `L419(g)` (tessellation residuals, 30 cases) --
+   untouched, same IR-dump-and-reduce methodology candidate.
+5. **(standing)** `L419(h)`'s 12 remaining special-loop residuals
+   (`elseblock`/`ifblock`/`mixed_break_continue`) -- distinct shapes,
+   need their own reduction.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is
+   running and growing (not stalled) -- just check progress
+   (`ps aux | grep deqp-vk`, file size of `results.qpa`), don't restart.
