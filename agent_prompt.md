@@ -66,31 +66,33 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Can you please continue the work on the Vulkan FeMe ICD? A previous session
-suggested the next steps:
+linearize-defer-loop-body-mask-op-diamond.ll crashes on macOS with the following
+errors:
 
-1. **(cheap, first thing)** Check on `/tmp/l444_spirvasm_full_rerun.qpa`/`.log`
-   (still running, not restarted across two sessions now) — once done, record
-   the refreshed baseline in `VulkanCTSReport.md` and `Roadmap.md`'s `L444`
-   entry (expect ~249 remaining failures, pending the real measurement).
-2. **(standing, needs a full dedicated session, not a half-day slice)**
-   `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and both candidate
-   fix designs are fully written up in `Roadmap.md`'s own entry; this needs a
-   session that can give it full, undivided attention given its prior-regression
-   history in this exact code area.
-3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
-   tessellation residuals) — both still completely untouched.
-4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
-   (`L440(c)`) — still deferred every session.
-5. **(worth filing, low priority, carried forward)** `feme-run` cannot currently
-   execute a DXIL shader using a resource (not groupshared)
-   `InterlockedAdd`/atomic. Not investigated further.
-6. **(L444's own remaining clusters)** With `opquantize` and `opptraccesschain`
-   both now fixed, the next-largest remaining clusters in the original 275-case
-   baseline (per this session's own cluster breakdown) are `frexpstruct` (12
-   cases), and several ~8-case struct/array composite-decomposition clusters
-   (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
-   `switch`) — worth re-clustering against the fresh completed sweep (item 1)
-   before picking the next target, since some of these may already be fixed as
-   side effects of the two fixes landed this session (unlikely, but cheap to
-   confirm once the real data is in).
+Can you fix this?
+
+# RUN: at line 3
+/Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
+# .---command stderr------------
+# | warning: overriding the module target triple with arm64-apple-macosx26.0.0 [-Woverride-module]
+# | fatal error: error in backend: Can't create a MachineFunction using a Module with a Target-incompatible DataLayout attached
+# |   Target DataLayout: e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32
+# |   Module DataLayout: e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32
+# |
+# | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and dumped files.
+# | Stack dump:
+# | 0.  Program arguments: /Users/cbieneman/dev/llvm-project/build-rel/bin/clang -O0 -c /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.o
+# | 1.  Code generation
+# | 2.  Running pass 'Function Pass Manager' on module '/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Transforms/CPU/Output/linearize-defer-loop-body-mask-op-diamond.ll.tmp/lowered.ll'.
+# | 3.  Running pass 'Analysis containing CSE Info' on function '@main'
+# | Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+# | 0  clang-24 0x0000000101f7c6e0 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 56
+# | 1  clang-24 0x0000000101f7a400 llvm::sys::RunSignalHandlers() + 204
+# | 2  clang-24 0x0000000101f7bcb8 llvm::sys::CleanupOnSignal(unsigned long) + 304
+# | 3  clang-24 0x0000000101ec3668 (anonymous namespace)::CrashRecoveryContextImpl::HandleCrash(int, unsigned long) + 88
+# | 4  clang-24 0x0000000101ec35d8 llvm::CrashRecoveryContext::HandleExit(int) + 24
+# | 5  clang-24 0x0000000101f778ac llvm::sys::Process::Exit(int, bool) + 48
+# | 6  clang-24 0x000000010037a434 llvm::DenseMapBase<llvm::densemap::detail::DenseMapStorage<llvm::detail::DenseMapPair<llvm::AssertingVH<llvm::GetElementPtrInst>, int>>, llvm::AssertingVH<llvm::GetElementPtrInst>, int, llvm::DenseMapInfo<llvm::AssertingVH<llvm::GetElementPtrInst>, void>, llvm::detail::DenseMapPair<llvm::AssertingVH<llvm::GetElementPtrInst>, int>>::~DenseMapBase() + 0
+# | 7  clang-24 0x0000000101ece2ac llvm::report_fatal_error(llvm::Twine const&, bool) + 256
+# | 8  clang-24 0x00000001012c7680 llvm::MachineFunction::init() + 1352
