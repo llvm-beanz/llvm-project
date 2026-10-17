@@ -125280,3 +125280,47 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
 5. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
 6. **(once fresh sweep completes)** Re-cluster `L444`'s remaining ~229 failures against real data before picking the next target — stale-baseline candidates (`floatarray`, `matrix`, `nested_struct`/`undef_nested_struct`, `mip_1`, several ~8-case struct/array composite-decomposition clusters) should be re-verified, not assumed.
+
+# Session: Fixed macOS crash in linearize-defer-loop-body-mask-op-diamond.ll (datalayout mismatch)
+
+**First, the mandatory check**: `vulkaninfo --summary | grep deviceName` → `deviceName = FeMe CPU Vulkan Device`. Confirmed.
+
+**The ask**: `linearize-defer-loop-body-mask-op-diamond.ll` crashes on macOS with a clang backend fatal error (`Can't create a MachineFunction using a Module with a Target-incompatible DataLayout`), does not reproduce on this Linux host.
+
+## Root cause
+
+1. The test's `shader.ll` carries an explicit, DXIL/SPIR-V-style `target datalayout` copied from FeMe's own import-time IR — not any real target's layout.
+2. `feme-opt`'s lowering passes never rewrite it; the `-S` output still has it.
+3. The real AOT/JIT pipeline (`Target/CPU/Pipeline.cpp`/`CompiledStage.cpp`) always retargets a module to `getHostDataLayout()`'s real host layout before codegen — but this lit test skips that step entirely, calling `clang -c` directly on the raw lowered IR.
+4. On most hosts the mismatch is harmless (clang warns, proceeds with its own real defaults). On arm64-apple-macosx specifically, the module's ELF-style `m:e` mangling and `i8:8:32`/`i16:16:32` alignment overrides conflict with that target's real Mach-O `m:o` scheme closely enough to trip clang's fatal compatibility check instead of just warning.
+
+## Fix
+
+Strip `target datalayout`/`target triple` before compiling, piped through `clang -x ir -` (no extra `%t` file needed):
+```
+grep -v -e '^target datalayout' -e '^target triple' %t/lowered.ll | clang -O0 -x ir - -c -o %t/lowered.o
+```
+This reproduces exactly what the real pipeline's own retargeting would have done. Verified locally (same warning, no crash, correct object file) and via the lit test itself (still passes, `ALL-160-CORRECT`).
+
+## Verification
+
+- `llvm-lit` on the single test: PASS.
+- `ninja check-feme`: 3,775/3,782 Passed, 0 Failed, 7 Unsupported. Clean.
+- Committed the test fix alone (`c0c6193ac7ff`).
+- Codified the lesson in `feme/.instructions.md` (`ecb06c134c93`) — only this one test uses the `clang -c`-on-raw-lowered-IR pattern today, but any future one needs the same stripping step.
+- No Vulkan CTS rerun / `VulkanCTSReport.md` entry for this one: pure lit-test RUN-line portability fix, zero functional source-code change, matching the precedent set by this arc's earlier test-only commits (e.g. the `arithmetic-ops-to-llvm.mlir` stale-CHECK fix).
+
+## Bonus: the background CTS sweep finished
+
+`/tmp/l444_spirvasm_rerun3.qpa` (the correctly-timed re-sweep from last session) completed while I was working on this: **229 Failed** (was 275), exactly matching the `275-13-13-20=229` arithmetic prediction from the three landed fixes (`L449`/`L450`/`L451`). Re-clustered the 229 remaining failures and updated `Roadmap.md`/`VulkanCTSReport.md` with the real confirmed baseline (`4aa42aaa6bf1`).
+
+**New candidate cluster spotted**: an `opline`/`opnop`/`out_of_order` debug-instruction group (30 cases total across 6 sub-names: `opline_empty_name`, `opline_long_name`, `opline_short_name`, `opnoline`, `opnop`, `out_of_order`) — the shared naming pattern strongly suggests one root cause (likely a SPIR-V `OpLine`/`OpNoLine`/`OpNop` debug-info-adjacent legalization or ordering gap), not six independent bugs. This is now the single largest compact-cluster candidate for the next reduction session (bigger than any one of the 8-case struct/array clusters).
+
+## Next steps
+
+1. **(half day, new top candidate)** `opline`/`opnop`/`out_of_order` cluster (30 cases, single suspected root cause) — reduce one case (e.g. `opline_short_name`) first to confirm the shared mechanism before assuming all 6 sub-clusters share one fix.
+2. **(half day)** Seven ~8-case struct/array composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`, `switch`) — re-verify against the fresh 229-failure data (now confirmed real, not estimated) before picking one.
+3. **(standing, needs a full dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause and fix designs written up in `Roadmap.md`; still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — untouched across multiple sessions.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
