@@ -7520,15 +7520,28 @@ checks to use it instead of the raw `sliceInstruction`.
   `git stash`, unrelated to this change).
 - `check-feme`: 3,775/3,782 Passed, 0 Failed, 7 Unsupported -- no
   regressions.
-- Real CTS (rebuilt `libfeme_vulkan.so` first): full `opline` group
-  17/17 Pass (was 15 Fail among them -- the prior entry's per-stage-group
-  "5" count for each of `opline_empty_name`/`opline_long_name`/
-  `opline_short_name` undercounted by not summing across all 3 names'
-  own 5-stage breakdown correctly; the real number directly
-  re-confirmed from this session's own `.qpa` re-parse is 17, not 15);
-  full `opnop` group 6/6 Pass (was 6 Fail); full `opnoline` group 6/6
-  Pass (already passing beforehand, re-verified unaffected as a close
-  sibling).
+- Real CTS: rebuilt `libfeme_vulkan.so` and ran the full `opline`
+  (15/15 Pass) and `opnop` (6/6 Pass) groups directly, then launched a
+  full `dEQP-VK.spirv_assembly.*` re-sweep in the background to get a
+  real, programmatic before/after diff rather than relying on manual
+  spot-checks for anything beyond those two groups. **The background
+  sweep completed later in this same session** (see "L444 refreshed
+  baseline" below) and corrected two mistaken spot-check conclusions
+  made earlier: `opnoline` was *not* "already passing, unaffected" --
+  a quick manual check of a few `opnoline` cases happened to sample
+  only ones that were already passing, but the real sweep shows all 5
+  `opnoline*` cases were in the 229-case baseline and are fixed by
+  this same change (`OpNoLine` goes through the identical
+  `sliceNonDebugInstruction` path as `OpLine`, and `opnoline`'s own
+  CTS fixture places `OpNoLine` in the identical argument/label gaps).
+  The real sweep also found two clusters not named anywhere in the
+  original cluster table at all -- `spirv_version.*_compute` (7 cases,
+  SPIR-V 1.0 through 1.6) and `float_controls_extensionless*` (4
+  cases) -- both fixed as a side effect, presumably from incidental
+  `OpLine`/`OpNop` instructions in their own compute-shader
+  boilerplate. Real total: **37 cases fixed, 0 regressions** (confirmed
+  by a programmatic diff of the full before/after `.qpa` files), not
+  the 23 this entry's own earlier manual verification had concluded.
 
 **`out_of_order` investigated and root-caused this session** (not yet
 fixed): reduced one case each of `opphi.out_of_order_geom`,
@@ -7582,21 +7595,37 @@ feature/extension-surface change). This fix lives entirely outside
 handling: isolated, self-contained, with its own regression tests, in
 its own commit.
 
-A full `dEQP-VK.spirv_assembly.*` re-sweep was launched in the
-background at session end
-(`/tmp/l444_opline_opnop_full_rerun.qpa`/`.log`) to refresh `L444`'s
-baseline; expected new total: 229 − 17 − 6 = 206 remaining failures,
-pending the real measurement once it completes (it was still running,
-mid-alphabet, at the time this entry was written -- a future session
-should check it before trusting any number here beyond the two
-directly re-verified group counts above).
+## L444 refreshed baseline (confirmed, real measurement, completed this session)
 
-**Next steps**: confirm the refreshed full-sweep baseline (expect 206);
-`L452(a)`'s `out_of_order` breakdown (needs a real `FEME_DUMP_IR_PRESIMD`
-dump of `opphi.out_of_order_vert` to confirm/refute the
-Function-storage-leak hypothesis); the seven ~8-case struct/array
-composite-decomposition clusters (`f16arr3`, `struct16arr3`, `v3f16`,
-`v3f16arr5`, `v4f16arr3`, `struct`, `switch`); `L419(ad)`
+The full `dEQP-VK.spirv_assembly.*` re-sweep launched in the
+background (`/tmp/l444_opline_opnop_full_rerun.qpa`/`.log`) completed
+later in this same session: **12,343 Passed / 192 Failed / 57,802
+NotSupported** out of 70,337 (was 229 Failed before `L452`'s fix). A
+programmatic diff of the two full `.qpa`/log files (matching on exact
+case name, not just group-level counts) confirms **37 cases fixed, 0
+regressions** -- see the breakdown in `L452`'s own entry above (15
+`opline*`, 6 `opnop*`, 5 `opnoline*`, 7 `spirv_version.*_compute`, 4
+`float_controls_extensionless*`). 229 − 37 = 192, exactly matching the
+real sweep's own total.
+
+Re-clustered the real 192-case baseline against case-family prefix
+(`L452(c)`, same methodology as the prior session's own table): the
+seven ~8-case struct/array composite-decomposition clusters
+(`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`,
+`struct`, `switch`, 56 cases total) are **unchanged verbatim** from the
+prior session's table -- this fix did not touch that area at all --
+and, with `opline`/`opnop`/`opnoline`/`spirv_version`/
+`float_controls_extensionless` now gone, they are unambiguously the
+single largest remaining compact cluster in `L444`.
+
+**Next steps**: the seven ~8-case struct/array composite-decomposition
+clusters (56 cases, the clearest next pick, see `L452(c)`); `L452(a)`'s
+`out_of_order` fix (root cause and a concrete design sketch are both
+already written up -- a memory-carried divergence gap in
+`feme::cpu::WaveUniformity`, needs its own dedicated session given the
+regression risk of a divergence-analysis change); `L419(ad)`
 (`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
 (tessellation residuals); `L440(c)`'s 39-case residual triage. All
-unchanged standing items.
+unchanged standing items except `L452(a)`/`L452(b)`/`L452(c)`, all new
+this session.
+
