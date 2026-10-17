@@ -6847,3 +6847,98 @@ a separate `DiamondFlattener` body-shape gap, repro at
 `check-hlsl-clang-feme-vk` 92-failure triage (still deferred every session).
 `/tmp/l437_full_run3` still running and growing (428MB as of this session's
 end, up from 375MB) -- just check progress next session, don't restart.
+
+## L440(c): MLIR SPIR-V Deserializer `OpUndef`-in-`OpConstantComposite` fix
+
+This session picked up the previously-deferred `check-hlsl-clang-feme-vk`
+92-failure re-triage (`L440(b)`) rather than another attempt at the two
+flagged-as-high-risk loop-linearization items (`mixed_break_continue`,
+`L419(y)`), both still explicitly deferred to a dedicated session by prior
+sessions.
+
+**Re-measured the 92-failure baseline**: byte-identical to the prior
+session's own figure (92 Failed/293 Passed/269 Unsupported/139 Expectedly
+Failed out of 793), even with the standing `/tmp/l437_full_run3` background
+CTS sweep (one core pegged) running throughout -- confirms the figure is a
+genuine, reproducible baseline, not a load-skew artifact (contrary to
+`L440(b)`'s own open caveat; the load-skew-to-385 effect documented there
+only appears under much heavier contention than one background core).
+
+**Root-caused the dominant cluster, found and fixed outside FeMe**: 56 of
+the 92 failures (far broader than `L428`'s "Clang matrix intrinsic" framing
+assumed -- 30 are `_mat.test` cases, but the rest are plain scalar/vector
+`HLSLLib` functions like `f32tof16`/`degrees`/`radians`/`reversebits`/`cross`
+with no matrix involved at all) all hit the identical error
+`"OpConstantComposite component <id> N must come from a normal constant"`.
+Built a minimal reproducer (`f32tof16.test`'s compiled SPIR-V contains a
+`<2 x float> {undef, 0.0}` `OpConstantComposite`, a very common
+scalar-to-narrow-vector HLSL codegen shape), confirmed it passes
+`spirv-val --target-env vulkan1.3` cleanly (an `OpConstantComposite`
+constituent may legally be either a normal constant or an `OpUndef`, per
+spec) -- ruling out a `spirv-val`/SPIRV-Tools bug (the initial suspicion,
+by analogy to the already-documented, confirmed-external `L428(a)` bug) --
+and traced the actual error to **MLIR's own SPIR-V `Deserializer`**
+(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`'s
+`processConstantComposite`), which only ever consulted its `constantMap`
+when resolving a constituent's `<id>`, never the separate `undefMap` that
+`OpUndef` ids are tracked in -- rejecting perfectly spec-legal SPIR-V
+outright and aborting pipeline creation. Fixed `processConstantComposite`
+to substitute a concrete zero-valued attribute of the constituent's
+expected element type whenever its `<id>` resolves as an `OpUndef` rather
+than a normal constant. New regression test
+`mlir/test/Target/SPIRV/constant-composite-undef-constituent.spvasm`
+(confirmed red without the fix, green with it); full
+`mlir/test/Target/SPIRV` lit suite: 72/73 (the one pre-existing failure,
+`memory-ops.mlir`, reproduces identically on a clean pre-fix baseline via
+`git stash`/rebuild bisection, confirmed unrelated). Committed in its own
+commit touching only `mlir/` files
+(`fb72a78c2bb8 [mlir][spirv] Accept OpUndef constituents in OpConstantComposite`),
+per the standing "fixes outside FeMe get an isolated commit" instruction.
+
+**Net effect on `check-hlsl-clang-feme-vk`**: 92 Failed -> 39 Failed (53
+fixed), 293 Passed -> 346 Passed, 0 new regressions (verified via an exact
+before/after failure-name set diff, not just aggregate counts). Full
+`ninja check-feme`: 3,771/3,772 Passed (excluding the same pre-existing
+`entry-wrapper-loop-header-derived-value-in-suffix.ll` failure, reconfirmed
+present on a clean pre-fix baseline too), 7 Unsupported, 0 regressions.
+
+**CTS verification** (`VK_ICD_FILENAMES` pointed at the FeMe ICD,
+`vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`
+before running, both before and after this session's work):
+- `dEQP-VK.compute.*` (67,554 cases): 695 Pass/6 Fail/66,853 NotSupported.
+  The 6 failures are all
+  `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory.*`
+  -- **confirmed pre-existing, unrelated to this session's fix**: reverted
+  just this session's `Deserializer.cpp` diff in place, rebuilt
+  `feme_vulkan`/`feme-opt`, re-ran exactly these 6 cases, and got the
+  identical 6/6 Fail result on the pre-fix binary too (then restored the
+  fix and rebuilt clean before continuing). This is a previously
+  undocumented, still-open gap (likely an actual workgroup-memory
+  zero-initialization bug at the implementation's max-size boundary, not
+  investigated further this session) -- worth a future roadmap entry once
+  triaged (not yet assigned an `L4xx` id).
+- `dEQP-VK.spirv_assembly.*` (70,337 cases, the group most likely to
+  exercise `OpConstantComposite`/`OpUndef` shapes directly): sweep was
+  still running at session end (background, large group); result to be
+  recorded at the start of a future session once complete, alongside a
+  check-in on whether it surfaces any further latent `OpUndef`-composite
+  shapes this session's fix didn't cover (e.g. nested array-of-array or
+  struct-of-struct undef constituents, which the fix's conservative
+  `getElementTypeForOperand` lambda intentionally does not handle -- see
+  `agent_thoughts.md` for the exact limitation).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed -- this fix is a SPIR-V-ingestion correctness fix (accepting
+already-legal input the deserializer previously rejected), not a new
+feature or extension.
+
+**Next steps**: finish the `dEQP-VK.spirv_assembly.*` sweep check-in next
+session; triage the new `zero_initialize_workgroup_memory.max_workgroup_memory`
+compute failure (6 cases, pre-existing, previously undocumented); continue
+`L440(c)`'s remaining-39-failure cluster triage (see `Roadmap.md` for the
+per-cluster breakdown); `mixed_break_continue` was root-caused this session
+too (a `DiamondFlattener` diamond-arm post-dominator-escape bug, see
+`Roadmap.md`'s `L419(ad)`) but deliberately not fixed, deferred to a future
+dedicated session; `L419(y)` and `L419(g)` remain untouched standing items;
+`/tmp/l437_full_run3` still running and growing (524MB as of this session's
+end, up from 428MB) -- just check progress next session, don't restart.
