@@ -97,57 +97,6 @@ spirv.func @isubborrow_vector(%arg0: vector<2xi32>, %arg1: vector<2xi32>) "None"
 }
 
 //===----------------------------------------------------------------------===//
-// spirv.UMulExtended
-//===----------------------------------------------------------------------===//
-
-// CHECK-LABEL: @umulextended_scalar
-spirv.func @umulextended_scalar(%arg0: i32, %arg1: i32) "None" {
-  // CHECK: %[[LHS:.*]] = llvm.zext %{{.*}} : i32 to i64
-  // CHECK: %[[RHS:.*]] = llvm.zext %{{.*}} : i32 to i64
-  // CHECK: %[[PROD:.*]] = llvm.mul %[[LHS]], %[[RHS]] : i64
-  // CHECK: %[[LOW:.*]] = llvm.trunc %[[PROD]] : i64 to i32
-  // CHECK: %[[SHIFT:.*]] = llvm.mlir.constant(32 : i64) : i64
-  // CHECK: %[[HIGHWIDE:.*]] = llvm.lshr %[[PROD]], %[[SHIFT]] : i64
-  // CHECK: %[[HIGH:.*]] = llvm.trunc %[[HIGHWIDE]] : i64 to i32
-  // CHECK: %[[UNDEF:.*]] = llvm.mlir.poison : !llvm.struct<packed (i32, i32)>
-  // CHECK: %[[R0:.*]] = llvm.insertvalue %[[LOW]], %[[UNDEF]][0] : !llvm.struct<packed (i32, i32)>
-  // CHECK: llvm.insertvalue %[[HIGH]], %[[R0]][1] : !llvm.struct<packed (i32, i32)>
-  %0 = spirv.UMulExtended %arg0, %arg1 : !spirv.struct<(i32, i32)>
-  spirv.Return
-}
-
-// CHECK-LABEL: @umulextended_vector
-spirv.func @umulextended_vector(%arg0: vector<2xi32>, %arg1: vector<2xi32>) "None" {
-  // CHECK: %[[LHS:.*]] = llvm.zext %{{.*}} : vector<2xi32> to vector<2xi64>
-  // CHECK: %[[RHS:.*]] = llvm.zext %{{.*}} : vector<2xi32> to vector<2xi64>
-  // CHECK: %[[PROD:.*]] = llvm.mul %[[LHS]], %[[RHS]] : vector<2xi64>
-  // CHECK: %[[LOW:.*]] = llvm.trunc %[[PROD]] : vector<2xi64> to vector<2xi32>
-  // CHECK: llvm.lshr %[[PROD]], %{{.*}} : vector<2xi64>
-  %0 = spirv.UMulExtended %arg0, %arg1 : !spirv.struct<(vector<2xi32>, vector<2xi32>)>
-  spirv.Return
-}
-
-//===----------------------------------------------------------------------===//
-// spirv.SMulExtended
-//===----------------------------------------------------------------------===//
-
-// CHECK-LABEL: @smulextended_scalar
-spirv.func @smulextended_scalar(%arg0: i32, %arg1: i32) "None" {
-  // CHECK: %[[LHS:.*]] = llvm.sext %{{.*}} : i32 to i64
-  // CHECK: %[[RHS:.*]] = llvm.sext %{{.*}} : i32 to i64
-  // CHECK: %[[PROD:.*]] = llvm.mul %[[LHS]], %[[RHS]] : i64
-  // CHECK: %[[LOW:.*]] = llvm.trunc %[[PROD]] : i64 to i32
-  // CHECK: %[[SHIFT:.*]] = llvm.mlir.constant(32 : i64) : i64
-  // CHECK: %[[HIGHWIDE:.*]] = llvm.lshr %[[PROD]], %[[SHIFT]] : i64
-  // CHECK: %[[HIGH:.*]] = llvm.trunc %[[HIGHWIDE]] : i64 to i32
-  // CHECK: %[[UNDEF:.*]] = llvm.mlir.poison : !llvm.struct<packed (i32, i32)>
-  // CHECK: %[[R0:.*]] = llvm.insertvalue %[[LOW]], %[[UNDEF]][0] : !llvm.struct<packed (i32, i32)>
-  // CHECK: llvm.insertvalue %[[HIGH]], %[[R0]][1] : !llvm.struct<packed (i32, i32)>
-  %0 = spirv.SMulExtended %arg0, %arg1 : !spirv.struct<(i32, i32)>
-  spirv.Return
-}
-
-//===----------------------------------------------------------------------===//
 // spirv.IMul
 //===----------------------------------------------------------------------===//
 
@@ -191,8 +140,10 @@ spirv.func @smulextended_vector(%arg0: vector<2xi16>, %arg1: vector<2xi16>) "Non
   // CHECK: %[[RHS:.*]] = llvm.sext %{{.*}} : vector<2xi16> to vector<2xi32>
   // CHECK: %[[MUL:.*]] = llvm.mul %[[LHS]], %[[RHS]] : vector<2xi32>
   // CHECK: %[[LOW:.*]] = llvm.trunc %[[MUL]] : vector<2xi32> to vector<2xi16>
-  // CHECK: %[[C16:.*]] = llvm.mlir.constant(dense<16> : vector<2xi32>) : vector<2xi32>
-  // CHECK: %[[SHR:.*]] = llvm.lshr %[[MUL]], %[[C16]] : vector<2xi32>
+  // CHECK: %[[C16:.*]] = llvm.mlir.constant(16 : i32) : i32
+  // CHECK: %[[SPLAT:.*]] = llvm.insertelement %[[C16]], %{{.*}} : vector<2xi32>
+  // CHECK: %[[C16B:.*]] = llvm.insertelement %[[C16]], %[[SPLAT]]{{.*}} : vector<2xi32>
+  // CHECK: %[[SHR:.*]] = llvm.lshr %[[MUL]], %[[C16B]] : vector<2xi32>
   // CHECK: %[[HIGH:.*]] = llvm.trunc %[[SHR]] : vector<2xi32> to vector<2xi16>
   // CHECK: %[[UNDEF:.*]] = llvm.mlir.poison : !llvm.struct<packed (vector<2xi16>, vector<2xi16>)>
   // CHECK: %[[R0:.*]] = llvm.insertvalue %[[LOW]], %[[UNDEF]][0] : !llvm.struct<packed (vector<2xi16>, vector<2xi16>)>
@@ -227,8 +178,10 @@ spirv.func @umulextended_vector(%arg0: vector<2xi32>, %arg1: vector<2xi32>) "Non
   // CHECK: %[[RHS:.*]] = llvm.zext %{{.*}} : vector<2xi32> to vector<2xi64>
   // CHECK: %[[MUL:.*]] = llvm.mul %[[LHS]], %[[RHS]] : vector<2xi64>
   // CHECK: %[[LOW:.*]] = llvm.trunc %[[MUL]] : vector<2xi64> to vector<2xi32>
-  // CHECK: %[[C32:.*]] = llvm.mlir.constant(dense<32> : vector<2xi64>) : vector<2xi64>
-  // CHECK: %[[SHR:.*]] = llvm.lshr %[[MUL]], %[[C32]] : vector<2xi64>
+  // CHECK: %[[C32:.*]] = llvm.mlir.constant(32 : i64) : i64
+  // CHECK: %[[SPLAT:.*]] = llvm.insertelement %[[C32]], %{{.*}} : vector<2xi64>
+  // CHECK: %[[C32B:.*]] = llvm.insertelement %[[C32]], %[[SPLAT]]{{.*}} : vector<2xi64>
+  // CHECK: %[[SHR:.*]] = llvm.lshr %[[MUL]], %[[C32B]] : vector<2xi64>
   // CHECK: %[[HIGH:.*]] = llvm.trunc %[[SHR]] : vector<2xi64> to vector<2xi32>
   // CHECK: %[[UNDEF:.*]] = llvm.mlir.poison : !llvm.struct<packed (vector<2xi32>, vector<2xi32>)>
   // CHECK: %[[R0:.*]] = llvm.insertvalue %[[LOW]], %[[UNDEF]][0] : !llvm.struct<packed (vector<2xi32>, vector<2xi32>)>
