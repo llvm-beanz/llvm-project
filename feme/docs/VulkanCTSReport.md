@@ -6651,3 +6651,96 @@ cases), `L419(y)`'s masking-sequencing gap (6 cases), `L419(g)` (30
 tessellation residuals, untouched), and the
 `check-hlsl-clang-feme-vk` 92-failure triage (still deferred every
 session).
+
+## `L419(ab)`: attempted `L419(z)`/`L419(aa)`'s designed capability fix, root-caused a deeper masking-completeness gap, reverted
+
+Mandatory device check first: `VK_ICD_FILENAMES=.../feme_icd.json
+vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`,
+confirmed. Checked the standing `/tmp/l437_full_run3` sweep: still
+running and growing across the session (318MB -> 375MB), not stalled,
+left untouched.
+
+Picked up the prior session's "real prize" next step: implement
+`L419(aa)`'s designed fix so `Header`'s own divergent check is
+recognized even when it only reaches `ExitBlock` indirectly, through a
+shared dispatch block with its own `CondBr`. Took the narrower of the
+two designs on the table -- generalizing `recoverRelayExitCheck`'s
+`IsTrivialExitStub` chase to fold a `CondBr` whose condition is a
+`phi` with a known-constant incoming value for the edge just walked,
+rather than the riskier `OtherCondBrBlocks`/`DivergentCandidates`
+reordering -- since it required no change to code order, only to what
+shapes the existing relay chase tolerates.
+
+**This alone worked structurally**: `HeaderExit`/`LatchExit` resolved
+for all 12 target cases (4 `loop_in_switch` + 8 `elseblock`/`ifblock`),
+both reduced repros and the committed
+`loop-in-switch-divergent-header-and-relay.ll` regression test compiled
+cleanly instead of hitting the diagnostic, `FeMeTransformsCPUTests`
+(638/638) and the `Linearize` lit suite (53/53, after updating that
+one test to expect success) passed, and full `check-feme` showed
+3,770/3,778 with the same 1 pre-existing unrelated failure.
+
+**Real Vulkan CTS caught what the unit/lit suites could not**: all 12
+target cases changed from a clean "unsupported" diagnostic to a
+runtime **"Image mismatch"** -- wrong pixels, not a crash. Net
+Pass/Fail counts were unchanged (`dEQP-VK.glsl.switch.*`: 118/122,
+`dEQP-VK.glsl.loops.special.*`: 534/552), but the failure mode became
+strictly worse (silent wrong output vs. a safe, loud rejection).
+
+Root-caused in two layers before deciding to revert:
+
+1. **Found and fixed (but insufficient alone)**: `recoverRelayExitCheck`
+   set `EC.RelayBlock` to the relay chain's *first* hop, contradicting
+   `ExitCheck::RelayBlock`'s own documented contract (must be the
+   *last* hop, the literal CFG predecessor of `ExitBlock`) -- a latent
+   bug the function's original single-hop-only design never exposed.
+   Fixed by rewriting `IsTrivialExitStub` to return the resolved last
+   hop. Re-ran the same CTS sweeps: **identical "Image mismatch" result**,
+   proving this bug was real but not the (only) cause.
+2. **Root-caused, not fixed**: dumped the fully-lowered IR for the
+   `loop_in_switch` repro and traced the actual remaining gap. Once
+   `Header`'s divergent check is masked, its terminator becomes an
+   unconditional branch into the loop body every iteration for every
+   lane (correct -- uniform SIMD control flow, masking only gates
+   side effects). But because this shape's real continue/exit decision
+   is deferred to a later shared dispatch block rather than happening
+   immediately at `Header` -- the case the existing masking machinery
+   was designed and proven for -- the loop body keeps **unconditionally
+   recomputing every loop-carried value** (the running color and
+   iteration-count phis) for lanes that should have already "exited" at
+   `Header`'s own check and had their value frozen there. Side-effect
+   masking correctly prevents wrong *writes*, but nothing freezes the
+   loop-carried *value itself* across the extra iterations such a lane
+   nominally keeps running through, so the final merged output silently
+   picks up extra, incorrect iterations' worth of computation. A correct
+   fix needs per-lane freeze/select logic threaded through the loop body
+   for every loop-carried value -- essentially reusing the same
+   select-based merge machinery `DiamondFlattener` already uses
+   correctly for ordinary in-body diamonds -- which is a materially
+   larger change than either `L419(z)`/`L419(aa)`'s original design
+   notes anticipated.
+
+**Given this code area's two prior documented regressions
+(`L419(v)`/`L419(w)`) and that a wrong-pixel correctness bug is strictly
+worse than the pre-existing clean diagnostic, both changes were fully
+reverted** (`git checkout --`), rebuilt, and reconfirmed back to the
+exact pre-session baseline: `feme-opt` again emits the original "more
+than one divergent exit check" diagnostic; `FeMeTransformsCPUTests`
+638/638; `Linearize` lit suite 53/53; `dEQP-VK.glsl.switch.*` 118
+Pass/4 Fail with the original `VK_ERROR_INITIALIZATION_FAILED`
+diagnostic restored (not "Image mismatch"). **No code lands this
+session; the 12 cases remain unsupported with their original safe
+diagnostic.** `Roadmap.md` updated with a new `L419(ab)` entry recording
+this finding in full. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change needed (no capability landed).
+
+**Next steps**: a future session attempting this needs to design the
+per-lane loop-carried-value freeze mechanism first, prove it in
+isolation, and only then revisit the `IsTrivialExitStub`/`RelayBlock`
+work above (which remains correct and reusable once that mechanism
+exists). Standing items unchanged: `mixed_break_continue` (4 cases),
+`L419(y)`'s masking-sequencing gap (6 cases), `L419(g)` (30
+tessellation residuals, untouched), and the `check-hlsl-clang-feme-vk`
+92-failure triage (still deferred every session). `/tmp/l437_full_run3`
+still running and growing (375MB as of this session's end) -- just
+check progress next session, don't restart.
