@@ -2947,8 +2947,13 @@ private:
   /// flattening). Found reducing `select_iteration_count_
   /// {fragment,vertex}`'s own `do_while_dynamic`/`for_dynamic`/
   /// `while_dynamic_iterations` residual.
+  ///
+  /// \p C is the cycle currently being linearized (the one `Region`'s
+  /// blocks belong to); see this method's own definition comment for why
+  /// a candidate whose innermost cycle is some *other*, nested cycle must
+  /// be skipped here rather than re-examined as if it belonged to \p C.
   bool flattenTaintedBranchesInRegion(const SmallPtrSetImpl<BasicBlock *> &Region,
-                                      MaskPair Masks);
+                                      MaskPair Masks, CycleRef C);
 
   /// Returns whether a value has the `.linearized` suffix, indicating it was
   /// created by DiamondFlattener when collapsing a divergent branch. Such
@@ -4311,7 +4316,7 @@ bool LoopLinearizer::isDivergentBranch(const CondBrInst *Br) const {
 }
 
 bool LoopLinearizer::flattenTaintedBranchesInRegion(
-    const SmallPtrSetImpl<BasicBlock *> &Region, MaskPair Masks) {
+    const SmallPtrSetImpl<BasicBlock *> &Region, MaskPair Masks, CycleRef C) {
   // Collect candidates up front: `Region` is a `SmallPtrSet` with no
   // control-flow order, and flattening one block's diamond can delete
   // its own arms -- iterating a fixed snapshot avoids re-examining (or
@@ -4322,6 +4327,30 @@ bool LoopLinearizer::flattenTaintedBranchesInRegion(
   for (BasicBlock *BB : Region) {
     auto *CBr = dyn_cast<CondBrInst>(BB->getTerminator());
     if (!CBr)
+      continue;
+    // Roadmap L419(x): `BB` may be a different, nested child cycle's own
+    // header or latch -- `PreRegion`/`PostRegion` collect every block on
+    // a uniform pass-through walk from this cycle's `CheckBlock`/
+    // `CheckExit` without regard to cycle nesting, and a child cycle's
+    // own exit check sitting on that walk is not itself a member of this
+    // cycle `C`'s own body in the sense this scan cares about -- it was
+    // already linearized (and, if genuinely divergent, already correctly
+    // masked) in its own right when that child cycle was processed. Res-
+    // canning it here as if it were one of `C`'s own candidates double-
+    // counts it: `dependsOnTaintedValue` sees the same taint this cycle's
+    // masking threaded into a shared resource/image load and incorrectly
+    // treats the child cycle's own, already-resolved, genuinely uniform
+    // exit check as newly mask-dependent, which `flattenKnownDivergentBranch`
+    // then (correctly, given this faulty premise) refuses to flatten --
+    // found reducing `do_while_dynamic_iterations.{dowhile_trap,nested,
+    // nested_sequence,nested_tricky_dataflow_{1,2}}_{fragment,vertex}`
+    // (`L419(w)`'s own newly-regressed cases). Excluding `BB` here, at
+    // the point this scan actually consumes cycle membership, is
+    // deliberately narrower than excluding it from `OtherCondBrBlocks`'s
+    // own raw collection in `linearizeCycle` -- an earlier attempt at the
+    // latter caused an infinite loop (that collection's result is relied
+    // on by several other, unrelated decisions this scan does not make).
+    if (CycleRef BBCycle = CI.getCycle(BB); BBCycle.isValid() && BBCycle != C)
       continue;
     SmallPtrSet<Value *, 8> Visited;
     if (dependsOnTaintedValue(CBr->getCondition(), EmptyTainted, Visited))
@@ -5558,7 +5587,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // block there for a `CondBr` that only *looked* uniform before that
     // narrowing happened (see `flattenTaintedBranchesInRegion`'s own
     // comment for the full root-cause writeup).
-    if (!flattenTaintedBranchesInRegion(*PreRegion, Masks))
+    if (!flattenTaintedBranchesInRegion(*PreRegion, Masks, C))
       return false;
     applyStageMasks(*CheckBlock, Masks);
     rethreadNestedEntryMasks(CheckBlock, Masks);
@@ -5643,7 +5672,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       rethreadNestedEntryMasks(BB, MasksAfterCheck);
     }
     // Roadmap L419(w): see the identical `PreRegion` call above.
-    if (!flattenTaintedBranchesInRegion(*PostRegion, MasksAfterCheck))
+    if (!flattenTaintedBranchesInRegion(*PostRegion, MasksAfterCheck, C))
       return false;
     applyStageMasks(*Latch, MasksAfterCheck);
     rethreadNestedEntryMasks(Latch, MasksAfterCheck);
