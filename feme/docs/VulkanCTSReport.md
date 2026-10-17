@@ -7682,3 +7682,85 @@ divergence gap, needs its own dedicated session); `L419(ad)`
 `struct` cluster's own separate `spirv.GlobalVariable` legalization
 bug (8 cases, smaller/independent, could run in parallel).
 
+
+## L452(d): fix implemented, CTS-verified, zero regressions
+
+Implemented fix design (a) from the prior session's own writeup:
+`peelConstantFlowPredecessors` (in `feme/lib/Transforms/CPU/Linearize.cpp`)
+now calls a new `peelWouldDestroyAncestorReconvergencePoint` check before
+committing to a peel that would leave a block with exactly one real
+predecessor. The check walks backward from that sole survivor to the
+real `CondBrInst` it descends from, then tests whether both of that
+block's successors reach the peeled block through nothing but pure
+relay hops -- i.e. whether the peeled block is already serving as that
+ancestor's own private two-arm reconvergence point -- and bails out of
+the peel if so, leaving the (harmless, just not maximally simplified)
+original shape in place.
+
+Two refinements beyond the original design sketch were required to
+avoid false positives against the existing regression suite:
+
+1. The enclosing cycle's own `Header`/`Latch` are exempted from being
+   flagged as a dangerous origin: a loop header legitimately
+   reconverges at a `Flow`-style dispatch block the same way an
+   ordinary diamond does, and `LoopLinearizer::recoverRelayExitCheck`
+   is specifically built to handle that afterward. Confirmed via
+   `loop-break-structurized.ll`.
+2. The relay-chain walk now requires every hop strictly before the
+   target to be a genuine `isPureRelayBlock` (no real computation
+   besides phis/terminator), not just any `UncondBr`-terminated block
+   -- a loop latch's own trip-count recheck is `UncondBr`-terminated
+   but must not be treated as a pure relay hop. Confirmed via
+   `loop-relay-chain-two-hops.ll`.
+
+One known, accepted limitation: `checkblock-chained-divergent-check-
+bypass.ll` (the pre-existing `L377(a)` `%chain.merge` fast-path test)
+is structurally indistinguishable from the real bug by this purely
+local, structural check, so the new guard conservatively declines that
+one specific micro-optimization too. Verified the resulting output is
+still fully flattened and correct via
+`-passes=feme-cpu-linearize,verify` (no leftover divergent `br i1`);
+the test's own CHECK lines were updated to match the new (still
+correct) shape.
+
+**Real CTS verification**: ran a targeted `deqp-vk` caselist covering
+all 78 cases across the 6 named clusters (`f16arr3`/`struct16arr3`/
+`v3f16`/`v3f16arr5`/`v4f16arr3` across all stages, plus
+`type.scalar.{i8,i16,i32,i64,u8,u16,u32,u64}.switch_*`), both before
+(via a temporary `git stash` of just the fix, rebuilding
+`libfeme_vulkan.so`) and after this session's fix:
+
+| | Passed | Failed | Not supported |
+|---|---|---|---|
+| Before (baseline) | 14/78 | 28/78 | 36/78 |
+| After (this fix) | 29/78 | 13/78 | 36/78 |
+
+A real before/after set comparison of `Fail`-status cases (not a spot
+check) confirms **zero regressions**: every case that failed after the
+fix also failed before it; 15 cases flipped from `Fail` to `Pass`.
+
+The remaining 13 failures split into two buckets, neither touched this
+session:
+
+- 4 are `*_tessc` (tessellation-control) variants of the now-fixed
+  clusters -- very likely `L419(g)`'s already-known 30-case
+  tessellation-control residual bucket, not re-confirmed this session.
+- 8 are `type.scalar.{i32,u32}.switch_{comp,geom,tessc,tesse}`, which
+  reproduce the exact same top-level `feme-cpu-linearize` diagnostic
+  this cluster was originally grouped under, but this fix did not
+  resolve them -- logged as new roadmap item `L452(e)` for a future
+  session to root-cause with its own standalone reduction.
+
+`check-feme`: 3776/3776 passing (7 unsupported, as expected), 0
+failures, after a full clean rebuild. `FeMeTransformsCPUTests` unit
+test binary run directly: 640/640 passing.
+
+New lit regression test: `loop-body-switch-decode-shares-ancestor-
+reconvergence.ll`, derived from the real `f16arr3` CTS reduction this
+session started from.
+
+**Next steps**: `L452(e)` (the 8 remaining `i32`/`u32` `switch_*`
+residuals, needs its own standalone reduction); `L452(a)`'s
+`out_of_order` fix; `L419(ad)`/`L419(y)`/`L419(g)`; `L440(c)`'s 39-case
+residual triage; the `struct` cluster's own separate
+`spirv.GlobalVariable` legalization bug (8 cases).
