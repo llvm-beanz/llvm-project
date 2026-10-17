@@ -2561,4 +2561,121 @@ TEST(LinearizeTest, DoesNotPoisonMergeVisitedWhenWholeFunctionPassDeclines) {
   EXPECT_TRUE(FoundResourceStore);
 }
 
+// Roadmap L419(ac): distilled from `dEQP-VK.glsl.switch.loop_in_switch.
+// while_loop_in_switch_dynamic_fragment`'s own reduction (the `switch`
+// dispatch scaffolding this real case wraps the loop in is irrelevant to
+// this specific bug and omitted entirely here -- `header`'s own divergent
+// `CondBr` relaying through `Flow`, a shared merge block owning real,
+// multi-valued phis, straight to `exit` is the whole repro). `Flow` plays
+// the real case's own `Flow` block's role: `%merged`/`%flag` distinguish
+// "this lane just took `header`'s own exit edge" from "this lane is
+// still looping", exactly the shape `recoverRelayExitCheck`'s own
+// generalized chase (roadmap L419(ab)) newly admits into
+// `HeaderDivergent` handling. Before `freezeRelayChainExitValues`
+// (roadmap L419(ac) proper), erasing `header`'s own `CondBr` orphaned
+// `Flow`'s phis' `.Flow_crit_edge` contribution, silently collapsing
+// `%merged` to whatever `body`'s own still-executing `%bodyval` computed
+// on a later iteration once `EliminateUnreachableBlocks` ran, corrupting
+// `exit`'s own stored value for a lane whose real per-lane trip count
+// was already exhausted.
+TEST(LinearizeTest, FreezesRelayChainExitValueThroughSharedDispatchBlock) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr addrspace(1) %out) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %bound = add i32 %tid, 1
+      br label %header
+    header:
+      %val = phi <3 x float> [ %merged, %Flow._crit_edge ], [ zeroinitializer, %entry ]
+      %iv = phi i32 [ %inc, %Flow._crit_edge ], [ 0, %entry ]
+      %cond = icmp slt i32 %iv, %bound
+      br i1 %cond, label %body, label %.Flow_crit_edge
+    .Flow_crit_edge:
+      br label %Flow
+    body:
+      %inc = add i32 %iv, 1
+      %bodyval = fadd <3 x float> %val, <float 1.000000e+00, float 1.000000e+00, float 1.000000e+00>
+      br label %Flow
+    Flow:
+      %merged = phi <3 x float> [ %bodyval, %body ], [ %val, %.Flow_crit_edge ]
+      %flag = phi i1 [ false, %body ], [ true, %.Flow_crit_edge ]
+      br i1 %flag, label %exit, label %Flow._crit_edge
+    Flow._crit_edge:
+      br label %header
+    exit:
+      %x = extractelement <3 x float> %merged, i64 0
+      store float %x, ptr addrspace(1) %out, align 4
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="8,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(SawError)
+      << "header's own divergent branch, relayed through Flow straight to "
+         "exit, should now be admitted into HeaderDivergent handling "
+         "instead of being diagnosed as unsupported";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Flow = nullptr;
+  BasicBlock *Header = nullptr;
+  for (BasicBlock &BB : *F) {
+    if (BB.getName() == "Flow")
+      Flow = &BB;
+    if (BB.getName() == "header")
+      Header = &BB;
+  }
+  ASSERT_TRUE(Flow);
+  ASSERT_TRUE(Header);
+
+  // Roadmap L419(ac), fix (A): `Flow`'s own data phi must have been
+  // replaced with a `select` on the per-lane "still looping" guard mask,
+  // preserving the orphaned `.Flow_crit_edge` edge's own value (`%val`,
+  // `header`'s raw loop-carried phi) for any lane that already exited,
+  // instead of silently discarding it.
+  bool FoundRelayFreezeSelect = false;
+  for (Instruction &I : *Flow)
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getType()->isVectorTy() &&
+          SI->getFalseValue() == &*Header->begin())
+        FoundRelayFreezeSelect = true;
+  EXPECT_TRUE(FoundRelayFreezeSelect)
+      << "Flow's own data phi should be select-frozen against header's "
+         "raw loop-carried phi, not left to silently collapse once its "
+         "only predecessor from header is erased";
+
+  // Roadmap L419(ac), fix (B): because the orphaned value above is itself
+  // header's own raw phi (not a derived instruction), that phi's own
+  // backedge must *also* be sticky/self-referential now (the same
+  // pattern `freezeLoopCarriedValues` already applies elsewhere) -- a
+  // one-shot select in `Flow` alone is not sound, since header's own phi
+  // keeps mutating for every lane, every iteration, unless its own
+  // backedge is frozen too.
+  PHINode *ValPhi = cast<PHINode>(&*Header->begin());
+  ASSERT_EQ(ValPhi->getName(), "val");
+  bool FoundSelfReferentialFreeze = false;
+  for (unsigned I = 0, E = ValPhi->getNumIncomingValues(); I != E; ++I) {
+    auto *SI = dyn_cast<SelectInst>(ValPhi->getIncomingValue(I));
+    if (SI && (SI->getTrueValue() == ValPhi || SI->getFalseValue() == ValPhi))
+      FoundSelfReferentialFreeze = true;
+  }
+  EXPECT_TRUE(FoundSelfReferentialFreeze)
+      << "header's own %val phi should be frozen via a self-referential "
+         "select on its own backedge, not left to keep mutating for "
+         "already-exited lanes";
+}
+
 } // namespace
