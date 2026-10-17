@@ -7125,3 +7125,60 @@ already-completed 275-case `spirv_assembly.*` baseline (`L444`); `L419(ad)`
 and `L419(g)` (30 tessellation residuals) all remain untouched standing
 items; `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) also
 remains deferred.
+
+## Session: L442 root cause conclusively pinned to DiamondFlattener::run() (L447)
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary |
+grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed first action.
+
+**What changed**: nothing functionally. This session fully root-caused
+`L442` (see `Roadmap.md`'s new `L447` entry, which supersedes `L446`'s
+`feme-cpu-simdize` attribution) down to an exact mechanism in
+`Linearize.cpp`'s `DiamondFlattener::run()`, but did not implement a fix --
+the fix needs new masking-seed plumbing through `LoopLinearizer` and was
+judged too large/risky to rush in this session. All temporary diagnostic
+instrumentation added while tracing this (six `FEME_DEBUG_L442_TRACE`-gated
+`errs()` call sites in `Linearize.cpp`) was reverted before committing; the
+diff is preserved at `/tmp/l442_min/debug_instrumentation.patch` for the
+next session to reapply if it wants to re-trace.
+
+**Root cause, in one paragraph**: `DiamondFlattener::run()`'s single,
+whole-function `validate()`/`flatten()` walk runs *before*
+`LoopLinearizer` even starts, and its own documented design intentionally
+flattens any in-body divergent diamond that isn't itself one of the
+enclosing cycle's recognized loop-control edges. Because `StructurizeCFG`
+places this loop's real recognized header/exit-check (`Flow21`/`Flow22`) at
+the *bottom* of the loop body rather than the top, the walk reaches and
+flattens the shader's own `if`/`elseif` diamond (containing both resource
+atomics) several blocks before it ever reaches that recognized boundary --
+baking in a mask derived only from `AllActive` + the diamond's own
+condition, with zero contribution from the loop's own per-iteration bound.
+`LoopLinearizer`'s later, correct masking then can't fix this up:
+`narrowCallMask`'s documented one-shot "only overwrite a still-constant
+mask" guard (added for an unrelated, real, previously-fixed regression)
+refuses to touch it. Full mechanism, with exact block numbers and code
+references, is in `Roadmap.md`'s `L447` entry.
+
+**Verification**:
+- `check-feme`: 3,773/3,780 Passed, 0 Failed, 7 Unsupported -- unchanged
+  from the prior session's baseline, confirming the (reverted)
+  instrumentation introduced no regression.
+- Re-confirmed `L442`'s own 6-case CTS baseline is unchanged:
+  `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory.*`
+  still 0/6 Passed, 6/6 Failed -- expected, since no functional fix was
+  made this session.
+- `/tmp/l437_full_run3`'s sweep (67,043/67,234 Passed, 1 Failed -- that 1
+  being `L442`) was already fully recorded in the prior session's `L445`
+  entry; re-checked this session, confirmed complete and unchanged (not
+  growing, no longer running), nothing further to record.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure root-cause investigation and documentation this session, zero
+compiler/runtime behavior change).
+
+**Next steps**: implement `L447`'s fix (new masking-seed plumbing through
+`LoopLinearizer` to pick up a diamond `DiamondFlattener::run()` now defers)
+in a dedicated session; `L444`'s `opquantize`/`opinboundsaccesschain`
+reduction; `L419(ad)` (`mixed_break_continue`), `L419(y)`
+(`conditional_break`), `L419(g)` (tessellation residuals); `L440(c)`'s
+39-case residual triage. All unchanged standing items.
