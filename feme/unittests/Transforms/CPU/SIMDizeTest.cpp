@@ -417,6 +417,78 @@ TEST(SIMDizeTest, WidensDivergentLdexpCall) {
   EXPECT_TRUE(FoundWideLdexp);
 }
 
+// Roadmap L450: GLSL's `frexp(x, exp)` out-parameter builtin lowers to
+// SPIR-V `OpExtInst GLSL.std.450 FrexpStruct`, which
+// `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` converts straight to a
+// single `{T, iN} @llvm.frexp.*(T)` call -- confirmed by reducing a real
+// `dEQP-VK.spirv_assembly.instruction.graphics.float32.comparison_*.
+// frexpstruct_*` CTS failure down to this exact IR shape. Unlike the
+// `isOverflowArithIntrinsic` intrinsics (which this `WidenedAggregateComponents`
+// machinery already supported), `llvm.frexp` takes only one operand and its
+// two result fields are independently-overloaded types, so it needed its
+// own `widenFrexpIntrinsic` widening path rather than reusing
+// `widenOverflowArithIntrinsic` unchanged. Confirm both the fractional-part
+// and exponent fields widen to their own distinct vector overloads, and
+// that each is readable back out via `extractvalue` on the real (not
+// per-lane-cloned) wide call result.
+TEST(SIMDizeTest, WidensDivergentFrexpCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out_frac, ptr %out_exp) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %f = sitofp i32 %tid to float
+      %pair = call { float, i32 } @llvm.frexp.f32.i32(float %f)
+      %frac = extractvalue { float, i32 } %pair, 0
+      %exp = extractvalue { float, i32 } %pair, 1
+      store float %frac, ptr %out_frac
+      store i32 %exp, ptr %out_exp
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare { float, i32 } @llvm.frexp.f32.i32(float)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideFrexp = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getIntrinsicID() != Intrinsic::frexp)
+      continue;
+    FoundWideFrexp = true;
+    EXPECT_TRUE(CI->getArgOperand(0)->getType()->isVectorTy());
+    auto *ResultTy = cast<StructType>(CI->getType());
+    EXPECT_TRUE(ResultTy->getElementType(0)->isVectorTy());
+    EXPECT_TRUE(ResultTy->getElementType(1)->isVectorTy());
+    EXPECT_TRUE(
+        ResultTy->getElementType(1)->getScalarType()->isIntegerTy(32));
+
+    bool FoundFracExtract = false, FoundExpExtract = false;
+    for (User *U : CI->users()) {
+      auto *EV = dyn_cast<ExtractValueInst>(U);
+      if (!EV)
+        continue;
+      if (EV->getIndices()[0] == 0) {
+        FoundFracExtract = true;
+        EXPECT_TRUE(EV->getType()->isVectorTy());
+      } else if (EV->getIndices()[0] == 1) {
+        FoundExpExtract = true;
+        EXPECT_TRUE(EV->getType()->isVectorTy());
+      }
+    }
+    EXPECT_TRUE(FoundFracExtract);
+    EXPECT_TRUE(FoundExpExtract);
+  }
+  EXPECT_TRUE(FoundWideFrexp);
+}
+
 // Roadmap H149: `feme::cpu::LinearizePass` attaches a divergent region's own
 // live mask to a `WaveIsFirstLane`/`llvm.dx.wave.is.first.lane` call as a
 // `"feme.divergence.mask"` operand bundle (see LinearizeTest.cpp's own test

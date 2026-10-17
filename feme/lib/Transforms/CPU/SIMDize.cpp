@@ -481,6 +481,27 @@ bool isOverflowArithIntrinsic(Intrinsic::ID ID) {
   }
 }
 
+/// (Roadmap L450) Whether \p ID is `llvm.frexp`, the single remaining
+/// aggregate-result intrinsic reachable from a real shader besides the
+/// four `isOverflowArithIntrinsic` ones above. GLSL's `frexp(x, exp)`
+/// out-parameter builtin lowers to SPIR-V `OpExtInst GLSL.std.450
+/// FrexpStruct`, which `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`'s
+/// `DirectConversionPattern<spirv::GLFrexpStructOp, LLVM::FractionExpOp>`
+/// converts straight to a single `{T, iN} @llvm.frexp.*(T)` call (confirmed
+/// by reducing a real `dEQP-VK.spirv_assembly.instruction.graphics.
+/// float32.comparison_*.frexpstruct_*` failure down to its exact IR shape:
+/// `call { float, i32 } @llvm.frexp.f32.i32(float %x)`). Unlike the
+/// overflow-flag intrinsics, `llvm.frexp` takes only one operand and its
+/// two result fields are independently-overloaded types (the fractional
+/// part matches the operand's own float type; the exponent is always a
+/// plain integer type, `i32` in every case reachable from GLSL/HLSL, but
+/// not required to equal the operand's bit width the way `{iN, i1}`'s
+/// first field always does) -- so it needs its own widening path
+/// (`widenFrexpIntrinsic`) rather than reusing `widenOverflowArithIntrinsic`
+/// unchanged, even though both share the same `WidenedAggregateComponents`
+/// flattening convention.
+bool isFrexpIntrinsic(Intrinsic::ID ID) { return ID == Intrinsic::frexp; }
+
 /// (Roadmap L266) Whether every non-`ImmArg` argument of \p CI has type
 /// \p Ty -- the "homogeneous" shape check both `widenElementwise`'s scalar
 /// path and the vector-typed `CallInst` dispatch gates below use to decide
@@ -954,6 +975,7 @@ private:
   void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenAggregateSelect(SelectInst &SI, IRBuilder<> &Builder);
   void widenOverflowArithIntrinsic(CallInst &CI, IRBuilder<> &Builder);
+  void widenFrexpIntrinsic(CallInst &CI, IRBuilder<> &Builder);
   void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenVectorToScalarBitCast(BitCastInst &BC, IRBuilder<> &Builder);
   void widenScalarToVectorBitCast(BitCastInst &BC, IRBuilder<> &Builder);
@@ -1577,19 +1599,21 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
               callNonImmArgsHaveType(UserCI, UserCI->getType()))
             continue;
         }
-        // (Roadmap L266) `I`'s own vector-typed operand of one of the
+        // (Roadmap L266/L450) `I`'s own vector-typed operand of one of the
         // four `isOverflowArithIntrinsic` arithmetic-with-overflow
         // intrinsics (e.g. `uaddCarry`'s two `uvec2`/`uvec3`/`uvec4`
-        // operands) -- the call's own `{<N x iN>, <N x i1>}` *result* is
-        // aggregate-typed, so it is validated by `checkAggregateValueSupported`
-        // (not this vector-decomposition loop) when the call instruction
-        // itself is visited, but its *operands* are ordinary vector-typed
-        // values that still need this loop's own consumer acceptance --
-        // `widenOverflowArithIntrinsic`'s vector-operand branch decomposes
-        // each of `I`'s own per-component values into its own genuinely
-        // wide call, exactly like `widenVectorElementwise` does for an
-        // ordinary elementwise intrinsic.
-        if (Callee && isOverflowArithIntrinsic(Callee->getIntrinsicID()))
+        // operands), or of `isFrexpIntrinsic`'s single vector-typed operand
+        // -- the call's own aggregate *result* is validated by
+        // `checkAggregateValueSupported` (not this vector-decomposition
+        // loop) when the call instruction itself is visited, but its
+        // *operands* are ordinary vector-typed values that still need this
+        // loop's own consumer acceptance -- `widenOverflowArithIntrinsic`/
+        // `widenFrexpIntrinsic`'s vector-operand branches decompose each of
+        // `I`'s own per-component values into its own genuinely wide call,
+        // exactly like `widenVectorElementwise` does for an ordinary
+        // elementwise intrinsic.
+        if (Callee && (isOverflowArithIntrinsic(Callee->getIntrinsicID()) ||
+                       isFrexpIntrinsic(Callee->getIntrinsicID())))
           continue;
       }
       if (isa<ExtractElementInst>(U))
@@ -1692,16 +1716,19 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         isGroupSharedPointerType(CmpXchg->getPointerOperand()->getType()) &&
         isSupportedAggregateLeafType(I.getType());
   else if (auto *CI = dyn_cast<CallInst>(&I)) {
-    // (Roadmap L266) The only aggregate-*result* `CallInst` shape
-    // supported: one of the four `isOverflowArithIntrinsic` intrinsics,
-    // widened by `widenOverflowArithIntrinsic` below via a single real
+    // (Roadmap L266/L450) The only aggregate-*result* `CallInst` shapes
+    // supported: one of the four `isOverflowArithIntrinsic` intrinsics
+    // (widened by `widenOverflowArithIntrinsic` below), or `isFrexpIntrinsic`
+    // (widened by `widenFrexpIntrinsic`) -- both via a single real
     // vector-typed overload of the same call (no per-lane cloning
     // needed -- unlike `cmpxchg`, these are pure computations with no
     // memory side effect to sequence).
     Function *Callee = CI->getCalledFunction();
-    IsSupportedProducer = Callee &&
-                          isOverflowArithIntrinsic(Callee->getIntrinsicID()) &&
-                          isSupportedAggregateLeafType(I.getType());
+    IsSupportedProducer =
+        Callee &&
+        (isOverflowArithIntrinsic(Callee->getIntrinsicID()) ||
+         isFrexpIntrinsic(Callee->getIntrinsicID())) &&
+        isSupportedAggregateLeafType(I.getType());
   }
 
   if (!IsSupportedProducer) {
@@ -1710,11 +1737,12 @@ bool FunctionWidener::checkAggregateValueSupported(Instruction &I) {
         "' has a divergent value '" + I.getName() +
         "' of aggregate type; component decomposition is not yet supported "
         "for this producer (only an insertvalue chain, a nested "
-        "sub-aggregate extractvalue, a select, a phi, a cmpxchg, or an "
-        "arithmetic-with-overflow intrinsic call, over a "
+        "sub-aggregate extractvalue, a select, a phi, a cmpxchg, an "
+        "arithmetic-with-overflow intrinsic call, or a frexp intrinsic "
+        "call, over a "
         "struct/array whose every leaf is a genuine scalar or a whole "
-        "fixed vector, is supported) (roadmap milestone 7/L21/L27/L185/L266 "
-        "deviation)");
+        "fixed vector, is supported) (roadmap milestone 7/L21/L27/L185/L266/"
+        "L450 deviation)");
     return false;
   }
 
@@ -4179,6 +4207,63 @@ void FunctionWidener::widenOverflowArithIntrinsic(CallInst &CI,
   ToErase.push_back(&CI);
 }
 
+void FunctionWidener::widenFrexpIntrinsic(CallInst &CI, IRBuilder<> &Builder) {
+  // (Roadmap L450) `{T, iN} @llvm.frexp.*(T)` (`isFrexpIntrinsic`): a pure
+  // computation with no memory side effect, so -- exactly like
+  // `widenOverflowArithIntrinsic` above -- it widens via a single call to
+  // the same intrinsic's one real vector-typed overload rather than a
+  // per-lane clone loop. Unlike that function's four intrinsics, `frexp`
+  // takes only one operand, and its two result fields (`result[0]`, the
+  // fractional part; `result[1]`, the exponent) are independently-
+  // overloaded types rather than sharing one `LLVMMatchType<0>` slot, so
+  // the wide exponent type is derived from the *result* struct's own
+  // second field type, not reused from the operand's element type.
+  Function *Callee = CI.getCalledFunction();
+  Type *OperandTy = CI.getArgOperand(0)->getType();
+  auto *OperandVecTy = dyn_cast<FixedVectorType>(OperandTy);
+  Type *ScalarFloatTy =
+      OperandVecTy ? OperandVecTy->getElementType() : OperandTy;
+  auto *ResultStructTy = cast<StructType>(CI.getType());
+  Type *ExpTy = ResultStructTy->getElementType(1);
+  Type *ScalarExpTy =
+      OperandVecTy ? cast<FixedVectorType>(ExpTy)->getElementType() : ExpTy;
+  Type *WideFloatTy = FixedVectorType::get(ScalarFloatTy, WaveSize);
+  Type *WideExpTy = FixedVectorType::get(ScalarExpTy, WaveSize);
+  Function *WideCallee = Intrinsic::getOrInsertDeclaration(
+      NewF->getParent(), Callee->getIntrinsicID(), {WideFloatTy, WideExpTy});
+
+  if (!OperandVecTy) {
+    Value *WideArg = getWidened(CI.getArgOperand(0), Builder);
+    Value *WideCall =
+        Builder.CreateCall(WideCallee, {WideArg}, CI.getName() + ".wide");
+    Value *WideFrac = Builder.CreateExtractValue(
+        WideCall, 0, CI.getName() + ".wide.frac");
+    Value *WideExp = Builder.CreateExtractValue(
+        WideCall, 1, CI.getName() + ".wide.exp");
+    WidenedAggregateComponents[&CI] = {WideFrac, WideExp};
+    ToErase.push_back(&CI);
+    return;
+  }
+
+  SmallVector<Value *, 4> OperandComponents =
+      getVectorComponents(CI.getArgOperand(0), Builder);
+  SmallVector<Value *, 4> FracComponents;
+  SmallVector<Value *, 4> ExpComponents;
+  for (unsigned C = 0, E = OperandVecTy->getNumElements(); C != E; ++C) {
+    Value *WideCall = Builder.CreateCall(
+        WideCallee, {OperandComponents[C]}, CI.getName() + ".wide" + Twine(C));
+    FracComponents.push_back(Builder.CreateExtractValue(
+        WideCall, 0, CI.getName() + ".wide.frac" + Twine(C)));
+    ExpComponents.push_back(Builder.CreateExtractValue(
+        WideCall, 1, CI.getName() + ".wide.exp" + Twine(C)));
+  }
+  SmallVector<Value *, 8> Flattened(FracComponents.begin(),
+                                    FracComponents.end());
+  Flattened.append(ExpComponents.begin(), ExpComponents.end());
+  WidenedAggregateComponents[&CI] = std::move(Flattened);
+  ToErase.push_back(&CI);
+}
+
 void FunctionWidener::widenInsertElement(InsertElementInst &IE,
                                          IRBuilder<> &Builder) {
   // Decompose a divergent `insertelement` into its widened per-component
@@ -5354,20 +5439,25 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
   }
 
-  // (Roadmap L266) A `CallInst` to one of the four
-  // `isOverflowArithIntrinsic` arithmetic-with-overflow intrinsics has an
-  // aggregate (`{iN, i1}`) result type, so -- like the vector-typed
-  // `CallInst` case just above -- it cannot fall through to
-  // `widenElementwise`'s own scalar-only homogeneous-intrinsic path
-  // (which would try to build an illegal `<W x {iN, i1}>` aggregate-of-
+  // (Roadmap L266/L450) A `CallInst` to one of the four
+  // `isOverflowArithIntrinsic` arithmetic-with-overflow intrinsics, or to
+  // `isFrexpIntrinsic`'s `llvm.frexp`, has an aggregate result type, so --
+  // like the vector-typed `CallInst` case just above -- it cannot fall
+  // through to `widenElementwise`'s own scalar-only homogeneous-intrinsic
+  // path (which would try to build an illegal `<W x {T, iN}>` aggregate-of-
   // vector type); route it to its own dedicated widening function instead,
   // gated by the same `checkAggregateValueSupported` acceptance any other
   // aggregate-typed producer already goes through.
   if (auto *CI = dyn_cast<CallInst>(&I); CI && I.getType()->isAggregateType()) {
-    if (Function *Callee = CI->getCalledFunction();
-        Callee && isOverflowArithIntrinsic(Callee->getIntrinsicID())) {
-      widenOverflowArithIntrinsic(*CI, Builder);
-      return true;
+    if (Function *Callee = CI->getCalledFunction()) {
+      if (isOverflowArithIntrinsic(Callee->getIntrinsicID())) {
+        widenOverflowArithIntrinsic(*CI, Builder);
+        return true;
+      }
+      if (isFrexpIntrinsic(Callee->getIntrinsicID())) {
+        widenFrexpIntrinsic(*CI, Builder);
+        return true;
+      }
     }
   }
 
