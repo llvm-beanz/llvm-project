@@ -125130,3 +125130,42 @@ This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader
 4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 6. **(no standing background sweep)** `/tmp/l437_full_run3` and `/tmp/l440c_spirvasm.qpa` are both done and already recorded — nothing to check in on. A future session with idle background time could launch a fresh detached full-`dEQP-VK.*` sweep per the "launch detached" lesson in `.instructions.md`, but this is optional, not a blocker.
+
+# Session: L442/L447 fixed (L448) — DiamondFlattener::run() defers masked loop-body diamonds
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed first action.
+
+**What's done**: Implemented `L447`'s own fix design from scratch and verified it end to end. `L442`/`max_workgroup_memory` is fixed — 6/6 Passed, was 0/6 for every prior session back through `L442`'s discovery.
+
+**1. The fix**: `DiamondFlattener::validate()`/`::flatten()`'s whole-function walk now defers (skips past) any in-cycle divergent diamond that `regionHasStageMaskOps` flags, mirroring `flattenLoopBodyDiamond`'s own existing gate — so `LoopLinearizer` gets first crack at masking the diamond with the real, loop-bound-narrowed mask instead of a premature `AllActive` guess.
+
+**2. A first attempt regressed — caught before it shipped**: gating the defer only on `Br && isInCycle(Cur)` doesn't distinguish `run()`'s own top-level walk from the *same* `validate`/`flatten` methods being called recursively by `flattenLoopBodyDiamond`/`flattenLoopBodyRegion` (which are `LoopLinearizer`'s real masking machinery). Applying the defer unconditionally made those recursive calls defer the diamond right back to themselves — never actually flattening it. Confirmed live: `feme-cpu-simdize` then rejected a permanently-unflattened divergent branch. Fixed with a new `DiamondFlattener::IsWholeFunctionPass` constructor flag, `true` only at `run()`'s own single call site.
+
+**3. A verification-methodology bug, caught by habit, not luck**: the first regression-test draft checked that `feme-cpu-linearize`'s own IR output stopped emitting a literal `i1 true` mask operand on the atomic calls. This looked right (and matched the symptom I'd seen earlier in the session) — but a `git stash` sanity check before trusting it showed the *unmodified pre-fix* code already produces a real, non-constant SSA mask on both calls. The bug is that the computed mask is *wrong* (missing the inner loop's bound term), not that it's literally `true` — no simple IR-text pattern distinguishes the two states. This is exactly the standing "always verify a new test fails without the fix" lesson from a prior session, and it fired again here on a different signal than last time.
+
+**4. The real regression test**: compiles `feme-opt`'s fully-lowered IR (`feme-cpu-linearize,feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry`) to a real object via `clang -O0`, links it against a small C harness providing `feme.cpu.resource.atomic.add.raw.i32`, executes it, and checks the output heap buffer directly. Committed as `feme/test/Transforms/CPU/linearize-defer-loop-body-mask-op-diamond.ll` — the first lit test in this subtree that compiles-and-executes rather than only `FileCheck`-ing IR text. Confirmed both ways via `git stash`: `MISMATCH-COUNT=39` without the fix, `ALL-160-CORRECT` with it.
+
+**Verification**:
+- Real CTS: `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory.*` 6/6 Passed (was 0/6).
+- Full `dEQP-VK.compute.*` sweep (67,554 cases): 701 Pass/0 Fail/66,853 NotSupported (was 695 Pass/**6 Fail**/66,853 NotSupported) — exactly the 6 new passes, zero new failures.
+- `check-feme`: 3,774/3,781 Passed, 0 Failed, 7 Unsupported (one more total test than the prior session's baseline — the new lit test; no regressions).
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed again after the final rebuild (not just at session start).
+
+**Commits** (3, each independently buildable):
+1. `feme: defer masked loop-body diamonds in DiamondFlattener::run() (L442/L447/L448)` — the fix + the new execution-based regression test.
+2. `feme: update Roadmap.md for L442/L447/L448 fix` — struck-through `L442`/`L447` rows, new `L448` entry.
+3. `feme: record L442/L447/L448 CTS verification in VulkanCTSReport.md`.
+4. This `agent_thoughts.md` entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed — pure compiler correctness fix, zero feature/extension-surface change.
+
+**Cleanup done**: no diagnostic instrumentation left in the tree; `git status` is clean other than the commits above. Scratch artifacts under `/tmp/l442_min/`, `/tmp/l442_test/`, `/tmp/l442_lit_exec/`, `/tmp/l448_cts/` are disposable and can be deleted by a future session without losing anything (everything load-bearing is now in the committed lit test and docs).
+
+## Next steps
+
+1. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*` baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the two largest) for the next compact-cluster reduction.
+2. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases, root cause known, fix design sketched in a prior session) — still not attempted.
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+5. **(worth filing, low priority)** `feme-run` cannot currently execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target. Discovered this session while looking for an HLSL/`feme-run`-based regression test for `L448` before falling back to the compile-and-execute `.ll`-based approach above. Not investigated further; worth a dedicated look if execution-based HLSL testing of resource atomics becomes a recurring need.
+6. **(no standing background sweep)** Nothing currently running in the background to check in on.
