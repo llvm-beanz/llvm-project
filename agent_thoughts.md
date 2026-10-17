@@ -125362,3 +125362,106 @@ Can't reproduce or directly verify an `-isysroot` fix from this Linux host, so i
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — deferred every session.
 6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic. Not investigated further.
 7. **(worth a one-line follow-up if this recurs)** If a *third* macOS-only failure shows up in this exact test again, it's worth asking whether this file should just get a `REQUIRES: system-linux` guard (or a genuine cross-platform harness rewrite reviewed by someone with macOS CI access) rather than continuing to whack-a-mole one platform-specific gap at a time — two independent macOS-only bugs in the same ~80-line test in two consecutive sessions is a mild signal this test's host-execution approach is inherently fragile cross-platform, not just unlucky.
+
+# Session: L452 — opline/opnop deserialization fix; out_of_order separated out
+
+**Next action for the next session**: check
+`/tmp/l444_opline_opnop_full_rerun.qpa`/`.log` (PID 35885, launched
+~20:30 this session) — it was still mid-sweep (alphabetically in
+`float16.*`) when this session ended. Once done, confirm the new
+`L444` total (predicted 206) and update `Roadmap.md`/`VulkanCTSReport.md`
+with the real number.
+
+## What got done (1 of this session's 1 top-priority item)
+
+1. Ran the mandatory `vulkaninfo --summary | grep deviceName` check
+   first: confirmed `FeMe CPU Vulkan Device`.
+2. Took item 1 from the carried-forward list: the `opline`/`opnop`/
+   `out_of_order` 30-case cluster. Reduced one case first
+   (`opline_short_name_frag`) per the item's own instructions, rather
+   than assuming all 6 named sub-clusters shared a fix.
+3. Found **two separate bugs**, both in upstream
+   `mlir/lib/Target/SPIRV/Deserialization` (not FeMe's own code):
+   - `OpNop` had zero handling in the deserializer's dispatch switch.
+   - `processFunction`'s two strict opcode checks (parameter matching,
+     entry-block-starts-with-`OpLabel`) couldn't tolerate an
+     interspersed `OpLine`/`OpNoLine`/`OpNop`, even though the SPIR-V
+     spec allows those anywhere a non-terminator instruction can
+     appear — and the CTS's own `opline` fixture places them in
+     exactly those two gaps.
+4. Fixed both: added an `OpNop` no-op case, and a new
+   `sliceNonDebugInstruction` helper used by both strict checks.
+5. Tested thoroughly: 2 new MLIR unit tests (45/45 total pass), MLIR's
+   own SPIR-V lit suite (72/73, the 1 failure pre-existing/unrelated,
+   confirmed via `git stash`), `check-feme` (3,775/3,782, 0 Failed, no
+   regressions), and direct CTS re-runs: `opline` 17/17 Pass (was 15
+   Fail), `opnop` 6/6 Pass (was 6 Fail), `opnoline` 6/6 Pass (unaffected
+   sibling).
+6. Committed the fix (`b2294a255e92`) in its own commit, touching only
+   `mlir/` files — per the "issue outside FeMe" standing rule, isolated
+   and self-contained with its own regression tests.
+7. Reduced the remaining `out_of_order` sub-name directly, and found
+   it is **not** the same bug: all three reduced cases
+   (`opphi.out_of_order_geom`, `selection_block_order.out_of_order_geom`,
+   `switch_block_order.out_of_order_geom`) fail with a real rendering
+   mismatch, not a deserialization error. Went one step further and
+   checked `opphi.out_of_order`'s full 5-stage breakdown: `_frag`/
+   `_tessc`/`_tesse` **pass**, `_geom`/`_vert` fail with two *different*
+   mismatch corners. The shared shader shape is a loop with an
+   `OpSwitch`+out-of-order `OpPhi`; the two failing stages are exactly
+   the two where each of the 4 quad corners takes a genuinely different
+   switch case per-invocation. This smells like the same bug class as
+   the earlier `matrix_3x3`/`H004` "Function-storage tightening" fix
+   (un-privatized locals leaking across SIMD lanes), not a block-order
+   bug — but this is a hypothesis, not yet confirmed with a real IR
+   dump.
+8. Updated `Roadmap.md` (new `L452` entry plus `L452(a)` breaking down
+   the `out_of_order` next steps) and `VulkanCTSReport.md` (new `L452`
+   section with the same detail), committed separately (`bf24f7cbd2b9`).
+   No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+   needed — pure compiler/deserializer fix.
+
+## Why out_of_order wasn't fixed this session
+
+The item's own time budget was "half day" for the whole 30-case
+cluster. The opline/opnop half (23 cases, 2 distinct deserializer bugs,
+upstream MLIR code, needed its own unit tests) already consumed that
+budget properly. `out_of_order` turned out to be a third, unrelated
+bug needing a real IR-dump reduction (likely in `feme-cpu-simdize`,
+FeMe's own code, not upstream) — correctly scoped as its own future
+item (`L452(a)`) rather than rushed.
+
+## Next steps
+
+1. **(cheap, first thing)** Check
+   `/tmp/l444_opline_opnop_full_rerun.qpa`/`.log` (PID 35885) — once
+   done, record the refreshed `L444` baseline in `VulkanCTSReport.md`
+   and `Roadmap.md` (expect 206 remaining failures: 229 − 17 − 6).
+2. **(half day)** `L452(a)`: get a real `FEME_DUMP_IR_PRESIMD` (or
+   `PRENORM`) dump of `opphi.out_of_order_vert` specifically (simplest
+   of the two failing stages, no geometry-shader amplification on top)
+   to confirm or refute the Function-storage-leak hypothesis; if
+   confirmed, trace which `feme-cpu-simdize` code path fails to
+   privatize the `%iptr`/`%result` locals across the widened
+   `OpSwitch`'s divergent arms, and compare against `H004`'s existing
+   fix to see if it's the same gap recurring or a new sibling gap.
+3. **(half day)** Seven ~8-case struct/array composite-decomposition
+   clusters (`f16arr3`, `struct16arr3`, `v3f16`, `v3f16arr5`,
+   `v4f16arr3`, `struct`, `switch`) — still untouched, against whatever
+   the real refreshed baseline turns out to be.
+4. **(standing, needs a full dedicated session)** `L419(ad)`
+   (`mixed_break_continue`, 4 cases) — root cause and fix designs
+   already written up in `Roadmap.md`; still not attempted.
+5. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and
+   `L419(g)` (30 tessellation residuals) — untouched across multiple
+   sessions.
+6. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`) — deferred every session.
+7. **(low priority, carried forward)** `feme-run` cannot execute a
+   DXIL shader using a resource (not groupshared) `InterlockedAdd`/
+   atomic. Not investigated further.
+8. **(process reminder, carried forward, unchanged)** If a third
+   macOS-only failure recurs in
+   `linearize-defer-loop-body-mask-op-diamond.ll`, consider a
+   `REQUIRES: system-linux` guard or a real cross-platform harness
+   rewrite rather than continued incremental fixes.
