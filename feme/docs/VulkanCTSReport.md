@@ -6199,3 +6199,94 @@ multi-relay-hop `CheckBlock`/`CheckExit` machinery required to trigger
 it; correctness is validated here via the real CTS sweep (66/66
 targeted, 534/552 full) plus the unchanged 638/638
 `FeMeTransformsCPUTests` baseline instead.
+
+## `L419(y)`: `conditional_break_uniform`'s diagnosed failure root-caused (no fix landed) -- confirms next-step #2's hypothesis
+
+Investigated whether `conditional_break_{fragment,vertex}`'s diagnosed,
+not-corrupting failure (6 cases, all three `*_uniform_iterations`
+groups) is masking a more specific, fixable shape gap rather than being
+an inherent limitation of `flattenKnownDivergentBranch`'s
+cycle-containment safety check, as `L419(w)`'s own writeup suggested.
+
+**Reduced via `FEME_DUMP_IR_PRENORM=1`** (the shader cache must be
+disabled, `--deqp-shadercache=disable`, and `shadercache.bin` deleted
+first, or a cached compile silently skips the dump) on
+`do_while_uniform_iterations.conditional_break_fragment`:
+
+```llvm
+9:                              ; preds = %Flow._crit_edge, %0
+  %.06 = phi <4 x float> [ %8, %0 ], [ %11, %Flow._crit_edge ]
+  %.0  = phi i32 [ 0, %0 ], [ %14, %Flow._crit_edge ]
+  ...
+  %12 = call i32 @feme.cpu.resource.load.raw.i32(ptr ..., i1 true)
+  %13 = icmp ne i32 %.0, %12
+  br i1 %13, label %21, label %.Flow_crit_edge   ; Header's own break check
+
+.Flow_crit_edge:
+  br label %Flow
+Flow:                           ; preds = %.Flow_crit_edge, %21
+  %14 = phi i32 [ %22, %21 ], [ poison, %.Flow_crit_edge ]
+  %15 = phi i1  [ %24, %21 ], [ true,   %.Flow_crit_edge ]
+  br i1 %15, label %.loopexit, label %Flow._crit_edge
+21:                             ; preds = %9
+  %22 = add i32 %.0, 1
+  %23 = call i32 @feme.cpu.resource.load.raw.i32(ptr ..., i1 true)
+  %24 = icmp sge i32 %22, %23
+  br label %Flow
+```
+
+`Header` (block `9`) holds the shader's own `if (counter ==
+randomResourceValue) break;` check directly, reconverging with the
+Latch-adjacent block `21`'s separate, uniform trip-count check at a
+shared `Flow` block that feeds the cycle's single exit decision.
+
+**`FEME_DEBUG_LINEARIZE_TRACE=1`** on the same case confirms the
+mechanism directly:
+
+```
+L277TRACE: HeaderDivergent=0 LatchDivergent=0 OtherCondBrBlocks=[Flow (divergent=0) ]
+error: ... loop has a branch in '' that became mask-dependent after
+masking but does not have the simple shape this pass can flatten ...
+```
+
+`UniformityInfo`'s one-time, pre-masking snapshot correctly judges
+`Header`'s own branch (`%13`) uniform -- it is not even present in
+`OtherCondBrBlocks`, only `Flow` is. Only once `applyStageMasks`
+later narrows `%12`'s mask operand to a genuine per-lane value does
+`Header`'s branch become mask-dependent. At that point
+`flattenTaintedBranchesInRegion`'s candidate scan (correctly, per
+`L419(x)`'s own fix -- `Header` is part of *this* cycle `C`, not a
+different nested one) picks it up and routes it to
+`DiamondFlattener::flattenKnownDivergentBranch`, which refuses it via
+`L419(w)`'s own cycle-containment check: this branch's reconvergence
+point is the cycle's own exit machinery (`Flow`/`.loopexit`), not a
+local diamond `DiamondFlattener` can safely fold.
+
+**Conclusion**: this confirms this session's next-step #2 hypothesis
+exactly -- the diagnosed rejection is not an inherent limitation, it is
+masking a real, distinct, fixable gap. This is the same *class* of
+staleness bug `L419(v)` root-caused for `collectUniformPassThroughRegion`
+(a one-time, pre-masking uniform/divergent verdict that is never
+revisited once masking narrows the operand it depended on), but applied
+here to a different decision point: `Header`'s own branch-acceptance
+test inside `linearizeCycle`, not the region-candidate walk `L419(v)`/
+`L419(w)` already addressed.
+
+**Not fixed this session.** The real fix needs either (a) a post-masking
+re-check of `HeaderDivergent` before committing to treating `Header` as
+an ordinary uniform pass-through block (the same chicken-and-egg
+`L419(v)`'s own option (a) described), or (b) the same kind of
+ahead-of-time divergence prediction `L419(w)` implemented for
+`collectUniformPassThroughRegion`'s region candidates, generalized to
+`Header`'s own branch-acceptance test. Either option needs careful
+regression testing against the now-passing 6 `select_iteration_count_
+{fragment,vertex}` and 10 `dowhile_trap`/`nested*` cases -- this exact
+family of fix (ahead-of-time divergence prediction around `Header`/
+masking interaction) has regressed those twice before (`L419(v)`'s
+option (b) attempt -> `L419(w)`'s own initial poison-seed regression).
+Filed as `L419(y)` in `Roadmap.md`, P2 (diagnosed failure, not a crash
+or corruption, so lower urgency than `L419(x)` was).
+
+No code change this session for this investigation; `Linearize.cpp` is
+unchanged from the `L419(x)` commit. `Vulkan14FeatureInventory.md`/
+`VulkanExtensionInventory.md`: no change.
