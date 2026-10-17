@@ -125585,3 +125585,76 @@ feature/extension support surface.
    (`L440(c)`) — deferred every session.
 6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+
+# Session: L452(d) — root-causing the struct/array composite-decomposition cluster
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (with explicit `VK_ICD_FILENAMES`).
+
+**State**: investigation only, no code changed. Docs updated, committed.
+
+## What happened
+
+1. Picked the top carried-forward item: the seven ~8-case struct/array
+   clusters from `L452(c)`'s 192-case baseline (56 cases total).
+2. Ran all 7 directly via `deqp-vk`. Found `struct` is a naming
+   coincidence, not a real shared bug: it's actually
+   `variable_init`/`opcopymemory` cases failing on an unrelated
+   `spirv.GlobalVariable` legalization error. Parked — separate item.
+3. The other 6 leaves (`f16arr3`/`struct16arr3`/`v3f16`/`v3f16arr5`/
+   `v4f16arr3`/`switch`, 48 cases) all fail identically in
+   `feme-cpu-linearize`. Reduced one (`opcompositeextract.f16arr3`
+   compute) to a minimal standalone `.ll` via `FEME_DUMP_IR_PRELINEARIZE`,
+   confirmed it reproduces the exact diagnostic through
+   `feme-opt --llvm -passes=feme-cpu-linearize` alone (no CTS harness
+   needed — much faster iteration loop, worth reusing).
+4. Added temporary tracing + `Quiet=false` to `DiamondFlattener::validate`
+   (never committed, reverted at the end) and found the real, normally
+   suppressed diagnostic: `L375` — "reached by more than one divergent
+   root."
+5. Root cause: `peelConstantFlowPredecessors` + `mergeTrivialRelayBlocksInCycle`
+   — both individually intentional, already-tested simplifications — combine
+   to collapse a clean nested diamond-of-diamonds into exactly the CFG shape
+   `validate`'s own existing `L375`/`L383(a)` comments already document as
+   unsupported. **Not a new regression** — `validate` is correctly rejecting
+   a shape it was never built to handle. The new finding is *how* two
+   already-safe folds can produce that shape from input that was fine
+   before they ran.
+6. Wrote this up as `L452(d)` in `Roadmap.md` (full mechanism + two
+   candidate fixes) and a matching section in `VulkanCTSReport.md`.
+   Reverted all debug instrumentation, rebuilt `feme-opt` clean, confirmed
+   the repro still fails identically (sanity check the revert didn't
+   silently change behavior). Committed docs only — `8db5473db9c5`.
+
+## Why no fix this session
+
+Both candidate fixes touch `Linearize.cpp`, a file with five prior
+documented regressions in this exact area (`L375`, `L383(a)`, `L425`,
+`L447`, `L442`). Given session time was spent entirely on root-causing,
+implementing and testing a fix properly (regression test + full
+`check-feme` + full CTS re-sweep) needs its own dedicated session, not
+a rushed tail end.
+
+## Next steps
+
+1. **(half day to a day, top candidate, root cause already written up)**
+   Implement `L452(d)`'s fix design (a): teach `peelConstantFlowPredecessors`
+   to detect — before peeling — whether doing so would destroy an ancestor
+   diamond's own clean reconvergence point, and bail out if so (safer than
+   design (b), which needs a riskier `validate`/`flatten` generalization).
+   Needs `PDT` threaded into `peelConstantFlowPredecessors`'s signature.
+   Write a lit regression test from the existing `/tmp/repro_f16arr3.ll`
+   reduction before touching the fold.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order`
+   fix (5 cases) — memory-carried divergence gap in `WaveUniformity`,
+   design already written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
+   (30 tessellation residuals).
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate
+   `spirv.GlobalVariable` legalization bug (8 cases) — could run in
+   parallel with item 1, different code area (SPIRVToLLVM conversion,
+   not Linearize).
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
