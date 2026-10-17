@@ -65,34 +65,58 @@
 ; `lookThroughTrivialPhi` sees a single-incoming-value phi and (wrongly)
 ; treats it as the trivial constant `true`. A seeded-poison-placeholder
 ; fix for this was attempted and found to independently fix this gap,
-; but it also reintroduces a *different*, deeper regression in
+; but it also reintroduced a *different* regression in
 ; `dEQP-VK.glsl.loops.special.*select_iteration_count*`
 ; (`DiamondFlattener::flattenLoopBodyDiamond`'s own early fixed-point
-; pre-pass judges a loop-header-internal if/else built from a resource
+; pre-pass judged a loop-header-internal if/else built from a resource
 ; load's result "uniform" from a stale, not-yet-masked snapshot, and
-; never revisits that judgment once the mask legitimately becomes
-; non-constant) -- so it is deferred to a future change rather than
-; landed here; see the roadmap entry this comment's own commit updates.
+; never revisited that judgment once the mask legitimately became
+; non-constant). Roadmap `L419(w)` lands the complementary fix for that
+; regression (`LoopLinearizer::flattenTaintedBranchesInRegion` +
+; `DiamondFlattener::flattenKnownDivergentBranch`, re-scanning and
+; physically flattening any branch inside a `PreRegion`/`PostRegion` that
+; only became mask-dependent once `applyStageMasks` ran, including one
+; sitting at the cycle's own header), letting the poison-placeholder fix
+; finally land alongside it with no regression -- see that fix's own
+; roadmap entry and `agent_thoughts.md`'s matching session writeup for
+; the full mechanism. The resource store below is now correctly masked
+; by `active.sideeffect`, closing this gap.
 ;
 ; This reduces `dEQP-VK.glsl.loops.special.while_uniform_iterations.
 ; conditional_break_{fragment,vertex}` (and the identically-shaped
 ; `for_uniform_iterations.conditional_break_*`/`do_while_uniform_iterations.
 ; conditional_break_*`) down to its essential structure.
 
+; Roadmap L419(w): the body's own break check below is deliberately keyed
+; off `%k`, a value *unrelated* to the header's own `%inc`/`%n` trip-count
+; check, rather than (as an earlier version of this test had it) a second
+; comparison between `%inc` and `%n` themselves. That earlier choice was
+; an accidental self-contradiction: since `body` is only ever reached once
+; `%loop.cond = icmp slt i32 %inc, %n` has already been proven true on the
+; edge into it, `icmp eq i32 %inc, %n` is *always* false there by plain
+; flow-sensitive single-predecessor reasoning alone (confirmed with `opt
+; -passes=instsimplify` in isolation, no cycle/masking machinery
+; involved) -- entirely independent of whether this test's own masking
+; fix is correct, LLVM's own instruction simplification legitimately
+; folds that particular `icmp` away to `i1 false`, which then cascades
+; into folding away the very masking machinery this test exists to
+; exercise. Comparing `%inc` against an unrelated opaque value keeps the
+; break check genuinely data-dependent so the masking survives to be
+; checked below.
 ; CHECK-LABEL: define void @main(
 ; CHECK: header:
 ; CHECK: %active.live = phi i1 [ true, %entry ], [ %active.check.live, %latch ]
 ; CHECK: %active.sideeffect = phi i1 [ true, %entry ], [ %active.check.sideeffect, %latch ]
 ; CHECK: body:
-; CHECK: call void @feme.cpu.resource.store.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i32 1, i1 true)
-; CHECK: %break.cond = icmp eq i32 %inc, %n
+; CHECK: call void @feme.cpu.resource.store.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i32 1, i1 %active.sideeffect)
+; CHECK: %break.cond = icmp sgt i32 %inc, %k
 ; CHECK: %active.check.live = and i1 %active.live,
 ; CHECK: %active.check.sideeffect = and i1 %active.sideeffect,
 ; CHECK: br label %latch
 ; CHECK: latch:
 ; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.check.live)
 ; CHECK: br i1 %loop.any.active, label %header, label %exit
-define void @main(ptr %heap, i32 %heap_count, i32 %n) #0 {
+define void @main(ptr %heap, i32 %heap_count, i32 %n, i32 %k) #0 {
 entry:
   br label %header
 header:
@@ -102,7 +126,7 @@ header:
   br i1 %loop.cond, label %body, label %exit
 body:
   call void @feme.cpu.resource.store.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i32 1, i1 true)
-  %break.cond = icmp eq i32 %inc, %n
+  %break.cond = icmp sgt i32 %inc, %k
   br i1 %break.cond, label %exit, label %latch
 latch:
   br label %header

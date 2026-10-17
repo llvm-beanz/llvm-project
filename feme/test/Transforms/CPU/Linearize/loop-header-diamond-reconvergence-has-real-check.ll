@@ -104,20 +104,42 @@ declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1) #1
 attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
 attributes #1 = { nounwind willreturn memory(argmem: read) }
 
+; Roadmap L419(w): with `L419(w)`'s poison-placeholder-phi +
+; `flattenTaintedBranchesInRegion`/`flattenKnownDivergentBranch` fix
+; landed, Header's own internal if/else is now recognized as genuinely
+; mask-dependent (its resource load's mask operand narrows to
+; `active.live` once `makeActivePNPair`'s poison-seeded latch slot stops
+; `isKnownConstantMask` from folding the still-incomplete phi to a stale
+; `true`) and gets physically flattened via `flattenKnownDivergentBranch`
+; instead of surviving as a real, unmasked branch -- see that function's
+; own doc comment for the full mechanism. This is the actual fix for
+; `select_iteration_count_{fragment,vertex}`'s own masking bug (a lane
+; that already broke out via block `23`'s check must not still see the
+; resource load inside Header's if/else as if it were guaranteed live on
+; a later iteration); this file's own comment above, describing the
+; previous ("correct, not a reintroduced bug") understanding, predates
+; that root-cause finding.
+
 ; CHECK-LABEL: define void @main(
 ; The loop's own real trip count is genuinely per-lane divergent, so it
 ; must become a masked while-loop (confirms `LoopLinearizer`, not
 ; `DiamondFlattener::run()`'s early whole-function walk, builds this
 ; loop's masking).
 ; CHECK: %active.live = phi i1 [ true, {{.*}} ], [ %active.check.live, {{.*}} ]
-; Header's own internal if/else stays a real, unmasked branch (both arms
-; are side-effect free, and the load is lane-uniform, so this is
-; correct, not a reintroduced bug).
-; CHECK: %.not = icmp ne i32 %{{[0-9]+}}, 0
-; CHECK-NEXT: br i1 %.not, label %{{[0-9]+}}, label %._crit_edge
+; Header's own internal if/else's resource load is now masked by
+; `active.live` (narrowed once the poison-placeholder fix lets masking
+; see this phi as genuinely non-constant) ...
+; CHECK: %16 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 %active.live)
+; CHECK: %.not = icmp ne i32 %16, 0
+; ... and its branch is physically flattened (unconditional branch into
+; the taken arm, masked `live.t`/`live.f` splits) rather than surviving
+; as a real two-way branch.
+; CHECK-NOT: br i1 %.not,
+; CHECK: %live.t = and i1 %active.live, %.not
 ; The one-iteration exit arm's masks constant-fold to a plain `true`
-; rather than surviving as an unfolded two-constant-input phi (the fix's
-; actual observable effect on this reduction -- see file comment above).
+; rather than surviving as an unfolded two-constant-input phi (the
+; earlier `L419(u)` fix's own observable effect on this reduction -- see
+; file comment above).
 ; CHECK: call void @feme.cpu.masked.stage.output.store.f32(i32 2, i32 0, i32 0, float %{{[0-9]+}}, i32 0, i1 true)
 ; CHECK-NOT: %live.merge
 ; CHECK-NOT: %sideeffect.merge
