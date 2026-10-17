@@ -69,20 +69,25 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(half day, new top candidate with real data behind it)** The seven
-   ~8-case struct/array composite-decomposition clusters (`f16arr3`,
-   `struct16arr3`, `v3f16`, `v3f16arr5`, `v4f16arr3`, `struct`,
-   `switch`) — 56 cases, now the clearest largest remaining compact
-   cluster in the confirmed 192-case `L444` baseline.
-2. **(standing, needs a full dedicated session)** `L452(a)`'s
-   `out_of_order` fix (5 cases) — root cause and a concrete fix design
-   (alloca-divergence side-table) are both fully written up in
-   `Roadmap.md`; deliberately not attempted due to regression risk.
-3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases) — design
-   written up, still not attempted.
+1. **(half day to a day, top candidate, root cause already written up)**
+   Implement `L452(d)`'s fix design (a): teach `peelConstantFlowPredecessors`
+   to detect — before peeling — whether doing so would destroy an ancestor
+   diamond's own clean reconvergence point, and bail out if so (safer than
+   design (b), which needs a riskier `validate`/`flatten` generalization).
+   Needs `PDT` threaded into `peelConstantFlowPredecessors`'s signature.
+   Write a lit regression test from the existing `/tmp/repro_f16arr3.ll`
+   reduction before touching the fold.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order`
+   fix (5 cases) — memory-carried divergence gap in `WaveUniformity`,
+   design already written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
 4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)`
-   (30 tessellation residuals) — untouched across multiple sessions.
+   (30 tessellation residuals).
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
-   (`L440(c)`) — deferred every session.
-6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate
+   `spirv.GlobalVariable` legalization bug (8 cases) — could run in
+   parallel with item 1, different code area (SPIRVToLLVM conversion,
+   not Linearize).
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
