@@ -72,6 +72,42 @@ spirv.func @in_bounds_access_chain_zero_indices() "None" {
 }
 
 //===----------------------------------------------------------------------===//
+// spirv.PtrAccessChain
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @ptr_access_chain
+spirv.func @ptr_access_chain(%arg0: !spirv.ptr<f32, CrossWorkgroup>, %arg1 : i32) "None" {
+  // CHECK: llvm.getelementptr %{{.*}}[%{{.*}}] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+  %0 = spirv.PtrAccessChain %arg0[%arg1] : !spirv.ptr<f32, CrossWorkgroup>, i32 -> !spirv.ptr<f32, CrossWorkgroup>
+  spirv.Return
+}
+
+// `$element` plays the same "initial dereference" role `spirv.AccessChain`'s
+// own synthesized leading zero index does, so a struct/array base followed
+// by further `$indices` must thread `$element` through as the GEP's leading
+// index and the remaining indices unchanged -- not re-synthesize another
+// leading zero on top of it.
+// CHECK-LABEL: @ptr_access_chain_struct
+spirv.func @ptr_access_chain_struct(%arg0: !spirv.ptr<!spirv.struct<(f32, !spirv.array<4xf32>)>, CrossWorkgroup>, %arg1 : i32) "None" {
+  // CHECK: %[[ONE:.*]] = llvm.mlir.constant(1 : i32) : i32
+  %0 = spirv.Constant 1: i32
+  // CHECK: llvm.getelementptr %{{.*}}[%{{.*}}, 1] : (!llvm.ptr, i32) -> !llvm.ptr, !llvm.struct<packed (f32, array<4 x f32>)>
+  %1 = spirv.PtrAccessChain %arg0[%arg1 %0] : !spirv.ptr<!spirv.struct<(f32, !spirv.array<4xf32>)>, CrossWorkgroup>, i32, i32 -> !spirv.ptr<!spirv.array<4xf32>, CrossWorkgroup>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
+// spirv.InBoundsPtrAccessChain
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: @in_bounds_ptr_access_chain
+spirv.func @in_bounds_ptr_access_chain(%arg0: !spirv.ptr<f32, CrossWorkgroup>, %arg1 : i32) "None" {
+  // CHECK: llvm.getelementptr inbounds %{{.*}}[%{{.*}}] : (!llvm.ptr, i32) -> !llvm.ptr, f32
+  %0 = spirv.InBoundsPtrAccessChain %arg0[%arg1] : !spirv.ptr<f32, CrossWorkgroup>, i32 -> !spirv.ptr<f32, CrossWorkgroup>
+  spirv.Return
+}
+
+//===----------------------------------------------------------------------===//
 // spirv.GlobalVariable and spirv.mlir.addressof
 //===----------------------------------------------------------------------===//
 

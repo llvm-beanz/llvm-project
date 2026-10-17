@@ -542,6 +542,66 @@ using AccessChainPattern = AccessChainConversion<spirv::AccessChainOp>;
 using InBoundsAccessChainPattern =
     AccessChainConversion<spirv::InBoundsAccessChainOp>;
 
+/// Shared implementation for `spirv.PtrAccessChain` and its
+/// `spirv.InBoundsPtrAccessChain` sibling: both ops have identical operand,
+/// result, and indexing semantics and differ only in the same in-bounds
+/// contract `AccessChainConversion` above already maps onto `LLVM::GEPOp`'s
+/// `inbounds` flag. Unlike `spirv.AccessChain`, these ops carry an extra
+/// leading `$element` operand that -- per `SPIRVMemoryOps.td`'s own
+/// description -- "is used to do an initial dereference of Base: Base is
+/// treated as the address of an element in an array, and a new element
+/// address is computed from Base and Element to become the
+/// [plain]AccessChain Base to dereference". That is exactly what
+/// `AccessChainConversion`'s own synthesized leading *zero* index means to
+/// `LLVM::GEPOp` (treat the base pointer as pointing into a one-element
+/// array and select that element) -- the only difference here is that the
+/// leading index is `$element` itself rather than a hardcoded zero, since
+/// `$element` is explicitly allowed to be any signed count, not just zero.
+template <typename SPIRVOp>
+class PtrAccessChainConversion : public SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using typename SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(SPIRVOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // See `AccessChainConversion`'s own matching check for why this is
+    // required rather than always building a GEP from whatever operand is
+    // given.
+    if (!isa<LLVM::LLVMPointerType>(adaptor.getBasePtr().getType()))
+      return rewriter.notifyMatchFailure(op, "base is not an LLVM pointer");
+
+    auto dstType =
+        this->getTypeConverter()->convertType(op.getResult().getType());
+    if (!dstType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+
+    // Unlike `spirv.AccessChain`, the leading GEP index is `$element`
+    // itself, not a synthesized zero -- `$element` already plays that
+    // "initial dereference" role per the op's own semantics.
+    auto indices = llvm::to_vector<4>(adaptor.getIndices());
+    indices.insert(indices.begin(), adaptor.getElement());
+
+    auto elementType = this->getTypeConverter()->convertType(
+        cast<spirv::PointerType>(op.getBasePtr().getType()).getPointeeType());
+    if (!elementType)
+      return rewriter.notifyMatchFailure(op, "type conversion failed");
+    auto noWrapFlags =
+        std::is_same_v<SPIRVOp, spirv::InBoundsPtrAccessChainOp>
+            ? LLVM::GEPNoWrapFlags::inbounds
+            : LLVM::GEPNoWrapFlags::none;
+    rewriter.replaceOpWithNewOp<LLVM::GEPOp>(
+        op, dstType, elementType, adaptor.getBasePtr(), indices,
+        noWrapFlags);
+    return success();
+  }
+};
+using PtrAccessChainPattern =
+    PtrAccessChainConversion<spirv::PtrAccessChainOp>;
+using InBoundsPtrAccessChainPattern =
+    PtrAccessChainConversion<spirv::InBoundsPtrAccessChainOp>;
+
 class AddressOfPattern : public SPIRVToLLVMConversion<spirv::AddressOfOp> {
 public:
   using SPIRVToLLVMConversion<spirv::AddressOfOp>::SPIRVToLLVMConversion;
@@ -3110,7 +3170,8 @@ void mlir::populateSPIRVToLLVMConversionPatterns(
       DirectConversionPattern<spirv::AnyOp, LLVM::vector_reduce_or>,
 
       // Memory ops
-      AccessChainPattern, InBoundsAccessChainPattern, AddressOfPattern,
+      AccessChainPattern, InBoundsAccessChainPattern, PtrAccessChainPattern,
+      InBoundsPtrAccessChainPattern, AddressOfPattern,
       LoadStorePattern<spirv::LoadOp>, LoadStorePattern<spirv::StoreOp>,
       CopyMemoryPattern, VariablePattern,
 
