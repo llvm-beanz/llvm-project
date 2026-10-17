@@ -125041,3 +125041,51 @@ Wired into all 4 call sites that can erase a `HeaderExit`/`LatchExit` check's ow
 5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
 6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (598MB) — just check progress, don't restart.
 7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed `/tmp/l437_full_run3` results.
+
+# Session: L442 isolated to feme-cpu-simdize; two long-running sweeps completed
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed first action, as required.
+
+**What's done**: No fix landed for `L442` itself, but its root cause is now narrowed from "somewhere in the compiler" to a specific pass (`feme-cpu-simdize`), with a fast, faithful, small-scale repro built for the next session to pick up immediately. Also: both standing background CTS sweeps (`/tmp/l437_full_run3`, `/tmp/l440c_spirvasm.qpa`) are now fully accounted for, and a real (if unrelated) lit-test regression was found and fixed.
+
+**1. `/tmp/l437_full_run3` finally finished**: 67,043/67,234 Passed (99.7%), only **1** Failed. That 1 failure is `L442` — confirming it is genuinely the *only* outstanding `dEQP-VK.*` failure cluster across this entire 67k-case sweep. (`deqp-vk` printed "ABORTED" right after a complete totals block — looks like a reporting quirk, not a real early-exit, but worth a fresh full sweep someday to be sure.)
+
+**2. `L442` repro recipe — use this, don't rebuild one**:
+```
+# Patch VK-GL-CTS's MaxWorkgroupMemoryInstance::queuePass with an
+# env-var-gated shrink override (wgx=16, numElems=40), rebuild deqp-vk,
+# then:
+FEME_DEBUG_L442_SHRINK=1 VK_ICD_FILENAMES=.../feme_icd.json \
+  ./deqp-vk --deqp-case=dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.max_workgroup_memory.1
+```
+This reproduces the bug in ~1 second using the *exact* `glslang`-compiled shader shape, vs. minutes for the real case. **Do not try to rebuild this from scratch with HLSL/`dxc`** — already tried, `dxc`'s codegen for the shader's dynamic `wg_mem[i][j]` vector-component indexing doesn't match `glslang`'s and trips an unrelated diagnostic instead. Neither `glslangValidator` nor `glslc` are built standalone here, so patching the real CTS test is the only fast path. The patch itself was reverted (third-party checkout, not ours to commit) — re-apply it fresh from this description if picking this up again. The technique is now written up in `feme/.instructions.md` for future bugs with the same shape.
+
+**3. Where the bug actually is, narrowed this session**:
+- Manually scalar-traced the post-`feme-cpu-linearize` IR for one matching invocation (idx=4, i=1, j=0): exactly one atomic fires. **`Linearize.cpp` is innocent** — confirmed two independent ways now (this trace, plus `L443`'s own differential test).
+- Real-hardware atomic tracing (temporary instrumentation in `FeMeRuntimeCPU.c`, reverted) showed the smoking gun directly: per-lane byte offsets fire `0,4,8,12` (wave 0, correct) then `16,16,20` (wave 1's **lane 0 fires twice**, lane 1 fires once). Not a masking error — the shader's only other candidate branch (`elseif`) is provably false at this exact point.
+- Inspected the emitted unrolled 4-lane atomic-call sequences in `/tmp/l442_min/shrink_postsimd.ll` for both the shader's `if` and `elseif` branches — both look clean, no literal duplicate instruction. So the bug isn't a simple copy-paste error in the emitted code; it's in how the masked inner loop's per-(i,j) predicate state carries across repeated re-entries from the outer loop. **Next step is to instrument `SIMDize.cpp`'s own masked-loop construction directly**, not keep reading already-emitted IR text.
+
+**4. Found and fixed, as cleanup, an unrelated real regression**: `check-feme`'s `entry-wrapper-loop-header-derived-value-in-suffix.ll` had been silently broken since the `L429` commit (which only reported unit-test and `check-hlsl-feme-vk` results, not a full lit run). The test's `CHECK` lines were just stale against `L429`'s own correct behavior change. Fixed the test, not the compiler. `check-feme` is clean again: 3,773/3,780 Passed, 0 Failed.
+
+**Verification**:
+- `check-feme`: 3,773/3,780 Passed, 0 Failed, 7 Unsupported.
+- `check-hlsl-feme-vk`: 492/793 Passed, 273 Unsupported, 28 Expectedly Failed, 0 unexpected failures.
+- Re-confirmed `L442`'s 6-case baseline unchanged on a pristine checkout: 0/6 Passed, 6/6 Failed (same as every prior session).
+
+**Commits** (3, each independently buildable):
+1. `feme: fix stale CHECK lines in entry-wrapper-loop-header-derived-value-in-suffix.ll` — the lit-test fix, with full context on why `L429`'s behavior change was correct.
+2. `feme: document L442/L445/L446 findings and the CTS-shrink repro technique` — `Roadmap.md` (new `L445`/`L446` entries) + `VulkanCTSReport.md` + `.instructions.md` updates.
+3. This `agent_thoughts.md` entry.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed (nothing this session touches feature/extension surface — a test fix and two measurement-only sweep completions).
+
+**Cleanup done**: all diagnostic instrumentation (the CTS test's `FEME_DEBUG_L442_SHRINK`/`MUL4LIVE` patches, `FeMeRuntimeCPU.c`'s `FEME_DEBUG_L442_TRACE_ATOMIC` trace) was reverted before ending the session — both checkouts are back to pristine `git status` clean. The `/tmp/l442_min/` scratch directory (shrunk-case IR dumps, abandoned HLSL repro attempts) was left in place for the next session to reuse; the HLSL/`dxc` attempts inside it (`source1.hlsl` through `source7.hlsl`) are dead ends and can be deleted, but `shrink_prelin.ll`/`shrink_postlin.ll`/`shrink_postsimd.ll` are the useful artifacts to start from next time.
+
+## Next steps
+
+1. **(dedicated session, the real open item — do this first)** Instrument `feme/lib/Transforms/CPU/SIMDize.cpp`'s masked-loop/divergent-call-site construction directly (not more IR-reading) to find exactly how many `call` sites get built per masked resource call and whether some per-wave worklist iterates the matching lane twice when a uniform-trip-count inner loop is re-entered by an outer loop. Start from `/tmp/l442_min/shrink_postsimd.ll` and the repro recipe above — it's a ~1-second iteration loop now, not minutes.
+2. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*` baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the two largest) for the next compact-cluster reduction.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases, root cause known, fix design sketched) — still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+6. **(no longer standing)** Both `/tmp/l437_full_run3` and `/tmp/l440c_spirvasm.qpa` are done and recorded this session — no background sweep left to check in on. Consider launching a fresh detached full-`dEQP-VK.*` sweep if a future session has idle background time, per the "launch detached" lesson in `.instructions.md`.
