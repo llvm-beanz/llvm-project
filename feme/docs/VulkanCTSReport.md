@@ -7380,3 +7380,72 @@ the refreshed full baseline once complete; `L419(ad)`
 (`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
 (tessellation residuals); `L440(c)`'s 39-case residual triage. All
 unchanged standing items.
+
+## L451: `frexpstruct` SIMDize aggregate-intrinsic fix
+
+**Issue**: `L444`'s third-largest compact cluster, `frexpstruct` (20 of
+the 275-case baseline, across all 5 graphics shader stages --
+`instruction.graphics.float32.comparison_*.frexpstruct_*`). GLSL's
+`frexp(x, exp)` out-parameter builtin lowers to SPIR-V `OpExtInst
+GLSL.std.450 FrexpStruct`, which `mlir/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVM.cpp` converts straight to a single `{T, iN}
+@llvm.frexp.*(T)` call -- confirmed via `FEME_DUMP_IR_PRESIMD` on a
+direct repro: `call { float, i32 } @llvm.frexp.f32.i32(float %x)`.
+`feme-cpu-simdize`'s `checkAggregateValueSupported` only recognized one
+aggregate-result `CallInst` shape (the four `isOverflowArithIntrinsic`
+add/sub/mul-with-overflow intrinsics), so any divergent use of this
+call hit the pass's "component decomposition is not yet supported for
+this producer" diagnostic.
+
+**Fix**: `feme/lib/Transforms/CPU/SIMDize.cpp` -- added `isFrexpIntrinsic`
+and a dedicated `widenFrexpIntrinsic` widening path. Unlike the
+overflow intrinsics (one shared `LLVMMatchType<0>` operand/result
+type), `llvm.frexp` takes a single operand and its two result fields
+(fractional part, exponent) are independently-overloaded types, so the
+wide exponent type is derived from the result struct's own second
+field rather than reused from the operand's element type. Both the
+scalar-operand and vector-operand (per-component decomposition) shapes
+are handled, mirroring `widenOverflowArithIntrinsic`'s own two
+branches.
+
+**Verification**:
+- New `SIMDizeTest.WidensDivergentFrexpCall` unit test, covering both
+  result fields' independent widened types and their `extractvalue`
+  readback.
+- `check-feme`: 3,775/3,782 Passed, 0 Failed, 7 Unsupported (one more
+  total test than `L450`'s own count, the new unit test; no
+  regressions).
+- Real CTS: `dEQP-VK.spirv_assembly.instruction.*frexpstruct*` (72
+  cases): **72 Passed / 0 Failed** (was 20 Failed among these before
+  this fix -- all now pass, the other 52 already-passing cases
+  unaffected).
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change
+needed (pure compiler correctness fix, zero feature/extension-surface
+change). This fix lives entirely in `feme/` (FeMe's own CPU-target
+wave-widening pass), not upstream `mlir/` -- the gap is in SIMDize's
+aggregate-producer recognition, not in SPIR-V-to-LLVM opcode lowering
+itself.
+
+With all three of `L444`'s three largest clusters now fixed
+(`opquantize` via `L449`, `opptraccesschain` via `L450`, `frexpstruct`
+via this entry), the 275-case baseline should now stand at
+275 − 13 − 13 − 20 = 229 remaining failures, pending a fresh full
+re-sweep to confirm with a real measurement. Two prior same-purpose
+background sweeps were each discovered stale mid-session (started
+before a later fix in the same session rebuilt the library they were
+meant to measure) and discarded/relaunched; see the new
+`feme/.instructions.md` lesson on checking a sweep process's start
+time against the binary's rebuild time before trusting its results.
+The current sweep, `/tmp/l444_spirvasm_rerun3.qpa`, was launched after
+this session's final rebuild and should be valid when it completes.
+
+**Next steps**: check on `/tmp/l444_spirvasm_rerun3.qpa` and record the
+refreshed full baseline once complete; re-cluster the remaining
+failures against the fresh data before picking the next target (prior
+candidates per the stale baseline: several ~8-case struct/array
+composite-decomposition clusters, `floatarray`, `matrix`,
+`nested_struct`/`undef_nested_struct`, `mip_1`); `L419(ad)`
+(`mixed_break_continue`); `L419(y)` (`conditional_break`); `L419(g)`
+(tessellation residuals); `L440(c)`'s 39-case residual triage. All
+unchanged standing items.
