@@ -69,22 +69,24 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(cheap, every session)** Check in on `dEQP-VK.spirv_assembly.*` (started
-   this session, 70,337 cases, still running at session end) — record the result
-   in `VulkanCTSReport.md` once done. Also re-check `/tmp/l437_full_run3/`
-   (526MB and growing, don't restart).
-2. **(immediate, half day)** Triage `L442` (the 6-case
-   `zero_initialize_workgroup_memory.max_workgroup_memory` compute failure,
-   confirmed pre-existing, newly discovered this session) — likely a compact
-   single-root-cause cluster given every other `compute.*` case passes.
-3. **(immediate, half day)** Continue `L440(c)`'s remaining-39-failure triage:
-   confirm the `mad.32.test` FMA-rounding hypothesis, spot-check a few more of
-   the other 38 (`Feature/Textures`'s 6-case cluster looks like the next most
-   promising compact group per `Roadmap.md`'s breakdown).
-4. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
-   4 cases) — root cause now known (see above + `Roadmap.md`), fix design
-   sketched, not yet attempted. `L419(y)` (`conditional_break`, 6 cases) and
-   `L419(g)` (30 tessellation residuals) both still completely untouched.
-5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
+1. **(dedicated session, the real open item)** `L442`'s exact-2x
+   `max_workgroup_memory` doubling. Start from `FEME_DUMP_IR` on
+   `max_workgroup_memory.1` and check the
+   compute-dispatch/workgroup-invocation-count path and `shared ... = {}`'s
+   zero-init codegen — NOT `Linearize.cpp` masking, that avenue is now closed
+   off by this session's differential test.
+2. **(half day)** `L444`'s newly-completed 275-case `spirv_assembly.*` baseline:
+   pick the `opquantize` or `opinboundsaccesschain` cluster (the two largest,
+   ~confirmed again this session) for the next compact-cluster reduction.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
+   4 cases, root cause known, fix design sketched in a prior session) — still
+   not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+   tessellation residuals) — both still completely untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`) — still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and
+   growing (598MB) — just check progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
    master per-group table in one pass using the completed `/tmp/l437_full_run3`
    results.
