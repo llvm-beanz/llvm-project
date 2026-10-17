@@ -1,6 +1,6 @@
 ; RUN: split-file %s %t
 ; RUN: feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry -feme-cpu-wave-size=4 -S %t/shader.ll -o %t/lowered.ll
-; RUN: clang -O0 -c %t/lowered.ll -o %t/lowered.o
+; RUN: grep -v -e '^target datalayout' -e '^target triple' %t/lowered.ll | clang -O0 -x ir - -c -o %t/lowered.o
 ; RUN: clang -O0 %t/lowered.o %t/harness.c -o %t/run
 ; RUN: %t/run | FileCheck %s
 
@@ -43,6 +43,30 @@
 ; checks the resulting heap buffer for the exact doubling this bug caused
 ; (confirmed both ways: this harness shows `MISMATCH-COUNT=39` with the
 ; `L448` fix reverted, and `ALL-160-CORRECT` with it applied).
+;
+; `shader.ll` carries an explicit `target datalayout` copied verbatim from
+; FeMe's own import-time IR (a DXIL/SPIR-V-style logical layout, not any
+; real target's), and `feme-cpu-wrap-entry`'s `-S` output leaves it
+; untouched -- unlike the real AOT/JIT pipeline (`Target/CPU/Pipeline.cpp`/
+; `CompiledStage.cpp`), which always retargets a module to
+; `getHostDataLayout()`'s real host layout before codegen, this lit test
+; invokes `clang -c` directly against the raw `feme-opt -S` output. On a
+; host whose own native layout differs enough from this logical one in a
+; way the backend's own compatibility check flags as fatal (confirmed on
+; arm64-apple-macosx: the module's `m:e` ELF name-mangling scheme and its
+; `i8:8:32-i16:16:32` alignment overrides both conflict with that target's
+; real `m:o` Mach-O scheme and natural `i8:8/i16:16` alignment), `clang -c`
+; aborts with "Can't create a MachineFunction using a Module with a
+; Target-incompatible DataLayout" instead of compiling -- this host's own
+; linux-on-aarch64 defaults happened not to trip that same fatal check, so
+; the bug was invisible here. Fixed by stripping the `target
+; datalayout`/`target triple` lines before compiling (piped through
+; `clang -x ir -` rather than read as a file, so no intermediate stripped
+; copy needs its own path), letting `clang -c` fall back to its own true
+; host defaults exactly as the real pipeline's `getHostDataLayout()` would
+; have retargeted to -- this test is only checking two lowered functions'
+; correct runtime arithmetic, not their on-disk target metadata, so no
+; real target it compiles for is checked at all.
 
 ; CHECK: ALL-160-CORRECT
 
