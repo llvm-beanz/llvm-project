@@ -125757,3 +125757,93 @@ optimization.
    (`stash@{1}`–`stash@{9}` as of last session) remain uninspected —
    low value now that the one likely-relevant stash has been recovered
    and landed, but still open if a future session wants to check.
+
+# Session: L452(e) root-caused, fix attempted and reverted after check-feme caught a crash
+
+**Start here next session**: `L452(f)` in `Roadmap.md` — the `switch_comp`
+shape needs a `PDT`-based fix, not a CFG-walk heuristic. Do not re-try
+relaxing `reachesThroughRelayChain`'s purity check; it's been tried and
+shown to be fundamentally unable to tell the good case from the bad one.
+
+## What happened (20 min read, most of it diagnosis)
+
+1. Confirmed `vulkaninfo` → `FeMe CPU Vulkan Device` (mandatory check, done).
+2. Reduced `dEQP-VK.spirv_assembly.type.scalar.i32.switch_comp` standalone
+   via `FEME_DUMP_IR_PRELINEARIZE=1` → `/tmp/switch_comp.ll`.
+3. Confirmed (via temporary debug env var, since removed) it hits the
+   *exact same* underlying `validate` diagnostic as `L452(d)`'s `f16arr3`
+   fix — same bug family, not new.
+4. Found the precise gap: `reachesThroughRelayChain`'s purity check applies
+   to the *final* hop too, which wrongly rejects a switch-leaf block that
+   has real computation (an `icmp`) but still unconditionally branches
+   straight into the ancestor's reconvergence point.
+5. **Tried the obvious fix**: exempt only the final hop from the purity
+   check. Fixed `switch_comp` standalone. Passed both existing relay-chain
+   regression tests (`loop-relay-chain-two-hops.ll`,
+   `loop-break-structurized.ll`).
+6. Ran full `check-feme` anyway (always do this before trusting a "looks
+   good" local result) — caught a real crash in
+   `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`.
+7. Root-caused the crash: that test's own second-peel case has the
+   *exact same CFG shape* as `switch_comp` (ancestor `CondBr`, one pure
+   relay successor, one impure successor, both landing directly on the
+   same target) — but there the peel is *correct and required*, while in
+   `switch_comp` it's *dangerous*. The hand-rolled relay-chain walk cannot
+   tell these two apart on shape alone.
+8. Reverted the fix completely (`git checkout --` on `Linearize.cpp`,
+   deleted the draft lit test). Confirmed `git diff` clean against the
+   `L452(d)` commit. Re-ran `check-feme`: back to clean
+   (3,776/3,783 Passed, 0 Failed, 7 Unsupported).
+9. Wrote up the finding as `Roadmap.md`'s `L452(f)` so nobody re-tries
+   this same fix next session.
+
+## Win
+
+Nothing broke. `check-feme` is exactly as clean as it was at the start of
+the session. The failed approach is fully documented so the next session
+starts from the real constraint (needs postdominance, not CFG-walk
+heuristics) instead of re-discovering it the hard way.
+
+## Why this needed a revert, not a patch
+
+The deciding fact: both the good case (test) and the bad case
+(`switch_comp`) look *identical* if you only look at "does `Origin`'s
+impure successor still reach `Target` directly." The difference must be
+about whether `BB` genuinely postdominates both of `Origin`'s paths in a
+way that's load-bearing for something *outside* this one local diamond —
+which is a real dominance-tree question, not something a bounded
+backward walk over `UncondBr` chains can answer correctly. Patching the
+heuristic further (e.g. "exempt the final hop only if ___") would just
+be guessing at more special cases without the underlying analysis to
+back it up.
+
+## Next steps
+
+1. **(next candidate, now with a concrete design target)** `L452(f)`:
+   implement the `PDT`-based redesign the prior two sessions flagged but
+   deferred — thread a `PostDominatorTree` into
+   `peelConstantFlowPredecessors`/`peelWouldDestroyAncestorReconvergencePoint`
+   and check real postdominance of `BB` over `Origin`'s two successors,
+   rather than the current backward-walk-plus-purity-heuristic. This is
+   the "needs a full dedicated session" item from two sessions back —
+   estimate a day, given the risk of a dominance-based change touching
+   a lot of currently-passing shapes. Use
+   `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`
+   and the `/tmp/switch_comp.ll` repro as the two must-pass cases that
+   distinguish a correct fix from a plausible-looking one.
+2. **(standing, needs a full dedicated session)** `L452(a)`'s
+   `out_of_order` fix — memory-carried divergence gap in
+   `WaveUniformity`, design already written up.
+3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and
+   `L419(g)` (30 tessellation residuals) — still worth confirming
+   whether `L452(e)`'s 4 `*_tessc` failures are the same bucket.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+   (`L440(c)`).
+6. **(smaller, independent)** The `struct` cluster's own separate
+   `spirv.GlobalVariable` legalization bug (8 cases) — different code
+   area (SPIRVToLLVM conversion), can run in parallel with item 1.
+7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+8. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected — low value, still open if a future session wants to check.
