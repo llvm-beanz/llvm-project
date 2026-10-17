@@ -124999,3 +124999,45 @@ Wired into all 4 call sites that can erase a `HeaderExit`/`LatchExit` check's ow
 3. **(immediate, half day)** Continue `L440(c)`'s remaining-39-failure triage: confirm the `mad.32.test` FMA-rounding hypothesis, spot-check a few more of the other 38 (`Feature/Textures`'s 6-case cluster looks like the next most promising compact group per `Roadmap.md`'s breakdown).
 4. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases) — root cause now known (see above + `Roadmap.md`), fix design sketched, not yet attempted. `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) both still completely untouched.
 5. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed `/tmp/l437_full_run3` results.
+
+# Session: L442/L443 — `max_workgroup_memory` doubling stays open, but a real `CheckBlock` masking bug found and fixed along the way
+
+**Device check**: `VK_ICD_FILENAMES=.../feme_icd.json vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed first action, as required.
+
+**What's done**: Fixed a real, distinct `LoopLinearizer::linearizeCycle` masking bug (`L443`) found while investigating `L442`. Differentially proved (git stash/rebuild/re-run A-B) that it does **not** fix `L442` itself. Read and recorded the long-running `dEQP-VK.spirv_assembly.*` sweep's completion (`L444`).
+
+**The `L443` bug, in one sentence**: resource/atomic calls sharing a cycle's `CheckBlock` got masked with the stale, pre-check mask instead of the check's own narrowed mask, because the pre-existing code ran whole-block masking with the stale mask *before* the check-narrowed mask was even computed, and `narrowCallMask`'s one-shot "only overwrite while still constant" guard locks in whichever mask a call sees first.
+
+**Fix**: split masking at the check condition's own instruction position (stale mask before/at it, check-narrowed mask strictly after), plus a walk-forward-past-pre-existing-`SelectInst`s step to dodge a degenerate `Header==CheckBlock` collapse where an earlier `freezeRelayChainExitValues` call already inserted its own selects right after the block's phis. Two regressions surfaced and were fixed in sequence before landing clean (see commit message / `Roadmap.md`'s `L443` entry for the blow-by-blow) — this is the **third** time this exact code area has needed a careful incremental fix; same caution as `L419(h)`/`L419(w)` applies to any future touch here.
+
+**Why this does NOT fix `L442`**: `git stash`'d the fix, rebuilt, re-ran `max_workgroup_memory.1` alone — identical `"expected 1, got: 2"` failure both before and after. The symptom shape doesn't match anyway: every one of the 6 sizes fails with an **exact 2x** count (`1`→`2`, `16`→`32`, `128`→`256`), not a "+1 phantom iteration" shape a masking-narrowness bug would produce. **This is the key new clue for `L442`**: a clean doubling across every size smells like the compute-dispatch/workgroup-invocation-count machinery itself running the dispatch twice, or `shared ... = {}`'s zero-init logic executing twice — not anything in `Linearize.cpp`'s masking. Next session on this should start from `FEME_DUMP_IR` on one case and look at the dispatch path, not more masking code.
+
+**Verification**:
+- New regression test `loop-internal-break-with-mask-op-after-check.ll` (the complement of the existing before-the-check test): red without the fix, green with it.
+- `check-feme`: 3,772/3,780 Passed (only the pre-existing, unrelated `entry-wrapper-loop-header-derived-value-in-suffix.ll` failure remains), 7 Unsupported, 0 regressions.
+- `dEQP-VK.compute.*` full regression check (67,554 cases): 695 Pass/6 Fail/66,853 NotSupported — byte-identical to the pre-fix baseline, confirming the fix is safe and the 6 `max_workgroup_memory` failures are unchanged.
+- Real CTS run of the 6 target cases, both before and after: 0/6 Pass either way (unrelated, as established above).
+
+**`L444`: the standing `dEQP-VK.spirv_assembly.*` sweep (checked in on across several prior sessions, never restarted) finally completed**: 12,260/70,337 Passed (17.4%), 275 Failed (0.4%), 57,802 NotSupported (82.2%). Clustered the 275 failures — `opquantize`/`opspecconstantop_opquantize`/`opquantize_vec4` (all 5 graphics stages plus compute) and `opinboundsaccesschain`-adjacent access-chain cases are still the two largest compact clusters, confirming a much-earlier session's "232 of 528" framing, now against this session's completed, larger 275-case baseline. Not triaged further this session — the natural next reduction target.
+
+**Standing sweep**: `/tmp/l437_full_run3/` still running and growing (598MB as of this session's end, up from 591MB at start) — don't restart it.
+
+**Housekeeping**: a stray `shadercache.bin` kept reappearing at the repo root across sessions (the FeMe Vulkan ICD writes its shader cache to whatever directory a test/CTS tool's CWD happens to be); added it to the top-level `.gitignore` in its own isolated, FeMe-untouched commit so this stops recurring as an untracked-file distraction every session.
+
+**Commits** (4, each independently buildable):
+1. `feme: narrow CheckBlock resource/atomic masks with their own check condition` — the `L443` core fix.
+2. `feme: add regression test for CheckBlock after-check mask narrowing` — the new test, isolated per "small separate changes."
+3. `gitignore: ignore stray FeMe shadercache.bin artifact at repo root` — outside-FeMe hygiene fix, isolated commit.
+4. `feme: document L442/L443 findings and the completed spirv_assembly sweep` — `Roadmap.md` + `VulkanCTSReport.md` updates.
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no change needed either for the masking fix (pure compiler correctness, no new feature/extension surface) or for the sweep completion (a CTS measurement only).
+
+## Next steps
+
+1. **(dedicated session, the real open item)** `L442`'s exact-2x `max_workgroup_memory` doubling. Start from `FEME_DUMP_IR` on `max_workgroup_memory.1` and check the compute-dispatch/workgroup-invocation-count path and `shared ... = {}`'s zero-init codegen — NOT `Linearize.cpp` masking, that avenue is now closed off by this session's differential test.
+2. **(half day)** `L444`'s newly-completed 275-case `spirv_assembly.*` baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (the two largest, ~confirmed again this session) for the next compact-cluster reduction.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`, 4 cases, root cause known, fix design sketched in a prior session) — still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — both still completely untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`) — still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` still running and growing (598MB) — just check progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole master per-group table in one pass using the completed `/tmp/l437_full_run3` results.
