@@ -5663,6 +5663,48 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
         collectUniformPassThroughRegion(CheckExit->StayInLoop, Latch,
                                         ExitBlock, C, PeeledFrom);
     if (!PreRegion || !PostRegion) {
+      // Roadmap L419(h): `PreRegion`/`PostRegion` failing here (rather
+      // than at `RealExitCandidates.size() > 1` above) almost always
+      // means `Header`'s (or `Latch`'s) own terminator is itself a
+      // second, genuinely divergent branch that `HeaderExit`/`LatchExit`
+      // never recognized above -- not because its condition is uniform,
+      // but because its own relay to `ExitBlock` is itself indirect
+      // (e.g. funneled through `CheckBlock` rather than reaching
+      // `ExitBlock` directly or via a *pure* relay chain, the only two
+      // shapes `matchExitCheck`/`recoverRelayExitCheck` can recognize --
+      // see their own comments). `while_loop_in_switch_dynamic_fragment`'s
+      // own shape (`dEQP-VK.glsl.switch.loop_in_switch`) is exactly this:
+      // `Header`'s own per-fragment-dynamic trip-count check is
+      // genuinely divergent, but both of its successors merge into a
+      // single shared `Flow`-style dispatch block before ever reaching
+      // `ExitBlock`, so `HeaderExit` stays null and `HeaderDivergent`
+      // below reads `false` purely because there is no recognized
+      // `HeaderExit` to query -- not because `Header`'s real check is
+      // uniform. Detect this directly (not relying on `HeaderExit`/
+      // `LatchExit`) and emit the same "more than one divergent exit
+      // check" diagnostic `RealExitCandidates.size() > 1` above already
+      // uses, rather than this block's own generic "internal branch in
+      // '<CheckBlock>'" message, which incorrectly blames `CheckBlock`
+      // itself for a shape that is actually unsupported because of a
+      // second divergent check elsewhere entirely.
+      auto *HeaderBr = dyn_cast<CondBrInst>(Header->getTerminator());
+      bool HeaderHasOwnDivergentCheck =
+          Header != CheckBlock && HeaderBr && !HeaderExit &&
+          !PeeledFrom.contains(Header) && isDivergentBranch(HeaderBr);
+      auto *LatchBr = dyn_cast<CondBrInst>(Latch->getTerminator());
+      bool LatchHasOwnDivergentCheck =
+          Latch != CheckBlock && LatchBr && !LatchExit &&
+          !PeeledFrom.contains(Latch) && isDivergentBranch(LatchBr);
+      if (HeaderHasOwnDivergentCheck || LatchHasOwnDivergentCheck) {
+        BasicBlock *Other =
+            HeaderHasOwnDivergentCheck ? Header : Latch;
+        diagnose(F, "loop at '" + Header->getName() +
+                        "' has more than one divergent exit check ('" +
+                        Other->getName() + "' and '" +
+                        CheckBlock->getName() +
+                        "'); unsupported (roadmap milestone 6 deviation)");
+        return false;
+      }
       diagnose(F, "loop at '" + Header->getName() +
                       "' has an internal branch in '" + CheckBlock->getName() +
                       "'; only a uniform pass-through region to/from the "
