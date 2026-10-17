@@ -69,22 +69,31 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(half day)** `L444`'s already-completed 275-case `spirv_assembly.*`
-   baseline: pick the `opquantize` or `opinboundsaccesschain` cluster (still the
-   two largest) for the next compact-cluster reduction.
-2. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
-   4 cases, root cause known, fix design sketched in a prior session) — still
-   not attempted.
-3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+1. **(cheap, first thing)** Check on `/tmp/l444_spirvasm_full_rerun.qpa`/`.log`
+   (background `dEQP-VK.spirv_assembly.*` full sweep, 70,337 cases, launched
+   this session, not yet complete) — once done, record the refreshed baseline in
+   `VulkanCTSReport.md` and `Roadmap.md`'s `L444` entry (expect 262 remaining
+   failures).
+2. **(half day)** `L444`'s other large cluster — **double-check its exact
+   case-name prefix before starting**: `Roadmap.md`'s "`opinboundsaccesschain`"
+   label for this specific 275-case-baseline cluster looks like it may be an
+   echo of the *already-fixed*, differently-named `opinboundsaccesschain`
+   cluster documented earlier in `VulkanCTSReport.md` (a
+   `BlockAccessChainPattern`/struct-of-vec3/`matrix_3x3` fix from a much earlier
+   session) rather than a fresh discovery — the case names in this session's own
+   275-case sweep read more like `OpPtrAccessChain`/`opptraccesschain`. Confirm
+   which opcode is actually failing before reduction work starts.
+3. **(standing, needs a dedicated session)** `L419(ad)` (`mixed_break_continue`,
+   4 cases, root cause known, fix design sketched) — still not attempted.
+4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
    tessellation residuals) — both still completely untouched.
-4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`) — still deferred every session.
-5. **(worth filing, low priority)** `feme-run` cannot currently execute a DXIL
-   shader using a resource (not groupshared) `InterlockedAdd`/atomic —
-   `dx.op.atomicBinOp.i32` isn't raised before reaching the FeMe CPU target.
-   Discovered this session while looking for an HLSL/`feme-run`-based regression
-   test for `L448` before falling back to the compile-and-execute `.ll`-based
-   approach above. Not investigated further; worth a dedicated look if
-   execution-based HLSL testing of resource atomics becomes a recurring need.
-6. **(no standing background sweep)** Nothing currently running in the
-   background to check in on.
+6. **(worth filing, low priority, carried forward)** `feme-run` cannot currently
+   execute a DXIL shader using a resource (not groupshared)
+   `InterlockedAdd`/atomic — `dx.op.atomicBinOp.i32` isn't raised before
+   reaching the FeMe CPU target. Not investigated further.
+7. **(process reminder for next session)** Run `vulkaninfo --summary | grep
+   deviceName` **as the literal first action**, before any other work — this
+   session did it late. Worth adding extra emphasis/an explicit first-line habit
+   cue if this recurs.
