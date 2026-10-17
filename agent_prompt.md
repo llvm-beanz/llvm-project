@@ -69,19 +69,24 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(standing)** `L419(g)` -- 30 tessellation residuals, same
-   IR-dump-and-reduce methodology candidate, untouched.
-2. **(standing)** `L419(h)`'s remaining residuals
-   (`elseblock`/`ifblock`/`mixed_break_continue` special-loop shapes, plus
-   loop-in-switch cases) -- distinct shapes, need their own reduction.
-3. **(standing)** `L419(y)` (`conditional_break_uniform`, 6 cases) -- untouched.
-4. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline (`L440(b)`)
-   needs re-measuring on a quiet machine (no standing CTS sweep running) and
-   case-by-case triage -- likely dominated by the known upstream
-   `SPIRVEmitIntrinsics` bug class (llvm/llvm-project#226608) per existing
-   `XFAIL` markers, but not yet verified.
-5. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running
-   and growing (253MB+ as of this session's end) -- just check progress, don't
-   restart.
-6. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
+1. **(~1 day)** The actual capability fix for `L419(z)`'s shape: make
+   `collectUniformPassThroughRegion` (or `matchExitCheck`'s relay-recovery)
+   tolerate a successor chain that passes through another block with its own
+   `CondBr` before reaching `ExitBlock`, by recursively masking that
+   intermediate block's divergent split too. This is materially riskier than
+   today's fix — this exact code area (`L419(v)`/`L419(w)`) has regressed twice
+   before when generalized carelessly. Validate against the 4 loop-in-switch
+   cases plus the full 552-case `loops.special` sweep and the already-fixed
+   `L419(w)`/`L419(x)` cases (16 total) before considering it safe.
+2. **(standing)** `L419(g)` — 30 tessellation residuals, untouched.
+3. **(standing)** `L419(h)`'s other remaining residuals
+   (`elseblock`/`ifblock`/`mixed_break_continue`, 12 cases) — distinct shapes,
+   need their own reduction.
+4. **(standing)** `L419(y)` (`conditional_break_uniform`, 6 cases) — untouched.
+5. **(half day)** `check-hlsl-clang-feme-vk`'s 92-failure baseline re-triage,
+   still deferred every session.
+6. **(check-in, cheap, every session)** `/tmp/l437_full_run3/` is still running
+   and growing (294MB as of this session's end, up from 253MB) — just check
+   progress, don't restart.
+7. **(when the sweep finally completes)** Replace `VulkanCTSReport.md`'s whole
    master per-group table in one pass using the completed results.
