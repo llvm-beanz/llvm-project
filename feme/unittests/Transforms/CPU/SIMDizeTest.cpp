@@ -1524,20 +1524,31 @@ TEST(SIMDizeTest, WidensVectorPHIMergingUniformlyMaskedLoad) {
 
 // The `widenMaskedAllocaLoad` counterpart of the established H107/L118
 // scalar shape (`ReadsBackRealUniformValueThroughAMaskedLoadFeedingAn
-// UnwidenedPhi` below): an unconditional, *not itself* masked, `load`
-// reading back a `MaskedAllocas` base is force-decomposed by
-// `widenMaskedAllocaLoad` just as unconditionally as a real masked-load
-// call is (see that function's own comment for why: a plain `LoadInst`'s
-// divergence, per `UI`'s ordinary operand-based propagation, can only ever
-// reflect its *pointer* operand, never the divergent *value* an earlier
-// store through the same uniform address wrote -- there is no SSA def-use
-// edge from a store to a later load of the same address for that
-// propagation to follow). A `phi` merging this load's result, with `UI`
-// (consistently, by that same blind spot) judging both the load and the
-// `phi` uniform, exercises the same "sever every remaining `ToErase` use"
-// cleanup step as the masked-load-call shape, just through a different
-// force-decomposing producer -- confirming that mechanism is not somehow
-// specific to `widenMaskedLoad` alone.
+// UnwidenedPhi` below) -- *updated for roadmap L452(a)*: a plain,
+// not-itself-masked `load` reading back a `MaskedAllocas` base is
+// force-decomposed into a real per-lane vector by `widenMaskedAllocaLoad`
+// regardless of `UI`'s verdict (that part is unchanged). What changed is
+// what the `phi` merging it does: `UI`'s ordinary operand-based divergence
+// has no memory model, so it cannot see that the uniform-address `store`
+// feeding `%local` wrote a genuinely per-lane-divergent value (there is no
+// SSA def-use edge from a store to a later load of the same address for it
+// to follow) -- but that merge is nonetheless *really* divergent whenever
+// runtime execution takes the `%loaded` edge (every lane keeps its own
+// thread-ID-derived value, not a single broadcast one), exactly the same
+// memory-carried-divergence shape roadmap `L452(a)`'s own `out_of_order`
+// bug reduces to one hop further downstream (a uniformly-addressed
+// load/modify/store round trip whose *value* is per-lane-divergent).
+// Before `FunctionWidener::ForcedDivergentValues`/
+// `computeForcedDivergentValues` closed this gap, this `phi` (and
+// `%use`'s `fadd` below it) stayed narrow and silently collapsed every
+// lane's own value down to whichever lane `widen()`'s H107 "leftover use"
+// recovery happened to read, then broadcast that single value back out to
+// every lane -- the same silent-corruption failure mode `L452(a)`'s own
+// roadmap entry documents. `%loaded` is now seeded into
+// `ForcedDivergentValues` directly (it reads a `MaskedAllocas` base `UI`
+// still calls uniform), and the merge `phi` (then `%use`) picks that up by
+// ordinary forward propagation, so both are now properly, and correctly,
+// widened.
 TEST(SIMDizeTest, WidensPHIMergingMaskedAllocaLoad) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -1568,20 +1579,29 @@ TEST(SIMDizeTest, WidensPHIMergingMaskedAllocaLoad) {
   ASSERT_TRUE(F);
   EXPECT_FALSE(verifyModule(*M, &errs()));
 
-  // The merge `phi` stays a single, un-widened scalar `float` `phi` (`UI`
-  // is right that it is uniform); its `%loaded` incoming edge must read a
-  // real, non-`poison` recovered value rather than a dangling
-  // `poison`-RAUW'd operand.
-  bool FoundNarrowPHI = false;
+  // The merge `phi` is now a genuinely widened `<4 x float>` `phi` (roadmap
+  // L452(a)): `%loaded`'s per-lane-real incoming vector merges with the
+  // other edge's uniform value, broadcast out to all four lanes, rather
+  // than silently collapsing to one lane's value. `%use`'s `fadd` is
+  // widened in turn.
+  bool FoundWidePHI = false;
+  bool FoundWideFAdd = false;
+  auto *WideFloatTy = FixedVectorType::get(Type::getFloatTy(Ctx), 4);
   for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<PHINode>(I) && I.getType()->isFloatTy())
+        << "the merge phi must no longer stay scalar once its own "
+           "incoming value is forced-divergent (roadmap L452(a))";
     if (auto *PN = dyn_cast<PHINode>(&I)) {
-      if (PN->getType()->isFloatTy())
-        FoundNarrowPHI = true;
+      if (PN->getType() == WideFloatTy)
+        FoundWidePHI = true;
       for (Value *Incoming : PN->incoming_values())
         EXPECT_FALSE(isa<PoisonValue>(Incoming));
     }
+    if (I.getOpcode() == Instruction::FAdd && I.getType() == WideFloatTy)
+      FoundWideFAdd = true;
   }
-  EXPECT_TRUE(FoundNarrowPHI);
+  EXPECT_TRUE(FoundWidePHI);
+  EXPECT_TRUE(FoundWideFAdd);
 }
 
 TEST(SIMDizeTest, DecomposesScalarConditionVectorSelect) {
