@@ -8164,3 +8164,71 @@ git stashes.
 
 **Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
 `FeMe CPU Vulkan Device`, confirmed per standing instruction.
+
+## L440(c): `Feature/Textures` 6-case cluster fixed -- sampled 1D/3D zero-mip fetch
+
+**Issue**: `hasOnlySupportedImageUses` in `SPIRVResourceLowering.cpp` has two
+independent fetch-intrinsic code paths: `isFetchLevelIntrinsic` (explicit-Lod
+`texelFetch(sampler, coord, lod)`, already widened to accept
+`Plain1D`/`Array1D`/`Plain3D` by a prior session's `L72(c)` fix), and a
+separate zero-mip `getpointer`-based fetch path (what `Texture1D`/`Texture3D`'s
+HLSL `operator[]`, which has no explicit mip argument, actually lowers to in
+DXC's SPIR-V output). The zero-mip path still hard-rejected
+`Cube`/`CubeArray`/`Plain1D`/`Array1D`/`Plain3D` outright, citing the
+now-superseded `L52a`/`L66(a)` "ordinary sampling only" scope note. The shared
+`lowerImageAccesses` codegen switch (shape-driven, not `HandleKind`-driven)
+already had working `createLoad1D`/`createLoad1DArray`/`createLoad3D` cases
+from the storage-image side -- only the sampled-image validation path was
+blocking these shapes from reaching already-functional codegen. A latent,
+previously-unreachable `FetchCoordWidth` bug (defaulting `Plain1D`/`Plain3D`
+to the wrong width `2` instead of `1`/`3`) was also fixed in the same change.
+
+**Fix**: narrowed the zero-mip-fetch rejection list to `Cube`/`CubeArray` only
+(the genuine SPIR-V restriction -- `OpImageFetch` is illegal against
+`Dim::Cube`), corrected `FetchCoordWidth`'s per-shape formula, and updated
+three stale doc comments (the `Plain1D`/`Plain3D` enum docs and
+`hasOnlySupportedImageUses`'s function doc) that claimed sampled 1D/3D fetch
+was unsupported. New/updated unit tests in `SPIRVResourceLoweringTest.cpp`:
+renamed `LeavesAPlain1DImageFetchAlone` -> `LowersAPlain1DImageFetch` (now
+asserts the fetch *is* lowered, since the old assertion encoded the bug),
+added `LowersAnArray1DImageFetch` and `LowersAPlain3DImageFetch`.
+
+**CTS-verified**: isolated `/tmp/t1.hlsl` reproducer (a `Texture1D<float4>`
+indexed via `operator[]`) went from `VkResult=-3` pipeline-creation failure to
+success. `check-hlsl-clang-feme-vk`: 38 Failed -> 32 Failed, 353 Passed (was
+347) -- all 6 `Feature/Textures` cases now pass (`Array.OperatorIndex.test`,
+`Array.SRVToUAV.array.test`, `Array.SRVToUAV.test`, `OperatorIndex.test`,
+`SRVToUAV.array.test`, `SRVToUAV.test`), zero new regressions.
+`dEQP-VK.glsl.texture_functions.texelfetch.*sampler1d*`: 24/24 Pass.
+`dEQP-VK.glsl.texture_functions.texelfetch.*sampler3d*`: 12/24 Pass, 12 Not
+Supported (pre-existing/unrelated), 0 Failed. Full
+`dEQP-VK.glsl.texture_functions.texelfetch.*`: 60/96 Pass, 36 Not Supported, 0
+Failed. Broader confirmatory sweep, full
+`dEQP-VK.glsl.texture_functions.*`: 3,936/7,947 Pass, 4,011 Not Supported, 0
+Failed -- zero regressions across the entire GLSL texture-function family.
+`check-feme`: 3,784/3,784 Passed, 7 Unsupported, 0 Failed (after fixing the
+one unit test that asserted the old, now-incorrect behavior, and adding 2 new
+tests for the newly-supported shapes). `check-hlsl-feme-vk`: 0 Failed, 492
+Passed -- clean.
+
+**Inventories**: `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unchanged -- this closes a compiler-internals validation gap (sampled-image
+zero-mip fetch for shapes whose codegen already existed), not a new
+feature/extension surface.
+
+`L440(c)` status: 59/92 fixed, 33 residual (clusters: `Feature/HLSLLib` ~20,
+`Feature/LocalResources` 5, `Feature/StructuredBuffer` 4, `Basic`/
+`Basic/Matrix` 3, `WaveOps` 2-3, `Tools/Offloader` 2,
+`Feature/ResourceArrays` 2, plus several 1-case singletons), still untriaged.
+
+**Next steps**: `L419(g)` (30 tessellation residuals) remains the largest
+standing `L419` bucket and the user's own top pick for a future session;
+`L440(c)`'s remaining 33-case residual triage is a secondary option;
+`feme-run`'s DXIL atomic gap and the 9 uninspected git stashes remain low
+priority, carried forward.
+
+**Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed per standing instruction (required
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` env vars set to
+`build/tools/feme/tools/feme-vulkan/feme_icd.json` for `vulkaninfo` to select
+the FeMe ICD over the system's `llvmpipe` driver).
