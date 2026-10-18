@@ -126468,3 +126468,36 @@ bucket and the user's own top pick.
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy, never root-caused.
 
 **Build/test state**: `check-feme` passes clean (3784/3791 passed, 7 unsupported — unchanged baseline) after the `PatchPipeline.cpp` debug-aid commit. No functional FeMe code changed this session (debug instrumentation only, inert when env var unset), so no CTS regression sweep was needed — `VulkanCTSReport.md` and the inventories are unchanged and still accurate.
+
+# Session: L419(ae) root cause fully found (not fixed); L440(c) `Feature/LocalResources` 4/5 cases fixed via a missing `.i8` runtime symbol
+
+**Status check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, same `VK_ICD_FILENAMES` gotcha as always).
+
+**What's done**: two concrete pieces of progress, four commits:
+1. `FEME_DEBUG_DOMAIN_POSITIONS` debug aid in `PatchPipeline.cpp` (inert when unset).
+2. `Roadmap.md` `L419(ae)` entry rewritten with the full root-cause mechanism.
+3. `feme.cpu.resource.{load,store}.raw.i8` runtime entry points added, fixing 4 `Feature/LocalResources` cases.
+4. `Roadmap.md`/`VulkanCTSReport.md` updated for the `.i8` fix, plus a new `L453` entry for the 5th, still-unfixed `LocalResources` case.
+
+**`L419(ae)` — the chase, in order**:
+1. Picked up the prior session's exact next-step: dump real domain-stage output positions for the swapped-corner patch pair, not just Outer-level tess factors. Added `FEME_DEBUG_DOMAIN_POSITIONS`, built, re-ran the isolated `std::swap(cp0,cp3)` CTS repro with it.
+2. Captured real `cp[]`/`point[]` dumps. Found the grid has no jitter (simpler than suspected) — a plain regular grid.
+3. **Key unlock**: re-read the CTS's own `tese` shader source and found it applies a deliberate `+0.04` jitter keyed on bit-parity of the *pre-jitter* position. This reframes the pass/fail criterion as "bit-exact match," not "close" — any single ULP of mismatch fails.
+4. Cross-referenced the real cp[] dump against `appendQuadBoundaryRing`'s fixed edge convention (edge0=`v=0` forward, edge1=`u=1` forward, edge2/3 backward+integer-subtraction, per the existing `L336` fix's own doc comment). **Found: the swapped patch's shared edge maps to edge0, the unswapped neighbor's to edge1 — two different *forward* edges**, not the usual forward/backward pairing `L336` already handles.
+5. Verified numerically with `numpy.float32` (not Python's default double — tried that first, got a *wrong*, misleadingly-matching result): for `N=10`, only `K=1,2,4` out of 11 values show a real bit-exact mismatch between direct `K/N` and the shader's own `1-(N-K)/N` subtraction. This matches the "only some points crack" symptom exactly.
+6. Confirmed `swap(cp1,cp2)` (the passing diagonal) takes edge2 (backward, `L336`-fixed) on the swapped side instead — a genuinely different, already-handled case.
+
+**Why no fix yet**: `Tessellator.cpp` generates each patch's edges independently, with zero visibility into which edge index a neighboring patch uses for the same physical boundary. A general fix needs a real design (not a quick patch) and touches foundational fraction-generation code that hundreds of currently-passing tessellation cases depend on. Didn't want to gamble with limited remaining session time on an unreviewed change here — documented the mechanism precisely instead so the next session can start from a verified design problem, not more detective work.
+
+**`L440(c)` — quick pivot after wrapping up `L419(ae)`**: re-measured `check-hlsl-clang-feme-vk`'s baseline fresh. Found the old "~20 `Feature/HLSLLib`" cluster estimate in the roadmap was stale — it's actually only 3 now (`Feature/LocalResources`, 5 cases, is the real largest cluster). Used `FEME_DUMP_IR=1` on the simplest failing case (`local_resource_read_only.test`) and got a direct, unambiguous JIT symbol-not-found error: `feme.cpu.resource.load.raw.i8`/`.store.raw.i8`. The runtime only ever defined `.i16`/`.i32`/`.i64`/`.f16`/`.f32` — never `.i8`. Copying a local `ByteAddressBuffer` variable from a global one makes the resource-lowering pass decompose the access into 4 individual byte calls instead of one `i32` call, and those byte calls just didn't exist. Added them, mirroring the existing `.i16` pair exactly. Fixed 4 of 5 cases outright; the 5th (`local_resource_loop_array_index`) hit a completely different bug (a `SPIRVToLLVM` GEP-pointer-type error for an array of local resource handles indexed in a loop) — filed as new `L453`, not investigated further.
+
+**Verification**: `check-feme` 3785/3792 passed (7 unsupported, +1 new unit test), 0 regressions, both before and after the `.i8` fix. Ran `dEQP-VK.ssbo.*` (12,225 real CTS cases) as a smoke check since this touches shared runtime raw-buffer code — 0 Failed, confirming no regression. Didn't run a broader CTS sweep because the trigger (copying a local resource variable) is a DXC/Clang HLSL-frontend-only shape that glslangValidator's GLSL/CTS shaders never produce.
+
+**Next steps (ranked)**:
+1. **(~1 day, design-heavy, not a quick patch)** `L419(ae)`: design a fix for the edge0-vs-edge1 forward/forward cross-pairing ULP mismatch. Start from this session's `Roadmap.md` entry (full mechanism) and the `FEME_DEBUG_DOMAIN_POSITIONS`/`FEME_DEBUG_TESS_FACTORS` instrumentation. Validate against the full `dEQP-VK.tessellation.*` sweep before landing, not just `common_edge.*` — real regression risk to many passing cases.
+2. **(half day)** `L440(c)`: `Feature/StructuredBuffer` (4 cases) is now the next-largest residual cluster.
+3. **(half day, standalone, newly found)** `L453`: `local_resource_loop_array_index`'s `SPIRVToLLVM` GEP-pointer-type bug. Start with `FEME_DUMP_IR`/`FEME_DUMP_IR_PRENORM` for this one case.
+4. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+
+**Build/test state**: `check-feme` 3785/3792 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 32 → 26 failed, 0 regressions. Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed / 4755 Passed / 7470 NotSupported, no regression. `VulkanCTSReport.md`, `Roadmap.md` both updated this session; no inventory update needed (neither change is a new feature/extension).
