@@ -11485,6 +11485,188 @@ public:
   }
 };
 
+/// Recursively builds \p DstType's own composite value for a
+/// `spirv.GlobalVariable`'s `initial_value` attribute, for use inside the
+/// `llvm.mlir.global` initializer region
+/// `PrivateAggregateGlobalVariablePattern` below builds -- the global-scope
+/// analog of `AggregateInitializedVariablePattern` above (a *region*, not a
+/// single SSA value, is the only way to materialize a composite constant
+/// for a global's own initializer; there is no instruction stream to run
+/// ordinary `spirv.Constant`/`spirv.CompositeConstruct` ops in). Leaves
+/// (scalar or vector) use `convertStageIOInitialValue`'s own existing
+/// signed/unsigned-integer retyping; a `spirv.struct`/`spirv.array`
+/// composite recurses one level at a time, building an `llvm.mlir.poison`
+/// seed and one `llvm.insertvalue` per member/element (mirroring
+/// `StructConstantPattern`'s own one-level-at-a-time decomposition, and
+/// `ExecutionModeInfo`'s struct-building in `SPIRVToLLVM.cpp`). A struct
+/// member's own position is remapped through
+/// `getStructMemberPhysicalIndex`, exactly as `rewriteBlockAccess`'s own
+/// `AccessChain` conversion already must, in case layout reordered or
+/// padded it. Returns a null `mlir::Value`, declining the whole
+/// conversion, for any type this cannot build (currently only a
+/// `spirv.matrix` leaf, not yet seen in a composite `initial_value` by any
+/// known CTS case).
+mlir::Value buildAggregateGlobalInitializerValue(
+    mlir::OpBuilder &Builder, mlir::Location Loc, mlir::Type SrcType,
+    mlir::Attribute SrcAttr, mlir::Type DstType,
+    const mlir::TypeConverter &TypeConverter) {
+  if (SrcType.isIntOrFloat() || mlir::isa<mlir::VectorType>(SrcType)) {
+    mlir::Attribute Converted =
+        convertStageIOInitialValue(SrcType, SrcAttr, Builder);
+    return mlir::LLVM::ConstantOp::create(Builder, Loc, DstType, Converted);
+  }
+  if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(SrcType)) {
+    auto DstStruct = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(DstType);
+    auto Elements = mlir::dyn_cast<mlir::ArrayAttr>(SrcAttr);
+    if (!DstStruct || !Elements ||
+        Elements.size() != StructTy.getNumElements())
+      return nullptr;
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Builder, Loc, DstType);
+    for (unsigned I = 0, E = StructTy.getNumElements(); I != E; ++I) {
+      unsigned PhysicalIndex =
+          getStructMemberPhysicalIndex(StructTy, I, TypeConverter);
+      if (PhysicalIndex >= DstStruct.getBody().size())
+        return nullptr;
+      mlir::Value Member = buildAggregateGlobalInitializerValue(
+          Builder, Loc, StructTy.getElementType(I), Elements.getValue()[I],
+          DstStruct.getBody()[PhysicalIndex], TypeConverter);
+      if (!Member)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(
+          Builder, Loc, Result, Member,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(PhysicalIndex)});
+    }
+    return Result;
+  }
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(SrcType)) {
+    auto DstArray = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(DstType);
+    auto Elements = mlir::dyn_cast<mlir::ArrayAttr>(SrcAttr);
+    if (!DstArray || !Elements ||
+        Elements.size() != ArrayTy.getNumElements())
+      return nullptr;
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Builder, Loc, DstType);
+    for (unsigned I = 0, E = ArrayTy.getNumElements(); I != E; ++I) {
+      mlir::Value Element = buildAggregateGlobalInitializerValue(
+          Builder, Loc, ArrayTy.getElementType(), Elements.getValue()[I],
+          DstArray.getElementType(), TypeConverter);
+      if (!Element)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(
+          Builder, Loc, Result, Element,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(I)});
+    }
+    return Result;
+  }
+  return nullptr;
+}
+
+/// Returns whether \p SrcAttr (an `initial_value`, or recursively one of
+/// its own constituents) has a shape
+/// `buildAggregateGlobalInitializerValue` above can actually build for \p
+/// SrcType -- i.e. everywhere a `spirv.struct`/`spirv.array` is expected,
+/// \p SrcAttr is an `ArrayAttr` with exactly that many elements, down to a
+/// scalar/vector leaf (anything else, currently only a `spirv.matrix`
+/// leaf, is not yet needed by any known CTS case). Kept attribute/type-only
+/// (no `TypeConverter`/builder) so `PrivateAggregateGlobalVariablePattern`
+/// can call this *before* committing to `replaceOpWithNewOp` below, rather
+/// than discovering an unsupported shape only once rewriting is already
+/// underway and can no longer cleanly back out.
+bool isAggregateGlobalInitializerShapeSupported(mlir::Type SrcType,
+                                                mlir::Attribute SrcAttr) {
+  if (SrcType.isIntOrFloat() || mlir::isa<mlir::VectorType>(SrcType))
+    return true;
+  if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(SrcType)) {
+    auto Elements = mlir::dyn_cast<mlir::ArrayAttr>(SrcAttr);
+    if (!Elements || Elements.size() != StructTy.getNumElements())
+      return false;
+    for (unsigned I = 0, E = StructTy.getNumElements(); I != E; ++I)
+      if (!isAggregateGlobalInitializerShapeSupported(
+              StructTy.getElementType(I), Elements.getValue()[I]))
+        return false;
+    return true;
+  }
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(SrcType)) {
+    auto Elements = mlir::dyn_cast<mlir::ArrayAttr>(SrcAttr);
+    if (!Elements || Elements.size() != ArrayTy.getNumElements())
+      return false;
+    for (mlir::Attribute Element : Elements.getValue())
+      if (!isAggregateGlobalInitializerShapeSupported(
+              ArrayTy.getElementType(), Element))
+        return false;
+    return true;
+  }
+  return false;
+}
+
+/// Converts a `Private`-storage `spirv.GlobalVariable` whose `initial_value`
+/// is a `spirv.struct`/`spirv.array` composite (recursively, of any nesting
+/// -- e.g. `dEQP-VK.spirv_assembly.instruction.*.variable_init.private.
+/// struct*`'s own mixed array+vector+scalar aggregate, roadmap L452(d)).
+/// Upstream MLIR's own `GlobalVariablePattern` explicitly restricts
+/// `initial_value` lowering to a scalar or vector pointee type, leaving a
+/// composite one unconverted -- which then fails dialect-conversion
+/// legalization outright (`spirv.GlobalVariable` has no other pattern that
+/// can touch it), rather than merely dropping the initial value. Registered
+/// at `FeMeBenefit` so it wins over upstream's own pattern for exactly this
+/// shape; falls back to `failure()` (letting upstream's own pattern handle
+/// it, unchanged) for every scalar/vector/uninitialized/non-Private case
+/// this pattern does not need to touch -- `Input`/`Output` (including their
+/// own composite `initial_value`, not yet needed by any known CTS case) are
+/// `StageIOGlobalVariablePattern`'s own responsibility, not this one's.
+class PrivateAggregateGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Private)
+      return Rewriter.notifyMatchFailure(Op, "not a Private-storage variable");
+    mlir::Attribute InitialValueAttr = Op.getInitialValueAttr();
+    if (!InitialValueAttr)
+      return Rewriter.notifyMatchFailure(Op, "no initial value");
+    mlir::Type PointeeType = SrcType.getPointeeType();
+    if (PointeeType.isIntOrFloat() || mlir::isa<mlir::VectorType>(PointeeType))
+      return Rewriter.notifyMatchFailure(
+          Op, "scalar/vector initial value already handled upstream");
+
+    mlir::Type DstType = getTypeConverter()->convertType(PointeeType);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    // Validate the whole attribute shape *before* committing to replacing
+    // `Op` below -- `ConversionPatternRewriter` does not support "undoing"
+    // a `replaceOpWithNewOp` partway through a single pattern application,
+    // so any shape this pattern cannot build (currently only a
+    // `spirv.matrix` leaf) must be ruled out up front, not discovered only
+    // once `buildAggregateGlobalInitializerValue` is already rewriting in
+    // place.
+    if (!isAggregateGlobalInitializerShapeSupported(PointeeType,
+                                                     InitialValueAttr))
+      return Rewriter.notifyMatchFailure(
+          Op, "initial value shape not supported");
+
+    auto NewGlobal = Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::Private,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0);
+    mlir::Region &InitRegion = NewGlobal.getInitializerRegion();
+    mlir::Block *Block = Rewriter.createBlock(&InitRegion);
+    mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+    Rewriter.setInsertionPointToStart(Block);
+    mlir::Value InitValue = buildAggregateGlobalInitializerValue(
+        Rewriter, NewGlobal.getLoc(), PointeeType, InitialValueAttr, DstType,
+        *getTypeConverter());
+    assert(InitValue && "shape already validated by "
+                        "isAggregateGlobalInitializerShapeSupported above");
+    mlir::LLVM::ReturnOp::create(Rewriter, NewGlobal.getLoc(),
+                                 llvm::ArrayRef<mlir::Value>({InitValue}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.CompositeConstruct` building a 1-D vector out of scalar
 /// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
 /// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
@@ -17257,7 +17439,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
       SetMeshOutputsEXTConversionPattern, EmitMeshTasksEXTConversionPattern,
       SpecConstantErasurePattern, SpecConstantCompositeErasurePattern,
-      StageIOGlobalVariablePattern,
+      StageIOGlobalVariablePattern, PrivateAggregateGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
       VectorExtractDynamicPattern, VectorInsertDynamicPattern,
