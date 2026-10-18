@@ -126091,3 +126091,99 @@ Both bit me this session and cost real time before I figured them out:
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: L419(y) fixed — conditional_break's real root cause was a prediction category error, not the two options the previous writeup proposed
+
+**Next action**: pick one of the 6 carried-forward items below and start it.
+`L419(ad)` (`mixed_break_continue`) is the best next pick (see why at the
+bottom).
+
+## What shipped this session
+
+1. Started on `L419(y)` (`conditional_break`, 6 cases) per the prior
+   session's "best next pick" ranking. First attempt reused
+   `isMaskDependentLoadResult`/`dependsOnTaintedValue` (the mechanism
+   `L419(w)` built for `collectUniformPassThroughRegion`) to predict
+   `HeaderDivergent`/`LatchDivergent` ahead of time. It built clean,
+   passed `check-feme` with zero regressions, and **did not fix the real
+   CTS case** — a worthwhile reminder that a clean build + passing test
+   suite is not evidence a fix works; always re-check the actual target
+   repro.
+2. Root-caused why: `dependsOnTaintedValue` answers "is this load already
+   known non-constant" (built for a load an *earlier pass run* narrowed,
+   later misjudged by a *different* pass's fresh `UniformityInfo` — a
+   cross-pass staleness problem). `L419(y)`'s shape is a same-pass,
+   same-call problem: `Header`'s resource load is still a plain constant
+   `i1 true` at the point `HeaderDivergent` is first checked, because
+   `applyStageMasks` only rewrites it later in this very `linearizeCycle`
+   call. Confirmed via a standalone `feme-opt`/`FEME_DEBUG_LINEARIZE_TRACE=1`
+   repro: the first attempt's prediction found nothing, as expected once
+   this was understood.
+3. Real fix: new `dependsOnResourceOrImageLoadInCycle` helper — asks "does
+   this condition depend on *any* resource/image load inside this cycle"
+   (not "already known non-constant"), gated on the cycle already needing
+   real masking for some other reason (`cycleHasMaskOps(C)` is often true
+   from the very load in question, which is fine — it's a structural fact
+   independent of `Header`'s own divergence, not circular). Folds straight
+   into `HeaderDivergent`/`LatchDivergent`, routing the check through the
+   existing freeze/select recovery instead of the after-the-fact
+   `DiamondFlattener` patch-up that correctly refuses this shape.
+4. New lit test `loop-header-break-becomes-mask-dependent.ll`, a hand-built
+   minimal repro (not a CTS extraction) — confirmed via temporary revert
+   that it reproduces the exact diagnosed failure without the fix, and
+   produces the correct masked/frozen structure with it.
+5. `check-feme`: 3,779/3,786 Passed, 0 Failed, 7 Unsupported, zero
+   regressions.
+6. Real CTS: all 6 targeted cases now Pass (were 6 Fail). Broadened to the
+   90-case `*conditional_break*` glob: 90/90 Pass. Full
+   `dEQP-VK.glsl.loops.special.*` (552 cases, the established
+   regression-sweep methodology for this code area, which has regressed
+   twice before): **552/552 Pass, zero regressions**.
+7. Docs: `Roadmap.md` L419(y) struck through with the real fix + numbers;
+   `VulkanCTSReport.md` got a dedicated `## L419(y)` entry with the full
+   root-cause/fix/verification writeup, including why the first attempt
+   failed. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+   change needed — pure compiler correctness fix, no feature/extension
+   surface touched.
+
+**Visible win**: `conditional_break_{fragment,vertex}` now passes across
+all three `*_uniform_iterations` groups (`do_while`/`for`/`while`), and the
+fix is proven clean against the entire 552-case `glsl.loops.special` suite,
+not just the 6 named cases.
+
+## Process lesson (not new to `.instructions.md` — already covered by existing guidance, just re-confirmed)
+
+A clean `check-feme` run after a fix is necessary but not sufficient —
+always re-run the actual named CTS repro directly before declaring victory,
+especially when the fix reuses an existing helper for a new purpose. This
+session's first attempt would have shipped as a plausible-looking no-op if
+the direct `deqp-vk` check hadn't been done.
+
+## Commits this session (2, both with trailers)
+
+1. `Linearize.cpp` functional fix (`dependsOnResourceOrImageLoadInCycle` +
+   folded prediction) + new lit test
+   `loop-header-break-becomes-mask-dependent.ll`.
+2. `Roadmap.md` + `VulkanCTSReport.md` docs update (552/552 CTS sweep).
+3. This file.
+
+## Next steps (ranked)
+
+1. **(best next pick, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4
+   cases) — a separate, harder `DiamondFlattener::validate`
+   post-dominator-tree gap (nested interior break escaping before the
+   diamond's natural reconvergence point), already scoped by a prior
+   session. Now the clearest next pick since `L419(y)` is closed.
+2. **(~1 day, separate code area)** `L419(g)` (30 tessellation residuals)
+   — lives in `feme/lib/Graphics/Tessellator.cpp`, not Linearize/SIMDize.
+   Genuinely distinct from `L419(y)`'s own code area despite sharing a
+   `_tessc`-only residual pattern in CTS sweeps.
+3. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+   triage.
+4. **(half day, independent, can parallelize with 1-3)** The `struct`
+   cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
+   in SPIRVToLLVM conversion, not Linearize/SIMDize.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
