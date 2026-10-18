@@ -18,6 +18,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <cstdlib>
 
 using namespace feme;
 
@@ -47,6 +50,18 @@ SPIRVToLLVMDialectTranslator::translate(Module &&M, Context &Ctx) const {
   mlir::OwningOpRef<mlir::ModuleOp> Outer =
       mlir::ModuleOp::create(mlir::UnknownLoc::get(&MLIRCtx));
   Outer->push_back(InputOp.release());
+
+  // Debug aid: with `FEME_DUMP_IR_PRESPIRV` set in the environment, print
+  // the raw `spirv.module` right before this pass converts it -- the
+  // earliest point any `FEME_DUMP_IR*` debug aid can observe the module,
+  // predating even `FEME_DUMP_IR_PRENORM`'s already-LLVM-dialect
+  // snapshot (`feme/lib/Target/CPU/Pipeline.cpp`), since this whole
+  // SPIR-V-to-LLVM-dialect conversion runs *before* that pipeline ever
+  // sees the module. Needed for triaging a conversion pattern (or its
+  // absence) that fails, or produces ill-formed IR, during this pass
+  // itself -- `feme/.instructions.md` records the full recipe.
+  if (::getenv("FEME_DUMP_IR_PRESPIRV"))
+    Outer->print(llvm::errs());
 
   mlir::PassManager PM(&MLIRCtx);
   PM.addPass(feme::spirv::createConvertSPIRVToLLVMPass());
