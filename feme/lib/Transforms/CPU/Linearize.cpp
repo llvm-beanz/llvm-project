@@ -520,6 +520,75 @@ static bool dependsOnTaintedValue(Value *V,
   return false;
 }
 
+/// Whether \p CI is a resource/image *load* call (the same two shapes
+/// `isMaskDependentLoadResult` recognizes), regardless of whether its own
+/// mask operand currently looks constant. Unlike `isMaskDependentLoadResult`
+/// (which answers "has this call's mask operand *already* been narrowed to
+/// something non-constant"), this answers the structural question alone --
+/// see `dependsOnResourceOrImageLoadInCycle`'s own comment for why that
+/// distinction matters for predicting a *future* narrowing this same
+/// `linearizeCycle` call has not performed yet.
+static bool isResourceOrImageLoad(const CallInst *CI) {
+  if (std::optional<MatchedResourceCall> M = matchResourceCall(*CI))
+    return isLoad(M->Kind);
+  if (std::optional<MatchedImageCall> M = matchImageCall(*CI))
+    return M->Mask && !M->Texel && !M->AtomicValue;
+  return false;
+}
+
+/// (Roadmap L419(y)) Whether \p V transitively depends (through any chain
+/// of instruction operands, including `phi` incoming values) on a
+/// resource/image *load* call whose own parent block sits inside cycle
+/// \p C (and not some other, distinct, already-independently-linearized
+/// nested child cycle -- see the `CI.getCycle(BB) == C` filter below,
+/// mirroring the identical one `flattenTaintedBranchesInRegion`'s own
+/// candidate scan already applies for the same reason).
+///
+/// Exists to predict, *before* `applyStageMasks` has run at all, whether
+/// `Header`'s/`Latch`'s own currently-uniform-looking exit check will
+/// become mask-dependent once this cycle's masking (already known, right
+/// here, to be coming regardless -- see `CycleNeedsRealMasking`'s own
+/// `cycleHasMaskOps`/`DivergentCandidates` alternatives) actually runs:
+/// `PreRegion`/`PostRegion` below mask *every* block they walk, `Header`
+/// included whenever `!HeaderDivergent` left it as their own starting
+/// point (see `PreRegionStart`'s own comment) -- `narrowCallMask` then
+/// rewrites *any* resource/image load's still-constant mask operand
+/// inside such a block, not only ones some earlier pass already flagged
+/// non-constant. `isMaskDependentLoadResult`/`dependsOnTaintedValue` alone
+/// cannot predict this: a resource/image call's mask operand is still a
+/// plain constant `true` at the point `HeaderDivergent`/`LatchDivergent`
+/// are first computed (`SPIRVResourceLoweringPass`'s own universal
+/// placeholder, not yet touched by this very call's own upcoming
+/// `applyStageMasks` walk), so `isMaskDependentLoadResult` correctly (but
+/// unhelpfully, for this specific prediction) reports `false` for it.
+/// Found reducing `conditional_break_{fragment,vertex}`'s own
+/// `do_while`/`for`/`while`_uniform_iterations residual (6 cases): each
+/// shader's `if (counter == resourceLoad) break;` check sits in `Header`,
+/// reading a resource whose mask only becomes genuinely per-lane once
+/// this cycle's own body mask-ops (a *separate* resource load elsewhere
+/// in the loop) force `CycleNeedsRealMasking` regardless.
+static bool dependsOnResourceOrImageLoadInCycle(Value *V, CycleRef C,
+                                                CycleInfo &CI,
+                                                SmallPtrSetImpl<Value *> &Visited) {
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I || !Visited.insert(V).second)
+    return false;
+  if (auto *Call = dyn_cast<CallInst>(I)) {
+    if (isResourceOrImageLoad(Call)) {
+      BasicBlock *BB = Call->getParent();
+      if (CI.contains(C, BB)) {
+        CycleRef BBCycle = CI.getCycle(BB);
+        if (!BBCycle.isValid() || BBCycle == C)
+          return true;
+      }
+    }
+  }
+  for (Value *Op : I->operands())
+    if (dependsOnResourceOrImageLoadInCycle(Op, C, CI, Visited))
+      return true;
+  return false;
+}
+
 
 /// (Roadmap L116(a)) Recursively decomposes a masked load of a possibly
 /// struct/array-typed \p Ty at \p Ptr into one masked load per leaf
@@ -5552,6 +5621,61 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   }
   bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
   bool LatchDivergent = LatchExit && isDivergentBranch(LatchExit->Br);
+
+  // Roadmap L419(y): `isDivergentBranch` above only sees `UniformityInfo`'s
+  // one-time, pre-masking snapshot, which can misjudge `Header`'s/`Latch`'s
+  // own exit check uniform when its condition depends on a resource/image
+  // *load* whose mask operand is still `SPIRVResourceLoweringPass`'s own
+  // universal, compile-time-constant `true` placeholder at this point --
+  // `applyStageMasks` only narrows that operand to a genuine per-lane mask
+  // later, further down inside this very call, whenever it ends up walking
+  // the block that load sits in at all. Whether it does so is already
+  // knowable right here, independent of `Header`'s/`Latch`'s own
+  // divergence, whenever *something else* in this cycle already forces
+  // `CycleNeedsRealMasking` true (a separate genuinely divergent
+  // `OtherCondBrBlocks` candidate, or any mask-affecting op anywhere in the
+  // cycle's body per `cycleHasMaskOps`) -- in that case `PreRegion`'s/
+  // `PostRegion`'s masking walk below runs over `Header`/`Latch` right
+  // along with everything else whenever `!HeaderDivergent`/`!LatchDivergent`
+  // left either of them as that walk's own starting point (see
+  // `PreRegionStart`'s own comment), narrowing any resource/image load's
+  // mask operand found there regardless of whether that specific load's
+  // operand already looked non-constant beforehand (see `narrowCallMask`'s
+  // own comment). Predicting that ahead of time -- via
+  // `dependsOnResourceOrImageLoadInCycle`, which recognizes the right
+  // structural signal for this ("does this condition depend on *any*
+  // resource/image load located inside this cycle", not "does it depend on
+  // one already known non-constant") -- and folding the prediction
+  // straight into `HeaderDivergent`/`LatchDivergent` routes Header's/
+  // Latch's own check through the exact same freeze/select machinery a
+  // genuinely-`UniformityInfo`-divergent check already uses, rather than
+  // leaving it to `flattenTaintedBranchesInRegion`'s own after-the-fact
+  // `DiamondFlattener`-based patch-up (reached once masking actually runs
+  // and the previously-constant mask is gone), which correctly refuses
+  // this shape since Header's/Latch's own reconvergence point is this
+  // cycle's own exit machinery, not a local diamond `DiamondFlattener` can
+  // fold. Fixes `conditional_break`'s own diagnosed "does not have the
+  // simple shape this pass can flatten" failure (6 cases:
+  // `{do_while,for,while}_uniform_iterations.conditional_break_
+  // {fragment,vertex}`). Gated on `CycleWillNeedMaskingRegardless` (rather
+  // than firing unconditionally for any resource-load-derived condition)
+  // so a cycle with no other source of divergence or masking at all keeps
+  // taking the plain, no-masking-needed path it always has -- a resource
+  // load whose mask genuinely never gets touched is correctly left alone.
+  bool CycleWillNeedMaskingRegardless =
+      !DivergentCandidates.empty() || cycleHasMaskOps(C);
+  if (CycleWillNeedMaskingRegardless) {
+    if (!HeaderDivergent && HeaderExit) {
+      SmallPtrSet<Value *, 8> Visited;
+      HeaderDivergent = dependsOnResourceOrImageLoadInCycle(
+          HeaderExit->Br->getCondition(), C, CI, Visited);
+    }
+    if (!LatchDivergent && LatchExit) {
+      SmallPtrSet<Value *, 8> Visited;
+      LatchDivergent = dependsOnResourceOrImageLoadInCycle(
+          LatchExit->Br->getCondition(), C, CI, Visited);
+    }
+  }
 
   if (::getenv("FEME_DEBUG_LINEARIZE_TRACE")) {
     errs() << "L277TRACE: HeaderDivergent=" << HeaderDivergent
