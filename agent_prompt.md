@@ -69,21 +69,16 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(best next pick, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4
-   cases) — a separate, harder `DiamondFlattener::validate`
-   post-dominator-tree gap (nested interior break escaping before the
-   diamond's natural reconvergence point), already scoped by a prior
-   session. Now the clearest next pick since `L419(y)` is closed.
-2. **(~1 day, separate code area)** `L419(g)` (30 tessellation residuals)
-   — lives in `feme/lib/Graphics/Tessellator.cpp`, not Linearize/SIMDize.
-   Genuinely distinct from `L419(y)`'s own code area despite sharing a
-   `_tessc`-only residual pattern in CTS sweeps.
-3. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+1. **(best next pick, ~1 day)** `L419(g)` (30 tessellation residuals) —
+   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate code
+   area from Linearize/SIMDize. With both `L419(y)` and `L419(ad)` closed,
+   this is now the largest remaining `L419` bucket.
+2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
    triage.
-4. **(half day, independent, can parallelize with 1-3)** The `struct`
+3. **(half day, independent, can parallelize with 1-2)** The `struct`
    cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
    in SPIRVToLLVM conversion, not Linearize/SIMDize.
-5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+4. **(low priority, carried forward)** `feme-run` can't execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
-6. **(low priority, carried forward)** 9 older git stashes remain
+5. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
