@@ -8396,3 +8396,90 @@ ULP-mismatch fix remains an open, design-heavy architectural gap (see
 `Roadmap.md`, not revisited this session); `feme-run`'s DXIL
 resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9 uninspected git
 stashes remain carried-forward low-priority items.
+
+## L440(c): `Feature/StructuredBuffer` matrix-as-row-vector-array `AccessChain` fix
+
+**Baseline confirmed first** (after self-catching an in-session
+`VK_ICD_FILENAMES` mistake -- an initial `llvm-lit` run without it set
+silently targeted llvmpipe, not FeMe; `feme/.instructions.md` already
+documents this gotcha, this was purely this session's own oversight,
+corrected before trusting any further run): `check-hlsl-clang-feme-vk` is
+exactly 18 Failed, 0 Unexpectedly-Passed, matching the prior session's
+committed baseline precisely -- no drift.
+
+Of `L440(c)`'s named `Feature/StructuredBuffer` 4-case cluster,
+`inc_counter_array.test`/`inc_counter_array_imm_idx.test` are confirmed
+already passing as a genuine side effect of `L453`'s fix (same "whole
+descriptor, single index" `ArrayedBlockAccessChainPattern` shape). The
+remaining 2, `matrix.test`/`matrix_assign.test`
+(`StructuredBuffer<float3x2>`/`StructuredBuffer<float3x4>`, dynamically-
+indexed row access), hit a distinct bug: `"failed to legalize operation
+'spirv.AccessChain'...that was explicitly marked illegal"` for a *second*,
+separately-chained `AccessChain` indexing into the already-converted
+result of a first one.
+
+Root-caused via `FEME_DUMP_IR_PRESPIRV=1` directly through `offloader`:
+`clang-dxc -spirv -fvk-use-dx-layout` represents a `floatNx2`/`floatNx4`
+HLSL matrix as a plain `!spirv.array<N x vector<Mxf32>, stride=12>` (an
+array of row vectors, not a `spirv.MatrixType` at all). The first
+`AccessChain` (member-select + dynamic array index) correctly converts via
+`BlockAccessChainPattern`'s own "whole content" handling; the second
+indexes *into* that already-produced array pointer to select one row. Its
+base pointee, `array<2 x vector<3xf32>, stride=12>`, failed to convert at
+all: `convertArrayTypeIgnoringDecorations` (the fixed-size `spirv::ArrayType`
+conversion) only ever compensated for a declared `Stride` *narrower* than
+its element's natural size (by padding) -- never a `Stride` *narrower* than
+a vector element's own ABI-rounded natural size (`vector<3xf32>` naturally
+reports 16 bytes; the tightly-packed dx-layout stride here is 12) -- exactly
+the retry its sibling `RuntimeArrayType` conversion already performs via
+`getStridedTightVectorArrayType`, but this fixed-size-array conversion
+never had.
+
+**Fixed** by adding the same `getStridedTightVectorArrayType` retry to
+`convertArrayTypeIgnoringDecorations` for a vector element whose natural
+size exceeds the declared stride -- a minimal, targeted mirror of the
+existing `RuntimeArrayType` handling, not a new mechanism. New unit test
+`SPIRVToLLVMTest.TightRowVectorArrayAccessChainConvertsInsteadOfFailing`
+(confirmed red without the fix, reproducing the exact same error message as
+the real case via `git stash` bisection; green with it).
+
+**`check-feme`: 3,787/3,794 Passed (+1 new unit test vs. the prior
+3,786/3,793 baseline), 7 Unsupported, 0 regressions.**
+
+**`check-hlsl-clang-feme-vk`: 18 Failed -> 14 Failed, 0 regressions** (exact
+failure-name-set diff). 2 of `Feature/StructuredBuffer`'s cases fixed
+directly, plus 2 more (`Basic/Matrix/matrix_m-based_setter.test`,
+`Basic/Matrix/matrix_one-based_setter.test`) fixed as a side effect (same
+tight-row-vector-array shape, reached via a different test).
+
+**`check-hlsl-feme-vk` (DXC-compiled, non-Clang suite)**: 1 Failed
+(`Basic/Mandelbrot.test`), confirmed a pre-existing `L437`
+contention/timeout flake on immediate rerun (passes alone, 0 Failed) --
+not a regression.
+
+**Real Vulkan CTS verification**: `dEQP-VK.ssbo.*` (12,225 cases) -- 0
+Failed, 4,755 Passed, 7,470 NotSupported, byte-identical to the prior
+baseline. This fix's own code path (DXC/Clang's direct-to-SPIR-V dx-layout
+matrix-as-row-vector-array representation) is not reachable from
+glslangValidator's GLSL-authored CTS shaders, so no broader sweep was
+needed beyond this storage-buffer-layout smoke check.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (type-conversion completeness fix, not a new feature/extension).
+
+**Residual `L440(c)` count: 14** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1), `Feature/ConstantBufferT`
+(2), `Feature/HLSLLib` (3: `degrees.32`/`mad.32`/`radians.32`),
+`Feature/ResourcesInStructs` (1), `Feature/Semantics/MatrixSemantics.test`
+(1), `Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Feature/WaveOps/WaveActiveAnyTrue.test` (1),
+`Tools/Offloader/BufferFormats.test` (1),
+`WaveOps/QuadReadAcrossDiagonal.convergence.test`/`WaveActiveBitXor.int.test`
+(2).
+
+**Next steps**: `Feature/ConstantBufferT` (2 cases) or
+`Feature/HLSLLib`'s remaining 3-case cluster are the next-largest
+residuals; `L419(ae)`'s tessellation ULP-mismatch fix remains an open,
+design-heavy architectural gap (not revisited this session); `feme-run`'s
+DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9
+uninspected git stashes remain carried-forward low-priority items.
