@@ -7866,3 +7866,91 @@ and unrelated to this fix.
 `struct` cluster's own separate `spirv.GlobalVariable` legalization
 bug (8 cases); `feme-run`'s DXIL atomic gap; the 9 pre-existing,
 still-uninspected git stashes.
+
+## L452(a): memory-carried divergence propagated to consumers -- `out_of_order` fixed, plus 31 latent siblings
+
+**Issue**: `L452(a)`'s own root-cause writeup (previous entry's "Next
+steps") identified that `FunctionWidener::MaskedAllocas`
+(`feme/lib/Transforms/CPU/SIMDize.cpp`) already force-widens a `load`
+reading a uniformly-addressed local variable whose stored *value* is
+per-lane divergent (`UniformityInfo` has no memory model and cannot
+see this on its own), but that this was necessary and not sufficient:
+any downstream consumer of such a load (e.g. an `fadd` combining it
+with a uniform operand, or a `phi` merging it with a uniform
+constant) was still gated by the plain, memory-oblivious
+`UI.isDivergentAtDef` check. Left alone, that consumer silently
+collapsed the correctly-widened real per-lane vector down to one
+lane's value (via the existing H107 "give a uniform consumer its
+value back" fallback) and broadcast that single value back out to
+every lane's own storage -- the exact
+`dEQP-VK.spirv_assembly.instruction.*.{opphi,selection_block_order,
+switch_block_order}.out_of_order_*` rendering corruption this
+roadmap item names.
+
+**Fix**: added `FunctionWidener::ForcedDivergentValues`, a side-table
+seeded from every `load` reading a `MaskedAllocas` base that `UI`
+itself still calls uniform, propagated forward along ordinary SSA use
+edges to every downstream consumer via a worklist fixed point. A new
+`isDivergent(Value*)` wrapper consults both `UI` and this side-table,
+and replaces the three decision points that needed it: the generic
+`widenInstruction` dispatch gate, the pass-1 divergent-`phi` pre-pass,
+and `widenMaskedAllocaStore`'s own `ValueDivergent` flag. New lit test
+`simdize-masked-alloca-memory-divergent-consumer.ll` pins the exact
+`opphi.out_of_order` shape. A pre-existing unit test,
+`SIMDizeTest.WidensPHIMergingMaskedAllocaLoad`, turned out to encode a
+smaller-scale instance of the identical bug (its own assertion that a
+`phi` merging a `MaskedAllocas`-sourced load with a uniform constant
+"correctly" stays narrow was itself wrong); updated to assert the
+new, correct widened behavior.
+
+`check-feme`: 3,778/3,785 Passed, 0 Failed, 7 Unsupported, no
+regressions.
+
+**Real CTS verification**: ran the direct 15-case `out_of_order`
+caselist (`opphi`/`selection_block_order`/`switch_block_order` x 5
+shader stages each) -- all 15 now Pass (were 5 confirmed-failing
+pre-fix: `opphi.out_of_order_geom`/`_vert` plus the two sibling
+families sharing the same shape; the other 10 stage/case
+combinations were already passing, per `L452`'s own prior
+per-stage breakdown).
+
+Then re-ran the **full** `dEQP-VK.spirv_assembly.*` sweep (70,337
+cases, via `feme/utils/run_vulkan_cts.py`) to check for side effects,
+since a divergence-analysis change is exactly the kind of fix most
+likely to flip other, currently-passing cases in either direction:
+
+| | Passed | Failed | Not supported |
+|---|---|---|---|
+| Before (`L452(b)`'s confirmed baseline) | 12,343 | 192 | 57,802 |
+| After (this fix) | 12,389 | 146 | 57,802 |
+
+`NotSupported` is identical and `Passed + Failed` sums identically
+both before and after (12,535), confirming **exactly 46 cases flipped
+`Fail` -> `Pass` and zero regressions** -- substantially more than the
+15 directly-named `out_of_order` cases. Clustering the new 146-case
+fail list shows the other 31 fixes landed across several of
+`L452(c)`'s own previously-documented clusters: every non-`_tessc`
+stage of the `f16arr3`/`struct16arr3`/`v3f16`/`v3f16arr5`/`v4f16arr3`
+float16 composite-insert/extract cluster, and every non-`_tessc` stage
+of `variable_init.private.{floatarray,matrix,struct}` -- all of which
+share the identical uniform-address, per-lane-divergent-value
+local-variable round trip `out_of_order` itself reduces to, just
+without an obviously related case name. The remaining `_tessc` stage
+of each of those clusters is unaffected by this fix and stays tracked
+under `L419(g)`'s own 30-case tessellation-residual bucket (a
+separate, already-known issue).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+(a divergence-analysis correctness fix inside `feme-cpu-simdize`, no
+feature/extension-surface change).
+
+**`L452(a)` is now fully resolved.** With it, every sub-item of the
+`L452` family (a through i) is fixed and CTS-verified.
+
+**Next steps**: `L419(ad)` (`mixed_break_continue`, 4 cases);
+`L419(y)`/`L419(g)` (`conditional_break`, 6 cases + 30 tessellation
+residuals, now the most direct next pick given today's confirmed
+`_tessc`-only residual in three more clusters); `L440(c)`'s 39-case
+residual triage; the `struct` cluster's own separate
+`spirv.GlobalVariable` legalization bug (8 cases); `feme-run`'s DXIL
+atomic gap; the 9 pre-existing, still-uninspected git stashes.
