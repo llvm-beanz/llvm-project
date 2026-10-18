@@ -8044,3 +8044,69 @@ extension-surface change).
 separate `spirv.GlobalVariable` legalization bug (8 cases);
 `feme-run`'s DXIL atomic gap; the 9 pre-existing, still-uninspected
 git stashes.
+
+## L419(ad): `mixed_break_continue` already fixed by `L419(y)` -- same root cause, no new code change
+
+**Issue**: `mixed_break_continue` (4 cases, `for_uniform_iterations.{for,while}
+mixed_break_continue_{fragment,vertex}`) was root-caused, not fixed, by a
+prior session: a switch-lowered nested two-level diamond loop body (an
+`if`/`else if`/`else` chain inside a loop) where `DiamondFlattener::validate`'s
+ordinary-diamond reconvergence-point selection (`R = immediatePostDom(Cur)`)
+was diagnosed to escape all the way to the function's `.loopexit` block when
+the loop's own `Header` held a resource-load-derived trip-count check that
+`UniformityInfo`'s pre-masking snapshot judged uniform, pulling `Header`'s own
+branch into the same region `validate` walks for the switch-lowered body.
+
+**Investigation this session**: before attempting either of this row's own two
+previously-proposed fix designs (region-restricted post-dominator computation,
+or new freeze/select plumbing from an arbitrary interior block), re-ran this
+row's own repro (`/tmp/mbc_frag_mod2.ll`, extracted by a prior session) against
+current `HEAD` as a sanity check. It compiled clean with no diagnostic --
+unexpected, since no code change targeting `L419(ad)` specifically had landed.
+Confirmed this was a genuine fix, not a stale/misremembered roadmap entry, via
+a temporary single-file revert: `git checkout 436e0ddb4bb9^ --
+feme/lib/Transforms/CPU/Linearize.cpp` (the `L419(y)` fix commit), rebuilt
+`feme-opt`, reran the repro -- reproduced the exact original diagnostic
+("internal branch in a body shape this milestone does not yet lower").
+Restored `Linearize.cpp` to `HEAD`, rebuilt, reran -- clean again, `git diff
+--stat` empty throughout.
+
+**Root cause, confirmed shared with `L419(y)`**: `FEME_DEBUG_LINEARIZE_TRACE=1`
+on the repro at `HEAD` showed `HeaderDivergent=1` -- `L419(y)`'s
+`dependsOnResourceOrImageLoadInCycle` helper (added to catch `Header`'s own
+resource-load-fed `break` check in `L419(y)`'s shape) generalizes correctly to
+this row's shape too, since `L419(ad)`'s `Header` holds an *ordinary* trip-count
+check that also reads a resource load, inside a cycle that already needs
+masking for other reasons (`cycleHasMaskOps(C)` is true from the same load).
+With `HeaderDivergent` now correctly predicted `true` ahead of time, the
+pre-existing `if (HeaderDivergent)` freeze/select/advance-`PreRegionStart`
+recovery excludes `Header` from the switch-lowered body's own region *before*
+`DiamondFlattener::validate` ever runs on it, so the post-dominator escape to
+`.loopexit` this row originally diagnosed never arises. **Neither of this
+row's own two proposed fix designs was needed or implemented** -- the fix that
+already shipped (for a different, narrower-sounding row) took a third path
+neither design anticipated.
+
+**New regression test**: `loop-nested-switch-diamond-with-header-resource-check.ll`,
+trimmed from `/tmp/mbc_frag_mod2.ll` down to its essential control-flow
+skeleton (dropped the unrelated `<4 x float>` vector input-load preamble and
+output-store epilogue, kept every block name, branch, and control-flow-driving
+phi exactly). Confirmed via the same temporary-revert technique to reproduce
+the original diagnostic without the fix and compile clean with it.
+
+**CTS-verified**: broadened `dEQP-VK.glsl.loops.special.*mixed_break_continue*`
+(18 cases -- every `for`/`while`/`while_constant`/`while_dynamic`/
+`while_uniform` x `{fragment,vertex}` combination, a strictly larger set than
+this row's originally-tracked 4 `for_uniform_iterations` cases, the other 14
+combinations already passing independently of this gap): 18/18 Pass. Full
+`dEQP-VK.glsl.loops.special.*` sweep (552 cases): 552/552 Pass, zero
+regressions (matching the count already recorded after `L419(y)`, confirming
+this was not a fluke). `check-feme`: 3,780/3,787 Passed, 0 Failed, 7
+Unsupported (one test more than `L419(y)`'s own count, zero regressions).
+
+**Inventories**: `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unchanged -- no new capability, a documentation-and-test-only closure of an
+already-shipped fix.
+
+**Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed per standing instruction.
