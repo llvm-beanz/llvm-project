@@ -69,20 +69,20 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(best next pick, ~1 day)** `L419(y)`/`L419(g)`: `conditional_break`
-   (6 cases) + 30 tessellation residuals. This session's CTS sweep
-   independently reconfirmed that every fixed cluster's `_tessc` stage
-   stayed failing while every other stage passed — strong, fresh evidence
-   this bucket is one coherent tessellation-control-specific gap, not
-   scattered noise. Good next target precisely because today's data makes
-   the bucket's boundary unusually clear.
-2. **(standing, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+1. **(best next pick, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4
+   cases) — a separate, harder `DiamondFlattener::validate`
+   post-dominator-tree gap (nested interior break escaping before the
+   diamond's natural reconvergence point), already scoped by a prior
+   session. Now the clearest next pick since `L419(y)` is closed.
+2. **(~1 day, separate code area)** `L419(g)` (30 tessellation residuals)
+   — lives in `feme/lib/Graphics/Tessellator.cpp`, not Linearize/SIMDize.
+   Genuinely distinct from `L419(y)`'s own code area despite sharing a
+   `_tessc`-only residual pattern in CTS sweeps.
 3. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
    triage.
 4. **(half day, independent, can parallelize with 1-3)** The `struct`
    cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
-   in SPIRVToLLVM conversion, not Linearize/SIMDize, so it's a genuinely
-   separate code area from everything above.
+   in SPIRVToLLVM conversion, not Linearize/SIMDize.
 5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
