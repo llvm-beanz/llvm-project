@@ -70,15 +70,13 @@ Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
 1. **(best next pick, ~1 day)** `L419(g)` (30 tessellation residuals) —
-   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate code
-   area from Linearize/SIMDize. With both `L419(y)` and `L419(ad)` closed,
-   this is now the largest remaining `L419` bucket.
+   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate
+   code area from Linearize/SIMDize/SPIRVToLLVM. With `L452` now fully
+   closed and both `L419(y)`/`L419(ad)` already closed, this is the
+   largest remaining open bucket in either family.
 2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
    triage.
-3. **(half day, independent, can parallelize with 1-2)** The `struct`
-   cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
-   in SPIRVToLLVM conversion, not Linearize/SIMDize.
-4. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
-5. **(low priority, carried forward)** 9 older git stashes remain
+4. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
