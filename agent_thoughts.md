@@ -126269,3 +126269,82 @@ first.**
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 5. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: L452(j) — struct cluster `spirv.GlobalVariable` legalization fix, `L452` closed
+
+**Session-start check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`. Confirmed.
+
+## What's done (2 bugs, 2 fixes, both CTS-verified)
+
+1. **`opcopymemory.struct`** now Pass. Root cause: a `spirv.VulkanBuffer`
+   block's whole Content as a direct `Load`/`Store`/`CopyMemory` operand
+   had no FeMe pattern, so it fell to upstream MLIR's generic pattern,
+   which can't resolve a `VulkanBuffer` handle at all.
+   Fix: `getBlockWholeContentPointer`/`getWholeBlockElement` +
+   `BlockWholeLoadPattern`/`BlockWholeStorePattern`/
+   `BlockWholeCopyMemoryPattern` in `SPIRVToLLVMPatterns.cpp`.
+2. **6 of 8 `variable_init.*struct*`** cases now Pass (were 0/8). Root
+   cause: upstream's `GlobalVariablePattern` only lowers a scalar/vector
+   `initial_value`; a struct/array composite one has no lowering anywhere.
+   Fix: `isAggregateGlobalInitializerShapeSupported` (precheck — must run
+   *before* `replaceOpWithNewOp`, which can't be undone mid-pattern) +
+   `buildAggregateGlobalInitializerValue` (recursive `poison`+`insertvalue`
+   builder) + `PrivateAggregateGlobalVariablePattern`.
+   - 1 remaining case (`variable_init.output.struct`) is a documented,
+     out-of-scope limit: `Output`-storage + a `spirv.matrix` leaf member,
+     correctly declined by the new pattern.
+   - 1 remaining case was already `NotSupported` (missing
+     `VK_KHR_workgroup_memory_explicit_layout`) — unrelated, pre-existing.
+
+## Verification
+
+- Both new patterns got lit tests: `spirv-to-llvm-block-whole-content.mlir`
+  (3 sections) and `spirv-to-llvm-private-aggregate-initializer.mlir`
+  (1 section). **Both failed on first write** — neither was a real code
+  bug:
+  - block-whole-content: my `CHECK` lines expected the destination
+    pointer to be computed *after* the load; the real (correct) lowering
+    computes both pointers up front, then loads, then stores. Fixed the
+    `CHECK` order, not the code.
+  - private-aggregate-initializer: forgot the struct's `packed` keyword
+    in my own expected-output `CHECK` line, and originally laid the test
+    struct out so the vector member's offset didn't match its natural
+    alignment, which (correctly) triggers this file's *unrelated*
+    "tight vector" marker-struct substitution — reordered the struct so
+    the vector member sits at an aligned offset, since that substitution
+    is its own separate thing, not what this test is for.
+  - **Why this matters**: I'd flagged both of these as "possible real
+    bugs" before compaction last session. Chasing them down this session
+    confirmed both new patterns are correct as originally implemented —
+    good to close that worry out explicitly rather than leave it open.
+- CTS: `opcopymemory.struct` + the 6 fixable `variable_init.*struct*`
+  cases all Pass. Broad `dEQP-VK.spirv_assembly.instruction.*` sweep
+  (36,599/~146k cases, partial — 600s harness timeout) found 49 pre-
+  existing, unrelated failures, zero new ones.
+- `check-feme`: 3,782/3,782 Passed, 0 Failed, 7 Unsupported (was
+  3,780/3,780 before this session's 2 new lit tests — net +2 passing
+  tests, zero regressions).
+
+## Commits this session (3, all with trailers)
+
+1. `BlockWholeLoadPattern`/`BlockWholeStorePattern`/
+   `BlockWholeCopyMemoryPattern` + lit test.
+2. `PrivateAggregateGlobalVariablePattern` + lit test.
+3. `Roadmap.md`/`VulkanCTSReport.md` docs update (`L452(j)`, struck
+   through — the `L452` family, `a` through `j`, is now fully closed).
+4. This file (next commit).
+
+## Next steps (ranked)
+
+1. **(best next pick, ~1 day)** `L419(g)` (30 tessellation residuals) —
+   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate
+   code area from Linearize/SIMDize/SPIRVToLLVM. With `L452` now fully
+   closed and both `L419(y)`/`L419(ad)` already closed, this is the
+   largest remaining open bucket in either family.
+2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+   triage.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
