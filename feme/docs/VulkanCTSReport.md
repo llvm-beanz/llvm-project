@@ -8232,3 +8232,68 @@ priority, carried forward.
 `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` env vars set to
 `build/tools/feme/tools/feme-vulkan/feme_icd.json` for `vulkaninfo` to select
 the FeMe ICD over the system's `llvmpipe` driver).
+
+## Session: L419(ae) root-cause mechanism found (not fixed); L440(c) `Feature/LocalResources` 4/5 cases fixed
+
+**Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed per standing instruction (required
+`VK_ICD_FILENAMES`/`VK_DRIVER_FILES` env vars set to
+`build/tools/feme/tools/feme-vulkan/feme_icd.json`).
+
+**`L419(ae)` (`L419(g)`'s `common_edge.*_precise` 3-case tessellation
+residual)**: found and empirically confirmed the exact bit-level root-cause
+mechanism using a new `FEME_DEBUG_DOMAIN_POSITIONS` debug aid (committed,
+inert when unset) -- a shared-edge vertex between two adjacent tessellated
+patches can map to two *different* "forward" (direct-`K/N`-division)
+boundary-ring edges (edge0 vs edge1) rather than the usual forward/backward
+pairing roadmap `L336` already made bit-compatible; the domain shader's own
+`(1-x)` float subtraction (baked into the CTS's own GLSL, not FeMe's to
+modify) then rounds differently from the neighboring patch's direct `K/N`
+division for the same physical vertex. Verified numerically (`numpy.float32`)
+that only 3 of 11 `K` values mismatch for `N=10`, matching the intermittent
+(not uniform) crack. **No fix implemented this session** -- real regression
+risk against the many already-passing tessellation cases that rely on
+today's edge0/1-direct, edge2/3-subtracted convention; see `Roadmap.md`'s
+`L419(ae)` entry for the full mechanism and open fix-design question.
+No CTS re-run needed for this item (no functional code changed, debug
+instrumentation only, inert when its env var is unset).
+
+**`L440(c)` (`check-hlsl-clang-feme-vk` residual triage)**: re-measured the
+baseline fresh (32 Failed, corrected a stale "~20 `Feature/HLSLLib`" cluster
+estimate -- the real current breakdown has `Feature/LocalResources` (5) as
+the largest live cluster, not `HLSLLib` (3)). Root-caused and fixed 4 of
+`Feature/LocalResources`'s 5 cases: a local `ByteAddressBuffer` variable
+assigned from a global resource makes `ResourceLoweringPass` decompose the
+access into byte-granularity `feme.cpu.resource.{load,store}.raw.i8` calls,
+and the CPU runtime never defined those `.i8` scalar helpers (only
+`.i16`/`.i32`/`.i64`/`.f16`/`.f32` existed) -- every such load/store failed
+at JIT link time. Fixed by adding `femeCpuResourceLoadRawI8`/`StoreRawI8`,
+mirroring the existing `.i16` pair. **`check-hlsl-clang-feme-vk`: 32 Failed
+-> 26 Failed, 0 regressions** (exact failure-name-set diff). `check-feme`:
+3,785/3,792 Passed (7 Unsupported, +1 new test), no regressions.
+
+**Real Vulkan CTS verification**: ran `dEQP-VK.ssbo.*` (12,225 cases, the
+closest real-driver analog to this fix's raw-buffer-access code path) as a
+smoke check for the new runtime symbols -- **0 Failed, 4,755 Passed, 7,470
+Not Supported**, confirming no regression. (This specific fix's trigger --
+copying a local `ByteAddressBuffer` variable from a global one -- is a
+DXC/Clang HLSL-frontend-only shape; glslangValidator's GLSL shaders, which
+the real Vulkan CTS otherwise exercises, never generate it, so a broader
+sweep beyond `ssbo.*` was not expected to add further signal and was not
+run.) No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed for either item this session (a debug aid and a missing-runtime-
+symbol completeness fix, neither a new feature/extension).
+
+**Residual `L440(c)` count: 26** -- `Feature/StructuredBuffer` (4),
+`Basic`/`Basic/Matrix` (3), `Feature/HLSLLib` (3), `Feature/ConstantBufferT`/
+`Feature/ResourceArrays`/`Tools/Offloader`/`WaveOps` (2 each),
+`local_resource_loop_array_index` (1, a distinct `SPIRVToLLVM`
+getelementptr-pointer-type bug newly isolated this session, not yet fixed),
+and 8 further 1-case singletons.
+
+**Next steps**: a future session should design and prototype an `L419(ae)`
+fix behind the new debug instrumentation, validating against the full
+`dEQP-VK.tessellation.*` sweep before landing given the regression risk;
+`Feature/StructuredBuffer` (4 cases) is now `L440(c)`'s largest remaining
+cluster; `local_resource_loop_array_index`'s GEP-pointer-type bug is a new,
+separate, not-yet-investigated residual.
