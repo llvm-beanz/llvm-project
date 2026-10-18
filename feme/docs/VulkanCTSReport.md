@@ -7954,3 +7954,93 @@ residuals, now the most direct next pick given today's confirmed
 residual triage; the `struct` cluster's own separate
 `spirv.GlobalVariable` legalization bug (8 cases); `feme-run`'s DXIL
 atomic gap; the 9 pre-existing, still-uninspected git stashes.
+
+## L419(y): `conditional_break` fixed -- `Header`'s own exit check needed ahead-of-time mask-dependence prediction
+
+**Issue**: `conditional_break_{fragment,vertex}` (6 cases, all three
+`*_uniform_iterations` groups) was diagnosed, not fixed, by a prior
+session: `Header`'s own `if (counter == resourceValue) break;` check
+reads a resource load whose mask operand is still a plain, compile-time
+constant `i1 true` (`SPIRVResourceLoweringPass`'s own universal
+placeholder) at the point `LoopLinearizer::linearizeCycle` first
+computes `HeaderDivergent` -- genuinely uniform by `UniformityInfo`'s
+one-time, pre-masking snapshot. A first fix attempt this session (an
+ahead-of-time prediction reusing `isMaskDependentLoadResult`/
+`dependsOnTaintedValue`, the same mechanism `L419(w)` added for
+`collectUniformPassThroughRegion`) built and passed `check-feme`
+cleanly but **did not fix the real CTS case** -- direct IR inspection
+showed why: that mechanism predicts a load *already* narrowed
+non-constant by an *earlier pass run*, later misjudged uniform by a
+*different* pass's own fresh `UniformityInfo` (a cross-pass staleness
+problem). `Header`'s own load here is a same-pass, same-call problem:
+nothing distinguishes it from any other constant-`true` load at the
+point `HeaderDivergent` is checked, because `applyStageMasks`'s
+`narrowCallMask` only rewrites it later, in this very same
+`linearizeCycle` call. Reusing the wrong mechanism for the wrong
+scenario predicted nothing (confirmed via a standalone
+`feme-opt`/`FEME_DEBUG_LINEARIZE_TRACE=1` repro:
+`HeaderDivergent=0`/`LatchDivergent=0` unchanged with the attempt in
+place), and tracing `linearizeCycle` further down confirmed the real
+mechanism: `cycleHasMaskOps(C)` is already true (resource loads exist
+in the cycle body), triggering the pre-existing `L419(h)` widening
+(`Flow` becomes `CheckBlock`); since `HeaderDivergent` stays `false`,
+`PreRegionStart` stays `Header` itself (rather than being advanced past
+it, as the existing `if (HeaderDivergent)` recovery already does for a
+check `UniformityInfo` itself judged divergent from the start), so
+`collectUniformPassThroughRegion` walks straight through `Header`'s own
+branch as an ordinary tolerated uniform region-interior `CondBr` --
+only for `applyStageMasks` to then narrow `Header`'s own load's mask as
+part of that same region walk, and `flattenTaintedBranchesInRegion`'s
+later re-scan to find `Header`'s branch newly mask-dependent and route
+it to `DiamondFlattener::flattenKnownDivergentBranch`, which correctly
+refuses it (`Header`'s true reconvergence point is the cycle's own exit
+machinery via `Flow`/`CheckBlock`, not a local diamond).
+
+**Fix**: a new `dependsOnResourceOrImageLoadInCycle` helper, structurally
+different from `dependsOnTaintedValue`: rather than asking "does this
+load already look non-constant", it asks "does this condition depend
+on *any* resource/image load located inside this same cycle `C`" (via
+`CycleInfo::contains`/`getCycle`, matching the same nested-cycle
+exclusion `flattenTaintedBranchesInRegion` already applies), gated on
+`!DivergentCandidates.empty() || cycleHasMaskOps(C)` -- i.e. only fires
+when this cycle is *already* known, independent of `Header`'s/`Latch`'s
+own divergence, to need real masking for some other reason (here,
+simply because resource loads exist in the cycle's body at all --
+`Header`'s own load counts towards that by itself, so this is not
+circular). When it finds such a dependency, folds the prediction
+straight into `HeaderDivergent`/`LatchDivergent`, correctly routing
+`Header`'s/`Latch`'s own check through the exact same freeze/select/
+narrow-mask/erase-`CondBr` recovery the `if (HeaderDivergent)` block
+already implements for the already-known-divergent case, rather than
+leaving it to `flattenTaintedBranchesInRegion`'s own after-the-fact,
+local-diamond-only patch-up. New lit test
+`loop-header-break-becomes-mask-dependent.ll` pins the minimal shape
+(confirmed, via a temporary revert, to reproduce the exact "does not
+have the simple shape this pass can flatten" diagnostic without the
+fix, and to build clean with the correct masked-and-frozen structure
+with it).
+
+`check-feme`: 3,779/3,786 Passed, 0 Failed, 7 Unsupported (one new lit
+test added, no regressions).
+
+**Real CTS verification**: all 6 targeted `conditional_break` cases now
+Pass (previously all 6 Fail). Broadened to the full
+`dEQP-VK.glsl.loops.special.*conditional_break*` glob (90 cases,
+covering `unconditional_break`/`unconditional_continue`/etc. siblings
+too): 90/90 Pass, zero regressions. Then ran the **full**
+`dEQP-VK.glsl.loops.special.*` suite (552 cases, this code area's own
+established regression-testing methodology, since it has regressed
+twice before per `L419(w)`'s/`L419(x)`'s own writeups): **552/552
+Pass, zero regressions**.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+(an internal `Linearize.cpp` divergence-prediction fix, no feature/
+extension-surface change).
+
+**Next steps**: `L419(ad)` (`mixed_break_continue`, 4 cases);
+`L419(g)` (30 tessellation residuals, separate code area --
+`feme/lib/Graphics/Tessellator.cpp`, not Linearize/SIMDize);
+`L440(c)`'s 39-case residual triage; the `struct` cluster's own
+separate `spirv.GlobalVariable` legalization bug (8 cases);
+`feme-run`'s DXIL atomic gap; the 9 pre-existing, still-uninspected
+git stashes.
