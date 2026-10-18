@@ -126010,3 +126010,84 @@ Exactly the 8 `L452(e)` residual cases flip Fail→Pass. Zero regressions.
 7. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 
 With `L452` fully resolved end to end (a through i), item 1 (`L452(a)`'s `out_of_order` fix) is now the clearest top candidate for the next session — it's the last standing item in the `L452` family and already has a design written up.
+
+# Session: L452(a) fixed — memory-carried divergence now propagates to consumers, L452 family fully closed
+
+**Next action**: pick one of the 6 carried-forward items below and start it.
+`L419(y)`/`L419(g)` is the best next candidate (see why at the bottom).
+
+## What shipped this session
+
+1. Root-caused and fixed `L452(a)` (`out_of_order`): `FunctionWidener::
+   MaskedAllocas` force-widens a `load` from a uniformly-addressed,
+   memory-divergent alloca correctly, but anything *consuming* that load
+   (an `fadd`, a `phi`) was still gated by the plain `UI.isDivergentAtDef`
+   check, which has no memory model — so the consumer silently collapsed
+   the real per-lane vector to one lane's value and broadcast it back out.
+2. Fix: new `ForcedDivergentValues` side-table (seeded from loads `UI`
+   wrongly calls uniform, propagated forward through SSA uses), consulted
+   via a new `isDivergent(Value*)` wrapper at the 3 places that needed it
+   (generic dispatch gate, phi pre-pass, store's `ValueDivergent` flag).
+3. New lit test (`simdize-masked-alloca-memory-divergent-consumer.ll`) +
+   found & fixed a second, smaller latent instance of the same bug already
+   sitting in an existing unit test (`SIMDizeTest.WidensPHIMergingMasked
+   AllocaLoad` was asserting the *buggy* old behavior was correct).
+4. `check-feme`: 3,778/3,785 Passed, 0 Failed, 7 Unsupported.
+5. Real CTS, full `spirv_assembly.*` sweep (70,337 cases): 192 → 146
+   Fail. That's **46 cases fixed, not just the 15 directly-named
+   `out_of_order` cases** — the same bug shape was also silently breaking
+   non-`_tessc` stages of the float16 composite-insert/extract cluster and
+   `variable_init.private.{floatarray,matrix,struct}`. `NotSupported`
+   count identical before/after, `Pass+Fail` sums identical → confirmed
+   zero regressions, not just "fewer failures."
+6. Docs: `Roadmap.md` L452(a) struck through with the real fix + numbers;
+   `VulkanCTSReport.md` got a dedicated entry with the before/after table;
+   `feme/.instructions.md` got 2 new gotchas (see below).
+
+**Visible win**: `L452` (a through i) is now **fully closed**, all 9
+sub-items fixed and CTS-verified. This was the last standing item in that
+family.
+
+## Process gotchas codified in `feme/.instructions.md`
+
+Both bit me this session and cost real time before I figured them out:
+
+- `deqp-vk --deqp-runmode=txt-caselist` output is `GROUP:`/`TEST:`-prefixed,
+  but `run_vulkan_cts.py --case-list` wants bare case names — strip with
+  `grep '^TEST: ' | sed 's/^TEST: //'` first, or you get an instant,
+  confusing "Illegal character in test case name" failure.
+- `nohup cmd &` inside a **sync**-mode bash tool call does not survive —
+  the whole process group dies when the sync call returns, despite
+  `nohup`. Use the bash tool's own `mode: "async"` for anything meant to
+  outlive the current tool call (but not necessarily the whole session —
+  that's a different, already-documented case needing full `detach: true`).
+
+## Commits this session (4, all with trailers)
+
+1. `SIMDize.cpp` functional fix (`ForcedDivergentValues` + 3 call sites).
+2. New lit test `simdize-masked-alloca-memory-divergent-consumer.ll`.
+3. `SIMDizeTest.cpp` — corrected `WidensPHIMergingMaskedAllocaLoad`.
+4. `Roadmap.md` + `VulkanCTSReport.md` docs update (46-case CTS result).
+5. `feme/.instructions.md` — 2 CTS-harness gotchas.
+6. This file.
+
+## Next steps (ranked)
+
+1. **(best next pick, ~1 day)** `L419(y)`/`L419(g)`: `conditional_break`
+   (6 cases) + 30 tessellation residuals. This session's CTS sweep
+   independently reconfirmed that every fixed cluster's `_tessc` stage
+   stayed failing while every other stage passed — strong, fresh evidence
+   this bucket is one coherent tessellation-control-specific gap, not
+   scattered noise. Good next target precisely because today's data makes
+   the bucket's boundary unusually clear.
+2. **(standing, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+3. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+   triage.
+4. **(half day, independent, can parallelize with 1-3)** The `struct`
+   cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
+   in SPIRVToLLVM conversion, not Linearize/SIMDize, so it's a genuinely
+   separate code area from everything above.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
