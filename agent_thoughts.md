@@ -126438,3 +126438,33 @@ bucket and the user's own top pick.
    couple sessions back was never root-caused — possibly one flaky case.
    Worth a quick rerun-twice check next time the full suite runs, but not
    worth a dedicated session.
+
+# Session: L419(ae) — NoContraction hypothesis refuted, diagonal-corner-swap trigger isolated (not yet fixed)
+
+**Status check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, needed `VK_ICD_FILENAMES=.../feme_icd.json` explicitly — the shell default points at llvmpipe).
+
+**What's done**: `L419(ae)`'s root cause is narrowed a lot, but not fixed. Two commits landed:
+1. `FEME_DEBUG_TESS_FACTORS` env-var-gated debug dump in `PatchPipeline.cpp` (no behavior change when unset).
+2. `Roadmap.md` `L419(ae)` entry rewritten with this session's findings.
+
+**The chase, in order**:
+1. Tried `feme-translate --import-spirv` to diff basic-vs-precise shader IR directly. Dead end: hit an unrelated pre-existing MLIR `OpIAdd` signedness-verifier bug (`i32` vs `si32`) blocking import. Not fixed, flagged as a possible future "issue outside FeMe."
+2. Pivoted to real `FEME_DUMP_IR_PRENORM`/`PRESIMD` dumps from an actual CTS run. **Result: arithmetic dataflow is structurally identical between basic and precise `tese` shaders.** Only difference is instruction scheduling (glslang defers precise's fadds). No fast-math flags anywhere.
+3. Checked `TargetOptions` — `FPOpFusion`/`AllowFPOpFusion` **no longer exists in this LLVM version at all**. FMA fusion is purely gated by per-instruction `contract` flags, which are absent. **NoContraction hypothesis fully refuted.**
+4. Pivoted to CTS-source bisection (patch `vktTessellationCommonEdgeTests.cpp`, rebuild `deqp-vk` incrementally — under a minute per iteration, always revert after). Disabling `CASETYPE_PRECISE`'s index-reversal entirely → test **passes**. Confirms: it's the index permutation, not anything shader-side.
+5. Bisected the reversal itself: `std::swap(cp0, cp3)` alone → **fails**. `std::swap(cp1, cp2)` alone (the other diagonal pair) → **passes**. This is the real finding: FeMe treats two structurally-equivalent diagonal corner pairs asymmetrically.
+6. Re-traced `Executor.cpp` control-point gather and `PatchPipeline.cpp` `extractTessFactors`/`runPatchPipeline` a third time. Nothing wrong by static reading.
+7. Did manual algebra reconstructing the exact physical-vertex-to-local-slot mapping for two real adjacent patches from an actual CTS run (using the `FEME_DEBUG_TESS_FACTORS` dump). Outer-level values matched correctly between neighbors once the "reversal rotates which Outer[k] index represents which physical edge" effect is accounted for. Bilinear edge-point coefficients also appeared to check out term-for-term. **This means either the hand algebra has a subtle error, or the bug is specifically in corner/ring-joining logic, not plain edge-interior math.**
+
+**Why this matters**: six sessions in a row now have called `L419(g)`/`L419(ae)` near the top of the list. This session got much further than any prior one — ruled out an entire wrong hypothesis with hard IR evidence, and found the precise minimal reproduction (one `std::swap` in CTS source). That's a concrete, falsifiable starting point for whoever picks this up next, instead of vague "it's probably control-point gather" guessing.
+
+**Next action (concrete, <2 min to start)**: run with `FEME_DEBUG_TESS_FACTORS=1` set (see commit for usage), then add a second, similar debug dump of actual **domain-stage output positions** (not just Outer-level tess factors) for the swapped-corner patch and its unswapped neighbor. Compare the two patches' points along their shared edge directly. If they match, the bug is NOT in edge-interior math (consistent with this session's algebra) — look specifically at corner/ring-joining code in `Tessellator.cpp`'s `appendQuadBoundaryRing`/`tessellateQuad` for a corner-0-vs-corner-3 asymmetry.
+
+**Next steps (ranked)**:
+1. **(~half day)** Dump actual domain-output positions for the swapped-corner case (above) — most promising unblocked path.
+2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s remaining residual triage (`Feature/HLSLLib` ~20 cases is the biggest chunk).
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy, never root-caused.
+
+**Build/test state**: `check-feme` passes clean (3784/3791 passed, 7 unsupported — unchanged baseline) after the `PatchPipeline.cpp` debug-aid commit. No functional FeMe code changed this session (debug instrumentation only, inert when env var unset), so no CTS regression sweep was needed — `VulkanCTSReport.md` and the inventories are unchanged and still accurate.
