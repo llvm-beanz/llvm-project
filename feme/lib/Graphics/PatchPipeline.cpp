@@ -564,6 +564,16 @@ Expected<PatchPipelineResult> runPatchPipeline(
   // 3. Fixed-function tessellator.
   TessFactors Factors =
       extractTessFactors(Link.PatchConstantSig, Result.PatchConstants);
+  // Debug aid for roadmap L419(ae): dump the raw per-patch tessellation
+  // factors as read from the patch-constant output, before they reach the
+  // fixed-function tessellator. Useful for cross-checking that adjacent
+  // patches agree on the segment count for a shared edge when control-point
+  // index order differs between them (e.g. CTS's common_edge tests).
+  if (::getenv("FEME_DEBUG_TESS_FACTORS"))
+    errs() << "patch " << PrimitiveID << " outer=[" << Factors.Edges[0]
+           << "," << Factors.Edges[1] << "," << Factors.Edges[2] << ","
+           << Factors.Edges[3] << "] inner=[" << Factors.Inside[0] << ","
+           << Factors.Inside[1] << "]\n";
   Result.Tessellated =
       tessellate(Tess.Domain, Tess.Partitioning, Tess.OutputPrimitive, Factors,
                  Tess.MaxTessFactor);
