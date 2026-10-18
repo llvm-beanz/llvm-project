@@ -5388,6 +5388,36 @@ public:
              mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
              It->second.NameSymbol)});
 
+    // (Roadmap L453) An access chain with *only* the leading array-index
+    // -- no further selector into the chosen descriptor's own block
+    // content at all -- asks for nothing more than "a pointer/handle to
+    // descriptor N as a whole," exactly BlockAccessChainPattern's own
+    // "whole content, no further index" shortcut handles for a
+    // non-arrayed block (see its own comment) -- but unlike that sibling
+    // pattern, whose single wrapper-selecting index can still reach
+    // rewriteBlockAccess's own `AllIndices.size() == Selector + 1` early
+    // return by reusing index 0 as a stand-in selector, an arrayed
+    // block's *only* index here is the array index itself, already fully
+    // consumed building Handle above -- there is no remaining index left
+    // to hand rewriteBlockAccess at all. Op's own result type already
+    // converts to this same HandleType (its SPIR-V result is
+    // ElementPointerType itself -- a pointer to the chosen descriptor's
+    // whole block struct, not any one member), so Handle is already the
+    // right value with no further GEP/getpointer needed. Every known case
+    // reaching this shape is a dead store-to-local-variable style copy
+    // (`RWByteAddressBuffer Buf = gBufArray[I];`, fully unrolled with no
+    // real `spirv.Variable` for `Buf`) that a later `spirv.CopyObject`/
+    // `spirv.AccessChain` further indexes into separately -- before this
+    // fix, declining here (the old `Indices.size() <= Selector` check)
+    // fell through to MLIR's own generic `AccessChainPattern`, which
+    // built an illegal `llvm.getelementptr` whose result type was this
+    // same handle type (that pattern assumes every `spirv.AccessChain`'s
+    // base/result converts to an ordinary `!llvm.ptr`, never a target
+    // extension type) -- rejected by the LLVM dialect's own GEP verifier.
+    if (Indices.size() == 1) {
+      Rewriter.replaceOp(Op, Handle);
+      return mlir::success();
+    }
     if (Indices.size() <= Selector)
       return Rewriter.notifyMatchFailure(Op, "not enough indices");
 

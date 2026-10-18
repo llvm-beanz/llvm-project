@@ -902,6 +902,63 @@ TEST(SPIRVToLLVMTest, UnboundedArrayedBlockConvertsInsteadOfFailing) {
   EXPECT_NE(Result, "<failed>") << Result;
 }
 
+// (Roadmap L453) `RWByteAddressBuffer Buf = gBufArray[I];` inside a fully
+// loop-unrolled (compile-time-constant `I`) HLSL loop compiles its local-
+// variable copy down to a bare `spirv.CopyObject` of the array-indexing
+// `AccessChain`'s result, with no real `spirv.Variable`/Store/Load for
+// `Buf` itself (SSA-optimized away): the array-indexing `AccessChain`
+// itself has only its one array-selecting index (no further member
+// selector), asking for nothing more than "a pointer/handle to descriptor
+// I as a whole" -- the same "whole content, no further index" shape
+// BlockAccessChainPattern's own comment already describes for a
+// *non-arrayed* block, but ArrayedBlockAccessChainPattern had no
+// equivalent shortcut for the *arrayed* case: its own `Indices.size() <=
+// Selector` guard declined this shape unconditionally (Selector is always
+// >= 1), falling through to MLIR's generic `AccessChainPattern`, which
+// assumes every `spirv.AccessChain` converts to an ordinary `!llvm.ptr`
+// -- never true for a block-backed resource, whose pointer type always
+// converts to a `spirv.VulkanBuffer` handle -- and emitted an illegal
+// `llvm.getelementptr` whose *result* was that handle type, rejected by
+// the LLVM dialect's own GEP verifier ("result #0 must be LLVM pointer
+// type ..., but got '!llvm.target<"spirv.VulkanBuffer", ...>'"). A later
+// `spirv.AccessChain` into the `CopyObject`'s own result (selecting one
+// byte of the descriptor's content, e.g. the HLSL-level
+// `Buf.Store(0, val)`'s own byte-granular lowering) is unaffected: its
+// base is a direct struct (not array) block pointer, matched by
+// BlockAccessChainPattern instead.
+TEST(SPIRVToLLVMTest, ArrayedBlockWholeDescriptorAccessChainConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ "
+      "spirv.GlobalVariable @gBufArray bind(0, 0) : "
+      "!spirv.ptr<!spirv.array<4 x !spirv.struct<(!spirv.rtarray<i8, "
+      "stride=1> [0]), Block>>, StorageBuffer> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%addr = spirv.mlir.addressof @gBufArray : "
+      "!spirv.ptr<!spirv.array<4 x !spirv.struct<(!spirv.rtarray<i8, "
+      "stride=1> [0]), Block>>, StorageBuffer> "
+      "%idx = spirv.Constant 0 : i32 "
+      "%descriptor = spirv.AccessChain %addr[%idx] : "
+      "!spirv.ptr<!spirv.array<4 x !spirv.struct<(!spirv.rtarray<i8, "
+      "stride=1> [0]), Block>>, StorageBuffer>, i32 -> "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<i8, stride=1> [0]), "
+      "Block>, StorageBuffer> "
+      "%buf = spirv.CopyObject %descriptor : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<i8, stride=1> [0]), "
+      "Block>, StorageBuffer> "
+      "%zero = spirv.Constant 0 : i32 "
+      "%byte0 = spirv.Constant 0 : i32 "
+      "%ptr = spirv.AccessChain %buf[%zero, %byte0] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<i8, stride=1> [0]), "
+      "Block>, StorageBuffer>, i32, i32 -> !spirv.ptr<i8, StorageBuffer> "
+      "%val = spirv.Constant 10 : i8 "
+      "spirv.Store \"StorageBuffer\" %ptr, %val : i8 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+}
+
 // (Roadmap L102) An `AccessChain` selecting a single lane of a `bool`
 // vector (e.g. `bvec2`/`bvec3`/`bvec4`) cannot be lowered with upstream's
 // generic single-GEP `AccessChainPattern`: the resulting `getelementptr`
