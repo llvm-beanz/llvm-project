@@ -126501,3 +126501,39 @@ bucket and the user's own top pick.
 5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 
 **Build/test state**: `check-feme` 3785/3792 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 32 → 26 failed, 0 regressions. Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed / 4755 Passed / 7470 NotSupported, no regression. `VulkanCTSReport.md`, `Roadmap.md` both updated this session; no inventory update needed (neither change is a new feature/extension).
+
+# Session: L453 root-caused and fixed -- `ArrayedBlockAccessChainPattern` whole-descriptor access
+
+**Status check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, same `VK_ICD_FILENAMES` gotcha as always).
+
+**What's done**: `L453` (the `local_resource_loop_array_index.test` GEP-pointer-type bug, carried forward from last session as a new, uninvestigated item) is fully root-caused and fixed. Four commits:
+1. `FEME_DUMP_IR_PRESPIRV` debug aid in `SPIRVToLLVMDialectTranslator.cpp` (inert when unset) — the raw SPIR-V-input dump that made the real root cause visible.
+2. `BlockAccessChainPattern` match simplified to a pure static type check (drops a redundant, conversion-order-dependent dynamic guard) — a legitimate side-cleanup from the wrong-but-reasonable first hypothesis.
+3. The actual `L453` fix: a new "whole descriptor, single index" early-return in `ArrayedBlockAccessChainPattern`, plus a unit test.
+4. `Roadmap.md`/`VulkanCTSReport.md` updated.
+Plus one commit in the *separate* `offload-test-suite` checkout (a stale XFAIL this fix flipped to Unexpectedly-Passed).
+
+**The chase, in order**:
+1. Started from last session's hypothesis: a `CopyObjectConversionPattern`/`BlockAccessChainPattern` conversion-order race (`BlockAccessChainPattern` gates its match on the `Adaptor`'s already-converted base-pointer type, which seemed racy against the unrelated `CopyObject` identity-conversion pattern).
+2. Applied that fix (drop the dynamic guard, keep only the static SPIR-V-type check). Rebuilt, reran the actual failing test directly through `offloader`. **Error persisted, byte-for-byte identical.** Hypothesis wrong, but the cleanup still seemed worth keeping on its own merits.
+3. Added temporary `llvm::errs()` tracing directly in both patterns (plus the new `FEME_DUMP_IR_PRESPIRV` to see the raw SPIR-V alongside it). Reran via `offloader` directly (bypassing `llvm-lit`'s overhead for faster iteration).
+4. Read the trace carefully, counting which lines appeared and in what groups. **Surprise**: every single `CopyObject`/`BlockAccessChain` pair in the shader converted *correctly*. The actual mismatched case was something else entirely — a first-level, single-index, array-selecting `AccessChain` (`gBufArray[I]`) that `BlockAccessChainPattern` *correctly* declines (its pointee is an array, not a struct) because it belongs to the sibling pattern, `ArrayedBlockAccessChainPattern`.
+5. Re-read `ArrayedBlockAccessChainPattern` with this new lens: found its `Indices.size() <= Selector` guard unconditionally requires at least one index past the array selector — but a fully-unrolled `RWByteAddressBuffer Buf = gBufArray[I];` local-copy assignment produces an `AccessChain` with *only* that one array-selecting index. No prior code path handled "give me the whole descriptor, not a member of it" for the *arrayed* case (the non-arrayed `BlockAccessChainPattern` already has this shortcut, reusing its own single index as a stand-in selector — but an arrayed block's one index is already fully spent selecting the array element, so that reuse trick doesn't carry over).
+6. Implemented the real fix: hoist the `Handle` construction above the `Selector` check, then add `if (Indices.size() == 1) { replaceOp(Op, Handle); return success(); }` before the old guard. `Op`'s own result type already converts to the same `Handle` type, so no further GEP is needed.
+7. Removed all temporary debug tracing. Rebuilt, reran the failing case directly and via `llvm-lit` on `feme-vk` — both pass now.
+8. Wrote a new unit test reproducing the minimal shape, sanity-checked it by `git stash`-bisecting (fails without the fix with the exact same error, passes with it).
+
+**Bigger-than-expected payoff**: `check-hlsl-clang-feme-vk` went from 26 → 18 Failed, not 25 — the "whole descriptor, single index" shape evidently affects several tests beyond the one explicitly targeted. One of those side-fixed tests, `local_resource_if_else_array_elements.test`, carried a stale `XFAIL: Clang && Vulkan` in `offload-test-suite` (a *different* repo) that is no longer accurate for FeMe specifically and started reporting "Unexpectedly Passed." Narrowed it to `XFAIL: Clang && Vulkan && !FeMe` rather than deleting it outright, since the underlying llvm/llvm-project#192523 may still affect other Clang+Vulkan backends — committed in that repo alone, as its own commit.
+
+**Verification**: `check-feme` 3786/3793 passed (+1 new unit test), 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk` 26→18 Failed, 0 regressions, 0 Unexpectedly-Passed after the XFAIL narrowing. `check-hlsl-feme-vk` 0 Failed. Because `ArrayedBlockAccessChainPattern` is reachable by *any* shader indexing an array of SSBO/UBO blocks (not just DXC/Clang-frontend shapes, unlike several recent `L440(c)` fixes), ran two real-CTS sweeps instead of one: `dEQP-VK.ssbo.*` (0 Failed/4755 Passed/7470 NotSupported, matches baseline) and `dEQP-VK.binding_model.*` (0 Failed/1897 Passed/62586 NotSupported). No regressions in either.
+
+**Why this took most of the session**: the first hypothesis (conversion-order race) was plausible, had real supporting code smell (a dynamic guard that *looks* racy), and the fix compiled and ran without crashing — it's the kind of "fix" that's easy to mistake for done if you don't actually re-run the originally-failing case. Only direct re-testing against the real repro (not just "it builds now") caught that it hadn't actually changed anything, which is what forced the pivot to instrumentation and the real root cause.
+
+**Next steps (ranked)**:
+1. **(half day)** `L440(c)`: `Feature/StructuredBuffer` (4 cases: `inc_counter_array.test`, `inc_counter_array_imm_idx.test`, `matrix.test`, `matrix_assign.test`) is now the largest remaining residual cluster.
+2. **(~1 day, design-heavy, not a quick patch, carried forward)** `L419(ae)`: the edge0-vs-edge1 forward/forward cross-pairing tessellation ULP mismatch — proven architecturally unfixable via a local per-patch change in an earlier session; needs a real cross-patch-adjacency design, not a session-sized patch. Not touched this session.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused — worth a rerun-twice check next full-suite run, not a dedicated session.
+
+**Build/test state**: `check-feme` 3786/3793 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 26 → 18 failed, 0 regressions. `check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4755 Passed/7470 NotSupported; `dEQP-VK.binding_model.*` 0 Failed/1897 Passed/62586 NotSupported — no regressions in either. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no inventory update needed (bug fix only, no new feature/extension). `feme/.instructions.md` already covers the `libfeme_vulkan.so`-separate-rebuild-target gotcha from a prior session in detail — checked, no new update needed there this session.
