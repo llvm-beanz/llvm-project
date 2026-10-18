@@ -2563,13 +2563,15 @@ TEST(SPIRVResourceLoweringTest, LowersSampleBiasClampToArray1DWithMinLodClamp) {
   EXPECT_EQ(Sample->getArgOperand(14)->getName(), "clamp");
 }
 
-TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
-  // Roadmap L52a: unlike `Array2D`, `Plain1D`'s own `OpImageFetch`
-  // (`getpointer`) path is deliberately left unlowered this session (see
-  // `hasOnlySupportedImageUses`'s own comment) -- only its ordinary
-  // sample intrinsic is handled above -- so a real `texelFetch(sampler1D,
-  // ...)` (legal SPIR-V, unlike a Cube fetch) must still leave the whole
-  // handle alone rather than half-lowering it.
+TEST(SPIRVResourceLoweringTest, LowersAPlain1DImageFetch) {
+  // Roadmap L440(c): `Plain1D`'s own `OpImageFetch` (`getpointer`) path --
+  // `Texture1D`'s own `operator[]` -- now lowers the same way `Array2D`'s
+  // already did (see `hasOnlySupportedImageUses`'s own updated comment):
+  // a real `texelFetch(sampler1D, ...)`/`Tex1D[x]` reuses the identical
+  // `feme.cpu.image.load.1d.v4f32` runtime entry point `Plain1D`'s own
+  // *storage*-image `OpImageRead` already used, and *does* get fully
+  // lowered (unlike a Cube fetch, which stays illegal SPIR-V and must
+  // still be left alone -- see `LeavesACubeImageFetchAlone` below).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define <4 x float> @main(i32 %x) {
@@ -2590,8 +2592,65 @@ TEST(SPIRVResourceLoweringTest, LeavesAPlain1DImageFetchAlone) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.1d.v4f32"));
-  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.1d.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersAnArray1DImageFetch) {
+  // Roadmap L440(c): `Array1D`'s own counterpart to
+  // `LowersAPlain1DImageFetch` immediately above -- the 2-wide
+  // `(x, layer)` coordinate's own `FetchCoordWidth` (2) already fell into
+  // `hasOnlySupportedImageUses`'s pre-existing default before this fix, so
+  // only the shape's own entry in the rejection list needed to move.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %coord) {
+      %img = call target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg1darrfetch(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg1darrfetch(
+          target("spirv.Image", float, 0, 0, 1, 0, 1, 0) %img, <2 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 0, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg1darrfetch(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg1darrfetch(
+        target("spirv.Image", float, 0, 0, 1, 0, 1, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.1darray.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersAPlain3DImageFetch) {
+  // Roadmap L440(c): `Plain3D`'s own counterpart to
+  // `LowersAPlain1DImageFetch` above -- `Texture3D`'s own `operator[]`,
+  // reusing `FetchCoordWidth`'s now-corrected 3-wide width for this shape
+  // (previously defaulted to the wrong value of 2, unreachable before
+  // this fix since `Plain3D` was rejected outright beforehand).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<3 x i32> %coord) {
+      %img = call target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg3dfetch(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg3dfetch(
+          target("spirv.Image", float, 2, 0, 0, 0, 1, 0) %img, <3 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 2, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg3dfetch(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg3dfetch(
+        target("spirv.Image", float, 2, 0, 0, 0, 1, 0), <3 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(findImageCall(*F, "feme.cpu.image.load.3d.v4f32"));
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesACubeImageFetchAlone) {

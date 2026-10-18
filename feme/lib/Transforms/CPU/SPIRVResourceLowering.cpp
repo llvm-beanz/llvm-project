@@ -150,15 +150,25 @@ enum class ImageShape {
   /// A `TextureCubeArray`: a 3-component direction vector plus a float
   /// array-layer sample coordinate; no fetch, for the same reason as Cube.
   CubeArray,
-  /// A `Texture1D` (roadmap H19c, `HandleKind::StorageImage2D` only -- no
-  /// sampled-image counterpart exists yet): a single scalar `X` fetch
-  /// coordinate, per SPIR-V's own "Coordinate must be a scalar or vector"
-  /// rule (a 1-component coordinate is spelled as a bare scalar, not a
-  /// 1-element vector, unlike every other shape here).
+  /// A `Texture1D`: a single scalar `X` fetch coordinate, per SPIR-V's own
+  /// "Coordinate must be a scalar or vector" rule (a 1-component
+  /// coordinate is spelled as a bare scalar, not a 1-element vector,
+  /// unlike every other shape here). Originally `HandleKind::StorageImage2D`
+  /// only (roadmap H19c); roadmap L440(c) extended the zero-mip
+  /// `texelFetch()`/`operator[]` path to a sampled `HandleKind::
+  /// SampledImage2D` handle too, reusing this exact codegen case
+  /// unchanged (`lowerImageAccesses`'s dispatch is shape-driven, not
+  /// `HandleKind`-driven) -- an ordinary filtered *sample* against this
+  /// shape was already supported well before that (roadmap L52a).
   Plain1D,
-  /// A `Texture3D` (roadmap H19c, `HandleKind::StorageImage2D` only): a
-  /// 3-component `(X, Y, Z)` fetch coordinate. Never arrayed -- SPIR-V
-  /// disallows an arrayed `Dim::Dim3D` image entirely.
+  /// A `Texture3D`: a 3-component `(X, Y, Z)` fetch coordinate. Never
+  /// arrayed -- SPIR-V disallows an arrayed `Dim::Dim3D` image entirely.
+  /// Originally `HandleKind::StorageImage2D` only (roadmap H19c); roadmap
+  /// L440(c) extended the zero-mip `texelFetch()`/`operator[]` path to a
+  /// sampled `HandleKind::SampledImage2D` handle too, the same way
+  /// `Plain1D`'s own doc above describes (an ordinary filtered *sample*
+  /// against this shape was already supported well before that, roadmap
+  /// L66(a)).
   Plain3D,
   /// A `Texture1DArray` (roadmap H19e, `HandleKind::StorageImage2D` only):
   /// a 2-component `(X, Layer)` fetch coordinate -- distinct from
@@ -1512,9 +1522,9 @@ bool isGatherOffsetsVector(const Value *Offset) {
 /// Checks that every use of a sampled-image handle is one this pass can
 /// rewrite: the image operand of an `llvm.spv.resource.sample`/
 /// `samplelevel` whose coordinate, offset and result shapes the CPU
-/// runtime's helpers for \p Shape implement, or (`Plain2D`/`Array2D` only
-/// -- `OpImageFetch` is illegal against `Dim::Cube` in SPIR-V, so `Cube`/
-/// `CubeArray` never reach this branch) an `llvm.spv.resource.getpointer`
+/// runtime's helpers for \p Shape implement, or (every shape but `Cube`/
+/// `CubeArray` -- `OpImageFetch` is illegal against `Dim::Cube` in SPIR-V,
+/// so those two never reach this branch) an `llvm.spv.resource.getpointer`
 /// texel fetch (`OpImageFetch`, see `feme::spirv::ImageLoadPattern`) whose
 /// pointer is only loaded from. \p IsInteger (roadmap E26) is
 /// `classifySampledImage2DHandle`'s own channel-type test, repeated by the
@@ -1533,19 +1543,21 @@ bool isGatherOffsetsVector(const Value *Offset) {
 /// Roadmap L52a: `Plain1D` samples a bare scalar (1-component, no vector
 /// wrapping -- see `isCoordN`'s own comment); `Array1D` samples a
 /// 2-component one (the array layer as its own float second component).
-/// Neither shape's own `OpImageFetch` (`getpointer`) path is accepted yet
-/// below -- only its ordinary sample intrinsic is -- since this session's
-/// own real CTS-driven scope is ordinary sampling only (no real failing
-/// case exercises a 1D `texelFetch` today); a future row can lift this
-/// restriction the same way `Array2D`'s own fetch path already works.
+/// Roadmap L440(c) widened both shapes' zero-mip `getpointer` fetch path
+/// (`Texture1D`'s/`Texture1DArray`'s own `operator[]`) to be accepted too,
+/// the same way `Array2D`'s own fetch path already worked -- the fetch
+/// coordinate reuses this same `SampleCoordWidth` (an integer coordinate
+/// instead of a float one, same width), and `lowerImageAccesses`'s own
+/// codegen case was already shape-driven (added for a *storage* image's
+/// `OpImageRead`), so no new runtime entry point was needed.
 /// Roadmap L66(a): `Plain3D` samples a real 3-component `(U, V, W)`
-/// coordinate, same width as `Array2D`'s own arrayed one -- its own
-/// `OpImageFetch` path is likewise not accepted yet (this row's own scope
-/// is ordinary sampling only, mirroring `Plain1D`/`Array1D`'s identical
-/// decision above). Roadmap L67(a) adds real `Bias`/`MinLodClamp` support
-/// for `Plain3D`, and roadmap L67(b) adds real `Grad` support too (see the
-/// checks below) -- roadmap L67(c) adds real `ConstOffset` support for
-/// this shape too (see `isSupportedOffset`'s own updated doc).
+/// coordinate, same width as `Array2D`'s own arrayed one -- roadmap
+/// L440(c) likewise widened its own zero-mip fetch path to be accepted,
+/// mirroring `Plain1D`/`Array1D` immediately above. Roadmap L67(a) adds
+/// real `Bias`/`MinLodClamp` support for `Plain3D`, and roadmap L67(b)
+/// adds real `Grad` support too (see the checks below) -- roadmap L67(c)
+/// adds real `ConstOffset` support for this shape too (see
+/// `isSupportedOffset`'s own updated doc).
 bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
                                ImageShape Shape) {
   unsigned SampleCoordWidth =
@@ -2219,15 +2231,27 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
       continue;
     }
 
-    if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray ||
-        Shape == ImageShape::Plain1D || Shape == ImageShape::Array1D ||
-        Shape == ImageShape::Plain3D)
-      return false; // No fetch shape exists for Cube/CubeArray/Plain1D/
-                    // Array1D yet (roadmap L52a: ordinary sampling only),
-                    // nor for a sampled `Plain3D` handle's own `OpImageFetch`
-                    // (roadmap L66(a): ordinary *sample* only this row).
+    if (Shape == ImageShape::Cube || Shape == ImageShape::CubeArray)
+      return false; // `OpImageFetch` is illegal against `Dim::Cube` in
+                    // SPIR-V, so neither has a fetch shape at all.
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
       return false;
+    // Roadmap L440(c): a sampled `Plain1D`/`Array1D`/`Plain3D` handle's own
+    // zero-mip `texelFetch()` (`Texture1D`'s/`Texture1DArray`'s/
+    // `Texture3D`'s own `operator[]`, which DXC lowers to this same
+    // `getpointer`-based form, not `isFetchLevelIntrinsic`'s explicit-`Lod`
+    // one) was rejected here for a long time (roadmap L52a/L66(a): "ordinary
+    // sampling only") even though `lowerImageAccesses`'s own codegen switch
+    // below already has a `Plain1D`/`Array1D`/`Plain3D` case for this exact
+    // `getpointer`+`LoadInst` pattern -- added for a *storage* image's
+    // `OpImageRead` (roadmap H19c/H19e), but shape-driven, not
+    // `HandleKind`-driven, so it already produces the right
+    // `createLoad1D`/`createLoad1DArray`/`createLoad3D` call for a sampled
+    // handle's fetch too once reached. Confirmed via a real
+    // `Feature/Textures/OperatorIndex.test` capture
+    // (`Texture1D<float4>`/`Texture3D<float4>` indexed with `operator[]`):
+    // no new runtime entry point or codegen case was needed, only this
+    // validation-side widening.
     // Roadmap L307: a multisampled sampled image's own zero-mip
     // `texelFetch()` (no `Lod` image operand -- `isFetchLevelIntrinsic`
     // above already handles the explicit-`Lod` form, which SPIR-V never
@@ -2249,10 +2273,17 @@ bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger,
     // texel of a 2D image (sampled or storage)" and already accept the
     // `Sample` operand this needs (`FeMeRuntimeCPU.c`), so no new
     // `runtime/CPU` helper or `ImageCallKind` is needed after all.
+    // Roadmap L440(c): widened to also give `Plain1D`'s own bare-scalar
+    // (1-wide) and `Plain3D`'s own 3-wide coordinate the right width here
+    // -- both previously unreachable (rejected above), so this had never
+    // needed to account for them before; `Array1D`'s 2-wide `(x, layer)`
+    // coordinate already fell into the `: 2` default correctly.
     unsigned FetchCoordWidth = Shape == ImageShape::Array2D ||
-                                       Shape == ImageShape::Plain2DMS
+                                       Shape == ImageShape::Plain2DMS ||
+                                       Shape == ImageShape::Plain3D
                                    ? 3
                                : Shape == ImageShape::Array2DMS ? 4
+                               : Shape == ImageShape::Plain1D   ? 1
                                                                 : 2;
     if (!isCoordN(CI->getArgOperand(1), FetchCoordWidth, /*Float=*/false))
       return false;
