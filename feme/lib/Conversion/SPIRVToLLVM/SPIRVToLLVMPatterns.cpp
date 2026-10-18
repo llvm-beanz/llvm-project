@@ -6457,6 +6457,220 @@ getOffsetSortedMemberIndices(mlir::spirv::StructType Type) {
   return Order;
 }
 
+/// Returns a pointer to \p Element's entire `Content` -- used by
+/// BlockWholeLoadPattern/BlockWholeStorePattern/BlockWholeCopyMemoryPattern
+/// below for a `spirv.Load`/`spirv.Store`/`spirv.CopyMemory` that reads or
+/// writes a storage/uniform buffer block's *whole* content directly off its
+/// own base pointer, with no intervening `spirv.AccessChain` at all.
+/// BlockAccessChainPattern/ArrayedBlockAccessChainPattern above both
+/// convert an `AccessChain`, which always carries at least one index value
+/// (real, or a dummy wrapper selector) already present in the IR, to pass
+/// straight through as `llvm.spv.resource.getpointer`'s own index operand;
+/// a bare whole-block `spirv.Load`/`spirv.Store`/`spirv.CopyMemory` has no
+/// such index to reuse -- SPIR-V never requires one when there is nothing
+/// to select between (e.g. `dEQP-VK.spirv_assembly.instruction.compute.
+/// opcopymemory.struct`'s `OpCopyMemory %var %indata`, where `%indata`'s
+/// own pointer -- a `struct{vec4,vec4,vec4,vec4}` storage/uniform block --
+/// is the `OpCopyMemory`'s operand directly, with no access chain at all).
+///
+/// \p Element.HasWrapper's single-member wrapper (an array, dxc's own
+/// sole-member resource-representation convention, or a plain fixed-size-
+/// array uniform block) addresses the same way BlockAccessChainPattern's
+/// own "whole array" degenerate case already does: index 0 selects the
+/// wrapper's own sole member, i.e. Content itself.
+///
+/// The direct (no-wrapper) shape has no such dummy selector to reuse at
+/// all -- Content is \p BlockStruct itself, a real, possibly-multi-member
+/// struct -- so this instead finds whichever *physical* member occupies
+/// byte offset 0 (the struct's own base address, which a pointer to that
+/// one member's address coincides with exactly, in LLVM's opaque-pointer
+/// model -- no bitcast needed) and indexes to that. Returns null, declining
+/// the whole-block conversion rather than risk addressing the wrong
+/// member, if \p BlockStruct carries no `Offset` decorations to confirm
+/// this with, or if its own physical member 0 does not actually sit at
+/// offset 0 (neither shape has been seen in practice, but both are cheap
+/// to rule out rather than assume).
+mlir::Value getBlockWholeContentPointer(
+    mlir::Operation *Op, mlir::Location Loc,
+    mlir::ConversionPatternRewriter &Rewriter,
+    const mlir::TypeConverter &TypeConverter, const BlockElement &Element,
+    mlir::spirv::StructType BlockStruct, mlir::Value Handle) {
+  mlir::Type ResultType = mlir::LLVM::LLVMPointerType::get(Op->getContext());
+  mlir::Type IndexType = Rewriter.getI32Type();
+  unsigned Index = 0;
+  if (!Element.HasWrapper) {
+    if (!BlockStruct.hasOffset())
+      return nullptr;
+    llvm::SmallVector<unsigned, 8> Order =
+        getOffsetSortedMemberIndices(BlockStruct);
+    unsigned OffsetZeroDeclaredIndex = Order.front();
+    if (BlockStruct.getMemberOffset(OffsetZeroDeclaredIndex) != 0)
+      return nullptr;
+    Index = getStructMemberPhysicalIndex(BlockStruct, OffsetZeroDeclaredIndex,
+                                         TypeConverter);
+  }
+  mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, IndexType, Rewriter.getIntegerAttr(IndexType, Index));
+  return createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.getpointer",
+                             ResultType, {Handle, IndexConst});
+}
+
+/// Recovers \p Element/\p BlockStruct for \p PointeePointerType -- shared by
+/// BlockWholeLoadPattern/BlockWholeStorePattern/BlockWholeCopyMemoryPattern,
+/// each of which otherwise repeats the same getBufferBlockElement/
+/// getUniformBlockElement fallback pair BlockAccessChainPattern's own
+/// matchAndRewrite already does.
+std::optional<std::pair<BlockElement, mlir::spirv::StructType>>
+getWholeBlockElement(mlir::spirv::PointerType PointeePointerType) {
+  std::optional<BlockElement> Element =
+      getBufferBlockElement(PointeePointerType);
+  if (!Element)
+    Element = getUniformBlockElement(PointeePointerType);
+  if (!Element)
+    return std::nullopt;
+  auto BlockStruct =
+      mlir::cast<mlir::spirv::StructType>(PointeePointerType.getPointeeType());
+  return std::make_pair(*Element, BlockStruct);
+}
+
+/// Converts a `spirv.Load` reading a storage/uniform buffer block's whole
+/// content directly off its own base pointer (see
+/// getBlockWholeContentPointer's own comment for the shape and why it
+/// needs separate handling from BlockAccessChainPattern, which converts an
+/// `AccessChain` instead).
+class BlockWholeLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::LoadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::LoadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::LoadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
+        Adaptor.getPtr().getType());
+    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
+      return Rewriter.notifyMatchFailure(Op, "not a whole-block load");
+    auto PointerType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getPtr().getType());
+    auto ElementAndStruct = getWholeBlockElement(PointerType);
+    if (!ElementAndStruct)
+      return Rewriter.notifyMatchFailure(Op, "not a block pointer");
+    mlir::Value ContentPtr = getBlockWholeContentPointer(
+        Op, Op.getLoc(), Rewriter, *getTypeConverter(),
+        ElementAndStruct->first, ElementAndStruct->second, Adaptor.getPtr());
+    if (!ContentPtr)
+      return Rewriter.notifyMatchFailure(Op,
+                                         "whole-content address unknown");
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(Op, ResultType,
+                                                    ContentPtr);
+    return mlir::success();
+  }
+};
+
+/// The `spirv.Store` counterpart to BlockWholeLoadPattern above -- see its
+/// own comment for the shape matched.
+class BlockWholeStorePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::StoreOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::StoreOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::StoreOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
+        Adaptor.getPtr().getType());
+    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
+      return Rewriter.notifyMatchFailure(Op, "not a whole-block store");
+    auto PointerType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getPtr().getType());
+    auto ElementAndStruct = getWholeBlockElement(PointerType);
+    if (!ElementAndStruct)
+      return Rewriter.notifyMatchFailure(Op, "not a block pointer");
+    mlir::Value ContentPtr = getBlockWholeContentPointer(
+        Op, Op.getLoc(), Rewriter, *getTypeConverter(),
+        ElementAndStruct->first, ElementAndStruct->second, Adaptor.getPtr());
+    if (!ContentPtr)
+      return Rewriter.notifyMatchFailure(Op,
+                                         "whole-content address unknown");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Adaptor.getValue(),
+                                                     ContentPtr);
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.CopyMemory` with either (or both) of its `source`/
+/// `target` operands being a storage/uniform buffer block's own base
+/// pointer directly -- MLIR's own upstream `CopyMemoryPattern` assumes both
+/// operands convert to ordinary `!llvm.ptr` values (see its own comment),
+/// which is false for either side here (see getBlockWholeContentPointer's
+/// own comment for the shape and why BlockAccessChainPattern's own
+/// AccessChain-only conversion cannot help: this op has no access chain in
+/// between at all). Declines (falls through to upstream's own
+/// `CopyMemoryPattern`, unchanged) whenever neither operand actually needs
+/// this handling, and whenever \p Op carries any `MemoryAccess` bits at
+/// all -- unlike upstream's own pattern, this one does not decode
+/// alignment/volatile/non-temporal, a scope deliberately kept narrow until
+/// a real case needs it.
+class BlockWholeCopyMemoryPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CopyMemoryOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CopyMemoryOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CopyMemoryOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    bool SourceIsHandle =
+        mlir::isa<mlir::LLVM::LLVMTargetExtType>(Adaptor.getSource().getType());
+    bool TargetIsHandle =
+        mlir::isa<mlir::LLVM::LLVMTargetExtType>(Adaptor.getTarget().getType());
+    if (!SourceIsHandle && !TargetIsHandle)
+      return Rewriter.notifyMatchFailure(Op, "neither side is a block handle");
+    if (Op.getMemoryAccess() || Op.getSourceMemoryAccess())
+      return Rewriter.notifyMatchFailure(
+          Op, "whole-block copy with memory access bits not yet supported");
+
+    auto Resolve = [&](mlir::Value OriginalPtr,
+                       mlir::Value ConvertedPtr) -> mlir::Value {
+      if (mlir::isa<mlir::LLVM::LLVMPointerType>(ConvertedPtr.getType()))
+        return ConvertedPtr;
+      auto HandleType =
+          mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(ConvertedPtr.getType());
+      if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
+        return nullptr;
+      auto PointerType =
+          mlir::cast<mlir::spirv::PointerType>(OriginalPtr.getType());
+      auto ElementAndStruct = getWholeBlockElement(PointerType);
+      if (!ElementAndStruct)
+        return nullptr;
+      return getBlockWholeContentPointer(
+          Op, Op.getLoc(), Rewriter, *getTypeConverter(),
+          ElementAndStruct->first, ElementAndStruct->second, ConvertedPtr);
+    };
+
+    mlir::Value Src = Resolve(Op.getSource(), Adaptor.getSource());
+    mlir::Value Dst = Resolve(Op.getTarget(), Adaptor.getTarget());
+    if (!Src || !Dst)
+      return Rewriter.notifyMatchFailure(Op, "whole-content address unknown");
+
+    auto PointeeType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getSource().getType())
+            .getPointeeType();
+    mlir::Type ContentType = getTypeConverter()->convertType(PointeeType);
+    if (!ContentType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    mlir::Value Loaded =
+        mlir::LLVM::LoadOp::create(Rewriter, Op.getLoc(), ContentType, Src);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Loaded, Dst);
+    return mlir::success();
+  }
+};
+
 /// Builds the candidate LLVM struct for
 /// convertOffsetStructTypeIgnoringDecorations below out of an
 /// already-computed \p Members list (indexed by \p Type's own *declared*
@@ -16963,6 +17177,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BuiltInAccessChainPattern, BuiltInGlobalVariablePattern,
       BlockAccessChainPattern<mlir::spirv::AccessChainOp>,
       BlockAccessChainPattern<mlir::spirv::InBoundsAccessChainOp>,
+      BlockWholeLoadPattern, BlockWholeStorePattern,
+      BlockWholeCopyMemoryPattern,
       PtrAccessChainPattern<mlir::spirv::PtrAccessChainOp,
                             mlir::spirv::AccessChainOp>,
       PtrAccessChainPattern<mlir::spirv::InBoundsPtrAccessChainOp,
