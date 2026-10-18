@@ -8483,3 +8483,63 @@ residuals; `L419(ae)`'s tessellation ULP-mismatch fix remains an open,
 design-heavy architectural gap (not revisited this session); `feme-run`'s
 DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9
 uninspected git stashes remain carried-forward low-priority items.
+
+## L454: InBoundsAccessChain offset-struct-member-reorder fix
+
+**`check-feme`: 3,788/3,795 Passed (+1 new unit test), 7 Unsupported, 0
+regressions.**
+
+**`check-hlsl-clang-feme-vk`: 14 Failed -> 12 Failed, 0 regressions**
+(exact failure-name-set diff, confirmed via an A/B `git stash`
+rebuild/rerun). Both `Feature/ConstantBufferT` cases (`indexed-ref.test`,
+`vectors.test`) fixed by a single change: `OffsetStructMemberReorderAccessChainPattern`
+(remaps a SPIR-V struct's declared member index to its real, pad-adjusted
+physical LLVM field index) was only ever registered for `spirv.AccessChain`,
+never its `spirv.InBoundsAccessChain` sibling -- the exact same gap
+`L419(a)` had already found and fixed for `BlockAccessChainPattern`, just
+in a different (non-resource-handle) access-chain pattern. Fixed by
+templating the pattern over the SPIR-V op type and registering both
+instantiations (mirroring `BlockAccessChainPattern`'s own existing idiom).
+
+**`check-hlsl-feme-vk` (DXC-compiled, non-Clang suite)**: 0 Failed.
+
+**Real Vulkan CTS verification**: since this pattern is reachable by any
+SPIR-V shader with an offset-padded/reordered struct accessed via
+`InBoundsAccessChain` (not just a DXC-authored `ConstantBuffer<T>`), ran
+both:
+- `dEQP-VK.ssbo.*` (12,225 cases) -- 0 Failed, 12,162 Passed, 63
+  NotSupported, byte-identical to the established baseline.
+- `dEQP-VK.ubo.*` (13,240 cases) -- 0 Failed, 8,215 Passed, 5,025
+  NotSupported. No prior baseline was on record for this group in this
+  report; recording this sweep's result as the new established baseline.
+  0 new passes relative to `ssbo.*`'s own figures confirms glslang itself
+  never emits this exact `InBoundsAccessChain`-into-padded-struct shape
+  for any case already passing before this fix -- consistent with the
+  fix's own DXC/Clang-dx-layout-specific root cause.
+
+No regressions in either sweep.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (bug fix only, no new feature/extension).
+
+**Residual `L440(c)` count: 12** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1), `Feature/HLSLLib` (3:
+`degrees.32`/`mad.32`/`radians.32`),
+`Feature/ResourcesInStructs/res-of-matrix-in-struct.test` (1, SIGABRT --
+flag for a future dedicated session, looks like a distinct crash bug, not
+a lowering gap), `Feature/Semantics/MatrixSemantics.test` (1),
+`Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Feature/WaveOps/WaveActiveAnyTrue.test` (1),
+`Tools/Offloader/BufferFormats.test` (1),
+`WaveOps/QuadReadAcrossDiagonal.convergence.test`/`WaveActiveBitXor.int.test`
+(2).
+
+**Next steps**: `Feature/HLSLLib`'s 3-case cluster
+(`degrees.32`/`mad.32`/`radians.32`) is now the largest compact residual
+cluster; `res-of-matrix-in-struct.test`'s SIGABRT crash is worth isolating
+separately since it may be a distinct, more serious memory-safety bug
+rather than a lowering gap; `L419(ae)`'s tessellation ULP-mismatch fix
+remains an open, design-heavy architectural gap (not revisited this
+session); `feme-run`'s DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic
+gap and 9 uninspected git stashes remain carried-forward low-priority
+items.
