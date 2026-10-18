@@ -69,14 +69,21 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(best next pick, ~1 day)** `L419(g)` (30 tessellation residuals) —
-   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate
-   code area from Linearize/SIMDize/SPIRVToLLVM. With `L452` now fully
-   closed and both `L419(y)`/`L419(ad)` already closed, this is the
-   largest remaining open bucket in either family.
-2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
-   triage.
-3. **(low priority, carried forward)** `feme-run` can't execute a DXIL
-   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+1. **(top pick, ~1 day)** `L419(g)`: 30 tessellation residuals, isolated to
+   `feme/lib/Graphics/Tessellator.cpp` — a genuinely different code area from
+   everything closed so far in `L419`/`L452`.
+2. **(half day)** `L440(c)`'s remaining 33-case residual triage. Clusters,
+   by size: `Feature/HLSLLib` (~20), `Feature/LocalResources` (5),
+   `Feature/StructuredBuffer` (4), `Basic`/`Basic/Matrix` (3), `WaveOps`
+   (2-3), `Tools/Offloader` (2), `Feature/ResourceArrays` (2), plus several
+   1-case singletons. `Feature/HLSLLib` is the biggest remaining chunk and
+   the natural next sub-target if picking this up.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
+   using a resource (not groupshared) `InterlockedAdd`/atomic.
 4. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+5. **(low priority, carried forward, unexplained)** The 38-vs-39
+   `check-hlsl-clang-feme-vk` baseline failure-count discrepancy from a
+   couple sessions back was never root-caused — possibly one flaky case.
+   Worth a quick rerun-twice check next time the full suite runs, but not
+   worth a dedicated session.
