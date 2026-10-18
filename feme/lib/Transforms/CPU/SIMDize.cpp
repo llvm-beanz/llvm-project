@@ -885,6 +885,29 @@ class FunctionWidener {
   /// groupshared/atomicrmw special cases.
   DenseSet<AllocaInst *> MaskedAllocas;
 
+  /// (Roadmap L452(a)) Every value whose own, local, SSA-only
+  /// `UI.isDivergentAtDef` verdict is "uniform" but that is nonetheless
+  /// forced divergent by a memory round trip through a `MaskedAllocas`
+  /// base -- i.e. a load `collectMaskedAllocas`'s own `MaskedAllocas` set
+  /// already proves is memory-divergent (its alloca is written with a
+  /// per-lane-varying value somewhere, even though every access address is
+  /// itself uniform), plus every value transitively built from such a
+  /// load. `UniformityInfo` has no memory model: a uniformly-indexed
+  /// `result[i] = result[i] + operand;` round trip leaves the `fadd`
+  /// itself -- not just the load -- looking perfectly uniform to `UI`,
+  /// even once `widenMaskedAllocaLoad` has correctly force-widened the
+  /// load it directly consumes into a real per-lane vector (reduced from
+  /// a real `dEQP-VK.spirv_assembly.instruction.*.opphi.out_of_order_*`
+  /// failure: the `fadd` silently collapsed the real per-lane vector down
+  /// to one lane's value via the ordinary "give a uniform consumer its
+  /// value back" fallback, then broadcast that single value to every
+  /// lane's storage). `computeForcedDivergentValues` seeds this set from
+  /// exactly those loads and propagates it forward to every downstream
+  /// consumer a fixed-point worklist reaches; `isDivergent` is the gate
+  /// that must be consulted, instead of raw `UI.isDivergentAtDef`, at
+  /// every widening decision point downstream of such a load.
+  DenseSet<Value *> ForcedDivergentValues;
+
   /// Set by any `widen*` helper that diagnoses an unsupported construct via
   /// `emitError` partway through Pass 2 of `widen()` below (unlike
   /// `checkSupportedControlFlow`/`checkVectorDecompositionSupported`, which
@@ -918,6 +941,10 @@ private:
   bool checkVectorDecompositionSupported();
   bool checkAggregateValueSupported(Instruction &I);
   void collectMaskedAllocas();
+  void computeForcedDivergentValues();
+  bool isDivergent(Value *V) const {
+    return UI.isDivergentAtDef(V) || ForcedDivergentValues.contains(V);
+  }
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   Value *getFirstActiveLaneIndex();
@@ -1816,6 +1843,45 @@ void FunctionWidener::collectMaskedAllocas() {
         if (AllocaInst *AI = getUnderlyingAlloca(SI->getPointerOperand()))
           MaskedAllocas.insert(AI);
       }
+    }
+  }
+}
+
+void FunctionWidener::computeForcedDivergentValues() {
+  // (Roadmap L452(a)) Must run after `collectMaskedAllocas` (consulted
+  // here) but before any widening decision consults `isDivergent`/
+  // `ForcedDivergentValues` (every `widen*` helper's own gate). Seed from
+  // every load `UI` itself still calls uniform but that nonetheless reads
+  // a `MaskedAllocas` base -- i.e. exactly the loads `widenMaskedAllocaLoad`
+  // already force-widens into a real per-lane vector despite `UI`'s
+  // verdict -- then propagate forward with a worklist: any instruction
+  // using a forced-divergent value, that `UI` does not already call
+  // divergent on its own, is itself forced divergent in turn (e.g. the
+  // `fadd` consuming such a load's result). This is deliberately a
+  // one-directional, SSA-use-edge-only propagation -- it does not, for
+  // instance, re-examine `MaskedAllocas` membership itself, since that set
+  // is already complete by the time this runs.
+  SmallVector<Value *, 16> Worklist;
+  for (Instruction &I : instructions(*OldF)) {
+    auto *LI = dyn_cast<LoadInst>(&I);
+    if (!LI || !LI->isSimple() || UI.isDivergentAtDef(LI))
+      continue;
+    if (AllocaInst *AI = getUnderlyingAlloca(LI->getPointerOperand())) {
+      if (MaskedAllocas.contains(AI)) {
+        if (ForcedDivergentValues.insert(LI).second)
+          Worklist.push_back(LI);
+      }
+    }
+  }
+
+  while (!Worklist.empty()) {
+    Value *V = Worklist.pop_back_val();
+    for (User *U : V->users()) {
+      auto *UserI = dyn_cast<Instruction>(U);
+      if (!UserI || UI.isDivergentAtDef(UserI) ||
+          !ForcedDivergentValues.insert(UserI).second)
+        continue;
+      Worklist.push_back(UserI);
     }
   }
 }
@@ -3767,7 +3833,7 @@ void FunctionWidener::widenMaskedAllocaStore(StoreInst &SI,
 
   Value *Val = SI.getValueOperand();
   Type *ValTy = Val->getType();
-  bool ValueDivergent = UI.isDivergentAtDef(&SI);
+  bool ValueDivergent = isDivergent(&SI);
 
   Value *WideScalar = nullptr;
   SmallVector<Value *, 4> WideVectorComponents;
@@ -5316,7 +5382,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
            WidenedAggregateComponents.contains(U.get());
   });
 
-  if (!AnyOperandDecomposed && !UI.isDivergentAtDef(&I))
+  if (!AnyOperandDecomposed && !isDivergent(&I))
     return true; // Uniform, and no operand was force-decomposed: leave it
                  // exactly as it is.
 
@@ -5472,6 +5538,7 @@ Function *FunctionWidener::widen() {
     return nullptr;
 
   collectMaskedAllocas();
+  computeForcedDivergentValues();
 
   NewF = buildWidenedFunction();
 
@@ -5485,7 +5552,7 @@ Function *FunctionWidener::widen() {
   SmallVector<PHINode *, 8> DivergentPHIs;
   for (BasicBlock *BB : RPOT) {
     for (PHINode &PN : BB->phis()) {
-      if (UI.isDivergentAtDef(&PN))
+      if (isDivergent(&PN))
         DivergentPHIs.push_back(&PN);
     }
   }
