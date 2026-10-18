@@ -72,28 +72,25 @@ stored in a git stash.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, the actual next step)** Implement design (b): give
-   `peelWouldDestroyAncestorReconvergencePoint` a scoped dry-run that reuses
-   `DiamondFlattener::validate`'s own `MergeVisited`/rollback machinery (the
-   same pattern `flattenLoopBodyDiamond` already uses for its own
-   dry-run-and-rollback via `LastRegionVisited`). Must-pass cases:
-   `switch_comp.ll` (regenerate via `FEME_DUMP_IR_PRELINEARIZE` if `/tmp` was
-   cleared — the file may still be at `/tmp/switch_comp.ll`) must now report the
-   diagnostic;
-   `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAddsAThirdPredecessor`'s
-   `BB=Flow9` call specifically must keep behaving exactly as today.
-2. **(standing, needs a full dedicated session)** `L452(a)`'s `out_of_order` fix
-   — memory-carried divergence gap in `WaveUniformity`, design already written
-   up.
-3. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
-4. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
-   tessellation residuals).
-5. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
+1. **(standing, needs a full dedicated session, ~1 day)** `L452(a)`'s
+   `out_of_order` fix — memory-carried divergence gap in `WaveUniformity`.
+   Design already written up in `Roadmap.md`'s `L452(a)` entry: needs an "alloca
+   divergence" side-table so a uniformly-indexed load of a divergently-written
+   value is still treated divergent.
+2. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
+   tessellation residuals) — `L452(i)`'s remaining 4 `*_tessc` cases are
+   confirmed part of this same bucket, not a new issue.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
    (`L440(c)`).
-6. **(smaller, independent)** The `struct` cluster's own separate
+5. **(smaller, independent, ~half day)** The `struct` cluster's own separate
    `spirv.GlobalVariable` legalization bug (8 cases) — different code area
-   (SPIRVToLLVM conversion), can run in parallel with item 1.
-7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader
+   (SPIRVToLLVM conversion), not Linearize.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader
    using a resource (not groupshared) `InterlockedAdd`/atomic.
-8. **(low priority, carried forward)** 9 older git stashes remain uninspected —
-   low value, still open if a future session wants to check.
+7. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+
+With `L452` fully resolved end to end (a through i), item 1 (`L452(a)`'s
+`out_of_order` fix) is now the clearest top candidate for the next session —
+it's the last standing item in the `L452` family and already has a design
+written up.
