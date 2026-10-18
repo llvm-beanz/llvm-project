@@ -126348,3 +126348,93 @@ first.**
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 4. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: L440(c) Feature/Textures cluster fixed — sampled 1D/3D zero-mip fetch
+
+**Next action for a future session**: pick up `L419(g)` (30 tessellation
+residuals, `feme/lib/Graphics/Tessellator.cpp`) — still the largest standing
+bucket and the user's own top pick.
+
+## What shipped this session
+
+1. Root-caused the `Feature/Textures` 6-case cluster
+   (`Array.OperatorIndex.test`, `Array.SRVToUAV.{array,}.test`,
+   `OperatorIndex.test`, `SRVToUAV.{array,}.test`) to
+   `hasOnlySupportedImageUses` in `SPIRVResourceLowering.cpp`: a *second*,
+   separate fetch-intrinsic code path (zero-mip `getpointer`-based fetch, used
+   by `operator[]`-style indexing with no explicit mip) still hard-rejected
+   `Plain1D`/`Array1D`/`Plain3D` shapes, even though the storage-image codegen
+   switch already handled them and the *other* fetch path
+   (`isFetchLevelIntrinsic`, explicit-Lod) had already been widened to accept
+   them in an earlier session (`L72(c)`).
+2. Fixed it: narrowed the zero-mip rejection list to `Cube`/`CubeArray` only
+   (the real SPIR-V restriction), fixed a latent `FetchCoordWidth` bug
+   (`Plain1D`/`Plain3D` defaulted to width `2` instead of `1`/`3` —
+   unreachable before since those shapes were rejected outright), updated 3
+   stale doc comments.
+3. Fixed the 1 unit test that encoded the old (buggy) behavior as expected,
+   added 2 new unit tests for the newly-supported shapes.
+4. Ran the full verification ladder — see wins below.
+5. Updated `Roadmap.md` (`L440(c)`: 53/92 → 59/92 fixed) and
+   `VulkanCTSReport.md` with a new dated entry.
+
+## Wins (now working, previously broken)
+
+- `Texture1D`/`Texture3D` indexed via HLSL `operator[]` (zero explicit mip)
+  now compiles and runs correctly against FeMe's Vulkan backend.
+- `check-hlsl-clang-feme-vk`: 38 → 32 Failed (353 Passed, was 347).
+- `check-feme`: 3,784/3,784 Passed, 0 Failed (clean after the test fix/adds).
+- `check-hlsl-feme-vk`: 0 Failed, 492 Passed (clean, no regression).
+- Real Vulkan CTS: `dEQP-VK.glsl.texture_functions.texelfetch.*sampler1d*`
+  24/24 Pass; `*sampler3d*` 12/24 Pass + 12 Not Supported (pre-existing, not a
+  regression), 0 Failed; full `texelfetch.*` 60/96 Pass, 0 Failed; full
+  `texture_functions.*` (broader confirmatory sweep) 3,936/7,947 Pass, 0
+  Failed.
+
+## Commits this session
+
+1. `158f226a0dbf` — the `SPIRVResourceLowering.cpp` fix + unit test
+   fix/additions.
+2. `b982ba44bc13` — `Roadmap.md` `L440(c)` status update.
+3. `2b7480ef17ed` — `VulkanCTSReport.md` CTS verification entry.
+4. (this commit) — `agent_thoughts.md` update.
+
+## Process notes worth keeping
+
+- `vulkaninfo --summary | grep deviceName` only picks up the FeMe ICD when
+  `VK_ICD_FILENAMES`/`VK_DRIVER_FILES` are explicitly set to
+  `<build>/tools/feme/tools/feme-vulkan/feme_icd.json` first — run bare, it
+  reports the system's Mesa `llvmpipe` driver instead. Already documented in
+  `feme/.instructions.md` (lines ~131-162); re-confirmed this session after an
+  initial bare run returned `llvmpipe (LLVM 21.1.8, 128 bits)` by mistake.
+- `FEME_VULKAN_LOG_CREATION_ERRORS=1` remains essential for turning a bare
+  `VkResult=-3` pipeline-creation failure into an actionable diagnostic.
+- The codebase has a recurring pattern: new shape/format support is often
+  already latent in a shared codegen switch (because it was added for a
+  *different* `HandleKind` that happens to share the same switch), but gated
+  behind an overly conservative, separately-written validation check for the
+  new `HandleKind`. Worth grepping for this pattern (duplicate
+  shape/dim-rejection lists guarding the same codegen) when triaging future
+  `L419`/`L440` clusters — it may turn a "needs new codegen" estimate into a
+  much smaller "just a validation check" fix, as it did here.
+
+## Next steps (ranked)
+
+1. **(top pick, ~1 day)** `L419(g)`: 30 tessellation residuals, isolated to
+   `feme/lib/Graphics/Tessellator.cpp` — a genuinely different code area from
+   everything closed so far in `L419`/`L452`.
+2. **(half day)** `L440(c)`'s remaining 33-case residual triage. Clusters,
+   by size: `Feature/HLSLLib` (~20), `Feature/LocalResources` (5),
+   `Feature/StructuredBuffer` (4), `Basic`/`Basic/Matrix` (3), `WaveOps`
+   (2-3), `Tools/Offloader` (2), `Feature/ResourceArrays` (2), plus several
+   1-case singletons. `Feature/HLSLLib` is the biggest remaining chunk and
+   the natural next sub-target if picking this up.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
+   using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
+5. **(low priority, carried forward, unexplained)** The 38-vs-39
+   `check-hlsl-clang-feme-vk` baseline failure-count discrepancy from a
+   couple sessions back was never root-caused — possibly one flaky case.
+   Worth a quick rerun-twice check next time the full suite runs, but not
+   worth a dedicated session.
