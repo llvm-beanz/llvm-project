@@ -5040,6 +5040,30 @@ mlir::LogicalResult rewriteBlockAccess(
 /// index this pattern's own base pointer -- already converted to a handle
 /// with no such index -- cannot supply.
 ///
+/// (Roadmap L453) Matching is driven entirely by \p Op's own *static*
+/// SPIR-V base pointer type (whether `getBufferBlockElement`/
+/// `getUniformBlockElement` recognizes it below) rather than by first
+/// checking \p Adaptor's already-converted base pointer type: that base
+/// pointer need not have converted yet by the time this pattern first
+/// visits \p Op -- e.g. a fully loop-unrolled `RWByteAddressBuffer Buf =
+/// gBufArray[I];` compiles its local-copy assignment down to a bare
+/// `spirv.CopyObject` with no real `spirv.Variable`/Store/Load, and that
+/// CopyObject's own identity conversion (CopyObjectConversionPattern) may
+/// not have run yet when this access chain into its result is first
+/// legalized. Gating the match on the adaptor's operand already being an
+/// `spirv.VulkanBuffer` handle made this pattern's success depend on
+/// conversion visitation order: when the CopyObject result had not yet
+/// converted, this pattern declined, and MLIR's own generic, lower-benefit
+/// `AccessChainPattern` -- which has no such handle-type awareness --
+/// wrongly "won" instead, emitting an illegal `llvm.getelementptr` whose
+/// result type is `spirv.VulkanBuffer` rather than an LLVM pointer. The
+/// static check below is unaffected by conversion order (it only inspects
+/// \p Op's own never-changing SPIR-V type), so this pattern now matches
+/// consistently regardless of whether its base pointer's producer has
+/// converted yet; the dialect conversion driver's own operand
+/// materialization already threads the base pointer's eventual converted
+/// value through to \p Adaptor correctly either way.
+///
 /// Templated over `spirv.AccessChain`/`spirv.InBoundsAccessChain`: per the
 /// SPIR-V spec the latter "has the same operands, result, and semantic
 /// restrictions as AccessChain, except that if the input pointer is a
@@ -5058,11 +5082,6 @@ public:
   mlir::LogicalResult
   matchAndRewrite(SPIRVOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
-        Adaptor.getBasePtr().getType());
-    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
-      return Rewriter.notifyMatchFailure(Op, "not a block access");
-
     auto PointerType =
         mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
     std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
@@ -5347,8 +5366,6 @@ public:
     // extra leading index.
     mlir::ValueRange Indices = Adaptor.getIndices();
     unsigned Selector = Element->HasWrapper ? 2 : 1;
-    if (Indices.size() <= Selector)
-      return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
     mlir::Type HandleType = getTypeConverter()->convertType(ElementPointerType);
     if (!HandleType)
@@ -5370,6 +5387,9 @@ public:
              Rewriter, Loc,
              mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
              It->second.NameSymbol)});
+
+    if (Indices.size() <= Selector)
+      return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
     return rewriteBlockAccess(
         Op, Rewriter, *getTypeConverter(), *Element,
