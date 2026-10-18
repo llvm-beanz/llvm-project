@@ -66,31 +66,24 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-The last session did not commit any results. Any intermediate results will be
-stored in a git stash.
-
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(standing, needs a full dedicated session, ~1 day)** `L452(a)`'s
-   `out_of_order` fix — memory-carried divergence gap in `WaveUniformity`.
-   Design already written up in `Roadmap.md`'s `L452(a)` entry: needs an "alloca
-   divergence" side-table so a uniformly-indexed load of a divergently-written
-   value is still treated divergent.
-2. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
-3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30
-   tessellation residuals) — `L452(i)`'s remaining 4 `*_tessc` cases are
-   confirmed part of this same bucket, not a new issue.
-4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage
-   (`L440(c)`).
-5. **(smaller, independent, ~half day)** The `struct` cluster's own separate
-   `spirv.GlobalVariable` legalization bug (8 cases) — different code area
-   (SPIRVToLLVM conversion), not Linearize.
-6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader
-   using a resource (not groupshared) `InterlockedAdd`/atomic.
-7. **(low priority, carried forward)** 9 older git stashes remain uninspected.
-
-With `L452` fully resolved end to end (a through i), item 1 (`L452(a)`'s
-`out_of_order` fix) is now the clearest top candidate for the next session —
-it's the last standing item in the `L452` family and already has a design
-written up.
+1. **(best next pick, ~1 day)** `L419(y)`/`L419(g)`: `conditional_break`
+   (6 cases) + 30 tessellation residuals. This session's CTS sweep
+   independently reconfirmed that every fixed cluster's `_tessc` stage
+   stayed failing while every other stage passed — strong, fresh evidence
+   this bucket is one coherent tessellation-control-specific gap, not
+   scattered noise. Good next target precisely because today's data makes
+   the bucket's boundary unusually clear.
+2. **(standing, ~1 day)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+3. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+   triage.
+4. **(half day, independent, can parallelize with 1-3)** The `struct`
+   cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
+   in SPIRVToLLVM conversion, not Linearize/SIMDize, so it's a genuinely
+   separate code area from everything above.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
