@@ -7764,3 +7764,105 @@ residuals, needs its own standalone reduction); `L452(a)`'s
 `out_of_order` fix; `L419(ad)`/`L419(y)`/`L419(g)`; `L440(c)`'s 39-case
 residual triage; the `struct` cluster's own separate
 `spirv.GlobalVariable` legalization bug (8 cases).
+
+## L452(h)/L452(i): design (b) implemented, CTS-verified, `L452(e)` fully resolved
+
+Implemented fix design (b) for the `L452(d)`-through-`L452(h)` peel-
+safety bug, as prescribed by `L452(h)`'s own precise mechanism
+writeup (the "two-session" root-cause chain: `L452(e)` through
+`L452(h)` found that the old, purely-structural
+`reachesThroughRelayChain` heuristic could not distinguish the
+dangerous `switch_comp.ll` shape from the must-allow
+`LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAdds
+AThirdPredecessor` shape on CFG structure alone).
+
+`peelWouldDestroyAncestorReconvergencePoint` now performs a real,
+scoped dry run instead of a hand-rolled heuristic:
+
+1. Walks backward from the peel's sole surviving predecessor to the
+   real `CondBrInst` it descends from (`Origin`), bailing out early
+   for `Header`/`Latch`/non-`CondBrInst` origins exactly as before.
+2. Temporarily applies the actual peel's edge redirects
+   (`PredBr->setSuccessor(0, Target)` for every precomputed
+   `(Pred, Target)` pair).
+3. Recomputes `PostDominatorTree`.
+4. Constructs a throwaway `DiamondFlattener` with fresh, local
+   `MergeVisited`/`ResolvedBlocks` sets and calls a new public
+   `probeValidate(Origin, R)` wrapper -- reusing `validate`'s own
+   conflict-detection machinery to ask the exact question `L452(h)`
+   identified as necessary: would this specific peel's `Target` get
+   double-visited within one top-level `validate` call.
+5. Fully undoes every redirect and recomputes `PDT` again before
+   returning, regardless of outcome.
+
+`peelConstantFlowPredecessors` was refactored to precompute
+`PredToTarget`/`PredTargets` once, shared by both the new guard's dry
+run and the real mutation loop, eliminating any risk of the two
+drifting apart. `DT`/`PDT`/`CI`/`UI` were threaded through
+`peelConstantFlowPredecessorsInCycle` from `LoopLinearizer::
+linearizeCycle`'s own member fields.
+
+**Surprising, independently-verified discovery**: the new precise
+check is strictly *more permissive* than the old heuristic it
+replaces. `/tmp/switch_comp.ll` now fully linearizes end-to-end
+(confirmed well-formed via `opt -passes=verify`) rather than merely
+diagnosing gracefully, because the old heuristic was *also*
+incorrectly blocking a second, actually-safe peel elsewhere in the
+same function (an over-conservative false positive that happened to
+share the same diagnostic text as the one genuinely dangerous peel).
+Confirmed via temporary trace instrumentation (fully reverted before
+commit) that the new guard still correctly blocks the one genuinely
+dangerous peel (`BB=Flow18`); the pipeline nonetheless now succeeds
+because the *other*, previously-also-blocked peel is now correctly
+allowed through.
+
+Both must-pass cases held:
+
+- `LinearizeTest.ExtendsExistingReconvergencePhiWhenASecondPeelAdds
+  AThirdPredecessor`'s `BB=Flow9` call behaves identically to before
+  (same benign, pre-existing, unrelated diagnostic, unaffected).
+- `/tmp/switch_comp.ll` now succeeds fully (previously diagnosed).
+
+New lit regression test: `loop-switch-decode-peel-double-visit.ll`
+(`RUN: feme-opt --llvm -passes=feme-cpu-linearize -S %s | opt
+-passes=verify -S | FileCheck %s`, confirming both successful
+linearization and IR well-formedness).
+
+**Real CTS verification**: ran the 48-case
+`dEQP-VK.spirv_assembly.type.scalar.*.switch_*` superset caselist (all
+8 integer types x 6 shader stages), both before (via a temporary
+`git stash`/`ninja feme_vulkan` rebuild round-trip) and after this
+session's fix:
+
+| | Passed | Failed | Not supported |
+|---|---|---|---|
+| Before (baseline) | 4/48 | 8/48 | 36/48 |
+| After (this fix) | 12/48 | 0/48 | 36/48 |
+
+A real before/after set comparison confirms **zero regressions**:
+exactly the 8 `L452(e)` residual cases
+(`type.scalar.{i32,u32}.switch_{comp,geom,tessc,tesse}`) flip from
+`Fail` to `Pass`; the 36 `NotSupported` cases are unrelated 8/16-bit
+storage-capability gaps, unaffected by this fix. Also directly
+re-confirmed `dEQP-VK.spirv_assembly.type.scalar.i32.switch_comp`
+(the exact case used as the primary repro across all 4 prior
+sessions on this bug) passes standalone.
+
+`check-feme`: 3,777/3,784 Passed, 0 Failed, 7 Unsupported (one more
+total test than `L452(h)`'s own baseline, the new lit test).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change
+(pure compiler correctness fix inside `feme-cpu-linearize`, no
+feature/extension-surface change).
+
+**`L452(e)` is now fully resolved** (both of its sub-buckets
+accounted for): the 8 `i32`/`u32` `switch_*` cases are fixed by this
+session; the other 4 `*_tessc` residuals remain tracked under
+`L419(g)`'s own 30-case tessellation-residual bucket, unaffected by
+and unrelated to this fix.
+
+**Next steps**: `L452(a)`'s `out_of_order` fix; `L419(ad)`;
+`L419(y)`/`L419(g)`; `L440(c)`'s 39-case residual triage; the
+`struct` cluster's own separate `spirv.GlobalVariable` legalization
+bug (8 cases); `feme-run`'s DXIL atomic gap; the 9 pre-existing,
+still-uninspected git stashes.
