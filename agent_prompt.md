@@ -69,18 +69,23 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~half day)** Dump actual domain-output positions for the swapped-corner
-   case (above) — most promising unblocked path.
-2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s remaining residual
-   triage (`Feature/HLSLLib` ~20 cases is the biggest chunk).
-3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
+1. **(~1 day, design-heavy, not a quick patch)** `L419(ae)`: design a fix for
+   the edge0-vs-edge1 forward/forward cross-pairing ULP mismatch. Start from
+   this session's `Roadmap.md` entry (full mechanism) and the
+   `FEME_DEBUG_DOMAIN_POSITIONS`/`FEME_DEBUG_TESS_FACTORS` instrumentation.
+   Validate against the full `dEQP-VK.tessellation.*` sweep before landing, not
+   just `common_edge.*` — real regression risk to many passing cases.
+2. **(half day)** `L440(c)`: `Feature/StructuredBuffer` (4 cases) is now the
+   next-largest residual cluster.
+3. **(half day, standalone, newly found)** `L453`:
+   `local_resource_loop_array_index`'s `SPIRVToLLVM` GEP-pointer-type bug. Start
+   with `FEME_DUMP_IR`/`FEME_DUMP_IR_PRENORM` for this one case.
+4. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
    using a resource (not groupshared) `InterlockedAdd`/atomic.
-4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
-5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk`
-   baseline discrepancy, never root-caused.
+5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 
-**Build/test state**: `check-feme` passes clean (3784/3791 passed, 7 unsupported
-— unchanged baseline) after the `PatchPipeline.cpp` debug-aid commit. No
-functional FeMe code changed this session (debug instrumentation only, inert
-when env var unset), so no CTS regression sweep was needed —
-`VulkanCTSReport.md` and the inventories are unchanged and still accurate.
+**Build/test state**: `check-feme` 3785/3792 passed, 7 unsupported, 0
+regressions. `check-hlsl-clang-feme-vk`: 32 → 26 failed, 0 regressions. Real
+Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed / 4755 Passed / 7470 NotSupported, no
+regression. `VulkanCTSReport.md`, `Roadmap.md` both updated this session; no
+inventory update needed (neither change is a new feature/extension).
