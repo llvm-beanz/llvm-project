@@ -1168,6 +1168,43 @@ TEST_F(RuntimeCPUTest, RawLoadStoreRoundTrip) {
   EXPECT_EQ(Result, 42);
 }
 
+// Regression test for roadmap L440(c): a local `ByteAddressBuffer`/
+// `RWByteAddressBuffer` variable assigned from a global resource (e.g.
+// `ByteAddressBuffer Local = gInput;`) makes `ResourceLoweringPass`'s
+// `lowerRawLoad`/`lowerRawStore` fall back to a byte-granularity
+// decomposition of the access rather than recognizing it as a single
+// `i32` -- so until this milestone the CPU runtime never defined the
+// scalar `.i8` helpers, and any such local-resource load/store hit a late
+// JIT "Symbols not found" failure. Verify the new `.i8` helpers round-trip
+// a single byte correctly, mirroring `RawLoadStoreRoundTrip` (`.i32`)
+// above.
+TEST_F(RuntimeCPUTest, RawLoadStoreRoundTripI8) {
+  int8_t Storage = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper =
+      addStoreWrapper("test_raw_store_i8", "feme.cpu.resource.store.raw.i8",
+                      Type::getInt8Ty(Ctx));
+  Function *LoadWrapper =
+      addLoadWrapper("test_raw_load_i8", "feme.cpu.resource.load.raw.i8");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int8_t ToStore = -42;
+  Store(Heap, 1, 0, 0, &ToStore, true);
+  EXPECT_EQ(Storage, ToStore);
+
+  int8_t Result = 0;
+  Load(Heap, 1, 0, 0, true, &Result);
+  EXPECT_EQ(Result, ToStore);
+}
+
 // Regression test for roadmap H137: an HLSL `int64_t`/`uint64_t` raw or
 // structured-buffer element (e.g. `WaveOps/WaveActiveAllEqual.int64.test`'s
 // own `StructuredBuffer<int64_t>` input) mangles to

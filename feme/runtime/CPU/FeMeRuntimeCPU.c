@@ -1393,6 +1393,62 @@ femeCpuResourceStoreRawI16(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   __builtin_memcpy(Ptr, &Value, sizeof(Value));
 }
 
+// (Roadmap L440(c)) `feme.cpu.resource.load.raw.i8`/`.store.raw.i8`: the
+// single-byte sibling of `.i16`/`.i32` above. `feme::cpu::
+// ResourceLoweringPass`'s `lowerRawLoad`/`lowerRawStore` emit this when a
+// local `ByteAddressBuffer`/`RWByteAddressBuffer` variable (one assigned
+// from a global resource rather than declared as a global itself, e.g.
+// `ByteAddressBuffer Local = gInput;`) is loaded from or stored to: the
+// copy-to-local step's own type information is coarser than the global
+// case, so the lowering falls back to a byte-granularity decomposition of
+// the load/store instead of recognizing the access as a single `i32`.
+// (That decomposition is itself legal and doesn't need to be avoided --
+// without this entry point, though, every such local-resource load/store
+// simply fails to link.)
+int8_t femeCpuResourceLoadRawI8(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, _Bool Mask) asm("feme.cpu.resource.load.raw.i8");
+
+__attribute__((always_inline)) int8_t
+femeCpuResourceLoadRawI8(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                         uint32_t DescriptorIndex, uint64_t ByteOffset,
+                         _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 1);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 1);
+  if (!((OkRaw || OkStructured) && Mask))
+    return 0;
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  int8_t V;
+  __builtin_memcpy(&V, Ptr, sizeof(V));
+  return V;
+}
+
+void femeCpuResourceStoreRawI8(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ByteOffset, int8_t Value,
+    _Bool Mask) asm("feme.cpu.resource.store.raw.i8");
+
+__attribute__((always_inline)) void
+femeCpuResourceStoreRawI8(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                          uint32_t DescriptorIndex, uint64_t ByteOffset,
+                          int8_t Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  _Bool OkRaw = femeRTCheckAccess(Desc.Kind, /*ResourceKind::Raw=*/3,
+                                  Desc.SizeInBytes, Desc.Flags, ByteOffset, 1);
+  _Bool OkStructured =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Structured=*/2,
+                        Desc.SizeInBytes, Desc.Flags, ByteOffset, 1);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!((OkRaw || OkStructured) && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  __builtin_memcpy(Ptr, &Value, sizeof(Value));
+}
+
 // `feme.cpu.resource.load.raw.v4f32`: read a whole `<4 x float>` (e.g. a
 // GLSL `vec4` member of a uniform/storage block) through a bindless raw or
 // structured buffer descriptor in one call -- the same descriptor/bounds

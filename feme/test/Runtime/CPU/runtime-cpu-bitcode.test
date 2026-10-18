@@ -21,6 +21,8 @@
 ; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.typed.v4f32{{"?}}(
 ; CHECK-DAG: i32 @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.i32{{"?}}(
 ; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.i32{{"?}}(
+; CHECK-DAG: i8 @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.i8{{"?}}(
+; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.i8{{"?}}(
 ; CHECK-DAG: float @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.f32{{"?}}(
 ; CHECK-DAG: void @{{"?}}{{(\\01)?}}feme.cpu.resource.store.raw.f32{{"?}}(
 ; CHECK-DAG: <2 x float> @{{"?}}{{(\\01)?}}feme.cpu.resource.load.raw.v2f32{{"?}}(
