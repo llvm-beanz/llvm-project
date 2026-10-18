@@ -126187,3 +126187,85 @@ the direct `deqp-vk` check hadn't been done.
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: L419(ad) already fixed by L419(y) — no new code change, just verification + a test
+
+**Run `git log --oneline -3` to see this session's 3 commits (test, docs, this file).**
+
+## Device check (every session, per standing instruction)
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## What happened (1 finding, ~1.5 hours, no functional code change)
+
+1. Started on `L419(ad)` (`mixed_break_continue`, 4 cases) per the user's
+   ranked next-step #1.
+2. Before writing any new fix code, re-ran the prior session's own repro
+   (`/tmp/mbc_frag_mod2.ll`) against current `HEAD` as a sanity check.
+   **It compiled clean — no diagnostic.** Not expected, since no
+   `L419(ad)`-targeted change had landed.
+3. Ran the actual CTS cases directly: 18/18 `mixed_break_continue` cases
+   Pass (broader glob than the originally-named 4).
+4. Confirmed this wasn't a stale roadmap entry: temporarily reverted just
+   `Linearize.cpp` to its state immediately before the `L419(y)` fix commit
+   (`git checkout 436e0ddb4bb9^ -- feme/lib/Transforms/CPU/Linearize.cpp`),
+   rebuilt `feme-opt`, reran the repro — **reproduced the exact original
+   diagnostic**. Restored, rebuilt, reran — clean again. `git diff --stat`
+   empty the whole time.
+5. Traced the mechanism with `FEME_DEBUG_LINEARIZE_TRACE=1`:
+   `HeaderDivergent=1` now, because `L419(y)`'s
+   `dependsOnResourceOrImageLoadInCycle` helper generalizes to this row's
+   shape too (an ordinary trip-count check reading a resource load, not
+   just a data-dependent `break`). With `HeaderDivergent` correctly
+   predicted ahead of time, the pre-existing recovery excludes `Header`
+   from the switch-lowered body's own region before
+   `DiamondFlattener::validate` ever runs on it — so the post-dominator
+   escape to `.loopexit` this row's own prior investigation diagnosed
+   never arises.
+6. **Neither of `L419(ad)`'s own two previously-proposed fix designs
+   (region-restricted post-dominator; new freeze-mechanism plumbing from
+   an arbitrary interior block) was needed.** The fix that already shipped
+   for `L419(y)` covers it by accident.
+7. Trimmed `/tmp/mbc_frag_mod2.ll` into a lit-test-sized repro, validated
+   it still reproduces the bug pre-fix / compiles clean post-fix (same
+   revert technique), and committed it as
+   `loop-nested-switch-diamond-with-header-resource-check.ll`.
+8. Ran full `check-feme`: 3,780/3,787 Passed, 0 Failed, 7 Unsupported
+   (+1 test vs. `L419(y)`'s own count, zero regressions).
+9. Updated `Roadmap.md` (struck through `L419(ad)`) and
+   `VulkanCTSReport.md` (new `## L419(ad)` section).
+
+## Process lesson (the actual point of this session)
+
+**Always re-run a carried-forward item's own repro against current `HEAD`
+before assuming its originally-scoped fix design is still needed.** A
+roadmap row's "not fixed, here's the design" writeup can go stale the
+moment a *different* row's fix generalizes further than its own author
+realized. This is the second time in two sessions this exact pattern has
+shown up (`L419(y)` fixing `L419(ad)` as a side effect) — worth treating as
+a standing habit, not a one-off surprise: **before starting any
+carried-forward fix-design item, spend 5 minutes re-running its repro
+first.**
+
+## Commits this session (3, all with trailers)
+
+1. New regression test `loop-nested-switch-diamond-with-header-resource-check.ll`
+   (no source change).
+2. `Roadmap.md` + `VulkanCTSReport.md` docs update.
+3. This file.
+
+## Next steps (ranked)
+
+1. **(best next pick, ~1 day)** `L419(g)` (30 tessellation residuals) —
+   lives in `feme/lib/Graphics/Tessellator.cpp`, a genuinely separate code
+   area from Linearize/SIMDize. With both `L419(y)` and `L419(ad)` closed,
+   this is now the largest remaining `L419` bucket.
+2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s 39-case residual
+   triage.
+3. **(half day, independent, can parallelize with 1-2)** The `struct`
+   cluster's own `spirv.GlobalVariable` legalization bug (8 cases) — lives
+   in SPIRVToLLVM conversion, not Linearize/SIMDize.
+4. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+5. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
