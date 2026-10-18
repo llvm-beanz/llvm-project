@@ -125965,3 +125965,48 @@ Every static heuristic I tried is provably insufficient — confirmed from first
 6. **(smaller, independent)** The `struct` cluster's own separate `spirv.GlobalVariable` legalization bug (8 cases) — different code area (SPIRVToLLVM conversion), can run in parallel with item 1.
 7. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 8. **(low priority, carried forward)** 9 older git stashes remain uninspected — low value, still open if a future session wants to check.
+
+# L452(h)/L452(i): design (b) landed — peel-safety bug fixed after 5 sessions
+
+**Fixed this session.** `switch_comp.ll` and 8 CTS cases that have been broken since `L452(e)` now pass. This closes out a bug that's had 4 prior investigation-only sessions.
+
+## What changed
+
+1. Implemented design (b), exactly as `L452(h)` specified: `peelWouldDestroyAncestorReconvergencePoint` now does a real scoped dry run instead of a hand-rolled heuristic — temporarily apply the peel's edge redirects, recompute `PostDominatorTree`, probe `DiamondFlattener::validate`'s own conflict-detection machinery via a new `probeValidate` wrapper, then undo everything.
+2. Added `DiamondFlattener::probeValidate` (public wrapper around the private `validate`).
+3. Threaded `DT`/`PDT`/`CI`/`UI` through `peelConstantFlowPredecessors`/`peelConstantFlowPredecessorsInCycle`.
+4. Precomputed `PredToTarget`/`PredTargets` once, shared by the new guard and the real mutation loop — no risk of drift between dry-run and real behavior.
+5. Built, unit-tested (34/34 `LinearizeTest`), lit-tested, full `check-feme`: 3777/3784 Passed, 0 Failed, 7 Unsupported.
+
+## The surprising part
+
+The new precise check is **more permissive** than the old one, not just safer. `switch_comp.ll` now fully linearizes (confirmed via `opt -passes=verify`) instead of just failing gracefully — because the old purity heuristic was *also* wrongly blocking a second, actually-safe peel elsewhere in the same function. Confirmed with temporary trace instrumentation (reverted before commit) that the new guard still correctly blocks the one genuinely dangerous peel (`BB=Flow18`); the overall pipeline succeeds because the *other* peel is now correctly let through.
+
+## Real CTS numbers
+
+48-case `dEQP-VK.spirv_assembly.type.scalar.*.switch_*` caselist, before (git-stash baseline) vs after:
+
+| | Passed | Failed | NotSupported |
+|---|---|---|---|
+| Before | 4/48 | 8/48 | 36/48 |
+| After | 12/48 | 0/48 | 36/48 |
+
+Exactly the 8 `L452(e)` residual cases flip Fail→Pass. Zero regressions.
+
+## Commits this session
+
+1. `3d3a68e1ef70` — the `Linearize.cpp` functional fix.
+2. `99a779bf09f3` — new lit test `loop-switch-decode-peel-double-visit.ll`.
+3. `6b982777948f` — `Roadmap.md`/`VulkanCTSReport.md` updates (L452(h) struck through, L452(i) added).
+
+## Next steps
+
+1. **(standing, needs a full dedicated session, ~1 day)** `L452(a)`'s `out_of_order` fix — memory-carried divergence gap in `WaveUniformity`. Design already written up in `Roadmap.md`'s `L452(a)` entry: needs an "alloca divergence" side-table so a uniformly-indexed load of a divergently-written value is still treated divergent.
+2. **(standing)** `L419(ad)` (`mixed_break_continue`, 4 cases).
+3. **(standing)** `L419(y)` (`conditional_break`, 6 cases) and `L419(g)` (30 tessellation residuals) — `L452(i)`'s remaining 4 `*_tessc` cases are confirmed part of this same bucket, not a new issue.
+4. **(half day)** `check-hlsl-clang-feme-vk`'s 39-case residual triage (`L440(c)`).
+5. **(smaller, independent, ~half day)** The `struct` cluster's own separate `spirv.GlobalVariable` legalization bug (8 cases) — different code area (SPIRVToLLVM conversion), not Linearize.
+6. **(low priority, carried forward)** `feme-run` cannot execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+7. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+
+With `L452` fully resolved end to end (a through i), item 1 (`L452(a)`'s `out_of_order` fix) is now the clearest top candidate for the next session — it's the last standing item in the `L452` family and already has a design written up.
