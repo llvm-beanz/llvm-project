@@ -69,21 +69,18 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(top pick, ~1 day)** `L419(g)`: 30 tessellation residuals, isolated to
-   `feme/lib/Graphics/Tessellator.cpp` — a genuinely different code area from
-   everything closed so far in `L419`/`L452`.
-2. **(half day)** `L440(c)`'s remaining 33-case residual triage. Clusters,
-   by size: `Feature/HLSLLib` (~20), `Feature/LocalResources` (5),
-   `Feature/StructuredBuffer` (4), `Basic`/`Basic/Matrix` (3), `WaveOps`
-   (2-3), `Tools/Offloader` (2), `Feature/ResourceArrays` (2), plus several
-   1-case singletons. `Feature/HLSLLib` is the biggest remaining chunk and
-   the natural next sub-target if picking this up.
+1. **(~half day)** Dump actual domain-output positions for the swapped-corner
+   case (above) — most promising unblocked path.
+2. **(half day)** `L440(c)`: `check-hlsl-clang-feme-vk`'s remaining residual
+   triage (`Feature/HLSLLib` ~20 cases is the biggest chunk).
 3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
    using a resource (not groupshared) `InterlockedAdd`/atomic.
-4. **(low priority, carried forward)** 9 older git stashes remain
-   uninspected.
-5. **(low priority, carried forward, unexplained)** The 38-vs-39
-   `check-hlsl-clang-feme-vk` baseline failure-count discrepancy from a
-   couple sessions back was never root-caused — possibly one flaky case.
-   Worth a quick rerun-twice check next time the full suite runs, but not
-   worth a dedicated session.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk`
+   baseline discrepancy, never root-caused.
+
+**Build/test state**: `check-feme` passes clean (3784/3791 passed, 7 unsupported
+— unchanged baseline) after the `PatchPipeline.cpp` debug-aid commit. No
+functional FeMe code changed this session (debug instrumentation only, inert
+when env var unset), so no CTS regression sweep was needed —
+`VulkanCTSReport.md` and the inventories are unchanged and still accurate.
