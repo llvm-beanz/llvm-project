@@ -2076,4 +2076,55 @@ TEST(SPIRVToLLVMTest,
       << Result;
 }
 
+// (Roadmap L440(c)) `clang-dxc -spirv -fvk-use-dx-layout` represents an
+// HLSL `floatNx2` matrix inside a `StructuredBuffer` as a plain
+// `!spirv.array<2 x vector<Nxf32>, stride=12>` -- an array of row
+// vectors, not a `spirv.MatrixType` at all -- so a dynamically-indexed
+// row access (e.g. `InA[i].GetRow(j)`) lowers to two *separately* chained
+// `spirv.AccessChain`s: one selecting the whole row-vector array out of
+// the descriptor (handled by `BlockAccessChainPattern`'s own "whole
+// content" case), the other indexing *into* that array's own already-
+// converted result to reach one row. The second op's base pointee,
+// `!spirv.array<2 x vector<3xf32>, stride=12>`, previously failed to
+// convert at all: `convertArrayTypeIgnoringDecorations` only compensated
+// for a *narrower*-than-natural declared `Stride` (padding), never a
+// *wider*-than-declared natural vector size (here, `vector<3xf32>`'s own
+// 16-byte ABI-rounded size against the tightly-packed, dx-layout 12-byte
+// stride) -- exactly the retry its `RuntimeArrayType` sibling conversion
+// already has via `getStridedTightVectorArrayType`, but this (fixed-size)
+// array conversion was missing. Without it, the whole array failed to
+// convert, and the second `AccessChain` (with no LLVM type to build a GEP
+// result from) failed to legalize ("failed to legalize operation
+// 'spirv.AccessChain' that was explicitly marked illegal").
+TEST(SPIRVToLLVMTest, TightRowVectorArrayAccessChainConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ "
+      "spirv.GlobalVariable @gBuf bind(0, 0) : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<!spirv.array<2 x "
+      "vector<3xf32>, stride=12>, stride=24> [0]), Block>, StorageBuffer> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%addr = spirv.mlir.addressof @gBuf : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<!spirv.array<2 x "
+      "vector<3xf32>, stride=12>, stride=24> [0]), Block>, StorageBuffer> "
+      "%zero = spirv.Constant 0 : i32 "
+      "%idx = spirv.Constant 0 : i32 "
+      "%whole = spirv.AccessChain %addr[%zero, %idx] : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<!spirv.array<2 x "
+      "vector<3xf32>, stride=12>, stride=24> [0]), Block>, StorageBuffer>, "
+      "i32, i32 -> !spirv.ptr<!spirv.array<2 x vector<3xf32>, stride=12>, "
+      "StorageBuffer> "
+      "%row = spirv.Constant 1 : i32 "
+      "%ptr = spirv.AccessChain %whole[%row] : "
+      "!spirv.ptr<!spirv.array<2 x vector<3xf32>, stride=12>, "
+      "StorageBuffer>, i32 -> !spirv.ptr<vector<3xf32>, StorageBuffer> "
+      "%val = spirv.Load \"StorageBuffer\" %ptr : vector<3xf32> "
+      "spirv.Store \"StorageBuffer\" %ptr, %val : vector<3xf32> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_EQ(Result.find("spirv.AccessChain"), std::string::npos) << Result;
+}
+
 } // namespace

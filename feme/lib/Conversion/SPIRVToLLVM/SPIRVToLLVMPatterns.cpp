@@ -8033,12 +8033,33 @@ bool remapNestedStructMemberIndices(
 /// whenever this function's own (successful, but too-large) result
 /// doesn't reproduce the declared offsets.
 ///
-/// Returns null if the element type fails to convert, or if padding it to
-/// the declared stride fails (the declared stride is narrower than the
-/// element's own natural size) or is not needed (\p Stride is 0, meaning
-/// no stride was declared at all -- e.g. a workgroup-shared array -- in
-/// which case no padding applies and the plain element type is used
-/// directly).
+/// (Roadmap L453's own sibling gap, found triaging
+/// `Feature/StructuredBuffer/matrix.test`/`matrix_assign.test`) A
+/// `Stride` narrower than the element's own natural size is not always a
+/// real failure: a row-major matrix DXC's direct-to-SPIR-V `-spirv`
+/// backend represents as a plain array of row vectors under
+/// `-fvk-use-dx-layout` (no `spirv::MatrixType` at all, e.g. `float3x2`'s
+/// own `!spirv.array<2 x vector<3xf32>, stride=12>`) declares that exact
+/// shape -- a tightly-packed (12-byte) stride for a 3-component vector
+/// element whose ordinary, ABI-rounded ``DataLayout`` size is 16 bytes --
+/// for precisely the same `-fvk-use-scalar-layout`-style reason the
+/// sibling `RuntimeArrayType` conversion below already retries via
+/// `getStridedTightVectorArrayType` rather than giving up. Without the
+/// same retry here, this (fixed-size) array's own conversion failed
+/// outright, surfacing several `AccessChain`s and/or GEPs deep as a
+/// `"failed to legalize operation 'spirv.AccessChain'...explicitly
+/// marked illegal"` error on whichever later op first needed this
+/// array's own LLVM type, not a miscompile (no LLVM type for this
+/// member/array ever existed for that op's own GEP to use).
+///
+/// Returns null if the element type fails to convert, if padding it to
+/// the declared stride fails and the element isn't a vector whose own
+/// tight (alignment-free) substitution fits (the declared stride is
+/// narrower than the element's own natural size, and no such
+/// substitution exists for the element's own shape), or is not needed
+/// (\p Stride is 0, meaning no stride was declared at all -- e.g. a
+/// workgroup-shared array -- in which case no padding applies and the
+/// plain element type is used directly).
 mlir::Type convertArrayTypeIgnoringDecorations(
     mlir::spirv::ArrayType Type, const mlir::TypeConverter &Converter) {
   mlir::Type ElementType = Converter.convertType(Type.getElementType());
@@ -8051,11 +8072,19 @@ mlir::Type convertArrayTypeIgnoringDecorations(
       ElementType = Padded;
     } else {
       uint64_t NaturalSize = DL.getTypeSize(ElementType);
-      if (NaturalSize > Stride)
-        return nullptr;
-      if (NaturalSize < Stride)
+      if (NaturalSize > Stride) {
+        auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Type.getElementType());
+        mlir::Type Tight =
+            VectorTy ? getStridedTightVectorArrayType(VectorTy, Stride,
+                                                       Converter)
+                     : nullptr;
+        if (!Tight)
+          return nullptr;
+        ElementType = Tight;
+      } else if (NaturalSize < Stride) {
         ElementType = mlir::LLVM::LLVMArrayType::get(
             mlir::IntegerType::get(Type.getContext(), 8), Stride);
+      }
     }
   }
   return mlir::LLVM::LLVMArrayType::get(ElementType, Type.getNumElements());
