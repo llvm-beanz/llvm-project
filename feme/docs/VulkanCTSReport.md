@@ -8110,3 +8110,57 @@ already-shipped fix.
 
 **Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
 `FeMe CPU Vulkan Device`, confirmed per standing instruction.
+
+## L452(j): `struct` cluster's `spirv.GlobalVariable` legalization bug fixed -- `L452` family fully closed
+
+**Issue**: the `struct` cluster (8 cases, scoped out of `L452(d)`'s own fix as
+a separate, smaller item) failed with two independent `SPIRVToLLVMPatterns.cpp`
+gaps, not the shared `feme-cpu-linearize` root cause the rest of `L452`'s
+family addressed:
+
+1. `opcopymemory.struct`: a `spirv.VulkanBuffer`-backed block's entire Content
+   being the direct operand of a `spirv.Load`/`spirv.Store`/`spirv.CopyMemory`
+   (not a decomposed member access) had no FeMe pattern, falling through to
+   upstream MLIR's own generic patterns, which cannot resolve a
+   `spirv.VulkanBuffer` handle to a pointer at all.
+2. `variable_init.{private,output}.struct*` (7 cases): a `spirv.GlobalVariable`
+   whose `initial_value` attribute's pointee type is a struct/array composite
+   has no lowering anywhere -- upstream's own `GlobalVariablePattern`
+   explicitly restricts `initial_value` lowering to scalar/vector pointee
+   types (there is no instruction stream to run ordinary ops in for a
+   global's initializer, unlike an SSA-operand initializer).
+
+**Fix** (full writeup in `Roadmap.md`'s own `L452(j)` entry): added
+`getBlockWholeContentPointer`/`getWholeBlockElement` plus three new patterns
+(`BlockWholeLoadPattern`/`BlockWholeStorePattern`/`BlockWholeCopyMemoryPattern`)
+for gap 1, and `isAggregateGlobalInitializerShapeSupported`/
+`buildAggregateGlobalInitializerValue` plus `PrivateAggregateGlobalVariablePattern`
+for gap 2 -- both registered at this file's uniform `FeMeBenefit`. New lit
+tests: `spirv-to-llvm-block-whole-content.mlir`,
+`spirv-to-llvm-private-aggregate-initializer.mlir`.
+
+**CTS-verified**: `opcopymemory.struct` and 6 of the 7 `variable_init.*struct*`
+cases now Pass (were all Fail); the 7th (`variable_init.output.struct`) is a
+pre-existing, documented scope limit (`Output`-storage struct with a
+`spirv.matrix` member, correctly declined by the new pattern's shape precheck,
+not a regression of this fix). A broad `dEQP-VK.spirv_assembly.instruction.*`
+sweep (36,599 of ~146k cases, partial due to a 600s harness timeout) found 49
+Fail cases, all manually confirmed pre-existing and unrelated to this change.
+`check-feme`: 3,782/3,782 Passed (was 3,780/3,780 before this session's two new
+lit tests), 0 Failed, 7 Unsupported -- zero regressions.
+
+**Inventories**: `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unchanged -- pure compiler correctness fix, no feature/extension-surface
+change.
+
+With `L452(j)` closed, the `L452` family (`a` through `j`) is now fully
+resolved end to end.
+
+**Next steps**: `L419(g)` (30 tessellation residuals, in
+`feme/lib/Graphics/Tessellator.cpp`, the largest remaining `L419` bucket now
+that `L419(y)`/`L419(ad)` are both closed); `L440(c)`'s 39-case residual
+triage; `feme-run`'s DXIL atomic gap; the 9 pre-existing, still-uninspected
+git stashes.
+
+**Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed per standing instruction.
