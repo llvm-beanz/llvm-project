@@ -126537,3 +126537,83 @@ Plus one commit in the *separate* `offload-test-suite` checkout (a stale XFAIL t
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused — worth a rerun-twice check next full-suite run, not a dedicated session.
 
 **Build/test state**: `check-feme` 3786/3793 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 26 → 18 failed, 0 regressions. `check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4755 Passed/7470 NotSupported; `dEQP-VK.binding_model.*` 0 Failed/1897 Passed/62586 NotSupported — no regressions in either. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no inventory update needed (bug fix only, no new feature/extension). `feme/.instructions.md` already covers the `libfeme_vulkan.so`-separate-rebuild-target gotcha from a prior session in detail — checked, no new update needed there this session.
+
+# Session: L440(c) `Feature/StructuredBuffer` matrix row-vector-array fix
+
+Fixed `matrix.test`/`matrix_assign.test`, which also fixed
+`Basic/Matrix/matrix_m-based_setter.test`/`matrix_one-based_setter.test`
+as a side effect. `check-hlsl-clang-feme-vk`: 18 → 14 Failed, 0
+regressions. Done, committed, docs updated.
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed via
+`VK_ICD_FILENAMES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json
+vulkaninfo --summary | grep deviceName` at session start.
+
+## What was wrong
+
+`clang-dxc -spirv -fvk-use-dx-layout` stores an HLSL `float3x2`/`float3x4`
+matrix as a plain `!spirv.array<N x vector<Mxf32>, stride=12>` — an array
+of row vectors, no `spirv.MatrixType` involved. A dynamically-indexed row
+read splits into two chained `spirv.AccessChain` ops. The second one
+(indexing into the first's own result to pick a row) failed to legalize:
+`"failed to legalize operation 'spirv.AccessChain'...explicitly marked
+illegal"`.
+
+Root cause: `convertArrayTypeIgnoringDecorations`
+(`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) — the
+fixed-size `spirv::ArrayType` conversion — only compensated for a
+declared `Stride` *narrower* than its element's natural size (by
+padding). It never handled the opposite: `vector<3xf32>`'s own
+ABI-rounded 16-byte natural size vs. a tightly-packed 12-byte dx-layout
+stride. Its sibling `RuntimeArrayType` conversion already had this exact
+compensation via `getStridedTightVectorArrayType` — just never mirrored
+onto the fixed-size path.
+
+## The fix (1 commit, `782d6b348f14`)
+
+Added the same `getStridedTightVectorArrayType` retry to
+`convertArrayTypeIgnoringDecorations` when the element is a vector whose
+natural size exceeds the declared stride. New unit test
+`SPIRVToLLVMTest.TightRowVectorArrayAccessChainConvertsInsteadOfFailing`
+— confirmed red without the fix (`git stash` bisection, same error
+message as the real repro), green with it.
+
+## Verification done
+
+1. `check-feme`: 3,787/3,794 Passed (+1 new unit test), 7 Unsupported, 0 regressions.
+2. `check-hlsl-clang-feme-vk`: 18 → 14 Failed, 0 regressions (exact failure-name-set diff, not just aggregate).
+3. `check-hlsl-feme-vk`: 1 Failed (`Basic/Mandelbrot.test`), confirmed a known `L437` flake on immediate rerun alone (passes).
+4. Real Vulkan CTS `dEQP-VK.ssbo.*`: 0 Failed/4,755 Passed/7,470 NotSupported, byte-identical to baseline — this fix's code path is DXC/Clang-only, not reachable from GLSL CTS shaders, so no broader sweep needed.
+5. No inventory update needed (type-conversion completeness fix only).
+
+Docs updated: `Roadmap.md`'s `L440(c)` row, `VulkanCTSReport.md` new
+section — both committed in a separate docs-only commit (`f4e7e547b0f2`).
+
+## Process note (self-caught, no instructions.md change needed)
+
+Early in this session I ran `llvm-lit` without explicitly setting
+`VK_ICD_FILENAMES` and got a plausible-but-wrong result (9 Failed/1
+Unexpectedly-Passed against llvmpipe, not FeMe). Caught it by comparing
+against the known-good 18-failure baseline and checking
+`echo $VK_ICD_FILENAMES`. This exact gotcha is already thoroughly
+documented in `feme/.instructions.md` — this was my own oversight this
+session, not a new gap. Lesson restated for my own future sessions:
+every single shell call starts fresh with no persisted env vars, so
+`VK_ICD_FILENAMES=...` must be set on *every* `vulkaninfo`/`llvm-lit`/
+`offloader`/`deqp-vk` invocation, not just the mandatory startup check.
+
+## Outside-FeMe issues found this session
+
+None. (Last session's MLIR deserializer fix remains the only
+outside-FeMe fix so far; this session's bug and fix are entirely inside
+`feme/`.)
+
+## Next steps (ranked)
+
+1. **(half day)** `L440(c)`'s remaining 14 failures. Pick `Feature/ConstantBufferT` (2 cases) or `Feature/HLSLLib`'s 3-case cluster (`degrees.32`/`mad.32`/`radians.32`) next — both compact, untriaged.
+2. **(1 day, design-heavy, carried forward)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable via a local patch; needs a real cross-patch-adjacency design.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
+
+**Build/test state**: `check-feme` 3787/3794 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 18 → 14 failed, 0 regressions. `check-hlsl-feme-vk`: 1 Failed (known flake, confirmed on rerun). Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4755 Passed/7470 NotSupported — no regression. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no inventory update needed (bug fix only, no new feature/extension).
