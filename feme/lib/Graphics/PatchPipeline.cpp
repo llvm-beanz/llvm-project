@@ -654,6 +654,50 @@ Expected<PatchPipelineResult> runPatchPipeline(
       return std::move(E);
   }
 
+  // Debug aid for roadmap L419(ae): dump the control-point positions this
+  // patch's domain stage read from, the per-point (U, V) domain
+  // coordinates the tessellator generated, and the actual domain-stage
+  // output position for each -- so two adjacent patches sharing an edge
+  // (e.g. under CTS's common_edge tests, which reorder each patch's
+  // control-point indices independently) can be cross-checked for a
+  // bit-exact match along that shared edge, not just an Outer-level
+  // tess-factor match (see `FEME_DEBUG_TESS_FACTORS` above).
+  if (::getenv("FEME_DEBUG_DOMAIN_POSITIONS")) {
+    // The control-point input isn't always a system value (e.g. CTS's
+    // common_edge tests carry it as an ordinary location-0 varying,
+    // `in_te_position`, not `gl_Position`/`SV_Position`), so fall back to
+    // a plain location-0 lookup when there's no system-value match.
+    const SignatureElement *InPos = findElement(
+        Link.DomainSig, SignatureDirection::Input, SignatureSystemValue::Position);
+    if (!InPos)
+      InPos = findElementByLocation(Link.DomainSig, SignatureDirection::Input,
+                                    /*Location=*/0);
+    if (InPos) {
+      uint32_t NumComponents = InPos->FirstComponent + InPos->ComponentCount;
+      for (uint32_t C = 0; C < Tess.OutputControlPointCount; ++C) {
+        errs() << "patch " << PrimitiveID << " cp[" << C << "]=(";
+        for (uint32_t Comp = InPos->FirstComponent; Comp < NumComponents; ++Comp)
+          errs() << DomainInput->readFloat(InPos->ElementID, Comp, C)
+                 << (Comp + 1 < NumComponents ? "," : "");
+        errs() << ")\n";
+      }
+    }
+    const SignatureElement *OutPos = findElement(
+        Link.DomainSig, SignatureDirection::Output, SignatureSystemValue::Position);
+    for (uint32_t P = 0; P < PointCount; ++P) {
+      errs() << "patch " << PrimitiveID << " point[" << P << "] uv=("
+             << Result.Tessellated.Points[P].U << ","
+             << Result.Tessellated.Points[P].V << ")";
+      if (OutPos)
+        errs() << " pos=(" << Result.DomainOutputs.readFloat(OutPos->ElementID, 0, P)
+               << "," << Result.DomainOutputs.readFloat(OutPos->ElementID, 1, P)
+               << "," << Result.DomainOutputs.readFloat(OutPos->ElementID, 2, P)
+               << "," << Result.DomainOutputs.readFloat(OutPos->ElementID, 3, P)
+               << ")";
+      errs() << "\n";
+    }
+  }
+
   return Result;
 }
 
