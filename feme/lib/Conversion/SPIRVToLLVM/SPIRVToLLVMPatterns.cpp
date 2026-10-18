@@ -8133,11 +8133,19 @@ public:
   }
 };
 
-/// Converts a `spirv.AccessChain` whose base pointer's pointee is (or, per
-/// roadmap H101n, is a single-dimensional array of) a `spirv::StructType`
-/// requiring a leading/interior offset pad and/or (roadmap H101p) a member
-/// reordering (see getOffsetSortedMemberIndices/layOutStructIfOffsetsMatch's
-/// own comments). MLIR's own generic
+/// Converts a `spirv.AccessChain`/`spirv.InBoundsAccessChain` (templated
+/// over `SPIRVOp`, exactly like `BlockAccessChainPattern`/
+/// `rewriteBlockAccess` -- roadmap L454: MLIR's generic
+/// `InBoundsAccessChainPattern` has no member-reorder awareness either,
+/// and `dxc` emits a *direct* field access as `InBoundsAccessChain`, not
+/// `AccessChain`, whenever its base pointer already points straight at
+/// the struct -- e.g. `ConstantBuffer<T>`'s own per-member loads past the
+/// first, see `vectors.test`'s own repro) whose base pointer's pointee is
+/// (or, per roadmap H101n, is a single-dimensional array of) a
+/// `spirv::StructType` requiring a leading/interior offset pad and/or
+/// (roadmap H101p) a member reordering (see
+/// getOffsetSortedMemberIndices/layOutStructIfOffsetsMatch's own
+/// comments). MLIR's own generic
 /// `AccessChainPattern` forwards every index straight through to the
 /// converted LLVM struct unmodified -- exactly wrong once
 /// `layOutStructIfOffsetsMatch`'s own physical, ascending-offset field
@@ -8187,14 +8195,16 @@ public:
 /// violates that), or if the access chain does not reach far enough to
 /// select a struct member at all (e.g. only selects a whole array
 /// element).
+template <typename SPIRVOp>
 class OffsetStructMemberReorderAccessChainPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using OpAdaptor =
+      typename mlir::SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
 
   mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+  matchAndRewrite(SPIRVOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     auto PointerType =
         mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
@@ -8256,7 +8266,7 @@ public:
     bool NeedsRemap = false;
     if (StructTy) {
       if (!convertOffsetStructTypeIgnoringDecorations(
-              StructTy, *getTypeConverter(), &PhysicalIndexOf))
+              StructTy, *this->getTypeConverter(), &PhysicalIndexOf))
         return Rewriter.notifyMatchFailure(Op, "type conversion failed");
       for (unsigned I = 0, E = PhysicalIndexOf.size(); !NeedsRemap && I != E;
            ++I)
@@ -8311,19 +8321,19 @@ public:
           Op, "leading struct member selector is not a constant");
 
     mlir::Type DstType =
-        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+        this->getTypeConverter()->convertType(Op.getComponentPtr().getType());
     if (!DstType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     // The GEP's own source element type must match the base pointer's real
     // (possibly array-wrapping) pointee, not just the inner struct, or its
     // offset arithmetic would skip the outer array dimension entirely.
-    mlir::Type ElementType = getTypeConverter()->convertType(PointeeTy);
+    mlir::Type ElementType = this->getTypeConverter()->convertType(PointeeTy);
     if (!ElementType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Type IndexType = Op.getIndices()[MemberIndexPos].getType();
-    mlir::Type LLVMIndexType = getTypeConverter()->convertType(IndexType);
+    mlir::Type LLVMIndexType = this->getTypeConverter()->convertType(IndexType);
     if (!LLVMIndexType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
@@ -8366,7 +8376,7 @@ public:
     if (Op.getIndices().size() > MemberIndexPos + 1 &&
         mlir::isa<mlir::VectorType>(SelectedMemberType)) {
       mlir::Type PhysicalFieldTy = getStructMemberPhysicalFieldType(
-          StructTy, static_cast<unsigned>(*MemberIndex), *getTypeConverter());
+          StructTy, static_cast<unsigned>(*MemberIndex), *this->getTypeConverter());
       if (PhysicalFieldTy && getTightVectorMarkerInnerType(PhysicalFieldTy))
         Indices.push_back(Zero);
     }
@@ -8397,7 +8407,7 @@ public:
     // with how it was really embedded whenever \p SelectedMemberType is
     // itself a nested struct (roadmap L369).
     mlir::Type RealSelectedMemberTy = getStructMemberPhysicalFieldType(
-        StructTy, static_cast<unsigned>(*MemberIndex), *getTypeConverter());
+        StructTy, static_cast<unsigned>(*MemberIndex), *this->getTypeConverter());
     llvm::SmallVector<mlir::Value, 4> RemappedTail(Adaptor.getIndices().begin(),
                                                    Adaptor.getIndices().end());
     if (auto MatrixTy =
@@ -8406,11 +8416,11 @@ public:
           Op.getIndices().size() == MemberIndexPos + 3)
         adjustMatrixScalarElementIndices(
             StructTy, static_cast<unsigned>(*MemberIndex), MatrixTy,
-            *getTypeConverter(), MemberIndexPos + 1, Loc, Rewriter,
+            *this->getTypeConverter(), MemberIndexPos + 1, Loc, Rewriter,
             RemappedTail);
     }
     if (!remapNestedStructMemberIndices(SelectedMemberType, Op,
-                                        MemberIndexPos + 1, *getTypeConverter(),
+                                        MemberIndexPos + 1, *this->getTypeConverter(),
                                         Rewriter, RemappedTail,
                                         RealSelectedMemberTy))
       return Rewriter.notifyMatchFailure(
@@ -17509,7 +17519,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       RowMajorMatrixLoadPattern, MatrixColumnLoadPattern,
       MatrixColumnStorePattern, TightMatrixStorePattern,
       TightMatrixLoadPattern,
-      OffsetStructMemberReorderAccessChainPattern,
+      OffsetStructMemberReorderAccessChainPattern<mlir::spirv::AccessChainOp>,
+      OffsetStructMemberReorderAccessChainPattern<
+          mlir::spirv::InBoundsAccessChainOp>,
       CompositeExtractMemberReorderPattern, CompositeInsertMemberReorderPattern,
       FrexpStructPattern, ModfStructPattern,
       PushConstantGlobalVariablePattern, RotateConversionPattern,

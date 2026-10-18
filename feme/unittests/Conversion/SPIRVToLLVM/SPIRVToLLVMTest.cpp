@@ -2127,4 +2127,62 @@ TEST(SPIRVToLLVMTest, TightRowVectorArrayAccessChainConvertsInsteadOfFailing) {
   EXPECT_EQ(Result.find("spirv.AccessChain"), std::string::npos) << Result;
 }
 
+// (Roadmap L454) `OffsetStructMemberReorderAccessChainPattern` -- the
+// pattern remapping a declared/logical struct member index to its real
+// physical LLVM field index whenever `layOutStructIfOffsetsMatch`
+// inserted a leading/interior pad or reordered members (see its own doc
+// comment above) -- used to be templated only on `spirv.AccessChain`,
+// never `spirv.InBoundsAccessChain`, unlike `BlockAccessChainPattern`
+// (fixed for this exact same AccessChain/InBoundsAccessChain split by
+// L419(a), see `InBoundsAccessChainIntoStorageBufferWrapperConverts`
+// above). `ConstantBuffer<T>`'s own per-member access chains are not a
+// `spirv.VulkanBuffer`-handle base pointer by the time they select a
+// member past the first (the `Block` wrapper's own index is already
+// consumed by an outer `spirv.AccessChain`), so they fall through to
+// *this* pattern instead of `BlockAccessChainPattern` -- and dxc emits
+// every one of those per-member accesses but the first as
+// `spirv.InBoundsAccessChain`, not `spirv.AccessChain`
+// (`Feature/ConstantBufferT/vectors.test`'s own repro, root-caused this
+// session: `b2`/`b3`/`b4`'s accesses read offsets 13/16/40 instead of the
+// correct 16/32/48 for a `CBVectors` cbuffer with `i8` packing-filler
+// members interspersed between real fields). Without a matching pattern,
+// MLIR's own generic `InBoundsAccessChainPattern` forwards the
+// unremapped declared index straight through, silently selecting
+// whichever physical field happens to occupy that numeric slot -- often
+// a padding gap -- instead of the intended member. Fixed by templating
+// `OffsetStructMemberReorderAccessChainPattern` over the SPIR-V op type
+// (mirroring `BlockAccessChainPattern`'s own existing idiom) and
+// registering both `AccessChainOp` and `InBoundsAccessChainOp`
+// instantiations.
+TEST(SPIRVToLLVMTest,
+    InBoundsAccessChainOffsetStructInteriorPadRemapsMember) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @g : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], i32 [16])>, Private> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @g : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], i32 [16])>, Private> "
+      "%1 = spirv.Constant 1 : i32 "
+      "%2 = spirv.InBoundsAccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.struct<(f32 [0], i32 [16])>, Private>, i32 -> "
+      "!spirv.ptr<i32, Private> "
+      "%3 = spirv.Load \"Private\" %2 : i32 "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Fragment\" @entry "
+      "spirv.ExecutionMode @entry \"OriginUpperLeft\" }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // A declared `f32 [0], i32 [16]` layout needs a 12-byte interior pad
+  // after the `f32`, so the struct's own real physical layout is
+  // `(f32, pad[12], i32)` -- the `i32`'s declared index 1 must land at
+  // *physical* index 2, not 1 (the pad's own physical slot).
+  EXPECT_NE(Result.find("!llvm.struct<packed (f32, array<12 x i8>, i32)>"),
+            std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("getelementptr %0[%2, 2]"), std::string::npos)
+      << Result;
+  EXPECT_EQ(Result.find("spirv.InBoundsAccessChain"), std::string::npos)
+      << Result;
+}
+
 } // namespace
