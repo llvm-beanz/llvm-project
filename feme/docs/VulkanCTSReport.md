@@ -8297,3 +8297,102 @@ fix behind the new debug instrumentation, validating against the full
 `Feature/StructuredBuffer` (4 cases) is now `L440(c)`'s largest remaining
 cluster; `local_resource_loop_array_index`'s GEP-pointer-type bug is a new,
 separate, not-yet-investigated residual.
+
+## L453: `ArrayedBlockAccessChainPattern` whole-descriptor access fixed
+
+**Session-start device check**: `vulkaninfo --summary | grep deviceName` ->
+`FeMe CPU Vulkan Device`, confirmed per standing instruction.
+
+**`L453` (`local_resource_loop_array_index.test`'s GEP-pointer-type bug,
+isolated but not yet investigated as of the prior session)**: root-caused
+and fixed. `ArrayedBlockAccessChainPattern` (`spirv.AccessChain` into an
+array of SSBO/UBO blocks) unconditionally required at least one index
+beyond the leading array-selecting index -- a selector into the chosen
+descriptor's own block content. A fully loop-unrolled
+`RWByteAddressBuffer Buf = gBufArray[I];` local-copy assignment (no real
+`spirv.Variable` for `Buf`, just a bare `spirv.CopyObject`) compiles to an
+`AccessChain` with *only* the array-selecting index -- a request for "a
+pointer/handle to descriptor I as a whole," not any particular member --
+which this pattern always declined, falling through to MLIR's generic,
+type-unaware `AccessChainPattern`. That generic pattern assumes every
+`spirv.AccessChain`'s base/result converts to an ordinary `!llvm.ptr`,
+building an illegal `llvm.getelementptr` whose result type was instead the
+raw `spirv.VulkanBuffer` handle target-extension-type, rejected by the LLVM
+dialect's GEP verifier -- exactly the diagnostic isolated last session.
+
+Fixed with an early return in `ArrayedBlockAccessChainPattern`: when only
+the array index is present, `Op`'s result is already exactly the
+constructed `Handle` value (no further GEP/getpointer needed, since `Op`'s
+SPIR-V result type is the whole block struct pointer, not one member of
+it), so replace `Op` with `Handle` directly. This is the arrayed analog of
+`BlockAccessChainPattern`'s own pre-existing "whole content, no further
+index" shortcut for a *non-arrayed* block variable, which that sibling
+pattern reaches differently (reusing its own single index as a stand-in
+selector) since an arrayed block's only index is already fully consumed
+selecting the array element, with none spare.
+
+An initial hypothesis -- a `CopyObjectConversionPattern`/
+`BlockAccessChainPattern` conversion-order race, where `BlockAccessChainPattern`'s
+match depended on its base pointer's producer having already converted --
+was investigated first via temporary `llvm::errs()` tracing and found
+**wrong** (every `CopyObject`/`BlockAccessChain` pair in the failing case
+converts correctly; the real failure is in the separate, first-level
+array-indexing `AccessChain`, handled by `ArrayedBlockAccessChainPattern`,
+not `BlockAccessChainPattern`, at all). The associated code change (removing
+`BlockAccessChainPattern`'s redundant dynamic `Adaptor`-type guard, matching
+purely on the static SPIR-V type structure) was still kept as a legitimate,
+order-independence improvement, committed separately from the real fix.
+
+New unit test `ArrayedBlockWholeDescriptorAccessChainConvertsInsteadOfFailing`
+(`SPIRVToLLVMTest.cpp`), reproducing the minimal SPIR-V shape (array-of-4-
+blocks global, single-index `AccessChain`, `CopyObject`, byte-level
+`AccessChain`+`Store`) -- confirmed to fail with the exact original error
+without the fix (`git stash` bisection) and pass with it.
+
+**`check-feme`: 3,786/3,793 Passed (+1 new unit test vs. the prior
+3,785/3,792 baseline), 7 Unsupported, 0 regressions.**
+
+**`check-hlsl-clang-feme-vk`: 26 Failed -> 18 Failed, an 8-case
+improvement** -- larger than the single explicitly-targeted test, meaning
+the "whole descriptor, single index" shape affects several other test cases
+as a side effect (not individually re-diffed by name this session; only the
+aggregate count was captured). 0 regressions, 0 Unexpectedly-Passed.
+
+**Side-effect fix in `offload-test-suite` (separate repo, not `feme/`)**:
+one of the newly-passing cases,
+`Feature/LocalResources/local_resource_if_else_array_elements.test`,
+carried a stale `XFAIL: Clang && Vulkan` (referencing
+llvm/llvm-project#192523) that is no longer accurate for FeMe specifically
+-- the test went from Fail to "Unexpectedly Passed" after this session's
+fix. Narrowed to `XFAIL: Clang && Vulkan && !FeMe` (not removed outright,
+since other Clang+Vulkan backends covered by that XFAIL may still have the
+underlying bug). Re-ran `check-hlsl-clang-feme-vk` after the narrowing:
+exactly 18 Failed, no Unexpectedly-Passed entries remaining.
+
+**`check-hlsl-feme-vk` (DXC-compiled, non-Clang suite): 0 Failed** (492
+Passed, 273 Unsupported, 28 Expectedly Failed).
+
+**Real Vulkan CTS verification**: `ArrayedBlockAccessChainPattern` is
+reachable by any SPIR-V shader indexing an array of SSBO/UBO blocks,
+including GLSL-based real-driver CTS tests -- unlike several prior
+Clang/DXC-frontend-only fixes in this file, this one is not provably
+frontend-specific, so two targeted real-driver sweeps were run instead of
+one: `dEQP-VK.ssbo.*` (12,225 cases) -- **0 Failed, 4,755 Passed, 7,470
+NotSupported**, matches the pre-fix baseline exactly; `dEQP-VK.binding_model.*`
+(64,483 cases, more directly exercising array-of-descriptor binding code
+paths) -- **0 Failed, 1,897 Passed, 62,586 NotSupported**. No regressions in
+either sweep.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed
+(bug fix only, no new feature/extension).
+
+**Residual `L440(c)` count: 18** -- `Feature/StructuredBuffer` (4 cases,
+`inc_counter_array.test`, `inc_counter_array_imm_idx.test`, `matrix.test`,
+`matrix_assign.test`) is now the largest remaining cluster.
+
+**Next steps**: `L440(c)`'s `Feature/StructuredBuffer` cluster (4 cases) is
+the next-largest residual and a good next pick; `L419(ae)`'s tessellation
+ULP-mismatch fix remains an open, design-heavy architectural gap (see
+`Roadmap.md`, not revisited this session); `feme-run`'s DXIL
+resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9 uninspected git
+stashes remain carried-forward low-priority items.
