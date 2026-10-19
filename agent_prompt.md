@@ -69,27 +69,29 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
-   tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable
-   via a local patch; needs real cross-patch-adjacency design. Still untouched.
-2. **(half day)** `L440(c)`'s remaining 8 residuals are now small and scattered
-   (`Basic/Mandelbrot.test` known flake, `Bugs/UAV-Sequental-Consistency.yaml`,
-   `Feature/Semantics/MatrixSemantics.test`,
-   `Feature/SpecializationConstant/spec_const_other_sizes.test`,
-   `Feature/WaveOps/WaveActiveAnyTrue.test`,
-   `Tools/Offloader/BufferFormats.test`, 2 `WaveOps/*`) — triage each
-   individually next session rather than hunting for another compact cluster.
+1. **(half day, carried forward)** `L440(c)`'s remaining 7 residuals, triage
+   individually: `Bugs/UAV-Sequental-Consistency.yaml` or
+   `Feature/WaveOps/WaveActiveAnyTrue.test` (fails with `feme-cpu-linearize:
+   function 'main': divergent branch in '' has no reconvergence point` — a
+   `Linearize.cpp` diagnostic, worth checking first whether it's the same class
+   of issue `L419(ae)`'s tessellation work already explored) look like the next
+   most tractable single-case picks.
+   `Feature/ResourcesInStructs/res-of-matrix-in-struct.test` (SIGABRT) is still
+   only flagged across 3+ prior sessions, never actually isolated — worth a
+   dedicated triage-only pass to classify it before committing a full session to
+   a fix.
+2. **(1 day, design-heavy, carried forward many sessions, untouched again)**
+   `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally
+   unfixable via a local patch; needs real cross-patch-adjacency design.
 3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
    using a resource (not groupshared) `InterlockedAdd`/atomic.
 4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk`
    baseline discrepancy from several sessions back, never root-caused.
 
-**Build/test state**: `check-feme` 3790/3797 passed, 7 unsupported, 0
-regressions. `check-hlsl-clang-feme-vk`: 11 → 8 failed, 0 regressions.
-`check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS:
-`*denorm*`/`float_controls.*`/`glsl.builtin.precision.*` all 0 changed/0
-unexpected vs. a genuine pre-fix FeMe baseline.
-`VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session;
-no inventory update needed (default-behavior bug fix only, no new
-feature/extension).
+**Build/test state**: `check-feme` 3791/3798 passed, 7 unsupported, 0
+regressions (+1 new unit test). `check-hlsl-clang-feme-vk`: 8 → 7 failed, 0
+regressions. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no
+inventory update needed (conversion-pattern completeness fix, no new
+feature/extension); no real Vulkan CTS sweep scoped (DXC-only reachable code
+path, no CTS-detectable regression surface).
