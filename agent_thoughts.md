@@ -126802,3 +126802,46 @@ No `.instructions.md` update needed this session — no new environment/process 
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
 
 **Build/test state**: `check-feme` 3791/3798 passed, 7 unsupported, 0 regressions (+1 new unit test). `check-hlsl-clang-feme-vk`: 8 → 7 failed, 0 regressions. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no inventory update needed (conversion-pattern completeness fix, no new feature/extension); no real Vulkan CTS sweep scoped (DXC-only reachable code path, no CTS-detectable regression surface).
+
+# Session: L440(c) `WaveOps` cluster fixed — constant-condition-branch fold
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (`vulkaninfo --summary | grep deviceName`, `VK_ICD_FILENAMES` exported in the same command).
+
+**Done**: fixed all 3 `check-hlsl-clang-feme-vk` `WaveOps` residuals in one change — `Feature/WaveOps/WaveActiveAnyTrue.test`, `WaveOps/QuadReadAcrossDiagonal.convergence.test`, `WaveOps/WaveActiveBitXor.int.test`. 7 → 4 failed, 0 regressions.
+
+**Bonus find**: `Feature/ResourcesInStructs/res-of-matrix-in-struct.test` (a SIGABRT carried forward unconfirmed across 3+ sessions) now **Passes** outright — found by finally re-running it standalone, unrelated to this session's own fix. Likely a side effect of an earlier `L454`/`L455` fix nobody re-confirmed against this specific case.
+
+## What was wrong
+
+1. `feme-cpu-linearize` diagnosed `WaveActiveAnyTrue.test`'s entry block with: `divergent branch in '' has no reconvergence point`.
+2. `FEME_DUMP_IR_PRELINEARIZE=1` showed the real shape: `br i1 true, label %live, label %dead`, where `%dead` is a bare `unreachable` block.
+3. `spirv-dis` on the compiled `.o`'s raw SPIR-V (worked around a separate, unrelated `FEME_DEBUG_DUMP_SPIRV_MLIR` crash — see below) confirmed DXC's own LLVM-SPIRV backend already emits this exact `OpBranchConditional %true %live %unreachable` shape for a required `OpSelectionMerge`, even with a literal-constant condition.
+4. No earlier pipeline stage folds constant branches or prunes dead blocks, so `DiamondFlattener`'s `immediatePostDom` finds no common post-dominator for `%dead` (an `unreachable` block has no successors) — a trivially resolvable branch misdiagnosed as genuinely divergent.
+
+## The fix (1 commit)
+
+New `foldConstantConditionBranches` in `Linearize.cpp`, run once per function in `LinearizePass::run` before any analysis: folds a `CondBrInst` with a literal `ConstantInt` condition via `llvm::ConstantFoldTerminator`, then `llvm::EliminateUnreachableBlocks`. Deliberately **not** a general `SimplifyCFGPass` — roadmap `H19k` already found that corrupts an unrelated legitimate shape via its own tail-merging. This fold is syntactically gated on a literal constant, so it can never misfire on a real divergent branch.
+
+New lit test: `constant-condition-branch-unreachable-arm.ll`.
+
+## Verified
+
+1. `check-feme`: 3792/3799 passed (+1 new test), 7 unsupported, 0 failed.
+2. `check-hlsl-clang-feme-vk`: 7 → 4 failed, 0 regressions.
+3. `check-hlsl-feme-vk` (non-clang): 0 failed.
+4. Real Vulkan CTS: `dEQP-VK.subgroups.vote.*` (the GLSL analog of `WaveActiveAnyTrue`) 0 Failed/72 Passed/733 NotSupported; `dEQP-VK.glsl.switch.*` 122/122 Passed; `dEQP-VK.subgroups.basic.*` 0 Failed/21 Passed/49 NotSupported. All clean, 0 regressions.
+
+## 2 things found outside this fix's scope (not fixed, documented in `.instructions.md`)
+
+1. **`FEME_DEBUG_DUMP_SPIRV_MLIR=1` can crash** on a module that otherwise compiles fine — an `ImageOps.cpp` `verifyImageOperands` assertion, hit on `WaveActiveAnyTrue.test`'s `RWBuffer<int>` (a SPIR-V image-buffer under the hood). Worked around with `spirv-dis` directly on the compiled `.o` instead. Not root-caused — unclear if it's upstream MLIR or FeMe's own dump-path code. **~1-2 hours to triage** if picked up: first confirm whether it reproduces on any other image-buffer-resource test, then decide whether it needs an "outside FeMe" isolated fix.
+2. **A pre-existing, already-documented `GetElementPtrTypeIterator.h` "Not byte-addressable" crash** (same bug class as roadmap `E29f`/`H101e`/`L102`) was hit while probing `dEQP-VK.subgroups.ballot_broadcast.*` (a `bvec2` broadcast case). Unrelated to this session's fix — not re-triaged, just confirmed it's the same known class.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~1-2 hours)** `Bugs/UAV-Sequental-Consistency.yaml` — next most tractable single remaining residual; untriaged.
+2. **(~1 day, design-heavy, carried forward many sessions, still untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable via a local patch; needs a real cross-patch-adjacency design.
+3. **(~1-2 hours)** Triage the `FEME_DEBUG_DUMP_SPIRV_MLIR` crash found this session (see above) — confirm scope before deciding whether it needs an isolated "outside FeMe" fix.
+4. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+
+**Build/test state**: `check-feme` 3792/3799 passed, 7 unsupported, 0 regressions (+1 new lit test). `check-hlsl-clang-feme-vk`: 7 → 4 failed, 0 regressions. `check-hlsl-feme-vk`: 0 failed. `VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session; no inventory update needed (control-flow-legalization fix, no new feature/extension).
