@@ -3336,6 +3336,20 @@ void FunctionWidener::widenMaskedLoad(CallInst &CI,
   if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getType())) {
     Type *ElemTy = VecTy->getElementType();
     const DataLayout &DL = NewF->getParent()->getDataLayout();
+    // See `widenGroupSharedLoad`'s identical check for why a non-byte-
+    // addressable element type (e.g. a `bool` row's `i1` lanes, which
+    // share a single packed byte rather than each having its own byte
+    // offset) makes the per-component `getelementptr` below invalid, and
+    // why this reports the shape as unsupported instead of emitting it.
+    if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
+      Ctx.emitError(&CI, "feme-cpu-simdize: function '" + NewF->getName() +
+                             "' has a masked load of a vector whose element "
+                             "type is not byte-addressable (e.g. a "
+                             "bool-vector row); this pass cannot yet widen "
+                             "that shape");
+      HadError = true;
+      return;
+    }
     uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
     SmallVector<Value *, 4> PassthruComponents =
         getVectorComponents(Matched.ValueOperand, Builder);
@@ -3443,6 +3457,18 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
       auto *VecTy = cast<FixedVectorType>(Matched.ValueOperand->getType());
       Type *ElemTy = VecTy->getElementType();
       const DataLayout &DL = NewF->getParent()->getDataLayout();
+      // See `widenGroupSharedLoad`'s identical check for why a non-byte-
+      // addressable element type makes the per-component `getelementptr`
+      // below invalid.
+      if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
+        Ctx.emitError(&CI, "feme-cpu-simdize: function '" + NewF->getName() +
+                               "' has a masked store of a vector whose "
+                               "element type is not byte-addressable (e.g. "
+                               "a bool-vector row); this pass cannot yet "
+                               "widen that shape");
+        HadError = true;
+        return;
+      }
       uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
       SmallVector<Value *, 4> Components =
           getVectorComponents(Matched.ValueOperand, Builder);
@@ -4020,6 +4046,29 @@ void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
     // `NewF` is the live function being built and shares the same module
     // (and therefore the same `DataLayout`) as `OldF` did.
     const DataLayout &DL = NewF->getParent()->getDataLayout();
+    // Per-component `getelementptr VecTy, Ptr, {0, Idx}` below computes a
+    // *byte* offset for component `Idx` -- only valid when `ElemTy` is
+    // itself byte-addressable (`DL.typeSizeEqualsStoreSize`). A `bool`
+    // (`i1`) row -- e.g. a `groupshared bool2` -- packs every lane's bits
+    // into the *same* byte rather than giving each one its own byte
+    // offset, so indexing component 1+ this way has no well-defined
+    // address (LLVM's own `getelementptr`-offset machinery asserts
+    // "Not byte-addressable" on exactly this shape; see
+    // `GetElementPtrTypeIterator.h`). Decomposing such a row correctly
+    // would need a real bit-packed gather-then-extract design (loading
+    // the row's whole packed representation per lane, then shifting out
+    // each bit), which is out of scope for a local fix here -- report it
+    // as an unsupported shape instead of crashing, mirroring every other
+    // "shape this pass cannot widen" diagnostic in this file.
+    if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
+      Ctx.emitError(&LI, "feme-cpu-simdize: function '" + NewF->getName() +
+                              "' has a groupshared load of a vector whose "
+                              "element type is not byte-addressable "
+                              "(e.g. a bool-vector row); this pass cannot "
+                              "yet widen that shape");
+      HadError = true;
+      return;
+    }
     uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
     Value *ElemPassthru =
         Constant::getNullValue(FixedVectorType::get(ElemTy, WaveSize));
