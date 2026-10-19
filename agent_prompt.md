@@ -72,11 +72,11 @@ suggested the next steps:
 1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
    tessellation edge0-vs-edge1 ULP mismatch — needs real
    cross-patch-adjacency design, not a local patch.
-2. **(small, natural follow-on, new this session)** `InterlockedCompareExchange`
-   / DXIL opcode 79 is not yet raised — `createAtomicCompareExchangeRaw`/
-   `Typed` already exist in `ResourceCalls.h`, unused by DXIL today,
-   the exact same gap one opcode over from this session's fix.
-3. **(open-ended, standing)** No other known `SIMDize.cpp` "cannot yet
-   widen that shape" diagnostics remain as of this session.
+2. **(open-ended, standing)** Both DXIL resource-atomic opcodes HLSL
+   exposes against a buffer (`InterlockedAdd`/opcode 78,
+   `InterlockedCompareExchange`/opcode 79) are now raised and lowered.
+   No further atomic-opcode gap is currently known in this area.
+3. **(open-ended, standing)** No `SIMDize.cpp` "cannot yet widen that
+   shape" diagnostics remain open.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
    and the roadmap counts synchronized after every fix.
