@@ -127163,3 +127163,72 @@ heap YAML from scratch. Added to `.instructions.md`.
    widen that shape" diagnostics remain as of this session.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
    and the roadmap counts synchronized after every fix.
+
+# Session: L463 — `InterlockedCompareExchange`/DXIL opcode 79 raised (small follow-on to L462)
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (`vulkaninfo --summary | grep deviceName`, `VK_ICD_FILENAMES` exported in the same command). Re-confirmed again at session end.
+
+## What happened
+
+Handoff item 1 (`L419(ae)` tessellation ULP mismatch) stays untouched —
+still the same open, design-heavy architectural gap. Picked up item 2:
+the natural follow-on flagged by last session's `L462` fix —
+`InterlockedCompareExchange`/DXIL opcode 79 wasn't raised, even though
+`createAtomicCompareExchangeRaw`/`Typed` already existed unused.
+
+## Fix (two commits, same shape as `L462`)
+
+1. `OpRaising.cpp`: added `raiseAtomicCompareExchange`, raising
+   `dx.op.atomicCompareExchange` (79) into `llvm.dx.resource.getpointer`
+   + `cmpxchg`. Had to synthesize the `extractvalue ..., 0` immediately
+   at raise time, since the DXIL op returns the original value
+   directly (scalar) while `cmpxchg` returns a `{original, success}`
+   pair — no struct-unwrapping consumer exists to do this later the
+   way a real `ExtractValueInst` would.
+2. `ResourceLowering.cpp`: generalized last session's atomic-lowering
+   machinery (`isSupportedAtomicRMW`/`hasOnlySupportedAtomicUses`/
+   `lowerAtomicAccess`) from `AtomicRMWInst`-only to also accept
+   `AtomicCmpXchgInst`, dispatching to `createAtomicCompareExchangeRaw`/
+   `Typed`.
+
+## A false-positive worth knowing about
+
+First manual repro used `clang-dxc -T cs_6_0` (habit from `L462`'s own
+scratch testing) instead of the existing tests' `clang -target
+dxil--shadermodel6.5-compute -c`. Got `unsupported raised operation:
+'dx.op.bufferStore.i32'` on a **plain, non-atomic** scalar store —
+confirmed with a trivial repro with no atomic involved at all. Not a
+real bug: `clang-dxc`'s DXC-compat frontend path produces different
+DXIL codegen for this handle shape than the direct `-target` path.
+Switching to the correct invocation made it disappear. Documented in
+`VulkanCTSReport.md`, not `.instructions.md` — this isn't a new
+discovery, just a reminder to use the existing test convention.
+
+## Build/test state
+
+- `check-feme`: 3800/3800 Passed (+2 new lit tests:
+  `dxil-raise-atomic-cmpxchg.ll`, `resource-atomic-compare-exchange.hlsl`),
+  7 Unsupported, 0 regressions.
+- Real Vulkan CTS: **not run** — same reasoning as `L462`, no
+  Vulkan/SPIR-V-reachable code path for this DXIL-only fix.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  update needed.
+- `Roadmap.md`: no entry existed for this item — nothing to strike.
+- Git stashes: 0 (llvm-project, offload-test-suite, VK-GL-CTS) —
+  confirmed clean, matches last session's finding.
+- `SIMDize.cpp`: grepped for any "cannot yet widen" diagnostics —
+  none found, confirming last session's conclusion still holds.
+
+## Next steps
+
+1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
+   tessellation edge0-vs-edge1 ULP mismatch — needs real
+   cross-patch-adjacency design, not a local patch.
+2. **(open-ended, standing)** Both DXIL resource-atomic opcodes HLSL
+   exposes against a buffer (`InterlockedAdd`/opcode 78,
+   `InterlockedCompareExchange`/opcode 79) are now raised and lowered.
+   No further atomic-opcode gap is currently known in this area.
+3. **(open-ended, standing)** No `SIMDize.cpp` "cannot yet widen that
+   shape" diagnostics remain open.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
+   and the roadmap counts synchronized after every fix.
