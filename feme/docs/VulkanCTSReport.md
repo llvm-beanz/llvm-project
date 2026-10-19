@@ -8820,3 +8820,91 @@ ULP-mismatch fix remains an open, design-heavy architectural gap (not
 revisited this session); `feme-run`'s DXIL
 resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9 uninspected
 git stashes remain carried-forward low-priority items.
+
+## L440(c): constant-condition-branch fold fixes the `WaveOps` cluster (3 cases)
+
+**Test**: `Feature/WaveOps/WaveActiveAnyTrue.test`, `WaveOps/QuadReadAcrossDiagonal.convergence.test`, `WaveOps/WaveActiveBitXor.int.test`.
+
+**Symptom**: `feme-cpu-linearize: function 'main': divergent branch in ''
+has no reconvergence point` (empty name = the function's own unnamed
+entry block), then `Failed to create compute pipeline. (VkResult = -3)`.
+
+**Root cause**: `FEME_DUMP_IR_PRELINEARIZE=1` showed the entry block
+itself ending in `br i1 true, label %17, label %19`, where `%19` is a
+bare `unreachable` block -- a constant-condition conditional branch with
+one dead arm. Confirmed via `spirv-dis` directly on the compiled `.o`'s
+raw SPIR-V (bypassing a separate, pre-existing, unrelated
+`FEME_DEBUG_DUMP_SPIRV_MLIR` dump-path crash -- see
+`feme/.instructions.md`'s new note) that this shape is already present in
+DXC's own compiled SPIR-V: `OpBranchConditional %true %new_header
+%unreachable` boilerplate for a required `OpSelectionMerge`, emitted by
+DXC's own LLVM-SPIRV backend for this test's `switch` statement even
+though the branch's condition is a compile-time constant. No earlier
+pipeline stage folds constant branches or prunes dead blocks (confirmed
+via `grep`: no `SimplifyCFGPass`/`ConstantFoldTerminator`/
+`removeUnreachableBlocks` usage anywhere in `feme/lib/`), so this reaches
+`DiamondFlattener`'s `immediatePostDom` unchanged, which has no common
+post-dominator to find for the branch's two successors (`unreachable`
+has none of its own) -- a trivially, statically resolvable branch
+misdiagnosed as genuinely divergent.
+
+**Fix**: a new, narrow `foldConstantConditionBranches` cleanup in
+`feme/lib/Transforms/CPU/Linearize.cpp`, run once per function in
+`LinearizePass::run` before any analysis is computed: folds any
+conditional branch (`CondBrInst`, this fork's dedicated conditional-
+branch instruction type) whose condition is a literal `ConstantInt` into
+an unconditional branch via `llvm::ConstantFoldTerminator`, then removes
+any block this leaves truly unreachable via
+`llvm::EliminateUnreachableBlocks`. Deliberately *not* a general
+`SimplifyCFGPass` -- roadmap H19k already found that corrupts an
+unrelated, legitimate shape via its own unconditional
+`tailMergeBlocksWithSimilarFunctionTerminators`. This fold can never
+misfire on a genuinely divergent branch, whose runtime condition is
+never a compile-time literal. New lit test
+`constant-condition-branch-unreachable-arm.ll`
+(`feme/test/Transforms/CPU/Linearize/`) reproduces the minimal shape
+directly.
+
+**Net effect**: all 3 `WaveOps` residuals sharing this root cause fixed
+in one change -- `check-hlsl-clang-feme-vk`: 7 -> 4 Failed, 0 regressions
+(exact failure-name-set diff). `check-feme`: 3,792/3,799 Passed (7
+Unsupported, +1 new lit test), 0 regressions. `check-hlsl-feme-vk`
+(non-clang): 0 Failed.
+
+**Real Vulkan CTS**: `dEQP-VK.subgroups.vote.*` (`subgroupAny`/`All`/
+`AllEqual`, the GLSL analog of `WaveActiveAnyTrue`) 0 Failed/72 Passed/733
+NotSupported; `dEQP-VK.glsl.switch.*` 122/122 Passed; `dEQP-VK.subgroups.
+basic.*` 0 Failed/21 Passed/49 NotSupported -- all clean, no regressions.
+A pre-existing, unrelated, already-documented `GetElementPtrTypeIterator.h`
+"Not byte-addressable" assertion crash (same bug class as roadmap
+E29f/H101e/L102) was hit while probing the much larger, unrelated
+`dEQP-VK.subgroups.ballot_broadcast.*` bvec-broadcast family -- not
+re-triaged here, noted in `feme/.instructions.md`. No
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed
+(control-flow-legalization completeness fix, not a new feature/extension).
+
+**Bonus find**: `Feature/ResourcesInStructs/res-of-matrix-in-struct.test`
+(SIGABRT, flagged across 3+ prior sessions as "looks distinct, never
+actually isolated") was re-confirmed directly via a standalone
+`llvm-lit -v` re-run and now **Passes** outright -- unrelated to this
+session's own fix (which never touches matrix/resource-struct lowering),
+most likely fixed as a side effect of an earlier intervening session's
+`L454`/`L455` fix that was never re-confirmed against this specific case
+until now.
+
+**Residual `L440(c)` count: 4** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1),
+`Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Tools/Offloader/BufferFormats.test` (1).
+
+**Next steps**: triage each remaining residual individually --
+`Bugs/UAV-Sequental-Consistency.yaml` looks like the next most tractable
+single-case pick; `L419(ae)`'s tessellation ULP-mismatch fix remains an
+open, design-heavy architectural gap (not revisited this session);
+`feme-run`'s DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap
+and 9 uninspected git stashes remain carried-forward low-priority items;
+the `FEME_DEBUG_DUMP_SPIRV_MLIR` dump-path crash (an `ImageOps.cpp`
+`verifyImageOperands` assertion, hit while debugging this session's own
+fix) and the `GetElementPtrTypeIterator.h` "Not byte-addressable" crash
+(hit probing `dEQP-VK.subgroups.ballot_broadcast.*`) are both new,
+unconfirmed candidates for a future triage pass, not yet root-caused.
