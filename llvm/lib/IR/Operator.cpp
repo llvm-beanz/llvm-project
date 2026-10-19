@@ -182,6 +182,20 @@ bool GEPOperator::accumulateConstantOffset(
 
     Value *V = GTI.getOperand();
     StructType *STy = GTI.getStructTypeOrNull();
+    // A GEP's sequential (non-struct) index is translated into a byte
+    // offset via `getSequentialElementStride`, which in turn asserts the
+    // indexed vector element is byte-addressable (its in-memory bit size
+    // equals its in-register bit size) -- vectors of a type like `i1`
+    // tightly bit-pack their elements, so there is no well-defined,
+    // individually-addressable byte offset for a given lane to compute
+    // here at all. Such a GEP can still be produced by earlier
+    // transforms (e.g. sinking an `extractelement` of a sub-byte-element
+    // vector load into a GEP+scalar-load), so bail out like the
+    // `ScalableType` case above rather than asserting deep inside
+    // `getSequentialElementStride` itself.
+    bool NonByteAddressableVector =
+        !STy && GTI.isVector() &&
+        !DL.typeSizeEqualsStoreSize(GTI.getIndexedType());
     // Handle ConstantInt if possible.
     auto *ConstOffset = dyn_cast<ConstantInt>(V);
     if (ConstOffset && ConstOffset->getType()->isIntegerTy()) {
@@ -203,6 +217,8 @@ bool GEPOperator::accumulateConstantOffset(
           return false;
         continue;
       }
+      if (NonByteAddressableVector)
+        return false;
       if (!AccumulateOffset(ConstOffset->getValue(),
                             GTI.getSequentialElementStride(DL)))
         return false;
@@ -211,7 +227,7 @@ bool GEPOperator::accumulateConstantOffset(
 
     // The operand is not constant, check if an external analysis was provided.
     // External analsis is not applicable to a struct type.
-    if (!ExternalAnalysis || STy || ScalableType)
+    if (!ExternalAnalysis || STy || ScalableType || NonByteAddressableVector)
       return false;
     APInt AnalysisIndex;
     if (!ExternalAnalysis(*V, AnalysisIndex))
@@ -245,6 +261,12 @@ bool GEPOperator::collectOffset(
 
     Value *V = GTI.getOperand();
     StructType *STy = GTI.getStructTypeOrNull();
+    // See the identical comment in accumulateConstantOffset above: a
+    // non-byte-addressable vector element stride (e.g. `i1`) has no
+    // well-defined offset to compute here.
+    bool NonByteAddressableVector =
+        !STy && GTI.isVector() &&
+        !DL.typeSizeEqualsStoreSize(GTI.getIndexedType());
     // Handle ConstantInt if possible.
     auto *ConstOffset = dyn_cast<ConstantInt>(V);
     if (ConstOffset && ConstOffset->getType()->isIntegerTy()) {
@@ -267,12 +289,14 @@ bool GEPOperator::collectOffset(
                               1);
         continue;
       }
+      if (NonByteAddressableVector)
+        return false;
       CollectConstantOffset(ConstOffset->getValue(),
                             GTI.getSequentialElementStride(DL));
       continue;
     }
 
-    if (STy || ScalableType)
+    if (STy || ScalableType || NonByteAddressableVector)
       return false;
     // Truncate if type size exceeds index space.
     APInt IndexedSize(BitWidth, GTI.getSequentialElementStride(DL),

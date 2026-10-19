@@ -3450,7 +3450,13 @@ Instruction *InstCombinerImpl::visitGetElementPtrInst(GetElementPtrInst &GEP) {
       !FirstIdx->getType()->isVectorTy()) {
     gep_type_iterator GTI = gep_type_begin(GEP);
     ++GTI;
-    if (!GTI.isStruct() && GTI.getSequentialElementStride(DL) ==
+    // Bail out if the indexed type is a vector whose element type isn't
+    // byte-addressable (e.g. <N x i1>): there's no well-defined constant
+    // per-lane byte stride to compare against, so querying it would assert
+    // in getSequentialElementStride() instead of returning a safe answer.
+    if (!GTI.isStruct() &&
+        !(GTI.isVector() && !DL.typeSizeEqualsStoreSize(GTI.getIndexedType())) &&
+        GTI.getSequentialElementStride(DL) ==
                                DL.getTypeAllocSize(GTI.getIndexedType()))
       return replaceInstUsesWith(GEP, Builder.CreateGEP(GTI.getIndexedType(),
                                                         GEP.getPointerOperand(),

@@ -1003,6 +1003,32 @@ TEST(InstructionsTest, ZeroIndexGEP) {
   delete GEP;
 }
 
+TEST(InstructionsTest, GEPNonByteAddressableVectorElement) {
+  // A GEP indexing into a vector of a non-byte-addressable element type
+  // (e.g. `i1`, which `<2 x i1>` tightly bit-packs) has no well-defined
+  // per-lane byte offset to compute -- accumulateConstantOffset/
+  // collectOffset must report failure rather than assert deep inside
+  // GetElementPtrTypeIterator's getSequentialElementStride.
+  LLVMContext Context;
+  DataLayout DL;
+  Type *PtrTy = PointerType::getUnqual(Context);
+  Type *VecTy = FixedVectorType::get(Type::getInt1Ty(Context), 2);
+  Value *Indices[] = {ConstantInt::get(Type::getInt32Ty(Context), 0),
+                      ConstantInt::get(Type::getInt32Ty(Context), 1)};
+  auto *GEP = GetElementPtrInst::Create(VecTy, PoisonValue::get(PtrTy),
+                                        Indices);
+
+  APInt Offset(DL.getIndexTypeSizeInBits(PtrTy), 0);
+  EXPECT_FALSE(GEP->accumulateConstantOffset(DL, Offset));
+
+  SmallMapVector<Value *, APInt, 4> VariableOffsets;
+  APInt ConstantOffset(DL.getIndexTypeSizeInBits(PtrTy), 0);
+  EXPECT_FALSE(cast<GEPOperator>(GEP)->collectOffset(
+      DL, DL.getIndexTypeSizeInBits(PtrTy), VariableOffsets, ConstantOffset));
+
+  delete GEP;
+}
+
 TEST(InstructionsTest, SwitchInst) {
   LLVMContext C;
 

@@ -1387,6 +1387,14 @@ public:
         // TODO: Make isLegalAddressingMode TypeSize aware.
         if (TargetType->isScalableTy())
           return TTI::TCC_Basic;
+        // If this operand indexes into a vector whose element type isn't
+        // byte-addressable (e.g. <N x i1>), there's no well-defined constant
+        // per-lane byte stride, so bail out rather than asserting in
+        // getSequentialElementStride(). Such GEPs can appear after a
+        // transform sinks an extractelement of a sub-byte-element vector
+        // load into a GEP + scalar load.
+        if (GTI.isVector() && !DL.typeSizeEqualsStoreSize(TargetType))
+          return TTI::TCC_Basic;
         int64_t ElementSize =
             GTI.getSequentialElementStride(DL).getFixedValue();
         if (ConstIdx) {
