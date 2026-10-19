@@ -315,9 +315,72 @@ entry:
   ret <2 x i1> %0
 }
 
+declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
+declare <2 x i1> @llvm.is.fpclass.v2f32(<2 x float>, i32 immarg)
+
+; (Roadmap feme L456) `fcSubnormal` has no dedicated DXIL op either, same
+; as `fcNegZero` above: this is the case FeMe's own f32 subnormal-flush
+; default needs, but exercised directly here since it is a general DXIL
+; backend gap, not FeMe-specific.
+define noundef i1 @issubnormal(float noundef %a) {
+; CHECK-LABEL: define noundef i1 @issubnormal(
+; CHECK-SAME: float noundef [[A:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*:]]
+; CHECK-NEXT:    [[TMP0:%.*]] = bitcast float [[A]] to i32
+; CHECK-NEXT:    [[IS_FPCLASS_MAGNITUDE:%.*]] = and i32 [[TMP0]], 2147483647
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_NZ:%.*]] = icmp ne i32 [[IS_FPCLASS_MAGNITUDE]], 0
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_LT:%.*]] = icmp ult i32 [[IS_FPCLASS_MAGNITUDE]], 8388608
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL:%.*]] = and i1 [[IS_FPCLASS_SUBNORMAL_NZ]], [[IS_FPCLASS_SUBNORMAL_LT]]
+; CHECK-NEXT:    ret i1 [[IS_FPCLASS_SUBNORMAL]]
+;
+entry:
+  %0 = call i1 @llvm.is.fpclass.f32(float %a, i32 144)
+  ret i1 %0
+}
+
+define noundef <2 x i1> @issubnormalv2(<2 x float> noundef %a) {
+; CHECK-LABEL: define noundef <2 x i1> @issubnormalv2(
+; CHECK-SAME: <2 x float> noundef [[A:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*:]]
+; CHECK-NEXT:    [[A_I0:%.*]] = extractelement <2 x float> [[A]], i64 0
+; CHECK-NEXT:    [[DOTI0:%.*]] = bitcast float [[A_I0]] to i32
+; CHECK-NEXT:    [[A_I1:%.*]] = extractelement <2 x float> [[A]], i64 1
+; CHECK-NEXT:    [[DOTI1:%.*]] = bitcast float [[A_I1]] to i32
+; CHECK-NEXT:    [[IS_FPCLASS_MAGNITUDE_I0:%.*]] = and i32 [[DOTI0]], 2147483647
+; CHECK-NEXT:    [[IS_FPCLASS_MAGNITUDE_I1:%.*]] = and i32 [[DOTI1]], 2147483647
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_NZ_I0:%.*]] = icmp ne i32 [[IS_FPCLASS_MAGNITUDE_I0]], 0
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_NZ_I1:%.*]] = icmp ne i32 [[IS_FPCLASS_MAGNITUDE_I1]], 0
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_LT_I0:%.*]] = icmp ult i32 [[IS_FPCLASS_MAGNITUDE_I0]], 8388608
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_LT_I1:%.*]] = icmp ult i32 [[IS_FPCLASS_MAGNITUDE_I1]], 8388608
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_I0:%.*]] = and i1 [[IS_FPCLASS_SUBNORMAL_NZ_I0]], [[IS_FPCLASS_SUBNORMAL_LT_I0]]
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_I1:%.*]] = and i1 [[IS_FPCLASS_SUBNORMAL_NZ_I1]], [[IS_FPCLASS_SUBNORMAL_LT_I1]]
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_UPTO0:%.*]] = insertelement <2 x i1> poison, i1 [[IS_FPCLASS_SUBNORMAL_I0]], i64 0
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL:%.*]] = insertelement <2 x i1> [[IS_FPCLASS_SUBNORMAL_UPTO0]], i1 [[IS_FPCLASS_SUBNORMAL_I1]], i64 1
+; CHECK-NEXT:    ret <2 x i1> [[IS_FPCLASS_SUBNORMAL]]
+;
+entry:
+  %0 = call <2 x i1> @llvm.is.fpclass.v2f32(<2 x float> %a, i32 144)
+  ret <2 x i1> %0
+}
+
+define noundef i1 @issubnormald(double noundef %a) {
+; CHECK-LABEL: define noundef i1 @issubnormald(
+; CHECK-SAME: double noundef [[A:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*:]]
+; CHECK-NEXT:    [[TMP0:%.*]] = bitcast double [[A]] to i64
+; CHECK-NEXT:    [[IS_FPCLASS_MAGNITUDE:%.*]] = and i64 [[TMP0]], 9223372036854775807
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_NZ:%.*]] = icmp ne i64 [[IS_FPCLASS_MAGNITUDE]], 0
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL_LT:%.*]] = icmp ult i64 [[IS_FPCLASS_MAGNITUDE]], 4503599627370496
+; CHECK-NEXT:    [[IS_FPCLASS_SUBNORMAL:%.*]] = and i1 [[IS_FPCLASS_SUBNORMAL_NZ]], [[IS_FPCLASS_SUBNORMAL_LT]]
+; CHECK-NEXT:    ret i1 [[IS_FPCLASS_SUBNORMAL]]
+;
+entry:
+  %0 = call i1 @llvm.is.fpclass.f64(double %a, i32 144)
+  ret i1 %0
+}
+
+declare i1 @llvm.is.fpclass.f64(double, i32 immarg)
+
 ; CHECK-DAG: declare i1 @dx.op.isSpecialFloat.f32(i32, float) #[[#ATTR0:]]
 ; SM69CHECK-DAG: declare i1 @dx.op.isSpecialFloat.f16(i32, half) #[[#ATTR0]]
 ; CHECK: attributes #[[#ATTR0]] = { nounwind memory(none) }
-
-declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
-declare <2 x i1> @llvm.is.fpclass.v2f32(<2 x float>, i32 immarg)

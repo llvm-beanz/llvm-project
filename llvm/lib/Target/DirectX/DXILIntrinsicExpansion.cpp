@@ -12,6 +12,7 @@
 
 #include "DXILIntrinsicExpansion.h"
 #include "DirectX.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -589,6 +590,42 @@ static Value *expandIsFPClass(CallInst *Orig) {
     } else
       RetVal = Builder.CreateICmpEQ(FBitCast, NegZero, "is.fpclass.negzero");
     return RetVal;
+  }
+  case FPClassTest::fcSubnormal: {
+    // No DXIL opcode tests for a subnormal value directly (unlike
+    // fcInf/fcNan/fcNormal/fcFinite above, which DXILOpLowering.cpp maps
+    // onto dedicated IsInf/IsNaN/IsNormal/IsFinite ops), so expand it the
+    // same bit-pattern-compare way fcNegZero already is above: a value is
+    // subnormal, of either sign, exactly when its exponent field is all
+    // zero and its significand field is non-zero -- equivalently (the
+    // test actually used below, needing only one comparison rather than
+    // two), when its magnitude (the bit pattern with the sign bit
+    // cleared) is strictly between zero and the smallest positive normal
+    // value's own bit pattern.
+    const fltSemantics &Semantics = FTy->getScalarType()->getFltSemantics();
+    APInt SmallestNormalBits =
+        APFloat::getSmallestNormalized(Semantics).bitcastToAPInt();
+    Constant *MagnitudeMask =
+        ConstantInt::get(Builder.getIntNTy(BitWidth),
+                         APInt::getSignedMaxValue(BitWidth));
+    Constant *Zero = ConstantInt::get(Builder.getIntNTy(BitWidth), 0);
+    Constant *SmallestNormal =
+        ConstantInt::get(Builder.getIntNTy(BitWidth), SmallestNormalBits);
+    if (FNumElem) {
+      MagnitudeMask = ConstantVector::getSplat(
+          ElementCount::getFixed(FNumElem), MagnitudeMask);
+      Zero = ConstantVector::getSplat(ElementCount::getFixed(FNumElem), Zero);
+      SmallestNormal = ConstantVector::getSplat(
+          ElementCount::getFixed(FNumElem), SmallestNormal);
+    }
+    Value *Magnitude =
+        Builder.CreateAnd(FBitCast, MagnitudeMask, "is.fpclass.magnitude");
+    Value *NotZero =
+        Builder.CreateICmpNE(Magnitude, Zero, "is.fpclass.subnormal.nz");
+    Value *BelowSmallestNormal = Builder.CreateICmpULT(
+        Magnitude, SmallestNormal, "is.fpclass.subnormal.lt");
+    return Builder.CreateAnd(NotZero, BelowSmallestNormal,
+                             "is.fpclass.subnormal");
   }
   default:
     reportFatalUsageError("Unsupported FPClassTest");
