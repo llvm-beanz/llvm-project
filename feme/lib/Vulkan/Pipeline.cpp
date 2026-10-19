@@ -120,14 +120,22 @@ VkPipelineCreateFlags2 resolvePipelineCreateFlags2(VkPipelineCreateFlags Flags,
 /// (`VkSpecializationInfo`), validating every map entry's `(offset, size)`
 /// against the supplied data blob before reading it (see "Error Handling
 /// and Security": malformed/hostile sizes must fail cleanly, not read out
-/// of bounds). Only 4-byte entries are meaningful group-size overrides
-/// (`LocalSizeId`/`BuiltIn WorkgroupSize` constants are always 32-bit
-/// integers); anything else is recorded as an unmatched/zero override,
-/// which is harmless since `resolveComputeGroupSize` only ever consults an
-/// override for a `SpecId` it actually depends on. Also used by the
-/// graphics-stage path (`compileGraphicsStage`, GraphicsPipeline.cpp,
-/// roadmap H74) to build the override list `patchSpecializationConstants`
-/// applies directly to a shader module's raw SPIR-V words.
+/// of bounds). A map entry's `size` matches the host-side C type of the
+/// specialization constant it overrides (e.g. 2 bytes for an `int16_t`/
+/// `uint16_t` spec constant, 4 for `int32_t`/`float`/`VkBool32`), so an
+/// entry smaller than `sizeof(uint32_t)` is zero-extended into \p Value's
+/// low bytes rather than skipped -- every `SpecializationOverride::Value`
+/// this file and `SpecializationPatch.cpp` consume is always a single
+/// native-endian 32-bit word (matching `OpSpecConstant`'s own one-word
+/// literal encoding for any scalar type that fits in 32 bits, see
+/// SpecializationPatch.h's own file comment for this narrowed scope), so
+/// reading fewer than 4 bytes still produces the right value as long as
+/// the unread high bytes are zero. An entry larger than `sizeof(uint32_t)`
+/// (e.g. a 64-bit spec constant) only has its first word read, matching
+/// this same 32-bit-only scope; `resolveComputeGroupSize`/
+/// `patchSpecializationConstants` only ever consult an override for a
+/// `SpecId` they actually depend on, so an override that's only partially
+/// read but never consulted is harmless.
 Expected<SmallVector<SpecializationOverride, 4>>
 buildSpecializationOverrides(const VkSpecializationInfo *Info) {
   SmallVector<SpecializationOverride, 4> Overrides;
@@ -143,8 +151,8 @@ buildSpecializationOverrides(const VkSpecializationInfo *Info) {
                                "of its VkSpecializationInfo::dataSize",
                                I);
     uint32_t Value = 0;
-    if (Entry.size >= sizeof(uint32_t))
-      std::memcpy(&Value, Data + Entry.offset, sizeof(uint32_t));
+    std::memcpy(&Value, Data + Entry.offset,
+                std::min<size_t>(Entry.size, sizeof(uint32_t)));
     Overrides.push_back(SpecializationOverride{Entry.constantID, Value});
   }
   return Overrides;

@@ -32,6 +32,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Testing/Support/Error.h"
 
 #include "gtest/gtest.h"
 
@@ -1136,6 +1137,40 @@ TEST_F(PipelineTest, RejectsInlineShaderModuleWithMisalignedCodeSize) {
   EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
                                      nullptr, &Pipeline),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// `buildSpecializationOverrides` must zero-extend a map entry whose `size`
+/// is narrower than `sizeof(uint32_t)` -- e.g. a 2-byte `int16_t`/
+/// `uint16_t` specialization constant (`Feature/SpecializationConstant/
+/// spec_const_other_sizes.test`'s own regression shape) -- into the low
+/// bytes of `SpecializationOverride::Value`, rather than leaving `Value`
+/// at its default-initialized 0 the way a stale `Entry.size >=
+/// sizeof(uint32_t)` guard once did (every entry narrower than 4 bytes was
+/// silently dropped, matching VulkanCTSReport.md's `L440(c)` residual).
+TEST(BuildSpecializationOverridesTest, ZeroExtendsNarrowerThanWordEntries) {
+  // A raw little-endian byte blob holding one `int16_t` (123) immediately
+  // followed by one `uint16_t` (456), the same packed layout the HLSL
+  // `simple_64bit.hlsl`/`.yaml` regression case's own host-side
+  // specialization data uses.
+  uint8_t Data[4] = {123, 0, 200, 1}; // 456 == 0x01C8.
+  VkSpecializationMapEntry Entries[2] = {
+      {/*constantID=*/1, /*offset=*/0, /*size=*/2},
+      {/*constantID=*/2, /*offset=*/2, /*size=*/2},
+  };
+  VkSpecializationInfo Info{};
+  Info.mapEntryCount = 2;
+  Info.pMapEntries = Entries;
+  Info.dataSize = sizeof(Data);
+  Info.pData = Data;
+
+  llvm::Expected<llvm::SmallVector<SpecializationOverride, 4>> Overrides =
+      buildSpecializationOverrides(&Info);
+  ASSERT_THAT_EXPECTED(Overrides, llvm::Succeeded());
+  ASSERT_EQ(Overrides->size(), 2u);
+  EXPECT_EQ((*Overrides)[0].ConstantID, 1u);
+  EXPECT_EQ((*Overrides)[0].Value, 123u);
+  EXPECT_EQ((*Overrides)[1].ConstantID, 2u);
+  EXPECT_EQ((*Overrides)[1].Value, 456u);
 }
 
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
