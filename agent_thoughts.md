@@ -126762,3 +126762,43 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed —
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
 
 **Build/test state**: `check-feme` 3790/3797 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 11 → 8 failed, 0 regressions. `check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS: `*denorm*`/`float_controls.*`/`glsl.builtin.precision.*` all 0 changed/0 unexpected vs. a genuine pre-fix FeMe baseline. `VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session; no inventory update needed (default-behavior bug fix only, no new feature/extension).
+
+# Session: L440(c) `MatrixSemantics.test` fixed — `InBoundsAccessChain` templating gap
+
+**Check first, every session**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, `VK_ICD_FILENAMES` exported fresh in the same command).
+
+**State at start**: clean tree, previous session's 4 L456 commits already landed. `check-feme` 3790/3797, `check-hlsl-clang-feme-vk` 8 Failed — matched the handoff exactly.
+
+**The bug**: `Feature/Semantics/MatrixSemantics.test` (vertex shader writes a custom `float4x4 MY_MATRIX` interpolant, pixel shader reads it back row-by-row) failed with `'llvm.getelementptr' op result #0 must be LLVM pointer type ... but got 'vector<4xf32>'`, aborting pipeline creation.
+
+1. Dumped the vertex shader's PRENORM IR (`FEME_DUMP_IR_PRENORM=1`) — clean, ruled out the write side.
+2. Dumped both shaders' raw SPIR-V MLIR directly (`FEME_DEBUG_DUMP_SPIRV_MLIR=1 offloader -debug-layer`, against the test's already-split `.tmp-vertex.o`/`.tmp-pixel.o`) — this is the technique that actually found it. The pixel shader reads row 0 via a plain `spirv.AccessChain`, but rows 1–3 via `spirv.InBoundsAccessChain`.
+3. Grepped `SPIRVToLLVMPatterns.cpp` for `StageIOArrayAccessChainPattern` — the pattern that legalizes exactly this shape (an `Input`-storage array-of-vectors base) was templated for `AccessChainOp` only, never `InBoundsAccessChainOp`. Rows 1–3 fell through to MLIR's own generic pattern, which builds the wrong result type.
+4. This is the *same* two-op asymmetry `L454` already fixed for a different pattern (`OffsetStructMemberReorderAccessChainPattern`) two sessions ago — same root cause, different pattern class, never generalized across the codebase at the time.
+
+**The fix**: templated `isInputArrayAccessChain` and `StageIOArrayAccessChainPattern` over the op type, added `this->` for the now-dependent `getTypeConverter()` calls (3 call sites — easy to miss, caught immediately by the first build attempt), registered both `AccessChainOp`/`InBoundsAccessChainOp` instantiations.
+
+**Verification**:
+1. New unit test `SPIRVToLLVMTest.InputStorageArrayInBoundsAccessChainConvertsInsteadOfFailing` — red without the fix, green with it.
+2. `check-feme`: 3790/3797 → 3791/3798 Passed, 7 Unsupported, 0 Failed, 0 regressions.
+3. `check-hlsl-clang-feme-vk`: 8 → 7 Failed, 0 regressions (exact failure-name-set diff; `MatrixSemantics.test` now passes outright).
+4. No real Vulkan CTS sweep scoped — this fix's reachable shape (a DXC-direct mixed `AccessChain`/`InBoundsAccessChain` row-selector sequence for a custom semantic) is DXC/Clang-HLSL-only; glslangValidator never emits this exact mix for a plain GLSL varying.
+
+**A reusable lesson for future sessions**: when an error reproduces in one shader stage of a multi-stage pipeline but a per-stage IR dump (`FEME_DUMP_IR_PRENORM` etc.) only shows the *other* stage's output, that's a strong signal the failing stage crashed *before* reaching that dump point — go one level earlier (`FEME_DEBUG_DUMP_SPIRV_MLIR`, the rawest available dump) and diff the two stages' SPIR-V shapes directly against each other, rather than trying to guess from the (incomplete) later-stage dump alone. The vertex/pixel asymmetry here (`AccessChain` for the first row, `InBoundsAccessChain` for the rest) would have been easy to miss from the LLVM-dialect dump alone — it's a difference dxc makes at the SPIR-V level, visible only that early.
+
+## Commits this session (2, each small/scoped)
+
+1. FeMe fix: templated `isInputArrayAccessChain`/`StageIOArrayAccessChainPattern` over the access-chain op type, registered both instantiations, new unit test.
+2. Docs: `Roadmap.md` (`L440(c)` row updated, 85/92 fixed) + `VulkanCTSReport.md` (new session section).
+
+No `.instructions.md` update needed this session — no new environment/process gotcha found (the `VK_ICD_FILENAMES`/`qpa`-vendorID gotchas already documented from prior sessions covered everything encountered here).
+
+## Next steps
+
+1. **(half day, carried forward)** `L440(c)`'s remaining 7 residuals, triage individually: `Bugs/UAV-Sequental-Consistency.yaml` or `Feature/WaveOps/WaveActiveAnyTrue.test` (fails with `feme-cpu-linearize: function 'main': divergent branch in '' has no reconvergence point` — a `Linearize.cpp` diagnostic, worth checking first whether it's the same class of issue `L419(ae)`'s tessellation work already explored) look like the next most tractable single-case picks. `Feature/ResourcesInStructs/res-of-matrix-in-struct.test` (SIGABRT) is still only flagged across 3+ prior sessions, never actually isolated — worth a dedicated triage-only pass to classify it before committing a full session to a fix.
+2. **(1 day, design-heavy, carried forward many sessions, untouched again)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable via a local patch; needs real cross-patch-adjacency design.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
+
+**Build/test state**: `check-feme` 3791/3798 passed, 7 unsupported, 0 regressions (+1 new unit test). `check-hlsl-clang-feme-vk`: 8 → 7 failed, 0 regressions. `VulkanCTSReport.md`/`Roadmap.md` both updated this session; no inventory update needed (conversion-pattern completeness fix, no new feature/extension); no real Vulkan CTS sweep scoped (DXC-only reachable code path, no CTS-detectable regression surface).
