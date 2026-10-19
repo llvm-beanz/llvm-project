@@ -949,6 +949,14 @@ private:
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   Value *getFirstActiveLaneIndex();
   SmallVector<Value *, 4> getVectorComponents(Value *V, IRBuilderBase &Builder);
+  Value *packVectorRowComponents(ArrayRef<Value *> Components,
+                                 IntegerType *PackedTy, IRBuilder<> &Builder,
+                                 const Twine &Name);
+  SmallVector<Value *, 4> unpackVectorRowComponents(Value *Packed,
+                                                    unsigned NumComponents,
+                                                    Type *ElemTy,
+                                                    IRBuilder<> &Builder,
+                                                    const Twine &Name);
   SmallVector<Value *, 8> getAggregateComponents(Value *V,
                                                  IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
@@ -2099,6 +2107,61 @@ FunctionWidener::getVectorComponents(Value *V, IRBuilderBase &Builder) {
   for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
     Components.push_back(getWidened(
         Builder.CreateExtractElement(V, Builder.getInt32(I)), Builder));
+  return Components;
+}
+
+Value *FunctionWidener::packVectorRowComponents(ArrayRef<Value *> Components,
+                                                IntegerType *PackedTy,
+                                                IRBuilder<> &Builder,
+                                                const Twine &Name) {
+  // The real fix for a row whose element type is not byte-addressable
+  // (e.g. a `bool2`/`bool3`/`bool4` row, each lane's bits packed into the
+  // *same* byte rather than each having its own addressable offset --
+  // see `widenGroupSharedLoad`'s long comment on why a per-component
+  // `getelementptr` has no defined address for such a row): bit-pack all
+  // `N` of a (possibly divergent, already-decomposed-per-lane) vector
+  // value's own `<WaveSize x i1>`-shaped components into a single
+  // `<WaveSize x PackedTy>` integer, one bit of lane L's own integer per
+  // component, component 0 in the least-significant bit -- the same
+  // element-0-is-the-least-significant-bit convention LLVM's own
+  // `bitcast <N x i1> to iN` defines, so the packed integer this builds
+  // is bit-for-bit identical to what a plain (non-widened, non-divergent)
+  // `load`/`store` of the same row already reads/writes via the
+  // `BoolVectorLaneLoadPattern` precedent in `SPIRVToLLVMPatterns.cpp`.
+  // This is the inverse of `unpackVectorRowComponents` below.
+  auto *WidePackedTy = FixedVectorType::get(PackedTy, WaveSize);
+  Value *Packed = Constant::getNullValue(WidePackedTy);
+  for (unsigned Idx = 0, End = Components.size(); Idx != End; ++Idx) {
+    Value *Bit =
+        Builder.CreateZExt(Components[Idx], WidePackedTy,
+                           Name + ".bit" + Twine(Idx));
+    if (Idx)
+      Bit = Builder.CreateShl(Bit, Idx, Name + ".shl" + Twine(Idx));
+    Packed = Builder.CreateOr(Packed, Bit, Name + ".or" + Twine(Idx));
+  }
+  return Packed;
+}
+
+SmallVector<Value *, 4>
+FunctionWidener::unpackVectorRowComponents(Value *Packed,
+                                           unsigned NumComponents,
+                                           Type *ElemTy, IRBuilder<> &Builder,
+                                           const Twine &Name) {
+  // The inverse of `packVectorRowComponents` above: split a single
+  // `<WaveSize x PackedTy>` integer -- gathered wholesale from a
+  // non-byte-addressable row's address, one gather for the *entire* row
+  // rather than one per component, since no per-component sub-address is
+  // definable -- back into `NumComponents` separate `<WaveSize x i1>`-
+  // shaped components, one per element of the row's original vector type.
+  SmallVector<Value *, 4> Components;
+  auto *NarrowTy = FixedVectorType::get(ElemTy, WaveSize);
+  for (unsigned Idx = 0; Idx != NumComponents; ++Idx) {
+    Value *Shifted = Idx ? Builder.CreateLShr(Packed, Idx,
+                                              Name + ".lshr" + Twine(Idx))
+                         : Packed;
+    Components.push_back(
+        Builder.CreateTrunc(Shifted, NarrowTy, Name + ".elt" + Twine(Idx)));
+  }
   return Components;
 }
 
@@ -3336,18 +3399,30 @@ void FunctionWidener::widenMaskedLoad(CallInst &CI,
   if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getType())) {
     Type *ElemTy = VecTy->getElementType();
     const DataLayout &DL = NewF->getParent()->getDataLayout();
-    // See `widenGroupSharedLoad`'s identical check for why a non-byte-
-    // addressable element type (e.g. a `bool` row's `i1` lanes, which
-    // share a single packed byte rather than each having its own byte
-    // offset) makes the per-component `getelementptr` below invalid, and
-    // why this reports the shape as unsupported instead of emitting it.
+    // See `widenGroupSharedLoad`'s identical check and fix for why a
+    // non-byte-addressable element type (e.g. a `bool` row's `i1` lanes,
+    // which share a single packed byte rather than each having its own
+    // byte offset) makes the per-component `getelementptr` below invalid,
+    // and why such a row instead gathers its whole packed representation
+    // in one shot. This masked load's own passthru value needs the same
+    // treatment: pack its already-decomposed `<WaveSize x i1>` components
+    // into one `<WaveSize x iBits>` passthru (`packVectorRowComponents`)
+    // before gathering, then unpack the gathered result the same way the
+    // unmasked case does.
     if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
-      Ctx.emitError(&CI, "feme-cpu-simdize: function '" + NewF->getName() +
-                             "' has a masked load of a vector whose element "
-                             "type is not byte-addressable (e.g. a "
-                             "bool-vector row); this pass cannot yet widen "
-                             "that shape");
-      HadError = true;
+      auto *PackedTy =
+          Builder.getIntNTy(DL.getTypeSizeInBits(VecTy).getFixedValue());
+      SmallVector<Value *, 4> PassthruComponents =
+          getVectorComponents(Matched.ValueOperand, Builder);
+      Value *PackedPassthru = packVectorRowComponents(
+          PassthruComponents, PackedTy, Builder, CI.getName() + ".passthru");
+      Value *Packed = Builder.CreateMaskedGather(
+          FixedVectorType::get(PackedTy, WaveSize), WidePtr,
+          Align(Matched.Align ? Matched.Align : 1), EffectiveMask,
+          PackedPassthru, CI.getName() + ".packed");
+      WidenedVectorComponents[&CI] = unpackVectorRowComponents(
+          Packed, VecTy->getNumElements(), ElemTy, Builder, CI.getName());
+      ToErase.push_back(&CI);
       return;
     }
     uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
@@ -3457,16 +3532,24 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
       auto *VecTy = cast<FixedVectorType>(Matched.ValueOperand->getType());
       Type *ElemTy = VecTy->getElementType();
       const DataLayout &DL = NewF->getParent()->getDataLayout();
-      // See `widenGroupSharedLoad`'s identical check for why a non-byte-
-      // addressable element type makes the per-component `getelementptr`
-      // below invalid.
+      // See `widenGroupSharedLoad`'s identical check and fix for why a
+      // non-byte-addressable element type makes the per-component
+      // `getelementptr` below invalid, and why such a row instead packs
+      // all of its components into one `<WaveSize x iBits>` integer
+      // (`packVectorRowComponents`) and scatters that single packed value
+      // to the whole row's own address, rather than decomposing the
+      // scatter itself.
       if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
-        Ctx.emitError(&CI, "feme-cpu-simdize: function '" + NewF->getName() +
-                               "' has a masked store of a vector whose "
-                               "element type is not byte-addressable (e.g. "
-                               "a bool-vector row); this pass cannot yet "
-                               "widen that shape");
-        HadError = true;
+        auto *PackedTy =
+            Builder.getIntNTy(DL.getTypeSizeInBits(VecTy).getFixedValue());
+        SmallVector<Value *, 4> Components =
+            getVectorComponents(Matched.ValueOperand, Builder);
+        Value *Packed = packVectorRowComponents(Components, PackedTy, Builder,
+                                                CI.getName() + ".packed");
+        Builder.CreateMaskedScatter(
+            Packed, WidePtr, Align(Matched.Align ? Matched.Align : 1),
+            EffectiveMask);
+        ToErase.push_back(&CI);
         return;
       }
       uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);
@@ -4054,19 +4137,23 @@ void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
     // offset, so indexing component 1+ this way has no well-defined
     // address (LLVM's own `getelementptr`-offset machinery asserts
     // "Not byte-addressable" on exactly this shape; see
-    // `GetElementPtrTypeIterator.h`). Decomposing such a row correctly
-    // would need a real bit-packed gather-then-extract design (loading
-    // the row's whole packed representation per lane, then shifting out
-    // each bit), which is out of scope for a local fix here -- report it
-    // as an unsupported shape instead of crashing, mirroring every other
-    // "shape this pass cannot widen" diagnostic in this file.
+    // `GetElementPtrTypeIterator.h`). Such a row instead gathers its
+    // whole packed representation in one shot -- as a single
+    // `<WaveSize x iBits>` integer, `iBits` the row's own total bit
+    // width -- and bit-extracts each component afterward
+    // (`unpackVectorRowComponents`), rather than decomposing the gather
+    // itself.
     if (!DL.typeSizeEqualsStoreSize(ElemTy)) {
-      Ctx.emitError(&LI, "feme-cpu-simdize: function '" + NewF->getName() +
-                              "' has a groupshared load of a vector whose "
-                              "element type is not byte-addressable "
-                              "(e.g. a bool-vector row); this pass cannot "
-                              "yet widen that shape");
-      HadError = true;
+      auto *PackedTy =
+          Builder.getIntNTy(DL.getTypeSizeInBits(VecTy).getFixedValue());
+      Value *PackedPassthru =
+          Constant::getNullValue(FixedVectorType::get(PackedTy, WaveSize));
+      Value *Packed = Builder.CreateMaskedGather(
+          FixedVectorType::get(PackedTy, WaveSize), WidePtr, LI.getAlign(),
+          Env.EntryMask, PackedPassthru, LI.getName() + ".packed");
+      WidenedVectorComponents[&LI] = unpackVectorRowComponents(
+          Packed, VecTy->getNumElements(), ElemTy, Builder, LI.getName());
+      ToErase.push_back(&LI);
       return;
     }
     uint64_t ElemSize = DL.getTypeAllocSize(ElemTy);

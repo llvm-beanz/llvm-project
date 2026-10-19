@@ -1827,6 +1827,141 @@ TEST(SIMDizeTest, WidensGroupSharedDivergentIndexToVectorGEPAndGather) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap L459/L461: a divergent-index groupshared load of a `bool2`
+// (`<2 x i1>`) row previously crashed -- `widenGroupSharedLoad`'s vector
+// case tried to compute each component's own address with
+// `getelementptr <2 x i1>, Ptr, {0, Idx}`, which has no well-defined byte
+// offset once `Idx` is nonzero (both lanes of a `<2 x i1>` row share the
+// same packed byte). This is the real fix (L459 only made this shape fail
+// gracefully instead of crashing): the whole row gathers as one packed
+// `<4 x i2>` value in a single `llvm.masked.gather`, then each component
+// bit-extracts out of that packed integer (one `lshr`+`trunc` pair per
+// component) instead of being gathered separately.
+TEST(SIMDizeTest, WidensGroupSharedBoolVectorLoadWithPackedGather) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %ptr = getelementptr inbounds [4 x <2 x i1>], ptr addrspace(3) @shared, i32 0, i32 %tid
+      %val = load <2 x i1>, ptr addrspace(3) %ptr
+      %e0 = extractelement <2 x i1> %val, i32 0
+      %e1 = extractelement <2 x i1> %val, i32 1
+      ret void
+    }
+    @shared = internal addrspace(3) global [4 x <2 x i1>] undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundGather = false;
+  bool FoundShiftExtract = false;
+  bool FoundIllegalPerComponentGEP = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+        FoundGather = true;
+    if (I.getOpcode() == Instruction::LShr &&
+        I.getType()->isVectorTy() &&
+        cast<VectorType>(I.getType())->getElementType()->isIntegerTy())
+      FoundShiftExtract = true;
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      FoundIllegalPerComponentGEP |=
+          GEP->getSourceElementType()->isVectorTy() &&
+          cast<VectorType>(GEP->getSourceElementType())
+              ->getElementType()
+              ->isIntegerTy(1);
+  }
+  EXPECT_TRUE(FoundGather);
+  EXPECT_TRUE(FoundShiftExtract);
+  EXPECT_FALSE(FoundIllegalPerComponentGEP);
+}
+
+// The masked-load (divergent control flow) counterpart of
+// `WidensGroupSharedBoolVectorLoadWithPackedGather` above: `widenMaskedLoad`
+// has its own copy of the same vector-decomposition logic, including its
+// own packed passthru value (built from the masked load's own already-
+// divergent `ValueOperand`, not a constant `zeroinitializer`).
+TEST(SIMDizeTest, WidensMaskedBoolVectorLoadWithPackedGatherAndPassthru) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p, <2 x i1> %passthru) #0 {
+      %loaded = call <2 x i1> @feme.cpu.masked.load.v2i1(
+          ptr %p, i32 1, i1 true, <2 x i1> %passthru)
+      %e0 = extractelement <2 x i1> %loaded, i32 0
+      %e1 = extractelement <2 x i1> %loaded, i32 1
+      ret void
+    }
+    declare <2 x i1> @feme.cpu.masked.load.v2i1(ptr, i32, i1, <2 x i1>)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+        FoundGather = true;
+  EXPECT_TRUE(FoundGather);
+}
+
+// The masked-store (groupshared scatter, divergent control flow)
+// counterpart: `widenMaskedStore`'s groupshared vector-decomposition path
+// packs its `N` already-divergent value components into a single packed
+// integer and scatters once, instead of decomposing into `N` per-component
+// scatters that would need the same illegal per-lane GEP.
+TEST(SIMDizeTest, WidensGroupSharedBoolVectorMaskedStoreWithPackedScatter) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(<2 x i1> %val) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %t, label %f
+    t:
+      store <2 x i1> %val, ptr addrspace(3) @shared
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    @shared = internal addrspace(3) global <2 x i1> undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundScatter = false;
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() ==
+              Intrinsic::masked_scatter)
+        FoundScatter = true;
+  EXPECT_TRUE(FoundScatter);
+}
+
 // Roadmap H168: a raw, unmasked groupshared `store` whose *address* is
 // uniform but whose *value* is divergent (e.g.
 // `groupshared int Shared; Shared = ThreadID;`, every lane racing to write
