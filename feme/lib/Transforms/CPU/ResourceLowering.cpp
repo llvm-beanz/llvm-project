@@ -64,6 +64,66 @@ Intrinsic::ID getIntrinsicID(const Value *V) {
 /// always succeeds, reporting an out-of-bounds access as a zero result
 /// instead -- see "Bounds checking"); a store's resource operand must be
 /// \p Handle itself, not its stored value.
+
+/// Returns whether \p RMW is a shape `lowerAtomicAccess` below knows how to
+/// rewrite into a canonical `feme.cpu.resource.atomic.*` call: a scalar
+/// `i32` value directly against \p Ptr (never a further-indirected
+/// pointer), using one of the opcodes every `createAtomicXxxRaw`/
+/// `createAtomicXxxTyped` builder pair covers -- mirrors
+/// `hasOnlySupportedPointerUses`'s identical `AtomicRMWInst` check in
+/// `SPIRVResourceLowering.cpp` (this file's SPIR-V-origin counterpart,
+/// whose already-proven atomic support this reuses almost verbatim; see
+/// that file's own doc for why no ordering/syncscope check is needed --
+/// the CPU runtime's own locking discipline does not distinguish them).
+bool isSupportedAtomicRMW(const AtomicRMWInst &RMW, const Value &Ptr) {
+  if (RMW.getPointerOperand() != &Ptr ||
+      !RMW.getValOperand()->getType()->isIntegerTy(32))
+    return false;
+  switch (RMW.getOperation()) {
+  case AtomicRMWInst::Add:
+  case AtomicRMWInst::Sub:
+  case AtomicRMWInst::And:
+  case AtomicRMWInst::Or:
+  case AtomicRMWInst::Xor:
+  case AtomicRMWInst::Max:
+  case AtomicRMWInst::Min:
+  case AtomicRMWInst::UMax:
+  case AtomicRMWInst::UMin:
+  case AtomicRMWInst::Xchg:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// Returns whether every use of a raised `llvm.dx.resource.getpointer` call
+/// \p GetPtr (an atomic access's own address, see `raiseAtomicBinOp` in
+/// OpRaising.cpp) is a shape `lowerAtomicAccess` below can rewrite: either
+/// a supported `atomicrmw` directly on \p GetPtr's result (the common,
+/// scalar-element-type case -- a `RWStructuredBuffer<uint>`/
+/// `RWByteAddressBuffer`'s whole-element `InterlockedAdd`), or a single
+/// byte-level `getelementptr` off it (a genuine `StructuredBuffer`'s own
+/// intra-element byte offset, see `raiseAtomicBinOp`'s own doc) whose sole
+/// user is, in turn, a supported `atomicrmw`.
+bool hasOnlySupportedAtomicUses(const CallInst &GetPtr) {
+  for (const User *U : GetPtr.users()) {
+    if (const auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
+      if (!isSupportedAtomicRMW(*RMW, GetPtr))
+        return false;
+      continue;
+    }
+    const auto *GEP = dyn_cast<GetElementPtrInst>(U);
+    if (!GEP || GEP->getPointerOperand() != &GetPtr ||
+        !GEP->getSourceElementType()->isIntegerTy(8) ||
+        GEP->getNumIndices() != 1 || !GEP->hasOneUser())
+      return false;
+    const auto *RMW = dyn_cast<AtomicRMWInst>(*GEP->user_begin());
+    if (!RMW || !isSupportedAtomicRMW(*RMW, *GEP))
+      return false;
+  }
+  return true;
+}
+
 bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
   Intrinsic::ID LoadID = Kind == Family::Typed
                              ? Intrinsic::dx_resource_load_typedbuffer
@@ -79,6 +139,11 @@ bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
     Intrinsic::ID ID = getIntrinsicID(CI);
     if (ID == StoreID) {
       if (CI->getArgOperand(0) != &Handle)
+        return false;
+      continue;
+    }
+    if (ID == Intrinsic::dx_resource_getpointer) {
+      if (CI->getArgOperand(0) != &Handle || !hasOnlySupportedAtomicUses(*CI))
         return false;
       continue;
     }
@@ -240,6 +305,120 @@ void replaceLoadResultUses(CallInst &Access, Value *Loaded) {
   }
 }
 
+/// Builds the canonical `feme.cpu.resource.atomic.*` call matching \p Op,
+/// dispatching to the `Raw` or `Typed` builder pair (roadmap H8x/H8w
+/// respectively) based on \p Kind -- every `createAtomicXxxRaw`/
+/// `createAtomicXxxTyped` builder shares the same
+/// `(Builder, Env, DescriptorIndex, Offset, Val, Mask, Name)` signature, so
+/// only the callee differs between the two families. Mirrors
+/// `lowerRawPointerUses`'s identical `AtomicRMWInst` switch in
+/// `SPIRVResourceLowering.cpp`.
+CallInst *createAtomicCall(IRBuilderBase &Builder, const ResourceCallEnv &Env,
+                           Value *DescriptorIndex, Value *Offset, Value *Val,
+                           Value *Mask, AtomicRMWInst::BinOp Op, Family Kind,
+                           const Twine &Name) {
+  bool IsTyped = Kind == Family::Typed;
+  switch (Op) {
+  case AtomicRMWInst::Add:
+    return IsTyped ? createAtomicAddTyped(Builder, Env, DescriptorIndex,
+                                         Offset, Val, Mask, Name)
+                  : createAtomicAddRaw(Builder, Env, DescriptorIndex, Offset,
+                                       Val, Mask, Name);
+  case AtomicRMWInst::Sub:
+    return IsTyped ? createAtomicSubTyped(Builder, Env, DescriptorIndex,
+                                         Offset, Val, Mask, Name)
+                  : createAtomicSubRaw(Builder, Env, DescriptorIndex, Offset,
+                                       Val, Mask, Name);
+  case AtomicRMWInst::And:
+    return IsTyped ? createAtomicAndTyped(Builder, Env, DescriptorIndex,
+                                         Offset, Val, Mask, Name)
+                  : createAtomicAndRaw(Builder, Env, DescriptorIndex, Offset,
+                                       Val, Mask, Name);
+  case AtomicRMWInst::Or:
+    return IsTyped ? createAtomicOrTyped(Builder, Env, DescriptorIndex,
+                                        Offset, Val, Mask, Name)
+                  : createAtomicOrRaw(Builder, Env, DescriptorIndex, Offset,
+                                      Val, Mask, Name);
+  case AtomicRMWInst::Xor:
+    return IsTyped ? createAtomicXorTyped(Builder, Env, DescriptorIndex,
+                                         Offset, Val, Mask, Name)
+                  : createAtomicXorRaw(Builder, Env, DescriptorIndex, Offset,
+                                       Val, Mask, Name);
+  case AtomicRMWInst::Max:
+    return IsTyped ? createAtomicSMaxTyped(Builder, Env, DescriptorIndex,
+                                          Offset, Val, Mask, Name)
+                  : createAtomicSMaxRaw(Builder, Env, DescriptorIndex, Offset,
+                                        Val, Mask, Name);
+  case AtomicRMWInst::Min:
+    return IsTyped ? createAtomicSMinTyped(Builder, Env, DescriptorIndex,
+                                          Offset, Val, Mask, Name)
+                  : createAtomicSMinRaw(Builder, Env, DescriptorIndex, Offset,
+                                        Val, Mask, Name);
+  case AtomicRMWInst::UMax:
+    return IsTyped ? createAtomicUMaxTyped(Builder, Env, DescriptorIndex,
+                                          Offset, Val, Mask, Name)
+                  : createAtomicUMaxRaw(Builder, Env, DescriptorIndex, Offset,
+                                        Val, Mask, Name);
+  case AtomicRMWInst::UMin:
+    return IsTyped ? createAtomicUMinTyped(Builder, Env, DescriptorIndex,
+                                          Offset, Val, Mask, Name)
+                  : createAtomicUMinRaw(Builder, Env, DescriptorIndex, Offset,
+                                        Val, Mask, Name);
+  case AtomicRMWInst::Xchg:
+    return IsTyped ? createAtomicExchangeTyped(Builder, Env, DescriptorIndex,
+                                              Offset, Val, Mask, Name)
+                  : createAtomicExchangeRaw(Builder, Env, DescriptorIndex,
+                                            Offset, Val, Mask, Name);
+  default:
+    llvm_unreachable(
+        "hasOnlySupportedAtomicUses only accepts the RMW kinds handled "
+        "above");
+  }
+}
+
+/// Rewrites every `atomicrmw` reachable from a raised `llvm.dx.resource.
+/// getpointer` call \p GetPtr (an atomic access's own address, see
+/// `raiseAtomicBinOp` in OpRaising.cpp) into the corresponding canonical
+/// `feme.cpu.resource.atomic.*` call, erasing \p GetPtr (and any
+/// intervening byte-offset `getelementptr`,
+/// see`hasOnlySupportedAtomicUses`'s own doc) once every use is rewritten.
+/// \p ElementIndex is \p GetPtr's own index argument, already converted to
+/// \p Info.Kind's own addressing convention (a `Typed` element index, or a
+/// `Raw` byte offset -- see `lowerAccesses`'s own `Offset` computation,
+/// whose result this reuses unchanged for the non-struct common case).
+void lowerAtomicAccess(CallInst &GetPtr, const HandleInfo &Info,
+                      const ResourceCallEnv &Env, Value *DescriptorIndex,
+                      Value *ElementIndex) {
+  LLVMContext &Ctx = GetPtr.getContext();
+  Type *I64Ty = Type::getInt64Ty(Ctx);
+  Value *Mask = ConstantInt::getTrue(Ctx);
+
+  auto RewriteRMW = [&](AtomicRMWInst &RMW, Value *Offset) {
+    IRBuilder<> Builder(&RMW);
+    CallInst *Old =
+        createAtomicCall(Builder, Env, DescriptorIndex, Offset,
+                         RMW.getValOperand(), Mask, RMW.getOperation(),
+                         Info.Kind, RMW.getName());
+    RMW.replaceAllUsesWith(Old);
+    RMW.eraseFromParent();
+  };
+
+  for (User *U : llvm::make_early_inc_range(GetPtr.users())) {
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
+      RewriteRMW(*RMW, ElementIndex);
+      continue;
+    }
+    auto *GEP = cast<GetElementPtrInst>(U);
+    auto *RMW = cast<AtomicRMWInst>(*GEP->user_begin());
+    IRBuilder<> OffsetBuilder(RMW);
+    Value *ByteOffset = OffsetBuilder.CreateZExt(GEP->getOperand(1), I64Ty);
+    Value *Offset = OffsetBuilder.CreateAdd(ElementIndex, ByteOffset);
+    RewriteRMW(*RMW, Offset);
+    GEP->eraseFromParent();
+  }
+  GetPtr.eraseFromParent();
+}
+
 /// Rewrites every access through \p Info.Handle into the corresponding
 /// canonical `feme.cpu.resource.*` call, using \p Env and \p DescriptorIndex
 /// (the heap index the handle was created from).
@@ -255,6 +434,25 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
     Intrinsic::ID ID = getIntrinsicID(Access);
     bool IsStore = ID == Intrinsic::dx_resource_store_typedbuffer ||
                    ID == Intrinsic::dx_resource_store_rawbuffer;
+
+    if (ID == Intrinsic::dx_resource_getpointer) {
+      // `getpointer` carries a single index argument (no separate
+      // sub-element byte-offset operand the way `load`/`store`'s raw-
+      // buffer calls do -- see `raiseAtomicBinOp`'s own doc for why that
+      // offset, if any, instead arrives as a `getelementptr`
+      // `lowerAtomicAccess` itself resolves): a `Typed` buffer's is
+      // already an element index, and a `Raw` buffer's is already an
+      // element index needing the same `Stride` multiplication an
+      // ordinary access's `ElemIdx` does below (or already a byte address
+      // for an unstructured `ByteAddressBuffer`, `Info.Stride == 0`).
+      Value *ElemIdx = Builder.CreateZExt(Access->getArgOperand(1), I64Ty);
+      Value *ElementIndex =
+          Info.Kind == Family::Typed || Info.Stride == 0
+              ? ElemIdx
+              : Builder.CreateMul(ElemIdx, ConstantInt::get(I64Ty, Info.Stride));
+      lowerAtomicAccess(*Access, Info, Env, DescriptorIndex, ElementIndex);
+      continue;
+    }
 
     Value *Offset;
     if (Info.Kind == Family::Typed) {
@@ -302,6 +500,7 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
   }
   Info.Handle->eraseFromParent();
 }
+
 
 /// Which of the four sampled-image shapes `classifyImageHandle` recognizes
 /// (roadmap H7b-a widened it beyond plain, non-arrayed `Texture2D` --
