@@ -96,19 +96,52 @@ bool isSupportedAtomicRMW(const AtomicRMWInst &RMW, const Value &Ptr) {
   }
 }
 
+/// Returns whether \p CmpXchg is a shape `lowerAtomicAccess` below knows
+/// how to rewrite into a canonical `feme.cpu.resource.atomic.
+/// compare_exchange.*` call: a scalar `i32` comparator directly against
+/// \p Ptr, whose result is read only through a single `extractvalue ...,
+/// 0` picking out the original value -- `raiseAtomicCompareExchange`
+/// (OpRaising.cpp) already synthesizes exactly that one extract for every
+/// raised `dx.op.atomicCompareExchange` call, so this never needs to
+/// reject any other shape in practice, but the check stays defensive
+/// (mirroring `hasOnlySupportedPointerUses`'s identical `AtomicCmpXchgInst`
+/// check in `SPIRVResourceLowering.cpp`) in case a future IR producer
+/// constructs this same `getpointer`+`cmpxchg` shape some other way.
+bool isSupportedAtomicCmpXchg(const AtomicCmpXchgInst &CmpXchg,
+                              const Value &Ptr) {
+  if (CmpXchg.getPointerOperand() != &Ptr ||
+      !CmpXchg.getCompareOperand()->getType()->isIntegerTy(32))
+    return false;
+  for (const User *U : CmpXchg.users()) {
+    const auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getIndices() != ArrayRef<unsigned>{0})
+      return false;
+  }
+  return true;
+}
+
 /// Returns whether every use of a raised `llvm.dx.resource.getpointer` call
 /// \p GetPtr (an atomic access's own address, see `raiseAtomicBinOp` in
 /// OpRaising.cpp) is a shape `lowerAtomicAccess` below can rewrite: either
-/// a supported `atomicrmw` directly on \p GetPtr's result (the common,
-/// scalar-element-type case -- a `RWStructuredBuffer<uint>`/
-/// `RWByteAddressBuffer`'s whole-element `InterlockedAdd`), or a single
-/// byte-level `getelementptr` off it (a genuine `StructuredBuffer`'s own
-/// intra-element byte offset, see `raiseAtomicBinOp`'s own doc) whose sole
-/// user is, in turn, a supported `atomicrmw`.
+/// a supported `atomicrmw`/`cmpxchg` directly on \p GetPtr's result (the
+/// common, scalar-element-type case -- a `RWStructuredBuffer<uint>`/
+/// `RWByteAddressBuffer`'s whole-element `InterlockedAdd`/
+/// `InterlockedCompareExchange`), or a single byte-level `getelementptr`
+/// off it (a genuine `StructuredBuffer`'s own intra-element byte offset,
+/// see `raiseAtomicBinOp`'s own doc) whose sole user is, in turn, a
+/// supported `atomicrmw`/`cmpxchg`.
 bool hasOnlySupportedAtomicUses(const CallInst &GetPtr) {
+  auto IsSupportedAtomic = [](const User &U, const Value &Ptr) {
+    if (const auto *RMW = dyn_cast<AtomicRMWInst>(&U))
+      return isSupportedAtomicRMW(*RMW, Ptr);
+    if (const auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(&U))
+      return isSupportedAtomicCmpXchg(*CmpXchg, Ptr);
+    return false;
+  };
+
   for (const User *U : GetPtr.users()) {
-    if (const auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
-      if (!isSupportedAtomicRMW(*RMW, GetPtr))
+    if (isa<AtomicRMWInst>(U) || isa<AtomicCmpXchgInst>(U)) {
+      if (!IsSupportedAtomic(*U, GetPtr))
         return false;
       continue;
     }
@@ -117,8 +150,10 @@ bool hasOnlySupportedAtomicUses(const CallInst &GetPtr) {
         !GEP->getSourceElementType()->isIntegerTy(8) ||
         GEP->getNumIndices() != 1 || !GEP->hasOneUser())
       return false;
-    const auto *RMW = dyn_cast<AtomicRMWInst>(*GEP->user_begin());
-    if (!RMW || !isSupportedAtomicRMW(*RMW, *GEP))
+    const User *GEPUser = *GEP->user_begin();
+    if (!isa<AtomicRMWInst>(GEPUser) && !isa<AtomicCmpXchgInst>(GEPUser))
+      return false;
+    if (!IsSupportedAtomic(*GEPUser, *GEP))
       return false;
   }
   return true;
@@ -376,16 +411,35 @@ CallInst *createAtomicCall(IRBuilderBase &Builder, const ResourceCallEnv &Env,
   }
 }
 
-/// Rewrites every `atomicrmw` reachable from a raised `llvm.dx.resource.
-/// getpointer` call \p GetPtr (an atomic access's own address, see
-/// `raiseAtomicBinOp` in OpRaising.cpp) into the corresponding canonical
-/// `feme.cpu.resource.atomic.*` call, erasing \p GetPtr (and any
-/// intervening byte-offset `getelementptr`,
-/// see`hasOnlySupportedAtomicUses`'s own doc) once every use is rewritten.
-/// \p ElementIndex is \p GetPtr's own index argument, already converted to
-/// \p Info.Kind's own addressing convention (a `Typed` element index, or a
-/// `Raw` byte offset -- see `lowerAccesses`'s own `Offset` computation,
-/// whose result this reuses unchanged for the non-struct common case).
+/// Builds the canonical `feme.cpu.resource.atomic.compare_exchange.*` call,
+/// dispatching to the `Raw` or `Typed` builder based on \p Kind -- the
+/// `cmpxchg` counterpart to `createAtomicCall` above.
+CallInst *createAtomicCompareExchangeCall(IRBuilderBase &Builder,
+                                          const ResourceCallEnv &Env,
+                                          Value *DescriptorIndex,
+                                          Value *Offset, Value *Comparator,
+                                          Value *Val, Value *Mask,
+                                          Family Kind, const Twine &Name) {
+  return Kind == Family::Typed
+             ? createAtomicCompareExchangeTyped(Builder, Env, DescriptorIndex,
+                                               Offset, Comparator, Val, Mask,
+                                               Name)
+             : createAtomicCompareExchangeRaw(Builder, Env, DescriptorIndex,
+                                             Offset, Comparator, Val, Mask,
+                                             Name);
+}
+
+/// Rewrites every `atomicrmw`/`cmpxchg` reachable from a raised
+/// `llvm.dx.resource.getpointer` call \p GetPtr (an atomic access's own
+/// address, see `raiseAtomicBinOp`/`raiseAtomicCompareExchange` in
+/// OpRaising.cpp) into the corresponding canonical `feme.cpu.resource.
+/// atomic.*` call, erasing \p GetPtr (and any intervening byte-offset
+/// `getelementptr`, see`hasOnlySupportedAtomicUses`'s own doc) once every
+/// use is rewritten. \p ElementIndex is \p GetPtr's own index argument,
+/// already converted to \p Info.Kind's own addressing convention (a
+/// `Typed` element index, or a `Raw` byte offset -- see `lowerAccesses`'s
+/// own `Offset` computation, whose result this reuses unchanged for the
+/// non-struct common case).
 void lowerAtomicAccess(CallInst &GetPtr, const HandleInfo &Info,
                       const ResourceCallEnv &Env, Value *DescriptorIndex,
                       Value *ElementIndex) {
@@ -403,17 +457,53 @@ void lowerAtomicAccess(CallInst &GetPtr, const HandleInfo &Info,
     RMW.eraseFromParent();
   };
 
+  // `isSupportedAtomicCmpXchg` already guaranteed every user of `CmpXchg`
+  // is an `extractvalue ..., 0` picking out the original value -- replace
+  // each with the new call directly, since the call's own result *is*
+  // that original value (unlike `llvm.cmpxchg`, no `{i32, i1}` struct to
+  // extract from). Mirrors `lowerRawPointerUses`'s identical
+  // `AtomicCmpXchgInst` handling in `SPIRVResourceLowering.cpp`.
+  auto RewriteCmpXchg = [&](AtomicCmpXchgInst &CmpXchg, Value *Offset) {
+    IRBuilder<> Builder(&CmpXchg);
+    CallInst *Old = createAtomicCompareExchangeCall(
+        Builder, Env, DescriptorIndex, Offset, CmpXchg.getCompareOperand(),
+        CmpXchg.getNewValOperand(), Mask, Info.Kind, CmpXchg.getName());
+    for (User *EU : llvm::make_early_inc_range(CmpXchg.users())) {
+      auto *EV = cast<ExtractValueInst>(EU);
+      EV->replaceAllUsesWith(Old);
+      EV->eraseFromParent();
+    }
+    CmpXchg.eraseFromParent();
+  };
+
+  // Computes the byte-offset-adjusted `Offset` for a `getpointer` user
+  // reached through an intervening byte-offset `getelementptr` \p GEP (a
+  // genuine `StructuredBuffer`'s own intra-element offset), building the
+  // arithmetic right before \p AtomicUser so the inserted instructions
+  // dominate it regardless of which lambda below consumes the result.
+  auto OffsetForGEP = [&](GetElementPtrInst &GEP, Instruction &AtomicUser) {
+    IRBuilder<> OffsetBuilder(&AtomicUser);
+    Value *ByteOffset = OffsetBuilder.CreateZExt(GEP.getOperand(1), I64Ty);
+    return OffsetBuilder.CreateAdd(ElementIndex, ByteOffset);
+  };
+
   for (User *U : llvm::make_early_inc_range(GetPtr.users())) {
     if (auto *RMW = dyn_cast<AtomicRMWInst>(U)) {
       RewriteRMW(*RMW, ElementIndex);
       continue;
     }
+    if (auto *CmpXchg = dyn_cast<AtomicCmpXchgInst>(U)) {
+      RewriteCmpXchg(*CmpXchg, ElementIndex);
+      continue;
+    }
     auto *GEP = cast<GetElementPtrInst>(U);
-    auto *RMW = cast<AtomicRMWInst>(*GEP->user_begin());
-    IRBuilder<> OffsetBuilder(RMW);
-    Value *ByteOffset = OffsetBuilder.CreateZExt(GEP->getOperand(1), I64Ty);
-    Value *Offset = OffsetBuilder.CreateAdd(ElementIndex, ByteOffset);
-    RewriteRMW(*RMW, Offset);
+    User *GEPUser = *GEP->user_begin();
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(GEPUser)) {
+      RewriteRMW(*RMW, OffsetForGEP(*GEP, *RMW));
+    } else {
+      auto *CmpXchg = cast<AtomicCmpXchgInst>(GEPUser);
+      RewriteCmpXchg(*CmpXchg, OffsetForGEP(*GEP, *CmpXchg));
+    }
     GEP->eraseFromParent();
   }
   GetPtr.eraseFromParent();
