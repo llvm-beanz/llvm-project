@@ -69,26 +69,15 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1 day, design-heavy, carried forward many sessions, still
-   untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch —
-   proven architecturally unfixable via a local patch; needs a real
-   cross-patch-adjacency design.
-2. **(~1-2 hours, new this session)** Isolate the `requiredsubgroupsize128`
-   batch-mode stall: narrow to the smallest caselist that reproduces it,
-   determine whether it's FeMe-side pipeline-cache/JIT state growth or a
-   CTS-harness/driver issue.
-3. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
-   — actually already fixed (`L457`, prior session); double-check this
-   doesn't still appear in any stale handoff list before picking a new
-   cluster.
-4. **(1-2 days, design-heavy)** The real fix for `SIMDize.cpp`'s
-   bool-vector decomposition gap: a bit-packed gather-then-shift-extract
-   redesign, following the `buildBoolVectorGEP`/`BoolVectorLaneLoadPattern`
-   precedent in `SPIRVToLLVMPatterns.cpp`. Currently only diagnosed
-   gracefully, not actually supported — any real shader using a
-   `groupshared bool2`/`bool3`/`bool4` row (or a masked/divergent load of
-   one) will fail to compile until this is done.
-5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
+   tessellation edge0-vs-edge1 ULP mismatch — needs real
+   cross-patch-adjacency design, not a local patch.
+2. **(low priority, carried forward)** `feme-run` can't execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
-6. **(low priority, carried forward)** 9 older git stashes remain
-   uninspected.
+3. **(open-ended, standing)** No other known `SIMDize.cpp` "cannot yet
+   widen that shape" diagnostics remain as of this session — if a
+   future session hits a new one, check whether it's the same
+   byte-addressability class this session just fixed before assuming
+   it's new.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
+   and the roadmap counts synchronized after every fix.
