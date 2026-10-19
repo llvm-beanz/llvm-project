@@ -2185,4 +2185,60 @@ TEST(SPIRVToLLVMTest,
       << Result;
 }
 
+// (Roadmap L455) An ordinary (non-offset, non-Block) HLSL struct that
+// wraps a resource directly (`struct A { RWStructuredBuffer<T> Buf; };`,
+// `Feature/ResourcesInStructs/res-of-matrix-in-struct.test`'s own repro)
+// fatally errored instead of converting: `RWStructuredBuffer<T>`'s own
+// implicit append/consume counter means dxc's own `Buf` field is itself a
+// two-member struct of two separate `spirv.VulkanBuffer`-handle-typed
+// block pointers (the content buffer and the counter buffer) -- not a
+// bare handle -- so `struct.A`'s own one real member is a *struct
+// containing* two opaque resource handles, nested one level deeper than
+// a bare handle or an array of them. `layOutStructIfOffsetsMatch`'s
+// non-offset branch computes each member's own natural alignment/size via
+// plain `mlir::DataLayout` queries, and neither has any
+// `DataLayoutTypeInterface` registered for the opaque
+// `!llvm.target<"spirv.VulkanBuffer", ...>` handle type at all, so asking
+// for either triggered `report_fatal_error` ("neither the scoping op nor
+// the type class provide data layout information"). Fixed by substituting
+// a real pointer's own alignment/size wherever a resource handle (or an
+// array, or now a *packed struct* of them -- this exact two-handle
+// counter-buffer shape) is encountered, rather than querying the opaque
+// handle type's own (nonexistent) DataLayoutTypeInterface directly.
+TEST(SPIRVToLLVMTest,
+    NonOffsetStructWrappingResourceWithCounterConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ "
+      "spirv.GlobalVariable @content bind(0, 0) : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), "
+      "Block>, StorageBuffer> "
+      "spirv.GlobalVariable @counter bind(0, 1) : "
+      "!spirv.ptr<!spirv.struct<(i32 [0]), Block>, StorageBuffer> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%content = spirv.mlir.addressof @content : "
+      "!spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), "
+      "Block>, StorageBuffer> "
+      "%counter = spirv.mlir.addressof @counter : "
+      "!spirv.ptr<!spirv.struct<(i32 [0]), Block>, StorageBuffer> "
+      "%wrapper = spirv.CompositeConstruct %content, %counter : "
+      "(!spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0]), "
+      "Block>, StorageBuffer>, "
+      "!spirv.ptr<!spirv.struct<(i32 [0]), Block>, StorageBuffer>) -> "
+      "!spirv.struct<(!spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, "
+      "stride=4> [0]), Block>, StorageBuffer>, !spirv.ptr<!spirv.struct<"
+      "(i32 [0]), Block>, StorageBuffer>)> "
+      "%a = spirv.CompositeConstruct %wrapper : "
+      "(!spirv.struct<(!spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, "
+      "stride=4> [0]), Block>, StorageBuffer>, !spirv.ptr<!spirv.struct<"
+      "(i32 [0]), Block>, StorageBuffer>)>) -> "
+      "!spirv.struct<(!spirv.struct<(!spirv.ptr<!spirv.struct<"
+      "(!spirv.rtarray<i32, stride=4> [0]), Block>, StorageBuffer>, "
+      "!spirv.ptr<!spirv.struct<(i32 [0]), Block>, StorageBuffer>)>)> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"GLCompute\" @entry "
+      "spirv.ExecutionMode @entry \"LocalSize\", 1, 1, 1 }");
+  EXPECT_NE(Result, "<failed>") << Result;
+}
+
 } // namespace

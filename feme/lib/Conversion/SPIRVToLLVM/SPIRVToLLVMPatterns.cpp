@@ -6873,7 +6873,69 @@ uint64_t getNaturalAlignmentIgnoringPacking(mlir::Type Ty,
   }
   if (auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Ty))
     return getNaturalAlignmentIgnoringPacking(ArrTy.getElementType(), DL);
+  // (Roadmap L455) An opaque resource-handle member -- e.g. the
+  // `spirv.VulkanBuffer` target-extension type an earlier member's own
+  // struct-to-handle conversion already produced (see this file's own
+  // "Both shapes convert to the same spirv.VulkanBuffer handle" comment
+  // near its top) -- has no `DataLayoutTypeInterface` of its own, since
+  // nothing before this point ever needed one; calling
+  // `DL.getTypeABIAlignment` on it directly is a fatal error ("neither
+  // the scoping op nor the type class provide data layout information").
+  // This only ever arises here (this function's non-offset branch, not
+  // the offset-decorated one below): HLSL never puts a resource directly
+  // inside an interface Block's own *content* struct (resources are
+  // always separate global variables, never members of an SSBO/UBO's
+  // content type) -- but an ordinary HLSL `struct` wrapping one or more
+  // resource fields directly (`struct A { RWStructuredBuffer<T> Buf; };`,
+  // the shape `Feature/ResourcesInStructs/res-of-matrix-in-struct.test`
+  // exercises) has no declared `Offset`s to honor, and is laid out here.
+  // Nothing ever reads such a struct back by a declared byte offset the
+  // way an SSBO's content is, so standing in the real host pointer's own
+  // alignment is correct: only the handle's own contribution to this
+  // struct's (or an array of it's) *total* alignment/size matters, not
+  // any particular interior byte layout of the handle itself.
+  if (mlir::isa<mlir::LLVM::LLVMTargetExtType>(Ty))
+    return DL.getTypeABIAlignment(mlir::LLVM::LLVMPointerType::get(Ty.getContext()));
   return DL.getTypeABIAlignment(Ty);
+}
+
+/// `mlir::DataLayout::getTypeSize`'s counterpart to
+/// `getNaturalAlignmentIgnoringPacking` above -- both exist for the same
+/// reason (roadmap L455): a member's own total size, not merely its
+/// alignment, determines the very next member's own placement cursor in
+/// the layout loop below, and an opaque resource-handle member (or an
+/// array of them) hits `DL.getTypeSize`'s identical fatal error for the
+/// identical reason. A `RWStructuredBuffer<T>`/`StructuredBuffer<T>` with
+/// an implicit counter (e.g. from `IncrementCounter`/`DecrementCounter`)
+/// converts to a two-element *packed* struct of exactly two such handles
+/// (the content buffer and the counter buffer) rather than a single bare
+/// handle -- see this file's own "Both shapes convert to the same
+/// spirv.VulkanBuffer handle" comment -- so a packed `LLVMStructType` must
+/// be handled too: since every struct this codebase itself builds here is
+/// packed with any needed padding already materialized as an explicit
+/// `[N x i8]` member (roadmap H135), a packed struct's own total size is
+/// always exactly the sum of its members' own sizes, with no further
+/// alignment-driven padding to add. A non-packed struct reaching this
+/// point (which should never happen, since nothing else ever stores a raw
+/// resource handle inside an ordinary, non-packed aggregate) deliberately
+/// falls through to `DL.getTypeSize` and keeps diagnosing the same fatal
+/// error as before, rather than risk silently computing the wrong size by
+/// reimplementing a second, possibly-divergent copy of LLVM's own
+/// non-packed interior-padding algorithm.
+uint64_t getMemberStorageSize(mlir::Type Ty, mlir::DataLayout &DL) {
+  if (mlir::isa<mlir::LLVM::LLVMTargetExtType>(Ty))
+    return DL.getTypeSize(mlir::LLVM::LLVMPointerType::get(Ty.getContext()));
+  if (auto ArrTy = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Ty))
+    return getMemberStorageSize(ArrTy.getElementType(), DL) *
+           ArrTy.getNumElements();
+  if (auto StructTy = mlir::dyn_cast<mlir::LLVM::LLVMStructType>(Ty);
+      StructTy && StructTy.isPacked()) {
+    uint64_t Total = 0;
+    for (mlir::Type Member : StructTy.getBody())
+      Total += getMemberStorageSize(Member, DL);
+    return Total;
+  }
+  return DL.getTypeSize(Ty);
 }
 
 mlir::Type layOutStructIfOffsetsMatch(
@@ -6931,7 +6993,7 @@ mlir::Type layOutStructIfOffsetsMatch(
       Cursor = Aligned;
       PhysicalIndexOf[I] = Laid.size();
       Laid.push_back(Member);
-      Cursor += DL.getTypeSize(Member);
+      Cursor += getMemberStorageSize(Member, DL);
     }
     // A non-packed struct's own overall size is always rounded up to its
     // own largest member's alignment; replicate that same trailing
