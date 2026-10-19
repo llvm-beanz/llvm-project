@@ -126920,3 +126920,91 @@ burn an hour on the same thing.
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: L459 fixed — `SIMDize.cpp` bool-vector GEP crash root-caused (turned out not to be an LLVM bug)
+
+**Do this first if resuming**: `vulkaninfo --summary | grep deviceName` → expect `FeMe CPU Vulkan Device`. Confirmed this session.
+
+## What's done (verified, committed)
+
+1. Root-caused the `GetElementPtrTypeIterator.h` "Not byte-addressable"
+   assertion crash from `dEQP-VK.subgroups.ballot_broadcast.*` (flagged
+   two sessions ago, never re-triaged until now).
+2. **The real bug is in FeMe, not LLVM**, despite the crash surfacing
+   inside LLVM-core helpers. `SIMDize.cpp`'s SIMD-widening pass
+   (`widenGroupSharedLoad`, `widenMaskedLoad`, `widenMaskedStore`'s
+   groupshared-scatter path) decomposes a divergent vector load/store
+   into one `getelementptr <VecTy>, Ptr, {0, Idx}` per lane — fine for
+   `float4`, architecturally broken for `bool2`/`<2 x i1>` (bit-packed
+   lanes share a byte, no per-lane byte offset exists). Confirmed via
+   `FEME_DUMP_IR_PREOPT=1`: the illegal GEP is already in FeMe's own
+   pre-optimization IR.
+3. Fixed all 3 `SIMDize.cpp` call sites: report `Ctx.emitError`/
+   `HadError=true` instead of crashing (a real bit-packed redesign is
+   out of scope — same complexity class as `L419(ae)`).
+4. Added matching defense-in-depth guards to 3 LLVM-core helpers
+   (`Operator.cpp`, `TargetTransformInfoImpl.h`,
+   `InstructionCombining.cpp`) + a new `InstructionsTest` unit test —
+   committed separately (outside-FeMe files only), per standing process.
+5. Docs updated in a 3rd commit: `Roadmap.md` (new row `L459`),
+   `VulkanCTSReport.md`, `.instructions.md` (2 new notes).
+
+## Build/test state (all passing, 0 regressions)
+
+- Single-case repro: clean `Fail` (`VK_ERROR_INITIALIZATION_FAILED`)
+  instead of `SIGABRT`.
+- `llvm/unittests/IR` `IRTests`: 920/920 passed.
+- `check-feme`: 3793/3800 passed, 7 unsupported, 0 regressions.
+- Real Vulkan CTS: all 297 `ballot_broadcast.*bvec*` cases (the exact
+  trigger class) — 0 crashes (48 Passed/24 clean Fail/225 NotSupported).
+  500-case random sample of the rest of the family — 0 Failed, 0
+  crashes.
+
+## A time-sink worth flagging: the crash kept "moving"
+
+Patched one LLVM-core call site, reran the repro, it crashed again at a
+*different* call site (`accumulateConstantOffset` → `getGEPCost` →
+InstCombine's zero-index stripping → `emitGEPOffset`), each reached via
+a different LLVM pass. This looked like unbounded whack-a-mole until I
+used `FEME_DUMP_IR_PREOPT=1` to dump FeMe's own pre-optimization IR and
+found the illegal GEP sitting right there before any LLVM pass ran —
+that's what redirected the investigation from "patch every LLVM caller"
+to "find and fix the actual FeMe producer." Lesson for next time: when
+the same assertion recurs at a new call site after each individual fix,
+dump the pre-optimization IR *first*, don't keep chasing callers.
+
+## Found but not fixed this session (new, carried forward)
+
+A large single-process `deqp-vk` batch run (all 6117
+`ballot_broadcast.*` cases in one process) stalled indefinitely on
+`subgroupbroadcast_int_requiredsubgroupsize128` — but that exact case
+passes in under a second run standalone. Likely cumulative process
+state (pipeline cache / JIT growth) across many compiles in one
+process, not a per-shader compiler bug. Not isolated; noted in
+`.instructions.md`.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~1 day, design-heavy, carried forward many sessions, still
+   untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch —
+   proven architecturally unfixable via a local patch; needs a real
+   cross-patch-adjacency design.
+2. **(~1-2 hours, new this session)** Isolate the `requiredsubgroupsize128`
+   batch-mode stall: narrow to the smallest caselist that reproduces it,
+   determine whether it's FeMe-side pipeline-cache/JIT state growth or a
+   CTS-harness/driver issue.
+3. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
+   — actually already fixed (`L457`, prior session); double-check this
+   doesn't still appear in any stale handoff list before picking a new
+   cluster.
+4. **(1-2 days, design-heavy)** The real fix for `SIMDize.cpp`'s
+   bool-vector decomposition gap: a bit-packed gather-then-shift-extract
+   redesign, following the `buildBoolVectorGEP`/`BoolVectorLaneLoadPattern`
+   precedent in `SPIRVToLLVMPatterns.cpp`. Currently only diagnosed
+   gracefully, not actually supported — any real shader using a
+   `groupshared bool2`/`bool3`/`bool4` row (or a masked/divergent load of
+   one) will fail to compile until this is done.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
