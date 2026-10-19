@@ -72,12 +72,11 @@ suggested the next steps:
 1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
    tessellation edge0-vs-edge1 ULP mismatch — needs real
    cross-patch-adjacency design, not a local patch.
-2. **(low priority, carried forward)** `feme-run` can't execute a DXIL
-   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+2. **(small, natural follow-on, new this session)** `InterlockedCompareExchange`
+   / DXIL opcode 79 is not yet raised — `createAtomicCompareExchangeRaw`/
+   `Typed` already exist in `ResourceCalls.h`, unused by DXIL today,
+   the exact same gap one opcode over from this session's fix.
 3. **(open-ended, standing)** No other known `SIMDize.cpp` "cannot yet
-   widen that shape" diagnostics remain as of this session — if a
-   future session hits a new one, check whether it's the same
-   byte-addressability class this session just fixed before assuming
-   it's new.
+   widen that shape" diagnostics remain as of this session.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
    and the roadmap counts synchronized after every fix.
