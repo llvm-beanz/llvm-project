@@ -79,6 +79,7 @@
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 
 #include <optional>
@@ -1343,6 +1344,45 @@ bool hasStageMaskOps(Function &F) {
       return true;
   }
   return false;
+}
+
+/// Roadmap L440(c): folds every `br i1 <literal ConstantInt>, label A,
+/// label B` in \p F into an unconditional branch to the live successor,
+/// then deletes any block this leaves truly unreachable.
+///
+/// This is a narrow, purely syntactic cleanup -- deliberately *not* a
+/// general `SimplifyCFGPass` (roadmap H19k already tried that broadly and
+/// it corrupted an unrelated, legitimate shape via its own unconditional
+/// `tailMergeBlocksWithSimilarFunctionTerminators`, so this file always
+/// prefers small, targeted folds over reintroducing it). It can never
+/// misfire on a genuinely divergent branch, whose condition is always a
+/// real runtime value, never a literal constant.
+///
+/// Needed because a conditional branch with a literal-constant condition
+/// and one `unreachable` arm is valid, conformant SPIR-V on its own (DXC's
+/// own LLVM-SPIRV backend emits exactly this shape as `OpBranchConditional
+/// %true %live %unreachable` boilerplate for a required `OpSelectionMerge`,
+/// confirmed via `spirv-dis` on `WaveActiveAnyTrue.test`'s own compiled
+/// module), and it survives unchanged all the way to this pass's own input
+/// IR since no earlier stage in this pipeline folds constant branches or
+/// prunes dead blocks (see `Pipeline.cpp`). Left as-is, `DiamondFlattener`'s
+/// `immediatePostDom` has no common post-dominator to find for the branch's
+/// two successors (one of which is `unreachable`, with no successors of its
+/// own), so it is misdiagnosed as a real "divergent branch ... has no
+/// reconvergence point" error despite the branch being trivially,
+/// statically resolvable.
+static bool foldConstantConditionBranches(Function &F) {
+  bool Changed = false;
+  for (auto BBI = F.begin(), BBE = F.end(); BBI != BBE;) {
+    BasicBlock &BB = *BBI++;
+    auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
+    if (!Br || !isa<ConstantInt>(Br->getCondition()))
+      continue;
+    Changed |= ConstantFoldTerminator(&BB, /*DeleteDeadConditions=*/true);
+  }
+  if (Changed)
+    EliminateUnreachableBlocks(F);
+  return Changed;
 }
 
 //===----------------------------------------------------------------------===//
@@ -7232,6 +7272,10 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
   for (Function &F : M) {
     if (F.isDeclaration())
       continue;
+
+    // Roadmap L440(c): must run before any analysis below is computed --
+    // see `foldConstantConditionBranches`'s own comment.
+    Changed |= foldConstantConditionBranches(F);
 
     DominatorTree DT(F);
     CycleInfo CI;
