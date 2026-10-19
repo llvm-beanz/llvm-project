@@ -20,16 +20,27 @@
 // the same class of bug roadmap L208 found and fixed for `FConvert`
 // specifically. See spirv-to-llvm-rounding-mode-rtz.mlir's own comment
 // for the full explanation.
+//
+// (Roadmap L456) Every f32 case below also now flushes operands/results
+// to a same-signed zero around each arithmetic op, with no `DenormFlushToZero`/
+// `DenormPreserve` execution mode declared at all: see
+// spirv-to-llvm-rounding-mode-rtz.mlir's own L456 comment for why f32
+// alone flushes by default now, unless `DenormPreserve` is declared.
 
 // A per-instruction `FPRoundingMode` decoration applies with no
 // whole-entry-point execution mode declared at all.
 // CHECK-LABEL: llvm.func @rtz_decoration
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
+// CHECK: "llvm.intr.is.fpclass"(%arg0)
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: "llvm.intr.is.fpclass"(%arg1)
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
 // CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
-// CHECK: llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %[[A]], %[[B]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
+// CHECK: "llvm.intr.is.fpclass"(%[[SUM]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @rtz_decoration(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_rounding_mode = #spirv.fp_rounding_mode<RTZ>} : f32
@@ -45,15 +56,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // (roadmap F15a) has no way to express at all, round-trip through the same
 // constrained-intrinsics lowering.
 // CHECK-LABEL: llvm.func @rtp_rtn_decorations
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
 // CHECK: %[[OLD0:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTP:.*]] = llvm.mlir.constant(2 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTP]])
-// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %[[A]], %[[B]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD0]])
+// CHECK: %[[FLUSHED_SUM:.*]] = llvm.select {{.*}}, %[[SUM]] : i1, f32
+// CHECK: %[[C:.*]] = llvm.select {{.*}}, %[[FLUSHED_SUM]] : i1, f32
+// CHECK: %[[D:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD1:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTN:.*]] = llvm.mlir.constant(3 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTN]])
-// CHECK: llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} dynamic ignore : f32
+// CHECK: llvm.intr.experimental.constrained.fsub %[[C]], %[[D]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD1]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @rtp_rtn_decorations(%a: f32, %b: f32) -> (f32) "None" {
@@ -78,12 +94,17 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // generated code.
 // CHECK-LABEL: llvm.func @rte_override
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
-// CHECK: %[[SUM:.*]] = llvm.fadd %{{.*}}, %{{.*}} : f32
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[SUM:.*]] = llvm.fadd %[[A]], %[[B]] : f32
 // CHECK-NOT: fp_rounding_mode
+// CHECK: %[[FLUSHED_SUM:.*]] = llvm.select {{.*}}, %[[SUM]] : i1, f32
+// CHECK: %[[C:.*]] = llvm.select {{.*}}, %[[FLUSHED_SUM]] : i1, f32
+// CHECK: %[[D:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ]])
-// CHECK: llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} dynamic ignore : f32
+// CHECK: llvm.intr.experimental.constrained.fsub %[[C]], %[[D]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, RoundingModeRTZ], []> {
   spirv.func @rte_override(%a: f32, %b: f32) -> (f32) "None" {
@@ -100,10 +121,14 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, RoundingModeRTZ]
 
 // `FPFastMathMode` translates to LLVM's ordinary fast-math flags on the
 // plain op, an additive mechanism independent of any rounding-mode
-// decoration or execution mode.
+// decoration or execution mode. (Roadmap L456) f32 still flushes by
+// default around the plain op, same as any other f32 arithmetic with no
+// `DenormFlushToZero`/`DenormPreserve` declared.
 // CHECK-LABEL: llvm.func @fast_math_decoration
 // CHECK-NOT: strictfp
-// CHECK: llvm.fadd %{{.*}}, %{{.*}} fastmath<nnan, ninf, nsz> : f32
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: llvm.fadd %[[A]], %[[B]] fastmath<nnan, ninf, nsz> : f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @fast_math_decoration(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_fast_math_mode = #spirv.fastmath_mode<NotNaN|NotInf|NSZ>} : f32
@@ -118,7 +143,9 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // SPIR-V's core `Fast` bit maps to LLVM's own `fast` group, which implies
 // every individual flag at once.
 // CHECK-LABEL: llvm.func @fast_math_fast_bit
-// CHECK: llvm.fadd %{{.*}}, %{{.*}} fastmath<fast> : f32
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: llvm.fadd %[[A]], %[[B]] fastmath<fast> : f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @fast_math_fast_bit(%a: f32, %b: f32) -> (f32) "None" {
     %0 = spirv.FAdd %a, %b {fp_fast_math_mode = #spirv.fastmath_mode<Fast>} : f32

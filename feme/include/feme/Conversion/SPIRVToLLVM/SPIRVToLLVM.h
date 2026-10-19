@@ -181,7 +181,14 @@ StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
 /// already have been legalized away. `DenormFlushToZero`'s own declared
 /// widths (roadmap F15b) are recovered into a distinct map of this same
 /// type, since an entry point may declare either, both (for the same or
-/// different widths), or neither.
+/// different widths), or neither. `DenormPreserve`'s own declared widths
+/// (roadmap L456) are likewise recovered into a third map of this same
+/// type: at `f32`, the one width real hardware was found (via CTS golden
+/// data for plain, undecorated HLSL arithmetic) to flush subnormal
+/// arithmetic results by default, this is the only way to opt back out of
+/// that default and genuinely request a preserved subnormal result --
+/// unlike at `f16`/`f64`, where it still only describes already-default
+/// behavior, same as every other width did before L456.
 ///
 /// `VK_KHR_shader_float_controls2`'s own `FPRoundingMode`/`FPFastMathMode`
 /// decorations (roadmap F15c) need no map of this kind at all: unlike this
@@ -231,7 +238,10 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// \p Patterns, are recovered by ConvertSPIRVToLLVMPass.cpp's
 /// collectEntryPoints -- FeMe's own pass, not this file, since they are read
 /// from `spirv.ExecutionMode`, an op outside a `spirv.func` body these
-/// per-op conversion patterns otherwise never see.
+/// per-op conversion patterns otherwise never see. \p DenormPreserveWidths,
+/// likewise recovered by collectEntryPoints (roadmap L456), is the only way
+/// to opt a `f32` arithmetic op back out of the flush-by-default behavior
+/// \p DenormFlushToZeroWidths's own comment describes.
 /// \p FastMathDefaults, likewise recovered by collectEntryPoints (this time
 /// from `spirv.ExecutionModeId`), is `FPFastMathDefault`'s own per-type
 /// default (roadmap F15d).
@@ -242,6 +252,7 @@ void populateSPIRVToLLVMTargetPatterns(
     const SpecConstantValueMap &SpecConstants,
     const FloatControlInfoMap &RoundingModeRTZWidths,
     const FloatControlInfoMap &DenormFlushToZeroWidths,
+    const FloatControlInfoMap &DenormPreserveWidths,
     const FastMathDefaultMap &FastMathDefaults);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin

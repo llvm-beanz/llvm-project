@@ -188,6 +188,16 @@ struct EntryPointInfo {
   /// FloatControlArithmeticPattern, SPIRVToLLVMPatterns.cpp) rather than
   /// preserving it. Empty for an entry point that never declared the mode.
   llvm::SmallVector<unsigned, 3> DenormFlushToZeroWidths;
+  /// The bit widths (16/32/64) `VK_KHR_shader_float_controls`'s
+  /// `DenormPreserve` execution mode was declared for (roadmap L456): at
+  /// `f32` (the one width real hardware was found, via CTS golden data, to
+  /// flush subnormal arithmetic results at *by default*, absent any
+  /// declared execution mode at all -- see `FloatControlArithmeticPattern`'s
+  /// own comment), this is now the *only* way to ask for a genuinely
+  /// preserved subnormal result, rather than merely describing already-
+  /// default behavior the way it still does at `f16`/`f64`. Empty for an
+  /// entry point that never declared the mode.
+  llvm::SmallVector<unsigned, 3> DenormPreserveWidths;
   /// Whether this entry point's body contains an arithmetic FP op carrying
   /// a non-default `fp_rounding_mode` decoration
   /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
@@ -398,6 +408,10 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
     if (Mode.getExecutionMode() ==
         mlir::spirv::ExecutionMode::DenormFlushToZero) {
       It->second.DenormFlushToZeroWidths.push_back(getFloatControlWidth(Mode));
+      continue;
+    }
+    if (Mode.getExecutionMode() == mlir::spirv::ExecutionMode::DenormPreserve) {
+      It->second.DenormPreserveWidths.push_back(getFloatControlWidth(Mode));
       continue;
     }
     switch (Mode.getExecutionMode()) {
@@ -799,6 +813,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   feme::spirv::SpecConstantValueMap SpecConstants;
   feme::spirv::FloatControlInfoMap RoundingModeRTZWidths;
   feme::spirv::FloatControlInfoMap DenormFlushToZeroWidths;
+  feme::spirv::FloatControlInfoMap DenormPreserveWidths;
   feme::spirv::FastMathDefaultMap FastMathDefaults;
   unsigned Index = 0;
   for (mlir::Operation &Op :
@@ -821,6 +836,9 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
         if (!EntryPoint.second.DenormFlushToZeroWidths.empty())
           DenormFlushToZeroWidths[EntryPoint.getKey()] =
               EntryPoint.second.DenormFlushToZeroWidths;
+        if (!EntryPoint.second.DenormPreserveWidths.empty())
+          DenormPreserveWidths[EntryPoint.getKey()] =
+              EntryPoint.second.DenormPreserveWidths;
         if (!EntryPoint.second.FastMathDefaults.empty())
           FastMathDefaults[EntryPoint.getKey()] =
               EntryPoint.second.FastMathDefaults;
@@ -902,7 +920,8 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
   feme::spirv::populateSPIRVToLLVMTargetPatterns(
       TypeConverter, Patterns, Resources, StageIOVariables, SpecConstants,
-      RoundingModeRTZWidths, DenormFlushToZeroWidths, FastMathDefaults);
+      RoundingModeRTZWidths, DenormFlushToZeroWidths, DenormPreserveWidths,
+      FastMathDefaults);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();

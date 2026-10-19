@@ -1414,6 +1414,23 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         IsSupportedProducer = ID != Intrinsic::not_intrinsic &&
                              isElementwiseVectorizableIntrinsic(ID) &&
                              callNonImmArgsHaveType(CI, I.getType());
+        // (Roadmap L456) `llvm.is.fpclass.vNfM(<N x fM>, i32 immarg) ->
+        // <N x i1>` fails the plain homogeneous check just above (its
+        // result's element type, `i1`, never equals its float operand's,
+        // `fM`) even though it is otherwise just as decomposable as any
+        // other elementwise intrinsic -- `getDivergentCallOverloadShape`'s
+        // `PrimaryOperandIndex = 0` already tells `widenElementwise`
+        // (producer-widening) that argument 0, not the result, carries
+        // the call's true overloaded type, so accept it here the same
+        // way regardless of the mismatched result type. Needed since
+        // `flushSubnormalToZero` now wraps every f32 arithmetic operand/
+        // result by default (L456), so a vector-typed divergent value
+        // (e.g. a `float4` resource load) routinely produces this call's
+        // vector-typed `<N x i1>` result now, not just the rare explicit-
+        // `DenormFlushToZero` case this pass previously only had to
+        // support.
+        if (!IsSupportedProducer && ID == Intrinsic::is_fpclass)
+          IsSupportedProducer = true;
       }
     } else if (auto *LI = dyn_cast<LoadInst>(&I)) {
       // An ordinary, non-groupshared divergent-address `load` producing a
@@ -1624,6 +1641,27 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           if (ID != Intrinsic::not_intrinsic &&
               isElementwiseVectorizableIntrinsic(ID) &&
               callNonImmArgsHaveType(UserCI, UserCI->getType()))
+            continue;
+        }
+        // (Roadmap L456) `I`'s own vector-typed float operand of
+        // `llvm.is.fpclass.vNfM(<N x fM>, i32 immarg)` -- unlike the
+        // `ctlz`/`cttz` case just above, this call's *result* type
+        // (`<N x i1>`) never equals its float operand's own type, so
+        // `isElementwiseVectorizableIntrinsic`'s `callNonImmArgsHaveType`
+        // check above never matches it; `getDivergentCallOverloadShape`'s
+        // `PrimaryOperandIndex = 0` already tells `widenElementwise`
+        // (producer side) that argument 0, not the result, carries this
+        // call's true overloaded type, so accept exactly that operand
+        // here too. Needed since `FloatControlArithmeticPattern`/
+        // `FloatControlFmaPattern`'s `flushSubnormalToZero` now wraps
+        // every f32 arithmetic operand/result by default (L456), so a
+        // vector-typed divergent value (e.g. a `float4` resource load)
+        // routinely feeds this intrinsic now, not just the rare
+        // explicit-`DenormFlushToZero` case this pass previously only had
+        // to support.
+        if (Callee) {
+          Intrinsic::ID ID = Callee->getIntrinsicID();
+          if (ID == Intrinsic::is_fpclass && UserCI->getArgOperand(0) == &I)
             continue;
         }
         // (Roadmap L266/L450) `I`'s own vector-typed operand of one of the
@@ -4644,8 +4682,23 @@ void FunctionWidener::widenVectorElementwise(Instruction &I,
       // constant, not a per-component operand, and is never itself
       // vector-typed or widened.
       Intrinsic::ID ID = ICall->getCalledFunction()->getIntrinsicID();
-      Function *WideCallee =
-          Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideElemTy});
+      // (Roadmap L456) `llvm.is.fpclass.vNfM(<N x fM>, i32 immarg) ->
+      // <N x i1>`'s overloaded type is its float operand (argument 0),
+      // not its `i1`-element result -- unlike every other intrinsic this
+      // widening loop otherwise handles, where the result's own element
+      // type (`WideElemTy`, derived from `I.getType()`) is exactly the
+      // overload to re-declare. Using `WideElemTy` (here, `<W x i1>`)
+      // for this call would wrongly declare `llvm.is.fpclass` as if its
+      // float operand were itself `i1`-typed. `getDivergentCallOverloadShape`
+      // already records this via `PrimaryOperandIndex = 0`; the overload
+      // instead comes from the wide operand's own type, matching
+      // `flushSubnormalToZero`'s (L456) `is.fpclass` calls over a
+      // vector-typed f32 operand (e.g. a `float4` resource load).
+      Type *CallOverloadTy = WideElemTy;
+      if (ID == Intrinsic::is_fpclass)
+        CallOverloadTy = ComponentOperand(0)->getType();
+      Function *WideCallee = Intrinsic::getOrInsertDeclaration(
+          NewF->getParent(), ID, {CallOverloadTy});
       SmallVector<Value *, 4> WideArgs;
       for (unsigned OpIdx = 0, E = ICall->arg_size(); OpIdx != E; ++OpIdx)
         WideArgs.push_back(ICall->paramHasAttr(OpIdx, Attribute::ImmArg)
@@ -5109,6 +5162,23 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
         return true;
       }
     }
+    // (Roadmap L456) `llvm.is.fpclass.vNfM(<N x fM>, i32 immarg) ->
+    // <N x i1>` is just as "elementwise vectorizable" as the homogeneous
+    // case just above, but its mismatched result/operand element types
+    // (`i1` vs. `fM`) never satisfy that case's own `callNonImmArgsHaveType`
+    // check, so it needs this identical, dedicated gate -- the earlier-
+    // dispatch counterpart of `widenInstruction`'s later general-cascade
+    // gate (see that gate's own comment for the full rationale and the
+    // crash this fixes).
+    if (Function *Callee = CI->getCalledFunction(); Callee &&
+        CI->getType()->isVectorTy() &&
+        Callee->getIntrinsicID() == Intrinsic::is_fpclass) {
+      if (UI.isDivergentAtDef(CI)) {
+        widenVectorElementwise(*CI, Builder);
+        return true;
+      }
+    }
+
     if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI)) {
       widenMaskedLoad(*CI, *Matched, Builder);
       return true;
@@ -5497,11 +5567,30 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // shape correctly (each argument reconstructed generically via
   // `getVectorComponents`, independently of why it is being widened).
   if (auto *CI = dyn_cast<CallInst>(&I); CI && I.getType()->isVectorTy()) {
-    if (Function *Callee = CI->getCalledFunction();
-        Callee && isElementwiseVectorizableIntrinsic(Callee->getIntrinsicID()) &&
-        callNonImmArgsHaveType(CI, I.getType())) {
-      widenVectorElementwise(I, Builder);
-      return true;
+    if (Function *Callee = CI->getCalledFunction()) {
+      Intrinsic::ID ID = Callee->getIntrinsicID();
+      bool IsHomogeneousVectorizable =
+          isElementwiseVectorizableIntrinsic(ID) &&
+          callNonImmArgsHaveType(CI, I.getType());
+      // (Roadmap L456) `llvm.is.fpclass.vNfM(<N x fM>, i32 immarg) ->
+      // <N x i1>` reaches this same gate-widening dispatch (e.g. a
+      // `float4` resource load's own result feeding a `flushSubnormalToZero`
+      // in a shader whose vector decomposition is otherwise uniform until
+      // this call) but, like the other two `is_fpclass`-specific gates
+      // above (`checkVectorDecompositionSupported`'s consumer/producer
+      // checks), never satisfies `IsHomogeneousVectorizable`'s equal-
+      // types check -- without this, it would fall through to this
+      // function's bottom-of-cascade `widenElementwise(I, Builder)` call,
+      // whose own scalar-only homogeneous-intrinsic path would then try
+      // to build an illegal `<W x <N x fM>>` nested-vector overload type
+      // from `I.getType()` being a vector (the exact crash this
+      // comment's commit fixes). Route it to `widenVectorElementwise`
+      // instead, the same as the homogeneous case, which already special-
+      // cases `is_fpclass`'s own argument-0-driven overload.
+      if (IsHomogeneousVectorizable || ID == Intrinsic::is_fpclass) {
+        widenVectorElementwise(I, Builder);
+        return true;
+      }
     }
   }
 

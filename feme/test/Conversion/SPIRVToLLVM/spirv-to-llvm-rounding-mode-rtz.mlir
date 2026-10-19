@@ -25,30 +25,54 @@
 // CHECK-NOT: __spv__
 // CHECK-LABEL: llvm.func @rounding_mode_rtz
 // CHECK-SAME: attributes {passthrough = [{{.*}}"strictfp"]}
+// (Roadmap L456) f32 now flushes operands/results to a same-signed zero
+// by default around every one of these arithmetic ops, with no
+// `DenormFlushToZero`/`DenormPreserve` execution mode declared at all: an
+// isolated A/B comparison against `Feature/HLSLLib`'s own golden CTS data
+// found every plain f32 arithmetic op's subnormal result is expected to be
+// flushed, matching real GPU hardware -- see
+// spirv-to-llvm-denorm-flush-to-zero.mlir's own comment for the
+// `is.fpclass`/`copysign`/`select` software-flush sequence this reuses,
+// now applying unconditionally at this width rather than only when
+// `DenormFlushToZero` is declared.
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
 // CHECK: %[[OLD0:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ0:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ0]])
-// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %{{.*}}, %{{.*}} dynamic ignore : f32
+// CHECK: %[[SUM:.*]] = llvm.intr.experimental.constrained.fadd %[[A]], %[[B]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD0]])
+// CHECK: %[[FLUSHED_SUM:.*]] = llvm.select {{.*}}, %[[SUM]] : i1, f32
+// CHECK: %[[C:.*]] = llvm.select {{.*}}, %[[FLUSHED_SUM]] : i1, f32
+// CHECK: %[[D:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD1:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ1:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ1]])
-// CHECK: %[[DIFF:.*]] = llvm.intr.experimental.constrained.fsub %[[SUM]], %{{.*}} dynamic ignore : f32
+// CHECK: %[[DIFF:.*]] = llvm.intr.experimental.constrained.fsub %[[C]], %[[D]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD1]])
+// CHECK: %[[FLUSHED_DIFF:.*]] = llvm.select {{.*}}, %[[DIFF]] : i1, f32
+// CHECK: %[[E:.*]] = llvm.select {{.*}}, %[[FLUSHED_DIFF]] : i1, f32
+// CHECK: %[[F:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD2:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ2:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ2]])
-// CHECK: %[[PROD:.*]] = llvm.intr.experimental.constrained.fmul %[[DIFF]], %{{.*}} dynamic ignore : f32
+// CHECK: %[[PROD:.*]] = llvm.intr.experimental.constrained.fmul %[[E]], %[[F]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD2]])
+// CHECK: %[[FLUSHED_PROD:.*]] = llvm.select {{.*}}, %[[PROD]] : i1, f32
+// CHECK: %[[G:.*]] = llvm.select {{.*}}, %[[FLUSHED_PROD]] : i1, f32
+// CHECK: %[[H:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD3:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ3:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ3]])
-// CHECK: %[[QUOT:.*]] = llvm.intr.experimental.constrained.fdiv %[[PROD]], %{{.*}} dynamic ignore : f32
+// CHECK: %[[QUOT:.*]] = llvm.intr.experimental.constrained.fdiv %[[G]], %[[H]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD3]])
+// CHECK: %[[FLUSHED_QUOT:.*]] = llvm.select {{.*}}, %[[QUOT]] : i1, f32
+// CHECK: %[[I:.*]] = llvm.select {{.*}}, %[[FLUSHED_QUOT]] : i1, f32
+// CHECK: %[[J:.*]] = llvm.select {{.*}}, %arg1 : i1, f32
 // CHECK: %[[OLD4:.*]] = llvm.call_intrinsic "llvm.get.rounding"()
 // CHECK: %[[RTZ4:.*]] = llvm.mlir.constant(0 : i32) : i32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[RTZ4]])
-// CHECK: llvm.intr.experimental.constrained.frem %[[QUOT]], %{{.*}} dynamic ignore : f32
+// CHECK: llvm.intr.experimental.constrained.frem %[[I]], %[[J]] dynamic ignore : f32
 // CHECK: llvm.call_intrinsic "llvm.set.rounding"(%[[OLD4]])
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, RoundingModeRTZ], []> {
   spirv.func @rounding_mode_rtz(%a: f32, %b: f32) -> (f32) "None" {

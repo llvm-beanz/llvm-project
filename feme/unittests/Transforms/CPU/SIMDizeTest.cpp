@@ -367,6 +367,68 @@ TEST(SIMDizeTest, WidensDivergentIsFPClassCall) {
   EXPECT_TRUE(FoundWideIsFPClass);
 }
 
+// Roadmap L456: `llvm.is.fpclass.v4f32(<4 x float>, i32 immarg) -> <4 x i1>`
+// over a divergent, *already-vector-typed* float operand -- the shape
+// `FloatControlArithmeticPattern`'s `flushSubnormalToZero` (now applied to
+// every f32 arithmetic operand/result by default, L456) produces for a
+// `float4` SPIR-V arithmetic op, exactly what `Basic/simple.test`'s
+// `Out[GI] = In[GI] * In[GI]` reduces to. Distinct from
+// `WidensDivergentIsFPClassCall` above (a *scalar* divergent float reaching
+// the ordinary scalar `widenElementwise` path): here `is_fpclass` is
+// itself a genuinely vector-typed `CallInst` (its own `I.getType()` is
+// `<4 x i1>`, not scalar), which used to crash
+// (`FixedVectorType::get`'s own element-type assertion, trying to build a
+// `<W x <4 x float>>` nested vector) across three separate dispatch sites
+// in `widenInstruction`/`widenVectorElementwise` before each one's own
+// dedicated `is_fpclass` special case was added.
+TEST(SIMDizeTest, WidensDivergentVectorIsFPClassCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %f = sitofp i32 %tid to float
+      %v0 = insertelement <4 x float> poison, float %f, i64 0
+      %v1 = insertelement <4 x float> %v0, float %f, i64 1
+      %v2 = insertelement <4 x float> %v1, float %f, i64 2
+      %v = insertelement <4 x float> %v2, float %f, i64 3
+      %issub = call <4 x i1> @llvm.is.fpclass.v4f32(<4 x float> %v, i32 144)
+      %r = bitcast <4 x i1> %issub to i4
+      %r32 = zext i4 %r to i32
+      store i32 %r32, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare <4 x i1> @llvm.is.fpclass.v4f32(<4 x float>, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideIsFPClass = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getIntrinsicID() != Intrinsic::is_fpclass)
+      continue;
+    FoundWideIsFPClass = true;
+    // Argument 0 widens to `<W x float>` (never a nested `<W x <4 x
+    // float>>`); argument 1 (the test-mask immarg) stays scalar.
+    Type *Arg0Ty = CI->getArgOperand(0)->getType();
+    ASSERT_TRUE(Arg0Ty->isVectorTy());
+    EXPECT_TRUE(cast<VectorType>(Arg0Ty)->getElementType()->isFloatTy());
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(1)));
+    Type *ResultTy = CI->getType();
+    ASSERT_TRUE(ResultTy->isVectorTy());
+    EXPECT_TRUE(cast<VectorType>(ResultTy)->getElementType()->isIntegerTy(1));
+  }
+  EXPECT_TRUE(FoundWideIsFPClass);
+}
+
 // Roadmap L121: `llvm.ldexp.f32(float, i32)` over a divergent float -- the
 // shape `spirv.GL.Ldexp`'s own feme-side lowering pattern (L120) compiles
 // down to -- also fails the ordinary "same overloaded type shared by result

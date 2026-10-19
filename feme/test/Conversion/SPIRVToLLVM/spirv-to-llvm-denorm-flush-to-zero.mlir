@@ -85,3 +85,78 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DenormFlushToZer
   spirv.ExecutionMode @denorm_flush_to_zero_and_rounding_mode_rtz "DenormFlushToZero", 32
   spirv.ExecutionMode @denorm_flush_to_zero_and_rounding_mode_rtz "RoundingModeRTZ", 32
 }
+
+// -----
+
+// (Roadmap L456) No `DenormFlushToZero`/`DenormPreserve` execution mode is
+// declared at all here, unlike every case above -- yet this f32 `FAdd`
+// still flushes both operands and its result exactly like
+// `denorm_flush_to_zero` above, since `shaderDenormFlushToZeroFloat32`/
+// `shaderDenormPreserveFloat32` are both `VK_FALSE`
+// (`EntryPoints.cpp`/`PhysicalDevice.cpp`): a real Vulkan driver is
+// permitted to flush f32 subnormals by default with neither mode declared,
+// and FeMe's own golden-CTS-data-matching behavior now does so too.
+// CHECK-LABEL: llvm.func @default_flush_no_execution_mode
+// CHECK: "llvm.intr.is.fpclass"(%arg0) <{bit = 144 : i32}>
+// CHECK: %[[A:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: "llvm.intr.is.fpclass"(%arg1) <{bit = 144 : i32}>
+// CHECK: %[[B:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[SUM:.*]] = llvm.fadd %[[A]], %[[B]] : f32
+// CHECK: "llvm.intr.is.fpclass"(%[[SUM]]) <{bit = 144 : i32}>
+// CHECK: llvm.select {{.*}} : i1, f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @default_flush_no_execution_mode(%a: f32, %b: f32) -> (f32) "None" {
+    %0 = spirv.FAdd %a, %b : f32
+    spirv.ReturnValue %0 : f32
+  }
+  spirv.EntryPoint "Fragment" @default_flush_no_execution_mode
+  spirv.ExecutionMode @default_flush_no_execution_mode "OriginUpperLeft"
+}
+
+// -----
+
+// (Roadmap L456) `DenormPreserve` (the opposite declaration from
+// `DenormFlushToZero`) suppresses the new f32 default-flush behavior:
+// this entry point explicitly opts back into IEEE-754 subnormal
+// preservation, so its `FAdd` stays the plain, unflushed `llvm.fadd`.
+// CHECK-LABEL: llvm.func @denorm_preserve_suppresses_default_flush
+// CHECK-NOT: is.fpclass
+// CHECK: llvm.fadd %arg0, %arg1 : f32
+// CHECK-NOT: is.fpclass
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, DenormPreserve], []> {
+  spirv.func @denorm_preserve_suppresses_default_flush(%a: f32, %b: f32) -> (f32) "None" {
+    %0 = spirv.FAdd %a, %b : f32
+    spirv.ReturnValue %0 : f32
+  }
+  spirv.EntryPoint "Fragment" @denorm_preserve_suppresses_default_flush
+  spirv.ExecutionMode @denorm_preserve_suppresses_default_flush "OriginUpperLeft"
+  spirv.ExecutionMode @denorm_preserve_suppresses_default_flush "DenormPreserve", 32
+}
+
+// -----
+
+// (Roadmap L456) `spirv.GL.Fma` (HLSL `mad()`'s own lowering) is not a
+// `spirv.FAdd`/`spirv.FMul`/.../`spirv.FRem` arithmetic op at all (it is a
+// GLSL.std.450 extended-instruction ternary), so it bypasses
+// `FloatControlArithmeticPattern` entirely -- `FloatControlFmaPattern`
+// (L456) is its own, narrower pattern applying the identical f32
+// default-flush rule to its three operands and the `llvm.fma` result,
+// with no execution mode declared here either.
+// CHECK-LABEL: llvm.func @fma_default_flush
+// CHECK: "llvm.intr.is.fpclass"(%arg0) <{bit = 144 : i32}>
+// CHECK: %[[X:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: "llvm.intr.is.fpclass"(%arg1) <{bit = 144 : i32}>
+// CHECK: %[[Y:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: "llvm.intr.is.fpclass"(%arg2) <{bit = 144 : i32}>
+// CHECK: %[[Z:.*]] = llvm.select {{.*}} : i1, f32
+// CHECK: %[[FMA:.*]] = llvm.intr.fma(%[[X]], %[[Y]], %[[Z]]) : (f32, f32, f32) -> f32
+// CHECK: "llvm.intr.is.fpclass"(%[[FMA]]) <{bit = 144 : i32}>
+// CHECK: llvm.select {{.*}} : i1, f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @fma_default_flush(%x: f32, %y: f32, %z: f32) -> (f32) "None" {
+    %0 = spirv.GL.Fma %x, %y, %z : f32
+    spirv.ReturnValue %0 : f32
+  }
+  spirv.EntryPoint "Fragment" @fma_default_flush
+  spirv.ExecutionMode @fma_default_flush "OriginUpperLeft"
+}

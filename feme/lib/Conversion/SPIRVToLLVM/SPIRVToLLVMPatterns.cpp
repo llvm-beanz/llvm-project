@@ -14168,6 +14168,19 @@ mlir::Value flushSubnormalToZero(mlir::ConversionPatternRewriter &Rewriter,
                                        SignedZero, V);
 }
 
+/// Returns whether \p Widths declares \p Width for \p Func: shared by every
+/// float-controls-aware conversion pattern below (`FloatControlArithmeticPattern`
+/// and `FloatControlFmaPattern`) that needs to consult one of the
+/// `FloatControlInfoMap`s ConvertSPIRVToLLVMPass.cpp's collectEntryPoints
+/// recovers (`RoundingModeRTZWidths`, `DenormFlushToZeroWidths`,
+/// `DenormPreserveWidths`).
+bool declaresFloatControlWidth(const feme::spirv::FloatControlInfoMap &Widths,
+                               mlir::FunctionOpInterface Func,
+                               unsigned Width) {
+  auto It = Widths.find(Func.getName());
+  return It != Widths.end() && llvm::is_contained(It->second, Width);
+}
+
 /// Creates an `llvm.mlir.constant` of \p Value, scalar or splatted to match
 /// \p Ty's shape (mirroring upstream `SPIRVToLLVM.cpp`'s own file-local,
 /// inaccessible-from-here `createFPConstant`).
@@ -16374,10 +16387,10 @@ mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
 }
 
 /// Converts an arithmetic FP `spirv` op that would otherwise become MLIR's
-/// plain, round-to-nearest-even, denormal-preserving `PlainOp` (upstream
-/// `SPIRVToLLVM.cpp`'s `DirectConversionPattern`) into whichever of the
-/// following \p Op's own bit width was declared for by the enclosing entry
-/// point's `VK_KHR_shader_float_controls` execution modes, or \p Op's own
+/// plain, round-to-nearest-even `PlainOp` (upstream `SPIRVToLLVM.cpp`'s
+/// `DirectConversionPattern`) into whichever of the following \p Op's own
+/// bit width was declared for by the enclosing entry point's
+/// `VK_KHR_shader_float_controls` execution modes, or \p Op's own
 /// `VK_KHR_shader_float_controls2` per-instruction decorations, requests
 /// (the concrete, "actually produces the requested code" half of these
 /// modes this conversion previously could only diagnose, not honor -- see
@@ -16403,6 +16416,34 @@ mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
 ///   equivalent for flush-to-zero, so this is an explicit software flush
 ///   around an ordinary operation rather than a different intrinsic, a
 ///   materially different lowering strategy from `RoundingModeRTZ`'s.
+/// - (Roadmap L456) At `f32`, this same flush now also applies *by
+///   default*, independent of whether `DenormFlushToZero` was declared at
+///   all, unless the entry point instead declares `DenormPreserve` for
+///   that width: an isolated A/B comparison against `Feature/HLSLLib/
+///   {degrees,radians,mad}.32.test`'s own golden `ExpectedOut` data (none
+///   of which declares *any* `VK_KHR_shader_float_controls` execution
+///   mode -- `dxc` never emits one for a plain HLSL arithmetic
+///   expression) showed every one of them expects a subnormal arithmetic
+///   result to be exactly zero, not the correctly-rounded, non-flushed
+///   IEEE-754 answer this conversion previously always produced absent a
+///   declared mode. This models a real GPU's own hardware ALU, which
+///   commonly cannot represent a subnormal `f32` result at all and flushes
+///   it unconditionally -- the same reasoning
+///   `TranscendentalFlushInputPattern` above already established for a
+///   special-function unit's *input*, just now extended to ordinary
+///   arithmetic's *result* (and, since the same flush call already
+///   flushes operands too when enabled at all, its operands as well).
+///   `shaderDenormPreserveFloat32`/`shaderDenormFlushToZeroFloat32` both
+///   stay `VK_FALSE` in `EntryPoints.cpp` (see that file's own comment),
+///   so no shader can actually declare `DenormPreserve` and have it
+///   honored by a conformant pipeline -- this default cannot regress any
+///   currently-valid shader that relies on an explicitly *requested*
+///   preserved denormal, only ones that relied on the previously-silent,
+///   unrequested default. `f16`/`f64` are deliberately left at the old,
+///   preserve-unless-asked default: this session's own CTS evidence is
+///   `f32`-only (no `.16`/`.64`-suffixed `HLSLLib` test shares this
+///   failure), and flipping a width with no supporting evidence would be
+///   an unverified, purely speculative change.
 /// - `FPFastMathMode` (F15c, a per-instruction decoration): translated to
 ///   LLVM fast-math flags on \p PlainOp (see getFastMathFlagsDecoration);
 ///   dropped, rather than applied to \p ConstrainedIntrOp, if this
@@ -16420,9 +16461,11 @@ mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
 /// operands, rounding in a non-default direction, then flushing a
 /// subnormal result -- fast-math flags aside, per above), independently of
 /// each other. Any bit width neither whole-entry-point mode was declared
-/// for, on an op with neither per-instruction decoration either, falls
-/// through (a match failure, the same as any other pattern that does not
-/// apply) to MLIR's own lower-benefit `DirectConversionPattern`, unchanged.
+/// for (nor, at `f32`, left at its new flush-by-default state by a
+/// `DenormPreserve` declaration), on an op with neither per-instruction
+/// decoration either, falls through (a match failure, the same as any
+/// other pattern that does not apply) to MLIR's own lower-benefit
+/// `DirectConversionPattern`, unchanged.
 ///
 /// `spirv.FNegate` is deliberately not one of the ops this pattern (or any
 /// sibling of it) handles: negation is an exact sign-bit flip with no
@@ -16439,10 +16482,12 @@ public:
       mlir::PatternBenefit Benefit,
       const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths,
       const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths,
+      const feme::spirv::FloatControlInfoMap &DenormPreserveWidths,
       const feme::spirv::FastMathDefaultMap &FastMathDefaults)
       : mlir::SPIRVToLLVMConversion<SPIRVOp>(Context, TypeConverter, Benefit),
         RoundingModeRTZWidths(RoundingModeRTZWidths),
         DenormFlushToZeroWidths(DenormFlushToZeroWidths),
+        DenormPreserveWidths(DenormPreserveWidths),
         FastMathDefaults(FastMathDefaults) {}
 
   mlir::LogicalResult
@@ -16461,7 +16506,12 @@ public:
 
     unsigned Width =
         mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
-    bool FlushDenormals = declaresWidth(DenormFlushToZeroWidths, Func, Width);
+    // (Roadmap L456) At `f32`, flush unless `DenormPreserve` was declared
+    // for this width -- see this pattern's own comment above for why `f32`
+    // alone gets this inverted, flush-by-default treatment.
+    bool FlushDenormals =
+        declaresFloatControlWidth(DenormFlushToZeroWidths, Func, Width) ||
+        (Width == 32 && !declaresFloatControlWidth(DenormPreserveWidths, Func, Width));
 
     // A per-instruction `FPRoundingMode` decoration (F15c) overrides the
     // entry point's own whole-module `RoundingModeRTZ` (F15a) for this one
@@ -16471,7 +16521,7 @@ public:
     std::optional<mlir::LLVM::RoundingMode> PerOpRounding =
         getRoundingModeDecoration(Op);
     std::optional<mlir::LLVM::RoundingMode> Rounding = PerOpRounding;
-    if (!Rounding && declaresWidth(RoundingModeRTZWidths, Func, Width))
+    if (!Rounding && declaresFloatControlWidth(RoundingModeRTZWidths, Func, Width))
       Rounding = mlir::LLVM::RoundingMode::TowardZero;
     bool NeedsConstrainedOp =
         Rounding && *Rounding != mlir::LLVM::RoundingMode::NearestTiesToEven;
@@ -16504,10 +16554,12 @@ public:
         FastMath == mlir::LLVM::FastmathFlags::none && !PerOpRounding &&
         !HasFastMathDecoration)
       return Rewriter.notifyMatchFailure(
-          Op, "enclosing entry point declared neither RoundingModeRTZ, "
-              "DenormFlushToZero, nor an FPFastMathDefault for this bit "
-              "width, and this instruction has neither an FPRoundingMode "
-              "nor an FPFastMathMode decoration of its own");
+          Op, "enclosing entry point declared neither RoundingModeRTZ nor "
+              "an FPFastMathDefault for this bit width, this instruction "
+              "has neither an FPRoundingMode nor an FPFastMathMode "
+              "decoration of its own, and (at non-f32 widths only, since "
+              "f32 flushes by default -- roadmap L456) the entry point "
+              "did not declare DenormFlushToZero for this width either");
 
     mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
     if (!DstType)
@@ -16587,16 +16639,80 @@ public:
   }
 
 private:
-  /// Returns whether \p Widths declares \p Width for \p Func.
-  static bool declaresWidth(const feme::spirv::FloatControlInfoMap &Widths,
-                             mlir::FunctionOpInterface Func, unsigned Width) {
-    auto It = Widths.find(Func.getName());
-    return It != Widths.end() && llvm::is_contained(It->second, Width);
-  }
-
   const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths;
   const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths;
+  const feme::spirv::FloatControlInfoMap &DenormPreserveWidths;
   const feme::spirv::FastMathDefaultMap &FastMathDefaults;
+};
+
+/// Converts `spirv.GL.Fma`/`spirv.CL.fma` (HLSL `mad`) the same
+/// flush-unless-`DenormPreserve`-declared way `FloatControlArithmeticPattern`
+/// above converts ordinary binary arithmetic (roadmap L456): at `f32`, all
+/// three operands (\p SPIRVOp's `x`/`y`/`z`) and the result are each flushed
+/// to a same-signed zero first if subnormal (see flushSubnormalToZero),
+/// unless the entry point declares `DenormPreserve` for that width, or
+/// unconditionally if it declares `DenormFlushToZero` for it. Deliberately
+/// narrower in scope than `FloatControlArithmeticPattern`: `mad` has no
+/// known `RoundingModeRTZ`/`FPRoundingMode`/`FPFastMathMode` CTS failure of
+/// its own (unlike the five binary ops that pattern is templated over), so
+/// this one only ever changes the op's *flush* behavior, otherwise
+/// forwarding straight to \p PlainOp (`llvm.fma`) exactly as upstream's own
+/// `DirectConversionPattern` would -- if a rounding-mode or fast-math need
+/// for `mad` ever turns up, broaden this pattern the same way
+/// `FloatControlArithmeticPattern` already was, rather than guessing at it
+/// now with no evidence.
+template <typename SPIRVOp>
+class FloatControlFmaPattern : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+
+  FloatControlFmaPattern(
+      mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
+      mlir::PatternBenefit Benefit,
+      const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths,
+      const feme::spirv::FloatControlInfoMap &DenormPreserveWidths)
+      : mlir::SPIRVToLLVMConversion<SPIRVOp>(Context, TypeConverter, Benefit),
+        DenormFlushToZeroWidths(DenormFlushToZeroWidths),
+        DenormPreserveWidths(DenormPreserveWidths) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto Func = Op->template getParentOfType<mlir::FunctionOpInterface>();
+    if (!Func)
+      return Rewriter.notifyMatchFailure(Op, "not inside a function");
+
+    unsigned Width =
+        mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
+    bool FlushDenormals =
+        declaresFloatControlWidth(DenormFlushToZeroWidths, Func, Width) ||
+        (Width == 32 &&
+         !declaresFloatControlWidth(DenormPreserveWidths, Func, Width));
+    if (!FlushDenormals)
+      return Rewriter.notifyMatchFailure(
+          Op, "enclosing entry point declared DenormPreserve for this bit "
+              "width, or this bit width is not f32 and the entry point "
+              "did not declare DenormFlushToZero for it either");
+
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value X = flushSubnormalToZero(Rewriter, Loc, Adaptor.getX());
+    mlir::Value Y = flushSubnormalToZero(Rewriter, Loc, Adaptor.getY());
+    mlir::Value Z = flushSubnormalToZero(Rewriter, Loc, Adaptor.getZ());
+    mlir::Value Result =
+        mlir::LLVM::FMAOp::create(Rewriter, Loc, DstType, X, Y, Z);
+    Result = flushSubnormalToZero(Rewriter, Loc, Result);
+
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths;
+  const feme::spirv::FloatControlInfoMap &DenormPreserveWidths;
 };
 
 /// (roadmap E4) Drops `spirv.ExecutionModeId` (`VK_KHR_maintenance4`'s
@@ -17480,6 +17596,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const SpecConstantValueMap &SpecConstants,
     const FloatControlInfoMap &RoundingModeRTZWidths,
     const FloatControlInfoMap &DenormFlushToZeroWidths,
+    const FloatControlInfoMap &DenormPreserveWidths,
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
       AggregateInitializedVariablePattern,
@@ -17632,7 +17749,21 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       FloatControlArithmeticPattern<mlir::spirv::FRemOp, mlir::LLVM::FRemOp,
                                     mlir::LLVM::ConstrainedFRemIntr>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths,
-      DenormFlushToZeroWidths, FastMathDefaults);
+      DenormFlushToZeroWidths, DenormPreserveWidths, FastMathDefaults);
+  // (Roadmap L456) `spirv.GL.Fma` (HLSL `mad`) needs the same `f32`
+  // flush-by-default-unless-`DenormPreserve`-declared treatment
+  // `FloatControlArithmeticPattern` above gives ordinary arithmetic, but is
+  // not one of that pattern's own template instantiations: it is a ternary
+  // GLSL.std.450 extended instruction, not one of the five binary
+  // `spirv.F*` ops that pattern is templated over, and (unlike those five)
+  // has no `RoundingModeRTZ`/`FPRoundingMode` story of its own yet (no CTS
+  // evidence either way for `mad`'s own rounding-mode behavior, so left
+  // untouched here rather than guessed at). See `FloatControlFmaPattern`'s
+  // own comment above for why only the flush half is handled.
+  Patterns.add<FloatControlFmaPattern<mlir::spirv::GLFmaOp>,
+               FloatControlFmaPattern<mlir::spirv::CLFmaOp>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit, DenormFlushToZeroWidths,
+      DenormPreserveWidths);
   // (Roadmap L208) `FConvertRoundingModePattern` is not templated over
   // `RoundingModeRTZWidths`/`DenormFlushToZeroWidths`/`FastMathDefaults`
   // the way `FloatControlArithmeticPattern` above is: `RoundingModeRTZ`/
