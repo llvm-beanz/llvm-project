@@ -127008,3 +127008,81 @@ process, not a per-shader compiler bug. Not isolated; noted in
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
    uninspected.
+
+# Session: `requiredsubgroupsize128` triage + real bool-vector SIMDize fix + stash cleanup
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed first thing (standing requirement, every session).
+
+## 1. Closed out the carried-forward `requiredsubgroupsize128` "stall" (L460)
+
+Not a hang. Isolated to one standalone case
+(`subgroupbroadcast_int_requiredsubgroupsize128`): it genuinely takes
+~79 seconds to compile, confirmed via 5 `gdb -batch -ex attach -ex bt`
+samples all landing in plain upstream LLVM backend codegen
+(`MachineScheduler`/`RegAllocGreedy`/`SelectionDAGISel`), never FeMe
+code. `requiredSubgroupSize=128` forces a 128-lane widened function;
+these LLVM passes are quadratic-ish in function size. Scope: only 6 of
+`ballot_broadcast`'s 6117 cases hit this path (2m41s total, not
+indefinite). No fix — real fix would mean redesigning CPU codegen
+strategy for extreme-width functions, same complexity class as
+`L419(ae)`. Documented and committed (`e34e5023476a`).
+
+## 2. Confirmed `spec_const_other_sizes.test` already fixed
+
+Ran `check-hlsl-clang-feme-vk`: only the known `Basic/Mandelbrot.test`
+flake fails (1 Failed/385 Passed/269 Unsupported/138 XFail). No code
+change needed, no longer worth tracking as an open item.
+
+## 3. Real fix for `SIMDize.cpp`'s bool-vector gap (was L459's diagnostic-only guard, now L461)
+
+This was the biggest item: replaced the "report unsupported shape"
+guard with the actual bit-packed gather/scatter design at all 3 sites
+(`widenGroupSharedLoad`, `widenMaskedLoad`, `widenMaskedStore`'s
+groupshared scatter). Instead of indexing a lane's sub-byte offset with
+`getelementptr` (undefined for `<N x i1>` — lanes share one byte), the
+whole row now gathers/scatters as a single `<WaveSize x iBits>` packed
+integer, with two new helpers (`packVectorRowComponents`/
+`unpackVectorRowComponents`) bit-packing/unpacking components via
+shift+trunc/zext+shl+or — same convention as LLVM's own
+`bitcast <N x i1> <-> iN`.
+
+Verified:
+- 3 new `SIMDizeTest` unit tests (one per call site), all pass.
+- `check-feme`: 3790 → 3796 passed (+6 unit tests), 0 regressions.
+- Real Vulkan CTS: all 297 `ballot_broadcast.*bvec*` cases — 72
+  Passed/0 Failed/225 NotSupported (unchanged NotSupported set; every
+  case that previously hit the graceful-failure diagnostic now
+  actually Passes). Re-ran the exact `subgroupbroadcast_bvec2` repro
+  from `L459`'s commit — now `Pass`.
+
+Committed in 2 commits (code+tests `77379b6f7f46`, docs `2bde2bd03ef4`).
+
+## 4. Inspected and cleared all 9 git stashes
+
+8 of 9 were empty (docs-only WIP snapshots with 0 diff vs HEAD — stale
+artifacts from an older workflow, nothing lost). The 9th (`Linearize.cpp`,
+labeled L419(v)) turned out to be an exact duplicate of a fix already
+landed as `L419(u)` (`eefe52affa6a`) — confirmed by diffing the current
+file against the stash. All 9 safely `git stash clear`ed.
+
+## Not done this session
+
+- **`L419(ae)` tessellation ULP mismatch** — still untouched,
+  design-heavy (~1 day), needs real cross-patch-adjacency work.
+- **`feme-run` DXIL resource `InterlockedAdd`/atomic gap** — low
+  priority, still carried forward.
+
+## Next steps
+
+1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
+   tessellation edge0-vs-edge1 ULP mismatch — needs real
+   cross-patch-adjacency design, not a local patch.
+2. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+3. **(open-ended, standing)** No other known `SIMDize.cpp` "cannot yet
+   widen that shape" diagnostics remain as of this session — if a
+   future session hits a new one, check whether it's the same
+   byte-addressability class this session just fixed before assuming
+   it's new.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
+   and the roadmap counts synchronized after every fix.
