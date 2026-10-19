@@ -73,16 +73,21 @@ suggested the next steps:
    untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch —
    proven architecturally unfixable via a local patch; needs a real
    cross-patch-adjacency design.
-2. **(~1-2 hours)** Triage the `FEME_DEBUG_DUMP_SPIRV_MLIR` crash (an
-   `ImageOps.cpp` `verifyImageOperands` assertion) — flagged a prior
-   session, not yet root-caused.
-3. **(~1-2 hours)** Triage the `GetElementPtrTypeIterator.h` "Not
-   byte-addressable" crash hit probing `dEQP-VK.subgroups.
-   ballot_broadcast.*` — same bug class as roadmap `E29f`/`H101e`/`L102`,
-   not yet re-triaged against this specific case.
-4. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
-   is now `L440(c)`'s only non-flake residual — worth a quick triage pass
-   before the next session picks a new compact cluster to hunt for.
+2. **(~1-2 hours, new this session)** Isolate the `requiredsubgroupsize128`
+   batch-mode stall: narrow to the smallest caselist that reproduces it,
+   determine whether it's FeMe-side pipeline-cache/JIT state growth or a
+   CTS-harness/driver issue.
+3. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
+   — actually already fixed (`L457`, prior session); double-check this
+   doesn't still appear in any stale handoff list before picking a new
+   cluster.
+4. **(1-2 days, design-heavy)** The real fix for `SIMDize.cpp`'s
+   bool-vector decomposition gap: a bit-packed gather-then-shift-extract
+   redesign, following the `buildBoolVectorGEP`/`BoolVectorLaneLoadPattern`
+   precedent in `SPIRVToLLVMPatterns.cpp`. Currently only diagnosed
+   gracefully, not actually supported — any real shader using a
+   `groupshared bool2`/`bool3`/`bool4` row (or a masked/divergent load of
+   one) will fail to compile until this is done.
 5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
    shader using a resource (not groupshared) `InterlockedAdd`/atomic.
 6. **(low priority, carried forward)** 9 older git stashes remain
