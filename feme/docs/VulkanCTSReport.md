@@ -8543,3 +8543,77 @@ remains an open, design-heavy architectural gap (not revisited this
 session); `feme-run`'s DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic
 gap and 9 uninspected git stashes remain carried-forward low-priority
 items.
+
+## L455: non-offset struct wrapping a resource-handle-with-counter fix
+
+**`check-feme`: 3,789/3,796 Passed (+1 new unit test), 7 Unsupported, 0
+regressions.**
+
+**Triaged `Feature/ResourcesInStructs/res-of-matrix-in-struct.test`'s
+SIGABRT, flagged "scope first, maybe its own session" across two prior
+sessions' handoffs but never actually reduced.** Built a standalone,
+`llvm-lit`-independent reproducer (`split-file` the `.test`'s embedded
+sections into real files, compile with the exact `%dxc_target`
+substitution flags, run `offloader pipeline.yaml t.o` directly) that
+crashed deterministically, 100% of the time -- not a flaky/ASLR-dependent
+memory-safety bug like some prior sessions' SIGABRT triages, correcting
+the "looks distinct, maybe memory-unsafe" framing those earlier sessions
+had assumed without actually reducing it.
+
+**Root cause**: an ordinary (non-offset, non-`Block`) HLSL struct wrapping
+a resource directly (`struct A { RWStructuredBuffer<int3x2> Buf; };`) has
+its `Buf` member converted, by an existing struct-to-handle collapse rule,
+into a nested two-member *packed* struct of two separate opaque
+`spirv.VulkanBuffer` resource-handle types -- the content buffer and
+`RWStructuredBuffer`'s own implicit append/consume counter buffer -- not a
+bare handle. `layOutStructIfOffsetsMatch`'s non-offset branch computes
+each member's natural alignment/size via plain `mlir::DataLayout` queries,
+and neither has any `DataLayoutTypeInterface` registered for the opaque
+handle type at all, so both triggered `report_fatal_error` ("neither the
+scoping op nor the type class provide data layout information") the
+moment `struct.A`'s own member-layout loop reached it.
+
+**Fix**: extended `getNaturalAlignmentIgnoringPacking` and a new
+`getMemberStorageSize` helper to substitute a real pointer's own
+alignment/size wherever a resource handle, an array of them, or a packed
+struct of them is encountered -- leaving the actual stored/returned member
+type untouched so downstream resource-lowering patterns still recognize
+it by its real handle type. (The first fix attempt only handled a bare
+handle or an array of them; re-running the isolated repro immediately
+caught that the real shape needed one more level of recursion -- a packed
+struct of two handles -- via `getMemberStorageSize` itself appearing in
+the still-crashing stack trace.)
+
+**`check-hlsl-clang-feme-vk`: 12 Failed -> 11 Failed, 0 regressions**
+(exact failure-name-set diff).
+
+**`check-hlsl-feme-vk` (DXC-compiled, non-Clang suite)**: 0 Failed.
+
+**Real Vulkan CTS verification**: this fix's reachable code path (an
+ordinary HLSL struct directly wrapping a resource) is a DXC/Clang-HLSL-only
+construct -- GLSL has no equivalent (resources are always top-level
+bindings, never struct members) -- so ran `dEQP-VK.ssbo.*` (12,225 cases)
+as the broadest already-established-baseline smoke check for this file's
+shared layout machinery: 0 Failed, 4,755 Passed, 7,470 NotSupported,
+byte-identical to the established baseline, 0 regressions.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (bug fix only, no new feature/extension).
+
+**Residual `L440(c)` count: 11** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1), `Feature/HLSLLib` (3:
+`degrees.32`/`mad.32`/`radians.32`),
+`Feature/Semantics/MatrixSemantics.test` (1),
+`Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Feature/WaveOps/WaveActiveAnyTrue.test` (1),
+`Tools/Offloader/BufferFormats.test` (1),
+`WaveOps/QuadReadAcrossDiagonal.convergence.test`/`WaveActiveBitXor.int.test`
+(2) -- `res-of-matrix-in-struct.test` is no longer in this list (fixed by
+`L455` above).
+
+**Next steps**: `Feature/HLSLLib`'s 3-case cluster
+(`degrees.32`/`mad.32`/`radians.32`) is now the largest compact residual
+cluster; `L419(ae)`'s tessellation ULP-mismatch fix remains an open,
+design-heavy architectural gap (not revisited this session); `feme-run`'s
+DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9
+uninspected git stashes remain carried-forward low-priority items.
