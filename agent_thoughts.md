@@ -127232,3 +127232,104 @@ discovery, just a reminder to use the existing test convention.
    shape" diagnostics remain open.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
    and the roadmap counts synchronized after every fix.
+
+# Session: L419(ae) — proved no per-edge formula fix exists (negative result, reverted)
+
+**Start here next session**: `L419(ae)` (tessellation edge0-vs-edge1 ULP
+crack) needs a real cross-patch-adjacency design now. Per-edge arithmetic
+tweaks are a **closed, proven-impossible** class — don't retry one.
+
+## What I did
+
+1. Confirmed device: `FeMe CPU Vulkan Device` ✅ (mandatory check, done first).
+2. Re-derived the exact mechanism from `Roadmap.md`'s `L419(ae)` entry
+   (written by a prior session): edge0 and edge1 are both "forward" edges
+   generated via plain direct `K/N` division; a `swap(0,3)` control-point
+   permutation makes one patch see a shared edge as its own edge0 while the
+   neighbor sees it as edge1. The domain shader's fixed bilinear blend
+   (not FeMe code) computes the "other corner" weight via an uncontrollable
+   `1.0f - x` float subtraction, which doesn't bit-match a plain direct
+   division for the complementary index.
+3. **Verified numerically** (`numpy.float32`, N=2..32, every K): redefining
+   edge1's `V` as `1.0f - (N-K)/N` (mirroring the shader's own subtraction)
+   gives 0 bit-mismatches, vs. 208/558 for the current formula.
+4. **Implemented the fix** in `appendQuadBoundaryRing` (`Tessellator.cpp`)
+   plus a new unit test (`QuadAdjacentForwardEdgesMatchAcrossSwappedPatches`)
+   reproducing the swapped-patch blend directly. Both passed in isolation.
+5. **It broke an existing test**: `QuadOppositeEdgesProduceBitExactlyEqualCoordinateSets`
+   (the `L335`/`L336` regression test) immediately failed — edge1's values
+   no longer matched edge3's (`0.333333343` vs `0.333333313`, a genuine new
+   ULP regression in the already-passing `outer_edge_index_independence`
+   invariant).
+6. Reran `dEQP-VK.tessellation.common_edge.*precise*` live against the
+   broken fix: still 3/6 passing — **no net gain even in practice**, so
+   this wasn't a worthwhile trade-off even ignoring the regression.
+7. **Reverted** both files (`git checkout --`). Rebuilt, reran `check-feme`:
+   3800/3800 Passed, 7 Unsupported — clean baseline confirmed.
+8. Reran `common_edge.*precise*` again post-revert: unchanged 3/6 — confirms
+   the revert didn't silently fix or break anything else either.
+
+## Why this matters (not wasted effort)
+
+A **prior session** (commit `066cafeb1a5f`) already suspected this was
+unfixable via an abstract `numpy` search over possible formulas. This
+session went one step further and actually **implemented the fix and hit
+the regression concretely**, which is much stronger evidence: it's not
+just "we couldn't find a formula that works," it's "here is the exact
+formula that fixes the target case, and here is the exact pre-existing
+test it breaks, with the exact numbers." The algebraic reason is now
+nailed down too: edge0-vs-edge2 and edge1-vs-edge3 (already passing) are
+pure coordinate-*value* comparisons (no float subtraction on either side,
+so direct-division formulas are bit-exact under index reversal by
+construction); edge0-vs-edge1 is a blended-*position* comparison where one
+side passes through the shader's own uncontrollable subtraction. These two
+requirement types are **provably mutually exclusive** for a single per-edge
+formula. No future session should attempt a "just tweak one edge's K/N
+formula" fix again — that whole approach is closed.
+
+## Docs updated
+
+- `feme/docs/Roadmap.md`: appended the full derivation + counter-example
+  to the existing `L419(ae)` entry (still open, not struck through —
+  downgraded from "risk flagged" to "proven impossible", with the real
+  next step spelled out: a global-edge-identity/adjacency mechanism).
+- `feme/docs/VulkanCTSReport.md`: new entry recording the attempted fix,
+  the regression, the live CTS reruns (before/after revert), and the
+  `check-feme` reconfirmation.
+- No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+  needed (no functional/feature change landed).
+
+## Build/test state
+
+- `check-feme`: 3800/3800 Passed, 7 Unsupported, 0 regressions (clean
+  tree, post-revert).
+- Real Vulkan CTS: `dEQP-VK.tessellation.common_edge.*precise*` run twice
+  (with the attempted fix, and again post-revert) — 3/6 both times,
+  confirming no regression and no accidental fix.
+- Git stashes: 0 across `llvm-project`, `offload-test-suite`, `VK-GL-CTS`
+  — still clean.
+- `offload-test-suite`'s `feme` branch: not touched this session (no
+  `check-hlsl-feme-vk`-relevant work happened).
+
+## Next steps
+
+1. **(real architecture work, not yet scoped into hours)** `L419(ae)`
+   needs a genuine cross-patch-adjacency mechanism: compute each shared
+   physical edge's boundary points *once*, keyed by a global edge identity
+   derived from the input patch's control-point indices (not the per-patch
+   local edge index you get from `appendQuadBoundaryRing` today), and reuse
+   that single point set for whichever side of the pairing walks it. This
+   requires `Tessellator.cpp` (or its caller) to gain adjacency visibility
+   it does not currently have. Start by figuring out *where* in the
+   pipeline patch adjacency could realistically be tracked (is there an
+   existing concept of "which patches are neighbors" anywhere upstream, or
+   does this need a new data structure threaded through from the hull
+   shader's output topology?) before writing any tessellator code.
+2. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic —
+   wait, this was already fixed (`L462`); double-check this stale item
+   doesn't appear in any future handoff list again.
+3. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
+   the roadmap counts synchronized after every fix.
