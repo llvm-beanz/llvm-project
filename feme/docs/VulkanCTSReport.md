@@ -8742,3 +8742,81 @@ and 9 uninspected git stashes remain carried-forward low-priority items;
 the remaining 8 `L440(c)` residuals are now small/scattered enough that a
 future session should individually triage each rather than looking for
 another compact cluster.
+
+## L440(c): `InBoundsAccessChain`-templating fix for `MatrixSemantics.test`
+
+**Task**: continue triaging `L440(c)`'s remaining 8 small/scattered
+`check-hlsl-clang-feme-vk` residuals individually (per the prior
+session's explicit handoff guidance), starting with
+`Feature/Semantics/MatrixSemantics.test`.
+
+**Root cause**: a vertex shader writes a custom `float4x4 MY_MATRIX`
+semantic (a vertex-to-pixel interpolant); the pixel shader reads it back
+row by row. `dxc` emits a plain `spirv.AccessChain` selecting only the
+*first* row of such an `Input`-storage `!spirv.array<4 x vector<4xf32>>`,
+and an `spirv.InBoundsAccessChain` for every subsequent row.
+`isInputArrayAccessChain`/`StageIOArrayAccessChainPattern` (added for
+roadmap H7y) were only ever instantiated for `spirv.AccessChain`, never
+templated over `spirv.InBoundsAccessChainOp` the way
+`OffsetStructMemberReorderAccessChainPattern`/`BlockAccessChainPattern`
+already are (the identical two-op asymmetry `L454` fixed for a different
+pattern). Every row but the first fell through to MLIR's own generic
+`AccessChainPattern`, which built an ill-typed `llvm.getelementptr` whose
+declared result was the eagerly-loaded-value type (`vector<4xf32>`)
+rather than the real pointer this array's own base actually is, failing
+MLIR's own `LLVM::GEPOp::verify()` outright ("result #0 must be LLVM
+pointer type ... but got 'vector<4xf32>'") and aborting graphics pipeline
+creation (`VkResult = -3`).
+
+Isolated via `FEME_DEBUG_DUMP_SPIRV_MLIR=1` run directly against the
+test's own already-split pixel-shader object (`offloader -debug-layer`),
+confirming the vertex shader's own conversion was clean and the error was
+specific to the pixel shader's mixed `AccessChain`/`InBoundsAccessChain`
+row-selector sequence.
+
+**Fix**: templated both `isInputArrayAccessChain` and
+`StageIOArrayAccessChainPattern` over the access-chain op type (adding
+`this->` qualification for the now-dependent `getTypeConverter()` calls)
+and registered both the `spirv.AccessChain` and
+`spirv.InBoundsAccessChain` instantiations in
+`populateSPIRVToLLVMConversionPatterns`. New unit test
+`SPIRVToLLVMTest.InputStorageArrayInBoundsAccessChainConvertsInsteadOfFailing`
+(confirmed red without the fix, reproducing the exact failing shape --
+an `Input`-storage array-of-vectors' second row read via
+`InBoundsAccessChain` -- green with it).
+
+**Net effect**: `check-hlsl-clang-feme-vk`: 8 -> 7 Failed, 0 regressions
+(exact failure-name-set diff; `MatrixSemantics.test` now passes
+outright). `check-feme`: 3,791/3,798 Passed (7 Unsupported, +1 new unit
+test), 0 regressions.
+
+No real Vulkan CTS sweep scoped: this fix's own reachable code path -- a
+custom HLSL semantic's own multi-row vertex-to-pixel matrix interpolant,
+read with a *mixed* `AccessChain`/`InBoundsAccessChain` row-selector
+sequence -- is DXC/Clang-HLSL-direct-to-SPIR-V-only; glslangValidator's
+GLSL-authored CTS shaders never produce this exact two-op mix for a plain
+`in`/`out` varying, so no CTS-detectable regression surface exists for
+this change. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+update needed (conversion-pattern completeness fix, not a new
+feature/extension).
+
+**Residual `L440(c)` count: 7** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1),
+`Feature/ResourcesInStructs/res-of-matrix-in-struct.test` (1, SIGABRT,
+still only flagged, not yet isolated),
+`Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Feature/WaveOps/WaveActiveAnyTrue.test` (1),
+`Tools/Offloader/BufferFormats.test` (1),
+`WaveOps/QuadReadAcrossDiagonal.convergence.test`/`WaveActiveBitXor.int.test`
+(2) -- `Feature/Semantics/MatrixSemantics.test` is no longer in this list
+(fixed this session).
+
+**Next steps**: triage each remaining residual individually, same as this
+session's approach -- `Bugs/UAV-Sequental-Consistency.yaml` or
+`Feature/WaveOps/WaveActiveAnyTrue.test` (`"divergent branch in '' has no
+reconvergence point"`, a `feme-cpu-linearize` diagnostic) look like the
+next most tractable single-case picks; `L419(ae)`'s tessellation
+ULP-mismatch fix remains an open, design-heavy architectural gap (not
+revisited this session); `feme-run`'s DXIL
+resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9 uninspected
+git stashes remain carried-forward low-priority items.
