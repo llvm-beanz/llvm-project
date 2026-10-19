@@ -69,26 +69,27 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(1-2 days, design-heavy, new this session)** `L456`: design and implement
-   denormal flush-to-zero handling for float32 arithmetic. Start by checking
-   whether `shaderDenormFlushToZeroFloat32` is something FeMe should
-   advertise/require, decide per-op-clamp vs. global-FP-environment-switch, then
-   sweep every `dEQP-VK.*` denormal-adjacent test family (not just `HLSLLib`)
-   before landing — real regression risk to any currently-passing case relying
-   on preserved denormals.
-2. **(low priority, carried forward, untouched again)** `L419(ae)`: tessellation
-   edge0-vs-edge1 ULP mismatch — proven architecturally unfixable via a local
-   patch; needs real cross-patch-adjacency design.
+1. **(1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
+   tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable
+   via a local patch; needs real cross-patch-adjacency design. Still untouched.
+2. **(half day)** `L440(c)`'s remaining 8 residuals are now small and scattered
+   (`Basic/Mandelbrot.test` known flake, `Bugs/UAV-Sequental-Consistency.yaml`,
+   `Feature/Semantics/MatrixSemantics.test`,
+   `Feature/SpecializationConstant/spec_const_other_sizes.test`,
+   `Feature/WaveOps/WaveActiveAnyTrue.test`,
+   `Tools/Offloader/BufferFormats.test`, 2 `WaveOps/*`) — triage each
+   individually next session rather than hunting for another compact cluster.
 3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
    using a resource (not groupshared) `InterlockedAdd`/atomic.
 4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk`
    baseline discrepancy from several sessions back, never root-caused.
 
-**Build/test state**: `check-feme` 3789/3796 passed, 7 unsupported, 0
-regressions. `check-hlsl-clang-feme-vk`: 12 → 11 failed, 0 regressions (L456 not
-fixed, so its 3 failures remain in that 11). `check-hlsl-feme-vk`: 0 Failed.
-Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4,755 Passed/7,470 NotSupported —
-matches baseline, 0 regressions. `VulkanCTSReport.md`/`Roadmap.md` both updated
-this session (L455 done, L456 scoped-not-started); no inventory update needed
-(L455 is bug-fix-only, L456 has no code change yet).
+**Build/test state**: `check-feme` 3790/3797 passed, 7 unsupported, 0
+regressions. `check-hlsl-clang-feme-vk`: 11 → 8 failed, 0 regressions.
+`check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS:
+`*denorm*`/`float_controls.*`/`glsl.builtin.precision.*` all 0 changed/0
+unexpected vs. a genuine pre-fix FeMe baseline.
+`VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session;
+no inventory update needed (default-behavior bug fix only, no new
+feature/extension).
