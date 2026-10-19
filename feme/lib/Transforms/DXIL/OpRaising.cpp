@@ -1795,6 +1795,95 @@ bool raiseRawBufferStore(CallInst &CI) {
   return true;
 }
 
+/// Maps a DXIL `AtomicBinOpCode` (the `dx.op.atomicBinOp` call's own
+/// `Coord1`-preceding operand) to the `llvm::AtomicRMWInst::BinOp` an
+/// `atomicrmw` on a raised `llvm.dx.resource.getpointer` result would use --
+/// the exact inverse of `getAtomicBinOpCode` in
+/// `llvm/lib/Target/DirectX/DXILResourceAccess.cpp`. `Sub` has no DXIL
+/// opcode of its own (an `InterlockedAdd` with a negated operand is used
+/// instead, so `AtomicBinOpCode::Add` is the only addition-family opcode
+/// ever emitted), hence its absence here mirrors that file's own mapping.
+std::optional<AtomicRMWInst::BinOp> getAtomicRMWOp(uint64_t BinOpCode) {
+  switch (static_cast<llvm::dxil::AtomicBinOpCode>(BinOpCode)) {
+  case llvm::dxil::AtomicBinOpCode::Add:
+    return AtomicRMWInst::Add;
+  case llvm::dxil::AtomicBinOpCode::And:
+    return AtomicRMWInst::And;
+  case llvm::dxil::AtomicBinOpCode::Or:
+    return AtomicRMWInst::Or;
+  case llvm::dxil::AtomicBinOpCode::Xor:
+    return AtomicRMWInst::Xor;
+  case llvm::dxil::AtomicBinOpCode::IMin:
+    return AtomicRMWInst::Min;
+  case llvm::dxil::AtomicBinOpCode::IMax:
+    return AtomicRMWInst::Max;
+  case llvm::dxil::AtomicBinOpCode::UMin:
+    return AtomicRMWInst::UMin;
+  case llvm::dxil::AtomicBinOpCode::UMax:
+    return AtomicRMWInst::UMax;
+  case llvm::dxil::AtomicBinOpCode::Exchange:
+    return AtomicRMWInst::Xchg;
+  }
+  return std::nullopt;
+}
+
+/// Raises a `dx.op.atomicBinOp` (opcode 78) call on an already-raised
+/// raw/structured or typed buffer handle back into the target-independent
+/// `llvm.dx.resource.getpointer` plus `atomicrmw` pair Clang's own DXIL
+/// frontend emits *before* `DXILResourceAccess`/`DXILOpLowering` ever
+/// convert it into this literal DXIL op (the "idiomatic LLVM IR" the CPU
+/// target's own `unsupported raised operation` diagnostic already expects
+/// every other raised operation to reach) -- the `llvm.dx.resource.
+/// getpointer`+`atomicrmw` shape this reconstructs is already fully
+/// supported downstream, by the same `feme::cpu::ResourceLoweringPass`
+/// logic the ordinary (non-atomic) raw/typed buffer load/store calls
+/// above reach (see "Resource atomics" in feme/docs/FeMeCPUDesign.md).
+/// `Coord2` (the third buffer coordinate DXIL's op always carries, for
+/// parity with a texture access) is poison for every buffer shape and so
+/// is simply discarded; `Coord1` (a `StructuredBuffer`'s own intra-element
+/// byte offset, see `getAtomicResourceCoords`'s comment) only needs an
+/// extra byte-level `getelementptr` when it is not itself poison -- the
+/// common, scalar-element-type case (what `InterlockedAdd` against a
+/// `RWStructuredBuffer<uint>`/`RWByteAddressBuffer` produces) never
+/// carries one, matching the direct `atomicrmw` on the bare `getpointer`
+/// result Clang itself emits for that shape.
+bool raiseAtomicBinOp(CallInst &CI) {
+  if (CI.arg_size() != 7)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || (HandleTy->getName() != "dx.RawBuffer" &&
+                    HandleTy->getName() != "dx.TypedBuffer"))
+    return false;
+
+  std::optional<uint64_t> RawBinOpCode = getConstInt(CI.getArgOperand(2));
+  std::optional<AtomicRMWInst::BinOp> RMWOp =
+      RawBinOpCode ? getAtomicRMWOp(*RawBinOpCode) : std::nullopt;
+  if (!RMWOp)
+    return false;
+
+  Value *Coord0 = CI.getArgOperand(3);
+  Value *Coord1 = CI.getArgOperand(4);
+  Value *NewValue = CI.getArgOperand(6);
+  if (NewValue->getType() != CI.getType())
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Value *Ptr = Builder.CreateIntrinsic(PointerType::get(CI.getContext(), 0),
+                                       Intrinsic::dx_resource_getpointer,
+                                       {Handle, Coord0});
+  if (!isa<UndefValue>(Coord1))
+    Ptr = Builder.CreateGEP(Builder.getInt8Ty(), Ptr, Coord1);
+
+  AtomicRMWInst *RMW = Builder.CreateAtomicRMW(
+      *RMWOp, Ptr, NewValue, MaybeAlign(),
+      AtomicOrdering::Monotonic, SyncScope::System);
+  CI.replaceAllUsesWith(RMW);
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.rawBufferLoad` (opcode 139) call on an already-raised
 /// raw/structured buffer handle into `llvm.dx.resource.load.rawbuffer`,
 /// mirroring `raiseTypedBufferLoad`: the loaded scalar's type is recovered
@@ -1908,6 +1997,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(72, [](CallInst &CI) { // GetDimensions
     return raiseGetDimensions(CI);
+  });
+  Changed |= forEachDXOpCall(78, [](CallInst &CI) { // AtomicBinOp
+    return raiseAtomicBinOp(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
