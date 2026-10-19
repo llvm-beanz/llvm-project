@@ -4,7 +4,7 @@
 ; ModuleID = 'test_counters.hlsl'
 source_filename = "test_counters.hlsl"
 
-; CHECK: OpCapability Int8
+; CHECK-NOT: OpCapability Int8
 ; CHECK-DAG: OpName [[OutputBuffer:%[0-9]+]] "OutputBuffer"
 ; CHECK-DAG: OpName [[InputBuffer:%[0-9]+]] "InputBuffer"
 ; CHECK-DAG: OpName [[OutputBufferCounter:%[0-9]+]] "OutputBuffer.counter"

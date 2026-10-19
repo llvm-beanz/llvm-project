@@ -10,19 +10,18 @@
 ; CHECK-NOT:  OpTypeInt 64 0
 
 define void @main() "hlsl.shader"="pixel"  {
-; CHECK:         %[[FUNC:[0-9]+]] = OpFunction %[[VOID:[0-9]+]] None %[[FNTYPE:[0-9]+]] ; -- Begin function main
-; CHECK-NEXT:     %[[LABEL:[0-9]+]] = OpLabel
-; CHECK-NEXT:    %[[VAR:[0-9]+]] = OpVariable %[[PTR_FN:[a-zA-Z0-9_]+]] Function %[[INIT:[a-zA-Z0-9_]+]]
-; CHECK-NEXT:    %[[LOAD1:[0-9]+]] = OpLoad %[[IMG_TYPE:[a-zA-Z0-9_]+]] %[[IMG_VAR:[a-zA-Z0-9_]+]]
-; CHECK-NEXT:    %[[READ:[0-9]+]] = OpImageRead %[[VEC4:[a-zA-Z0-9_]+]] %[[LOAD1]] %[[COORD:[a-zA-Z0-9_]+]]
-; CHECK-NEXT:    %[[EXTRACT1:[0-9]+]] = OpCompositeExtract %[[FLOAT:[a-zA-Z0-9_]+]] %[[READ]] 0
-; CHECK-NEXT:    %[[EXTRACT2:[0-9]+]] = OpCompositeExtract %[[FLOAT]] %[[READ]] 1
-; CHECK-NEXT:    %[[ADD:[0-9]+]] = OpFAdd %[[FLOAT]] %[[EXTRACT2]] %[[EXTRACT1]]
-; CHECK-NEXT:    %[[INSERT:[0-9]+]] = OpCompositeInsert %[[VEC4]] %[[ADD]] %[[READ]] 0
-; CHECK-NEXT:    %[[LOAD2:[0-9]+]] = OpLoad %[[IMG_TYPE]] %[[IMG_VAR]]
-; CHECK-NEXT:          OpImageWrite %[[LOAD2]] %[[COORD]] %[[INSERT]]
-; CHECK-NEXT:          OpReturn
-; CHECK-NEXT:          OpFunctionEnd
+; CHECK:       %11 = OpFunction %2 None %3 ; -- Begin function main
+; CHECK-NEXT:    %1 = OpLabel
+; CHECK-NEXT:    %12 = OpLoad %6 %10
+; CHECK-NEXT:    %13 = OpImageRead %5 %12 %9
+; CHECK-NEXT:    %14 = OpCompositeExtract %4 %13 0
+; CHECK-NEXT:    %15 = OpCompositeExtract %4 %13 1
+; CHECK-NEXT:    %16 = OpFAdd %4 %15 %14
+; CHECK-NEXT:    %17 = OpCompositeInsert %5 %16 %13 0
+; CHECK-NEXT:    %18 = OpLoad %6 %10
+; CHECK-NEXT:    OpImageWrite %18 %9 %17
+; CHECK-NEXT:    OpReturn
+; CHECK-NEXT:    OpFunctionEnd
 entry:
   %0 = tail call target("spirv.Image", float, 5, 2, 0, 0, 2, 0) @llvm.spv.resource.handlefrombinding.tspirv.Image_f32_5_2_0_0_2_0t(i32 0, i32 0, i32 1, i32 0, ptr nonnull @.str)
   %1 = tail call noundef align 16 dereferenceable(16) ptr addrspace(11) @llvm.spv.resource.getpointer.p11.tspirv.Image_f32_5_2_0_0_2_0t(target("spirv.Image", float, 5, 2, 0, 0, 2, 0) %0, i32 0)

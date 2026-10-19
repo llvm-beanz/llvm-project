@@ -2795,6 +2795,36 @@ static bool isArtificialGlobal(StringRef Name) {
   return isUseListGlobal(Name) || Name == "llvm.global.annotations";
 }
 
+// Returns true if every use of GV is as the resource-name argument of a call
+// to llvm.spv.resource.handlefrombinding or
+// llvm.spv.resource.handlefromimplicitbinding. Clang emits such a global
+// purely to let the backend read its constant string content at compile time
+// (to attach an OpName to the resource for debugging); the argument is never
+// dereferenced at run time. Without this check, the generic global-variable
+// lowering materializes the string as a genuine SPIR-V variable and constant,
+// which can needlessly require capabilities (e.g. Int8) the target does not
+// otherwise need and does not support.
+static bool isResourceNameOnlyGlobal(const GlobalVariable &GV) {
+  if (GV.user_empty())
+    return false;
+  for (const User *U : GV.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    if (!CI)
+      return false;
+    const auto *II = dyn_cast<IntrinsicInst>(CI);
+    if (!II)
+      return false;
+    Intrinsic::ID ID = II->getIntrinsicID();
+    if (ID != Intrinsic::spv_resource_handlefrombinding &&
+        ID != Intrinsic::spv_resource_handlefromimplicitbinding)
+      return false;
+    // The resource name is always the last argument of these intrinsics.
+    if (II->getArgOperand(II->arg_size() - 1) != &GV)
+      return false;
+  }
+  return true;
+}
+
 // Returns true if every use of GV traces back to llvm.compiler.used or
 // llvm.used.
 static bool hasOnlyArtificialUses(const GlobalVariable &GV) {
@@ -2824,6 +2854,11 @@ shouldEmitIntrinsicsForGlobalValue(const GlobalVariableUsers &GVUsers,
                                    const Function *F) {
   // Skip special artificial variables.
   if (isArtificialGlobal(GV.getName()))
+    return false;
+
+  // Skip globals that exist solely to carry a resource's debug name string to
+  // the backend; see isResourceNameOnlyGlobal for details.
+  if (isResourceNameOnlyGlobal(GV))
     return false;
 
   auto &UserFunctions = GVUsers.getTransitiveUserFunctions(GV);
