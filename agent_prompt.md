@@ -69,21 +69,21 @@ mid-investigation to avoid losing documentation.
 Can you please continue the work on the Vulkan FeMe ICD? A previous session
 suggested the next steps:
 
-1. **(~1-2 hours)** `Bugs/UAV-Sequental-Consistency.yaml` — next most tractable
-   single remaining residual; untriaged.
-2. **(~1 day, design-heavy, carried forward many sessions, still untouched)**
-   `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally
-   unfixable via a local patch; needs a real cross-patch-adjacency design.
-3. **(~1-2 hours)** Triage the `FEME_DEBUG_DUMP_SPIRV_MLIR` crash found this
-   session (see above) — confirm scope before deciding whether it needs an
-   isolated "outside FeMe" fix.
-4. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader
-   using a resource (not groupshared) `InterlockedAdd`/atomic.
-5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
-
-**Build/test state**: `check-feme` 3792/3799 passed, 7 unsupported, 0
-regressions (+1 new lit test). `check-hlsl-clang-feme-vk`: 7 → 4 failed, 0
-regressions. `check-hlsl-feme-vk`: 0 failed.
-`VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session;
-no inventory update needed (control-flow-legalization fix, no new
-feature/extension).
+1. **(~1 day, design-heavy, carried forward many sessions, still
+   untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch —
+   proven architecturally unfixable via a local patch; needs a real
+   cross-patch-adjacency design.
+2. **(~1-2 hours)** Triage the `FEME_DEBUG_DUMP_SPIRV_MLIR` crash (an
+   `ImageOps.cpp` `verifyImageOperands` assertion) — flagged a prior
+   session, not yet root-caused.
+3. **(~1-2 hours)** Triage the `GetElementPtrTypeIterator.h` "Not
+   byte-addressable" crash hit probing `dEQP-VK.subgroups.
+   ballot_broadcast.*` — same bug class as roadmap `E29f`/`H101e`/`L102`,
+   not yet re-triaged against this specific case.
+4. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
+   is now `L440(c)`'s only non-flake residual — worth a quick triage pass
+   before the next session picks a new compact cluster to hunt for.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
