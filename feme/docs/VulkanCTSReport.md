@@ -8617,3 +8617,128 @@ cluster; `L419(ae)`'s tessellation ULP-mismatch fix remains an open,
 design-heavy architectural gap (not revisited this session); `feme-run`'s
 DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap and 9
 uninspected git stashes remain carried-forward low-priority items.
+
+## L456: f32 denormal flush-to-zero default + DXIL/SIMDize cascade fixes
+
+**Task**: design and implement denormal flush-to-zero (FTZ) handling for
+float32 arithmetic (roadmap `L456`, previously root-caused-but-not-fixed:
+`Feature/HLSLLib`'s `degrees.32`/`mad.32`/`radians.32` cluster expects
+every subnormal float32 input/output to flush to an exactly-signed zero,
+matching real Vulkan drivers' permitted default f32 FTZ behavior, while
+FeMe's CPU backend previously only flushed when `DenormFlushToZero` was
+explicitly declared).
+
+**Fix**: `FloatControlArithmeticPattern` (covering every `spirv.F*`
+arithmetic op already handled by that pattern) now flushes each operand
+and the op's own result to a same-signed zero via
+`llvm.is.fpclass`/`llvm.copysign`/`llvm.select` **by default at f32**,
+unless the entry point explicitly declares `DenormPreserve` at that bit
+width -- matching `shaderDenormFlushToZeroFloat32`/
+`shaderDenormPreserveFloat32` both staying `VK_FALSE` (confirmed, not
+assumed: `EntryPoints.cpp` unchanged this session) and real Vulkan
+drivers' own permitted default behavior. `spirv.GL.Fma`/`spirv.CL.fma`
+are a separate GLSL.std.450 extended instruction, not a `spirv.F*`
+arithmetic op, so they bypass that pattern entirely -- added a new,
+narrower `FloatControlFmaPattern` applying the identical f32
+default-flush rule to all three operands and the `llvm.fma` result. New
+`.mlir` lit coverage added directly to
+`spirv-to-llvm-denorm-flush-to-zero.mlir`: default-flush-with-no-
+execution-mode-declared-at-all, `DenormPreserve`-suppresses-the-default-
+flush, and `GLFmaOp`-flushes-by-default.
+
+**Cascading bugs found and fixed** (this default-behavior change
+immediately and pervasively exercises an `is.fpclass`/`copysign`/`select`
+shape that previously only ran when `DenormFlushToZero` was explicitly
+opted into -- exposing two independent, previously-dormant gaps in code
+that had never needed to handle it at scale before):
+
+1. **Upstream, outside FeMe** (`llvm/lib/Target/DirectX/
+   DXILIntrinsicExpansion.cpp`): `expandIsFPClass` had no case at all for
+   `FPClassTest::fcSubnormal`. Fixed, with correct vector-operand support
+   via `ConstantVector::getSplat` (an initial scalar-only attempt crashed
+   `BinaryOperator::CreateNeg` on a vector input, a mismatched-type
+   assertion). Three new cases (`@issubnormal`/`@issubnormalv2`/
+   `@issubnormald`) added to `llvm/test/CodeGen/DirectX/is_fpclass.ll`;
+   validated via `opt -dxil-intrinsic-expansion -scalarizer
+   -dxil-op-lower | FileCheck` for both `6.8-library`/`6.9-library` and
+   via `llvm-lit`. Committed separately, touching only non-FeMe files, per
+   standing instruction.
+2. **FeMe's own CPU SIMD-widening pass** (`feme/lib/Transforms/CPU/
+   SIMDize.cpp`): running `check-hlsl-clang-feme-vk` after the core fix
+   found a real, deterministic 12-test regression (`Basic/
+   DescriptorSets`/`Basic/simple`/`Feature/StructuredBuffer/srv`/3
+   `Feature/Textures/*`/5 `Graphics/{Ddx,Ddy,fwidth}*`/`UseCase/particle-
+   life`), confirmed via rerun (identical failure set both times, ruling
+   out load-induced flakiness) and root-caused via `git stash` bisection.
+   Root cause: `is_fpclass`'s producer/consumer/widening-dispatch special
+   casing (needed because its overload is its float operand, not its own
+   `i1`/`<N x i1>` result type, unlike every other already-handled
+   vectorizable intrinsic) had only ever been wired into this pass's
+   *scalar* widening path, never its *vector*-operand path or either of
+   `widenInstruction`'s two vector-`CallInst` dispatch gates -- a gap
+   immediately and pervasively exposed once ordinary `float4` arithmetic
+   started invoking `is.fpclass` routinely. Fixed across 5 call sites
+   (consumer-check in `checkVectorDecompositionSupported`, producer-check
+   in the main per-instruction loop, `widenVectorElementwise`'s overload-
+   type derivation, and both `widenInstruction` dispatch gates). New
+   `SIMDizeTest.WidensDivergentVectorIsFPClassCall` unit test added
+   alongside the pre-existing scalar-only `WidensDivergentIsFPClassCall`.
+
+**`check-feme`: 3789/3796 -> 3790/3797 Passed, 7 Unsupported, 0 Failed**
+(1 net new unit test + 3 net new `.mlir` lit cases).
+
+**`check-hlsl-clang-feme-vk`: 11 Failed -> 8 Failed, 0 regressions**
+(exactly the 3 originally-targeted `degrees.32`/`mad.32`/`radians.32`
+cases fixed, confirmed via an explicit before/after failure-set diff).
+
+**`check-hlsl-feme-vk`: 0 Failed** (492 Passed/273 Unsupported/28
+Expectedly Failed, unchanged).
+
+**Real Vulkan CTS verification**: this is a default-behavior change
+affecting all f32 arithmetic, so swept all 3 families the prior session's
+own handoff called for, each diffed case-by-case (not just by aggregate
+count) against a genuine pre-`L456` FeMe build via `git stash`:
+
+| Suite | Cases | Changed | Unexpected failures |
+|---|---|---|---|
+| `dEQP-VK.*denorm*` | 5,351 | 0 | 0 |
+| `dEQP-VK.spirv_assembly.*float_controls*` | 2,569 | 0 | 0 |
+| `dEQP-VK.glsl.builtin.precision.*` | 664 | 0 | 0 |
+
+0 regressions, 0 newly-fixed cases in any of the three families -- expected,
+since nearly every case in these suites already explicitly declares
+`DenormFlushToZero`/`DenormPreserve` itself, matching the prior opt-in
+behavior exactly; this fix's actual behavior delta is concentrated in
+**undeclared-default** cases like the 3 originally-targeted `HLSLLib`
+ones, none of which this suite's case list itself contains.
+
+**Process note** (now also recorded in `feme/.instructions.md`): the first
+comparison attempt used 3 "before" baselines captured earlier in this same
+session, which turned out to have silently run against `lavapipe`, not
+FeMe (caught only by checking each saved `qpa` file's own `#sessionInfo
+vendorID` against FeMe's hard-coded `0x10000` after the resulting diff --
+446 spurious "Pass -> NotSupported" cases, all failing an unrelated,
+long-hard-coded-`VK_FALSE` `16BitStorage` feature check -- looked
+suspiciously unrelated to this fix). Real baselines were recaptured via
+`git stash` against a genuine pre-fix build before trusting any diff.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed (default-behavior bug fix only, no new feature/extension surface).
+
+**Residual `L440(c)` count: 8** -- `Basic/Mandelbrot.test` (1, known
+flake), `Bugs/UAV-Sequental-Consistency.yaml` (1),
+`Feature/Semantics/MatrixSemantics.test` (1),
+`Feature/SpecializationConstant/spec_const_other_sizes.test` (1),
+`Feature/WaveOps/WaveActiveAnyTrue.test` (1),
+`Tools/Offloader/BufferFormats.test` (1),
+`WaveOps/QuadReadAcrossDiagonal.convergence.test`/`WaveActiveBitXor.int.test`
+(2) -- `Feature/HLSLLib`'s 3-case cluster is no longer in this list
+(fixed by `L456` above).
+
+**Next steps**: `L419(ae)`'s tessellation ULP-mismatch fix remains an
+open, design-heavy architectural gap (not revisited this session);
+`feme-run`'s DXIL resource-(non-groupshared)-`InterlockedAdd`/atomic gap
+and 9 uninspected git stashes remain carried-forward low-priority items;
+the remaining 8 `L440(c)` residuals are now small/scattered enough that a
+future session should individually triage each rather than looking for
+another compact cluster.
