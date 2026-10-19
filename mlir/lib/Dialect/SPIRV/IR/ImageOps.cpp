@@ -209,13 +209,24 @@ static LogicalResult verifyImageOperands(Operation *imageOp,
     ++index;
   }
 
+  if (spirv::bitEnumContainsAll(attr.getValue(),
+                                spirv::ImageOperands::SignExtend |
+                                    spirv::ImageOperands::ZeroExtend))
+    return imageOp->emitError(
+        "it is invalid to set both the SignExtend and ZeroExtend bits");
+
+  // SignExtend/ZeroExtend carry no accompanying <id> operand of their own
+  // (per the SPIR-V spec's own Image Operands table) -- they are pure
+  // result-conversion flags on the already-produced texel value, so
+  // `index` is deliberately left untouched here, unlike every other
+  // operand kind handled above.
+
   // TODO: Add the validation rules for the following Image Operands.
   spirv::ImageOperands noSupportOperands =
       spirv::ImageOperands::ConstOffset | spirv::ImageOperands::Offset |
       spirv::ImageOperands::ConstOffsets |
       spirv::ImageOperands::MinLod | spirv::ImageOperands::MakeTexelAvailable |
-      spirv::ImageOperands::MakeTexelVisible |
-      spirv::ImageOperands::SignExtend | spirv::ImageOperands::ZeroExtend;
+      spirv::ImageOperands::MakeTexelVisible;
 
   assert(!spirv::bitEnumContainsAny(attr.getValue(), noSupportOperands) &&
          "unimplemented operands of Image Operands");

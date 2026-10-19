@@ -188,6 +188,37 @@ func.func @image_read(%arg0: !spirv.image<f32, Dim2D, NoDepth, NonArrayed, Singl
 
 // -----
 
+// `SignExtend`/`ZeroExtend` carry no accompanying <id> operand (unlike
+// e.g. `Lod`/`Bias`/`Sample`) -- they are pure result-conversion flags, so
+// this should verify cleanly rather than hitting `verifyImageOperands`'s
+// own now-removed "unimplemented operands of Image Operands" assertion
+// (the shape `clang-dxc -spirv`'s `RWBuffer<int>`/`OpImageRead ...
+// SignExtend` codegen produces, matching a signed scalar type read from an
+// unsigned-integer image storage format).
+func.func @image_read_sign_extend(%arg0: !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, %arg1: i32) -> () {
+  // CHECK: {{%.*}} = spirv.ImageRead {{%.*}}, {{%.*}} ["SignExtend"] : !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, i32 -> vector<4xsi32>
+  %0 = spirv.ImageRead %arg0, %arg1 ["SignExtend"] : !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, i32 -> vector<4xsi32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_read_zero_extend(%arg0: !spirv.image<ui32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32ui>, %arg1: i32) -> () {
+  // CHECK: {{%.*}} = spirv.ImageRead {{%.*}}, {{%.*}} ["ZeroExtend"] : !spirv.image<ui32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32ui>, i32 -> vector<4xui32>
+  %0 = spirv.ImageRead %arg0, %arg1 ["ZeroExtend"] : !spirv.image<ui32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32ui>, i32 -> vector<4xui32>
+  spirv.Return
+}
+
+// -----
+
+func.func @image_read_sign_and_zero_extend(%arg0: !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, %arg1: i32) -> () {
+  // expected-error @+1 {{it is invalid to set both the SignExtend and ZeroExtend bits}}
+  %0 = spirv.ImageRead %arg0, %arg1 ["SignExtend|ZeroExtend"] : !spirv.image<si32, Buffer, DepthUnknown, NonArrayed, SingleSampled, NoSampler, R32i>, i32 -> vector<4xsi32>
+  spirv.Return
+}
+
+// -----
+
 func.func @image_read_type_mismatch(%arg0: !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba8>, %arg1: vector<2xsi32>) -> () {
   // expected-error @+1 {{op failed to verify that the result component type must match the image sampled type}}
   %0 = spirv.ImageRead %arg0, %arg1 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba8>, vector<2xsi32> -> vector<4xf16>
