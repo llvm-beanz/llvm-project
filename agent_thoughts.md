@@ -126845,3 +126845,78 @@ New lit test: `constant-condition-branch-unreachable-arm.ll`.
 5. **(low priority, carried forward)** 9 older git stashes remain uninspected.
 
 **Build/test state**: `check-feme` 3792/3799 passed, 7 unsupported, 0 regressions (+1 new lit test). `check-hlsl-clang-feme-vk`: 7 → 4 failed, 0 regressions. `check-hlsl-feme-vk`: 0 failed. `VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session; no inventory update needed (control-flow-legalization fix, no new feature/extension).
+
+# Session: L440(c) `UAV-Sequental-Consistency.yaml` fixed — upstream SPIR-V spurious `OpCapability Int8`
+
+**Do this first if resuming**: `vulkaninfo --summary | grep deviceName` → expect `FeMe CPU Vulkan Device`. Already confirmed this session.
+
+## What's done (verified, committed)
+
+1. Fixed `Bugs/UAV-Sequental-Consistency.yaml`'s real failure: a Vulkan
+   validation error (spurious `OpCapability Int8`), unrelated to the
+   test's own documented Intel-coherence XFAIL.
+2. Root cause was an **upstream LLVM SPIR-V backend bug, not a FeMe gap**:
+   `SPIRVEmitIntrinsics.cpp` materialized HLSL resource debug-name
+   strings (meant only for compile-time `OpName` generation) into real,
+   dead SPIR-V locals, forcing a needless `Int8` capability.
+3. Fixed in `llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp` — 1 commit,
+   touches only files outside `feme/`, per standing instructions.
+4. Added a new red/green regression test
+   (`ResourceNameNoSpuriousInt8Capability.ll`) + fixed 5 existing tests
+   whose `CHECK` lines asserted on the buggy behavior.
+5. Docs updated in their own commit: `VulkanCTSReport.md`, `Roadmap.md`'s
+   `L440(c)` row (4 → 2 residual), `.instructions.md` (new pitfall note).
+
+## Build/test state (all passing, 0 regressions)
+
+- `test/CodeGen/SPIRV` (1432 cases) + `clang/test/CodeGenHLSL/resources`: 0 failed.
+- `check-feme`: 3792/3799 passed, 7 unsupported, 0 regressions.
+- `check-hlsl-clang-feme-vk`: 4 → 2 failed (only `Basic/Mandelbrot.test`
+  known flake and `spec_const_other_sizes.test` remain).
+- `check-hlsl-feme-vk`: 0 failed.
+- Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4,755 Passed/7,470
+  NotSupported (matches baseline exactly). `dEQP-VK.ubo.*` 0 Failed/8,318
+  Passed/4,922 NotSupported — **+103 Passed vs. the prior baseline**,
+  consistent with debug-named UBO resources that previously failed
+  shader-module creation now compiling correctly.
+
+## Bonus find (not this session's own fix, just re-confirmed)
+
+`Tools/Offloader/BufferFormats.test` is already passing — same
+"quietly fixed between sessions, never re-confirmed by name" shape as
+`res-of-matrix-in-struct.test` two sessions ago. Closed without needing
+its own dedicated fix.
+
+## A real time-sink this session, now documented so it doesn't repeat
+
+Spent a long stretch convinced a hand-written `.ll` lit test couldn't
+reproduce a bug that `clang-dxc` reliably reproduced — tried every
+combination of `-O0`/`-O3`/`-mtriple`/`-spirv-ext=...` flags. The actual
+cause: `ninja clang` does **not** relink `llc`, even though both share
+the same just-rebuilt static library. Several `git stash`/`ninja
+clang`/`git stash pop` cycles (used for red/green sanity-checking) left
+a stale `llc` binary in place the whole time. Fixed by always naming
+every binary you're testing in the same `ninja` invocation (`ninja
+clang llc`). Now in `feme/.instructions.md` so the next session doesn't
+burn an hour on the same thing.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~1 day, design-heavy, carried forward many sessions, still
+   untouched)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch —
+   proven architecturally unfixable via a local patch; needs a real
+   cross-patch-adjacency design.
+2. **(~1-2 hours)** Triage the `FEME_DEBUG_DUMP_SPIRV_MLIR` crash (an
+   `ImageOps.cpp` `verifyImageOperands` assertion) — flagged a prior
+   session, not yet root-caused.
+3. **(~1-2 hours)** Triage the `GetElementPtrTypeIterator.h` "Not
+   byte-addressable" crash hit probing `dEQP-VK.subgroups.
+   ballot_broadcast.*` — same bug class as roadmap `E29f`/`H101e`/`L102`,
+   not yet re-triaged against this specific case.
+4. **(~30 min)** `Feature/SpecializationConstant/spec_const_other_sizes.test`
+   is now `L440(c)`'s only non-flake residual — worth a quick triage pass
+   before the next session picks a new compact cluster to hunt for.
+5. **(low priority, carried forward)** `feme-run` can't execute a DXIL
+   shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+6. **(low priority, carried forward)** 9 older git stashes remain
+   uninspected.
