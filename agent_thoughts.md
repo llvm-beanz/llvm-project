@@ -127086,3 +127086,80 @@ file against the stash. All 9 safely `git stash clear`ed.
    it's new.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
    and the roadmap counts synchronized after every fix.
+
+# Session: L462 — `feme-run` DXIL resource `InterlockedAdd`/atomic gap fixed
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (`vulkaninfo --summary | grep deviceName`, `VK_ICD_FILENAMES` exported in the same command).
+
+## What happened
+
+Handoff item 1 (`L419(ae)` tessellation ULP mismatch) was already
+re-confirmed architecturally unfixable in a prior session — not
+revisited again. Picked up handoff item 2 instead: `feme-run` couldn't
+execute a DXIL shader using a resource (not `groupshared`)
+`InterlockedAdd`/atomic (`unsupported raised operation:
+'dx.op.atomicBinOp.i32'`) — carried forward across roughly a dozen
+prior sessions as low priority, never actually fixed.
+
+## Fix (two commits, DXIL raising + CPU lowering)
+
+1. `OpRaising.cpp`: added `raiseAtomicBinOp`, raising DXIL opcode 78
+   (`dx.op.atomicBinOp`) into `llvm.dx.resource.getpointer` +
+   `atomicrmw`, the same idiomatic IR shape SPIR-V's atomic path
+   already produces. Maps all 9 `AtomicBinOpCode` values
+   (Add/And/Or/Xor/IMin/IMax/UMin/UMax/Exchange) to the matching
+   `AtomicRMWInst::BinOp`.
+2. `ResourceLowering.cpp`: added `isSupportedAtomicRMW`/
+   `hasOnlySupportedAtomicUses`/`createAtomicCall`/`lowerAtomicAccess`,
+   lowering that raised shape into the pre-existing (previously
+   DXIL-unreachable) `createAtomicXxxRaw`/`createAtomicXxxTyped`
+   runtime-call builders, for both `Family::Raw` and `Family::Typed`.
+
+Both committed separately, each with its own test. A third commit
+added the `VulkanCTSReport.md`/`.instructions.md` doc updates.
+
+## Gotcha found and documented
+
+A `--heap` YAML entry for a Typed buffer (`RWBuffer<T>`) needs both
+`kind: typed-buffer` and `format: <format>` — without them the
+runtime's atomic-address helper silently no-ops (returns `NULL`)
+instead of erroring. Not a new bug, just easy to miss hand-writing a
+heap YAML from scratch. Added to `.instructions.md`.
+
+## Build/test state
+
+- `check-feme`: 3798/3798 Passed (+2 new lit tests:
+  `dxil-raise-atomic-binop.ll` unit-level, `resource-atomic.hlsl`
+  end-to-end), 7 Unsupported, 0 regressions.
+- Real Vulkan CTS: **not run** this session — confirmed this fix has
+  no Vulkan/SPIR-V-reachable code path (`OpRaisingPass` only runs for
+  direct DXIL/`feme-run` entry points, never through
+  `compileGraphicsStage`/`compileComputeStage`), so there's no
+  CTS-detectable regression surface. Documented this reasoning
+  explicitly in `VulkanCTSReport.md` rather than skipping silently.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no
+  update needed (internal compiler capability, not a new Vulkan
+  feature/extension).
+- `Roadmap.md`: no entry existed for this item (it was only ever
+  tracked as a carried-forward `agent_thoughts.md` line, never given a
+  roadmap ID) — nothing to strike through.
+- Git stashes: **0** in `llvm-project`, `offload-test-suite`, and
+  `VK-GL-CTS` — the "9 uninspected stashes" carried forward across
+  many prior sessions is now moot (stashes are gone, presumably
+  cleaned up in an earlier session not reflected in the handoff
+  notes). Dropping this from next steps below.
+- `offload-test-suite`'s `feme` branch: clean, no drift.
+
+## Next steps
+
+1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
+   tessellation edge0-vs-edge1 ULP mismatch — needs real
+   cross-patch-adjacency design, not a local patch.
+2. **(small, natural follow-on, new this session)** `InterlockedCompareExchange`
+   / DXIL opcode 79 is not yet raised — `createAtomicCompareExchangeRaw`/
+   `Typed` already exist in `ResourceCalls.h`, unused by DXIL today,
+   the exact same gap one opcode over from this session's fix.
+3. **(open-ended, standing)** No other known `SIMDize.cpp` "cannot yet
+   widen that shape" diagnostics remain as of this session.
+4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
+   and the roadmap counts synchronized after every fix.
