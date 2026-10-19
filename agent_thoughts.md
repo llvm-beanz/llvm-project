@@ -126714,3 +126714,51 @@ No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes this sess
 5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
 
 **Build/test state**: `check-feme` 3789/3796 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 12 → 11 failed, 0 regressions (L456 not fixed, so its 3 failures remain in that 11). `check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS: `dEQP-VK.ssbo.*` 0 Failed/4,755 Passed/7,470 NotSupported — matches baseline, 0 regressions. `VulkanCTSReport.md`/`Roadmap.md` both updated this session (L455 done, L456 scoped-not-started); no inventory update needed (L455 is bug-fix-only, L456 has no code change yet).
+
+# Session: L456 fixed — f32 denormal flush-to-zero default + DXIL/SIMDize bug cascade
+
+**Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`** at session start, per standing instruction.
+
+**Picked up where the last session left off**: `L456`, root-caused but explicitly not fixed last time (correctly scoped as design-heavy, not a quick patch).
+
+## L456: fixed
+
+**The fix itself was small.** `FloatControlArithmeticPattern` (every `spirv.F*` arithmetic op) now flushes each operand and the result to a same-signed zero at f32 by default — via `llvm.is.fpclass`/`llvm.copysign`/`llvm.select` — unless the entry point explicitly declares `DenormPreserve`. Added a second, narrower `FloatControlFmaPattern` for `spirv.GL.Fma`/`spirv.CL.fma` (a GLSL.std.450 extended instruction, not a `spirv.F*` op, so it bypasses the first pattern entirely).
+
+**The fallout was not small.** This default-behavior change means `is.fpclass`/`copysign`/`select` around f32 ops now runs on *every* shader, not just the rare few that opted into `DenormFlushToZero` explicitly. That instantly exercised two previously-dormant bugs nobody had hit before:
+
+1. **Outside FeMe, in LLVM's DirectX backend**: `DXILIntrinsicExpansion.cpp`'s `expandIsFPClass` had no case for `fcSubnormal` at all. Fixed, with a vector-type bug of my own caught on first test run (scalar-only `CreateNot` crashed `BinaryOperator::CreateNeg` on a vector operand — fixed via `ConstantVector::getSplat`). Committed separately, touching only `llvm/` files, per the standing "issue outside FeMe" instruction.
+2. **Inside FeMe's own CPU SIMD-widening pass** (`SIMDize.cpp`): `check-hlsl-clang-feme-vk` regressed 12 tests after the core fix. Confirmed deterministic via rerun, then root-caused via `git stash` bisection (stash the FeMe-side change only, keep the DXIL fix, rebuild, retest — isolates which uncommitted change is responsible, cheap and reliable). Real bug: `is_fpclass`'s special-case handling (needed because its overload is its *operand* type, not its result type, unlike every other vectorizable intrinsic this pass already knew about) was only ever wired into the pass's *scalar* widening path. Nobody had ever fed it a genuinely vector-typed `is_fpclass` call before. Fixed in 5 places — found one crash at a time, each fix exposing the next: consumer-check, producer-check, then three separate widening-dispatch sites that each independently derive the wrong overload type.
+
+**Debugging technique that mattered twice this session**: `git stash push -- <files>`, rebuild, test, compare, `git stash pop` — isolates exactly which uncommitted change caused a regression when several files changed together. Used it both for the SIMDize bisection and (see below) for building a genuine pre-fix CTS baseline.
+
+## A real CTS-baseline mistake, caught before it caused harm
+
+Tried to diff 3 real-CTS sweeps (`*denorm*`/`float_controls.*`/`glsl.builtin.precision.*`) against "before" baselines saved earlier this session. Got a 446-case "Pass → NotSupported" diff that looked like a disaster. **It wasn't real** — those 3 "before" baselines had silently run against `lavapipe`, not FeMe, because `VK_ICD_FILENAMES` wasn't exported in the exact command that launched that particular sweep (it doesn't persist across separate `bash` calls, a known gotcha, but this time it bit a background-script invocation, not a direct `vulkaninfo` check). Caught it by checking each saved `qpa` file's own `#sessionInfo vendorID` line against FeMe's hard-coded `0x10000` — `lavapipe`/Mesa reports `0x10005`. Recaptured real pre-fix baselines via `git stash` + rebuild. **Added this to `feme/.instructions.md`** so a future session checks `qpa` vendorID on every CTS baseline, not just when a diff looks suspicious — a wrong-driver baseline that happens to diff clean would look identically trustworthy.
+
+## Verification
+
+1. `check-feme`: 3789/3796 → 3790/3797 Passed, 7 Unsupported, 0 Failed.
+2. `check-hlsl-clang-feme-vk`: 11 → 8 Failed, 0 regressions (exactly the 3 targeted cases fixed, confirmed via explicit failure-set diff).
+3. `check-hlsl-feme-vk`: 0 Failed, unchanged.
+4. Real Vulkan CTS, 3 families, each diffed case-by-case against a genuine pre-fix FeMe build (not just aggregate counts): `*denorm*` (5,351 cases), `float_controls.*` (2,569 cases), `glsl.builtin.precision.*` (664 cases) — **0 changed, 0 unexpected failures, all three.**
+5. New unit test (`SIMDizeTest.WidensDivergentVectorIsFPClassCall`) and 3 new `.mlir` lit cases, all passing.
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update needed — confirmed `EntryPoints.cpp` unchanged, `shaderDenormFlushToZeroFloat32`/`shaderDenormPreserveFloat32` still `VK_FALSE` (this is a bug fix matching already-permitted driver behavior, not a new advertised feature).
+
+## Commits this session (4, each small/scoped)
+
+1. FeMe-side L456 core fix + SIMDize's 5-site `is_fpclass` vector fix + new unit test + updated `.mlir` lit tests.
+2. DXIL `fcSubnormal` fix + its test (`llvm/` only — standalone, outside-FeMe commit).
+3. Docs: `Roadmap.md` (L456 struck through) + `VulkanCTSReport.md` (new session section) + `.instructions.md` (the lavapipe-baseline gotcha).
+4. This `agent_thoughts.md` entry.
+
+## Next steps
+
+1. **(1 day, design-heavy, carried forward many sessions)** `L419(ae)`: tessellation edge0-vs-edge1 ULP mismatch — proven architecturally unfixable via a local patch; needs real cross-patch-adjacency design. Still untouched.
+2. **(half day)** `L440(c)`'s remaining 8 residuals are now small and scattered (`Basic/Mandelbrot.test` known flake, `Bugs/UAV-Sequental-Consistency.yaml`, `Feature/Semantics/MatrixSemantics.test`, `Feature/SpecializationConstant/spec_const_other_sizes.test`, `Feature/WaveOps/WaveActiveAnyTrue.test`, `Tools/Offloader/BufferFormats.test`, 2 `WaveOps/*`) — triage each individually next session rather than hunting for another compact cluster.
+3. **(low priority, carried forward)** `feme-run` can't execute a DXIL shader using a resource (not groupshared) `InterlockedAdd`/atomic.
+4. **(low priority, carried forward)** 9 older git stashes remain uninspected.
+5. **(low priority, carried forward)** 38-vs-39 `check-hlsl-clang-feme-vk` baseline discrepancy from several sessions back, never root-caused.
+
+**Build/test state**: `check-feme` 3790/3797 passed, 7 unsupported, 0 regressions. `check-hlsl-clang-feme-vk`: 11 → 8 failed, 0 regressions. `check-hlsl-feme-vk`: 0 Failed. Real Vulkan CTS: `*denorm*`/`float_controls.*`/`glsl.builtin.precision.*` all 0 changed/0 unexpected vs. a genuine pre-fix FeMe baseline. `VulkanCTSReport.md`/`Roadmap.md`/`.instructions.md` all updated this session; no inventory update needed (default-behavior bug fix only, no new feature/extension).
