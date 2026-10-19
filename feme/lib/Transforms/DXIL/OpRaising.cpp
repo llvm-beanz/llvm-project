@@ -1884,6 +1884,54 @@ bool raiseAtomicBinOp(CallInst &CI) {
   return true;
 }
 
+/// Raises a `dx.op.atomicCompareExchange` (opcode 79) call on an
+/// already-raised raw/structured or typed buffer handle back into the
+/// target-independent `llvm.dx.resource.getpointer` plus `cmpxchg` pair,
+/// the `InterlockedCompareExchange` counterpart to `raiseAtomicBinOp`
+/// above (whose own doc covers `Coord1`/`Coord2`'s handling, identical
+/// here). Unlike the DXIL op -- which, having no way to express `cmpxchg`'s
+/// success flag, returns only the original value directly -- `llvm.cmpxchg`
+/// always yields a `{original, success}` pair; this synthesizes an
+/// `extractvalue ..., 0` immediately so every original use of \p CI's
+/// (scalar) result is satisfied, matching the exact `{extractvalue 0}`-only
+/// shape `feme::cpu::ResourceLoweringPass`'s existing (SPIR-V-origin)
+/// `cmpxchg` support already expects (see "cmpxchg not a scalar-i32
+/// direct-pointer use" and its neighboring check in
+/// SPIRVResourceLowering.cpp).
+bool raiseAtomicCompareExchange(CallInst &CI) {
+  if (CI.arg_size() != 7)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || (HandleTy->getName() != "dx.RawBuffer" &&
+                    HandleTy->getName() != "dx.TypedBuffer"))
+    return false;
+
+  Value *Coord0 = CI.getArgOperand(2);
+  Value *Coord1 = CI.getArgOperand(3);
+  Value *Compare = CI.getArgOperand(5);
+  Value *NewValue = CI.getArgOperand(6);
+  if (NewValue->getType() != CI.getType() ||
+      Compare->getType() != CI.getType())
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Value *Ptr = Builder.CreateIntrinsic(PointerType::get(CI.getContext(), 0),
+                                       Intrinsic::dx_resource_getpointer,
+                                       {Handle, Coord0});
+  if (!isa<UndefValue>(Coord1))
+    Ptr = Builder.CreateGEP(Builder.getInt8Ty(), Ptr, Coord1);
+
+  AtomicCmpXchgInst *CmpXchg = Builder.CreateAtomicCmpXchg(
+      Ptr, Compare, NewValue, MaybeAlign(), AtomicOrdering::Monotonic,
+      AtomicOrdering::Monotonic, SyncScope::System);
+  Value *Original = Builder.CreateExtractValue(CmpXchg, 0);
+  CI.replaceAllUsesWith(Original);
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.rawBufferLoad` (opcode 139) call on an already-raised
 /// raw/structured buffer handle into `llvm.dx.resource.load.rawbuffer`,
 /// mirroring `raiseTypedBufferLoad`: the loaded scalar's type is recovered
@@ -2000,6 +2048,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(78, [](CallInst &CI) { // AtomicBinOp
     return raiseAtomicBinOp(CI);
+  });
+  Changed |= forEachDXOpCall(79, [](CallInst &CI) { // AtomicCompareExchange
+    return raiseAtomicCompareExchange(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
