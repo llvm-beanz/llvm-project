@@ -3545,7 +3545,20 @@ private:
 /// isCompositeStageIOType, and StageIOAddressOfPattern's own comment for
 /// why such a variable stays a real pointer, and
 /// StageIOArrayAccessChainPattern below for what this identifies it for).
-bool isInputArrayAccessChain(mlir::spirv::AccessChainOp Op) {
+///
+/// (Roadmap L440(c)) Templated over `spirv.AccessChain`/
+/// `spirv.InBoundsAccessChain` -- `dxc` emits a plain `spirv.AccessChain`
+/// for a composite `Input` variable's first-selected row/member and an
+/// `spirv.InBoundsAccessChain` for every subsequent one (both reach this
+/// same array-typed-`Input`-variable base), so recognizing only the
+/// former left every row but the first routed to MLIR's own generic
+/// `AccessChainPattern` instead of StageIOArrayAccessChainPattern below --
+/// which, exactly as this function's own doc already explains for the
+/// untemplated case, builds an ill-typed `getelementptr` whose declared
+/// result is the eagerly-loaded-value type rather than the real pointer
+/// this array's own base actually is.
+template <typename SPIRVOp>
+bool isInputArrayAccessChain(SPIRVOp Op) {
   auto BaseType =
       mlir::dyn_cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
   return BaseType &&
@@ -3595,14 +3608,16 @@ bool remapNestedStructMemberIndices(
     llvm::SmallVectorImpl<mlir::Value> &Indices,
     mlir::Type RealCurrentType = nullptr);
 
+template <typename SPIRVOp>
 class StageIOArrayAccessChainPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+  using mlir::SPIRVToLLVMConversion<SPIRVOp>::SPIRVToLLVMConversion;
+  using OpAdaptor =
+      typename mlir::SPIRVToLLVMConversion<SPIRVOp>::OpAdaptor;
 
   mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+  matchAndRewrite(SPIRVOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     if (!isInputArrayAccessChain(Op))
       return Rewriter.notifyMatchFailure(
@@ -3616,14 +3631,14 @@ public:
                                          "base did not convert to a pointer");
 
     mlir::Type ElementType =
-        getTypeConverter()->convertType(BaseType.getPointeeType());
+        this->getTypeConverter()->convertType(BaseType.getPointeeType());
     if (!ElementType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
     llvm::SmallVector<mlir::Value, 4> Indices;
-    mlir::Type IndexType =
-        getTypeConverter()->convertType(Op.getIndices().front().getType());
+    mlir::Type IndexType = this->getTypeConverter()->convertType(
+        Op.getIndices().front().getType());
     if (!IndexType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
     Indices.push_back(mlir::LLVM::ConstantOp::create(
@@ -3640,9 +3655,10 @@ public:
     // OffsetStructMemberReorderAccessChainPattern/rewriteBlockAccess
     // already do for their own struct-typed accesses.
     llvm::SmallVector<mlir::Value, 4> RemappedIndices(Adaptor.getIndices());
-    if (!remapNestedStructMemberIndices(BaseType.getPointeeType(), Op,
-                                        /*StartIndex=*/0, *getTypeConverter(),
-                                        Rewriter, RemappedIndices, ElementType))
+    if (!remapNestedStructMemberIndices(
+            BaseType.getPointeeType(), Op,
+            /*StartIndex=*/0, *this->getTypeConverter(), Rewriter,
+            RemappedIndices, ElementType))
       return Rewriter.notifyMatchFailure(
           Op, "struct member selector is not a constant");
     llvm::append_range(Indices, RemappedIndices);
@@ -17735,8 +17751,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ReferenceOfConversionPattern>(Patterns.getContext(),
                                              TypeConverter, FeMeBenefit,
                                              SpecConstants);
-  Patterns.add<StageIOArrayAccessChainPattern>(Patterns.getContext(),
-                                               TypeConverter, FeMeBenefit);
+  Patterns.add<StageIOArrayAccessChainPattern<mlir::spirv::AccessChainOp>,
+               StageIOArrayAccessChainPattern<
+                   mlir::spirv::InBoundsAccessChainOp>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<
       FloatControlArithmeticPattern<mlir::spirv::FAddOp, mlir::LLVM::FAddOp,
                                     mlir::LLVM::ConstrainedFAddIntr>,

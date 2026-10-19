@@ -1180,6 +1180,49 @@ TEST(SPIRVToLLVMTest, InputStorageMatrixAccessChainConvertsInsteadOfFailing) {
       << Result;
 }
 
+// (Roadmap L440(c)) `isInputArrayAccessChain`/`StageIOArrayAccessChainPattern`
+// above were only ever instantiated for `spirv.AccessChain`, never
+// `spirv.InBoundsAccessChain` -- even though `dxc` emits a plain
+// `spirv.AccessChain` for only the *first* row/member it selects out of a
+// composite `Input` variable and an `spirv.InBoundsAccessChain` for every
+// subsequent one (both reach this same array-typed-`Input`-variable base).
+// Reproduces the real `Feature/Semantics/MatrixSemantics.test` failure: a
+// pixel shader reading a custom `float4x4` vertex-to-pixel interpolant
+// (SPIR-V: an `Input`-storage `!spirv.array<4 x vector<4xf32>>`) row by
+// row -- row 0 via `spirv.AccessChain`, every other row via
+// `spirv.InBoundsAccessChain` -- used to leave the latter's own access
+// chain routed to MLIR's own generic `AccessChainPattern` instead, which
+// built an ill-typed `llvm.getelementptr` whose declared result was the
+// eagerly-loaded-value type (a bare `vector<4xf32>`) rather than the real
+// pointer this array's own base actually is, failing MLIR's own
+// `LLVM::GEPOp::verify()` outright ("result #0 must be LLVM pointer type
+// ... but got 'vector<4xf32>'").
+TEST(SPIRVToLLVMTest,
+     InputStorageArrayInBoundsAccessChainConvertsInsteadOfFailing) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> "
+      "{ spirv.GlobalVariable @in_mat_rows : "
+      "!spirv.ptr<!spirv.array<4 x vector<4xf32>>, Input> "
+      "spirv.func @entry() -> () \"None\" { "
+      "%0 = spirv.mlir.addressof @in_mat_rows : "
+      "!spirv.ptr<!spirv.array<4 x vector<4xf32>>, Input> "
+      "%1 = spirv.Constant 1 : i64 "
+      "%2 = spirv.InBoundsAccessChain %0[%1] : "
+      "!spirv.ptr<!spirv.array<4 x vector<4xf32>>, Input>, i64 -> "
+      "!spirv.ptr<vector<4xf32>, Input> "
+      "%3 = spirv.Load \"Input\" %2 : vector<4xf32> "
+      "spirv.Return "
+      "} spirv.EntryPoint \"Fragment\" @entry "
+      "spirv.ExecutionMode @entry \"OriginUpperLeft\" }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  // The array's own address stays a real pointer, and the
+  // `InBoundsAccessChain`'s row index (`1`) legalizes to an ordinary,
+  // pointer-result `getelementptr` -- exactly as a plain `AccessChain`
+  // selecting row 0 already does -- not an eagerly-loaded-value-typed one.
+  EXPECT_NE(Result.find("llvm.getelementptr %0[%2, %1]"), std::string::npos)
+      << Result;
+}
+
 // (Roadmap L104) A non-offset struct with a `vec3` member immediately
 // followed by another member needs that trailing member placed 12 bytes
 // (the vec3's own real, tight alloc size) after the vec3's own start, not
