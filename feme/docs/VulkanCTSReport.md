@@ -161,6 +161,39 @@ do not subtract old fixes from a historical full-run total to manufacture
 a current total. See the current-container priorities in
 [Roadmap.md](Roadmap.md).
 
+### Update: 5 of 6 assertion crashes fixed (`L462`)
+
+Root-caused and fixed the double-claim bug behind the five
+`spirv_assembly.instruction.spirv1p4.loop_control.*` insertion-point
+aborts (see `L462` in [Roadmap.md](Roadmap.md) for the full mechanism).
+Re-ran all five cases against a freshly rebuilt `libfeme_vulkan.so` (the
+real ICD shared library, not just the standalone `feme-opt`/`feme-run`
+JIT tools -- a stale ICD `.so` silently keeps reproducing the old
+crash):
+
+```
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.iteration_multiple .. Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.max_iterations ..... Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.min_iterations ..... Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.partial_count ...... Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.peel_count ......... Pass
+Passed: 5/5 (100.0%)
+```
+
+`check-feme`: 3,803 -> 3,805 Passed (+2 new regression tests), 4
+Unsupported, 0 regressions.
+
+The sixth case,
+`graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false`, is a
+different bug (re-confirmed still crashing after this fix, same
+diagnostic text, same second-assertion signature) and remains open,
+tracked as `ENV3(a)` in [Roadmap.md](Roadmap.md): the "unsupported FeMe
+loop linearization" diagnostic path leaves a block without a terminator
+before its own clean, diagnosed bailout, which a later `getTerminator()`
+call then asserts on. No feature/extension change; no
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
+needed.
+
 ## Historical full-run baseline (2026-10-12)
 
 The remainder records the earlier complete re-triage and its subsequent
