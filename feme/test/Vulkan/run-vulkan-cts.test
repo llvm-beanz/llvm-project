@@ -22,6 +22,7 @@
 // RUN:   --write-verified-failures %t.verified-failures.txt
 // RUN: FileCheck %s < %t.out/report.txt
 // RUN: FileCheck --check-prefix=VERIFIED %s < %t.verified-failures.txt
+// RUN: %python %S/Inputs/run-vulkan-cts-verify-isolation.py %S/../../utils
 //
 // CHECK: Total cases: 4
 // CHECK: Completed cases: 4

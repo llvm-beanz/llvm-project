@@ -310,7 +310,7 @@ def main(argv):
     if verify_cases:
         verify_results, verify_unrun, verify_timed_out = run_round(
             args.deqp_vk, chunk(verify_cases, 1), args.output_dir, "verify",
-            args.workers, args.deqp_vk_arg, args.cwd,
+            1, args.deqp_vk_arg, args.cwd,
             timeout=args.final_timeout)
         for case_name in verify_cases:
             original_status = merged[case_name]
