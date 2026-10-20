@@ -1291,9 +1291,23 @@ static bool feedsInLoopBranchCondition(
 /// terminator -- mirroring `freezeLoopCarriedValues`'s own in-place
 /// freeze, just without that function's "already a loop-carried phi"
 /// shortcut, since there is no such phi to shortcut to here.
+/// Roadmap L466: \p OutShadow, when non-null, receives the dedicated
+/// shadow `phi` this function materializes in \p Header (left untouched
+/// on the early-return path, since there is no such phi for that case).
+/// The shadow phi is itself `Header`-resident -- dominating every block
+/// \p Header dominates, which, for the cycle shapes this pass recognizes,
+/// is every block between \p Header and \p Latch -- so a caller that
+/// needs an equivalent "frozen so far" value at some *other* predecessor
+/// of the cycle's `ExitBlock` (one that bypasses \p Latch entirely via a
+/// genuinely uniform exit edge \p collectUniformPassThroughRegion already
+/// validated, rather than `Header`'s own relay chain) can reuse it
+/// directly, rather than reading \p Latch's own `Frozen` result (which
+/// does *not* dominate such a predecessor whenever it is reached without
+/// ever passing through \p Latch at all).
 static Value *
 freezeExitRelayValue(BasicBlock *Header, BasicBlock *Latch, Value *V,
-                     function_ref<Value *()> GetDivergedThisIter) {
+                     function_ref<Value *()> GetDivergedThisIter,
+                     PHINode **OutShadow = nullptr) {
   if (auto *PN = dyn_cast<PHINode>(V); PN && PN->getParent() == Header)
     return V; // `freezeLoopCarriedValues` already freezes this case.
   PHINode *Shadow = PHINode::Create(V->getType(), /*NumReservedValues=*/2,
@@ -1306,6 +1320,8 @@ freezeExitRelayValue(BasicBlock *Header, BasicBlock *Latch, Value *V,
   Value *Frozen = B.CreateSelect(GetDivergedThisIter(), V, Shadow,
                                   "exit.relay.shadow.frozen");
   Shadow->addIncoming(Frozen, Latch);
+  if (OutShadow)
+    *OutShadow = Shadow;
   return Frozen;
 }
 
@@ -7293,8 +7309,36 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // predecessor was removed, above), so every one of `ExitBlock`'s phis
   // still lists exactly one entry per real predecessor. A no-op whenever
   // `HeaderExit` was a direct (non-relay) match or `HeaderDivergent` is
-  // false, since then either `HeaderExitRelayValues` is empty or `Latch`
-  // already had its own, unrelated incoming value for these phis.
+  // false, since then `HeaderExitRelayValues` is empty.
+  //
+  // Roadmap L466: `Latch` can *also* already be its own, genuinely
+  // separate predecessor of `ExitBlock` here -- not merely "unrelated",
+  // as a previous version of this comment claimed -- whenever the loop
+  // has a second, uniform exit edge that reaches `ExitBlock` directly
+  // from `Latch` itself (as opposed to the `OtherCondBrBlocks`-handled
+  // "uniform exit from somewhere in the body region" shape
+  // `loop-divergent-exit-carried-value-feeds-uniform-check.ll` already
+  // covers), e.g. a hard iteration-count cap check that is itself
+  // `Latch`'s own terminator. That edge's existing phi value was wired
+  // up long before this pass ran (typically by `StructurizeCFG`) under
+  // scalar semantics, where reaching it at all already proves this
+  // thread never took `Header`'s own divergent exit -- no longer true
+  // once lanes are packed into a SIMD group: a lane that *did* take
+  // `Header`'s own divergent exit on some earlier round, while a
+  // slower sibling lane kept the whole group looping, still ends up
+  // taking this same uniform edge once the group's shared trip count
+  // finally runs out, silently clobbering that lane's already-frozen
+  // relay value back to this edge's own, now-stale constant. Blend the
+  // two together with the same "did this lane leave via `Header`'s own
+  // divergent exit, as of now or any earlier round" condition
+  // `MasksAtLatch.Live`'s own negation already encodes, keeping this
+  // edge's original value only for a lane that is genuinely still
+  // active entering it. Confirmed via a real, reproduced
+  // `Basic/Mandelbrot.test` residual-pixel-diff (`for (; Iteration <
+  // MaxIteration; ++Iteration) { if (Diverged) break; }`, whose
+  // `MaxIteration` cap is exactly this shape) and the standalone
+  // `loop-divergent-exit-uniform-latch-exit.ll` reproducer.
+  //
   // Roadmap L420: `HeaderDivergedThisIter` is computed lazily, on first
   // actual use below, so a cycle whose every `HeaderExitRelayValues`
   // entry is already one of `Header`'s own phis (the common case,
@@ -7311,11 +7355,78 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     }
     return HeaderDivergedThisIter;
   };
-  for (auto &[PN, V] : HeaderExitRelayValues)
-    if (PN->getBasicBlockIndex(Latch) == -1)
+  for (auto &[PN, V] : HeaderExitRelayValues) {
+    PHINode *Shadow = nullptr;
+    int LatchIdx = PN->getBasicBlockIndex(Latch);
+    if (LatchIdx == -1) {
       PN->addIncoming(
-          freezeExitRelayValue(Header, Latch, V, GetHeaderDivergedThisIter),
+          freezeExitRelayValue(Header, Latch, V, GetHeaderDivergedThisIter,
+                               &Shadow),
           Latch);
+    } else if (Value *Frozen = freezeExitRelayValue(
+                   Header, Latch, V, GetHeaderDivergedThisIter, &Shadow);
+               Frozen != V) {
+      // Already one of `Header`'s own phis (`Frozen == V`) is handled by
+      // `freezeLoopCarriedValues`'s own mechanism instead; nothing further
+      // to do for that case.
+      IRBuilder<> LatchBlendBuilder(Latch->getTerminator());
+      Value *DivergedViaHeaderByNow = LatchBlendBuilder.CreateNot(
+          MasksAtLatch.Live, "diverged.via.header.by.now");
+      PN->setIncomingValue(
+          LatchIdx, LatchBlendBuilder.CreateSelect(
+                        DivergedViaHeaderByNow, Frozen,
+                        PN->getIncomingValue(LatchIdx),
+                        "exit.relay.latch.blend"));
+    }
+    // Roadmap L466: `BodyRegion` (the uniform pass-through region between
+    // `Header`'s own exit check and `Latch`, see
+    // `collectUniformPassThroughRegion`'s own comment on a walk ending at
+    // `ExitBlock` directly) can itself contain a block with its own,
+    // genuinely separate, *direct* edge to `ExitBlock` that bypasses
+    // `Latch` entirely -- a hard, uniform iteration-count cap that is
+    // itself some block strictly between `Header` and `Latch`, not
+    // `Latch`'s own terminator (reduced from Clang's own
+    // `Basic/Mandelbrot.test`, whose `MaxIteration` cap check is
+    // `StructurizeCFG`-relayed through exactly such a block, distinct
+    // from this cycle's own `Latch`). Any such predecessor's existing
+    // phi entry has the identical "stale, scalar-only constant" problem
+    // `Latch`'s own entry can have above, but `Latch`'s own `Frozen`
+    // value does not dominate it (it is reached without ever passing
+    // through `Latch` at all), so it needs its own, equivalent blend
+    // built from values that *do* dominate it: `Masks.Live`/
+    // `MasksAtLatch.Live` are both computed in `Header` itself (the sole
+    // entry to this entire region), so they dominate every `BodyRegion`
+    // member; `Shadow` is likewise `Header`-resident. `V` itself, by
+    // contrast, is not guaranteed to dominate an arbitrary `BodyRegion`
+    // member (it may be defined somewhere along `HeaderExit`'s own relay
+    // chain, strictly between `Header` and `Latch`) -- conservatively
+    // require it to be a `Constant` (trivially dominates everywhere,
+    // true of every shape reduced so far) before blending it in here,
+    // leaving any other shape exactly as unfixed as it was before this
+    // roadmap entry rather than risk an invalid, non-dominating use.
+    if (!Shadow || !isa<Constant>(V) || !BodyRegion)
+      continue;
+    for (BasicBlock *Pred : predecessors(ExitBlock)) {
+      if (Pred == Latch || Pred == HeaderExit->RelayBlock ||
+          !BodyRegion->contains(Pred))
+        continue;
+      int Idx = PN->getBasicBlockIndex(Pred);
+      if (Idx == -1)
+        continue;
+      IRBuilder<> PredBlendBuilder(Pred->getTerminator());
+      Value *ExitedThisRoundAtPred = PredBlendBuilder.CreateAnd(
+          Masks.Live, PredBlendBuilder.CreateNot(MasksAtLatch.Live),
+          "exited.via.header.this.iter.bypass");
+      Value *FrozenAtPred = PredBlendBuilder.CreateSelect(
+          ExitedThisRoundAtPred, V, Shadow, "exit.relay.shadow.frozen.bypass");
+      Value *DivergedViaHeaderByNow = PredBlendBuilder.CreateNot(
+          MasksAtLatch.Live, "diverged.via.header.by.now.bypass");
+      PN->setIncomingValue(
+          Idx, PredBlendBuilder.CreateSelect(
+                   DivergedViaHeaderByNow, FrozenAtPred,
+                   PN->getIncomingValue(Idx), "exit.relay.bypass.blend"));
+    }
+  }
 
   freezeLoopCarriedValues(
       Header, Latch, MasksAtLatch.Live,

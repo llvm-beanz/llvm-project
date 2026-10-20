@@ -29,16 +29,29 @@
 ; correctly-frozen per-lane value instead, updated via a `select` keyed
 ; on a new per-iteration "did this lane just exit via header's own
 ; check" mask.
+;
+; Roadmap L466: `body`'s own direct exit edge to `exit` (taken when the
+; loop's separate, genuinely-uniform trip-count check fires) is itself a
+; second, independent bypass of `latch` -- `body` is a `BodyRegion`
+; member, not `latch` itself. The literal `false` on that edge is
+; broadcast to *every* lane simultaneously when the uniform check fires,
+; which silently clobbers any lane that already recorded `true` via an
+; earlier round's divergent `header` exit (the exact same class of bug
+; as the `latch`-relayed value above, just on a different incoming
+; edge). It must likewise be blended against the per-lane shadow instead
+; of applied unconditionally.
 ; CHECK-LABEL: define void @main(
 ; CHECK: header:
 ; CHECK: %exit.relay.shadow = phi i1 [ poison, %entry ], [ %exit.relay.shadow.frozen, %latch ]
+; CHECK: body:
+; CHECK: %exit.relay.bypass.blend = select i1 %{{.*}}, i1 %exit.relay.shadow.frozen.bypass, i1 false
 ; CHECK: latch:
 ; CHECK: %[[NOT:.+]] = xor i1 %active.header.live, true
 ; CHECK-NEXT: %exited.via.header.this.iter = and i1 %active.live, %[[NOT]]
 ; CHECK-NEXT: %exit.relay.shadow.frozen = select i1 %exited.via.header.this.iter, i1 true, i1 %exit.relay.shadow
 ; CHECK: exit:
 ; CHECK-NEXT: %i.result = phi i32 [ %i.next, %body ], [ %i.frozen.shadow, %latch ]
-; CHECK-NEXT: %diverged.result = phi i1 [ false, %body ], [ %exit.relay.shadow.frozen, %latch ]
+; CHECK-NEXT: %diverged.result = phi i1 [ %exit.relay.bypass.blend, %body ], [ %exit.relay.shadow.frozen, %latch ]
 define void @main(ptr %out, ptr %out2) #0 {
 entry:
   br label %header

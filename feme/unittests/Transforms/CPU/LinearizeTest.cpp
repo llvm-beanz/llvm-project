@@ -797,6 +797,174 @@ TEST(LinearizeTest, FreezesNonPhiExitRelayValueViaDedicatedShadowPhi) {
   EXPECT_TRUE(FoundShadowPhiInHeader);
 }
 
+// Roadmap L466: like `FreezesNonPhiExitRelayValueViaDedicatedShadowPhi`
+// above, but the loop's own separate, genuinely uniform exit check is
+// `latch`'s *own* terminator (a real, direct edge to `exit`) rather than
+// some other, non-`latch` block's. Reduced from Clang's own
+// `Basic/Mandelbrot.test`, whose
+// `for (; Iteration < MaxIteration; ++Iteration) { if (Diverged) break; }`
+// loop has exactly this shape once `StructurizeCFG` relays both exits
+// through the loop's own latch block.
+//
+// Before this fix, `latch` already had its *own* pre-existing incoming
+// value on `exit`'s merge phi (the literal `false`), so the restore loop
+// that re-attaches `header`'s own frozen relay value onto `latch`'s edge
+// -- guarded by "does `latch` not yet have an entry on this phi" --
+// skipped this case entirely, silently discarding the frozen value and
+// leaving every lane to read the stale, scalar-only constant
+// unconditionally.
+TEST(LinearizeTest, BlendsExitRelayValueWithPreexistingUniformLatchExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %body
+    body:
+      br label %latch
+    latch:
+      %i.next = add i32 %i, 1
+      %trip = icmp slt i32 %i.next, 10
+      br i1 %trip, label %header, label %exit
+    exit:
+      %result = phi i1 [ true, %header ], [ false, %latch ]
+      store i1 %result, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+
+  // `exit`'s own `%result` merge must no longer read the raw literal
+  // `false` directly off `latch`'s edge -- it must instead read a
+  // `select` that blends in the frozen relay value for any lane that
+  // already diverged via `header`'s own check.
+  PHINode *Result = nullptr;
+  for (Instruction &I : instructions(F))
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName() == "result")
+        Result = PN;
+  ASSERT_TRUE(Result);
+  bool FoundRawConstantOnLatchEdge = false;
+  bool FoundBlendSelectOnLatchEdge = false;
+  for (unsigned Idx = 0, End = Result->getNumIncomingValues(); Idx != End;
+       ++Idx) {
+    if (Result->getIncomingBlock(Idx)->getName() != "latch")
+      continue;
+    Value *V = Result->getIncomingValue(Idx);
+    if (isa<ConstantInt>(V))
+      FoundRawConstantOnLatchEdge = true;
+    if (auto *SI = dyn_cast<SelectInst>(V))
+      if (SI->getName().contains("exit.relay.latch.blend"))
+        FoundBlendSelectOnLatchEdge = true;
+  }
+  EXPECT_FALSE(FoundRawConstantOnLatchEdge);
+  EXPECT_TRUE(FoundBlendSelectOnLatchEdge);
+
+  // The blend's own "already diverged" branch must read the frozen
+  // shadow phi (not some other, un-frozen value), and its "still active"
+  // branch must preserve the edge's own original constant.
+  bool FoundShadowOperand = false;
+  bool FoundOriginalConstantOperand = false;
+  for (Instruction &I : instructions(F))
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getName().contains("exit.relay.latch.blend")) {
+        if (SI->getTrueValue()->getName().contains("exit.relay.shadow"))
+          FoundShadowOperand = true;
+        if (auto *CI = dyn_cast<ConstantInt>(SI->getFalseValue()))
+          FoundOriginalConstantOperand = CI->isZero();
+      }
+  EXPECT_TRUE(FoundShadowOperand);
+  EXPECT_TRUE(FoundOriginalConstantOperand);
+}
+
+// Roadmap L466: like
+// `BlendsExitRelayValueWithPreexistingUniformLatchExit` above, but the
+// loop's own separate, genuinely uniform exit check sits in some *other*
+// block strictly between `header`'s own divergent exit check and
+// `latch` (inside `collectUniformPassThroughRegion`'s own uniform
+// pass-through region, which tolerates a walk ending at `exit` directly,
+// bypassing `latch` entirely) rather than being `latch`'s own
+// terminator. Reduced from Clang's own `Basic/Mandelbrot.test`, whose
+// `MaxIteration` hard iteration-count cap check is `StructurizeCFG`-
+// relayed through exactly such a block, distinct from that same loop's
+// own `latch`.
+//
+// `header`'s own `Frozen` relay value (computed at `latch`) does *not*
+// dominate `body`'s own direct edge to `exit` here, since `body` is
+// reached without ever passing through `latch` at all -- the fix must
+// build an equivalent blend from `header`-resident values instead.
+TEST(LinearizeTest, BlendsExitRelayValueWithPreexistingUniformBypassExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %body
+    body:
+      %i.next = add i32 %i, 1
+      %trip = icmp slt i32 %i.next, 10
+      br i1 %trip, label %cont, label %exit
+    cont:
+      br label %latch
+    latch:
+      br label %header
+    exit:
+      %result = phi i1 [ true, %header ], [ false, %body ]
+      store i1 %result, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+
+  // `exit`'s own `%result` merge must no longer read the raw literal
+  // `false` directly off `body`'s edge -- it must instead read a
+  // `select` that blends in the frozen relay value for any lane that
+  // already diverged via `header`'s own check.
+  PHINode *Result = nullptr;
+  for (Instruction &I : instructions(F))
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName() == "result")
+        Result = PN;
+  ASSERT_TRUE(Result);
+  bool FoundRawConstantOnBodyEdge = false;
+  bool FoundBlendSelectOnBodyEdge = false;
+  for (unsigned Idx = 0, End = Result->getNumIncomingValues(); Idx != End;
+       ++Idx) {
+    if (Result->getIncomingBlock(Idx)->getName() != "body")
+      continue;
+    Value *V = Result->getIncomingValue(Idx);
+    if (isa<ConstantInt>(V))
+      FoundRawConstantOnBodyEdge = true;
+    if (auto *SI = dyn_cast<SelectInst>(V))
+      if (SI->getName().contains("exit.relay.bypass.blend"))
+        FoundBlendSelectOnBodyEdge = true;
+  }
+  EXPECT_FALSE(FoundRawConstantOnBodyEdge);
+  EXPECT_TRUE(FoundBlendSelectOnBodyEdge);
+}
+
 TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
