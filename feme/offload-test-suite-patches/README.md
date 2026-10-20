@@ -1,7 +1,7 @@
 # offload-test-suite patches
 
 `/home/dev/dev/offload-test-suite`'s local `feme` branch is wiped back to a
-pure `origin/main` mirror (plus the upstream `854cc3f` FeMe-enabling
+pure `origin/main` mirror (plus the upstream `llvm-beanz/feme` tip-commit FeMe-enabling
 cherry-pick) at the start of every session by a root-owned setup script
 outside this project's control (see `feme/.instructions.md`). This repo has
 no push access to `llvm-beanz/offload-test-suite`, so any local commits made
@@ -9,12 +9,12 @@ there during a session do not persist to the next one.
 
 These patches fix genuine, isolated, unit-tested bugs in `offload-test-suite`
 discovered while validating the Clang Mandelbrot fix (FeMe Roadmap `ENV3(b)`,
-`L464`). Re-apply them after the standard `854cc3f` cherry-pick each session,
+`L464`). Re-apply them after the standard `llvm-beanz/feme` cherry-pick each session,
 in order, until they are upstreamed to `llvm-beanz/offload-test-suite`:
 
 ```sh
 cd /home/dev/dev/offload-test-suite
-git fetch llvm-beanz feme && git cherry-pick 854cc3f
+git fetch llvm-beanz feme && git cherry-pick llvm-beanz/feme
 git am /home/dev/dev/llvm-project/feme/offload-test-suite-patches/*.patch
 ```
 
