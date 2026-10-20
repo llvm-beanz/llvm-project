@@ -3600,7 +3600,39 @@ private:
   /// support lands, a non-leaf parent -- is actually linearized, its own
   /// exit-block answer was already computed and cached, against blocks
   /// every one of which was still alive at the time.
-  DenseMap<CycleRef, SmallVector<BasicBlock *, 2>> ExitBlocksByCycle;
+  ///
+  /// Roadmap L463: `WeakTrackingVH`-valued, not a plain `BasicBlock *`,
+  /// for exactly the same reason `HeaderActiveMasks` is `WeakMaskPair`-
+  /// valued (see that member's own "Roadmap L440" comment) -- this cache
+  /// is itself only safe against mutation that happens *before* the
+  /// cycle it answers for is attempted, not mutation an *enclosing*
+  /// cycle's own fold helpers (`foldRedundantFlowBlocksInCycle`,
+  /// `mergeTrivialRelayBlocksInCycle`, `peelConstantFlowPredecessorsInCycle`)
+  /// apply afterward: those are deliberately scoped via `CI.contains`,
+  /// which (by `GenericCycleInfo::contains`'s own Euler-tour-range
+  /// definition) is true for every block of every nested child cycle too,
+  /// not just the enclosing cycle's own "direct" body. A child cycle left
+  /// completely alone (its own `linearizeCycle` returning `false` after a
+  /// clean "unsupported shape" diagnostic, never masking anything) is
+  /// still fully in-bounds for its parent's later folds to merge or erase
+  /// pieces of -- including, confirmed by direct instrumentation of every
+  /// `BasicBlock::eraseFromParent`/`MergeBlockIntoPredecessor` call in
+  /// this file, the child's own cached exit block itself, via
+  /// `mergeTrivialRelayBlocksInCycle`'s `MergeBlockIntoPredecessor` once a
+  /// sibling peel/fold has left it a phi-less, single-predecessor relay
+  /// stub. `GetAlreadyLinearizedCycleExit` (`LoopLinearizer::linearizeCycle`,
+  /// "Roadmap L375 (6th investigation)") reads this cache for exactly such
+  /// an abandoned child while its own *parent* is being processed, well
+  /// after that erasure -- a raw `BasicBlock *` there is a genuine,
+  /// reproduced use-after-free (`dEQP-VK.graphicsfuzz.cov-loop-condition-
+  /// divide-by-uniform-always-false`'s nested `for`/`for` crashes
+  /// `DiamondFlattener::validate`'s `getTerminator()` on the freed block).
+  /// `WeakTrackingVH` auto-nulls instead of dangling once the block it
+  /// tracks is really erased, letting `getExitBlocks` filter those out and
+  /// `GetAlreadyLinearizedCycleExit` fall back to its existing, already-
+  /// graceful "multiple/no exits: not yet supported here" path instead of
+  /// reading freed memory.
+  DenseMap<CycleRef, SmallVector<WeakTrackingVH, 2>> ExitBlocksByCycle;
 
   /// Populates `ExitBlocksByCycle` for every cycle in `CI` (not just
   /// leaves -- see that member's own comment for why a future non-leaf
@@ -3608,12 +3640,28 @@ private:
   /// before any mutation begins.
   void precomputeExitBlocks();
 
+  /// Roadmap L463: materializes `ExitBlocksByCycle`'s current, still-live
+  /// entries for \p C into `LiveExitBlocksCache` (dropping any that have
+  /// since been erased -- see `ExitBlocksByCycle`'s own comment) and
+  /// returns a view of that materialized list. Recomputed on every call
+  /// rather than memoized permanently: cheap (at most a couple of exit
+  /// blocks per cycle), and correct regardless of how many more erasures
+  /// happen between one call and the next.
   ArrayRef<BasicBlock *> getExitBlocks(CycleRef C) const {
     auto It = ExitBlocksByCycle.find(C);
     if (It == ExitBlocksByCycle.end())
       return {};
-    return It->second;
+    SmallVector<BasicBlock *, 2> Live;
+    for (const WeakTrackingVH &VH : It->second)
+      if (VH)
+        Live.push_back(cast<BasicBlock>(VH));
+    return LiveExitBlocksCache[C] = std::move(Live);
   }
+
+  /// Roadmap L463: backing storage for `getExitBlocks`'s returned
+  /// `ArrayRef` -- see that method's own comment. `mutable` since
+  /// `getExitBlocks` is otherwise a read-only query.
+  mutable DenseMap<CycleRef, SmallVector<BasicBlock *, 2>> LiveExitBlocksCache;
 
   /// Roadmap L282: every cycle's own header, once successfully
   /// linearized, mapped to the `MaskPair` phis `makeActivePNPair` created
@@ -7294,7 +7342,10 @@ void LoopLinearizer::precomputeExitBlocks() {
   for (CycleRef C : CI.cycles()) {
     SmallVector<BasicBlock *, 2> Exits;
     CI.getExitBlocks(C, Exits);
-    ExitBlocksByCycle.try_emplace(C, std::move(Exits));
+    // Roadmap L463: `WeakTrackingVH`-wrapped, not stored raw -- see
+    // `ExitBlocksByCycle`'s own comment.
+    SmallVector<WeakTrackingVH, 2> WeakExits(Exits.begin(), Exits.end());
+    ExitBlocksByCycle.try_emplace(C, std::move(WeakExits));
   }
 }
 

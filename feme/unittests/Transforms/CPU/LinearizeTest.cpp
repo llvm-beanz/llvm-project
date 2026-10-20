@@ -2766,4 +2766,146 @@ TEST(LinearizeTest,
          "per-lane mask, not left with its original constant-true operand";
 }
 
+// Roadmap L463: a minimized reduction of
+// `dEQP-VK.graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false`'s
+// fragment shader -- two nested `for` loops where the inner loop's own
+// body has a genuinely divergent `if` (guarding an `fdiv`-based
+// comparison) that `DiamondFlattener::validate` cannot yet lower, so the
+// inner loop is left alone with a clean "unsupported" diagnostic. The
+// *outer* loop's own fold helpers (`foldRedundantFlowBlocksInCycle`,
+// `peelConstantFlowPredecessorsInCycle`, `mergeTrivialRelayBlocksInCycle`)
+// are scoped via `CycleInfo::contains`, which also matches every block of
+// the still-nested inner cycle, and one of them merges the inner loop's
+// own cached exit block (`LoopLinearizer::ExitBlocksByCycle`, "Roadmap
+// L197") away as collateral damage. The outer loop's own `validate` walk
+// then reaches the inner loop's header and, recognizing it as an
+// already-attempted child cycle, reads that now-stale cache entry via
+// `GetAlreadyLinearizedCycleExit` -- before this fix, a raw, dangling
+// `BasicBlock *` into freed memory, asserting on `getTerminator()`. See
+// `nested-loop-abandoned-child-exit-block-merged.ll` for the equivalent
+// lit-level coverage.
+TEST(LinearizeTest, DoesNotUseFreedChildCycleExitBlockAfterOuterLoopFold) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
+    declare float @llvm.copysign.f32(float, float)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1)
+
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #0 {
+      %1 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 0, i1 true)
+      %2 = sitofp i32 %1 to float
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %2, i32 0)
+      br label %5
+    5:
+      %.05 = phi i32 [ 1, %0 ], [ %53, %Flow6._crit_edge ]
+      %6 = icmp slt i32 %.05, 9
+      br i1 %6, label %._crit_edge, label %.Flow6_crit_edge
+    .Flow6_crit_edge:
+      br label %Flow6
+    ._crit_edge:
+      br label %20
+    common.ret:
+      ret void
+    7:
+      %8 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 16, i1 true)
+      %9 = sitofp i32 %8 to float
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %9, i32 0)
+      br label %common.ret
+    20:
+      %.0 = phi i32 [ %31, %Flow._crit_edge ], [ 1, %._crit_edge ]
+      %21 = icmp slt i32 %.0, 10
+      br i1 %21, label %28, label %.Flow_crit_edge
+    .Flow_crit_edge:
+      br label %Flow
+    22:
+      %23 = add i32 %.05, 1
+      br label %Flow7
+    Flow4:
+      %24 = phi i1 [ false, %34 ], [ true, %.Flow4_crit_edge ]
+      %25 = phi i1 [ %48, %34 ], [ %30, %.Flow4_crit_edge ]
+      br i1 %25, label %26, label %Flow4.Flow5_crit_edge
+    Flow4.Flow5_crit_edge:
+      br label %Flow5
+    26:
+      %27 = add i32 %.0, 1
+      br label %Flow5
+    28:
+      %29 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 16, i1 true)
+      %30 = icmp sgt i32 %.05, %29
+      %.inv = xor i1 %30, true
+      br i1 %.inv, label %34, label %.Flow4_crit_edge
+    .Flow4_crit_edge:
+      br label %Flow4
+    Flow:
+      %31 = phi i32 [ %51, %Flow5 ], [ poison, %.Flow_crit_edge ]
+      %32 = phi i1 [ %24, %Flow5 ], [ true, %.Flow_crit_edge ]
+      %33 = phi i1 [ %52, %Flow5 ], [ true, %.Flow_crit_edge ]
+      br i1 %33, label %loop.exit.guard1, label %Flow._crit_edge
+    Flow._crit_edge:
+      br label %20
+    34:
+      %35 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %36 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 2, i64 0, i1 true)
+      %37 = call i1 @llvm.is.fpclass.f32(float %35, i32 144)
+      %38 = call float @llvm.copysign.f32(float 0.000000e+00, float %35)
+      %39 = select i1 %37, float %38, float %35
+      %40 = call i1 @llvm.is.fpclass.f32(float %36, i32 144)
+      %41 = call float @llvm.copysign.f32(float 0.000000e+00, float %36)
+      %42 = select i1 %40, float %41, float %36
+      %43 = fdiv float %39, %42
+      %44 = call i1 @llvm.is.fpclass.f32(float %43, i32 144)
+      %45 = call float @llvm.copysign.f32(float 0.000000e+00, float %43)
+      %46 = select i1 %44, float %45, float %43
+      %47 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %48 = fcmp uge float %46, %47
+      br label %Flow4
+    Flow7:
+      %49 = phi i32 [ %23, %22 ], [ poison, %loop.exit.guard1.Flow7_crit_edge ]
+      %50 = phi i1 [ false, %22 ], [ true, %loop.exit.guard1.Flow7_crit_edge ]
+      br label %Flow6
+    loop.exit.guard:
+      br i1 %54, label %7, label %loop.exit.guard.common.ret_crit_edge
+    loop.exit.guard.common.ret_crit_edge:
+      br label %common.ret
+    Flow5:
+      %51 = phi i32 [ %27, %26 ], [ poison, %Flow4.Flow5_crit_edge ]
+      %52 = phi i1 [ false, %26 ], [ true, %Flow4.Flow5_crit_edge ]
+      br label %Flow
+    Flow6:
+      %53 = phi i32 [ %49, %Flow7 ], [ poison, %.Flow6_crit_edge ]
+      %54 = phi i1 [ false, %Flow7 ], [ true, %.Flow6_crit_edge ]
+      %55 = phi i1 [ %50, %Flow7 ], [ true, %.Flow6_crit_edge ]
+      br i1 %55, label %loop.exit.guard, label %Flow6._crit_edge
+    Flow6._crit_edge:
+      br label %5
+    loop.exit.guard1:
+      br i1 %32, label %22, label %loop.exit.guard1.Flow7_crit_edge
+    loop.exit.guard1.Flow7_crit_edge:
+      br label %Flow7
+    }
+    attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+
+  // The bug was an assertion failure (an aborted process) reached from
+  // inside the inner loop's own clean, intentional "unsupported"
+  // diagnostic path, so the regression coverage here is simply that
+  // `run` returns without crashing, having emitted that one diagnostic
+  // (not zero, not a crash) and otherwise valid IR.
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_TRUE(SawError) << "the inner loop's divergent-if body shape "
+                            "should still be diagnosed as unsupported";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
