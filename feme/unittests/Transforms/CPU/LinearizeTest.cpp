@@ -620,6 +620,93 @@ TEST(LinearizeTest, LinearizesLoopWithDivergentExit) {
   EXPECT_TRUE(FoundActivePhi);
 }
 
+// Roadmap H125(a): `%i`, read after the loop exits (via `exit`'s own
+// `%i.result` merge), also feeds a second, genuinely uniform in-loop exit
+// check (`%trip`, comparing `%i.next` against the compile-time constant
+// `10`) that reaches the cycle's single `exit` block directly, alongside
+// `header`'s own divergent exit check -- reduced from Clang's own
+// `Basic/Mandelbrot.test`, whose `for (; Iteration < MaxIteration;
+// ++Iteration) { if (Diverged) break; }` loop has exactly this shape.
+// Before this fix, `freezeLoopCarriedValues` froze `%i` itself in place
+// (needed for its own `exit`-block use), which also retroactively made
+// `%trip`'s condition divergent per `UniformityInfo` (a `phi` with any
+// divergent incoming value is divergent for all its uses), corrupting
+// `body`'s own, otherwise untouched branch and eventually tripping
+// `feme-cpu-simdize`'s "has a divergent branch" diagnostic. `%i`'s own
+// `header` phi must stay completely untouched here -- still backed
+// directly by `%i.next` -- with a new, separate shadow `phi` instead
+// carrying the frozen value `exit`'s own merge actually needs.
+TEST(LinearizeTest, FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformCheck) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %body
+    body:
+      %i.next = add i32 %i, 1
+      %trip = icmp slt i32 %i.next, 10
+      br i1 %trip, label %latch, label %exit
+    latch:
+      br label %header
+    exit:
+      %i.result = phi i32 [ %i, %header ], [ %i.next, %body ]
+      store i32 %i.result, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Body = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName() == "body")
+      Body = &BB;
+  ASSERT_TRUE(Body);
+
+  // `body`'s own `%trip` branch must still be a plain, untouched CondBr:
+  // the fix must not have widened or masked it in any way.
+  auto *Term = dyn_cast<CondBrInst>(Body->getTerminator());
+  ASSERT_TRUE(Term);
+  auto *Trip = dyn_cast<CmpInst>(Term->getCondition());
+  ASSERT_TRUE(Trip);
+  EXPECT_EQ(Trip->getName(), "trip");
+  auto *TripNext = dyn_cast<BinaryOperator>(Trip->getOperand(0));
+  ASSERT_TRUE(TripNext);
+  EXPECT_EQ(TripNext->getName(), "i.next");
+
+  // `header`'s own `%i` phi must still be backed directly by `%i.next` on
+  // the latch edge -- not by any `select`/frozen value.
+  BasicBlock *Header = F->getEntryBlock().getSingleSuccessor();
+  PHINode *IPhi = nullptr;
+  for (Instruction &I : *Header)
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName() == "i")
+        IPhi = PN;
+  ASSERT_TRUE(IPhi);
+  for (unsigned Idx = 0, End = IPhi->getNumIncomingValues(); Idx != End;
+       ++Idx)
+    if (IPhi->getIncomingBlock(Idx)->getName() == "latch")
+      EXPECT_EQ(IPhi->getIncomingValue(Idx), TripNext);
+
+  // A separate shadow phi must exist, feeding `exit`'s own merge.
+  bool FoundShadowPhi = false;
+  for (Instruction &I : instructions(F))
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName().contains("frozen.shadow"))
+        FoundShadowPhi = true;
+  EXPECT_TRUE(FoundShadowPhi);
+}
+
 TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

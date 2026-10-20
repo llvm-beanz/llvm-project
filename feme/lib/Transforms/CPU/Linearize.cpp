@@ -1158,6 +1158,40 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks,
   applyStageMasks(BB.begin(), BB.end(), Masks, MaskedLoads);
 }
 
+/// Roadmap H125(a): bounded, pure-dataflow-only search for whether \p V
+/// (an in-loop value) feeds, directly or through a short chain of simple
+/// arithmetic/comparison/cast/`select` instructions, a conditional
+/// branch's own condition somewhere \p InLoop -- used by
+/// `freezeLoopCarriedValues` below to recognize when in-place freezing a
+/// loop-carried `phi` would corrupt a *different*, still-untouched
+/// in-loop branch's uniformity (see that function's own comment on why
+/// this matters). Deliberately only follows instructions with no memory
+/// or other side effects: anything else (a load, a call, ...) is either
+/// already handled by `applyStageMasks`'s own per-use narrowing or is not
+/// the narrow "ordinary induction-variable-style trip-count recheck"
+/// shape this search exists to protect.
+static bool feedsInLoopBranchCondition(
+    Value *V, function_ref<bool(const BasicBlock *)> InLoop,
+    SmallPtrSetImpl<Value *> &Visited) {
+  if (!Visited.insert(V).second)
+    return false;
+  for (User *U : V->users()) {
+    auto *I = dyn_cast<Instruction>(U);
+    if (!I || !InLoop(I->getParent()))
+      continue;
+    if (auto *Br = dyn_cast<CondBrInst>(I)) {
+      if (Br->getCondition() == V)
+        return true;
+      continue;
+    }
+    if ((isa<BinaryOperator>(I) || isa<CmpInst>(I) || isa<CastInst>(I) ||
+        isa<SelectInst>(I)) &&
+        feedsInLoopBranchCondition(I, InLoop, Visited))
+      return true;
+  }
+  return false;
+}
+
 /// (Roadmap H125) After if-converting a loop with a divergent exit, an
 /// ordinary loop-carried value (any \p Header `phi` besides the two mask
 /// phis \p LoopLinearizer::makeActivePNPair itself just created --
@@ -1228,12 +1262,65 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
     Value *NewValue = PN.getIncomingValue(Idx);
     if (NewValue == &PN)
       continue; // Already trivially frozen; nothing this iteration changed.
-    bool UsedOutsideLoop =
-        llvm::is_contained(RelayCaptured, &PN) || any_of(PN.users(), [&](User *U) {
-          return !InLoop(cast<Instruction>(U)->getParent());
-        });
-    if (!UsedOutsideLoop)
+    bool IsRelayCaptured = llvm::is_contained(RelayCaptured, &PN);
+    SmallVector<Use *, 4> OutsideUses;
+    for (Use &U : PN.uses())
+      if (!InLoop(cast<Instruction>(U.getUser())->getParent()))
+        OutsideUses.push_back(&U);
+    if (!IsRelayCaptured && OutsideUses.empty())
       continue; // Only ever read inside the loop: nothing to freeze.
+
+    // Roadmap H125(a): a loop-carried value this cycle's masking must
+    // freeze (because some use reads it after the loop, or a relay-chain
+    // hop needs it frozen in place -- see `RelayCaptured`'s own contract
+    // above) can *also* still feed a genuinely-uniform, untouched in-loop
+    // branch condition: an ordinary `for`/`while` trip-count re-check
+    // `linearizeCycle`'s own `OtherCondBrBlocks` handling left completely
+    // alone (see that handling's own comment on why a uniform
+    // pass-through block need not be touched at all). Mutating `PN`
+    // itself in place -- the pre-existing behavior -- makes *every* use
+    // of `PN` divergent per `UniformityInfo` (a `phi` with any divergent
+    // incoming value is divergent, full stop), not just the external ones
+    // this freeze actually needs to fix up: that retroactively turns the
+    // untouched in-loop branch divergent too, tripping
+    // `feme-cpu-simdize`'s own "has a divergent branch" diagnostic on IR
+    // this pass otherwise leaves completely alone (reduced from Clang's
+    // own `Basic/Mandelbrot.test`, whose `for` loop's own
+    // `Iteration < MaxIteration` trip-count check depends on the exact
+    // same per-lane iteration counter its own early-`break` condition's
+    // masking must freeze for the counter's *other*, after-the-loop use).
+    // `feedsInLoopBranchCondition` scopes this precisely to that shape --
+    // an ordinary in-loop data use that never reaches a branch condition
+    // (like `loop-divergent-exit-carried-value.ll`'s/`loop-check-separate-
+    // carried-value.ll`'s own `%r.next = add i32 %r, 1`, whose only
+    // consumer is the phi's own backedge, not a branch) still gets the
+    // original, simpler in-place freeze unchanged. When `PN` does feed
+    // such a branch, and is not itself a relay-chain hop that must keep
+    // re-reading `PN`'s own identity (`RelayCaptured`), freeze a
+    // *separate* shadow `phi` instead, redirecting only the
+    // outside-the-loop uses to it: `PN` itself is then left completely
+    // untouched, so the in-loop branch's own uniformity is unaffected.
+    SmallPtrSet<Value *, 8> Visited;
+    bool FeedsUniformBranch =
+        !IsRelayCaptured && feedsInLoopBranchCondition(&PN, InLoop, Visited);
+    if (FeedsUniformBranch) {
+      PHINode *Shadow =
+          PHINode::Create(PN.getType(), PN.getNumIncomingValues(),
+                           PN.getName() + ".frozen.shadow");
+      Shadow->insertBefore(Header->getFirstNonPHIIt());
+      for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
+        BasicBlock *IncomingBB = PN.getIncomingBlock(I);
+        Value *IncomingV =
+            static_cast<int>(I) == Idx
+                ? B.CreateSelect(BodyMask, NewValue, &PN, PN.getName() + ".frozen")
+                : PN.getIncomingValue(I);
+        Shadow->addIncoming(IncomingV, IncomingBB);
+      }
+      for (Use *U : OutsideUses)
+        U->set(Shadow);
+      continue;
+    }
+
     PN.setIncomingValue(
         Idx, B.CreateSelect(BodyMask, NewValue, &PN, PN.getName() + ".frozen"));
   }
