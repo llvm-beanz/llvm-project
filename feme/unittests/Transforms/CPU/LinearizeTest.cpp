@@ -707,6 +707,96 @@ TEST(LinearizeTest, FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformC
   EXPECT_TRUE(FoundShadowPhi);
 }
 
+// Roadmap L420: like
+// `FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformCheck`
+// above, but the value read after the loop (`%diverged.result`) is *not*
+// a reference to one of `header`'s own loop-carried phis -- it is a
+// second `exit`-block merge whose two incoming values are themselves
+// simple, fixed per-edge constants (`true` for "exited via the
+// divergent `break`", `false` for "exited via the loop's own separate,
+// genuinely uniform trip-count check"). Reduced from `Basic/
+// Mandelbrot.test`'s own per-pixel escape-iteration loop, whose post-loop
+// `if (Diverged)` color selection reads exactly this shape of merge.
+// Before this fix, this merge's `header`-path value (the literal `true`)
+// was carried onto `latch`'s new edge completely unfrozen (`V` is a
+// `ConstantInt`, not a `header` phi, so `freezeLoopCarriedValues`'s own
+// use-rewriting scan never touches it): every lane that took the
+// divergent exit was made to read whichever constant the group's
+// *final* round happened to carry, not its own -- confirmed to
+// eventually SIMDize into a group-wide broadcast scalar instead of a
+// genuine per-lane vector.
+TEST(LinearizeTest, FreezesNonPhiExitRelayValueViaDedicatedShadowPhi) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out, ptr %out2) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %body
+    body:
+      %i.next = add i32 %i, 1
+      %trip = icmp slt i32 %i.next, 10
+      br i1 %trip, label %latch, label %exit
+    latch:
+      br label %header
+    exit:
+      %i.result = phi i32 [ %i, %header ], [ %i.next, %body ]
+      %diverged.result = phi i1 [ true, %header ], [ false, %body ]
+      store i32 %i.result, ptr %out
+      %diverged.ext = zext i1 %diverged.result to i32
+      store i32 %diverged.ext, ptr %out2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+
+  // `exit`'s own `%diverged.result` merge must no longer read the raw
+  // literal `true` directly off `latch`'s edge -- it must instead read a
+  // dedicated shadow phi this fix introduces.
+  PHINode *DivergedResult = nullptr;
+  for (Instruction &I : instructions(F))
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName() == "diverged.result")
+        DivergedResult = PN;
+  ASSERT_TRUE(DivergedResult);
+  bool FoundRawConstantOnLatchEdge = false;
+  bool FoundShadowOnLatchEdge = false;
+  for (unsigned Idx = 0, End = DivergedResult->getNumIncomingValues();
+       Idx != End; ++Idx) {
+    if (DivergedResult->getIncomingBlock(Idx)->getName() != "latch")
+      continue;
+    Value *V = DivergedResult->getIncomingValue(Idx);
+    if (isa<ConstantInt>(V))
+      FoundRawConstantOnLatchEdge = true;
+    if (V->getName().contains("exit.relay.shadow"))
+      FoundShadowOnLatchEdge = true;
+  }
+  EXPECT_FALSE(FoundRawConstantOnLatchEdge);
+  EXPECT_TRUE(FoundShadowOnLatchEdge);
+
+  // The shadow phi itself must live in `header`, seeded `poison` on
+  // entry (never observably read by a lane that has not yet taken the
+  // divergent exit) and updated via a `select` keyed on a per-iteration
+  // "did this lane just exit via header's own check" mask.
+  bool FoundShadowPhiInHeader = false;
+  for (Instruction &I : instructions(F))
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName().contains("exit.relay.shadow") &&
+          PN->getParent()->getName() == "header")
+        FoundShadowPhiInHeader = true;
+  EXPECT_TRUE(FoundShadowPhiInHeader);
+}
+
 TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(

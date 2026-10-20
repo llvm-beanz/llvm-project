@@ -1245,6 +1245,70 @@ static bool feedsInLoopBranchCondition(
 /// other externally-read phi, since a relay-chain hop's own phi silently
 /// re-reads whatever `PN` currently holds on every subsequent iteration
 /// once that hop's own distinguishing predecessor edge is gone.
+
+/// Roadmap L420: freezes a single `ExitBlock` phi's own captured
+/// exit-relay value \p V -- captured directly from `Header`'s or
+/// `Latch`'s own now-removed divergent-exit edge, see
+/// `HeaderExitRelayValues`/`LatchExitRelayValues`'s own declaration
+/// comments -- across however many *additional* rounds the rest of the
+/// group keeps looping after this lane's own exit decision was already
+/// made.
+///
+/// Reduced from `Basic/Mandelbrot.test`'s own per-pixel escape-iteration
+/// loop (a *single* divergent header exit, no separate `CheckBlock`):
+/// its own post-loop `if (Diverged)` color selection reads a loop-exit
+/// merge `phi` whose two incoming values are themselves simple, fixed
+/// per-edge constants (`true` for "exited via the divergent `break`",
+/// `false` for "exited via the loop's own separate, genuinely uniform
+/// trip-count check") -- *not* a reference to one of `Header`'s own
+/// loop-carried phis the way an `%i.result`-style merge is (see
+/// `freezeLoopCarriedValues`'s own comment above). `V` being a raw
+/// constant (or, more generally, anything that is not itself one of
+/// `Header`'s own phis) means `freezeLoopCarriedValues`'s own
+/// use-rewriting scan -- which only ever redirects a *use of one of
+/// `Header`'s own phis* -- never sees `V` at all, so `V` never gets a
+/// shadow. Left unfrozen, every lane that takes this cycle's own
+/// divergent exit on an *earlier* round than some other, still-active
+/// lane ends up reading whichever constant the group's *final* round
+/// happened to capture instead of its own -- wrong for any lane whose
+/// own exit decision happened on a different round than the group's
+/// eventual last one (confirmed: Mandelbrot's own per-pixel `Diverged`
+/// flag, fed straight into a color-selection `select`, came back
+/// group-uniform instead of per-lane after `feme-cpu-simdize`, a
+/// genuine "has a divergent branch" diagnostic traced to exactly this).
+///
+/// Returns \p V itself, unmodified, whenever it already is one of
+/// \p Header's own phis: `freezeLoopCarriedValues`'s own per-use scan
+/// already correctly freezes that case (its own "OutsideUses" check
+/// finds the very use this function's caller is about to add), and
+/// wrapping it here too would be redundant. Otherwise, materializes a
+/// brand-new shadow `phi` in \p Header, seeded `poison` on every
+/// predecessor but \p Latch (a lane can only ever read this value after
+/// having taken the exit edge \p V itself came from -- never before),
+/// and threads a `select`, keyed on \p GetDivergedThisIter (see its own
+/// callers for the exact "was this lane active entering this round's own
+/// divergent check, but not after" construction), through \p Latch's own
+/// terminator -- mirroring `freezeLoopCarriedValues`'s own in-place
+/// freeze, just without that function's "already a loop-carried phi"
+/// shortcut, since there is no such phi to shortcut to here.
+static Value *
+freezeExitRelayValue(BasicBlock *Header, BasicBlock *Latch, Value *V,
+                     function_ref<Value *()> GetDivergedThisIter) {
+  if (auto *PN = dyn_cast<PHINode>(V); PN && PN->getParent() == Header)
+    return V; // `freezeLoopCarriedValues` already freezes this case.
+  PHINode *Shadow = PHINode::Create(V->getType(), /*NumReservedValues=*/2,
+                                     "exit.relay.shadow");
+  Shadow->insertBefore(Header->getFirstNonPHIIt());
+  for (BasicBlock *Pred : predecessors(Header))
+    if (Pred != Latch)
+      Shadow->addIncoming(PoisonValue::get(V->getType()), Pred);
+  IRBuilder<> B(Latch->getTerminator());
+  Value *Frozen = B.CreateSelect(GetDivergedThisIter(), V, Shadow,
+                                  "exit.relay.shadow.frozen");
+  Shadow->addIncoming(Frozen, Latch);
+  return Frozen;
+}
+
 static void
 freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
                         ArrayRef<PHINode *> MaskPhis,
@@ -7190,9 +7254,29 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     CondBrInst::Create(Continue, Header, ExitBlock,
                        LatchExit->Br->getIterator());
     LatchExit->Br->eraseFromParent();
+    // Roadmap L420: see `freezeExitRelayValue`'s own comment -- `V` may
+    // be a plain per-edge constant (or any other non-`Header`-phi
+    // value) that still needs its own per-lane freeze across however
+    // many further rounds the rest of the group keeps looping. Computed
+    // lazily, on first actual use, with a fresh builder (not the
+    // now-dangling `B`, anchored to the just-erased `LatchExit->Br`)
+    // positioned at `Latch`'s own new, already-created terminator.
+    Value *LatchDivergedThisIter = nullptr;
+    auto GetLatchDivergedThisIter = [&]() -> Value * {
+      if (!LatchDivergedThisIter) {
+        IRBuilder<> RelayFreezeBuilder(Latch->getTerminator());
+        LatchDivergedThisIter = RelayFreezeBuilder.CreateAnd(
+            MasksAtLatch.Live,
+            RelayFreezeBuilder.CreateNot(MasksAfterLatchCheck.Live),
+            "exited.via.latch.this.iter");
+      }
+      return LatchDivergedThisIter;
+    };
     for (auto &[PN, V] : LatchExitRelayValues)
       if (PN->getBasicBlockIndex(Latch) == -1)
-        PN->addIncoming(V, Latch);
+        PN->addIncoming(
+            freezeExitRelayValue(Header, Latch, V, GetLatchDivergedThisIter),
+            Latch);
   } else {
     // The latch's own condition (if any) is real/uniform control flow and
     // stays exactly as it branches today, conjoined with "any lane still
@@ -7211,9 +7295,27 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // `HeaderExit` was a direct (non-relay) match or `HeaderDivergent` is
   // false, since then either `HeaderExitRelayValues` is empty or `Latch`
   // already had its own, unrelated incoming value for these phis.
+  // Roadmap L420: `HeaderDivergedThisIter` is computed lazily, on first
+  // actual use below, so a cycle whose every `HeaderExitRelayValues`
+  // entry is already one of `Header`'s own phis (the common case,
+  // already handled by `freezeLoopCarriedValues`'s own mechanism, see
+  // `freezeExitRelayValue`'s own early return) never materializes this
+  // otherwise-dead mask at all.
+  Value *HeaderDivergedThisIter = nullptr;
+  auto GetHeaderDivergedThisIter = [&]() -> Value * {
+    if (!HeaderDivergedThisIter) {
+      IRBuilder<> RelayFreezeBuilder(Latch->getTerminator());
+      HeaderDivergedThisIter = RelayFreezeBuilder.CreateAnd(
+          Masks.Live, RelayFreezeBuilder.CreateNot(MasksAtLatch.Live),
+          "exited.via.header.this.iter");
+    }
+    return HeaderDivergedThisIter;
+  };
   for (auto &[PN, V] : HeaderExitRelayValues)
     if (PN->getBasicBlockIndex(Latch) == -1)
-      PN->addIncoming(V, Latch);
+      PN->addIncoming(
+          freezeExitRelayValue(Header, Latch, V, GetHeaderDivergedThisIter),
+          Latch);
 
   freezeLoopCarriedValues(
       Header, Latch, MasksAtLatch.Live,
