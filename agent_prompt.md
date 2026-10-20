@@ -69,26 +69,30 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(first thing, under 2 minutes, every future session until done)** Check
-   `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` to confirm
-   the detached run is still alive and progressing; if it died, check
-   `driver.log` for why and consider restarting from the point it left off (the
-   script has its own recovery-batch handling, but a fully-dead parent process
-   needs manual relaunch).
-2. **(ongoing, do not do until `ENV4` finishes)** No `ninja`/build work on this
-   host while the run is active — contention previously caused real SIGSEGV
-   crashes under a 17-worker overcommit; the same risk applies to any other
-   CPU-heavy concurrent job.
-3. **(once the initial 1,803-batch pass finishes)** Let `run_vulkan_cts.py`'s
-   own recovery/solo-verification rounds run to completion (`ENV4(b)`), then
-   write up full Pass/Fail/NotSupported/Crashed totals and remeasure
-   `L417`-`L419` in `VulkanCTSReport.md` (`ENV4(c)`); strike `ENV4` in
-   `Roadmap.md` if it's fully clean.
-4. **(after `ENV4` closes, ~build is safe again)** `ENV5`: start with `ENV5(e)`
-   (`info.device_mandatory_features`, 5 cases including the mandatory-feature
-   gap the user explicitly called out) or `ENV5(b)`'s
-   `compute_shader_derivatives` cluster (12 cases, largest single compute
-   sub-group) — both are concretely scoped, ready to pick up without further
-   triage.
-5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if
-   push access ever becomes available.g
+1. **(first, under 2 minutes, every session until `ENV4` finishes)** Check
+   `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk`.
+2. **(once `ENV4` is done or paused, ~15-30 min)** Apply
+   `env5b-builtin-access-chain-zero-index.patch` (saved in this session's
+   workspace) to `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, add
+   a lit test (SPIR-V `.spv.ll`/`mlir` round-trip style, mirroring existing
+   `SPIRVToLLVM` conversion tests) exercising a zero-index access chain on
+   `gl_SubgroupID`, build, run `check-feme`, then commit.
+3. **(~20-40 min)** Add the `hlsl_functionality1`/`uniformid` no-op-decoration
+   handling (likely near-identical one-line fixes in the SPIR-V importer's
+   decoration-handling switch) -- 7 cases, two independent small commits.
+4. **(~1-2 hours)** Fix `terminate_invocation`'s shared null-pointer-constant
+   lowering gap (add a pointer-typed `spirv.Constant` pattern emitting
+   `llvm.mlir.zero`) -- 15 cases, one commit, needs careful testing since it's a
+   new pattern class, not an extension of an existing one.
+5. **(~1-2 hours)** Fix `opcopylogical`'s layout-mismatch bug (needs a real
+   recursive, layout-converting copy, not a 1-line fix) -- 9 cases.
+6. **(lower priority, needs real build+trace, not log-mining)**
+   `compute_shader_derivatives.lod_op.*` (9, numeric),
+   `image_query.samples_storage` (1), `entrypoint.tess_con_*` (3, likely a
+   tessellation gap), the untriaged 15 `compute.*` cases, all 38 `graphics.*`
+   cases.
+7. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals
+   in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in
+   `Roadmap.md` if clean.
+8. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if
+   push access ever becomes available.
