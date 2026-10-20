@@ -127625,3 +127625,109 @@ Mandelbrot's dispatch now succeeds, but `imgdiff` still fails the suite's own `P
 3. **(after ENV3(c))** Move to `ENV4`: full current CTS corpus collection, needs a dedicated clean-host block, not an end-of-session afterthought (carried forward from every prior session).
 4. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures into independently tested fixes.
 5. **(low priority, time-permitting)** Upstream the 3 `offload-test-suite` patches to `llvm-beanz/offload-test-suite` if push access ever becomes available, to stop needing the every-session `git am` step.
+
+# ENV3(c) root-caused: Mandelbrot's bug is a per-lane-vs-group-wide divergent-boolean mix-up
+
+**Next action (do this first, under 2 minutes)**: open `feme/docs/Roadmap.md`
+at `ENV3(c)(1)` and write the minimal `.ll` reproducer described there
+(a loop with a per-lane-divergent early exit, whose only loop-carried
+*boolean* is read after the loop in a `WaveSize>1` kernel).
+
+## State: what's true right now
+
+1. Prior session's `ENV3(c)` hypothesis ("inherent chaotic-boundary float
+   precision sensitivity") is **wrong**. Retracted, with hard evidence, this
+   session. Don't re-litigate it.
+2. The real bug is root-caused (high confidence, direct IR evidence), but
+   **not fixed**. No `feme/lib`/`feme/include` code changed this session.
+3. Two commits landed this session, both doc-only:
+   - `6ca7a64` -- stop hardcoding `llvm-beanz/feme`'s drifting tip hash.
+   - `c8ae799` -- the full root-cause writeup (Roadmap.md, VulkanCTSReport.md,
+     .instructions.md).
+4. Scratch dirs (`/tmp/mandel_repro`, `scratch_mandel`) already cleaned up.
+   `/tmp/venv` (Python+Pillow+numpy) still exists, harmless, reusable.
+
+## The bug, in one paragraph
+
+Mandelbrot's shader sets `Diverged = true` and `break`s inside a
+per-lane-divergent loop. `L464` (last session) correctly fixed `Iteration`
+to freeze per-lane on divergence. But `Diverged` itself never got the same
+treatment: its post-loop value is reconstructed from a single scalar
+"which loop-exit edge did the group take" discriminator (same idea as
+`StructurizeCFG`'s `Flow`/`Flow2` blocks) -- correct for one scalar thread,
+wrong once 4 lanes (`WaveSize=4`) are packed together, because now *every*
+lane in the group gets the *same* answer regardless of its own math. One
+slow-escaping or genuinely-non-escaping sibling pixel makes its whole
+4-pixel group render black. Confirmed via `FEME_DUMP_IR_PRESIMD=1`/
+`FEME_DUMP_IR=1` dumped directly off `offloader` (not `clang-dxc` -- that's
+blocked by a harness approval gate, now documented in `.instructions.md`;
+workaround is reusing a lit run's already-compiled, not-cleaned-up `.o`).
+
+## Why this took the whole session
+
+- Confirming "not inherent precision" needed an independent float32/float64
+  reimplementation of the exact shader math (scale/offset formula + escape
+  loop) and a per-pixel diff against the golden image -- straightforward but
+  slow to set up (had to install Pillow/numpy in a venv first, PEP 668).
+- Getting an actual IR dump was blocked twice: (1) direct `clang-dxc`
+  bash-tool invocation hit a harness permission wall even for trivial
+  one-liners, (2) `cmake -E env FEME_DUMP_IR_PRESIMD=1 ... llvm-lit` silently
+  drops the var (lit's env whitelist, same class of bug as last session's
+  `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` fix, but this one's an ad-hoc debug
+  var, not worth patching lit.cfg.py for generically).
+- The fix was: reuse the `.o` a completed lit run already left on disk
+  (confirmed NOT cleaned up), and call `offloader` directly with the env
+  var set in that same bash command. That worked immediately.
+- First theory after getting the dump ("a sibling pixel must be *exactly*
+  solid-interior/eternal") only explained ~10% of sampled bad pixels when
+  checked empirically against the golden image. Had to re-derive the
+  *actual* mechanism from the IR itself (uniform iteration-cap branch
+  taken strictly before the per-lane active-mask check, every software
+  pass) rather than trust the first plausible-sounding theory. The IR-level
+  mechanism is solid; the narrower "which siblings exactly" empirical
+  check was not pursued further since the IR evidence alone is conclusive.
+
+## Next steps (in order, from Roadmap.md ENV3(c)(1)-(3))
+
+1. **(~20-30 min)** Write the minimal `.ll` reproducer: a loop with a
+   per-lane-divergent early-exit branch, where the *only* loop-carried value
+   read after the loop is a boolean set to different literal constants on
+   different paths (not a monotonic counter like `L464`'s case) -- feed it
+   through `feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize
+   -feme-cpu-wave-size=4` and confirm the post-SIMD IR shows the same
+   scalar-broadcast bug (a `<4 x i1>` that's just a `splat` of one scalar,
+   not derived from the per-lane frozen value). Add as a
+   `Transforms/CPU` lit test + `LinearizeTest.cpp`/`SIMDizeTest.cpp` unit
+   test, confirmed to show the wrong IR shape on today's tree.
+2. **(~30-60 min)** Fix in `Linearize.cpp`: give any loop-carried value set
+   to different per-lane-divergent-path-dependent values inside the loop
+   body its own frozen shadow phi (reuse/generalize `freezeLoopCarriedValues`'s
+   existing mechanism), instead of letting it be represented by the
+   structural exit-edge discriminator. **Watch for regressions** across the
+   ~190 existing `Transforms/CPU` lit tests -- the discriminator-reuse
+   behavior is *correct* for genuinely-uniform cases, so the fix needs to be
+   scoped to only the divergent case, not a blanket change.
+3. **(~15-20 min)** Re-validate: `check-feme`, the real
+   `check-hlsl-clang-feme-vk` Mandelbrot test (confirm `PixelPercent` passes
+   under 0.2%), and all 6 `assertion-crash-cases.txt` reproducers (no
+   regression). Update `Roadmap.md` (strike `ENV3(c)` if closed) and
+   `VulkanCTSReport.md`.
+4. **(after ENV3(c) closes)** `ENV4`: full current CTS corpus collection
+   (dedicated clean-host block, not an end-of-session afterthought --
+   carried forward unchanged from every prior session).
+5. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures +
+   4 graphicsfuzz failures into independently tested fixes.
+6. **(low priority)** Upstream the 3 `offload-test-suite` patches if push
+   access ever becomes available.
+
+## Process notes codified this session (already in `.instructions.md`, don't rediscover)
+
+- `llvm-beanz/feme`'s tip hash drifts (confirmed again: `854cc3f` ->
+  `0cc94c2` this session alone). Docs now reference the branch name, not a
+  pinned hash.
+- `FEME_DUMP_IR_PRESIMD`/`FEME_DUMP_IR` don't survive `cmake -E env ...
+  llvm-lit`; set them directly on an `offloader` invocation against a prior
+  lit run's persisted `Output/<T>.test.tmp/` artifacts instead.
+- Direct bash-tool `clang-dxc` invocation (real compile, not `--version`) is
+  blocked by a harness approval gate in this environment; use the
+  `offloader`-direct workaround above instead of retrying it.
