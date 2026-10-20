@@ -1,8 +1,170 @@
 # Vulkan CTS status
 
-This report records the complete Vulkan CTS re-triage performed on
-2026-10-12. It supersedes the 2026-10-05 full-run baseline and all partial
-counts previously recorded in this file.
+## Current container baseline (2026-10-20)
+
+**The container is configured and both auxiliary suites run against FeMe.
+The current CTS measurement is a 132,345-case selection, not a full CTS
+re-triage.** It includes all compute, SPIR-V assembly and info cases,
+all mesh-shader EXT input/output cases, and a deterministic sample from
+every top-level group. The historical full-run results below are retained
+as history, not as current measurements.
+
+### Configuration and reproducibility
+
+| Component | Tested state |
+|---|---|
+| FeMe compiler/runtime | `595102f8becf`, with no compiler/runtime changes during setup |
+| CTS runner | `f08a4ca0390c`, serial failure verification |
+| LLVM build | AArch64 host; Clang/LLD; Release with assertions; ccache; no PCH |
+| LLVM targets | AArch64, AMDGPU, DirectX, NVPTX, SPIRV, X86 |
+| CTS upstream | `880f31a2bd9cd0659f84f3f80dafd07f2e693f6d` |
+| CTS tested | `0c4f09a1f`, isolated std430 host-layout correction |
+| CTS registry | Vulkan-Docs `f84d432d5b89`, header version 362 |
+| Driver build headers | System Vulkan 1.4.341 |
+| Offload integration | `0cc94c2`, applied locally as `35b9d54` |
+| Offload tested | `aae728a`, including `80c0565` and `8cf0f76` |
+| Device | `FeMe CPU Vulkan Device`; QPA vendor ID `0x10000` |
+| Runtime environment | Both ICD loader variables select FeMe; safety-net timeout 30000 ms |
+
+See [Development.md](Development.md) for the exact configure/build
+commands. Both builds use compiler launchers for object caching, assertions
+are enabled, and precompiled headers are disabled. Xvfb is installed for
+the optional xcb tests. Offload and CTS ran sequentially, without a build
+competing for CPU resources.
+
+Artifacts are retained under
+`/home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/`.
+The generated corpus has **3,244,369 cases in 54 groups**, 9,215 fewer than
+the historical report's newer CTS checkout. Do not compare aggregate
+counts as if the corpora or source revisions were identical.
+
+The selection is the union of all `compute`, `spirv_assembly`, and `info`
+cases; all `mesh_shader.ext.in_out` cases; and up to 32 evenly spaced
+entries from each group in generated-list order. For a group of size `n`,
+select indices `i * (n - 1) // (min(32, n) - 1)` for
+`0 <= i < min(32, n)` (select the sole entry if `n == 1`).
+Deduplicate and sort the union. The retained
+`container-baseline-cases.txt` has SHA-256
+`2f9a67af007b915ca441c01981c48cbec686fc316d384d59570802a72c778d46`.
+
+```shell
+. /home/dev/.config/feme/env.sh
+run=/home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a
+xvfb-run -a python3 feme/utils/run_vulkan_cts.py \
+  --deqp-vk "$FEME_VULKAN_CTS_DEQP_VK" \
+  --cwd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan \
+  --case-list "$run/container-baseline-cases.txt" \
+  --output-dir "$run/container-baseline-isolated" \
+  --workers 6 --batch-size 1800 --final-timeout 600 \
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+The runner recovers incomplete batches at 200/20/1-case granularity.
+Failure verification now uses **one worker**, not merely one case per
+process: the previous implementation accidentally retained six concurrent
+workers. A regression test fails before that fix and passes afterward.
+Both the original and corrected selected runs produced the same counts.
+The corrected run reverified all 108 failures sequentially. Its return
+code reports successful reconciliation, **not a passing CTS run**.
+
+### Measured CTS results
+
+| Outcome | Cases |
+|---|---:|
+| Pass | 13,701 |
+| Fail, reverified sequentially | 108 |
+| NotSupported | 118,530 |
+| Assertion crash, reverified sequentially | 6 |
+| **Selected total** | **132,345** |
+| **Outside this selection; not measured this session** | **3,112,024** |
+
+No completed QPA record was invented for a crash. The raw
+`container-baseline-isolated/report.txt` reports 132,339 completed cases
+and six `Unrun` cases. Each of those six was subsequently reproduced with
+`--workers 1 --batch-size 1 --recovery-batch-sizes 1` on an idle host;
+both attempts abort with an assertion. Their separate logs are in
+`assertion-crashes-solo/`. `baseline-summary.json` and
+`baseline-results.json` annotate these six as `Crashed`; the original
+QPA files remain unchanged. No DeviceLost or timeout was observed in the
+selected runs. This says nothing about unselected cases.
+
+| Group or complete family | Selected | Pass | Fail | NotSupported | Assertion crash |
+|---|---:|---:|---:|---:|---:|
+| compute, complete | 61,460 | 700 | 0 | 60,760 | 0 |
+| spirv_assembly, complete | 68,734 | 12,424 | 103 | 56,202 | 5 |
+| info, complete | 23 | 19 | 1 | 3 | 0 |
+| mesh_shader.ext.in_out, complete | 560 | 160 | 0 | 400 | 0 |
+| graphicsfuzz, sample | 32 | 27 | 4 | 0 | 1 |
+| All remaining selected cases | 1,536 | 371 | 0 | 1,165 | 0 |
+
+The 103 SPIR-V assembly failures partition into compute instructions (27),
+graphics instructions (38), SPIR-V 1.4 (22), terminate-invocation (15), and
+image query (1). Exact names are retained in `verified-failures.txt`.
+`info.device_mandatory_features` still fails: the log names missing
+robust image access, Vulkan memory model/device scope, buffer device
+address, dynamic descriptor indexing, full 32-bit draw indices, 8/16-bit
+storage/arithmetic, YCbCr conversion and float-controls-2 features.
+Advertisement inventories are not evidence of conformance.
+
+Five crashes are
+`spirv_assembly.instruction.spirv1p4.loop_control.{iteration_multiple,max_iterations,min_iterations,partial_count,peel_count}`:
+LLVM asserts that an insertion-point instruction is not in a basic block.
+The sixth,
+`graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false`,
+first reports unsupported FeMe loop linearization, then asserts while
+querying a malformed block's terminator. These are current FeMe compiler
+stability blockers, not contention-only outcomes. The sampled subgroup,
+ray-tracing, memory-model and WSI cases are all NotSupported; no execution
+coverage for those families is implied.
+
+### FeMe and offload baseline
+
+| Suite | Discovered | Pass | Unsupported | Expected failure | Failure |
+|---|---:|---:|---:|---:|---:|
+| check-feme, CTS enabled | 3,807 | 3,803 | 4 | 0 | 0 |
+| check-hlsl-feme-vk, DXC | 799 | 497 | 275 | 27 | 0 |
+| check-hlsl-clang-feme-vk | 799 | 388 | 271 | 139 | 1 |
+
+The clean `check-feme` invocation built its own required tools, unit
+executables, ICD and smoke clients before testing. The first run, before
+CTS discovery was enabled, had one additional unsupported test. The final
+run above includes the CTS smoke test.
+
+Clang's `Basic/Mandelbrot.test` remains a real failure, reproduced alone:
+`feme-cpu-simdize` reports a divergent branch left by `LinearizePass`, and
+pipeline creation returns `VK_ERROR_INITIALIZATION_FAILED`. This is
+separate from DXC's corrected timeout. It is not masked with an XFAIL.
+
+### External harness corrections
+
+The auxiliary fixes are committed independently, outside FeMe:
+
+- CTS `0c4f09a1f`: host std430 vec3 array elements need 16-byte rather than
+  12-byte stride. The isolated 80-case `with_f16` reproducer changed from
+  22 Pass / 58 Fail to **80 Pass**; the complete 560-case in/out family
+  then has 160 Pass / 400 NotSupported / zero Fail.
+- Offload `80c0565`: WaveActiveMax accessed four-element buffers from 32
+  threads with an eight-element index range. Four in-bounds threads now
+  test negative infinity independently of subgroup width. Both compilers
+  pass on FeMe and lavapipe (four runs).
+- Offload `8cf0f76`: lit must forward the configured safety-net timeout.
+  With 30000 ms actually reaching FeMe, isolated DXC Mandelbrot passes in
+  14.30 seconds instead of expiring at the five-second default.
+- Offload `aae728a`: scope two stale expected failures away from FeMe
+  only for the configurations now passing; preserve other drivers'
+  expectations. There are no XPASS results in either final suite.
+
+**Next baseline work:** fix the six compiler assertion aborts and Clang
+Mandelbrot, then collect the complete generated corpus with the corrected
+verification runner. Reconfirm historical residual families individually;
+do not subtract old fixes from a historical full-run total to manufacture
+a current total. See the current-container priorities in
+[Roadmap.md](Roadmap.md).
+
+## Historical full-run baseline (2026-10-12)
+
+The remainder records the earlier complete re-triage and its subsequent
+targeted updates. It is not a full measurement of this clean container.
 
 ## Tested configuration
 

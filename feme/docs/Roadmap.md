@@ -30,35 +30,56 @@ Priorities are relative, not scheduled:
   landed depends on it.
 - **P2** — genuinely later; listed so it isn't rediscovered as a surprise.
 
-**Status audit (2026-10-12):** all open priority-bearing milestones were
-re-triaged against the complete 3,253,584-case Vulkan CTS run at FeMe
-revision `d3577f8378eb` and updated CTS revision `c28b36293093` (registry
-version 365). Every case has a measured outcome: 704,272 Pass, 1,549 Fail,
-2,547,677 NotSupported, 46 QualityWarning, 24 persistent DeviceLost, and 16
-repeatable ten-minute TimedOut outcomes; there are no InternalError, Crash, or
-Unrun results. The 466 initial parallel DeviceLost outcomes were all rerun
-alone: 442 passed and 24 reproduced. The 58 mesh-shader f16 failures caused
-by a CTS-side std430 host-layout defect were fixed and independently rerun
-58/58 Pass. H/L rows whose measured acceptance criteria are now satisfied
-are struck below; current residuals are partitioned under L417-L419. Open
-milestones in the other series remain open because CTS evidence alone does
-not satisfy their implementation, platform, upstreaming, or CI criteria.
+**Current-container audit (2026-10-20):** the clean AArch64 container now
+builds with ccache, assertions enabled and PCH disabled. `check-feme`
+passes 3,803 tests with four unsupported; DXC offload passes all expected
+outcomes; Clang offload retains one real Mandelbrot compiler failure.
+The current CTS selection contains 132,345 cases across all 54 groups:
+13,701 Pass, 108 sequentially verified Fail, 118,530 NotSupported and six
+sequentially reproduced assertion crashes. It includes complete compute,
+SPIR-V assembly, info and mesh in/out families, **not the full corpus**.
+The other 3,112,024 cases have not been measured in this container.
+
+The older 2026-10-12 full run used a different CTS revision and registry.
+Its H/L milestone history remains useful, but its counts and incremental
+fix notes are not a fresh current baseline. In particular, current
+assertion-enabled crashes invalidate any blanket statement that no
+abnormal outcomes remain. See [VulkanCTSReport.md](VulkanCTSReport.md) for
+exact revisions, case-list selection, results and retained reproducer logs.
+
+### Current-container priorities
+
+These bounded rows take precedence over historical residual counts below.
+They do not reopen unrelated completed implementation milestones. New
+breakdowns must use at most one lowercase suffix, such as `ENV3(a)`.
+
+| Milestone | Acceptance and next work | Priority |
+|---|---|---|
+| ~~ENV1: reproducible development environment~~ | ~~Configure both builds with object caching, assertions and no PCH; restore offload FeMe targets; build `check-feme` from clean dependencies; select the real ICD; install Xvfb and persist the non-login environment.~~ Complete; see [Development.md](Development.md). | done |
+| ~~ENV2: measured initial container baseline~~ | ~~Run both offload suites and a declared cross-group CTS selection; fix auxiliary harness defects in isolated commits; regenerate inventories from reconciled manifests.~~ Complete for the 132,345-case selection, not full CTS. | done |
+| ENV3: compiler stability and offload correctness | First isolate the five SPIR-V 1.4 loop-control insertion-point aborts; then prevent the graphicsfuzz unsupported-loop diagnostic from leaving malformed IR; then fix Clang Mandelbrot's divergent branch. Require importer/linearization/SIMDization regression tests at the affected phases, end-to-end pipeline checks, six idle-host crash reproducers completing without abort, and zero unexpected Clang offload failures. Do not hide these with XFAILs or classify them as contention. | P0 |
+| ENV4: complete current CTS audit | Run all 3,244,369 generated cases with the corrected one-worker verification round; preserve raw QPA and logs, classify incomplete cases explicitly, and remeasure historical L417-L419 families. Until then, keep the 108 current selected failures distinct from old whole-corpus totals. Break remaining full-audit work into corpus execution, incomplete-case recovery, and solo residual classification. | P0 |
+| ENV5: mandatory-feature and residual implementation | Start from `info.device_mandatory_features` and the regenerated inventories: 97/150 feature bits, 59/86 promoted extensions implemented, 50 advertised extension names. Scope missing memory-model, buffer-address, descriptor-indexing, storage/arithmetic, YCbCr and image-robustness contracts before advertising them. Partition the 103 selected SPIR-V instruction failures and four graphicsfuzz failures into independently tested fixes; retain later tessellation/graphics residuals as not remeasured, not solved. | P1 |
+
+Setup made no compiler/runtime design change. Historical implementation
+milestones are not closed by NotSupported results, advertisement counts,
+or the external mesh host-layout correction.
 
 ### The two tracks
 
 Everything through §1.7 and R1–R15 is the *retargeting and compute
 execution* track: FeMe as a library that imports DXIL/SPIR-V/DXBC, retargets
-it, and executes compute shaders on the CPU. That track is the one every
-landed milestone belongs to.
+it, and executes compute shaders on the CPU. Both tracks now contain
+landed milestones.
 
 §1.8–§1.10 and R16 onward are the *graphics and API runtime* track added by
-FeMeGraphicsDesign.md, FeMeVulkanDesign.md and FeMeWARPDesign.md. Nothing in
-it exists in tree today — there is no `feme::ShaderStage`, no signature
-reflection, no `feme.stage.*`/`feme.image.*` operation, no `CompiledStage`,
-no image or sampler descriptor, and no `lib/Graphics`, `lib/RayTracing`,
-`lib/Vulkan` or `lib/Direct3D` directory of any kind. Its priorities are
-relative *within that track*: a P0 there does not outrank a P1 in §1.1–§1.7,
-it means "the graphics/runtime work stalls until this lands".
+FeMeGraphicsDesign.md, FeMeVulkanDesign.md and FeMeWARPDesign.md. Graphics
+stages, image/sampler operations, compiled-stage execution, graphics and
+Vulkan runtime libraries, and an executable Vulkan ICD now exist in tree.
+Treat the detailed open rows as remaining coverage or implementation gaps,
+not as evidence that this entire track is unimplemented. Priorities are
+relative *within each track*; the current-container P0 stability and
+measurement blockers above are the immediate baseline work.
 
 Since §1.9.2, both tracks answer to a third thing that is neither a
 subsystem nor a milestone: the **conformance target**. Per
