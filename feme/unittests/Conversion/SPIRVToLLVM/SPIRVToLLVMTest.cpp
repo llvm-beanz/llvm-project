@@ -137,6 +137,100 @@ std::string convertToLLVMDialect(llvm::StringRef Source) {
   return Result;
 }
 
+/// Runs feme::spirv::createConvertSPIRVToLLVMPass on an already-built \p
+/// Module (as opposed to convertToLLVMDialect's text-parsed one) and
+/// returns the resulting `llvm` dialect module printed to a string, or
+/// "<failed>" if conversion fails.
+std::string
+convertModuleToLLVMDialect(mlir::OwningOpRef<mlir::spirv::ModuleOp> Module) {
+  mlir::MLIRContext *Ctx = Module->getContext();
+  Ctx->loadDialect<mlir::LLVM::LLVMDialect>();
+  mlir::OwningOpRef<mlir::ModuleOp> Outer =
+      mlir::ModuleOp::create(mlir::UnknownLoc::get(Ctx));
+  Outer->push_back(Module.release());
+
+  mlir::PassManager PM(Ctx);
+  PM.addPass(feme::spirv::createConvertSPIRVToLLVMPass());
+  if (mlir::failed(PM.run(*Outer)))
+    return "<failed>";
+
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  Outer->print(OS);
+  return Result;
+}
+
+/// Builds a `spirv.module` with a scalar value-modeled builtin
+/// (`SubgroupId`) read through a degenerate, zero-index
+/// `spirv.AccessChain` -- the shape glslang emits for a *scalar* builtin
+/// (roadmap ENV5(b)), used only to obtain a "pointer" to feed the
+/// following `spirv.Load`. Unlike every other `spirv.AccessChain` test in
+/// this file, this shape cannot be written as parsed text:
+/// `AccessChainOp`'s generated assembly format requires at least one type
+/// in `type($indices)` even when `$indices` itself is empty, so it must be
+/// built directly via `OpBuilder`, the same way MLIR's own SPIR-V
+/// deserializer would construct it from a real binary module.
+mlir::OwningOpRef<mlir::spirv::ModuleOp>
+buildZeroIndexBuiltinAccessChainModule(mlir::MLIRContext &Ctx) {
+  Ctx.loadDialect<mlir::spirv::SPIRVDialect>();
+  mlir::OpBuilder Builder(&Ctx);
+  mlir::Location Loc = mlir::UnknownLoc::get(&Ctx);
+  auto Module = mlir::spirv::ModuleOp::create(
+      Builder, Loc, mlir::spirv::AddressingModel::Logical,
+      mlir::spirv::MemoryModel::GLSL450);
+  Builder.setInsertionPointToStart(Module.getBody());
+
+  auto PointerTy = mlir::spirv::PointerType::get(
+      Builder.getI32Type(), mlir::spirv::StorageClass::Input);
+  auto Global = mlir::spirv::GlobalVariableOp::create(
+      Builder, Loc, PointerTy, "sg_id", mlir::spirv::BuiltIn::SubgroupId);
+
+  auto EntryFn = mlir::spirv::FuncOp::create(
+      Builder, Loc, "entry",
+      Builder.getType<mlir::FunctionType>(
+          llvm::ArrayRef<mlir::Type>(),
+          llvm::ArrayRef<mlir::Type>(Builder.getI32Type())),
+      mlir::spirv::FunctionControl::None);
+  EntryFn.addEntryBlock();
+  Builder.setInsertionPointToEnd(&EntryFn.getBody().front());
+
+  auto AddrOf = mlir::spirv::AddressOfOp::create(Builder, Loc, Global);
+  auto AccessChain = mlir::spirv::AccessChainOp::create(Builder, Loc, AddrOf,
+                                                        mlir::ValueRange());
+  auto Load = mlir::spirv::LoadOp::create(Builder, Loc, AccessChain,
+                                          mlir::spirv::MemoryAccessAttr(),
+                                          mlir::IntegerAttr());
+  mlir::spirv::ReturnValueOp::create(Builder, Loc, Load);
+
+  Builder.setInsertionPointToEnd(Module.getBody());
+  mlir::spirv::EntryPointOp::create(
+      Builder, Loc, mlir::spirv::ExecutionModel::GLCompute,
+      llvm::StringRef("entry"), Builder.getArrayAttr({}));
+
+  return mlir::OwningOpRef<mlir::spirv::ModuleOp>(Module);
+}
+
+// (Roadmap ENV5(b)) A zero-index `spirv.AccessChain` over a scalar
+// value-modeled builtin (e.g. `gl_SubgroupID`) forwards straight through
+// to BuiltInAddressOfPattern's intrinsic call -- there is no lane to
+// extract, unlike the single-index vector-builtin case -- instead of
+// falling through to MLIR's generic `AccessChainPattern`, which cannot
+// handle a non-pointer base and used to abort legalization entirely
+// (`compute_shader_derivatives.verify_ndx.*`'s
+// `VK_ERROR_INITIALIZATION_FAILED`).
+TEST(SPIRVToLLVMTest, ZeroIndexBuiltinAccessChainConvertsInsteadOfFailing) {
+  mlir::MLIRContext Ctx;
+  std::string Result =
+      convertModuleToLLVMDialect(buildZeroIndexBuiltinAccessChainModule(Ctx));
+  EXPECT_NE(Result, "<failed>");
+  EXPECT_NE(Result.find("llvm.call_intrinsic \"llvm.spv.subgroup.id\""),
+            std::string::npos)
+      << Result;
+  // No real pointer arithmetic for the zero-index access chain itself: it
+  // must forward straight through, not synthesize a `getelementptr`.
+  EXPECT_EQ(Result.find("llvm.getelementptr"), std::string::npos) << Result;
+}
+
 // A non-builtin `Input`/`Output` variable (an ordinary stage-IO variable)
 // converts to a real `llvm.mlir.global` in the address space LLVM's SPIRV
 // backend expects that storage class to use, instead of failing to legalize

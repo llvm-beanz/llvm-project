@@ -3807,6 +3807,22 @@ public:
 /// navigating real memory. The `spirv.Load` that always follows such an
 /// access chain then collapses to the identity via LoadValuePattern, the
 /// same as a direct load of the whole builtin variable already does.
+///
+/// Also handles the degenerate, zero-index `spirv.AccessChain` glslang
+/// emits for a *scalar* value-modeled builtin (e.g. `gl_SubgroupID`,
+/// `gl_SubgroupInvocationID`): SPIR-V allows an access chain with no
+/// indices at all (the result type then equals the base type exactly),
+/// used here only to obtain a "pointer" to feed a following `spirv.Load`,
+/// the same role the vector case's one-index lane selection plays. There
+/// is no lane to extract -- the base operand already *is* the scalar
+/// value (BuiltInAddressOfPattern replaced `spirv.mlir.addressof` with the
+/// `llvm.spv.*` intrinsic call directly) -- so the only sound rewrite is
+/// to forward it unchanged; the following `spirv.Load` again collapses to
+/// the identity via LoadValuePattern. (roadmap ENV5(b): this shape
+/// previously fell through to MLIR's generic `AccessChainPattern`, which
+/// cannot handle a non-pointer base either, failing legalization and
+/// aborting every affected `compute_shader_derivatives` pipeline's
+/// creation with `VK_ERROR_INITIALIZATION_FAILED`.)
 class BuiltInAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
@@ -3816,13 +3832,30 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::ValueRange Indices = Adaptor.getIndices();
+
+    if (Indices.empty()) {
+      if (mlir::isa<mlir::LLVM::LLVMPointerType>(
+              Adaptor.getBasePtr().getType()))
+        return Rewriter.notifyMatchFailure(Op, "base is an ordinary pointer");
+
+      mlir::Type ResultType =
+          getTypeConverter()->convertType(Op.getComponentPtr().getType());
+      if (!ResultType)
+        return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+      if (ResultType != Adaptor.getBasePtr().getType())
+        return Rewriter.notifyMatchFailure(Op, "unexpected result type");
+
+      Rewriter.replaceOp(Op, Adaptor.getBasePtr());
+      return mlir::success();
+    }
+
     auto VectorTy =
         mlir::dyn_cast<mlir::VectorType>(Adaptor.getBasePtr().getType());
     if (!VectorTy)
       return Rewriter.notifyMatchFailure(
           Op, "base is not a value-modeled builtin vector");
 
-    mlir::ValueRange Indices = Adaptor.getIndices();
     if (Indices.size() != 1)
       return Rewriter.notifyMatchFailure(Op, "expected a single lane index");
 
