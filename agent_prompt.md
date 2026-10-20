@@ -1,6 +1,5 @@
 ---
-model: claude-sonnet-5
-resume: b8ce7a07-6a6f-4205-864b-b09621346aaf
+model: claude-opus-5.5
 ---
 # Initial Guidelines
 
@@ -66,17 +65,10 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-Can you please continue the work on the Vulkan FeMe ICD? A previous session
-suggested the next steps:
+This is a clean container. Please configure this container for feme development
+and setup both the offload-test-suite and Vulkan CTS.
 
-1. **(~1 day, design-heavy, carried forward many sessions)** `L419(ae)`:
-   tessellation edge0-vs-edge1 ULP mismatch — needs real
-   cross-patch-adjacency design, not a local patch.
-2. **(open-ended, standing)** Both DXIL resource-atomic opcodes HLSL
-   exposes against a buffer (`InterlockedAdd`/opcode 78,
-   `InterlockedCompareExchange`/opcode 79) are now raised and lowered.
-   No further atomic-opcode gap is currently known in this area.
-3. **(open-ended, standing)** No `SIMDize.cpp` "cannot yet widen that
-   shape" diagnostics remain open.
-4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories,
-   and the roadmap counts synchronized after every fix.
+When you've completed the configuration and initial builds, please run the
+offload test suite and Vulkan CTS against Feme, and regenerate the
+VulkanCTSReport. Then re-triage the roadmap to provide a clear baseline of the
+current state and the next steps.
