@@ -1,5 +1,6 @@
 ---
 model: claude-sonnet-5
+resume: 1b814ab3-f423-4724-ae98-f676112844de
 ---
 # Initial Guidelines
 
@@ -68,26 +69,26 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **ENV3: stop compiler aborts first.** Use
-   `assertion-crash-cases.txt`: five SPIR-V 1.4 loop-control cases assert
-   on a detached insertion point; one graphicsfuzz unsupported loop
-   leaves malformed IR before a terminator assertion. Add regressions
-   at each affected translation phase before changing lowering.
-2. **ENV3: fix Clang Mandelbrot.** It reproduces alone with a genuine
-   SIMDization divergent-branch diagnostic. Increasing the wait budget
-   fixes DXC's separate timeout, not this compiler failure. Keep it
-   visible rather than adding an XFAIL.
-3. **ENV4: collect the full current corpus.** Use the corrected runner
-   without competing builds/offload jobs. Execute the remaining cases,
-   recover incomplete batches, and verify residuals sequentially.
-   The initial multi-case rounds have no process timeout; monitor their
-   progress and retain stalled-process evidence rather than claiming
-   that the final single-case timeout bounds the whole run.
-4. **ENV5: implement contracts, then advertise.** Start with the current
-   mandatory-feature failure and partition the 103 SPIR-V instruction
-   failures and four graphicsfuzz failures. Older tessellation/graphics
-   residuals remain historical until rerun.
-
-**Next action (under two minutes):** open
-`feme/docs/Roadmap.md` at ENV3 and the retained
-`assertion-crash-cases.txt` to select the first compiler reproducer.
+1. **(~20-30 min)** Write a minimal standalone `.ll` reproducer for the
+   graphicsfuzz terminator-assertion bug (use
+   `FEME_DUMP_IR_PRELINEARIZE=1` against the real `.spv` first, like this
+   session did, to capture the exact crashing IR before distilling it).
+2. **(~30-45 min)** Fix `DiamondFlattener::flattenLoopBodyRegion`'s `nullopt`
+   path so the block it bails out of always has a valid terminator before the
+   "unsupported" diagnostic returns — likely needs either a transactional
+   erase/insert ordering or an explicit terminator-restore step on the bailout
+   path. Add a lit + unit test mirroring this session's pattern.
+3. **(~15 min)** Re-run all 6 original `assertion-crash-cases.txt` entries
+   plus `check-feme` to confirm the full ENV3 acceptance bar ("six idle-host
+   crash reproducers completing without abort") is finally met; update
+   `Roadmap.md`'s `ENV3`/`ENV3(a)` rows (strike through if fully closed) and
+   `VulkanCTSReport.md`.
+4. **(~30-60 min, separate session recommended)** Pick up Clang Mandelbrot:
+   get a fresh backtrace/IR dump of the `feme-cpu-simdize` divergent-branch
+   diagnostic, confirm whether it's related to the same `UniformityInfo`
+   snapshot-staleness class of bug just fixed here (plausible, worth checking
+   first) or genuinely separate.
+5. After ENV3 is fully closed: move to ENV4 (full corpus collection with the
+   corrected runner) — this needs a clean host with no competing builds/offload
+   jobs, so schedule it as a dedicated block, not an afterthought at the end of
+   a bug-fixing session.
