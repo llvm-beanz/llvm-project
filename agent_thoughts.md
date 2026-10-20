@@ -127520,3 +127520,64 @@ bug or Mandelbrot in the same session risked a rushed, under-tested second fix
    corrected runner) — this needs a clean host with no competing builds/offload
    jobs, so schedule it as a dedicated block, not an afterthought at the end of
    a bug-fixing session.
+
+# Session: L463 — graphicsfuzz cross-cycle exit-block use-after-free fixed (6 of 6 assertion crashes closed)
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed twice (start and mid-session).
+
+## Win: all 6 `assertion-crash-cases.txt` crashes now fixed
+
+```
+dEQP-VK.graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false ..... Fail (no crash)
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.iteration_multiple  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.max_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.min_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.partial_count ....  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.peel_count .......  Pass
+```
+
+`check-feme`: 3805 -> 3807 Passed (+2 new tests), 4 Unsupported, 0 regressions. `ENV3(a)` struck through in Roadmap.md.
+
+## What the bug actually was (prior session's guess was wrong)
+
+The previous session guessed the 6th crash was `DiamondFlattener::flattenLoopBodyRegion`'s `nullopt` path leaving a block without a terminator. That guess was wrong. The real mechanism:
+
+1. Two nested `for` loops. Inner loop's body has a genuinely divergent `if` that `validate` can't lower — it's cleanly diagnosed "unsupported" and left alone. Its own cached exit block (`ExitBlocksByCycle`, precomputed once up front) is still fine at this point.
+2. Outer loop's own fold helpers (`foldRedundantFlowBlocksInCycle`, `peelConstantFlowPredecessorsInCycle`, `mergeTrivialRelayBlocksInCycle`) are scoped via `CycleInfo::contains`, which *also* matches every block of the still-nested inner cycle.
+3. `mergeTrivialRelayBlocksInCycle`'s `MergeBlockIntoPredecessor` call merges the inner loop's own cached exit block away as collateral damage.
+4. Outer loop's `validate` walk reaches inner loop's header, recognizes it as an already-attempted child, and reads the now-freed `BasicBlock *` straight out of the cache → `getTerminator()` assertion.
+
+**Fix**: `ExitBlocksByCycle` is now `WeakTrackingVH`-valued instead of raw `BasicBlock *` — same exact pattern as the existing `HeaderActiveMasks`/`WeakMaskPair` fix (Roadmap L440) for the identical bug class. A freed entry auto-nulls instead of dangling.
+
+## How I found it (no working gdb locals in this environment)
+
+`gdb` has no usable debug-info for locals in this library here (`"No symbol table info available"` — already documented in `.instructions.md`). Debugged entirely via `errs()`-based tracing gated by `REPRO_TRACE_VALIDATE`, rebuilt 4-5 times. **All instrumentation removed before committing** — none of it shipped.
+
+Key step that cracked it: traced every `BasicBlock::eraseFromParent()` call site I could find (2 of them) — neither fired for the block that went missing. That meant a *third* mechanism was responsible. Grepped the file's own comments for "may have already `eraseFromParent`'d" and found `mergeTrivialRelayBlocksInCycle`, which erases via `MergeBlockIntoPredecessor` (an LLVM utility, not a direct call I'd grepped for).
+
+## Validation performed
+
+1. Standalone `.ll` repro (`/tmp/gf/frag_prelinearize.ll`, captured via `FEME_DUMP_IR_PRELINEARIZE=1` against the real ICD) crashes identically via plain `feme-opt`.
+2. New lit test (`nested-loop-abandoned-child-exit-block-merged.ll`) + unit test (`DoesNotUseFreedChildCycleExitBlockAfterOuterLoopFold`) — both confirmed to abort via `git stash` + rebuild + rerun *without* the fix (same `SIGABRT`, same assertion, same backtrace shape), then confirmed to pass *with* the fix restored.
+3. `check-feme`: 0 regressions, +2 tests passing.
+4. Rebuilt `libfeme_vulkan.so` (separate target from `feme-opt`/`feme-run` — documented gotcha) and re-ran all 6 real CTS cases against it.
+
+## Docs updated
+
+- `Roadmap.md`: struck through `ENV3(a)`; split remaining Clang Mandelbrot work into new `ENV3(b)` (one-lowercase-letter nesting, not deeper); added `L463` changelog row.
+- `VulkanCTSReport.md`: added an update section with the 6/6 re-run table.
+- No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed (bug fix only, no feature/extension change).
+- No new `.instructions.md` entry needed (the gdb-debug-info gotcha this session relied on is already documented from a prior session).
+
+## What's still open
+
+- **`ENV3(b)`: Clang Mandelbrot.** Separate bug (`feme-cpu-simdize` divergent-branch diagnostic), not investigated this session. Next session should get a fresh backtrace/IR dump and check whether it's the same `UniformityInfo`-snapshot-staleness *class* of bug as `L419(y)`/`L462` (plausible, worth checking first) or genuinely separate.
+- **`ENV4`: full corpus collection.** Untouched. Needs a clean host with no competing builds/offload jobs — schedule as its own dedicated block.
+- **`ENV5`: mandatory-feature/residual partitioning.** Untouched.
+- The graphicsfuzz case itself (`cov-loop-condition-divide-by-uniform-always-false`) still functionally `Fail`s — its inner loop's divergent-`if` body shape is a real, separate, not-yet-implemented lowering gap (milestone 6 deviation), tracked under `ENV5`'s graphicsfuzz-failure partitioning, not a crash anymore.
+
+## Suggested next steps, in order
+
+1. **(~30-60 min)** Clang Mandelbrot: fresh backtrace/IR dump of the `feme-cpu-simdize` divergent-branch diagnostic. Check the `UniformityInfo`-staleness angle first.
+2. **(dedicated block, needs clean host)** `ENV4` full corpus collection with the corrected runner — not an end-of-session afterthought.
+3. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures (including this session's now-non-crashing one) into independently tested fixes.
