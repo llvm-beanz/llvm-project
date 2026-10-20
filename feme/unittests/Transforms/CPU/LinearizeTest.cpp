@@ -2678,4 +2678,92 @@ TEST(LinearizeTest, FreezesRelayChainExitValueThroughSharedDispatchBlock) {
          "already-exited lanes";
 }
 
+// Roadmap L462: `header` is a genuinely trivial, single-successor
+// pass-through block (only the induction `phi`, no `CondBr` of its own),
+// with its real, uniform-looking trip-count check one hop forward in
+// `check` -- the shape `findForwardExitCheckBlock`'s own "Roadmap
+// L432(a)" fallback exists for. `check`'s condition reads a resource
+// load whose mask operand is still the literal, compile-time constant
+// `i1 true` `UniformityInfo`'s one-time, pre-masking snapshot sees (see
+// "Roadmap L419(y)"'s own comment), so the forward-match guard
+// ("Roadmap L432(c)", restricted to `!isDivergentBranch`) previously let
+// it through as `HeaderExit` -- but `check` is also this cycle's *only*
+// `OtherCondBrBlocks` member, so the "Roadmap L419(h)" widening
+// (`cycleHasMaskOps(C) && OtherCondBrBlocks.size() == 1`) independently
+// recognized the very same block as `CheckBlock` too, and both code
+// paths erased and replaced the same, already-detached `CondBr`,
+// asserting ("Instruction to insert before is not in a basic block!").
+// Reduced from the real crash in `dEQP-VK.spirv_assembly.instruction.
+// spirv1p4.loop_control.{iteration_multiple,max_iterations,
+// min_iterations,partial_count,peel_count}`. See
+// `loop-header-forward-check-is-sole-conditional-branch.ll` for the
+// equivalent lit-level coverage.
+TEST(LinearizeTest,
+     DoesNotDoubleClaimSoleConditionalBranchAsBothHeaderAndCheckExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %heap, i32 %heap_count) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%inc, %latch]
+      br label %check
+    check:
+      %val = call i32 @feme.cpu.resource.load.raw.i32(ptr %heap, i32 %heap_count, i32 0, i64 0, i1 true)
+      %cond = icmp slt i32 %i, %val
+      br i1 %cond, label %body, label %exit
+    body:
+      %inc = add i32 %i, 1
+      br label %latch
+    latch:
+      br label %header
+    exit:
+      ret void
+    }
+    declare i32 @feme.cpu.resource.load.raw.i32(ptr, i32, i32, i64, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  // The bug was an assertion failure (an aborted process), not a
+  // diagnosable error, so the real regression coverage here is simply
+  // that `run` returns without crashing and produces verifiable IR;
+  // still check for an unexpected diagnostic as a secondary signal.
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(SawError) << "the sole forward exit check should be "
+                             "claimed exactly once, not diagnosed";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Check = nullptr;
+  for (BasicBlock &BB : *F)
+    if (BB.getName() == "check")
+      Check = &BB;
+  ASSERT_TRUE(Check);
+  // `check`'s own conditional branch is the cycle's single, genuine exit
+  // check, so `CheckBlock`'s own handling (not the `HeaderExit`-specific
+  // one) must be the sole owner of its rewrite: its terminator is now an
+  // unconditional branch into the loop body (the real exit decision
+  // lives in the `active.check.live` mask threaded through `latch`
+  // instead), and its own resource load's mask operand must have been
+  // narrowed to a genuine per-lane value rather than left as the
+  // original constant `true` -- both only possible if the block's
+  // original `CondBr` was mutated exactly once, not twice (crashing).
+  EXPECT_TRUE(isa<UncondBrInst>(Check->getTerminator()));
+  auto *Call = dyn_cast<CallInst>(&*Check->begin());
+  ASSERT_TRUE(Call);
+  EXPECT_FALSE(isa<ConstantInt>(Call->getArgOperand(4)))
+      << "check's resource load should have been narrowed to a real "
+         "per-lane mask, not left with its original constant-true operand";
+}
+
 } // namespace

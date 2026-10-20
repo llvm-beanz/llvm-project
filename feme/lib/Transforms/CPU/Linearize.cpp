@@ -5649,14 +5649,47 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   // it. The uniform case this helper actually exists for (see its own
   // comment) never has a genuinely divergent forward match in the first
   // place, so this restriction costs it nothing.
+  // Roadmap L462: `isDivergentBranch` alone is not enough here -- it only
+  // sees `UniformityInfo`'s one-time, pre-masking snapshot (see the
+  // `dependsOnResourceOrImageLoadInCycle`/"Roadmap L419(y)" comment
+  // below), so a forward match whose condition reads a resource/image
+  // load still looks uniform to it even when this cycle's body has its
+  // own separate mask-affecting op, which later forces exactly that
+  // load's mask to become genuinely per-lane and `HeaderDivergent` to be
+  // corrected to `true` for this very same block a few lines down. Left
+  // unchecked, that reclassification re-creates precisely the double-claim
+  // crash this guard exists to prevent (see its own comment just above):
+  // `HeaderExit` (processed as the "uniform forward check" case, right
+  // below) and `CheckBlock` (the "Roadmap L419(h)" widening a few hundred
+  // lines down, which accepts exactly this kind of uniform-looking-but-
+  // really-divergent resource-load check as a genuine exit candidate) both
+  // resolve to the same forward block and both erase its terminator.
+  // Reusing the same, more accurate `dependsOnResourceOrImageLoadInCycle`
+  // test the later correction uses -- rather than a separate, narrower
+  // check -- keeps this guard and that correction in agreement about
+  // which blocks are "really" divergent. Found reducing the SPIR-V 1.4
+  // `spirv_assembly.instruction.spirv1p4.loop_control.*` insertion-point
+  // aborts (`iteration_multiple`, `max_iterations`, `min_iterations`,
+  // `partial_count`, `peel_count`): each shader's `for` loop has a plain,
+  // single-successor `Header` whose real trip-count check sits one hop
+  // forward, reading a resource load that is this cycle's *only* other
+  // conditional branch.
   if (!HeaderExit) {
     if (BasicBlock *Forward =
             findForwardExitCheckBlock(Header, Latch, ExitBlock, C)) {
       std::optional<ExitCheck> ForwardExit = matchExitCheck(*Forward, ExitBlock);
       if (!ForwardExit)
         ForwardExit = recoverRelayExitCheck(Forward, C, ExitBlock);
-      if (ForwardExit && !isDivergentBranch(ForwardExit->Br))
-        HeaderExit = ForwardExit;
+      if (ForwardExit) {
+        bool ForwardDivergent = isDivergentBranch(ForwardExit->Br);
+        if (!ForwardDivergent) {
+          SmallPtrSet<Value *, 8> Visited;
+          ForwardDivergent = dependsOnResourceOrImageLoadInCycle(
+              ForwardExit->Br->getCondition(), C, CI, Visited);
+        }
+        if (!ForwardDivergent)
+          HeaderExit = ForwardExit;
+      }
     }
   }
   bool HeaderDivergent = HeaderExit && isDivergentBranch(HeaderExit->Br);
