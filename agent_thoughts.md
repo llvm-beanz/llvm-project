@@ -127731,3 +127731,106 @@ workaround is reusing a lit run's already-compiled, not-cleaned-up `.o`).
 - Direct bash-tool `clang-dxc` invocation (real compile, not `--version`) is
   blocked by a harness approval gate in this environment; use the
   `offloader`-direct workaround above instead of retrying it.
+
+# Session: L465 — exit-relay-value freeze fix landed, but Mandelbrot's real bug is still elsewhere
+
+**Next action (do this first, under 2 minutes):** `vulkaninfo --summary | grep deviceName` — confirmed `FeMe CPU Vulkan Device` at least twice this session, as required every session.
+
+## What happened, in order
+
+1. Resumed from the prior session's root-cause: `freezeLoopCarriedValues` only
+   freezes a `Header`-phi's own identity. The separate `HeaderExitRelayValues`/
+   `LatchExitRelayValues` restore loops threaded a raw `addIncoming(V, Latch)`
+   — correct only when `V` happens to already be a `Header` phi, silently
+   broadcast group-wide when `V` is a plain per-edge constant.
+2. Built a minimal `.ll` reproducer, confirmed the bug (scalar `phi i1` after
+   SIMDize, not `<4 x i1>`).
+3. Fixed it: new `freezeExitRelayValue` helper in `Linearize.cpp`, a no-op for
+   already-`Header`-phi values, otherwise a dedicated shadow phi + lazy
+   per-round `select`. Laziness was required — an eager first attempt caused
+   2 lit-test regressions by inserting dead IR into exact-match `FileCheck`
+   output.
+4. Added 1 unit test + 2 lit tests. Full `check-feme`: 3813/3813 Passed, 0
+   regressions (up from 3810).
+5. Re-ran all 6 `assertion-crash-cases.txt` reproducers against the real
+   rebuilt ICD: still 5/6 Pass, 1/6 fails cleanly (not a crash) — same as
+   `L463`, no regression. `ENV3`'s "no crash" bar still holds.
+6. Re-ran `check-hlsl-clang-feme-vk`: same 2 known failures, 1 known
+   unexpected-pass, as before — no regression.
+7. **The big finding**: confirmed via `FEME_DUMP_IR_PRESIMD=1`/`FEME_DUMP_IR=1`
+   against the real compiled Mandelbrot artifact that this fix's new
+   mechanism is present and *correctly widened end-to-end* (`<4 x i32>`, not
+   a scalar broadcast) in the real shader. But an A/B rebuild — build
+   `libfeme_vulkan.so` with the fix, run `offloader`, `imgdiff` it; then
+   `git stash` (revert the fix), rebuild, run again, `imgdiff` again — produced
+   **byte-for-byte identical `imgdiff` histograms both times**. This is
+   conclusive: the fix is real and correctly applied, but it is **not** the
+   cause of Mandelbrot's residual pixel-diff. Popped the stash, restored the
+   fix (it's still independently valuable), and committed it.
+
+## Why this matters (so the next session doesn't repeat the investigation)
+
+Two full sessions now (the one before this, and this one) have correctly
+root-caused and fixed *real* bugs in the "group-wide broadcast of a per-lane
+divergent value" bug class, and both times the fix did NOT move Mandelbrot's
+`imgdiff` numbers. That is strong evidence the actual `ENV3(c)` root cause is
+a *different* mechanism, not a third variant of the same broadcast bug.
+
+The most promising unexplored lead (from reading ~490 of ~576 lines of the
+post-SIMD IR dump this session): there is a **second, outer** masking stage
+downstream of the loop-exit relay, named like LLVM's `StructurizeCFG`
+(`Flow`/`.Flow_crit_edge`/`live.t2`/`live.f4`/`.linearized`), that looks like
+an `if (Diverged) { color = black } else { color = palette[...] }`
+dispatch. This session did NOT finish tracing it — ran out of budget after
+confirming the loop-exit-relay fix doesn't explain the diff.
+
+## Commits made this session (4, each small)
+
+1. `feme: freeze non-phi exit-relay values during linearization` — the fix
+   itself + unit test + 2 lit tests.
+2. `feme: update Roadmap.md for L465` — struck through the superseded
+   `ENV3(c)(1)`-`(3)` sub-items, added `ENV3(c)(4)`-`(6)` for the still-open
+   work, kept to the one-lowercase-letter nesting rule.
+3. `feme: document L465 in VulkanCTSReport.md` — full validation writeup,
+   the A/B-rebuild evidence, and the `deqp-vk --deqp-caselist-file`/working-
+   directory process note (already covered in `.instructions.md`, so no
+   `.instructions.md` change was needed this session).
+4. This `agent_thoughts.md` entry (next).
+
+No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes —
+this was a compiler-internals bug fix, no feature/extension surface moved.
+No real Vulkan CTS (`VK-GL-CTS`) full run beyond the 6 targeted
+`assertion-crash-cases.txt` reproducers — this fix's only CTS-reachable
+code path is already covered by those 6 cases, and they show 0 regressions.
+
+## Next steps for whoever picks this up
+
+1. **(~20-40 min)** Finish reading the post-SIMD IR dump's remaining ~90
+   unread lines (`/tmp/mandel_dbg/postsimd.ll` from this session, or
+   regenerate fresh via `FEME_DUMP_IR=1 ./bin/offloader ... 2> postsimd.ll`
+   from `build/` against the lit-run's persisted
+   `tools/OffloadTest/test/clang-feme-vk/Basic/Output/Mandelbrot.test.tmp.o`)
+   to find exactly which value feeds the final black-vs-palette `select` at
+   the `Flow`/`.linearized` blocks, and whether IT is the thing still
+   broadcasting wrong.
+2. **(~15 min, do this in parallel/first — cheap, might shortcut step 1)**
+   Sanity-check `.frozen.shadow`'s own value isn't subtly off-by-a-few-
+   iterations (feeds the `uitofp`/`log2`/`sqrt` palette-index math) — e.g.
+   dump a handful of per-pixel iteration counts from FeMe's run and compare
+   to a quick Python re-implementation of the same escape-time loop, keyed
+   by pixel coordinate, the way the prior session's doc entry describes for
+   confirming genuinely-wrong vs. inherent.
+3. **(~30-60 min, once the real bug is found)** Fix with a minimal `.ll`
+   reproducer + unit/lit tests mirroring this session's pattern (`L465`),
+   watch for regressions in `Transforms/CPU`'s ~190+ existing lit tests.
+4. **(~15-20 min)** Re-validate: `check-feme`, `check-hlsl-clang-feme-vk`
+   (confirm Mandelbrot's `PixelPercent` passes under 0.2%), all 6
+   `assertion-crash-cases.txt` reproducers. Strike `ENV3(c)` in `Roadmap.md`
+   if it fully closes; update `VulkanCTSReport.md`.
+5. **(after ENV3(c) truly closes)** `ENV4`: full current CTS corpus
+   collection — still needs a dedicated clean-host block, carried forward
+   unchanged from every prior session.
+6. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures +
+   4 graphicsfuzz failures into independently tested fixes.
+7. **(low priority)** Upstream the 3 `offload-test-suite` patches to
+   `llvm-beanz/offload-test-suite` if push access ever becomes available.
