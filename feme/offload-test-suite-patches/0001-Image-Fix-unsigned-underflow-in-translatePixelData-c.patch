@@ -1,0 +1,162 @@
+From 96a2a72888789dd22a21fdf068903b58fd96f14e Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 14:49:55 +0000
+Subject: [PATCH 1/3] [Image] Fix unsigned underflow in translatePixelData
+ channel fill/skip loops
+
+When Src and Dst have different channel counts, CopiedChannels is their
+min(), so the "fill extra dst channels" and "skip extra src channels"
+loop bounds were computed backwards (CopiedChannels - Dst.getChannels()
+and CopiedChannels - Src.getChannels()), always underflowing the
+uint32_t subtraction on whichever side has more channels and producing
+an effectively-unbounded loop that walks far out of bounds before
+crashing. Swap the subtraction operands so neither can underflow.
+
+Found via FeMe's Clang Mandelbrot repro (4-channel float4 source ->
+3-channel 8-bit PNG destination).
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 1b814ab3-f423-4724-ae98-f676112844de
+---
+ lib/Image/Image.cpp                     |  4 +-
+ unittests/Image/CMakeLists.txt          |  2 +-
+ unittests/Image/ImageTranslateTests.cpp | 96 +++++++++++++++++++++++++
+ 3 files changed, 99 insertions(+), 3 deletions(-)
+ create mode 100644 unittests/Image/ImageTranslateTests.cpp
+
+diff --git a/lib/Image/Image.cpp b/lib/Image/Image.cpp
+index b569721..24ddcdc 100644
+--- a/lib/Image/Image.cpp
++++ b/lib/Image/Image.cpp
+@@ -42,7 +42,7 @@ static void translatePixelData(Image &Dst, ImageRef Src, bool ForWrite) {
+         llvm::sys::swapByteOrder(*DstPtr);
+     }
+     // If the destination has more channels fill it with saturated values.
+-    for (uint32_t J = 0; J < CopiedChannels - Dst.getChannels();
++    for (uint32_t J = 0; J < Dst.getChannels() - CopiedChannels;
+          ++J, ++DstPtr) {
+       if constexpr (std::is_floating_point<DstType>())
+         *DstPtr = 1.0;
+@@ -50,7 +50,7 @@ static void translatePixelData(Image &Dst, ImageRef Src, bool ForWrite) {
+         *DstPtr = std::numeric_limits<DstType>::max();
+     }
+     // If the source has more channels skip them.
+-    for (uint32_t J = 0; J < CopiedChannels - Src.getChannels(); ++J, ++SrcPtr)
++    for (uint32_t J = 0; J < Src.getChannels() - CopiedChannels; ++J, ++SrcPtr)
+       ;
+   }
+ }
+diff --git a/unittests/Image/CMakeLists.txt b/unittests/Image/CMakeLists.txt
+index 6e9222e..0264a2b 100644
+--- a/unittests/Image/CMakeLists.txt
++++ b/unittests/Image/CMakeLists.txt
+@@ -1,3 +1,3 @@
+-add_offloadtest_unittest(ImageTests ColorTests.cpp)
++add_offloadtest_unittest(ImageTests ColorTests.cpp ImageTranslateTests.cpp)
+ 
+ target_link_libraries(ImageTests PRIVATE OffloadTestImage)
+diff --git a/unittests/Image/ImageTranslateTests.cpp b/unittests/Image/ImageTranslateTests.cpp
+new file mode 100644
+index 0000000..30621ac
+--- /dev/null
++++ b/unittests/Image/ImageTranslateTests.cpp
+@@ -0,0 +1,96 @@
++//===- ImageTranslateTests.cpp - Image::translateImage Tests -----*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++//
++//===----------------------------------------------------------------------===//
++
++#include "Image/Image.h"
++
++#include "gtest/gtest.h"
++
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <memory>
++
++using namespace offloadtest;
++
++namespace {
++
++// `translatePixelData`'s own "extra channel" fill/skip loops used to
++// compute their trip counts as `CopiedChannels - Dst.getChannels()` and
++// `CopiedChannels - Src.getChannels()` -- backwards from what the
++// loops' own comments describe ("if the destination/source has *more*
++// channels..."). Since `CopiedChannels` is `min(Dst.getChannels(),
++// Src.getChannels())`, whichever side legitimately has more channels
++// always has `CopiedChannels < That.getChannels()`, so the subtraction
++// wrapped around to a huge `uint32_t` instead of the intended `0`,
++// walking the source/destination pointer far out of bounds. This is
++// exactly the shape `RWBuffer<float4>` (4-channel float source) ->
++// 8-bit PNG (3-channel, `uint8_t` destination) output hits -- e.g.
++// Clang's own `Basic/Mandelbrot.test`, which only started actually
++// reaching this code path once a separate, unrelated FeMe compiler bug
++// (a `feme-cpu-simdize` false "divergent branch" diagnostic) stopped
++// masking it. Translating a 4-channel source into a 3-channel
++// destination (the "source has more channels, skip them" case) used to
++// corrupt memory and crash; this test exercises exactly that shape.
++TEST(ImageTranslateTests, HandlesSourceWithMoreChannelsThanDestination) {
++  const uint32_t Height = 1;
++  const uint32_t Width = 2;
++  const uint8_t SrcChannels = 4;
++  std::unique_ptr<char[]> SrcData =
++      std::make_unique<char[]>(static_cast<size_t>(Height) * Width *
++                                sizeof(float) * SrcChannels);
++  float *SrcPixels = reinterpret_cast<float *>(SrcData.get());
++  for (uint32_t I = 0; I < Width * SrcChannels; ++I)
++    SrcPixels[I] = static_cast<float>(I) / 10.0f;
++  ImageRef Src(Height, Width, sizeof(float), SrcChannels, /*F=*/true,
++               llvm::StringRef(SrcData.get(),
++                                static_cast<size_t>(Height) * Width *
++                                    sizeof(float) * SrcChannels));
++
++  Image Dst = Image::translateImage(Src, sizeof(uint8_t), /*Channels=*/3,
++                                     /*Float=*/false);
++  EXPECT_EQ(Dst.getChannels(), 3);
++  EXPECT_EQ(Dst.getDepth(), sizeof(uint8_t));
++  EXPECT_EQ(Dst.size(),
++            static_cast<size_t>(Height) * Width * sizeof(uint8_t) * 3);
++}
++
++// The mirror image shape: destination has more channels than the
++// source (the "destination has more channels, fill them" case), which
++// used to hit the same `uint32_t` underflow from the other side.
++TEST(ImageTranslateTests, HandlesDestinationWithMoreChannelsThanSource) {
++  const uint32_t Height = 1;
++  const uint32_t Width = 2;
++  const uint8_t SrcChannels = 3;
++  std::unique_ptr<char[]> SrcData =
++      std::make_unique<char[]>(static_cast<size_t>(Height) * Width *
++                                sizeof(float) * SrcChannels);
++  float *SrcPixels = reinterpret_cast<float *>(SrcData.get());
++  for (uint32_t I = 0; I < Width * SrcChannels; ++I)
++    SrcPixels[I] = static_cast<float>(I) / 10.0f;
++  ImageRef Src(Height, Width, sizeof(float), SrcChannels, /*F=*/true,
++               llvm::StringRef(SrcData.get(),
++                                static_cast<size_t>(Height) * Width *
++                                    sizeof(float) * SrcChannels));
++
++  Image Dst = Image::translateImage(Src, sizeof(uint8_t), /*Channels=*/4,
++                                     /*Float=*/false);
++  EXPECT_EQ(Dst.getChannels(), 4);
++  EXPECT_EQ(Dst.getDepth(), sizeof(uint8_t));
++  EXPECT_EQ(Dst.size(),
++            static_cast<size_t>(Height) * Width * sizeof(uint8_t) * 4);
++  // The 4th (alpha) channel of every pixel must be saturated, not left
++  // uninitialized or corrupted by the underflowed fill loop.
++  const uint8_t *DstPixels = reinterpret_cast<const uint8_t *>(Dst.data());
++  for (uint32_t Px = 0; Px < Width; ++Px)
++    EXPECT_EQ(DstPixels[Px * 4 + 3], std::numeric_limits<uint8_t>::max());
++}
++
++} // namespace
+-- 
+2.53.0
+

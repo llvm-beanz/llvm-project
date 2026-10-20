@@ -1,0 +1,50 @@
+From 7e81a2873e9fb534efea02d1da1408bacf5e38a2 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 14:50:12 +0000
+Subject: [PATCH 3/3] [lit] Pass FEME_VULKAN_SAFETY_NET_TIMEOUT_MS through to
+ tests
+
+lit's default config.environment is a curated whitelist (PATH plus a
+handful of sanitizer vars), not a copy of the ambient environment, so a
+shell's own FEME_VULKAN_SAFETY_NET_TIMEOUT_MS setting was silently
+dropped for every lit-driven run of this suite: FeMe's software ICD got
+its five-second default wait-safety-net bound regardless of what the
+invoking shell or CMake target had configured, even though the
+five-second default is too tight on a host this suite's own parallel
+lit workers oversubscribe (a known characteristic, not a hang -- see
+Basic/Mandelbrot.test). Add it to the existing with_system_environment
+passthrough list alongside the VK_* variables.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 1b814ab3-f423-4724-ae98-f676112844de
+---
+ test/lit.cfg.py | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/test/lit.cfg.py b/test/lit.cfg.py
+index 58f68c5..5aadf54 100644
+--- a/test/lit.cfg.py
++++ b/test/lit.cfg.py
+@@ -59,6 +59,19 @@ llvm_config.with_system_environment(
+         "VK_INSTANCE_LAYERS",
+         "VK_LOADER_DRIVERS_SELECT",
+         "VK_LOADER_DEBUG",
++        # A CPU-based ICD (e.g. FeMe) has no real device latency of its
++        # own to need more than its default wait-safety-net bound, but a
++        # host heavily oversubscribed by this suite's own parallel lit
++        # workers can legitimately push one otherwise-unremarkable large
++        # dispatch's own wait past that default purely from scheduling
++        # contention, not a real hang (see `Basic/Mandelbrot.test`).
++        # Without this passthrough, a shell's own
++        # `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS` setting was silently
++        # dropped here (this suite's own `config.environment` isn't the
++        # full ambient environment), so every lit-driven run of this
++        # suite got the ICD's five-second default regardless of what the
++        # invoking shell or CMake target had configured.
++        "FEME_VULKAN_SAFETY_NET_TIMEOUT_MS",
+     ]
+ )
+ 
+-- 
+2.53.0
+

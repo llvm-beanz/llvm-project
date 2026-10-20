@@ -1,0 +1,103 @@
+From 91c6eb2674de8394174f18cb6f0665202d0ca473 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 14:50:03 +0000
+Subject: [PATCH 2/3] [Image] Map NaN to 0 and tolerate small overshoot in
+ convertColor
+
+Unclamped shader math (e.g. log2/sqrt of an overflowed sum) can
+legitimately produce NaN or slightly-out-of-[0,1] color values; real
+GPU hardware saturates on UNORM writes rather than producing garbage or
+trapping. convertColor's strict [0,1] assert instead aborted the whole
+process. Map NaN to 0.0, clamp the value to [0,1] before conversion,
+and loosen the assert to a [-0.01, 1.01] tolerance band to allow
+ordinary floating-point rounding slop (e.g. smoothstep overshoot).
+
+Found via FeMe's Clang Mandelbrot repro: severely-diverging pixels
+overflow X*X+Y*Y to Inf one iteration before the loop's own divergence
+check catches it, making log2(Inf) and sqrt(-Inf) legitimately NaN.
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Copilot-Session: 1b814ab3-f423-4724-ae98-f676112844de
+---
+ include/Image/Color.h          | 25 +++++++++++++++++++++----
+ unittests/Image/ColorTests.cpp | 22 ++++++++++++++++++++++
+ 2 files changed, 43 insertions(+), 4 deletions(-)
+
+diff --git a/include/Image/Color.h b/include/Image/Color.h
+index 14f8779..2330763 100644
+--- a/include/Image/Color.h
++++ b/include/Image/Color.h
+@@ -40,11 +40,28 @@ std::enable_if_t<std::is_arithmetic_v<T>, double> toDouble(T Val) {
+ template <typename NewTy, typename OldTy> NewTy convertColor(OldTy Val) {
+   if constexpr (std::is_same_v<NewTy, OldTy>)
+     return Val;
+-  const double Dbl = toDouble(Val);
+-  assert(Dbl >= 0.0 && Dbl <= 1.0 && "Value should be normalized");
++  double Dbl = toDouble(Val);
++  // GPU shader output genuinely overshoots [0, 1] by a small floating-point
++  // rounding margin in practice (e.g. a `smoothstep`-like
++  // `t * t * (3 - 2 * t)` blend with `t` within rounding error of `1.0`),
++  // and can even legitimately be `NaN`/`Inf` for shaders that do unclamped
++  // math on severely out-of-range inputs (e.g. Clang's own
++  // `Basic/Mandelbrot.test`, whose unbounded `X*X+Y*Y` can overflow to
++  // `Inf` for strongly-diverging points one iteration before its own
++  // divergence check catches it, making its `log2`/`sqrt`-based coloring
++  // produce `NaN`). Real GPU fixed-function UNORM writes convert `NaN` to
++  // `0` and saturate everything else instead of asserting; match that
++  // convention here. Only flag inputs far enough out of the finite [0, 1]
++  // range to indicate an actual bug (not rounding slop or shader-level
++  // NaN/Inf) with a generous tolerance.
++  if (std::isnan(Dbl))
++    Dbl = 0.0;
++  else
++    assert(Dbl >= -0.01 && Dbl <= 1.01 && "Value should be normalized");
++  const double Clamped = std::clamp(Dbl, 0.0, 1.0);
+   if constexpr (std::is_integral_v<NewTy>)
+-    return toInt<NewTy>(Dbl);
+-  return static_cast<NewTy>(Dbl);
++    return toInt<NewTy>(Clamped);
++  return static_cast<NewTy>(Clamped);
+ }
+ } // namespace ColorUtils
+ 
+diff --git a/unittests/Image/ColorTests.cpp b/unittests/Image/ColorTests.cpp
+index d9d34af..3c31ced 100644
+--- a/unittests/Image/ColorTests.cpp
++++ b/unittests/Image/ColorTests.cpp
+@@ -14,6 +14,7 @@
+ #include "gtest/gtest.h"
+ 
+ #include <cstdint>
++#include <limits>
+ 
+ using namespace offloadtest;
+ 
+@@ -49,4 +50,25 @@ TEST(ColorTests, RoundTrip) {
+     EXPECT_EQ(RGB.getAs<uint16_t>(), RGBPrime.getAs<uint16_t>());
+   }
+ }
++
++// GPU shader output can legitimately overshoot [0, 1] by a small rounding
++// margin (e.g. a `smoothstep`-like blend evaluated at a parameter within
++// rounding error of `1.0`, as Clang's own `Basic/Mandelbrot.test` coloring
++// produces); `convertColor` must saturate such values rather than assert,
++// matching real GPU UNORM-write behavior.
++TEST(ColorTests, ConvertColorSaturatesSmallOutOfRangeOvershoot) {
++  EXPECT_EQ(ColorUtils::convertColor<uint8_t>(1.0000001f), 255);
++  EXPECT_EQ(ColorUtils::convertColor<uint8_t>(-0.0000001f), 0);
++  EXPECT_EQ(ColorUtils::convertColor<uint8_t>(1.0f), 255);
++  EXPECT_EQ(ColorUtils::convertColor<uint8_t>(0.0f), 0);
++}
++
++// Unbounded shader math (e.g. Clang's own `Basic/Mandelbrot.test`, whose
++// `log2`/`sqrt`-based coloring of severely-diverging points can produce
++// `NaN`) must convert to `0`, matching real GPU UNORM-write behavior,
++// rather than asserting or propagating the `NaN`.
++TEST(ColorTests, ConvertColorMapsNaNToZero) {
++  const float NaN = std::numeric_limits<float>::quiet_NaN();
++  EXPECT_EQ(ColorUtils::convertColor<uint8_t>(NaN), 0);
++}
+ } // namespace
+-- 
+2.53.0
+
