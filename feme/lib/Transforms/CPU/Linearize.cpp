@@ -1361,7 +1361,92 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
     SmallVector<Use *, 4> OutsideUses;
   };
   SmallVector<ShadowExitFixup, 4> ShadowExitFixups;
+
+  // Roadmap ENV3(c)(10): a value computed fresh in `Header` on every
+  // iteration -- not itself a loop-carried `phi` -- can still be read
+  // outside the loop when it happens to dominate the exit (e.g. CSE
+  // folding a post-loop expression into the identical, already-computed
+  // in-loop one it recomputes verbatim). The scan below only ever visits
+  // `Header`'s own *phis*, so such a value's outside use sees whatever
+  // `Header` most recently computed for the whole masked group on its
+  // final iteration, not this lane's own value as of its individual exit
+  // (reduced from Clang's own `Basic/Mandelbrot.test`: the post-loop
+  // palette computation re-reads `X * X + Y * Y`, folded with the
+  // identical in-loop escape-check expression -- every lane in a group
+  // except the one with the group's own longest-running iteration count
+  // ends up reading that longest-running lane's own stale, blown-up
+  // `X`/`Y`, corrupting the palette index for every other lane).
+  //
+  // Such a value is computed *before* `BodyMask` (\p BodyMask is the
+  // "exiting" mask -- whether a lane remains active for *another* round
+  // -- computed from exactly this kind of value, among others) decides
+  // whether this round's masked computation should even be kept: unlike
+  // an ordinary loop-carried `phi` (whose own update is gated by
+  // continuing past the check, so freezing it with `BodyMask` correctly
+  // keeps the pre-check value for a lane that exits this round), this
+  // value's own freshly-computed-this-round result is exactly what a
+  // lane exiting *this* round needs kept (it is, after all, the value
+  // that caused the exit) -- so its own freeze must instead be gated on
+  // `MaskPhis.front()`, the "entering" mask (was this lane still looping
+  // as of the *start* of this round), not `BodyMask` (confirmed via
+  // direct runtime comparison against a `numpy.float32` reference: an
+  // earlier version of this fix, gated on `BodyMask` like an ordinary
+  // phi, kept the group's one longest-running lane's own ever-growing
+  // post-divergence value for every other lane instead, corrupting far
+  // more pixels than the original bug). Builds its own self-contained
+  // freeze + `ShadowExitFixup` entry directly (mirroring
+  // `freezeExitRelayValue`'s own idiom), rather than going through the
+  // loop below's generic, `BodyMask`-gated mechanism, and is excluded
+  // from that loop's own scan below (`MaterializedLCSSAPhis`) to avoid
+  // re-freezing it a second time with the wrong mask.
+  SmallPtrSet<PHINode *, 4> MaterializedLCSSAPhis;
+  {
+    SmallVector<Instruction *, 8> ToConvert;
+    for (Instruction &I : *Header) {
+      if (isa<PHINode>(I) || I.getType()->isVoidTy())
+        continue;
+      for (Use &U : I.uses()) {
+        if (!InLoop(cast<Instruction>(U.getUser())->getParent())) {
+          ToConvert.push_back(&I);
+          break;
+        }
+      }
+    }
+    // `MaskPhis.front()` (`Masks.Live`/the "entering" mask -- see the
+    // comment above) is also used purely as a template for `Header`'s own
+    // incoming-edge/-block layout below (handling any duplicate-
+    // predecessor edges the same way an ordinary `addIncoming` loop over
+    // a real phi already would).
+    PHINode *Template = MaskPhis.front();
+    for (Instruction *I : ToConvert) {
+      PHINode *LCSSAPhi =
+          PHINode::Create(I->getType(), Template->getNumIncomingValues(),
+                          I->getName() + ".lcssa");
+      LCSSAPhi->insertBefore(Header->getFirstNonPHIIt());
+      for (unsigned Idx = 0, E = Template->getNumIncomingValues(); Idx != E;
+           ++Idx) {
+        BasicBlock *IncomingBB = Template->getIncomingBlock(Idx);
+        if (IncomingBB != Latch)
+          LCSSAPhi->addIncoming(PoisonValue::get(I->getType()), IncomingBB);
+      }
+      Value *Frozen =
+          B.CreateSelect(Template, I, LCSSAPhi, I->getName() + ".lcssa.frozen");
+      LCSSAPhi->addIncoming(Frozen, Latch);
+
+      SmallVector<Use *, 4> OutsideUses;
+      for (Use &U : I->uses())
+        if (!InLoop(cast<Instruction>(U.getUser())->getParent()))
+          OutsideUses.push_back(&U);
+      for (Use *U : OutsideUses)
+        U->set(LCSSAPhi);
+      ShadowExitFixups.push_back({LCSSAPhi, OutsideUses});
+      MaterializedLCSSAPhis.insert(LCSSAPhi);
+    }
+  }
+
   for (PHINode &PN : Header->phis()) {
+    if (MaterializedLCSSAPhis.contains(&PN))
+      continue; // Already fully handled, with its own mask, just above.
     if (llvm::is_contained(MaskPhis, &PN))
       continue;
     int Idx = PN.getBasicBlockIndex(Latch);
