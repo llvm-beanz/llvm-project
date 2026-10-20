@@ -194,6 +194,46 @@ call then asserts on. No feature/extension change; no
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` update
 needed.
 
+### Update: 6 of 6 assertion crashes fixed (`L463`); `ENV3(a)` closed
+
+Root-caused and fixed the sixth and final `assertion-crash-cases.txt`
+crash, `graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false`
+(see `L463` in [Roadmap.md](Roadmap.md) for the full mechanism) -- a
+stale `LoopLinearizer::ExitBlocksByCycle` cache entry, not the earlier
+guessed "diagnostic path leaves a block without a terminator" mechanism.
+Re-ran all six original cases against a freshly rebuilt
+`libfeme_vulkan.so`:
+
+```
+dEQP-VK.graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false ..... Fail
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.iteration_multiple  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.max_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.min_iterations ...  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.partial_count ....  Pass
+dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.peel_count .......  Pass
+```
+
+All six now complete without abort (the acceptance bar `ENV3(a)`/`ENV3`
+describe as "six idle-host crash reproducers completing without abort").
+The graphicsfuzz case's own result is `Fail`, not `Pass`: its inner
+loop's divergent-`if` body shape is still genuinely unsupported by this
+milestone (a pre-existing, separate limitation, not a crash), so
+`vkCreateGraphicsPipelines` now fails cleanly instead of aborting the
+whole `deqp-vk` process. This is expected and unchanged from this
+milestone's documented scope (see the Status section's milestone 6
+deviation note in `FeMeCPUDesign.md`) -- fixing that body shape itself is
+tracked separately (`ENV5`'s remaining-SPIR-V/graphicsfuzz-failure
+partitioning), not part of `ENV3(a)`'s own crash-prevention bar.
+
+`check-feme`: 3,805 -> 3,807 Passed (+2 new regression tests), 4
+Unsupported, 0 regressions.
+
+`ENV3` as a whole remains open: Clang Mandelbrot's divergent-branch
+SIMDization failure (now tracked as `ENV3(b)`) and the zero-unexpected-
+Clang-offload-failures bar are not yet addressed. No feature/extension
+change; no `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+update needed.
+
 ## Historical full-run baseline (2026-10-12)
 
 The remainder records the earlier complete re-triage and its subsequent
