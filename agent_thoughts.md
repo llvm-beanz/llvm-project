@@ -127834,3 +127834,44 @@ code path is already covered by those 6 cases, and they show 0 regressions.
    4 graphicsfuzz failures into independently tested fixes.
 7. **(low priority)** Upstream the 3 `offload-test-suite` patches to
    `llvm-beanz/offload-test-suite` if push access ever becomes available.
+
+# Session: L466 — second exit-relay freeze gap fixed, Mandelbrot residual narrowed but not closed
+
+**Next action (under two minutes)**: open `feme/docs/Roadmap.md` at `ENV3(c)(8)` and re-read the Vulkan CTS Report entry for `ENV3(c)(7) follow-up` for the exact instrumentation idea (write `Diverged`/`%.wide2` to the output buffer instead of `Color` for a known-bad pixel) before doing anything else.
+
+## What got done
+
+1. Finished the prior (compacted) session's half-landed fix: both layers of `L466` (blend into `Latch`'s pre-existing entry; blend into a `Latch`-bypassing `BodyRegion` predecessor's pre-existing entry) built, tested, and **committed** (`9f39fecea64a`).
+2. Found and fixed a regression the second fix layer exposed in an *existing* test (`loop-divergent-exit-non-phi-exit-relay-value.ll`): its own `body`-edge literal `false` was itself an untested instance of the same bypass bug, reduced from this same Mandelbrot loop. Updated its CHECK lines rather than reverting the fix — confirmed via manual trace this was a real latent gap in that test's own original, narrower fix.
+3. Full validation: `check-feme` 3813 → 3819 Passed, 0 regressions. All 6 `assertion-crash-cases.txt` reproducers re-run solo against the rebuilt real ICD — still 5 Pass / 1 clean Fail, no abort, no regression.
+4. Real Mandelbrot re-run: `PixelPercent` moved from 1.245624% → 1.245630% — **confirmed the fix is real and hit by the real shader** (its `.Flow3_crit_edge` entry visibly changed), but this is not the dominant bug.
+5. Pushed the investigation further than originally planned: sampled 8 "FeMe=black, golden=colorful" pixels (two full 4-wide SIMD groups) and independently re-implemented the escape-time loop in `numpy.float32`. **All 8 lanes diverge in 12-23 iterations** — nowhere near the 2000 cap. This conclusively answers `ENV3(c)(7)`: the residual is a **genuine lowering bug, not inherent floating-point sensitivity**. It also rules out `L466`'s own bypass mechanism as the cause for *these* pixels (the whole group exits via `Latch` well before the uniform cap could ever fire).
+6. Docs: struck `ENV3(c)(4)`/`(5)`/`(7)` in `Roadmap.md`, added `ENV3(c)(8)` with the concrete next diagnostic step; two new dated `VulkanCTSReport.md` sections; two new process notes in `feme/.instructions.md` (`pip install --break-system-packages`; `deqp-vk` solo-invocation convention).
+
+## Wins (visible, not buried)
+
+- 6 new regression tests (4 lit + 2 unit), zero regressions across 3819 `check-feme` tests and all 6 crash reproducers.
+- A real, independently-valuable bug fixed and shipped (`L466`), even though it didn't close Mandelbrot — this is the second time this milestone a "confirmed real, confirmed not dominant" fix has landed cleanly (same shape as `L465`). Worth keeping both.
+- **The single biggest unlock this session**: definitively killing the "maybe it's just inherent FP chaos" hypothesis that's been hanging over `ENV3(c)` since before `L465`. It's a real, fixable bug. That focuses the next session instead of leaving an open philosophical question.
+
+## State of `ENV3(c)` right now
+
+- `ENV3(c)(1)`-`(5)`, `(7)`: done/struck.
+- `ENV3(c)(6)`: still open (the acceptance-bar re-check; `PixelPercent` still fails).
+- `ENV3(c)(8)`: the live item. **Root cause is confirmed downstream of the loop's own exit-relay merge** (which is now structurally correct and well-tested) — either the merge's *runtime value* is wrong despite looking right on paper, or the bug is a second instance of the identical bug class in the shader's *outer* `if (Diverged)` color-selection dispatch (`StructurizeCFG`'s own `Flow`/`live.t2`/`live.f4`/`.linearized` blocks), which nobody has traced value-by-value yet — only flagged as suspicious, twice now, across two sessions.
+
+## Suggested next steps
+
+1. **(~20-30 min, do this first)** Direct instrumentation: patch a *scratch copy* of the compiled Mandelbrot `.o`/IR so the final store writes `Diverged`'s own value (or `%.wide2`, zero-extended) into the color channels instead of the computed palette `Color`, rebuild `libfeme_vulkan.so`, rerun, and inspect the output PNG for the 8 known-bad pixel coordinates from this session (`(3832-3839, 901)`). If it reads "diverged" (nonzero) there, the loop's own merge is fine and the bug is 100% in the outer dispatch blocks — skip straight to step 3. If it reads "not diverged" there, the merge itself is wrong at runtime despite looking right in the IR — go to step 2.
+2. **(~30-60 min, only if step 1 says the merge itself is wrong)** Re-examine `freezeExitRelayValue`/the `HeaderExitRelayValues` restore loop for a subtler bug (e.g. ordering relative to `freezeLoopCarriedValues`'s own mutation, or a mask computed before vs. after some other CFG edit this session didn't check) — this would mean `L465`/`L466`'s own validation (which only checked IR *shape*, not actual runtime values against this specific real shader) missed something; add a new reduced `.ll` reproducer matching whatever's found.
+3. **(~30-60 min, the more likely branch per two sessions' worth of flagging)** Trace the outer `if (Diverged)` dispatch (`Flow`/`live.t2`/`live.f4`/`.linearized` blocks) value-by-value in the post-SIMD dump, specifically looking for another `addIncoming`/phi-restore call elsewhere in `Linearize.cpp` (not `HeaderExitRelayValues`) that has the same "silently keeps a stale literal on a reconvergence edge instead of freezing" shape `L465`/`L466` already fixed twice. Grep for other `PN->addIncoming`/`setIncomingValue` call sites outside the code this session touched as a starting point.
+4. **(~15-20 min once the real bug is found and fixed)** Re-validate: `check-feme`, the real `check-hlsl-clang-feme-vk` Mandelbrot test (confirm `PixelPercent` passes under 0.2%), all 6 `assertion-crash-cases.txt` reproducers. Strike `ENV3(c)(6)`/`ENV3(c)` itself in `Roadmap.md` if it fully closes; update `VulkanCTSReport.md`.
+5. **(only if, against expectation, a future session finds the residual genuinely *is* partly inherent after all)** Loosen `offload-test-suite`'s `Basic/Mandelbrot.test` `rules.yaml` tolerance as a documented fallback — but this session's 8-for-8 sample makes that increasingly unlikely to be needed at all.
+6. **(after `ENV3(c)` truly closes)** `ENV4`: full current CTS corpus collection — still needs a dedicated clean-host block, carried forward unchanged from every prior session.
+7. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures into independently tested fixes.
+8. **(low priority)** Upstream the 3 `offload-test-suite` patches to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+
+## Not done this session (be aware, not alarmed)
+
+- Full Vulkan CTS from `/home/dev/dev/VK-GL-CTS/` was **not** re-run beyond the 6 solo `assertion-crash-cases.txt` reproducers — same reasoning as every `L464`/`L465`/`L466`-adjacent session before this one: the change is confined to the Clang-offload compute-compiler path (`feme-cpu-linearize`), not the SPIR-V-origin `dEQP-VK.*` path a full CTS run exercises, and the 6 reproducer cases already cover the one place this code is reachable from that side.
+- `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`: no update needed or made (bug fix + investigation only, no feature/extension-surface change).
