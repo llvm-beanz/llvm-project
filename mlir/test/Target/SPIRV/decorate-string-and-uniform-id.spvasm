@@ -1,0 +1,54 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpDecorateString`/`OpMemberDecorateString` (`SPV_GOOGLE_decorate_string`,
+; COM: opcodes 5632/5633) and the `UniformId` decoration (decoration 27) were
+; COM: entirely unhandled before this test was added:
+; COM:   - `OpDecorateString`/`OpMemberDecorateString` are not mirrored by any
+; COM:     dialect op and were not even registered as known `Opcode` enumerators,
+; COM:     so the deserializer failed with `unhandled opcode 5632`/`5633`.
+; COM:   - `UniformId` is a known `Decoration` enumerator but had no `case` in
+; COM:     `processDecoration`, so it failed with `unhandled Decoration :
+; COM:     'UniformId'`.
+; COM: None of the three carries information any downstream consumer reads
+; COM: (they are debug/reflection hints, e.g. glslang's HLSL semantic-name
+; COM: annotations, or an optimization-only uniformity hint), so the fix
+; COM: discards all three rather than mirroring them into the dialect --
+; COM: found by a real `dEQP-VK.spirv_assembly.instruction.*.hlsl_functionality1.*`
+; COM: / `*.uniformid.*` CTS cluster (7 cases).
+
+; CHECK-DAG: spirv.GlobalVariable @var : !spirv.ptr<f32, Private>
+; CHECK-DAG: spirv.GlobalVariable @sg : !spirv.ptr<!spirv.struct<(f32)>, Private>
+; CHECK-DAG: spirv.SpecConstant @sc = 0 : i32
+
+               OpCapability Shader
+               OpExtension "SPV_GOOGLE_decorate_string"
+               OpExtension "SPV_GOOGLE_hlsl_functionality1"
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+
+               OpName %var "var"
+               OpName %sg "sg"
+               OpName %sc "sc"
+
+               OpDecorateString %var UserSemantic "SV_Target"
+               OpDecorate %sc UniformId %uint_3
+               OpMemberDecorateString %struct 0 UserSemantic "FOO"
+
+       %void = OpTypeVoid
+       %uint = OpTypeInt 32 0
+     %uint_3 = OpConstant %uint 3
+     %voidfn = OpTypeFunction %void
+      %float = OpTypeFloat 32
+         %pp = OpTypePointer Private %float
+        %var = OpVariable %pp Private
+     %struct = OpTypeStruct %float
+    %pp_struct = OpTypePointer Private %struct
+         %sg = OpVariable %pp_struct Private
+         %sc = OpSpecConstant %uint 0
+
+       %main = OpFunction %void None %voidfn
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

@@ -4805,6 +4805,8 @@ def SPIRV_OC_OpSubgroupBlockReadINTEL         : I32EnumAttrCase<"OpSubgroupBlock
 def SPIRV_OC_OpSubgroupBlockWriteINTEL        : I32EnumAttrCase<"OpSubgroupBlockWriteINTEL", 5576>;
 def SPIRV_OC_OpAssumeTrueKHR                  : I32EnumAttrCase<"OpAssumeTrueKHR", 5630>;
 def SPIRV_OC_OpExpectKHR                      : I32EnumAttrCase<"OpExpectKHR", 5631>;
+def SPIRV_OC_OpDecorateStringGOOGLE           : I32EnumAttrCase<"OpDecorateStringGOOGLE", 5632>;
+def SPIRV_OC_OpMemberDecorateStringGOOGLE     : I32EnumAttrCase<"OpMemberDecorateStringGOOGLE", 5633>;
 def SPIRV_OC_OpAtomicFAddEXT                  : I32EnumAttrCase<"OpAtomicFAddEXT", 6035>;
 def SPIRV_OC_OpTypeStructContinuedINTEL       : I32EnumAttrCase<"OpTypeStructContinuedINTEL", 6090>;
 def SPIRV_OC_OpConstantCompositeContinuedINTEL : I32EnumAttrCase<"OpConstantCompositeContinuedINTEL", 6091>;
@@ -4953,7 +4955,9 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpDemoteToHelperInvocation,
       SPIRV_OC_OpIsHelperInvocationEXT,
       SPIRV_OC_OpSubgroupBlockReadINTEL, SPIRV_OC_OpSubgroupBlockWriteINTEL,
-      SPIRV_OC_OpAssumeTrueKHR, SPIRV_OC_OpExpectKHR, SPIRV_OC_OpAtomicFAddEXT,
+      SPIRV_OC_OpAssumeTrueKHR, SPIRV_OC_OpExpectKHR,
+      SPIRV_OC_OpDecorateStringGOOGLE, SPIRV_OC_OpMemberDecorateStringGOOGLE,
+      SPIRV_OC_OpAtomicFAddEXT,
       SPIRV_OC_OpTypeStructContinuedINTEL,
       SPIRV_OC_OpConstantCompositeContinuedINTEL,
       SPIRV_OC_OpSpecConstantCompositeContinuedINTEL,

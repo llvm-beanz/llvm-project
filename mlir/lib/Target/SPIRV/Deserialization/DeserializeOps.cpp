@@ -303,6 +303,15 @@ LogicalResult spirv::Deserializer::processInstruction(
     return processDecoration(operands);
   case spirv::Opcode::OpMemberDecorate:
     return processMemberDecoration(operands);
+  case spirv::Opcode::OpDecorateStringGOOGLE:
+  case spirv::Opcode::OpMemberDecorateStringGOOGLE:
+    // `SPV_GOOGLE_decorate_string` attaches a debug/reflection-only string
+    // (e.g. glslang's `HlslSemanticGOOGLE` HLSL semantic name) that carries
+    // no effect on how a correctly-structured module is lowered, unlike
+    // every other decoration above -- discard it rather than mirroring it
+    // into the dialect, the same way OpModuleProcessed/OpSource (also
+    // debug-only) are discarded above.
+    return success();
   case spirv::Opcode::OpDecorationGroup:
     return processDecorationGroup(operands);
   case spirv::Opcode::OpGroupDecorate:

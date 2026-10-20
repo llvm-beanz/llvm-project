@@ -413,6 +413,20 @@ LogicalResult spirv::Deserializer::processDecoration(ArrayRef<uint32_t> words) {
     }
     decorations[words[0]].set(symbol, opBuilder.getUnitAttr());
     break;
+  case spirv::Decoration::UniformId:
+    // The execution-scope operand records which scope the uniformity
+    // holds across (e.g. Subgroup); it is an optimization hint with no
+    // effect on how a correctly-structured module must be lowered, so it
+    // is recorded only as a marker, discarding the scope <id> operand
+    // itself rather than resolving it to a symbol the way
+    // AlignmentId/MaxByteOffsetId/CounterBuffer below do for their own
+    // (semantically load-bearing) <id> operands.
+    if (words.size() != 3) {
+      return emitError(unknownLoc, "OpDecorate with ")
+             << decorationName << " needs a single scope <id> operand";
+    }
+    decorations[words[0]].set(symbol, opBuilder.getUnitAttr());
+    break;
   case spirv::Decoration::CacheControlLoadINTEL: {
     LogicalResult res = deserializeCacheControlDecoration<
         CacheControlLoadINTELAttr, LoadCacheControlAttr, LoadCacheControl>(
