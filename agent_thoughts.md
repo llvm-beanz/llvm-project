@@ -127906,3 +127906,56 @@ code path is already covered by those 6 cases, and they show 0 regressions.
 - Did not re-run the full Vulkan CTS from `/home/dev/dev/VK-GL-CTS/`: following the same documented precedent as `L464`-`L466` (this fix, like those, is confined to the Clang-offload compute-compiler path, not exercised by the SPIR-V-origin `dEQP-VK.*` path CTS covers), this was judged not to add new evidence and skipped to preserve session time for the diagnosis work above. If a future session wants to double-check this precedent still holds, a quick `dEQP-VK.compute.*`/`dEQP-VK.spirv_assembly.*` spot-check (not a full multi-hour sweep) would be the lowest-cost way to confirm.
 
 **Technical detail worth remembering** (also now in `.instructions.md`): a loop header phi's value, read via plain SSA dominance from a block after the loop (not through a fresh per-edge exit merge), is always "as of entering the current iteration" — it does not include whatever the loop's own latch computes *during* that same, possibly-final iteration. This is invisible for single-iteration or always-uniform loops, but wrong for masked SIMD loops where different lanes diverge on different iterations and a whole group shares a late, common final iteration. Check for this shape first in any future "a value read after a masked loop is subtly wrong only for some lanes" bug, before assuming the bug is elsewhere.
+
+# Session: L468 — root cause found and fixed; ENV3/ENV3(c) closed
+
+**Next action (under two minutes)**: `vulkaninfo --summary | grep deviceName` (confirmed `FeMe CPU Vulkan Device` at session start, as required every session). Then open `feme/docs/Roadmap.md` at `ENV4` and pick a clean-host block to run the full current CTS corpus collection — that's the next open milestone.
+
+**Visible win this session**: found and fixed the actual dominant root cause of Mandelbrot's residual. `PixelPercent` drops from 1.245630% to **0.160%** — under the 0.2% `offload-test-suite` threshold. The real `Basic/Mandelbrot.test` lit test **passes** for the first time this entire investigation. `ENV3(c)`, and `ENV3` overall, are now struck through in `Roadmap.md`.
+
+## What was wrong (in one paragraph)
+
+A value computed fresh every loop iteration from loop-carried phis (`X*X + Y*Y`, the escape-check expression) is **not itself a phi**, but LLVM's CSE folded the shader's post-loop palette computation's identical re-read of that same expression into the exact same SSA value already computed in-loop. `freezeLoopCarriedValues` in `Linearize.cpp` only ever scanned `Header`'s own phis for values needing a frozen-on-exit shadow — it had no mechanism at all for an ordinary (non-phi) instruction with a direct outside-the-loop use. Every lane in a masked group of 4 except the one with that group's own longest-running iteration count ended up reading that lane's own further-recomputed, blown-up `X`/`Y` values, corrupting the palette math into black for ~1.09% of pixels.
+
+## How it was found
+
+1. Picked 6 new "binary flip" pixels (solid black vs. a palette color) from a full-image diff (not the 8 pixels prior sessions already investigated).
+2. Built a `numpy.float32` reference of the exact escape-time loop; confirmed golden always agrees with Python, FeMe never does for these pixels.
+3. **The unlock**: grouped flip pixels into their actual 4-lane SIMD wave windows and found that in every group, exactly the lane with the longest Python-reference iteration count matched golden — every other (earlier-exiting) lane was wrong. That's a broadcast/stale-value signature, not FP chaos.
+4. Dumped fresh post-SIMD IR and found `X`, `Y` have **zero** masking/freezing — only `Iteration` had the shadow-phi treatment from `L464`-`L467`. The post-loop math reads a CSE-folded, unfrozen in-loop SSA value directly.
+
+## How it was fixed (and the mistake caught along the way)
+
+- **First attempt** reused the existing `FeedsUniformBranch`/`ShadowExitFixups` machinery wholesale (same mechanism that worked for `Iteration`). This **regressed catastrophically**: 87.6% of pixels wrong, up from 1.25%. Caught only via direct pixel-diff — `check-feme` passed cleanly on the broken version, because none of its 3824 tests exercise this real shader path.
+- **Root cause of the regression**: `Iteration`-style values are updated *after* the branch decision (a "post-check" value), so freezing with the *exiting* mask is correct. But `X*X+Y*Y` is computed *before* and *determines* the branch decision (a "pre-check" value) — freezing it with the exiting mask discards exactly the round's own value that caused the exit.
+- **Correct fix**: build a self-contained freeze using the *entering* mask (`MaskPhis.front()`) instead, feeding the same pre-existing `ShadowExitFixups` merge epilogue. Confirmed via rebuild: 0.160% residual.
+- Also fixes a second, independently-discovered instance of the exact same bug shape in a pre-existing lit test (`loop-header-diamond-reconvergence-has-real-check.ll`) — only its `CHECK` lines needed updating, no correctness impact there.
+
+## Validation
+
+- New `Transforms/CPU` lit test (`loop-divergent-exit-non-phi-exit-use.ll`) + new `LinearizeTest.cpp` unit test (`FreezesNonPhiHeaderValueReadOutsideTheLoopViaPlainDominance`), both built from a minimal, hand-constructed `.ll` reproducer matching Mandelbrot's exact structural shape (dominance-only outside-the-loop read, no existing phi).
+- `check-feme`: 3820 → 3822 Passed (+2), 4 Unsupported, **0 regressions**.
+- All 654 `FeMeTransformsCPUTests` unit tests pass.
+- Real `check-hlsl-clang-feme-vk` `Basic/Mandelbrot.test` lit test: **PASS** (first time).
+- Ran a targeted Vulkan CTS regression subset (`dEQP-VK.spirv_assembly.*` + `dEQP-VK.compute.*` + `dEQP-VK.graphicsfuzz.*`, 130,226 cases — the groups that actually exercise `Linearize.cpp`'s loop/branch handling) since, unlike `L464`-`L467`, this fix touches shared infrastructure reachable from both the Clang-offload and SPIR-V-origin paths, not just the Clang-only path prior sessions used to justify skipping a CTS run. **Result: Pass 13156, Fail 108, NotSupported 116962, 0 Crashed/TimedOut — 0 regressions.** The only deltas from the stale 2026-10-20 baseline for these same groups are the 6 previously-`Crashed` cases now resolving cleanly, exactly matching `L462`/`L463`'s already-landed, already-documented fixes (5 `spirv1p4.loop_control.*` → `Pass`, 1 `graphicsfuzz` case → clean `Fail`). Full details in `VulkanCTSReport.md`'s new `L468` section.
+
+## Commits this session (small, separate)
+
+1. `[feme] Linearize: freeze non-phi Header values read outside the loop` — the fix + its new lit/unit tests.
+2. `[feme] test: update CHECK lines for new LCSSA freeze select` — mechanical fallout in a pre-existing test.
+3. `[feme] docs: close ENV3/ENV3(c) in Roadmap, add L468`.
+4. (this file, `agent_thoughts.md`) — own commit, per standing instructions.
+5. `VulkanCTSReport.md` update — own commit.
+
+## Wins (visible, not buried)
+
+- **The dominant residual is finally fixed, not just further characterized.** Three prior sessions (`L465`, `L466`, `L467`) each found and fixed a real, independently-valuable bug in the exit-relay/frozen-shadow family without moving `PixelPercent` at all. This session found a genuinely different bug class (non-phi, not exit-relay, not loop-carried-phi) and it was the dominant contributor all along.
+- Caught a severe self-inflicted regression (87.6% bad pixels) before it ever reached a commit, purely because this session trusted direct pixel-diff evidence over `check-feme`'s clean pass — a reminder that `check-feme`'s lit/unit coverage, while broad, does not cover every real-world shader shape.
+- `ENV3` (the whole top-level milestone: 6 crash reproducers + Mandelbrot's SIMDization failure + Mandelbrot's residual) is **closed** for the first time.
+
+## Next steps
+
+1. **(next, ~2-4 hours, dedicated clean-host block)** `ENV4`: full current CTS corpus collection. Needs a dedicated block with no competing builds/offload jobs — carried forward unchanged from every prior session's recommendation, now finally unblocked since `ENV3` no longer needs attention first.
+2. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures into independently tested fixes. Start with any mandatory-feature gaps `info.device_mandatory_features` surfaces.
+3. **(low priority)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+4. **(if a future session finds another "value read after a masked loop is subtly wrong" bug)** Check this session's bug class first: a non-phi, loop-body-resident instruction read outside the loop via plain dominance (not through any phi). `freezeLoopCarriedValues` now handles it, but watch for a *third* variant neither this session nor `L465`-`L467` anticipated — the fix only scans `Header` itself, not every block in the cycle (provably sufficient for a natural loop's header, per `CycleInfo`, but worth double-checking if a future bug report doesn't fit this shape).
