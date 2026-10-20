@@ -127419,3 +127419,104 @@ corpus. Compiler correctness and conformance are not claimed complete.
 **Next action (under two minutes):** open
 `feme/docs/Roadmap.md` at ENV3 and the retained
 `assertion-crash-cases.txt` to select the first compiler reproducer.
+
+# Session: L462 — loop-linearizer double-claim crash fixed (5 of 6 assertion aborts closed)
+
+**Next action (under two minutes):** open `feme/docs/Roadmap.md` at `ENV3(a)`
+and pick the graphicsfuzz malformed-IR bug (`DiamondFlattener::flattenLoopBodyRegion`
+returning `nullopt` without first fixing up the terminator) as the next repro to write.
+
+## What's fixed, right now
+
+1. `dEQP-VK.spirv_assembly.instruction.spirv1p4.loop_control.{iteration_multiple,
+   max_iterations,min_iterations,partial_count,peel_count}` — all 5 — no longer
+   abort. Verified against the **real rebuilt `libfeme_vulkan.so`** (not just
+   `feme-opt`/`feme-run`): `5/5 Pass, 0 Fail`.
+2. `check-feme`: 3803 -> 3805 Passed (+2 new regression tests), 4 Unsupported,
+   **0 regressions**.
+3. Root cause fully understood and documented (`Linearize.cpp`, "Roadmap L462"
+   comment; full mechanism also in `Roadmap.md`'s `L462` row and
+   `VulkanCTSReport.md`'s new "Update: 5 of 6 assertion crashes fixed" section).
+
+## Root cause, in one paragraph
+
+`LoopLinearizer::linearizeCycle` has two independent mechanisms that can each
+decide "this `CondBr` block is the cycle's real exit check": the `HeaderExit`
+forward-match fallback (`findForwardExitCheckBlock`, guarded since `L432(c)` by
+`isDivergentBranch`), and the `L419(h)` widening fallback (claims the sole
+`OtherCondBrBlocks` member when `RealExitCandidates` is empty and
+`cycleHasMaskOps(C)`). `isDivergentBranch` uses a pre-masking `UniformityInfo`
+snapshot, so a forward exit check reading a resource load can look "uniform" to
+it while `dependsOnResourceOrImageLoadInCycle` (used elsewhere, `L419(y)`)
+correctly flags it divergent. When that one block is simultaneously the
+forward match *and* the cycle's only other conditional branch, both paths
+claim it, and the second one crashes erasing an already-detached `CondBr`.
+
+**Fix:** make the `L432(c)` guard also run `dependsOnResourceOrImageLoadInCycle`
+before accepting a forward match, so it agrees with `L419(y)`'s later
+correction instead of racing it.
+
+## Gotcha that cost real time this session (**already in `.instructions.md`**,
+I just re-learned it the hard way)
+
+Rebuilding `feme-opt`/`feme-run` does **not** rebuild `libfeme_vulkan.so`.
+`deqp-vk` loads the `.so` directly — if you only rebuild the JIT tools, the CTS
+run silently tests the **stale, pre-fix** driver. Caught this only by comparing
+mtimes. The `.instructions.md` file at lines ~216-218 and ~513-531 already
+warns about this; I should have checked it before running CTS instead of after
+getting a confusing false negative.
+
+## What's still broken / not attempted
+
+- **`graphicsfuzz.cov-loop-condition-divide-by-uniform-always-false`** (the
+  6th crash case): a *different* bug. The "unsupported FeMe loop linearization"
+  diagnostic correctly fires, but `DiamondFlattener::flattenLoopBodyRegion`'s
+  `nullopt`-return path leaves a block without a terminator before the clean
+  bailout, so a later `getTerminator()` call asserts. Tracked as `ENV3(a)` in
+  Roadmap.md. Not started — no repro file written yet this session (only
+  reproduced it live with `FEME_DUMP_IR_PRELINEARIZE=1` to confirm it's not the
+  same bug).
+- **Clang Mandelbrot** (`Basic/Mandelbrot.test`): still fails. Reproduces
+  alone: `feme-cpu-simdize` reports a divergent branch left by `LinearizePass`,
+  pipeline creation returns `VK_ERROR_INITIALIZATION_FAILED`. Not investigated
+  this session at all — no time spent, no new evidence beyond what the prior
+  session already recorded in `VulkanCTSReport.md`.
+- **ENV4** (full corpus collection) and **ENV5** (contract/advertisement
+  partitioning): untouched this session. Still queued exactly as the prior
+  session left them.
+
+## Why I stopped here
+
+Budget for this session went entirely into root-causing and safely fixing one
+genuinely subtle compiler bug (two independently-correct-looking fallback
+paths silently overlapping) plus full verification (unit test, lit test, real
+CTS re-run against the rebuilt ICD, check-feme delta) and doc sync. That is one
+clean, fully-tested, committed unit of work. Stretching into the graphicsfuzz
+bug or Mandelbrot in the same session risked a rushed, under-tested second fix
+— better to start those fresh.
+
+## Suggested next steps, in order
+
+1. **(~20-30 min)** Write a minimal standalone `.ll` reproducer for the
+   graphicsfuzz terminator-assertion bug (use
+   `FEME_DUMP_IR_PRELINEARIZE=1` against the real `.spv` first, like this
+   session did, to capture the exact crashing IR before distilling it).
+2. **(~30-45 min)** Fix `DiamondFlattener::flattenLoopBodyRegion`'s `nullopt`
+   path so the block it bails out of always has a valid terminator before the
+   "unsupported" diagnostic returns — likely needs either a transactional
+   erase/insert ordering or an explicit terminator-restore step on the bailout
+   path. Add a lit + unit test mirroring this session's pattern.
+3. **(~15 min)** Re-run all 6 original `assertion-crash-cases.txt` entries
+   plus `check-feme` to confirm the full ENV3 acceptance bar ("six idle-host
+   crash reproducers completing without abort") is finally met; update
+   `Roadmap.md`'s `ENV3`/`ENV3(a)` rows (strike through if fully closed) and
+   `VulkanCTSReport.md`.
+4. **(~30-60 min, separate session recommended)** Pick up Clang Mandelbrot:
+   get a fresh backtrace/IR dump of the `feme-cpu-simdize` divergent-branch
+   diagnostic, confirm whether it's related to the same `UniformityInfo`
+   snapshot-staleness class of bug just fixed here (plausible, worth checking
+   first) or genuinely separate.
+5. After ENV3 is fully closed: move to ENV4 (full corpus collection with the
+   corrected runner) — this needs a clean host with no competing builds/offload
+   jobs, so schedule it as a dedicated block, not an afterthought at the end of
+   a bug-fixing session.
