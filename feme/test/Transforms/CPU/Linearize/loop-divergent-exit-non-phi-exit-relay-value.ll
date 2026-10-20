@@ -40,6 +40,12 @@
 ; as the `latch`-relayed value above, just on a different incoming
 ; edge). It must likewise be blended against the per-lane shadow instead
 ; of applied unconditionally.
+;
+; Roadmap ENV3(c)(9): `%i.result`'s own `latch` edge likewise reads
+; `%i.frozen.shadow.frozen` (the shadow's fully-resolved, this-iteration
+; value), not the raw `%i.frozen.shadow` header phi -- see
+; `loop-divergent-exit-carried-value-feeds-uniform-check.ll`'s own
+; identical comment for the staleness root cause this closes.
 ; CHECK-LABEL: define void @main(
 ; CHECK: header:
 ; CHECK: %exit.relay.shadow = phi i1 [ poison, %entry ], [ %exit.relay.shadow.frozen, %latch ]
@@ -50,7 +56,7 @@
 ; CHECK-NEXT: %exited.via.header.this.iter = and i1 %active.live, %[[NOT]]
 ; CHECK-NEXT: %exit.relay.shadow.frozen = select i1 %exited.via.header.this.iter, i1 true, i1 %exit.relay.shadow
 ; CHECK: exit:
-; CHECK-NEXT: %i.result = phi i32 [ %i.next, %body ], [ %i.frozen.shadow, %latch ]
+; CHECK-NEXT: %i.result = phi i32 [ %i.next, %body ], [ %i.frozen.shadow.frozen, %latch ]
 ; CHECK-NEXT: %diverged.result = phi i1 [ %exit.relay.bypass.blend, %body ], [ %exit.relay.shadow.frozen, %latch ]
 define void @main(ptr %out, ptr %out2) #0 {
 entry:

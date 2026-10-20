@@ -1329,10 +1329,38 @@ static void
 freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
                         ArrayRef<PHINode *> MaskPhis,
                         function_ref<bool(const BasicBlock *)> InLoop,
-                        ArrayRef<PHINode *> RelayCaptured = {}) {
+                        ArrayRef<PHINode *> RelayCaptured = {},
+                        BasicBlock *ExitBlock = nullptr) {
   if (isKnownConstantMask(BodyMask))
     return; // All-active: the unmasked value is already correct.
   IRBuilder<> B(Latch->getTerminator());
+  // Roadmap ENV3(c)(9): a `FeedsUniformBranch` shadow phi created below
+  // (`.frozen.shadow`) is appended to `Header`'s own phi list, and this
+  // very `Header->phis()` loop goes on to visit it too, on a later
+  // iteration of itself (the range is computed once but walks a live,
+  // mutated instruction list): that second visit's own simple (non-
+  // uniform-branch) freeze path is what actually finishes computing the
+  // shadow's correct, cumulative freeze value on its own Latch-incoming
+  // edge (confirmed via direct algebraic expansion across iterations --
+  // the shadow's Latch-incoming value only converges to "the iteration
+  // this lane first diverged, held fixed forever after" once *both* this
+  // creation step's own select *and* the second visit's own self-select
+  // are composed together). Redirecting `OutsideUses` to `Shadow`
+  // immediately below (unchanged from the pre-existing behavior) is
+  // required to make that second visit even see an outside-the-loop use
+  // to trigger its own freeze on. But reading the raw `Shadow` phi from
+  // `ExitBlock` (every other call site's pre-existing, still-correct
+  // behavior for a *single*-iteration shape) is, for a genuinely
+  // multi-iteration loop, one iteration stale relative to the value
+  // `Latch` freshly computes for lanes whose masked group shares a late,
+  // common final active iteration -- see the long comment below, after
+  // this loop, on `ShadowExitFixups`, for the full root-cause story
+  // (reduced from Clang's own `Basic/Mandelbrot.test`).
+  struct ShadowExitFixup {
+    PHINode *Shadow;
+    SmallVector<Use *, 4> OutsideUses;
+  };
+  SmallVector<ShadowExitFixup, 4> ShadowExitFixups;
   for (PHINode &PN : Header->phis()) {
     if (llvm::is_contained(MaskPhis, &PN))
       continue;
@@ -1396,6 +1424,8 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
                 : PN.getIncomingValue(I);
         Shadow->addIncoming(IncomingV, IncomingBB);
       }
+      if (ExitBlock)
+        ShadowExitFixups.push_back({Shadow, OutsideUses});
       for (Use *U : OutsideUses)
         U->set(Shadow);
       continue;
@@ -1403,6 +1433,72 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
 
     PN.setIncomingValue(
         Idx, B.CreateSelect(BodyMask, NewValue, &PN, PN.getName() + ".frozen"));
+  }
+
+  // Roadmap ENV3(c)(9): resolve each deferred shadow fixup now that every
+  // shadow phi above has finished its own self-processing (see the file
+  // comment above `ShadowExitFixups`'s own declaration). Root cause
+  // (reduced from Clang's own `Basic/Mandelbrot.test`, whose `Iteration`
+  // counter is exactly this shape -- both a uniform
+  // `Iteration < MaxIteration` trip-count condition and an after-the-loop
+  // read feeding the palette color computation): `Shadow` is defined in
+  // `Header`, which dominates `ExitBlock` along every path reaching it,
+  // so every outside use the loop above already redirected to the raw
+  // `Shadow` phi is valid SSA -- but reading `Shadow` itself only ever
+  // yields its value as of *entering* the current (possibly final)
+  // iteration, not the freshly-recomputed freeze this exact iteration's
+  // own divergence may have just produced on `Latch`'s own incoming edge.
+  // A lane whose divergence happens to land on the group's shared *last*
+  // active iteration therefore reads one iteration stale, corrupting
+  // whatever downstream computation depends on it for exactly those
+  // lanes (confirmed via direct runtime instrumentation of
+  // `Basic/Mandelbrot.test` showing the loop's own `Diverged` exit-relay
+  // value -- a *different* mechanism, `freezeExitRelayValue`'s own
+  // `HeaderExitRelayValues`, already hardened by `L465`/`L466` -- is
+  // correct at the known-bad pixels, isolating the residual to this
+  // separate frozen-shadow value instead).
+  //
+  // Build a genuine `ExitBlock`-resident merge for ordinary (non-phi)
+  // outside uses: the `Latch` predecessor gets `Shadow`'s own (now fully
+  // resolved) Latch-incoming value; every other predecessor keeps the
+  // raw `Shadow` reference (unconditionally dominance-valid, and -- for
+  // every shape reduced so far -- never actually read: a non-`Latch`
+  // predecessor of `ExitBlock` only carries a lane that took the loop's
+  // genuinely-uniform exit, not its divergent one, so whatever this
+  // specific loop-carried value represents is masked off downstream by
+  // that same divergent-exit discriminator regardless of its value
+  // here).
+  //
+  // An outside use that is *itself* a phi already resident in
+  // `ExitBlock`, with `Shadow` as its specific incoming value for the
+  // `Latch` edge, needs different handling: the new merge phi above would
+  // itself be defined in `ExitBlock`, so using it as that *same* phi's
+  // own `Latch`-edge operand is not valid SSA (`ExitBlock` does not
+  // dominate `Latch`, which is still inside the loop) -- substitute the
+  // already-resolved `LatchValue` directly into that one operand slot
+  // instead, leaving the phi's other incoming edges (and its use of
+  // `Shadow` on any non-`Latch` edge) untouched.
+  for (ShadowExitFixup &Fixup : ShadowExitFixups) {
+    Value *LatchValue = Fixup.Shadow->getIncomingValueForBlock(Latch);
+    if (LatchValue == Fixup.Shadow)
+      continue; // No self-reprocessing happened; raw Shadow is accurate.
+    PHINode *ExitPN = nullptr;
+    for (Use *U : Fixup.OutsideUses) {
+      if (auto *UserPN = dyn_cast<PHINode>(U->getUser());
+          UserPN && UserPN->getParent() == ExitBlock &&
+          UserPN->getIncomingBlock(*U) == Latch) {
+        U->set(LatchValue);
+        continue;
+      }
+      if (!ExitPN) {
+        ExitPN = PHINode::Create(Fixup.Shadow->getType(), pred_size(ExitBlock),
+                                  Fixup.Shadow->getName() + ".exit");
+        ExitPN->insertBefore(ExitBlock->getFirstNonPHIIt());
+        for (BasicBlock *Pred : predecessors(ExitBlock))
+          ExitPN->addIncoming(Pred == Latch ? LatchValue : Fixup.Shadow, Pred);
+      }
+      U->set(ExitPN);
+    }
   }
 }
 
@@ -5675,7 +5771,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     freezeLoopCarriedValues(
         Header, Latch, MasksNext.Live,
         {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
-        [&](const BasicBlock *BB) { return CI.contains(C, BB); });
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); }, {},
+        ExitBlock);
     addLatchIncoming(Masks, MasksNext);
     // Roadmap L282: see the identical comment at the other two success
     // paths' own `return true` -- a single-block loop can never itself be
@@ -6824,7 +6921,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
          ExitedViaCheck},
         [&](const BasicBlock *BB) { return CI.contains(C, BB); },
         SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
-                                  RelayCapturedHeaderPhis.end()));
+                                  RelayCapturedHeaderPhis.end()),
+        ExitBlock);
     addLatchIncoming(EntryMasks, MasksAfterCheck);
     // Roadmap L282: record this cycle's own entry masks so an *enclosing*
     // cycle (linearized afterward, post-order) can retroactively narrow
@@ -7056,7 +7154,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     freezeLoopCarriedValues(
         Header, Latch, MasksAtLatch->Live,
         {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
-        [&](const BasicBlock *BB) { return CI.contains(C, BB); });
+        [&](const BasicBlock *BB) { return CI.contains(C, BB); }, {},
+        ExitBlock);
     addLatchIncoming(Masks, *MasksAtLatch);
     // Roadmap L292: `Header`'s own exit edge to `ExitBlock` is untouched
     // by this path (unlike the `HeaderDivergent` case below, this check
@@ -7433,7 +7532,8 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
       {cast<PHINode>(Masks.Live), cast<PHINode>(Masks.SideEffect)},
       [&](const BasicBlock *BB) { return CI.contains(C, BB); },
       SmallVector<PHINode *, 4>(RelayCapturedHeaderPhis.begin(),
-                                RelayCapturedHeaderPhis.end()));
+                                RelayCapturedHeaderPhis.end()),
+      ExitBlock);
   addLatchIncoming(Masks, MasksAfterLatchCheck);
   // Roadmap L282: see the identical comment at the `DivergentCandidates`
   // branch's own `return true` above.

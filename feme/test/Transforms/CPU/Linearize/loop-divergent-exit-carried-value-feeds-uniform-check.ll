@@ -29,6 +29,16 @@
 ; only via `%i.next`, keeps whatever uniformity it had before this cycle
 ; was linearized at all. A new, separate shadow `phi` instead carries the
 ; frozen value `exit`'s own merge actually needs.
+;
+; Roadmap ENV3(c)(9): `exit`'s own `i.result` merge reads
+; `%i.frozen.shadow.frozen` (the shadow's fully-resolved, this-iteration
+; value) on the `latch` edge, not the raw `%i.frozen.shadow` header phi --
+; reading the raw phi there would be one iteration stale for a masked
+; group whose lanes share a late, common final active iteration (the
+; phi's value, read from a dominated block, is only ever "as of entering
+; the current iteration"; `latch`'s own select for *this* iteration has
+; not yet been folded in). Reduced from Clang's own `Basic/Mandelbrot.test`,
+; whose `Iteration` counter is exactly this shape.
 ; CHECK-LABEL: define void @main(
 ; CHECK: header:
 ; CHECK-NEXT: %i = phi i32 [ 0, %entry ], [ %i.next, %latch ]
@@ -41,7 +51,7 @@
 ; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(
 ; CHECK: %i.frozen.shadow.frozen = select i1 %active.header.live, i32 %{{.*}}, i32 %i.frozen.shadow
 ; CHECK: exit:
-; CHECK-NEXT: %i.result = phi i32 [ %i.next, %body ], [ %i.frozen.shadow, %latch ]
+; CHECK-NEXT: %i.result = phi i32 [ %i.next, %body ], [ %i.frozen.shadow.frozen, %latch ]
 ; CHECK-NEXT: store i32 %i.result, ptr %out
 define void @main(ptr %out) #0 {
 entry:

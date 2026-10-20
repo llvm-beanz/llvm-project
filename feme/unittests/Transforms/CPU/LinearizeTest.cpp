@@ -707,6 +707,84 @@ TEST(LinearizeTest, FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformC
   EXPECT_TRUE(FoundShadowPhi);
 }
 
+// Roadmap ENV3(c)(9): like
+// `FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformCheck`
+// above, but checks a deeper property of the very same reproducer: the
+// shadow phi's own Header-resident identity is appended to, and
+// therefore later re-visited by, the same `Header->phis()` scan that
+// created it -- that second visit's own self-select
+// (`%i.frozen.shadow.frozen`) is what actually finishes computing the
+// shadow's correct, cumulative "frozen at first divergence" value for a
+// masked SIMD group whose lanes share a late, common final active
+// iteration. Before this fix, `exit`'s own `i.result` merge read the raw
+// `header`-resident shadow phi directly on the `latch` edge -- valid SSA
+// (`header` dominates `exit`), but one iteration stale: the raw phi's
+// value, read from a dominated block, is only ever "as of entering the
+// current iteration," not the freshly-recomputed freeze this exact,
+// possibly-final iteration's own divergence may have just produced.
+// Reduced from Clang's own `Basic/Mandelbrot.test`, whose `Iteration`
+// counter is exactly this shape (read after the loop to compute the
+// palette color index).
+TEST(LinearizeTest,
+     FreezesLoopCarriedValueExitUseWithFullyResolvedShadowNotStaleOne) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+    entry:
+      br label %header
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %body
+    body:
+      %i.next = add i32 %i, 1
+      %trip = icmp slt i32 %i.next, 10
+      br i1 %trip, label %latch, label %exit
+    latch:
+      br label %header
+    exit:
+      %i.result = phi i32 [ %i, %header ], [ %i.next, %body ]
+      store i32 %i.result, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  BasicBlock *Exit = nullptr, *Latch = nullptr;
+  for (BasicBlock &BB : *F) {
+    if (BB.getName() == "exit")
+      Exit = &BB;
+    if (BB.getName() == "latch")
+      Latch = &BB;
+  }
+  ASSERT_TRUE(Exit);
+  ASSERT_TRUE(Latch);
+
+  PHINode *IResult = nullptr;
+  for (Instruction &I : *Exit)
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getName() == "i.result")
+        IResult = PN;
+  ASSERT_TRUE(IResult);
+
+  Value *LatchValue = IResult->getIncomingValueForBlock(Latch);
+  auto *LatchValueI = dyn_cast<Instruction>(LatchValue);
+  ASSERT_TRUE(LatchValueI);
+  // Must not be the raw, Header-resident shadow phi itself (the stale
+  // value this fix removes); must be defined in `latch` (the
+  // self-reprocessed select).
+  EXPECT_FALSE(isa<PHINode>(LatchValueI));
+  EXPECT_EQ(LatchValueI->getParent(), Latch);
+  EXPECT_TRUE(LatchValueI->getName().contains("frozen.shadow.frozen"));
+}
+
 // Roadmap L420: like
 // `FreezesSharedLoopCarriedValueViaShadowPhiWhenItFeedsUniformCheck`
 // above, but the value read after the loop (`%diverged.result`) is *not*
