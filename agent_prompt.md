@@ -69,21 +69,33 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~20-30 min)** `ENV3(c)`: pick 3-5 specific diverging pixels near the
-   boundary, dump their iteration count / intermediate `X,Y,Smooth,ColorIdx`
-   values from both FeMe's run and a plain double-precision CPU
-   re-implementation of the same loop. If they match the golden image's own
-   apparent iteration count but FeMe's differs, that points at real lowering
-   imprecision, not inherent sensitivity.
-2. **(~10 min, only if #1 says "inherent")** Loosen `offload-test-suite`'s
-   `Basic/Mandelbrot.test`'s own `rules.yaml` `PixelPercent`/`DiffRMS` tolerance
-   to match observed inherent variance; add this as a fourth patch in
-   `feme/offload-test-suite-patches/`.
-3. **(after ENV3(c))** Move to `ENV4`: full current CTS corpus collection, needs
-   a dedicated clean-host block, not an end-of-session afterthought (carried
-   forward from every prior session).
-4. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
-   graphicsfuzz failures into independently tested fixes.
-5. **(low priority, time-permitting)** Upstream the 3 `offload-test-suite`
-   patches to `llvm-beanz/offload-test-suite` if push access ever becomes
-   available, to stop needing the every-session `git am` step.
+1. **(~20-30 min)** Write the minimal `.ll` reproducer: a loop with a
+   per-lane-divergent early-exit branch, where the *only* loop-carried value
+   read after the loop is a boolean set to different literal constants on
+   different paths (not a monotonic counter like `L464`'s case) -- feed it
+   through `feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize
+   -feme-cpu-wave-size=4` and confirm the post-SIMD IR shows the same
+   scalar-broadcast bug (a `<4 x i1>` that's just a `splat` of one scalar,
+   not derived from the per-lane frozen value). Add as a
+   `Transforms/CPU` lit test + `LinearizeTest.cpp`/`SIMDizeTest.cpp` unit
+   test, confirmed to show the wrong IR shape on today's tree.
+2. **(~30-60 min)** Fix in `Linearize.cpp`: give any loop-carried value set
+   to different per-lane-divergent-path-dependent values inside the loop
+   body its own frozen shadow phi (reuse/generalize `freezeLoopCarriedValues`'s
+   existing mechanism), instead of letting it be represented by the
+   structural exit-edge discriminator. **Watch for regressions** across the
+   ~190 existing `Transforms/CPU` lit tests -- the discriminator-reuse
+   behavior is *correct* for genuinely-uniform cases, so the fix needs to be
+   scoped to only the divergent case, not a blanket change.
+3. **(~15-20 min)** Re-validate: `check-feme`, the real
+   `check-hlsl-clang-feme-vk` Mandelbrot test (confirm `PixelPercent` passes
+   under 0.2%), and all 6 `assertion-crash-cases.txt` reproducers (no
+   regression). Update `Roadmap.md` (strike `ENV3(c)` if closed) and
+   `VulkanCTSReport.md`.
+4. **(after ENV3(c) closes)** `ENV4`: full current CTS corpus collection
+   (dedicated clean-host block, not an end-of-session afterthought --
+   carried forward unchanged from every prior session).
+5. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures +
+   4 graphicsfuzz failures into independently tested fixes.
+6. **(low priority)** Upstream the 3 `offload-test-suite` patches if push
+   access ever becomes available.
