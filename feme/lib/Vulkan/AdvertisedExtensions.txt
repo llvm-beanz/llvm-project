@@ -1,15 +1,10 @@
 # Extension name strings PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions
 # literally lists, plus VK_KHR_surface/VK_EXT_headless_surface which
 # EntryPoints.cpp/Surface.cpp's own getSupportedInstanceExtensions()
-# advertises at the instance level instead (roadmap H10 split the
-# instance-level extension list from the device-level one for the first
-# time -- these two are the only entries in this file advertised at that
-# scope, not the device one). Kept in sync by hand; a stale entry here
-# would only ever make feme/utils/vk_gen_extension_inventory.py's own
-# consistency check fail (it cross-checks every name here is a real,
-# non-disabled vk.xml extension), not silently drift, since
-# PhysicalDeviceInfo.cpp/Surface.cpp are the actual source of truth this
-# file transcribes.
+# advertises at the instance level instead, together with the conditional
+# VK_KHR_xcb_surface entry below. Kept in sync by hand. The inventory generator
+# checks registry membership, not runtime advertisements; compare this file
+# against PhysicalDeviceInfo.cpp/Surface.cpp and the built driver's queries.
 VK_KHR_dynamic_rendering
 VK_EXT_extended_dynamic_state
 VK_KHR_synchronization2
@@ -53,6 +48,15 @@ VK_EXT_graphics_pipeline_library
 VK_EXT_primitives_generated_query
 VK_KHR_pipeline_library
 VK_KHR_compute_shader_derivatives
+VK_KHR_depth_stencil_resolve = roadmap K6/L412(d): sample-zero resolve, also available to sub-1.2 devices
+VK_KHR_create_renderpass2 = roadmap L412(d): render-pass-2 entry points, also available to sub-1.2 devices
+VK_KHR_sampler_mirror_clamp_to_edge = roadmap K6b: mirror-clamp address mode
+VK_KHR_shader_draw_parameters = roadmap K6c: base vertex, base instance and draw ID
+VK_KHR_image_format_list = roadmap K6d: mutable-format compatibility
+VK_EXT_separate_stencil_usage = roadmap K6e: separate stencil usage
+VK_KHR_shader_float_controls = roadmap K6f/L455: floating-point control properties
+VK_EXT_sampler_filter_minmax = roadmap K6g: component-wise min/max sampler reduction
+VK_KHR_draw_indirect_count = roadmap K6h: indirect count-buffer commands
 
 # Roadmap H10 (V8, partially closed): instance-level surface object model.
 VK_KHR_surface = roadmap H10 (V8): headless surface first (Surface.cpp)

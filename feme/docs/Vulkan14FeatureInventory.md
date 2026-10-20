@@ -6,17 +6,25 @@ manifests maintained beside the FeMe Vulkan ICD. It covers every core feature
 from Vulkan 1.0 through 1.4, every 1.3/1.4 limit, and every extension promoted
 into those core versions.
 
-Current registry: VK-GL-CTS `c28b36293093`
-(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 365).
+Current registry: VK-GL-CTS `880f31a2bd9c`, Vulkan-Docs `f84d432d5b89`
+(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 362).
+Regenerated during the 2026-10-20 clean-container baseline. The ICD itself
+is compiled against the container's Vulkan headers 1.4.341. Counts below
+describe advertisements, not a conformance claim or passing CTS coverage.
 
 | Version | Features advertised | Limits enumerated | Promoted extensions implemented |
 |---|---:|---:|---:|
 | 1.0 | 34 of 55 | n/a | n/a |
-| 1.1 | 3 of 12 | n/a | 7 of 23 |
-| 1.2 | 22 of 47 | n/a | 11 of 24 |
+| 1.1 | 6 of 12 | n/a | 9 of 23 |
+| 1.2 | 25 of 47 | n/a | 16 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
 | 1.4 | 20 of 21 | 25 | 15 of 16 |
-| **Total** | **91 of 150** | **70** | **52 of 86** |
+| **Total** | **97 of 150** | **70** | **59 of 86** |
+
+The refreshed input manifests restore already-implemented variable pointers,
+indirect draw counts, sampler min/max reduction and scalar block layout.
+Earlier hand-edited tables were not reproducible from their input manifests.
+No runtime feature bit changed during this audit.
 
 Regenerate after changing feature or promoted-extension support:
 
@@ -98,11 +106,11 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_1 | `multiview` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewGeometryShader` | yes |  |
 | feature | VK_VERSION_1_1 | `multiviewTessellationShader` | no |  |
-| feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | yes | roadmap K6p: closed after a full `*variable_pointer*` CTS sweep (4464 cases: 966 Pass, 3492 NotSupported, 6 Fail) found only the pre-existing, already-documented roadmap-milestone-9 groupshared-canonicalization gap (`feme-cpu-simdize`'s "only a getelementptr chain ... is supported" diagnostic) as a residual, not a new or K6-scoped issue. Roadmap L430 closed that residual too: all 6 cases now pass (`dEQP-VK.spirv_assembly.instruction.*.variable_pointers*` sweep, 962/1650 Pass, 0 Fail, 688 NotSupported) |
-| feature | VK_VERSION_1_1 | `variablePointers` | yes | roadmap K6p: see `variablePointersStorageBuffer` row; same verification, same milestone-9-only residual (the 6 `_wg_`/workgroup-groupshared-pointer failing cases). Roadmap L430 closed that residual too; see `variablePointersStorageBuffer` row |
+| feature | VK_VERSION_1_1 | `variablePointersStorageBuffer` | yes | roadmap K6p/L430: resource and groupshared pointer merges and comparisons are supported |
+| feature | VK_VERSION_1_1 | `variablePointers` | yes | roadmap K6p/L430: resource and groupshared pointer merges and comparisons are supported |
 | feature | VK_VERSION_1_1 | `protectedMemory` | no |  |
 | feature | VK_VERSION_1_1 | `samplerYcbcrConversion` | no |  |
-| feature | VK_VERSION_1_1 | `shaderDrawParameters` | yes | roadmap K6c: gl_BaseVertex/gl_BaseInstance were already real; gl_DrawID's own gap (DrawCommand had no DrawID field, Executor.cpp hardcoded 0) is now closed too |
+| feature | VK_VERSION_1_1 | `shaderDrawParameters` | yes | roadmap K6c: gl_BaseVertex, gl_BaseInstance and gl_DrawID are implemented |
 | extension | VK_VERSION_1_1 | `VK_KHR_16bit_storage` | no |  |
 | extension | VK_VERSION_1_1 | `VK_KHR_bind_memory2` | yes | core, not advertised by name: vkBindBufferMemory2/vkBindImageMemory2 (Buffer.cpp, Image.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_dedicated_allocation` | no |  |
@@ -123,11 +131,11 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | extension | VK_VERSION_1_1 | `VK_KHR_multiview` | yes | roadmap H2, advertised by name: vkCreateFramebuffer/vkCreateRenderPass/vkCreateRenderPass2 accept layers > 1/a nonzero viewMask (RenderPass.cpp), CommandBuffer.cpp's runDraw runs one draw per set view bit -- dEQP-VK.multiview's own cases enable this extension by name regardless of apiVersion |
 | extension | VK_VERSION_1_1 | `VK_KHR_relaxed_block_layout` | yes | core, not advertised by name: declared offsets/strides are used as-is, no std140 re-layout is imposed (SPIRVToLLVMPatterns.cpp) |
 | extension | VK_VERSION_1_1 | `VK_KHR_sampler_ycbcr_conversion` | no |  |
-| extension | VK_VERSION_1_1 | `VK_KHR_shader_draw_parameters` | no |  |
+| extension | VK_VERSION_1_1 | `VK_KHR_shader_draw_parameters` | yes | roadmap K6c: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.1 core-promotion point); adds no commands of its own, only the pre-existing gl_BaseVertex/gl_BaseInstance/gl_DrawID builtins and its own feature bit (gl_DrawID's own DrawCommand::DrawID gap closed this session) |
 | extension | VK_VERSION_1_1 | `VK_KHR_storage_buffer_storage_class` | yes | core, not advertised by name: the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp) |
-| extension | VK_VERSION_1_1 | `VK_KHR_variable_pointers` | no |  |
+| extension | VK_VERSION_1_1 | `VK_KHR_variable_pointers` | yes | core, not advertised by name: roadmap K6p/L430, resource and groupshared pointer merges and comparisons |
 | feature | VK_VERSION_1_2 | `samplerMirrorClampToEdge` | yes |  |
-| feature | VK_VERSION_1_2 | `drawIndirectCount` | yes | roadmap K6h |
+| feature | VK_VERSION_1_2 | `drawIndirectCount` | yes | roadmap K6h: indirect draw counts are read from the count buffer |
 | feature | VK_VERSION_1_2 | `storageBuffer8BitAccess` | no |  |
 | feature | VK_VERSION_1_2 | `uniformAndStorageBuffer8BitAccess` | no |  |
 | feature | VK_VERSION_1_2 | `storagePushConstant8` | no |  |
@@ -156,8 +164,8 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `descriptorBindingPartiallyBound` | yes |  |
 | feature | VK_VERSION_1_2 | `descriptorBindingVariableDescriptorCount` | yes |  |
 | feature | VK_VERSION_1_2 | `runtimeDescriptorArray` | yes |  |
-| feature | VK_VERSION_1_2 | `samplerFilterMinmax` | yes | roadmap K6g |
-| feature | VK_VERSION_1_2 | `scalarBlockLayout` | yes | roadmap K6a: `SPIRVToLLVMPatterns.cpp`'s offset-struct layout conversion now generalizes its tight vector/matrix substitution to arbitrary array nesting depth and relaxes its ABI-alignment pre-check for the `AllowInteriorPad` retry tier, confirmed against real CTS (`dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.scalar.*` 100% of supported cases; `dEQP-VK.ubo.*` overall 25/13240 residual failures, all `single_nested_struct`/`random.scalar` nested-struct-member cases -- a separate, still-open gap, see Roadmap.md) |
+| feature | VK_VERSION_1_2 | `samplerFilterMinmax` | yes | roadmap K6g: sampler reduction modes use component-wise min/max |
+| feature | VK_VERSION_1_2 | `scalarBlockLayout` | yes | roadmap K6i-K6m: declared scalar offsets and nested array/matrix strides are honored |
 | feature | VK_VERSION_1_2 | `imagelessFramebuffer` | yes |  |
 | feature | VK_VERSION_1_2 | `uniformBufferStandardLayout` | yes |  |
 | feature | VK_VERSION_1_2 | `shaderSubgroupExtendedTypes` | yes |  |
@@ -175,23 +183,23 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | feature | VK_VERSION_1_2 | `subgroupBroadcastDynamicId` | yes |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_descriptor_indexing` | no |  |
 | extension | VK_VERSION_1_2 | `VK_EXT_host_query_reset` | yes | core, not advertised by name: roadmap C6, vkResetQueryPool (QueryPool.cpp) |
-| extension | VK_VERSION_1_2 | `VK_EXT_sampler_filter_minmax` | no |  |
-| extension | VK_VERSION_1_2 | `VK_EXT_scalar_block_layout` | yes | core, not advertised by name: roadmap K6a, `scalarBlockLayout` feature bit VK_TRUE (EntryPoints.cpp) |
-| extension | VK_VERSION_1_2 | `VK_EXT_separate_stencil_usage` | no |  |
+| extension | VK_VERSION_1_2 | `VK_EXT_sampler_filter_minmax` | yes | roadmap K6g: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); `Sampler`'s constructor (Image.cpp) now parses a chained `VkSamplerReductionModeCreateInfo` and the CPU runtime's own bilinear/trilinear/cube-seamless blend sites (FeMeRuntimeCPU.c) reduce via component-wise min/max instead of blending, confirmed against a real dEQP-VK.pipeline.monolithic.sampler.view_type.*.{mag,min}_reduce CTS run |
+| extension | VK_VERSION_1_2 | `VK_EXT_scalar_block_layout` | yes | core, not advertised by name: roadmap K6i-K6m, declared scalar offsets and nested array/matrix strides |
+| extension | VK_VERSION_1_2 | `VK_EXT_separate_stencil_usage` | yes | roadmap K6e: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); adds no commands of its own and has no feature bit, Image.h's Image class tracks one combined usage() with no command validating it per-aspect, so there is no path that could observe or enforce the depth/stencil usage divergence this struct declares |
 | extension | VK_VERSION_1_2 | `VK_EXT_shader_viewport_index_layer` | yes | core, not advertised by name: roadmap H3, shaderOutputViewportIndex/shaderOutputLayer both VK_TRUE (Executor.cpp's VSViewportOut/VSLayerOut) |
 | extension | VK_VERSION_1_2 | `VK_KHR_8bit_storage` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_buffer_device_address` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_create_renderpass2` | yes | core, not advertised by name: vkCreateRenderPass2 and its command family (RenderPass.cpp, CommandBuffer.cpp) |
-| extension | VK_VERSION_1_2 | `VK_KHR_depth_stencil_resolve` | yes | core, not advertised by name: roadmap K6, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT only (RenderPass.cpp, CommandBuffer.cpp, Executor.cpp, EntryPoints.cpp) |
-| extension | VK_VERSION_1_2 | `VK_KHR_draw_indirect_count` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_create_renderpass2` | yes | roadmap L412(d): advertised by name, including for sub-1.2 devices; vkCreateRenderPass2 and its command family (RenderPass.cpp, CommandBuffer.cpp) |
+| extension | VK_VERSION_1_2 | `VK_KHR_depth_stencil_resolve` | yes | roadmap K6: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom sub-1.2 device), VK_RESOLVE_MODE_SAMPLE_ZERO_BIT only (RenderPass.cpp, CommandBuffer.cpp, Executor.cpp, EntryPoints.cpp) |
+| extension | VK_VERSION_1_2 | `VK_KHR_draw_indirect_count` | yes | roadmap K6h: advertised by name; vkCmdDrawIndirectCount/vkCmdDrawIndexedIndirectCount (CommandBuffer.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_driver_properties` | yes | core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp) |
-| extension | VK_VERSION_1_2 | `VK_KHR_image_format_list` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_image_format_list` | yes | roadmap K6d: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); adds no commands of its own and has no feature bit, vkCreateImageView's own format-compatibility-class check already enforces the real mutable-format rule unconditionally |
 | extension | VK_VERSION_1_2 | `VK_KHR_imageless_framebuffer` | yes | core, not advertised by name: roadmap C6, VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT + VkRenderPassAttachmentBeginInfo (RenderPass.cpp, CommandBuffer.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_sampler_mirror_clamp_to_edge` | yes | roadmap K6b: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); adds no commands of its own, only the pre-existing MIRROR_CLAMP_TO_EDGE address mode and its own feature bit |
 | extension | VK_VERSION_1_2 | `VK_KHR_separate_depth_stencil_layouts` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | yes | not advertised by name: roadmap L414(a), `shaderSignedZeroInfNanPreserveFloat16`/`Float32` genuinely `VK_TRUE` (honored unconditionally by every FP op conversion pattern -- no fast-math flag ever discards a signed zero/Inf/NaN); `RoundingModeRTZ`/`DenormFlushToZero`/`RoundingModeRTE`/`DenormPreserve` and `Float64` still `VK_FALSE` (EntryPoints.cpp) |
+| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | yes | roadmap K6f: advertised by name (PhysicalDeviceInfo.cpp's getSupportedDeviceExtensions, for a custom device created below this extension's 1.2 core-promotion point); properties-only, no commands and no feature bit, VkPhysicalDeviceFloatControlsProperties is already filled in truthfully (roadmap L414(a)) |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_spirv_1_4` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_timeline_semaphore` | yes | core, not advertised by name: V3's timeline semaphores (Sync.cpp) |
@@ -311,8 +319,8 @@ python3 feme/utils/vk_gen_feature_inventory.py \
 | limit | VK_VERSION_1_4 | `earlyFragmentSampleMaskTestBeforeSampleCounting` | n/a |  |
 | limit | VK_VERSION_1_4 | `depthStencilSwizzleOneSupport` | n/a |  |
 | limit | VK_VERSION_1_4 | `polygonModePointSize` | n/a |  |
-| limit | VK_VERSION_1_4 | `nonStrictSinglePixelWideLinesUseParallelogram` | n/a | roadmap L333: VK_TRUE, matching GraphicsPipeline.cpp's real Rectangular-mode default |
-| limit | VK_VERSION_1_4 | `nonStrictWideLinesUseParallelogram` | n/a | roadmap L333: VK_TRUE, matching GraphicsPipeline.cpp's real Rectangular-mode default |
+| limit | VK_VERSION_1_4 | `nonStrictSinglePixelWideLinesUseParallelogram` | n/a |  |
+| limit | VK_VERSION_1_4 | `nonStrictWideLinesUseParallelogram` | n/a |  |
 | limit | VK_VERSION_1_4 | `blockTexelViewCompatibleMultipleLayers` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxCombinedImageSamplerDescriptorCount` | n/a |  |
 | limit | VK_VERSION_1_4 | `fragmentShadingRateClampCombinerInputs` | n/a |  |

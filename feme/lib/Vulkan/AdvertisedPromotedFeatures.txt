@@ -100,6 +100,9 @@ storageInputOutput16 = roadmap L98(a): float16 stage I/O is widened at the stage
 # view bit, writing that bit's own attachment array layer.
 multiview
 multiviewGeometryShader
+variablePointersStorageBuffer = roadmap K6p/L430: resource and groupshared pointer merges and comparisons are supported
+variablePointers = roadmap K6p/L430: resource and groupshared pointer merges and comparisons are supported
+shaderDrawParameters = roadmap K6c: gl_BaseVertex, gl_BaseInstance and gl_DrawID are implemented
 #
 # --- Core Vulkan 1.2 (VkPhysicalDeviceVulkan12Features): roadmap C6,
 # --- plus timelineSemaphore from V3.
@@ -135,12 +138,9 @@ shaderOutputLayer
 # femeRTApplyAddressMode already implements its mode-4 math; only the
 # advertisement was missing.
 samplerMirrorClampToEdge
-# shaderDrawParameters: roadmap K6c -- gl_BaseVertex/gl_BaseInstance were
-# already real (Executor.cpp's per-draw command fields); gl_DrawID's own
-# gap (DrawCommand had no DrawID field, so Executor.cpp hardcoded 0 for
-# every draw) is now closed too, so all three builtins the one combined
-# bit covers are real.
-shaderDrawParameters
+drawIndirectCount = roadmap K6h: indirect draw counts are read from the count buffer
+samplerFilterMinmax = roadmap K6g: sampler reduction modes use component-wise min/max
+scalarBlockLayout = roadmap K6i-K6m: declared scalar offsets and nested array/matrix strides are honored
 # Roadmap L12: dynamic texel-buffer indexing and the descriptor binding
 # behaviors below are implemented and reported consistently by both the
 # aggregate Vulkan 1.2 and dedicated descriptor-indexing feature structs.

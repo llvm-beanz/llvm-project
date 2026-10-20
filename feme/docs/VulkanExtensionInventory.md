@@ -11,16 +11,26 @@ derived from the FeMe Vulkan ICD manifests:
   assigned to a roadmap milestone.
 - **Not implemented**: outside the currently declared implementation plan.
 
-Current registry: VK-GL-CTS `c28b36293093`
-(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 365).
+Current registry: VK-GL-CTS `880f31a2bd9c`, Vulkan-Docs `f84d432d5b89`
+(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 362).
+Regenerated during the 2026-10-20 clean-container baseline. The ICD itself
+is compiled against the container's Vulkan headers 1.4.341. Counts describe
+advertisements, not passing CTS coverage.
 
 | Status | Count |
 |---|---:|
-| Advertised | 44 |
+| Advertised | 50 |
 | Implemented (core, not advertised by name) | 19 |
-| Planned (in scope, not implemented) | 45 |
+| Planned (in scope, not implemented) | 39 |
 | Not implemented | 194 |
 | **Total** | **302** |
+
+The input manifests now include the nine extension names already exposed by
+the driver but omitted from `AdvertisedExtensions.txt`. Render-pass-2 moves
+from core-only to advertised; scalar block layout moves from planned to
+core-only. Partial extensions, including `VK_KHR_16bit_storage`, remain in
+the planned category until their full contract is implemented. No runtime
+advertisement changed during this audit.
 
 Regenerate after changing extension support:
 
@@ -148,9 +158,9 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_rgba10x6_formats` | Not implemented |  |
 | `VK_EXT_robustness2` | Not implemented |  |
 | `VK_EXT_sample_locations` | Not implemented |  |
-| `VK_EXT_sampler_filter_minmax` | Implemented | roadmap K6g: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; `FeMeRuntimeCPU.c`'s sampling blend sites now do real component-wise min/max reduction (not just the weighted-average blend), `Image.cpp`'s `Sampler` parses `VkSamplerReductionModeCreateInfo`, and `Format.cpp` advertises `SAMPLED_IMAGE_FILTER_MINMAX_BIT` |
-| `VK_EXT_scalar_block_layout` | Implemented | roadmap K6a: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits); `scalarBlockLayout` feature bit VK_TRUE in `EntryPoints.cpp`. `SPIRVToLLVMPatterns.cpp`'s offset-struct layout conversion generalizes its tight vector/matrix substitution (`getTightNestedArrayOfVectorsOrMatricesType`) to arbitrary array nesting depth (previously only one level deep) and relaxes `layOutStructIfOffsetsMatch`'s ABI-alignment overshoot pre-check for the `AllowInteriorPad` retry tier, since a tightly-packed scalar-layout struct can legitimately declare a member's offset below what its own natural (SIMD-rounded) alignment would otherwise require. Confirmed against real CTS: `dEQP-VK.ubo.{single_basic_array,2_level_array,3_level_array}.scalar.*` (1512 cases) now pass 100% of supported cases (previously 32/192/192 failing respectively); `dEQP-VK.ubo.*` overall improves to 25/13240 residual failures, every one a `single_nested_struct`/`random.scalar` nested-struct-member case -- a separate, still-open scalar-layout-for-struct-array gap (see Roadmap.md's K6a follow-up) |
-| `VK_EXT_separate_stencil_usage` | Implemented | roadmap K6e: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; adds no commands and has no feature bit of its own, and `Image::usage()` has no reader anywhere outside a comment, so there is no per-aspect usage validation path for a chained `VkImageStencilUsageCreateInfo` to disagree with |
+| `VK_EXT_sampler_filter_minmax` | Advertised | roadmap K6g: component-wise min/max sampler reduction |
+| `VK_EXT_scalar_block_layout` | Implemented (core, not advertised by name) | roadmap K6i-K6m: scalarBlockLayout reported true; declared scalar offsets and nested array/matrix strides honored (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
+| `VK_EXT_separate_stencil_usage` | Advertised | roadmap K6e: separate stencil usage |
 | `VK_EXT_shader_64bit_indexing` | Not implemented |  |
 | `VK_EXT_shader_atomic_float` | Not implemented |  |
 | `VK_EXT_shader_atomic_float2` | Not implemented |  |
@@ -189,7 +199,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_EXT_ycbcr_2plane_444_formats` | Planned (in scope, not implemented) | roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion |
 | `VK_EXT_ycbcr_image_arrays` | Not implemented |  |
 | `VK_EXT_zero_initialize_device_memory` | Not implemented |  |
-| `VK_KHR_16bit_storage` | Partially implemented | core-promoted into Vulkan 1.1; `storageInputOutput16` (float16 and 16-bit integer stage I/O, including true SPIR-V signedness as of roadmap L206) is CTS-verified working -- `uniformAndStorageBuffer16BitAccess`/`storageBuffer16BitAccess` remain unimplemented (roadmap 1.9.10, K-series) |
+| `VK_KHR_16bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_8bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_acceleration_structure` | Planned (in scope, not implemented) | roadmap J4 |
 | `VK_KHR_android_surface` | Not implemented |  |
@@ -200,11 +210,11 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_cooperative_matrix` | Not implemented |  |
 | `VK_KHR_copy_commands2` | Implemented (core, not advertised by name) | roadmap D0: vkCmdCopyBuffer2/vkCmdCopyImage2/vkCmdBlitImage2/vkCmdCopyBufferToImage2/vkCmdCopyImageToBuffer2/vkCmdResolveImage2 all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_copy_memory_indirect` | Not implemented |  |
-| `VK_KHR_create_renderpass2` | Implemented (core; now also advertised by name, roadmap `L412(d)`) | vkCreateRenderPass2 and vkCmdBeginRenderPass2/vkCmdNextSubpass2/vkCmdEndRenderPass2 implemented (RenderPass.cpp, CommandBuffer.cpp); added to getSupportedDeviceExtensions() so a custom device below this extension's 1.2 core-promotion point can still enable it by name (`dEQP-VK.api.version_check.unavailable_entry_points`) |
+| `VK_KHR_create_renderpass2` | Advertised | roadmap L412(d): render-pass-2 entry points, also available to sub-1.2 devices |
 | `VK_KHR_dedicated_allocation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_deferred_host_operations` | Planned (in scope, not implemented) | roadmap J3 |
 | `VK_KHR_depth_clamp_zero_one` | Not implemented |  |
-| `VK_KHR_depth_stencil_resolve` | Implemented (`VK_RESOLVE_MODE_SAMPLE_ZERO_BIT` only; now also advertised by name, roadmap `L412(d)`) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K6, closed for the mandatory mode). `AVERAGE`/`MIN`/`MAX` (optional modes) are rejected at `vkCreateRenderPass2` time with `VK_ERROR_FEATURE_NOT_PRESENT`, not silently substituted. Added to getSupportedDeviceExtensions() so a custom device below this extension's core-promotion point can still enable it by name (`dEQP-VK.api.version_check.unavailable_entry_points`) |
+| `VK_KHR_depth_stencil_resolve` | Advertised | roadmap K6/L412(d): sample-zero resolve, also available to sub-1.2 devices |
 | `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate) |
 | `VK_KHR_device_address_commands` | Not implemented |  |
 | `VK_KHR_device_fault` | Not implemented |  |
@@ -212,7 +222,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_device_group_creation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_display` | Not implemented |  |
 | `VK_KHR_display_swapchain` | Not implemented |  |
-| `VK_KHR_draw_indirect_count` | Implemented | roadmap K6h: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; `vkCmdDrawIndirectCount`/`vkCmdDrawIndexedIndirectCount` are new `CommandBuffer.cpp` entry points, reusing the pre-existing `readIndirectDrawCount`/`readIndirectDraws` helpers built for `vkCmdDrawMeshTasksIndirectCountEXT` (roadmap H6f) |
+| `VK_KHR_draw_indirect_count` | Advertised | roadmap K6h: indirect count-buffer commands |
 | `VK_KHR_driver_properties` | Implemented (core, not advertised by name) | roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties) |
 | `VK_KHR_dynamic_rendering` | Advertised |  |
 | `VK_KHR_dynamic_rendering_local_read` | Advertised |  |
@@ -237,7 +247,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_get_physical_device_properties2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_get_surface_capabilities2` | Planned (in scope, not implemented) | roadmap H10 (V8) |
 | `VK_KHR_global_priority` | Advertised |  |
-| `VK_KHR_image_format_list` | Implemented | roadmap K6d: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; adds no commands and has no feature bit of its own, and `vkCreateImageView`'s format-compatibility-class check already enforces the real mutable-format rule unconditionally |
+| `VK_KHR_image_format_list` | Advertised | roadmap K6d: mutable-format compatibility |
 | `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
 | `VK_KHR_index_type_uint8` | Advertised |  |
@@ -277,7 +287,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_ray_tracing_position_fetch` | Planned (in scope, not implemented) | roadmap J8 |
 | `VK_KHR_relaxed_block_layout` | Implemented (core, not advertised by name) | SPIR-V block access uses each member's declared offset/stride rather than imposing or validating a std140 re-layout (SPIRVToLLVMPatterns.cpp's getUniformBlockElement) |
 | `VK_KHR_robustness2` | Not implemented |  |
-| `VK_KHR_sampler_mirror_clamp_to_edge` | Implemented | roadmap K6b: `samplerMirrorClampToEdge` feature bit now `VK_TRUE`, extension advertised by name (PhysicalDeviceInfo.cpp); `VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE` math (FeMeRuntimeCPU.c's `femeRTApplyAddressMode` mode 4) was already implemented, only the advertisement was missing |
+| `VK_KHR_sampler_mirror_clamp_to_edge` | Advertised | roadmap K6b: mirror-clamp address mode |
 | `VK_KHR_sampler_ycbcr_conversion` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_separate_depth_stencil_layouts` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_abort` | Not implemented |  |
@@ -285,10 +295,10 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_shader_bfloat16` | Not implemented |  |
 | `VK_KHR_shader_clock` | Not implemented |  |
 | `VK_KHR_shader_constant_data` | Not implemented |  |
-| `VK_KHR_shader_draw_parameters` | Implemented | roadmap K6c: core-promoted into Vulkan 1.1 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.1 device |
+| `VK_KHR_shader_draw_parameters` | Advertised | roadmap K6c: base vertex, base instance and draw ID |
 | `VK_KHR_shader_expect_assume` | Advertised |  |
 | `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_shader_float_controls` | Implemented | roadmap K6f: core-promoted into Vulkan 1.2 (part of the mandatory floor a 1.4 claim inherits), advertised by name in `PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions` for a custom sub-1.2 device; properties-only, no commands, no feature bit, and `VkPhysicalDeviceFloatControlsProperties` is already filled in truthfully (roadmap L414(a)) |
+| `VK_KHR_shader_float_controls` | Advertised | roadmap K6f/L455: floating-point control properties |
 | `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F3 |
 | `VK_KHR_shader_fma` | Not implemented |  |
 | `VK_KHR_shader_integer_dot_product` | Advertised |  |
@@ -314,7 +324,7 @@ python3 feme/utils/vk_gen_extension_inventory.py \
 | `VK_KHR_timeline_semaphore` | Implemented (core, not advertised by name) | V3: vkGetSemaphoreCounterValue/vkWaitSemaphores/vkSignalSemaphore plus the feature and limit cases (Sync.cpp, EntryPoints.cpp) |
 | `VK_KHR_unified_image_layouts` | Not implemented |  |
 | `VK_KHR_uniform_buffer_standard_layout` | Implemented (core, not advertised by name) | roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
-| `VK_KHR_variable_pointers` | Implemented (core, not advertised by name) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series). `variablePointers`/`variablePointersStorageBuffer` feature bits VK_TRUE (`EntryPoints.cpp`, roadmap K6p/K6a); the milestone-9 groupshared pointer-merge/compare gap that was the sole remaining CTS residual (6 `_wg_`-storage-class cases) closed by roadmap L430 (`GroupShared.cpp`'s `retargetGroupSharedMergesAndCompares`) |
+| `VK_KHR_variable_pointers` | Implemented (core, not advertised by name) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series). variablePointers/variablePointersStorageBuffer feature bits VK_TRUE (EntryPoints.cpp, roadmap K6p/K6a); the milestone-9 groupshared pointer-merge/compare gap that was the sole remaining CTS residual closed by roadmap L430 (GroupShared.cpp's retargetGroupSharedMergesAndCompares) |
 | `VK_KHR_vertex_attribute_divisor` | Advertised |  |
 | `VK_KHR_video_decode_av1` | Not implemented |  |
 | `VK_KHR_video_decode_h264` | Not implemented |  |
