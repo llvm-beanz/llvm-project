@@ -69,11 +69,21 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~30-60 min)** Clang Mandelbrot: fresh backtrace/IR dump of the
-   `feme-cpu-simdize` divergent-branch diagnostic. Check the
-   `UniformityInfo`-staleness angle first.
-2. **(dedicated block, needs clean host)** `ENV4` full corpus collection with
-   the corrected runner — not an end-of-session afterthought.
-3. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
-   graphicsfuzz failures (including this session's now-non-crashing one) into
-   independently tested fixes.
+1. **(~20-30 min)** `ENV3(c)`: pick 3-5 specific diverging pixels near the
+   boundary, dump their iteration count / intermediate `X,Y,Smooth,ColorIdx`
+   values from both FeMe's run and a plain double-precision CPU
+   re-implementation of the same loop. If they match the golden image's own
+   apparent iteration count but FeMe's differs, that points at real lowering
+   imprecision, not inherent sensitivity.
+2. **(~10 min, only if #1 says "inherent")** Loosen `offload-test-suite`'s
+   `Basic/Mandelbrot.test`'s own `rules.yaml` `PixelPercent`/`DiffRMS` tolerance
+   to match observed inherent variance; add this as a fourth patch in
+   `feme/offload-test-suite-patches/`.
+3. **(after ENV3(c))** Move to `ENV4`: full current CTS corpus collection, needs
+   a dedicated clean-host block, not an end-of-session afterthought (carried
+   forward from every prior session).
+4. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
+   graphicsfuzz failures into independently tested fixes.
+5. **(low priority, time-permitting)** Upstream the 3 `offload-test-suite`
+   patches to `llvm-beanz/offload-test-suite` if push access ever becomes
+   available, to stop needing the every-session `git am` step.
