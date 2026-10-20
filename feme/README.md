@@ -20,6 +20,9 @@ ninja -C build check-feme
 
 Building feme also implicitly enables MLIR, which it depends on.
 
+See [docs/Development.md](docs/Development.md) for the cached,
+assertions-enabled container build and offload-test-suite/Vulkan CTS setup.
+
 FeMe additionally includes an optional Vulkan installable client driver,
 `libfeme_vulkan` (see [docs/FeMeVulkanDesign.md](docs/FeMeVulkanDesign.md)),
 built automatically whenever Vulkan-Headers 1.3+ can be found and disableable
