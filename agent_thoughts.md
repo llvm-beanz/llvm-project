@@ -127959,3 +127959,38 @@ A value computed fresh every loop iteration from loop-carried phis (`X*X + Y*Y`,
 2. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures into independently tested fixes. Start with any mandatory-feature gaps `info.device_mandatory_features` surfaces.
 3. **(low priority)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
 4. **(if a future session finds another "value read after a masked loop is subtly wrong" bug)** Check this session's bug class first: a non-phi, loop-body-resident instruction read outside the loop via plain dominance (not through any phi). `freezeLoopCarriedValues` now handles it, but watch for a *third* variant neither this session nor `L465`-`L467` anticipated — the fix only scans `Header` itself, not every block in the cycle (provably sufficient for a natural loop's header, per `CycleInfo`, but worth double-checking if a future bug report doesn't fit this shape).
+
+# Session: ENV4 full CTS corpus launch (no compiler changes this session)
+
+**Next action (under two minutes)**: `ls /home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/env4-full-audit/qpa | wc -l` to see how far the background run has gotten, then `ps aux | grep deqp-vk` to confirm it's still alive.
+
+## State check (done first, every session)
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## What happened
+
+No compiler changes this session — this was a pure `ENV4` ops session, per the carried-forward roadmap ordering (`ENV4` before `ENV5`).
+
+1. Pre-flight: confirmed idle host, clean git tree, fresh `libfeme_vulkan.so` (still `L468`), unchanged CTS checkout (`880f31a2bd9c` + local `0c4f09a1f`), and that the pre-generated 3,244,369-case `all-cases.txt` is still valid — no regeneration needed.
+2. Launched the full corpus run via `run_vulkan_cts.py`, detached in the background (`--workers 6 --batch-size 1800 --final-timeout 600`, output to `env4-full-audit/`), so it survives this session ending.
+3. Watched throughput for ~7 minutes: the first ~190 of 1,803 batches (api/info-style groups, mostly `NotSupported`) finished in under 2 minutes; batches since then are taking 2+ minutes each. **This is a multi-hour, likely multi-day run** — confirms the prior sessions' ~20-hour estimate and rules out finishing it synchronously in any one session.
+4. Broke `ENV4` and `ENV5` down in `Roadmap.md` into one-letter-deep sub-items (`ENV4(a)`-`(c)`, `ENV5(a)`-`(e)`) so the next session doesn't have to re-derive the plan: `ENV4(a)` execute, `(b)` recover/classify incomplete cases, `(c)` report + remeasure `L417`-`L419`. `ENV5(a)`-`(e)` partition the known 108 failures by CTS subgroup (spirv1p4: 22, compute: 27, graphics: 38, terminate_invocation+image_query: 16, graphicsfuzz+mandatory-features: 5) — this partition is purely read-only analysis of the existing `verified-failures.txt`, no new fix work done yet.
+5. Documented the launch in `VulkanCTSReport.md` (`L469`) with the exact invocation and observed throughput.
+
+## Why no code fix this session
+
+The user's own ordering was explicit: `ENV4` (corpus collection) before `ENV5` (fixes). Since `ENV4` is now running and expected to take many hours, and `ninja` builds would contend for CPU with the 6 `deqp-vk` workers (the documented SIGSEGV-under-contention lesson applies to *any* CPU-heavy concurrent process, not just extra CTS workers), starting `ENV5` fix work this session would risk corrupting `ENV4`'s own results. Chose to keep the host clean instead.
+
+## Wins (visible)
+
+- `ENV4` is **running**, not just planned — first time this exact full corpus (not a subset) has been launched.
+- `ENV5`'s 108 known failures are now broken into 5 concretely-sized, independently-tackleable clusters (`ENV5(a)`-`(e)`) instead of one undifferentiated blob — the next session that picks up `ENV5` can start immediately on e.g. `compute_shader_derivatives` (12 cases, largest compute cluster) without re-deriving this.
+
+## Next steps
+
+1. **(first thing, under 2 minutes, every future session until done)** Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` to confirm the detached run is still alive and progressing; if it died, check `driver.log` for why and consider restarting from the point it left off (the script has its own recovery-batch handling, but a fully-dead parent process needs manual relaunch).
+2. **(ongoing, do not do until `ENV4` finishes)** No `ninja`/build work on this host while the run is active — contention previously caused real SIGSEGV crashes under a 17-worker overcommit; the same risk applies to any other CPU-heavy concurrent job.
+3. **(once the initial 1,803-batch pass finishes)** Let `run_vulkan_cts.py`'s own recovery/solo-verification rounds run to completion (`ENV4(b)`), then write up full Pass/Fail/NotSupported/Crashed totals and remeasure `L417`-`L419` in `VulkanCTSReport.md` (`ENV4(c)`); strike `ENV4` in `Roadmap.md` if it's fully clean.
+4. **(after `ENV4` closes, ~build is safe again)** `ENV5`: start with `ENV5(e)` (`info.device_mandatory_features`, 5 cases including the mandatory-feature gap the user explicitly called out) or `ENV5(b)`'s `compute_shader_derivatives` cluster (12 cases, largest single compute sub-group) — both are concretely scoped, ready to pick up without further triage.
+5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
