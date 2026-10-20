@@ -69,26 +69,11 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~20-30 min)** Write a minimal standalone `.ll` reproducer for the
-   graphicsfuzz terminator-assertion bug (use
-   `FEME_DUMP_IR_PRELINEARIZE=1` against the real `.spv` first, like this
-   session did, to capture the exact crashing IR before distilling it).
-2. **(~30-45 min)** Fix `DiamondFlattener::flattenLoopBodyRegion`'s `nullopt`
-   path so the block it bails out of always has a valid terminator before the
-   "unsupported" diagnostic returns — likely needs either a transactional
-   erase/insert ordering or an explicit terminator-restore step on the bailout
-   path. Add a lit + unit test mirroring this session's pattern.
-3. **(~15 min)** Re-run all 6 original `assertion-crash-cases.txt` entries
-   plus `check-feme` to confirm the full ENV3 acceptance bar ("six idle-host
-   crash reproducers completing without abort") is finally met; update
-   `Roadmap.md`'s `ENV3`/`ENV3(a)` rows (strike through if fully closed) and
-   `VulkanCTSReport.md`.
-4. **(~30-60 min, separate session recommended)** Pick up Clang Mandelbrot:
-   get a fresh backtrace/IR dump of the `feme-cpu-simdize` divergent-branch
-   diagnostic, confirm whether it's related to the same `UniformityInfo`
-   snapshot-staleness class of bug just fixed here (plausible, worth checking
-   first) or genuinely separate.
-5. After ENV3 is fully closed: move to ENV4 (full corpus collection with the
-   corrected runner) — this needs a clean host with no competing builds/offload
-   jobs, so schedule it as a dedicated block, not an afterthought at the end of
-   a bug-fixing session.
+1. **(~30-60 min)** Clang Mandelbrot: fresh backtrace/IR dump of the
+   `feme-cpu-simdize` divergent-branch diagnostic. Check the
+   `UniformityInfo`-staleness angle first.
+2. **(dedicated block, needs clean host)** `ENV4` full corpus collection with
+   the corrected runner — not an end-of-session afterthought.
+3. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
+   graphicsfuzz failures (including this session's now-non-crashing one) into
+   independently tested fixes.
