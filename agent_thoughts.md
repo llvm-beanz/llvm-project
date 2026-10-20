@@ -127994,3 +127994,46 @@ The user's own ordering was explicit: `ENV4` (corpus collection) before `ENV5` (
 3. **(once the initial 1,803-batch pass finishes)** Let `run_vulkan_cts.py`'s own recovery/solo-verification rounds run to completion (`ENV4(b)`), then write up full Pass/Fail/NotSupported/Crashed totals and remeasure `L417`-`L419` in `VulkanCTSReport.md` (`ENV4(c)`); strike `ENV4` in `Roadmap.md` if it's fully clean.
 4. **(after `ENV4` closes, ~build is safe again)** `ENV5`: start with `ENV5(e)` (`info.device_mandatory_features`, 5 cases including the mandatory-feature gap the user explicitly called out) or `ENV5(b)`'s `compute_shader_derivatives` cluster (12 cases, largest single compute sub-group) — both are concretely scoped, ready to pick up without further triage.
 5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV4 monitoring + ENV5 log-mining triage (no build, host kept clean)
+
+**Next action (under two minutes)**: `ls /home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/env4-full-audit/qpa | wc -l` then `ps aux | grep deqp-vk` -- confirm the detached `ENV4` run is still alive (was at batch 194/1,803 when this session ended). If it died, check `driver.log`.
+
+## State check (done first, every session)
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+## What happened
+
+1. Checked on `ENV4`'s background run (launched last session): still alive, progressing, genuinely slow on heavy batches (one batch took 11+ minutes of 99%+ CPU while its `.qpa` file kept growing -- confirmed real progress, not a stall, by watching file size over 20s).
+2. Kept the explicit no-build-while-`ENV4`-is-active rule: did **not** run `ninja` this session.
+3. Used the idle time productively: mined the prior `L468` targeted-regression run's already-recorded `.log`/`.qpa` files (which exercise the *same current* `libfeme_vulkan.so`) for the actual compiler error behind each of `ENV5`'s 108 known failures, without needing a new build.
+4. Found and root-caused several real bugs this way (full detail in `VulkanCTSReport.md`'s `L470` and `Roadmap.md`'s `ENV5(a)`-`(e)`):
+   - `compute_shader_derivatives.verify_ndx.*` (3 cases): zero-index `spirv.AccessChain` on a scalar builtin (`gl_SubgroupID`) isn't handled by `BuiltInAccessChainPattern`. **Drafted and verified-by-inspection a fix**, then deliberately reverted it from the working tree (no build = no validation = no commit, per standing rules) and saved the diff as `env5b-builtin-access-chain-zero-index.patch` in this session's own workspace folder, ready to apply immediately next session.
+   - `terminate_invocation.terminate.*` (all 15 cases): one shared `'llvm.load' ... got 'i32'` error -- SPIR-V null-pointer constants have no dedicated lowering pattern.
+   - `hlsl_functionality1.*` (2) + `uniformid.*` (5): unhandled opcode/decoration, likely one-line no-op fixes each.
+   - `opcopylogical.*` (9): one shared `llvm.insertvalue` layout-mismatch root cause.
+   - `opselect.array_stride_select` (1): a narrow custom-array-stride constant-legalization gap.
+   - Confirmed (not newly found, but now cross-checked) that `opptrequal`/`opptrnotequal` (2) and all 4 `graphicsfuzz` cases are genuinely the already-documented structural `Linearize`/`SIMDize` limitations, not something a quick fix would resolve.
+5. Updated `Roadmap.md`'s `ENV5(a)`-`(e)` rows with all of the above so the next session can start *fixing* immediately instead of re-deriving root causes from scratch.
+
+## Why this is safe even though `ENV4` keeps changing the "current" state
+
+The mined logs come from `L468`'s targeted regression run, captured against the *exact same* `libfeme_vulkan.so` build that's still current right now (confirmed unchanged all session -- no rebuild happened). `ENV4`'s own run doesn't touch the binary either, so these findings remain valid for whenever a build becomes safe again.
+
+## Wins (visible)
+
+- **25 of the 108 `ENV5`-tracked failures now have a concrete, scoped root cause** (3 drafted-fixed, 15+7 one-line-fix candidates), up from "0 of 108 individually triaged" at session start.
+- A full, ready-to-apply patch for the `verify_ndx` cluster already exists -- the very next build-safe session can apply it in minutes rather than re-diagnosing.
+- `ENV4` kept running, undisturbed, the entire session -- no risk of corrupting its results from CPU contention.
+
+## Next steps
+
+1. **(first, under 2 minutes, every session until `ENV4` finishes)** Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk`.
+2. **(once `ENV4` is done or paused, ~15-30 min)** Apply `env5b-builtin-access-chain-zero-index.patch` (saved in this session's workspace) to `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, add a lit test (SPIR-V `.spv.ll`/`mlir` round-trip style, mirroring existing `SPIRVToLLVM` conversion tests) exercising a zero-index access chain on `gl_SubgroupID`, build, run `check-feme`, then commit.
+3. **(~20-40 min)** Add the `hlsl_functionality1`/`uniformid` no-op-decoration handling (likely near-identical one-line fixes in the SPIR-V importer's decoration-handling switch) -- 7 cases, two independent small commits.
+4. **(~1-2 hours)** Fix `terminate_invocation`'s shared null-pointer-constant lowering gap (add a pointer-typed `spirv.Constant` pattern emitting `llvm.mlir.zero`) -- 15 cases, one commit, needs careful testing since it's a new pattern class, not an extension of an existing one.
+5. **(~1-2 hours)** Fix `opcopylogical`'s layout-mismatch bug (needs a real recursive, layout-converting copy, not a 1-line fix) -- 9 cases.
+6. **(lower priority, needs real build+trace, not log-mining)** `compute_shader_derivatives.lod_op.*` (9, numeric), `image_query.samples_storage` (1), `entrypoint.tess_con_*` (3, likely a tessellation gap), the untriaged 15 `compute.*` cases, all 38 `graphics.*` cases.
+7. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in `Roadmap.md` if clean.
+8. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
