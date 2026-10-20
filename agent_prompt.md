@@ -1,5 +1,5 @@
 ---
-model: gpt-6.1-sol
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -65,10 +65,29 @@ mid-investigation to avoid losing documentation.
 
 # Request
 
-This is a clean container. Please configure this container for feme development
-and setup both the offload-test-suite and Vulkan CTS.
+Please continue working on the FeMe Vulkan ICD. The previous session suggested
+the next steps:
 
-When you've completed the configuration and initial builds, please run the
-offload test suite and Vulkan CTS against Feme, and regenerate the
-VulkanCTSReport. Then re-triage the roadmap to provide a clear baseline of the
-current state and the next steps.
+1. **ENV3: stop compiler aborts first.** Use
+   `assertion-crash-cases.txt`: five SPIR-V 1.4 loop-control cases assert
+   on a detached insertion point; one graphicsfuzz unsupported loop
+   leaves malformed IR before a terminator assertion. Add regressions
+   at each affected translation phase before changing lowering.
+2. **ENV3: fix Clang Mandelbrot.** It reproduces alone with a genuine
+   SIMDization divergent-branch diagnostic. Increasing the wait budget
+   fixes DXC's separate timeout, not this compiler failure. Keep it
+   visible rather than adding an XFAIL.
+3. **ENV4: collect the full current corpus.** Use the corrected runner
+   without competing builds/offload jobs. Execute the remaining cases,
+   recover incomplete batches, and verify residuals sequentially.
+   The initial multi-case rounds have no process timeout; monitor their
+   progress and retain stalled-process evidence rather than claiming
+   that the final single-case timeout bounds the whole run.
+4. **ENV5: implement contracts, then advertise.** Start with the current
+   mandatory-feature failure and partition the 103 SPIR-V instruction
+   failures and four graphicsfuzz failures. Older tessellation/graphics
+   residuals remain historical until rerun.
+
+**Next action (under two minutes):** open
+`feme/docs/Roadmap.md` at ENV3 and the retained
+`assertion-crash-cases.txt` to select the first compiler reproducer.
