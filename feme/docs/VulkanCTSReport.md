@@ -9505,3 +9505,31 @@ Result: **Pass 13156, Fail 108, NotSupported 116962, Crashed/TimedOut 0** (130,2
 **`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update needed (bug fix only, no feature/extension/functional change landed).
 
 **Next steps**: `ENV4` (full current CTS corpus collection, dedicated clean-host block) is now unblocked since `ENV3` no longer needs attention first. `ENV5` (partition the 103 SPIR-V instruction failures + 4 graphicsfuzz failures into independently tested fixes) follows. Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+## L469: `ENV4` full CTS corpus audit launched (in progress, not yet complete)
+
+**Pre-flight**: `vulkaninfo --summary | grep deviceName` confirmed `FeMe CPU Vulkan Device`. Confirmed a clean, idle host (no competing `ninja`/`deqp-vk`/`offloader` processes), a clean git tree, and that the current `build/lib/libfeme_vulkan.so` is fresh (reflects `L468`'s Mandelbrot fix). Reused the pre-existing, already-generated full case list (`feme-20261020-595102f-880f31a/all-cases.txt`, 3,244,369 lines) from a prior session rather than regenerating it; confirmed the `880f31a2bd9c` CTS checkout (plus the local `0c4f09a1f` std430 mesh-layout fix) is unchanged since that list was produced, so it is still valid.
+
+**Launched**: a detached background run against the full corpus:
+
+```shell
+. /home/dev/.config/feme/env.sh
+cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan
+xvfb-run -a python3 feme/utils/run_vulkan_cts.py \
+  --deqp-vk "$FEME_VULKAN_CTS_DEQP_VK" \
+  --cwd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan \
+  --case-list /home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/all-cases.txt \
+  --output-dir /home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/env4-full-audit \
+  --workers 6 --batch-size 1800 --final-timeout 600 \
+  --write-verified-failures .../env4-full-audit/verified-failures.txt \
+  --report .../env4-full-audit/report.txt \
+  --deqp-vk-arg=--deqp-log-images=disable
+```
+
+1,803 initial batches total. Throughput is highly non-uniform: the first ~190 batches (covering `api`/`info`-style groups, dominated by near-instant `NotSupported` checks) completed in under 2 minutes, but subsequent batches (real pipeline/compute/image execution) are each taking on the order of 2+ minutes. This confirms the ~20-hour rough wall-clock estimate carried forward from prior sessions is plausible, likely an underestimate for the slower groups -- this run will not complete within a single session and must be monitored/resumed across several, matching the established pattern for similarly large sweeps.
+
+**Status at end of this session**: still running in the background (detached, survives this session's exit), at batch ~191/1,803. No stalled or crashed processes observed yet in this session's monitoring window. See `ENV4(a)`-`(c)` in `Roadmap.md` for the follow-up breakdown: keep the host clean of competing builds while it runs, recover/classify any incomplete cases once the initial pass finishes, then report full results and remeasure the historical `L417`-`L419` families.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update needed yet (audit in progress, no feature/extension change).
+
+**Next steps**: resume this exact session by checking `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` for the detached run; once the initial 1,803-batch pass finishes, let `run_vulkan_cts.py`'s own recovery/solo-verification rounds run to completion, then write up full Pass/Fail/NotSupported/Crashed totals here and remeasure `L417`-`L419`. Do not start any `ninja` build on this host while the run is active (CPU contention previously caused SIGSEGV-under-load, per the documented 17-worker incident). `ENV5`'s partitioned sub-items (`ENV5(a)`-`(e)` in `Roadmap.md`) are ready to pick up once a build is safe again.
