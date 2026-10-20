@@ -69,27 +69,22 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-**Next action (under two minutes)**: open `feme/docs/Roadmap.md` at
-`ENV3(c)(10)` and dump a per-lane, per-iteration trace (X, Y, the escape-check
-result each round) for 3-5 of the newly-found binary-`Diverged`-flip pixels,
-comparing round-by-round against a `numpy.float32` reference, to find the exact
-iteration/instruction they first disagree at.
-
-1. **(~20-30 min)** Dump a full per-lane, per-iteration trace for 3-5
-   binary-flip pixels (pick new ones, not the original 8 — those were confirmed
-   fine) from FeMe's actual post-SIMD IR/runtime, comparing against the Python
-   float32 reference round-by-round, to find the first disagreement.
-2. **(~30-60 min, once the exact disagreement is found)** Fix with a minimal
-   `.ll` reproducer + unit/lit tests, mirroring the `L464`-`L467` pattern —
-   watch for regressions across the ~282 existing `Transforms/CPU` lit tests.
-3. **(~15-20 min)** Re-validate: `check-feme`, the real
-   `check-hlsl-clang-feme-vk` Mandelbrot test (confirm `PixelPercent` passes
-   under 0.2%). Strike `ENV3(c)` in `Roadmap.md` if it fully closes; update
-   `VulkanCTSReport.md`.
-4. **(after `ENV3(c)` truly closes)** `ENV4`: full current CTS corpus collection
-   — still needs a dedicated clean-host block, carried forward unchanged from
-   every prior session.
-5. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
-   graphicsfuzz failures into independently tested fixes.
-6. **(low priority)** Upstream the 3 `offload-test-suite` patches if push access
-   ever becomes available.
+1. **(next, ~2-4 hours, dedicated clean-host block)** `ENV4`: full current CTS
+   corpus collection. Needs a dedicated block with no competing builds/offload
+   jobs — carried forward unchanged from every prior session's recommendation,
+   now finally unblocked since `ENV3` no longer needs attention first.
+2. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
+   graphicsfuzz failures into independently tested fixes. Start with any
+   mandatory-feature gaps `info.device_mandatory_features` surfaces.
+3. **(low priority)** Upstream the 3 `offload-test-suite` patches (`Image.cpp`
+   underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped
+   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if
+   push access ever becomes available.
+4. **(if a future session finds another "value read after a masked loop is
+   subtly wrong" bug)** Check this session's bug class first: a non-phi,
+   loop-body-resident instruction read outside the loop via plain dominance (not
+   through any phi). `freezeLoopCarriedValues` now handles it, but watch for a
+   *third* variant neither this session nor `L465`-`L467` anticipated — the fix
+   only scans `Header` itself, not every block in the cycle (provably sufficient
+   for a natural loop's header, per `CycleInfo`, but worth double-checking if a
+   future bug report doesn't fit this shape).
