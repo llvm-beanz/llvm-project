@@ -69,32 +69,45 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~20-40 min)** Finish reading the post-SIMD IR dump's remaining ~90
-   unread lines (`/tmp/mandel_dbg/postsimd.ll` from this session, or
-   regenerate fresh via `FEME_DUMP_IR=1 ./bin/offloader ... 2> postsimd.ll`
-   from `build/` against the lit-run's persisted
-   `tools/OffloadTest/test/clang-feme-vk/Basic/Output/Mandelbrot.test.tmp.o`)
-   to find exactly which value feeds the final black-vs-palette `select` at
-   the `Flow`/`.linearized` blocks, and whether IT is the thing still
-   broadcasting wrong.
-2. **(~15 min, do this in parallel/first — cheap, might shortcut step 1)**
-   Sanity-check `.frozen.shadow`'s own value isn't subtly off-by-a-few-
-   iterations (feeds the `uitofp`/`log2`/`sqrt` palette-index math) — e.g.
-   dump a handful of per-pixel iteration counts from FeMe's run and compare
-   to a quick Python re-implementation of the same escape-time loop, keyed
-   by pixel coordinate, the way the prior session's doc entry describes for
-   confirming genuinely-wrong vs. inherent.
-3. **(~30-60 min, once the real bug is found)** Fix with a minimal `.ll`
-   reproducer + unit/lit tests mirroring this session's pattern (`L465`),
-   watch for regressions in `Transforms/CPU`'s ~190+ existing lit tests.
-4. **(~15-20 min)** Re-validate: `check-feme`, `check-hlsl-clang-feme-vk`
-   (confirm Mandelbrot's `PixelPercent` passes under 0.2%), all 6
-   `assertion-crash-cases.txt` reproducers. Strike `ENV3(c)` in `Roadmap.md`
-   if it fully closes; update `VulkanCTSReport.md`.
-5. **(after ENV3(c) truly closes)** `ENV4`: full current CTS corpus
-   collection — still needs a dedicated clean-host block, carried forward
-   unchanged from every prior session.
-6. **(after ENV4)** `ENV5`: partition the 103 SPIR-V instruction failures +
-   4 graphicsfuzz failures into independently tested fixes.
-7. **(low priority)** Upstream the 3 `offload-test-suite` patches to
+1. **(~20-30 min, do this first)** Direct instrumentation: patch a *scratch
+   copy* of the compiled Mandelbrot `.o`/IR so the final store writes
+   `Diverged`'s own value (or `%.wide2`, zero-extended) into the color channels
+   instead of the computed palette `Color`, rebuild `libfeme_vulkan.so`, rerun,
+   and inspect the output PNG for the 8 known-bad pixel coordinates from this
+   session (`(3832-3839, 901)`). If it reads "diverged" (nonzero) there, the
+   loop's own merge is fine and the bug is 100% in the outer dispatch blocks —
+   skip straight to step 3. If it reads "not diverged" there, the merge itself
+   is wrong at runtime despite looking right in the IR — go to step 2.
+2. **(~30-60 min, only if step 1 says the merge itself is wrong)** Re-examine
+   `freezeExitRelayValue`/the `HeaderExitRelayValues` restore loop for a subtler
+   bug (e.g. ordering relative to `freezeLoopCarriedValues`'s own mutation, or a
+   mask computed before vs. after some other CFG edit this session didn't check)
+   — this would mean `L465`/`L466`'s own validation (which only checked IR
+   *shape*, not actual runtime values against this specific real shader) missed
+   something; add a new reduced `.ll` reproducer matching whatever's found.
+3. **(~30-60 min, the more likely branch per two sessions' worth of flagging)**
+   Trace the outer `if (Diverged)` dispatch
+   (`Flow`/`live.t2`/`live.f4`/`.linearized` blocks) value-by-value in the
+   post-SIMD dump, specifically looking for another `addIncoming`/phi-restore
+   call elsewhere in `Linearize.cpp` (not `HeaderExitRelayValues`) that has the
+   same "silently keeps a stale literal on a reconvergence edge instead of
+   freezing" shape `L465`/`L466` already fixed twice. Grep for other
+   `PN->addIncoming`/`setIncomingValue` call sites outside the code this session
+   touched as a starting point.
+4. **(~15-20 min once the real bug is found and fixed)** Re-validate:
+   `check-feme`, the real `check-hlsl-clang-feme-vk` Mandelbrot test (confirm
+   `PixelPercent` passes under 0.2%), all 6 `assertion-crash-cases.txt`
+   reproducers. Strike `ENV3(c)(6)`/`ENV3(c)` itself in `Roadmap.md` if it fully
+   closes; update `VulkanCTSReport.md`.
+5. **(only if, against expectation, a future session finds the residual
+   genuinely *is* partly inherent after all)** Loosen `offload-test-suite`'s
+   `Basic/Mandelbrot.test` `rules.yaml` tolerance as a documented fallback — but
+   this session's 8-for-8 sample makes that increasingly unlikely to be needed
+   at all.
+6. **(after `ENV3(c)` truly closes)** `ENV4`: full current CTS corpus collection
+   — still needs a dedicated clean-host block, carried forward unchanged from
+   every prior session.
+7. **(after `ENV4`)** `ENV5`: partition the 103 SPIR-V instruction failures + 4
+   graphicsfuzz failures into independently tested fixes.
+8. **(low priority)** Upstream the 3 `offload-test-suite` patches to
    `llvm-beanz/offload-test-suite` if push access ever becomes available.
