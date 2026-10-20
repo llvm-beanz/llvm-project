@@ -127333,3 +127333,89 @@ formula" fix again — that whole approach is closed.
    uninspected.
 4. **(standing)** Keep `VulkanCTSReport.md`, both Vulkan inventories, and
    the roadmap counts synchronized after every fix.
+
+# 2026-10-20: clean-container FeMe development baseline
+
+**State:** the container builds and runs FeMe, offload-test-suite and
+Vulkan CTS. The real device is confirmed. Initial measurement is complete
+for a declared 132,345-case CTS selection, not the full 3,244,369-case
+corpus. Compiler correctness and conformance are not claimed complete.
+
+## What now works
+
+1. LLVM and CTS use ccache, enabled assertions and disabled PCH.
+   `check-feme` built its own tools, unit executables, ICD and smoke
+   dependencies from the clean build. The final CTS-enabled run has
+   **3,803 Pass / 4 Unsupported / zero failures**.
+2. Both offload targets exist in the main LLVM build. The final DXC
+   suite has **497 Pass / 275 Unsupported / 27 expected failures**.
+   Clang has **388 Pass / 271 Unsupported / 139 expected failures /
+   one real failure**. Neither suite has XPASS results.
+3. The CTS selection covers every top-level group and complete compute,
+   SPIR-V assembly, info and mesh EXT in/out families. Results are
+   **13,701 Pass / 118,530 NotSupported / 108 Fail / six assertion
+   crashes**. All failures were verified sequentially after fixing the
+   runner; all six crashes were separately reproduced on an idle host.
+4. Both inventory tables reproduce from their corrected manifests.
+   All 150 core feature entries match fresh `api-query` output:
+   97 are true. The extension inventory has 50 advertised, 19 core-only,
+   39 planned and 194 unimplemented names. These are not passing-CTS
+   counts.
+
+## Decisions and evidence
+
+- Preserve one main build directory rather than creating another
+  cold offload build. Enable all six translation targets; an incomplete
+  target list silently skips coverage. Persist the ICD and CTS environment
+  in `~/.config/feme/env.sh` and source it explicitly in non-login shells.
+  The first requested device check found llvmpipe because no FeMe ICD
+  existed yet; the rebuilt device is now `FeMe CPU Vulkan Device`.
+- Commit external defects independently in their owning checkouts:
+  offload `80c0565` fixes the out-of-bounds, subgroup-dependent
+  WaveActiveMax test; `8cf0f76` forwards the safety-net timeout;
+  `aae728a` narrows two stale XFAIL annotations. CTS `0c4f09a1f` fixes
+  host std430 vec3 array stride. Its isolated f16 reproducer improves
+  from 22/80 to 80/80 Pass; complete mesh in/out has 160 Pass /
+  400 NotSupported / zero failures.
+- Fix the measurement defect before trusting the baseline:
+  `f08a4ca0390c` gives CTS failure verification one worker. One case
+  per process did not provide isolation with six concurrent processes.
+  The new Fail/DeviceLost scheduling regression fails before the fix.
+  The repeated selection retains the same 108 failures.
+- Do not copy the historical full-run totals into a current report.
+  The available CTS revision and registry differ, and the current
+  assertion build exposes six crashes. The raw report correctly leaves
+  those records Unrun; separate crash logs support the annotated
+  classification. Preserve both, without fabricating QPA results.
+- No compiler/runtime implementation or design contract changed.
+  Setup instructions, reproducible inventory inputs and a current
+  report/roadmap are committed separately. The report explicitly leaves
+  3,112,024 corpus cases unmeasured. Configuration/build logs, final
+  offload logs, QPA, case lists and summary JSON are retained under
+  `/home/dev/dev/VK-GL-CTS/run/feme-20261020-595102f-880f31a/`.
+
+## Next steps
+
+1. **ENV3: stop compiler aborts first.** Use
+   `assertion-crash-cases.txt`: five SPIR-V 1.4 loop-control cases assert
+   on a detached insertion point; one graphicsfuzz unsupported loop
+   leaves malformed IR before a terminator assertion. Add regressions
+   at each affected translation phase before changing lowering.
+2. **ENV3: fix Clang Mandelbrot.** It reproduces alone with a genuine
+   SIMDization divergent-branch diagnostic. Increasing the wait budget
+   fixes DXC's separate timeout, not this compiler failure. Keep it
+   visible rather than adding an XFAIL.
+3. **ENV4: collect the full current corpus.** Use the corrected runner
+   without competing builds/offload jobs. Execute the remaining cases,
+   recover incomplete batches, and verify residuals sequentially.
+   The initial multi-case rounds have no process timeout; monitor their
+   progress and retain stalled-process evidence rather than claiming
+   that the final single-case timeout bounds the whole run.
+4. **ENV5: implement contracts, then advertise.** Start with the current
+   mandatory-feature failure and partition the 103 SPIR-V instruction
+   failures and four graphicsfuzz failures. Older tessellation/graphics
+   residuals remain historical until rerun.
+
+**Next action (under two minutes):** open
+`feme/docs/Roadmap.md` at ENV3 and the retained
+`assertion-crash-cases.txt` to select the first compiler reproducer.
