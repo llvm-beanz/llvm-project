@@ -144,4 +144,13 @@ attributes #1 = { nounwind willreturn memory(argmem: read) }
 ; CHECK-NOT: %live.merge
 ; CHECK-NOT: %sideeffect.merge
 ; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.check.live)
+; Roadmap ENV3(c)(10): `%14` (the loop-carried `%.08` phi's own
+; shufflevector, read post-loop at block `17` by direct dominance, not
+; through its own phi) now gets its own `freezeLoopCarriedValues`-
+; materialized LCSSA phi + entering-mask freeze, same as any other
+; value this cycle's masking must keep correct for a lane exiting this
+; round -- harmless to this reduction's own correctness (neither block
+; `17`'s lone caller nor this file's own `CHECK`s read `%14` through a
+; divergent path), but it does insert this `select` here.
+; CHECK-NEXT: %.lcssa.frozen = select i1 %active.live, <4 x float> %14, <4 x float> %.lcssa
 ; CHECK-NEXT: br i1 %loop.any.active, label %12, label %17
