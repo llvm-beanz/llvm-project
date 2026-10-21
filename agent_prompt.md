@@ -69,27 +69,36 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~30-60 min)** `ENV5(a)`'s remaining 6 cases:
-   `opselect.array_stride_select` (1, custom-array-stride constant-legalization
-   gap, `failed to legalize 'spirv.Constant'`) and `entrypoint.tess_con_*` (3,
-   likely tessellation gap, no error logged -- needs a real build+trace, not
-   log-mining). `opptrequal`/`opptrnotequal` (2) is already-known-structural
-   (`feme-cpu-simdize` groupshared-global limitation), not a quick fix.
-2. **(~1-2 hours, needs real build+trace)** `ENV5(b)`'s remaining 24 cases:
-   `compute_shader_derivatives.lod_op.*` (9, numeric) and 15 untriaged
-   `compute.*` cases.
-3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
-   current CTS corpus collection. The 6 background workers were paused (SIGSTOP)
-   by a prior session to allow this session's builds; resumed via `kill -CONT`
-   at the end of this session -- confirmed all 6 back to `Rl` (running) state.
-   Let it keep progressing; do not start another build while it's mid-run.
-4. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches
-   (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped
-   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if
-   push access ever becomes available.
-5. **(worth a quick check, ~15 min, carried forward from a prior session)** A
-   broader regression sweep for any other
-   `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape in the untriaged
-   `compute.*`/`graphics.*` failure lists -- the trivial vertex-shader
-   passthrough pattern L472 fixed is common to many Amber-based tests, not just
-   `terminate_invocation`.
+1. **(~1-2 hrs, needs a real build+trace)** `ENV5(b)(2)`'s `lod_op.query.*` (6
+   cases, all fail): dump IR around the `OpImageQueryLod`-to-LLVM lowering
+   (`FEME_DUMP_IR_PRESPIRV`/`FEME_DUMP_IR_PRENORM`) for one minimal case,
+   compare the computed LOD value against the expected one, find where it
+   diverges. This is the bigger of the two `lod_op` sub-bugs (6 of 9 cases) and
+   has no passing baseline to compare against.
+2. **(~30-60 min, likely smaller/narrower)** `ENV5(b)(2)`'s
+   `lod_op.sample.*mip_1` (3 cases, `mip_0` already passes): since `mip_0`
+   works, diff the `mip_0`-vs-`mip_1` code path directly (image-sampling
+   mip-level selection/addressing) rather than starting from scratch -- likely a
+   much shorter path to the bug than the `query.*` case.
+3. **(~1-2 hours)** `ENV5(b)`'s remaining 15 untriaged `compute.*` cases
+   (`variable_init` (3),
+   `memory_access`/`multiple_shaders`/`opname`/`unused_variables` (2 each),
+   `opundef`/`opunreachable`/`signed_op`/`vector_shuffle` (1 each)) -- same
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`/`deqp-vk --deqp-case=...` direct-run
+   triage pass as this session did for `lod_op`, before attempting any fix.
+4. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
+   current CTS corpus collection. Still running since a prior session with no
+   interruption. Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep
+   deqp-vk` every session until it finishes; let its own
+   recovery/solo-verification rounds run to completion before writing up final
+   Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md` and striking
+   `ENV4` in `Roadmap.md`.
+5. **(low priority, unchanged across many sessions)** Upstream the 3
+   `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp
+   assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to
+   `llvm-beanz/offload-test-suite` if push access ever becomes available.
+
+**Next action (under two minutes): open `feme/docs/Roadmap.md` at `ENV5(b)(2)`
+and re-run
+`dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.compute.lod_op.query.linear.16_1_1.mip_0`
+with `FEME_DUMP_IR_PRESPIRV=1` to get the first IR dump for the LOD-value bug.**
