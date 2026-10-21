@@ -69,21 +69,23 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV6`'s remaining untriaged clusters, in priority order:
-1. `ENV6(b)`: `pipeline.*` (181 cases,
-   `fast_linked_library`/`pipeline_library`/`monolithic`) — **best next
-   target**, now the largest untriaged cluster. Check first whether a single fix
-   covers all three pipeline-construction-method variants.
-2. `ENV6(c)`: `graphicsfuzz` (106 cases) — likely a long tail of distinct small
-   bugs rather than one root cause, per this project's prior `graphicsfuzz`
-   experience; budget per-case time accordingly.
-3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
-   cases combined) — `memory_model.{write_after_read,message_passing}` (52) and
-   `tessellation.invariance` (26) are each large single-suite clusters worth
-   checking for a shared cause first.
-4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases,
-   `barrier.{in_if,in_switch,in_loop}`) — scoped but not started; ~1000 lines of
-   `EntryWrapperPass` machinery to generalize to `HullWrapperPass`'s ABI. Lowest
-   priority, multi-session effort.
-5. (low priority, unchanged for many sessions) Upstream the 3
+`ENV6(b)`'s remaining 41 cases, in priority order:
+1. `ENV6(b)(3)`:
+   `spec_constant`/`max_varyings`/`misc`/`cache`/`framebuffer_attachment` (21
+   cases, untriaged) — **best next target**, `spec_constant`/`max_varyings` (6
+   cases each) are the largest of the five and worth sampling first for a shared
+   cause.
+2. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) — confirmed genuine
+   rendering-correctness bug, not yet root-caused.
+3. `ENV6(b)(2)`:
+   `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}`
+   (12 cases) — confirmed genuine rendering-correctness bug, not yet
+   root-caused.
+4. `ENV6(c)`: `graphicsfuzz` (106 cases) — unchanged from prior sessions, likely
+   a long tail of distinct small bugs.
+5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
+   cases combined) — unchanged from prior sessions.
+6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) — scoped, not
+   started, lowest priority.
+7. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
