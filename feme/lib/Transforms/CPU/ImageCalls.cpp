@@ -4965,7 +4965,8 @@ feme::cpu::getOrSynthesizeSample2DDerivatives(IRBuilderBase &B,
                                               Function &Caller, Value *U,
                                               Value *V) {
   std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
-  if (Stage != feme::ShaderStage::Fragment) {
+  if (Stage != feme::ShaderStage::Fragment &&
+      Stage != feme::ShaderStage::Compute) {
     Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
     return {Zero, Zero, Zero, Zero};
   }
@@ -4983,7 +4984,8 @@ SampleDerivatives1D
 feme::cpu::getOrSynthesizeSample1DDerivatives(IRBuilderBase &B,
                                               Function &Caller, Value *U) {
   std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
-  if (Stage != feme::ShaderStage::Fragment) {
+  if (Stage != feme::ShaderStage::Fragment &&
+      Stage != feme::ShaderStage::Compute) {
     Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
     return {Zero, Zero};
   }
@@ -4997,7 +4999,8 @@ CubeDirectionDerivatives feme::cpu::getOrSynthesizeSampleCubeDerivatives(
     IRBuilderBase &B, Function &Caller, Value *DirX, Value *DirY,
     Value *DirZ) {
   std::optional<feme::ShaderStage> Stage = feme::getShaderStage(Caller);
-  if (Stage != feme::ShaderStage::Fragment) {
+  if (Stage != feme::ShaderStage::Fragment &&
+      Stage != feme::ShaderStage::Compute) {
     Value *Zero = ConstantFP::get(B.getFloatTy(), 0.0);
     return {Zero, Zero, Zero, Zero, Zero, Zero};
   }

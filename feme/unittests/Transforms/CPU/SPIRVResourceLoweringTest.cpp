@@ -7589,6 +7589,57 @@ TEST(SPIRVResourceLoweringTest,
 }
 
 TEST(SPIRVResourceLoweringTest,
+     ComputeStageQueryLodSynthesizesRealDerivatives) {
+  // Roadmap ENV5(b)(2): same shape as
+  // `FragmentStageQueryLodSynthesizesRealDerivatives` above, except `main`
+  // now carries a `feme.shader.stage"="compute"` attribute instead of
+  // `"fragment"` -- `VK_KHR_compute_shader_derivatives`'s
+  // `DerivativeGroupQuadsKHR`/`DerivativeGroupLinearKHR` execution modes
+  // legalize the exact same implicit-LOD `OpImageQueryLod`/`Sample2D` shape
+  // in a `Compute` entry point too, so this must synthesize real
+  // `feme.stage.derivative.*` calls, not zero constants, exactly like the
+  // `Fragment` case -- this was the real root cause of every real
+  // `dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.
+  // compute.lod_op.query.*` CTS case failing (a wrong, always-zero-
+  // derivative LOD value reaches every caller, not a crash or legalization
+  // failure).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(<2 x float> %coord) #0 {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %level = call float @llvm.spv.resource.calculate.lod(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord)
+      ret float %level
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+    attributes #0 = { "feme.shader.stage"="compute" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *QueryLod = findImageCall(*F, "feme.cpu.image.querylod.2d.v2f32");
+  ASSERT_TRUE(QueryLod);
+  for (unsigned ArgNo : {6, 7, 8, 9}) {
+    Value *Deriv = QueryLod->getArgOperand(ArgNo);
+    EXPECT_FALSE(isa<ConstantFP>(Deriv));
+    auto *DerivCall = dyn_cast<CallInst>(Deriv);
+    ASSERT_TRUE(DerivCall);
+    Function *Callee = DerivCall->getCalledFunction();
+    ASSERT_TRUE(Callee);
+    EXPECT_TRUE(Callee->getName().starts_with("feme.stage.derivative."));
+  }
+}
+
+TEST(SPIRVResourceLoweringTest,
      LowersArray2DQueryLodToImageQueryLodSharingPlain2DFormula) {
   // Roadmap H124t: `Array2D`'s own `CalculateLevelOfDetail` (an
   // `OpImageQueryLod` against a `Texture2DArray`) -- unlike an ordinary

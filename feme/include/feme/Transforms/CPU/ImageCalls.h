@@ -2630,11 +2630,17 @@ struct SampleDerivatives {
 /// via `feme::getShaderStage`): real derivatives, synthesized via
 /// `feme::createStageDerivative` (`feme.stage.derivative.x.coarse`/
 /// `.y.coarse`, later lowered by `feme::cpu::WaveLoweringPass`'s existing
-/// quad-lane machinery) when \p Caller's own stage is `Fragment` -- the
-/// only stage GLSL/HLSL's own implicit `texture()`/`Sample()` is ever legal
-/// from -- or four zero constants otherwise (an explicit-LOD sample, or
-/// (defensively) any other stage), leaving that sample's own implicit level
-/// resolved to mip 0 exactly as before this row.
+/// quad-lane machinery, stage-agnostic) when \p Caller's own stage is
+/// `Fragment` (the implicit `texture()`/`Sample()` stage GLSL/HLSL itself
+/// defines) or `Compute` (roadmap ENV5(b)(2):
+/// `VK_KHR_compute_shader_derivatives`'s `DerivativeGroupQuadsKHR`/
+/// `DerivativeGroupLinearKHR` execution modes legalize the same implicit
+/// derivative there too -- `WaveLoweringPass`'s quad-shuffle math already
+/// computes the spec-correct answer for both modes, see
+/// `feme::vulkan::ComputeDerivativeGroupMode`'s own doc), or four zero
+/// constants otherwise (an explicit-LOD sample, or (defensively) any other
+/// stage), leaving that sample's own implicit level resolved to mip 0
+/// exactly as before this row.
 SampleDerivatives getOrSynthesizeSample2DDerivatives(llvm::IRBuilderBase &B,
                                                      llvm::Function &Caller,
                                                      llvm::Value *U,
@@ -2657,12 +2663,13 @@ struct SampleDerivatives1D {
 /// `createSample1D`/`createSample1DArray`, mirroring
 /// `getOrSynthesizeSample2DDerivatives`'s own `Caller`-stage-gated
 /// real-derivatives-or-zero-constants behavior: real derivatives
-/// (synthesized via `feme::createStageDerivative`) only when \p Caller's
-/// own stage is `Fragment`, else two zero constants, leaving that
-/// sample's own implicit level resolved to mip 0 exactly as before this
-/// row (roadmap L52a's original, deliberately-narrower `Plain1D`/
-/// `Array1D` scope) -- not a regression for any caller not in a position
-/// to synthesize a real derivative.
+/// (synthesized via `feme::createStageDerivative`) when \p Caller's own
+/// stage is `Fragment` or `Compute` (roadmap ENV5(b)(2), see
+/// `getOrSynthesizeSample2DDerivatives`'s own updated doc), else two zero
+/// constants, leaving that sample's own implicit level resolved to mip 0
+/// exactly as before this row (roadmap L52a's original, deliberately-
+/// narrower `Plain1D`/`Array1D` scope) -- not a regression for any caller
+/// not in a position to synthesize a real derivative.
 SampleDerivatives1D getOrSynthesizeSample1DDerivatives(llvm::IRBuilderBase &B,
                                                        llvm::Function &Caller,
                                                        llvm::Value *U);
@@ -2694,12 +2701,12 @@ struct CubeDirectionDerivatives {
 /// \p DirZ an implicit-LOD `SampleCube`/`SampleCubeArray` call should pass
 /// to `createSampleCube`/`createSampleCubeArray`, mirroring
 /// `getOrSynthesizeSample2DDerivatives`'s own `Caller`-stage-gated
-/// real-derivatives-or-zero-constants behavior (real derivatives only ever
-/// apply in the `Fragment` stage; every other caller gets six zero
-/// constants, leaving that sample's own implicit level resolved to mip 0
-/// exactly as before this row -- the same pre-L56 behavior, not a
-/// regression, for any caller not in a position to synthesize a real
-/// derivative).
+/// real-derivatives-or-zero-constants behavior (real derivatives apply in
+/// the `Fragment` and `Compute` stages, roadmap ENV5(b)(2); every other
+/// caller gets six zero constants, leaving that sample's own implicit
+/// level resolved to mip 0 exactly as before this row -- the same pre-L56
+/// behavior, not a regression, for any caller not in a position to
+/// synthesize a real derivative).
 CubeDirectionDerivatives
 getOrSynthesizeSampleCubeDerivatives(llvm::IRBuilderBase &B,
                                     llvm::Function &Caller, llvm::Value *DirX,

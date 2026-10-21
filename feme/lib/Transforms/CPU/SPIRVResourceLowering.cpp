@@ -6279,7 +6279,7 @@ void lowerImageAccesses(
         continue;
       }
 
-      // Roadmap L52e/L267: `OpImageQueryLod`'s clamped/unclamped
+      // Roadmap L52e/L267/ENV5(b)(2): `OpImageQueryLod`'s clamped/unclamped
       // intrinsic halves (`hasOnlySupportedImageUses` already restricts
       // this to the shapes listed above, with no channel-type
       // restriction -- see that check's own updated doc). Unlike an
@@ -6290,10 +6290,11 @@ void lowerImageAccesses(
       // unconditionally synthesized via `getOrSynthesizeSample2DDeriv
       // atives`, the same helper `Sample2D`'s own implicit-LOD path
       // calls (which itself still only produces a *real* derivative in
-      // the one stage, `Fragment`, this instruction is ever legal from;
-      // outside it, it degenerates to zero constants exactly as
-      // `Sample2D`'s own call site does). `ImageQueryLodPattern` always
-      // legalizes a single `OpImageQueryLod` into two separate
+      // the two stages, `Fragment` and `Compute`
+      // (`VK_KHR_compute_shader_derivatives`), this instruction is ever
+      // legal from; outside those, it degenerates to zero constants
+      // exactly as `Sample2D`'s own call site does). `ImageQueryLodPattern`
+      // always legalizes a single `OpImageQueryLod` into two separate
       // intrinsic calls sharing the same `(image, sampler, coord)`
       // operands, so each is lowered to its own independent
       // `createQueryLod2D` call here (redundantly recomputing the same
