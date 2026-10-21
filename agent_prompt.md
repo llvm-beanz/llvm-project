@@ -69,23 +69,30 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV6(b)`'s remaining 41 cases, in priority order:
-1. `ENV6(b)(3)`:
-   `spec_constant`/`max_varyings`/`misc`/`cache`/`framebuffer_attachment` (21
-   cases, untriaged) — **best next target**, `spec_constant`/`max_varyings` (6
-   cases each) are the largest of the five and worth sampling first for a shared
-   cause.
-2. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) — confirmed genuine
-   rendering-correctness bug, not yet root-caused.
-3. `ENV6(b)(2)`:
-   `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}`
-   (12 cases) — confirmed genuine rendering-correctness bug, not yet
-   root-caused.
-4. `ENV6(c)`: `graphicsfuzz` (106 cases) — unchanged from prior sessions, likely
-   a long tail of distinct small bugs.
+`ENV6(b)(3)`'s remaining 15 cases, in priority order:
+1. `spec_constant.graphics.{geometry,tess_control}.expression.array_size_pass_to_function`
+   (6 cases) and
+   `max_varyings.test_{geometry_io_between_geometry_fragment,tess_eval_io_between_tess_eval_fragment}`
+   (6 cases) -- both confirmed genuine rendering-correctness bugs (`Fail (Values
+   did not match)`/`Fail (Rendered image is not correct...)`), **best next
+   target**. No `FEME_VULKAN_LOG_CREATION_ERRORS` diagnostic exists for either
+   (confirmed this session for `spec_constant`), so this needs
+   `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DUMP_IR_PRENORM`-style IR investigation,
+   not the simpler creation-error pattern every `ENV6(b)` fix so far has used.
+   Sample one case from each sub-cluster first to check for a shared root cause
+   before splitting further.
+2. `cache.misc_tests.invalid_size_test` (3 cases) -- suspected CTS-side harness
+   assertion per the existing `H29f` roadmap note, not independently
+   re-confirmed this session. Lowest priority of the three.
+3. `ENV6(b)(1)`/`ENV6(b)(2)`: `emulate_msrtss` (8
+   cases)/`multisample_interpolation` (12 cases) -- confirmed genuine
+   rendering-correctness bugs from earlier sessions, not yet root-caused,
+   unchanged.
+4. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions,
+   likely a long tail of distinct small bugs.
 5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
-   cases combined) — unchanged from prior sessions.
-6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) — scoped, not
+   cases combined) -- unchanged from prior sessions.
+6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not
    started, lowest priority.
 7. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
