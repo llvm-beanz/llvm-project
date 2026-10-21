@@ -4333,6 +4333,104 @@ TEST(CanonicalizeStageTest, SplitsHullEntryThreadingCapturedSSAValue) {
                "defined in the control-point phase";
 }
 
+/// (Roadmap H4c-b) `dEQP-VK.spirv_assembly.instruction.graphics.barrier.
+/// in_function`'s own real shape: a `GetElementPtrInst` computing the
+/// address of this invocation's own per-vertex output (here,
+/// `@gl_out_pos[%id]`, never `Patch`-decorated) *before* the one group-
+/// sync barrier, with the actual store through that already-computed
+/// pointer placed *after* it -- unlike `SplitsHullEntryThreadingCaptured
+/// SSAValue` above, where the crossing value is an ordinary scalar.
+/// Naively routing the computed *address* itself through the generic
+/// "capture an SSA value via a private global" mechanism is unsound here:
+/// that global's own synthetic `Location` decoration makes
+/// `canonicalizeSPIRVStage`'s later global-discovery scan treat it as a
+/// genuine (if spurious) extra signature element, and the real store
+/// through the reloaded pointer keeps addressing `@gl_out_pos` with a
+/// payload of pointer type -- which never resolves to any of
+/// `feme::getStageOpInfo`'s real scalar/vector overloads, so
+/// `@gl_out_pos` itself is never actually given a real store any later
+/// pass can see, surfacing only as an unresolved `spirv_varN` symbol at
+/// JIT-link time with no earlier diagnostic at all. The fix clones the
+/// `GetElementPtrInst` itself, fresh, into the patch-constant phase
+/// (capturing only its scalar index operand by value, the same way
+/// `SplitsHullEntryThreadingCapturedSSAValue` above already does) so the
+/// patch-constant phase's own store keeps directly addressing the real
+/// `@gl_out_pos` global with its real `<4 x float>` payload, letting
+/// `canonicalizeSPIRVStage` rewrite it into an ordinary typed `Output`
+/// store exactly as it would in the control-point phase.
+TEST(CanonicalizeStageTest, SplitsHullEntryCloningCapturedOutputPointer) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_invocation_id = external addrspace(7) constant i32, !spirv.Decorations !5
+    @gl_in_pos = external addrspace(7) constant [32 x <4 x float>], !spirv.Decorations !1
+    @gl_out_pos = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main() #0 {
+      %id = load i32, ptr addrspace(7) @gl_invocation_id
+      %src = getelementptr [32 x <4 x float>], ptr addrspace(7) @gl_in_pos, i32 0, i32 %id
+      %v = load <4 x float>, ptr addrspace(7) %src
+      %dst = getelementptr [3 x <4 x float>], ptr addrspace(8) @gl_out_pos, i32 0, i32 %id
+      call void @llvm.spv.group.memory.barrier.with.group.sync()
+      store <4 x float> %v, ptr addrspace(8) %dst
+      ret void
+    }
+    declare void @llvm.spv.group.memory.barrier.with.group.sync()
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!2}
+    !1 = !{!2}
+    !2 = !{i32 11, i32 0}
+    !5 = !{!6}
+    !6 = !{i32 11, i32 8}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // No synthetic pointer-typed capture global was created for the GEP's
+  // own computed address -- only (at most) a scalar one for its index
+  // operand -- unlike the buggy fallback this test guards against, which
+  // would capture the address itself.
+  for (GlobalVariable &GV : M->globals())
+    if (GV.getName().contains("patchconst.capture"))
+      EXPECT_FALSE(GV.getValueType()->isPointerTy())
+          << "a crossing stage-IO-global address must never itself be "
+             "threaded through a synthetic capture global: " << GV;
+
+  // The patch-constant phase's store still addresses the real
+  // `@gl_out_pos` global directly, with a real `<4 x float>` payload --
+  // not a pointer -- so it gets rewritten into an ordinary typed `Output`
+  // stage-op call rather than surviving as a raw, unresolved store.
+  bool FoundTypedStore = false;
+  for (Instruction &I : instructions(PatchConstant)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    StageOpKind Kind;
+    if (!isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    EXPECT_FALSE(CI->getArgOperand(3)->getType()->isPointerTy())
+        << "an output-store call's own value operand must never be a "
+           "pointer: " << *CI;
+    FoundTypedStore = true;
+  }
+  EXPECT_TRUE(FoundTypedStore);
+
+  // No instruction left in either phase still references `@gl_out_pos`
+  // via a raw, un-rewritten `GetElementPtrInst`/`StoreInst` pair -- every
+  // real use was folded into the typed stage-op call checked above.
+  for (Function *F : {ControlPoint, PatchConstant})
+    for (Instruction &I : instructions(*F))
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+        EXPECT_NE(GEP->getPointerOperand(), M->getGlobalVariable("gl_out_pos"))
+            << "a raw GEP into the stage-IO global must not survive "
+               "canonicalization in "
+            << F->getName();
+}
+
 /// (Roadmap L223) A captured value that is (through the inliner's own
 /// well-known convention of hoisting every inlined callee's static
 /// `alloca` into the *caller's* entry block) an `alloca` whose every real

@@ -3652,17 +3652,61 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   // first-use order, deduplicated by value, so each is threaded through
   // exactly one new patch-shared global below rather than erroring as
   // before.
+  // (Roadmap H4c-b) A pointer-typed cross-barrier value that is itself a
+  // `GetElementPtrInst` rooted at a real stage-IO global (e.g. `%p =
+  // getelementptr @spirv_var_2, ..., i32 %InvocationID`, computed before
+  // the barrier and *stored through* -- never loaded from -- after it,
+  // exactly `dEQP-VK.spirv_assembly.instruction.graphics.barrier.
+  // in_function`'s own shape) must never be threaded through the generic
+  // "capture the value itself via a private global" mechanism just below:
+  // that would capture the computed *address* as an opaque payload, and
+  // `canonicalizeSPIRVStage`'s own per-phase `classifySPIRVElement` would
+  // then misclassify both the synthetic capture global (an
+  // address-space-8 global with its own synthetic `Location` decoration,
+  // indistinguishable at that point from a genuine signature element) as
+  // a spurious extra `Input`, and the real post-barrier store through the
+  // reloaded pointer as a typeless/"unknown" `Output` write -- surfacing
+  // as a JIT-link-time "Symbols not found: [ spirv_varN ]" failure, since
+  // the real global this pointer addresses is never given a real
+  // store/load the rest of this pass's machinery can see and so is never
+  // actually materialized -- rather than the ordinary typed
+  // vertex-frequency output store it actually is. Such a `GetElementPtr`
+  // is instead cloned fresh into \p PatchConstantPhase, once its own
+  // index operands are captured by value as usual below (its base global
+  // needs no capturing at all -- it is already visible, unchanged, to
+  // both functions), so `canonicalizeSPIRVStage` sees the identical
+  // access-chain shape it already knows how to rewrite into a real,
+  // typed stage-IO store.
   SmallVector<Instruction *, 4> Captured;
   SmallPtrSet<Instruction *, 4> CapturedSeen;
+  SmallVector<GetElementPtrInst *, 4> ClonedAddressComputations;
+  SmallPtrSet<Instruction *, 4> ClonedAddressSeen;
+  SmallVector<Instruction *, 8> CrossBarrierWorklist;
   for (BasicBlock *BB : Region)
     for (Instruction &I : *BB)
-      for (Value *Op : I.operands()) {
-        auto *OpI = dyn_cast<Instruction>(Op);
-        if (!OpI || Region.contains(OpI->getParent()))
-          continue;
-        if (CapturedSeen.insert(OpI).second)
-          Captured.push_back(OpI);
-      }
+      for (Value *Op : I.operands())
+        if (auto *OpI = dyn_cast<Instruction>(Op);
+            OpI && !Region.contains(OpI->getParent()))
+          CrossBarrierWorklist.push_back(OpI);
+  while (!CrossBarrierWorklist.empty()) {
+    Instruction *OpI = CrossBarrierWorklist.pop_back_val();
+    auto *GEP = dyn_cast<GetElementPtrInst>(OpI);
+    unsigned AddrSpace = 0;
+    if (GEP && graphics::isSPIRVStageIOGlobal(
+                   dyn_cast<GlobalVariable>(GEP->getPointerOperand()),
+                   AddrSpace)) {
+      if (!ClonedAddressSeen.insert(GEP).second)
+        continue;
+      ClonedAddressComputations.push_back(GEP);
+      for (Value *Idx : GEP->indices())
+        if (auto *IdxI = dyn_cast<Instruction>(Idx);
+            IdxI && !Region.contains(IdxI->getParent()))
+          CrossBarrierWorklist.push_back(IdxI);
+      continue;
+    }
+    if (CapturedSeen.insert(OpI).second)
+      Captured.push_back(OpI);
+  }
 
   PatchConstantPhase =
       Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
@@ -3706,9 +3750,10 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   // defined behavior *after* a barrier establishes visibility, so any
   // value defined *before* the one barrier this pass splits at can only
   // ever depend on this invocation's own state.
-  if (!Captured.empty()) {
-    BasicBlock *CaptureEntry = BasicBlock::Create(
-        F.getContext(), "patchconst.captures", PatchConstantPhase);
+  BasicBlock *CaptureEntry = nullptr;
+  if (!Captured.empty() || !ClonedAddressComputations.empty()) {
+    CaptureEntry = BasicBlock::Create(F.getContext(), "patchconst.captures",
+                                      PatchConstantPhase);
     IRBuilder<> CaptureBuilder(CaptureEntry);
     unsigned NextLocation = computeNextSyntheticLocation(*F.getParent());
     for (Instruction *V : Captured) {
@@ -3839,6 +3884,21 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
 
       VMap[V] = CaptureBuilder.CreateLoad(Ty, GV, V->getName() + ".captured");
     }
+
+    // (Roadmap H4c-b) Clone each crossing stage-IO-global `GetElementPtr`
+    // collected above directly into `CaptureEntry`, rather than
+    // threading its already-computed address through a private capture
+    // global like an ordinary scalar -- see this loop's own leading
+    // comment above `Captured`'s declaration.
+    for (GetElementPtrInst *GEP : ClonedAddressComputations) {
+      Instruction *Clone = GEP->clone();
+      Clone->setName(GEP->getName());
+      Clone->insertInto(CaptureEntry, CaptureEntry->end());
+      VMap[GEP] = Clone;
+    }
+    for (GetElementPtrInst *GEP : ClonedAddressComputations)
+      RemapInstruction(cast<Instruction>(VMap[GEP]), VMap,
+                       RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
   }
 
   SmallVector<BasicBlock *, 8> OrderedRegion;
@@ -3891,7 +3951,7 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
   // preserves `F`'s own block order and `PatchEntry` is always the first
   // block in `Region` by construction -- is `PatchConstantPhase`'s first
   // *cloned* block.
-  if (!Captured.empty())
+  if (CaptureEntry)
     UncondBrInst::Create(cast<BasicBlock>(VMap[PatchEntry]),
                          &PatchConstantPhase->front());
 
