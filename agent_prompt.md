@@ -69,34 +69,33 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(next large untriaged block, ~1-2 hrs to triage)** `ENV5(c)`: 38 untriaged
-   `graphics.*` cases (`float16` 10, `variable_init` 10, `unused_variables` 8,
-   `barrier` 5, `module` 4, `indexing` 1) — no logs/build done yet for this
-   block in any session so far. `float16` and `variable_init` are the largest
-   clusters, good first targets. Same triage pattern as every prior cluster:
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1`/direct `deqp-vk --deqp-case=...` before
-   guessing at a fix.
-2. **(low priority, structural, revisit only if a design change opens it up)**
-   `opunreachable.all`: the linearizer does not support unreachable-terminated
-   blocks (tracked since `ENV3`'s `assertion-crash-cases.txt`). Not expected to
-   be a quick fix; don't start here next session unless `ENV5(c)` is fully
-   closed first.
+1. **(~1-2 hrs, best next target)** `ENV5(c)(2)`: confirm the
+   `main.patchconstant`-specific dominance-bug theory with a minimal standalone
+   `.ll` reduction of just that clone's CFG, run through `feme-opt --llvm
+   -passes=feme-cpu-linearize,verify` (fast iteration, bypasses the full CTS
+   harness). If confirmed, extend `L452(d)`'s
+   `peelWouldDestroyAncestorReconvergencePoint` guard to cover whatever makes
+   `.patchconstant`'s CFG differ from the primary entry point.
+2. **(~30-60 min each)** `ENV5(c)`'s other 10 cases: `barrier` (5, three
+   distinct error signatures already captured, not yet root-caused),
+   `module.same_module*` (4, no pipeline-creation error logged, needs
+   render-verification-focused diagnosis), `indexing.output.component_tessc` (1,
+   shares a "JIT session error: Symbols not found" signature with 2 `barrier`
+   cases).
 3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
-   current CTS corpus collection, still running uninterrupted across many
-   sessions (`initial-01187` and climbing as of this session's last check). Keep
-   checking `ps aux | grep deqp-vk` and batch-file growth each session; let it
-   finish on its own before writing up final Pass/Fail/NotSupported/Crashed
-   totals and striking `ENV4` in `Roadmap.md`.
+   corpus collection, still running uninterrupted (past `initial-01802` as of
+   this session). Keep checking `ps aux | grep deqp-vk` and qpa growth each
+   session; write up final totals and strike `ENV4` in `Roadmap.md` once it
+   finishes.
 4. **(low priority, unchanged across many sessions)** Upstream the 3
    `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp
-   assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to
-   `llvm-beanz/offload-test-suite` if push access ever becomes available.
+   assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) if push
+   access ever becomes available.
 
 **Next action (under two minutes):** `cd
 /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan &&
 FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
---deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.float16.scalar'
---deqp-log-images=disable` (or the nearest matching real `graphics.float16.*`
-case name) to get the first real error string for `ENV5(c)`'s largest untriaged
-cluster.
-
+--deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.barrier.compute_shared_memory_all'
+--deqp-log-images=disable` (or the nearest matching real `graphics.barrier.*`
+case name) to get the first real error string for `ENV5(c)`'s next-largest
+untriaged cluster.
