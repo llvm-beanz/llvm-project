@@ -1403,8 +1403,23 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   // unconditionally too, for the same reason as `DepthClampEnable` above.
   if ((Out.DynamicStates & DynamicStateDepthBiasEnable) == 0)
     Out.Raster.DepthBiasEnable = Info->depthBiasEnable != VK_FALSE;
-  if (Info->depthBiasEnable &&
-      (Out.DynamicStates & DynamicStateDepthBias) == 0) {
+  // (roadmap ENV6(b)) This used to also require `Info->depthBiasEnable`
+  // itself before reading the constant/clamp/slope factors below, which
+  // is wrong whenever `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE` makes the
+  // *enable* flag dynamic while these factors stay static
+  // (`dEQP-VK.pipeline.*.extended_dynamic_state.*.depth_bias_enable`'s own
+  // shape: a pipeline created with `depthBiasEnable = VK_FALSE` whose
+  // factors are nonetheless real, meant to take effect once
+  // `vkCmdSetDepthBiasEnable(true)` dynamically enables them). Gating this
+  // read on the pipeline's own static (and, in that shape, irrelevant)
+  // `depthBiasEnable` value silently left every such pipeline's factors at
+  // their zero default, so a later dynamic enable rasterized with no bias
+  // at all. These fields are otherwise unused whenever bias ends up
+  // disabled (enable resolves to `false` one way or another), so reading
+  // them unconditionally here is always safe -- only an actually-dynamic
+  // `VK_DYNAMIC_STATE_DEPTH_BIAS` itself (resolved at draw time in
+  // `buildExecutorPipeline`) still needs to override them.
+  if ((Out.DynamicStates & DynamicStateDepthBias) == 0) {
     Out.Raster.DepthBiasConstantFactor = Info->depthBiasConstantFactor;
     Out.Raster.DepthBiasClamp = Info->depthBiasClamp;
     Out.Raster.DepthBiasSlopeFactor = Info->depthBiasSlopeFactor;

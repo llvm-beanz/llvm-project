@@ -2030,6 +2030,48 @@ TEST_F(GraphicsPipelineTest, DynamicDepthBiasEnableOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap ENV6(b)) `dEQP-VK.pipeline.*.extended_dynamic_state.*.depth_bias_
+/// enable`'s exact shape: `depthBiasEnable` is created statically `VK_FALSE`
+/// but made dynamic (`VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE`), while the
+/// constant/clamp/slope factors stay static and nonzero. Those factors must
+/// still be captured from `pRasterizationState` at pipeline-creation time --
+/// gating that capture on the pipeline's own (here irrelevant) static
+/// `depthBiasEnable` value left every such pipeline's factors at zero,
+/// silently rasterizing with no bias at all once dynamically enabled.
+TEST_F(GraphicsPipelineTest,
+       DynamicDepthBiasEnablePreservesStaticFactorsWhenCreatedDisabled) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.depthBiasEnable = VK_FALSE;
+  Raster.depthBiasConstantFactor = 2e7f;
+  Raster.depthBiasClamp = 0.25f;
+  Raster.depthBiasSlopeFactor = 0.0f;
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState DynState;
+  DynState.DepthBiasEnable = true;
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(DynState).getRasterState();
+  EXPECT_TRUE(Resolved.DepthBiasEnable);
+  EXPECT_EQ(Resolved.DepthBiasConstantFactor, 2e7f);
+  EXPECT_EQ(Resolved.DepthBiasClamp, 0.25f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (roadmap H7d) `depthBounds`: a pipeline may enable
 /// `depthBoundsTestEnable` with static `min`/`maxDepthBounds`, which
 /// `translateDepthStencilState` now accepts (instead of unconditionally
