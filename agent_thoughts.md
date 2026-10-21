@@ -128080,3 +128080,34 @@ The error text (`'llvm.load' op operand #0 must be LLVM pointer type, but got 'i
 3. **(~30-60 min, needs a real build+trace, not log-mining)** `opselect.array_stride_select` (1, custom-array-stride constant-legalization gap), `entrypoint.tess_con_*` (3, likely tessellation gap), `image_query.samples_storage` (1, the last `ENV5(d)` case).
 4. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in `Roadmap.md` if clean.
 5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV5(a)(2) fixed -- opcopylogical's matrix-layout/array-stride substitution gap (9 cases), plus a git-checkout near-miss
+
+**Bottom line**: all 9 `opcopylogical` CTS cases pass now. `check-feme` clean (3823/3827, 4 Unsupported, 0 Failed). 3 commits landed. ENV4's 6 background workers resumed. `vulkaninfo` confirmed `FeMe CPU Vulkan Device` at start and after rebuild.
+
+## What changed
+
+1. `convertCopyLogicalValue` (SPIRVToLLVM lowering for `spirv.CopyLogical`) now threads a `DstLLVMTypeHint` down through struct/array recursion, carrying the *real* destination slot type from the parent level -- the only place a struct member's matrix-layout decoration or an array's enclosing stride substitution actually lives.
+2. Two new value-level matrix transpose/pad helpers (`convertLogicalMatrixToPhysical`/`convertPhysicalMatrixToLogical`), mirroring the existing `RowMajorMatrixStorePattern`/`LoadPattern` logic but operating on pure SSA values (CopyLogical has no real memory access to anchor at).
+3. A `reinterpretLeafValue` alloca-roundtrip helper for same-bytes array-stride reinterpretation.
+4. Two gating bugs found and fixed mid-implementation (both now written up in `VulkanCTSReport.md`'s L473 and `Roadmap.md`'s struck-through `ENV5(a)(2)` row):
+   - Matrix substitution must gate through `isMatrixMemberLayoutRepresentable`, not `getMatrixMemberLayout`'s mere presence (every Block-member matrix carries `MatrixStride` regardless of representability) -- this one caused a SIGABRT on first rebuild.
+   - An array element's "natural" recursion type must come from `TypeConverter.convertType()` directly, not the parent's substituted slot type -- the two nested-array cases have an *asymmetric* substitution (one side's inner array stride-substituted, the other's not), and forwarding the parent hint silently read wrong bytes.
+
+## The near-miss (now documented in `.instructions.md`)
+
+Mid-session, `git clang-format HEAD -- <file>` (no `--diff`) refused because of unstaged changes. I ran `git checkout -- <file>` to "clean up and retry" -- this discarded the **entire ~450-line uncommitted fix**, not just a formatting attempt, reverting the file to the last commit. Lucky break: the prior session's own detailed written analysis (captured in this conversation's context) plus one earlier `view` call's output of the pre-fix baseline code were enough to reconstruct the whole thing from scratch, this time faster since the design was already fully worked out. Added a `.instructions.md` entry: never `git checkout --`/`git restore` a path as a "retry" step while uncommitted work exists in it; use `clang-format-diff -p1 -i < <(git diff -U0 -- <file>)` instead (no stage/commit prerequisite, no destructive retry risk).
+
+## Commits this session
+
+1. `acd1153202ce` -- the actual fix + 3 new lit tests.
+2. `f34603a30aa8` -- `Roadmap.md`/`VulkanCTSReport.md` updates.
+3. `d4938466886d` -- `.instructions.md` near-miss writeup.
+
+## Next steps (ranked, with time estimates)
+
+1. **(~30-60 min)** `ENV5(a)`'s remaining 6 cases: `opselect.array_stride_select` (1, custom-array-stride constant-legalization gap, `failed to legalize 'spirv.Constant'`) and `entrypoint.tess_con_*` (3, likely tessellation gap, no error logged -- needs a real build+trace, not log-mining). `opptrequal`/`opptrnotequal` (2) is already-known-structural (`feme-cpu-simdize` groupshared-global limitation), not a quick fix.
+2. **(~1-2 hours, needs real build+trace)** `ENV5(b)`'s remaining 24 cases: `compute_shader_derivatives.lod_op.*` (9, numeric) and 15 untriaged `compute.*` cases.
+3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus collection. The 6 background workers were paused (SIGSTOP) by a prior session to allow this session's builds; resumed via `kill -CONT` at the end of this session -- confirmed all 6 back to `Rl` (running) state. Let it keep progressing; do not start another build while it's mid-run.
+4. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+5. **(worth a quick check, ~15 min, carried forward from a prior session)** A broader regression sweep for any other `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape in the untriaged `compute.*`/`graphics.*` failure lists -- the trivial vertex-shader passthrough pattern L472 fixed is common to many Amber-based tests, not just `terminate_invocation`.
