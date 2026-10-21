@@ -128516,3 +128516,33 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device
 3. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one group-sync barrier per Hull entry point" limitation, lowest priority, not a quick fix.
 4. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
 5. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `module.same_module*` fully closed out (ENV5(c)(8)), two root causes, three fixes
+
+**Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.opcompositeextract.struct16arr3_tessc' --deqp-log-images=disable` to get a fresh error signature for `ENV5(c)(4)`'s next-largest untriaged cluster (6 deeper `float16.*_tessc` cases).
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, twice this session). No `deqp-vk` processes running.
+
+## What got done
+
+1. **Fixed `canonicalizeSPIRVStage`'s stale-sibling-global signature leak** (`L484`, `CanonicalizeStage.cpp`): a *live* `GV.use_empty()` query in the "never-read/never-written varying" fallback picked up an earlier-canonicalized sibling entry's own now-orphaned globals in a multi-entry-point module. Fixed by snapshotting `use_empty()` once, before any entry in the module is touched. Fixed `same_module` alone. New test `DoesNotLeakOrphanedSiblingEntryGlobalsIntoLaterEntrySignature`, confirmed fail-without/pass-with-fix. Committed `a62f678e497a`.
+2. **Fixed stage-agnostic entry-point lookup in `GraphicsPipeline.cpp`** (`L485` part 1): `compileGraphicsStage` used a raw `Module::getFunction(EntryPoint)` instead of `feme::findFunctionByEntryPointName(Module, Name, Stage)` (which already existed, with a header comment warning against exactly this anti-pattern). Fixed `same_module_geom`. New tests `AcceptsGeometryStageInCombinedSameNameModule`/`AcceptsTessellationStagesInCombinedSameNameModule` (`GraphicsPipelineTest.cpp`), hand-assembled via `spirv-as` since MLIR's `spirv` dialect can't express two `OpEntryPoint`s sharing one Name. Committed `1261ec0459be`.
+3. **Fixed `.patchconstant` clone's lost entry-name in Hull splitting** (`L485` part 2): `splitBarrierlessTessellationControlEntry`/`splitTessellationControlEntry` named their clone from the Hull entry's own LLVM symbol, then dropped its `feme.entry.name` instead of re-stamping it from the original entry's *entry point name*. Fixed both `tessc_tesse*` cases. New test `PatchConstantCloneIsFindableByEntryPointNameEvenWhenHullSymbolIsDisambiguated`. Committed `3f03a5dd514b`.
+4. **Docs**: `Roadmap.md` (struck `module.same_module*`, remaining count 13→9) and `VulkanCTSReport.md` (`L484`/`L485` entries). Committed `5b2108f37b95`.
+5. **Codified the technique** in `.instructions.md`: multi-entry-point-same-Name SPIR-V bugs need `(Name, Stage)` lookups, not bare symbols, and need raw `spirv-as` fixtures (not MLIR `spirv`-dialect text) to test. Also noted where the `feme-translate` IR-inspection pipeline currently dead-ends (no llvm-dialect-text → LLVM-IR-text path). Committed `2e98d0f31603`.
+6. **Full `check-feme` run**: 3838/3842 Passed, 4 Unsupported, 0 Failed — no regressions. Full `FeMeVulkanTests` (899 tests) and `FeMeTransformsGraphicsTests` (149 tests) both pass. All 4 real CTS `module.same_module*` cases confirmed **Pass** end-to-end.
+
+## Wins
+
+- **All 4 cases** in `module.same_module*` are now fixed and verified against the real CTS binary, not just unit tests.
+- 5 commits this session (3 code+test, 1 docs, 1 instructions), each independently bisectable — the 3 code fixes are logically separate bugs even though 2 of them live in the same file.
+- Every fix confirmed via the stash-and-rebuild technique (fails without, passes with) at both the unit-test and real-CTS level.
+- Found and fixed a gap in the test-infrastructure itself: `assembleSPIRV`'s MLIR-dialect round trip cannot express the exact shape (`createCombinedModule`'s shared-Name entry points) needed to regress this bug class — `createModuleFromWords` + `spirv-as` fixtures are now a reusable pattern for any future test needing this shape.
+
+## State for next session
+
+`ENV5(c)`'s remaining 9 cases, in priority order:
+1. `ENV5(c)(4)`: 6 deeper `float16.*_tessc` cases (`struct16arr3`/`v3f16arr5`/`v4f16arr3`) — same `foldRedundantFlowBlock` bug family as `L481`'s partial fix, but the aliasing predecessors are no longer immediate fold targets; needs either a transitive-reconvergence check or whole-fixed-point-loop slot-write tracking. Get a fresh standalone `.ll` reduction first (`FEME_DUMP_IR_PRELINEARIZE=1` + `feme-opt --llvm -passes=feme-cpu-linearize,verify`).
+2. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one group-sync barrier per Hull entry point" limitation, lowest priority, not a quick fix.
+3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
+4. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
