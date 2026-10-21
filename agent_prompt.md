@@ -69,17 +69,22 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV5(c)`'s remaining 9 cases, in priority order:
-1. `ENV5(c)(4)`: 6 deeper `float16.*_tessc` cases
-   (`struct16arr3`/`v3f16arr5`/`v4f16arr3`) — same `foldRedundantFlowBlock` bug
-   family as `L481`'s partial fix, but the aliasing predecessors are no longer
-   immediate fold targets; needs either a transitive-reconvergence check or
-   whole-fixed-point-loop slot-write tracking. Get a fresh standalone `.ll`
-   reduction first (`FEME_DUMP_IR_PRELINEARIZE=1` + `feme-opt --llvm
-   -passes=feme-cpu-linearize,verify`).
-2. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one
-   group-sync barrier per Hull entry point" limitation, lowest priority, not a
-   quick fix.
+`ENV5(c)`'s remaining 3 cases, in priority order:
+1. `ENV5(c)(7)(a)`: `barrier.{in_if,in_switch}` (2 cases) — **best next
+   target**. Generalize `splitTessellationControlEntry`
+   (`CanonicalizeStage.cpp:3644`) to accept N barrier call sites proven to be
+   the same dynamic barrier (no other barrier reachable between function entry
+   and each one; all N reconverge at one common block with nothing but the
+   barrier-then-branch in each originating block). Use that common reconvergence
+   block as the one flood-fill root instead of splitting a single
+   `BarrierBlock`; extend the existing cross-barrier-value capture logic to
+   insert captures at the end of all N barrier blocks. Get a fresh standalone
+   `.ll` reduction first (`FEME_DUMP_IR_PRECANON=1`, already captured this
+   session at `/tmp/in_if_precanon.txt` for reference).
+2. `ENV5(c)(7)(b)`: `barrier.in_loop` (1 case) — structural, needs a lockstep
+   multi-iteration barrier execution model; likely needs a design-doc update
+   before implementation. Lowest priority; revisit only after `(a)` or a
+   deliberate design decision.
 3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
    cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
 4. (low priority, unchanged for many sessions) Upstream the 3
