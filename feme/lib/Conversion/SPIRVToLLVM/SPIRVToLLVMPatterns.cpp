@@ -17426,6 +17426,99 @@ private:
   const feme::spirv::SpecConstantValueMap &SpecConstants;
 };
 
+/// Converts a `Private`-storage `spirv.GlobalVariable` whose own
+/// `initializer` is a `FlatSymbolRefAttr` naming a plain (scalar/vector)
+/// `spirv.SpecConstant` -- e.g. `dEQP-VK.spirv_assembly.instruction.
+/// compute.vector_shuffle.vector_shuffle`'s own
+/// `%var = OpVariable %ptr Private %spec_const`. Upstream MLIR's own
+/// `GlobalVariablePattern` unconditionally bails (`failure()`) whenever
+/// `op.getInitializer()` is set at all, explicitly including
+/// specialization constants ("Specialization constants are not
+/// considered as well"), leaving this shape for FeMe's own pattern --
+/// mirroring `PrivatePointerInitializerGlobalVariablePattern` immediately
+/// above (which handles the sibling shape of an `initializer` naming
+/// another `spirv.GlobalVariable`) and reusing the same resolved
+/// compile-time value `ReferenceOfConversionPattern` above already relies
+/// on for a direct `spirv.mlir.referenceof` of the same symbol (this ICD
+/// has no runtime `VkSpecializationInfo` override, so a spec constant's
+/// declared default value is the only value it could ever actually take).
+/// Declines any symbol `prepareSpecConstants` did not resolve to a
+/// scalar/vector value (a `spirv.SpecConstantComposite`, which would need
+/// `PrivateAggregateGlobalVariablePattern`'s own per-leaf recursion
+/// instead -- not yet needed by any known CTS case for this particular
+/// initializer-symbol shape).
+class PrivateSpecConstantInitializerGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  PrivateSpecConstantInitializerGlobalVariablePattern(
+      mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
+      mlir::PatternBenefit Benefit,
+      const feme::spirv::SpecConstantValueMap &SpecConstants)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp>(
+            Context, TypeConverter, Benefit),
+        SpecConstants(SpecConstants) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Private)
+      return Rewriter.notifyMatchFailure(Op, "not a Private-storage variable");
+    mlir::FlatSymbolRefAttr InitializerSym = Op.getInitializerAttr();
+    if (!InitializerSym)
+      return Rewriter.notifyMatchFailure(Op, "no initializer symbol");
+
+    auto It = SpecConstants.find(InitializerSym.getValue());
+    if (It == SpecConstants.end())
+      return Rewriter.notifyMatchFailure(
+          Op, "initializer symbol has no resolvable scalar/vector "
+              "compile-time value");
+
+    mlir::Type SrcValueType = It->second.Type;
+    mlir::Attribute SrcValue = It->second.Value;
+    mlir::Type DstType = getTypeConverter()->convertType(SrcValueType);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    auto NewGlobal = Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::Private,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0);
+    mlir::Region &InitRegion = NewGlobal.getInitializerRegion();
+    mlir::Block *Block = Rewriter.createBlock(&InitRegion);
+    mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+    Rewriter.setInsertionPointToStart(Block);
+
+    mlir::Value InitValue;
+    if (mlir::IntegerType SrcIntType =
+            getSignedOrUnsignedIntElementType(SrcValueType)) {
+      mlir::IntegerType SignlessType =
+          Rewriter.getIntegerType(SrcIntType.getWidth());
+      if (mlir::isa<mlir::VectorType>(SrcValueType)) {
+        auto SrcElements = mlir::cast<mlir::DenseIntElementsAttr>(SrcValue);
+        InitValue = mlir::LLVM::ConstantOp::create(
+            Rewriter, NewGlobal.getLoc(), DstType,
+            SrcElements.mapValues(
+                SignlessType,
+                [](const llvm::APInt &Value) { return Value; }));
+      } else {
+        auto SrcAttr = mlir::cast<mlir::IntegerAttr>(SrcValue);
+        InitValue = mlir::LLVM::ConstantOp::create(
+            Rewriter, NewGlobal.getLoc(), DstType,
+            Rewriter.getIntegerAttr(SignlessType, SrcAttr.getValue()));
+      }
+    } else {
+      InitValue = mlir::LLVM::ConstantOp::create(Rewriter, NewGlobal.getLoc(),
+                                                 DstType, SrcValue);
+    }
+    mlir::LLVM::ReturnOp::create(Rewriter, NewGlobal.getLoc(),
+                                 llvm::ArrayRef<mlir::Value>({InitValue}));
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::SpecConstantValueMap &SpecConstants;
+};
+
 /// Converts a uniform buffer array's own content (see BlockElement's own
 /// comment for the `layout(std140) uniform Input { uint data[16]; }` shape
 /// roadmap F12a covers) to the `!llvm.array<0 x ElemTy>` marker a storage
@@ -18339,6 +18432,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ReferenceOfConversionPattern>(Patterns.getContext(),
                                              TypeConverter, FeMeBenefit,
                                              SpecConstants);
+  Patterns.add<PrivateSpecConstantInitializerGlobalVariablePattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit, SpecConstants);
   Patterns.add<StageIOArrayAccessChainPattern<mlir::spirv::AccessChainOp>,
                StageIOArrayAccessChainPattern<
                    mlir::spirv::InBoundsAccessChainOp>>(

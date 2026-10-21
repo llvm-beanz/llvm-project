@@ -32,3 +32,28 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, VariablePointers
     spirv.ReturnValue %v : f32
   }
 }
+
+// -----
+
+// `dEQP-VK.spirv_assembly.instruction.compute.vector_shuffle.
+// vector_shuffle`'s own shape: a `Private`-storage `spirv.GlobalVariable`
+// whose `initializer` is a `FlatSymbolRefAttr` naming a plain (scalar)
+// `spirv.SpecConstant`, not a `spirv.SpecConstantCompositeOp`. Upstream
+// MLIR's own `spirv.GlobalVariable` verifier does allow this particular
+// shape (a `spirv.SpecConstant`-result `initializer` passes its "must be
+// result of a spirv.SpecConstant ... op" check), so this region parses
+// under the normal verifier, unlike the sibling region above.
+//
+// CHECK-LABEL: llvm.mlir.global private @priv()
+// CHECK-SAME: : i32
+// CHECK: %[[C:.*]] = llvm.mlir.constant(3 : i32) : i32
+// CHECK: llvm.return %[[C]] : i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @sc = 3 : i32
+  spirv.GlobalVariable @priv initializer(@sc) : !spirv.ptr<i32, Private>
+  spirv.func @read_priv() -> i32 "None" {
+    %0 = spirv.mlir.addressof @priv : !spirv.ptr<i32, Private>
+    %v = spirv.Load "Private" %0 : i32
+    spirv.ReturnValue %v : i32
+  }
+}
