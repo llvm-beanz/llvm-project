@@ -128679,3 +128679,35 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device
 5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) — unchanged from prior sessions.
 6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) — scoped, not started, lowest priority.
 7. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `ENV6(b)(3)` -- two more `pipeline.*` fixes (misc/framebuffer_attachment, 6 cases), 15 remain
+
+**Next action (under two minutes):** `FEME_DUMP_IR_PRELINEARIZE=1` against `dEQP-VK.pipeline.monolithic.spec_constant.graphics.geometry.expression.array_size_pass_to_function` (one of the 6 `spec_constant` cases) to start root-causing the next cluster -- no creation-error diagnostic exists for it, so this needs the IR-dump path, not the simpler `FEME_VULKAN_LOG_CREATION_ERRORS=1` pattern every `ENV6(b)` fix so far has used.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start of session). Clean git tree, no stray `deqp-vk` processes.
+
+## What got done
+
+1. **`misc.no_rendering` (3 cases, all pipeline-construction variants)**: CTS deliberately creates a pipeline with no `VkRenderPass` and no chained `VkPipelineRenderingCreateInfo`, draws it with 0 color attachments. `getRenderTargets` hard-rejected this as an error. Confirmed via the real Vulkan-Docs `pipelines.adoc` source (fetched directly, not via `web_search`, which gave the wrong answer twice) that omitting both is spec-legal -- an implicit all-zero default. Fixed with a `NoAttachmentsRendering` fallback. **3/3 now Pass.** Commit `bb1f31693f93`.
+2. **`misc.interpolate_at_sample_no_sample_shading` (1 case)**: still failed after (1) with a different error -- `resolveDrawAttachments` hard-required an exact color-attachment-count match between the pipeline and the render target. This CTS test deliberately draws a 0-color-attachment pipeline against a 1-attachment render target to force per-sample shading. Fixed by only walking the pipeline's own declared count, treating extra render-target slots as unused (same convention the file already uses for an explicit unused slot). **1/1 now Pass.** Commit `b1afccc8fa7a`.
+3. **Confirmed `framebuffer_attachment.no_attachments_ms` (2 cases) already passes**, no code change -- an apparent side effect of an earlier session's `multisample.mixed_count` fix.
+4. **Two new regression tests** (`GraphicsPipelineTest.AcceptsNoRenderPassAndNoRenderingCreateInfo`, `DrawTest.DynamicRenderingPipelineDeclaresFewerColorAttachmentsThanRenderTarget`), both confirmed passing against the fix.
+5. **Verification**: full `FeMeVulkanTests` unit suite (904/904 Pass), `check-feme` (3847/3851 Passed, 4 Unsupported, 0 regressions), and a targeted `dEQP-VK.pipeline.*.misc.*,dEQP-VK.pipeline.*.framebuffer_attachment.*` sweep (3,989 cases) showing exactly the 8 already-known `emulate_msrtss` failures and nothing new.
+6. **Docs**: `VulkanCTSReport.md`'s `L498` entry; `Roadmap.md`'s `ENV6(b)` tally updated (146/181 fixed, 35 remain) and `ENV6(b)(3)` struck through for the misc/framebuffer_attachment pair, narrowed to the remaining 15 `spec_constant`/`max_varyings`/`cache` cases; `.instructions.md` got a new entry on preferring raw Vulkan-Docs `.adoc` fetches (including `chapters/commonvalidity/*.adoc`) over `web_search` for exact VUID wording.
+
+## Wins
+
+- Two more genuine, narrowly-scoped ICD bugs fixed and regression-tested in their own commits, closing `ENV6(b)(3)`'s `misc`/`framebuffer_attachment` sub-cluster entirely.
+- Caught two confidently-wrong `web_search` answers about Vulkan spec semantics by insisting on the raw `.adoc` source -- codified as a standing instruction so future sessions don't repeat the detour.
+- Found the real commonvalidity VUID (`VUID-{refpage}-colorAttachmentCount-06179`) is technically unconditional, correctly identifying that the second fix tolerates CTS exercising an undefined-but-hardware-tolerated shape rather than mis-reading the spec as permitting it outright.
+
+## State for next session
+
+`ENV6(b)(3)`'s remaining 15 cases, in priority order:
+1. `spec_constant.graphics.{geometry,tess_control}.expression.array_size_pass_to_function` (6 cases) and `max_varyings.test_{geometry_io_between_geometry_fragment,tess_eval_io_between_tess_eval_fragment}` (6 cases) -- both confirmed genuine rendering-correctness bugs (`Fail (Values did not match)`/`Fail (Rendered image is not correct...)`), **best next target**. No `FEME_VULKAN_LOG_CREATION_ERRORS` diagnostic exists for either (confirmed this session for `spec_constant`), so this needs `FEME_DUMP_IR_PRELINEARIZE`/`FEME_DUMP_IR_PRENORM`-style IR investigation, not the simpler creation-error pattern every `ENV6(b)` fix so far has used. Sample one case from each sub-cluster first to check for a shared root cause before splitting further.
+2. `cache.misc_tests.invalid_size_test` (3 cases) -- suspected CTS-side harness assertion per the existing `H29f` roadmap note, not independently re-confirmed this session. Lowest priority of the three.
+3. `ENV6(b)(1)`/`ENV6(b)(2)`: `emulate_msrtss` (8 cases)/`multisample_interpolation` (12 cases) -- confirmed genuine rendering-correctness bugs from earlier sessions, not yet root-caused, unchanged.
+4. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions, likely a long tail of distinct small bugs.
+5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions.
+6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+7. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
