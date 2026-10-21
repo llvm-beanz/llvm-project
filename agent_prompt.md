@@ -69,23 +69,20 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV5(c)`'s remaining 3 cases, in priority order:
-1. `ENV5(c)(7)(a)`: `barrier.{in_if,in_switch}` (2 cases) — **best next
-   target**. Generalize `splitTessellationControlEntry`
-   (`CanonicalizeStage.cpp:3644`) to accept N barrier call sites proven to be
-   the same dynamic barrier (no other barrier reachable between function entry
-   and each one; all N reconverge at one common block with nothing but the
-   barrier-then-branch in each originating block). Use that common reconvergence
-   block as the one flood-fill root instead of splitting a single
-   `BarrierBlock`; extend the existing cross-barrier-value capture logic to
-   insert captures at the end of all N barrier blocks. Get a fresh standalone
-   `.ll` reduction first (`FEME_DUMP_IR_PRECANON=1`, already captured this
-   session at `/tmp/in_if_precanon.txt` for reference).
-2. `ENV5(c)(7)(b)`: `barrier.in_loop` (1 case) — structural, needs a lockstep
-   multi-iteration barrier execution model; likely needs a design-doc update
-   before implementation. Lowest priority; revisit only after `(a)` or a
-   deliberate design decision.
-3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
-   cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
-4. (low priority, unchanged for many sessions) Upstream the 3
+`ENV5(c)`'s remaining 3 cases now form one bucket, `ENV5(c)(7)(b)`:
+1. **(needs a design decision first, not a quick fix)** All 3 of
+   `barrier.{in_if,in_switch,in_loop}` need a real per-invocation-in-lockstep
+   multi-region barrier execution model inside the control-point phase itself
+   (closer to `feme::cpu::EntryWrapperPass`'s own compute-shader
+   barrier-splitting design, `FeMeCPUDesign.md` Phase 6, than to
+   `splitTessellationControlEntry`'s current phase-split approximation). Read
+   that section fully, then decide whether a graphics-pipeline-specific
+   design-doc addendum is warranted before writing any code — do not attempt
+   another `CanonicalizeStage.cpp`-local patch without that step; two sessions
+   in a row have now found the single-split model itself is the wrong shape for
+   these 3 cases.
+2. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
+   cluster in the 666-case corpus) — the more productive next body of work while
+   `(1)` needs a design decision.
+3. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
