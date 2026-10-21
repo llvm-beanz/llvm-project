@@ -128155,3 +128155,59 @@ Mid-session, `git clang-format HEAD -- <file>` (no `--diff`) refused because of 
 5. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
 
 **Next action (under two minutes): open `feme/docs/Roadmap.md` at `ENV5(b)(2)` and re-run `dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.compute.lod_op.query.linear.16_1_1.mip_0` with `FEME_DUMP_IR_PRESPIRV=1` to get the first IR dump for the LOD-value bug.**
+
+# Session: ENV5(b)(2) fixed -- `lod_op`'s real bug was a Fragment-only implicit-derivative gate, not two separate numeric bugs
+
+**Bottom line**: both `lod_op.query.*` and `lod_op.sample.*mip_1` (9 cases, previously thought to be two separate bugs) were the *same* single-line gate bug. Fixed, tested, committed. All 12/12 `lod_op.*` cases now pass.
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (standing check, every session).
+2. Checked `ENV4`'s background corpus run before touching anything: 8 `deqp-vk`-related processes alive, batches ~205→215+ in flight, qpa/log timestamps current → safe to build.
+3. Picked up exactly where the prior session was interrupted: `ENV5(b)(2)`'s `lod_op` cluster, already root-caused as a Fragment-only gate in `ImageCalls.cpp`'s three derivative-synthesis helpers (`getOrSynthesizeSample2DDerivatives`/`1D`/`CubeDerivatives`) and already patched, but not yet validated, tested, or committed.
+4. Read `LowersQueryLodToImageQueryLodWithZeroDerivativesOutsideFragment`'s source to confirm it uses *no* shader-stage attribute at all (not even untagged Compute) — the fix's widened gate doesn't touch it. Confirmed safe.
+5. Added `SPIRVResourceLoweringTest.ComputeStageQueryLodSynthesizesRealDerivatives` (mirrors the existing Fragment-stage test, swaps the attribute to `"compute"`). Built `FeMeTransformsCPUTests` — 655/655 pass.
+6. Rebuilt `feme_vulkan`, ran the real CTS cases directly: `dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.compute.lod_op.*` → **12/12 Pass** (was 3 Pass/9 Fail). The "two separate bugs" theory from the prior session's triage was wrong — one gate fix closed both sub-shapes at once.
+7. Broader regression sweep: all `compute_shader_derivatives.*` (549 cases) → 99 Pass, 0 Fail, 450 NotSupported (mesh/task, out of scope). Zero regressions.
+8. Ran full `check-feme` — **caught a real regression**: `simdize-image-call-scalarize.ll` failed. Root cause: that test's `main` (Compute-stage, via `"hlsl.shader"="compute"`) now legitimately gets real per-lane derivatives instead of hardcoded zero constants, and its `uniform_sample` case (implicit-LOD `Sample` with a constant coordinate) now also scalarizes into 4 calls instead of staying a single call — because real derivative synthesis is itself a lane-position-dependent (quad) operation, even for a uniform input. Fixed by (a) wildcarding the 4 derivative operands in `main`'s CHECK pattern, (b) switching `uniform_sample` to an explicit-LOD `SampleLevel` call, which never synthesizes derivatives at all, preserving that case's original "uniform stays one call" intent without re-entangling it with this fix.
+9. Re-ran `check-feme`: 3826/3830 Passed, 4 Unsupported, 0 Failed (0 regressions vs. 3825/3829 baseline, +2 new tests).
+10. Formatted the C++ diff with `clang-format-diff -p1 -i` (`.ll` files aren't clang-format's concern). Committed the fix as `d61b8c8b46dd`.
+11. Updated `Roadmap.md` (struck `ENV5(b)(2)`, remaining-cases row 24→15) and `VulkanCTSReport.md` (new `L476` entry). Committed as `ee9d0a8ad6bf`.
+12. Quick triage pass on `ENV5(b)`'s remaining 15 untriaged `compute.*` cases (direct `deqp-vk --deqp-case=...` runs, no fixes attempted — see table below).
+13. Re-confirmed `vulkaninfo` and `ENV4` health before writing this entry (see below).
+
+## Wins this session
+- ✅ `ENV5(b)(2)`: `lod_op.*` (9 cases) fixed in one single-line-gate fix, not two separate bugs as the prior session's triage assumed.
+- ✅ `ENV5(b)` down to 15 open cases (was 24 two sessions ago).
+- ✅ Caught and correctly fixed a real test regression (`simdize-image-call-scalarize.ll`) before committing — `check-feme` did its job.
+- ✅ Triaged all 15 remaining `ENV5(b)` cases down to concrete error strings (table below) — no more "untriaged" guessing needed next session.
+
+## `ENV5(b)` remaining 15 cases -- triage table (no fixes attempted, direct `deqp-vk` runs only)
+
+| Cluster | Fail | Error |
+|---|---|---|
+| `variable_init` | 3/9 | `vec4_from_workgroup`, likely siblings: `failed to legalize operation 'spirv.GlobalVariable'` for a `Private`-storage global initialized from a `Workgroup`-storage pointer (nested-pointer initializer shape). 2/9 `NotSupported` (`VK_KHR_workgroup_memory_explicit_layout`, expected). |
+| `memory_access` | 2/7 | `aligned_volatile`, `volatile`: "Output does not match with expected results" — numeric-correctness bug, likely volatile-access ordering/caching. |
+| `multiple_shaders` | 2/2 | Both: `vkCreateComputePipelines` `VK_ERROR_INITIALIZATION_FAILED` — needs `FEME_VULKAN_LOG_CREATION_ERRORS=1` for the real error (not yet captured). |
+| `opname` | 2/65 | `entry_main.func_is_main`, `entry_rdc.func_is_entry`: same `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation shape — smells like an entry-point-name resolution gap (func named `main` conflicting with the real entry, or similar). |
+| `unused_variables` | 2/4 | `function_set_0_binding_5`, `function_set_5_binding_5`: same `VK_ERROR_INITIALIZATION_FAILED` shape. |
+| `opundef` | 1/32 | `undefined_spec_constant_composite`: plain `Fail`, no further detail captured yet. |
+| `opunreachable` | 1/2 | `all`: `VK_ERROR_INITIALIZATION_FAILED` pipeline-creation shape. |
+| `signed_op` | 1/21 | `glsl_uint_sabs`: plain `Fail` — single signed/unsigned-abs numeric case, otherwise this whole GLSL-extended-instruction cluster passes. |
+| `vector_shuffle` | 1/2 | `vector_shuffle` (not `long_vector_shuffle`, which is `NotSupported`): plain `Fail`. |
+
+The `VK_ERROR_INITIALIZATION_FAILED` shape recurs in `multiple_shaders`, `opname`, `unused_variables`, `opunreachable` (7 cases total) — worth checking with `FEME_VULKAN_LOG_CREATION_ERRORS=1` first, since it may be one shared root cause like `lod_op` just turned out to be.
+
+## State check (confirmed just now)
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` ✅
+- `ENV4` background run: 8 processes alive, batches 217→222 actively advancing during this session's work, qpa/log timestamps current ✅ — **do not start a concurrent build without re-checking this first**.
+
+## Next steps (in priority order)
+
+1. **(~15-20 min, highest-leverage first move)** Re-run the 7 `VK_ERROR_INITIALIZATION_FAILED` cases (`multiple_shaders` ×2, `opname.entry_main.func_is_main`, `opname.entry_rdc.func_is_entry`, `unused_variables` ×2, `opunreachable.all`) with `FEME_VULKAN_LOG_CREATION_ERRORS=1` to get the real error string for each — given how often this codebase's "N different failures" turn out to be one shared gate/gap (see `lod_op` this session, `terminate_invocation`/`opcopylogical` in prior sessions), check whether these 7 share one root cause before triaging them individually.
+2. **(~1-2 hours, needs a real build+trace)** `variable_init.*vec4_from_workgroup` (and likely siblings): `Private`-storage global initialized from a `Workgroup`-storage pointer — `spirv.GlobalVariable` legalization gap, nested-pointer initializer shape not yet handled.
+3. **(~30-60 min each, numeric-correctness, needs real build+trace)** `memory_access.{aligned_volatile,volatile}` (2, volatile-ordering), `signed_op.glsl_uint_sabs` (1), `vector_shuffle.vector_shuffle` (1), `opundef.undefined_spec_constant_composite` (1) — five independent small numeric bugs, no shared shape expected.
+4. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus collection. Still running uninterrupted across many sessions now. Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` every session until it finishes; let its own recovery/solo-verification rounds run to completion before writing up final Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md` and striking `ENV4` in `Roadmap.md`.
+5. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+
+**Next action (under two minutes): `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.multiple_shaders.shader1' --deqp-log-images=disable` to get the first real pipeline-creation error string for the 7-case `VK_ERROR_INITIALIZATION_FAILED` cluster.**
