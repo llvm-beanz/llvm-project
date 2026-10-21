@@ -69,26 +69,28 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~1-2 hrs, needs a real build+trace)** `ENV5(b)(2)`'s `lod_op.query.*` (6
-   cases, all fail): dump IR around the `OpImageQueryLod`-to-LLVM lowering
-   (`FEME_DUMP_IR_PRESPIRV`/`FEME_DUMP_IR_PRENORM`) for one minimal case,
-   compare the computed LOD value against the expected one, find where it
-   diverges. This is the bigger of the two `lod_op` sub-bugs (6 of 9 cases) and
-   has no passing baseline to compare against.
-2. **(~30-60 min, likely smaller/narrower)** `ENV5(b)(2)`'s
-   `lod_op.sample.*mip_1` (3 cases, `mip_0` already passes): since `mip_0`
-   works, diff the `mip_0`-vs-`mip_1` code path directly (image-sampling
-   mip-level selection/addressing) rather than starting from scratch -- likely a
-   much shorter path to the bug than the `query.*` case.
-3. **(~1-2 hours)** `ENV5(b)`'s remaining 15 untriaged `compute.*` cases
-   (`variable_init` (3),
-   `memory_access`/`multiple_shaders`/`opname`/`unused_variables` (2 each),
-   `opundef`/`opunreachable`/`signed_op`/`vector_shuffle` (1 each)) -- same
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1`/`deqp-vk --deqp-case=...` direct-run
-   triage pass as this session did for `lod_op`, before attempting any fix.
+1. **(~15-20 min, highest-leverage first move)** Re-run the 7
+   `VK_ERROR_INITIALIZATION_FAILED` cases (`multiple_shaders` ×2,
+   `opname.entry_main.func_is_main`, `opname.entry_rdc.func_is_entry`,
+   `unused_variables` ×2, `opunreachable.all`) with
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1` to get the real error string for each —
+   given how often this codebase's "N different failures" turn out to be one
+   shared gate/gap (see `lod_op` this session,
+   `terminate_invocation`/`opcopylogical` in prior sessions), check whether
+   these 7 share one root cause before triaging them individually.
+2. **(~1-2 hours, needs a real build+trace)**
+   `variable_init.*vec4_from_workgroup` (and likely siblings): `Private`-storage
+   global initialized from a `Workgroup`-storage pointer —
+   `spirv.GlobalVariable` legalization gap, nested-pointer initializer shape not
+   yet handled.
+3. **(~30-60 min each, numeric-correctness, needs real build+trace)**
+   `memory_access.{aligned_volatile,volatile}` (2, volatile-ordering),
+   `signed_op.glsl_uint_sabs` (1), `vector_shuffle.vector_shuffle` (1),
+   `opundef.undefined_spec_constant_composite` (1) — five independent small
+   numeric bugs, no shared shape expected.
 4. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
-   current CTS corpus collection. Still running since a prior session with no
-   interruption. Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep
+   current CTS corpus collection. Still running uninterrupted across many
+   sessions now. Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep
    deqp-vk` every session until it finishes; let its own
    recovery/solo-verification rounds run to completion before writing up final
    Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md` and striking
@@ -98,7 +100,9 @@ the next steps:
    assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to
    `llvm-beanz/offload-test-suite` if push access ever becomes available.
 
-**Next action (under two minutes): open `feme/docs/Roadmap.md` at `ENV5(b)(2)`
-and re-run
-`dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.compute.lod_op.query.linear.16_1_1.mip_0`
-with `FEME_DUMP_IR_PRESPIRV=1` to get the first IR dump for the LOD-value bug.**
+**Next action (under two minutes): `cd
+/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan &&
+FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
+--deqp-case='dEQP-VK.spirv_assembly.instruction.compute.multiple_shaders.shader1'
+--deqp-log-images=disable` to get the first real pipeline-creation error string
+for the 7-case `VK_ERROR_INITIALIZATION_FAILED` cluster.**
