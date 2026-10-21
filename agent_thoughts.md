@@ -128743,3 +128743,35 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(3) max_varyings fix closes the cluster (L500)
+
+**Next action (under two minutes):** root-cause `ENV6(b)(1)` `multisample.misc.emulate_msrtss` (8 cases) with `FEME_VULKAN_LOG_CREATION_ERRORS`/IR dumps against the real MSAA-resolve rendering shape -- not yet started.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start of session). Resumed mid-investigation from a prior checkpoint with the fix already drafted and the unit-test target built but not yet run.
+
+## What got done
+
+1. **Ran the drafted fix's unit test for the first time** -- failed. The test asserted zero leftover `StoreInst` after the pass ran, copied from a sibling Mesh-stage test, but a dynamically-`Row`-indexed store legitimately also writes through an ordinary `alloca`/`getelementptr`/`store` shadow-tracking path (for later read-back), unlike the sibling test's `Vertex`-indexed shape. Dumped the post-pass IR directly (`M->print`) to confirm the real `feme.stage.output.store` calls already had the right `Row`/`Vertex` operands (`Row=%i`, `Vertex=0`) -- the fix itself was correct from the first attempt; only the test's own assertion was wrong. Fixed the test to check the right thing and removed the no-longer-valid assertion.
+2. **Full `FeMeTransformsGraphicsTests` suite**: 150/150 Pass, no regressions in any Hull/Mesh/Input precedent test.
+3. **`check-feme`**: 3850 -> 3851 Passed (4 Unsupported), 0 regressions.
+4. **Real `deqp-vk` re-run**: rebuilt `libfeme_vulkan.so` (via `check-feme`), re-confirmed `vulkaninfo` device, then ran all 6 `max_varyings` cases (both `test_geometry_io_between_geometry_fragment`/`test_tess_eval_io_between_tess_eval_fragment`, across `monolithic`/`fast_linked_library`/`pipeline_library`) directly against the rebuilt ICD: **6/6 Pass**, confirming both leaf names (Geometry and Domain stage) shared the exact same root cause -- `isDynamicIndexedArrayGlobal` in `CanonicalizeStage.cpp` wrongly recognized `Output` (address space 8) arrays with a dynamic index for Domain/Geometry as well as Hull/Mesh, which only the latter two genuinely need.
+5. **Commits** (2, feme-only): fix + unit test together; docs (`Roadmap.md` strike-through + `VulkanCTSReport.md`'s `L500` entry).
+6. **Docs**: `Roadmap.md`'s `ENV6(b)(3)` row struck through, `ENV6(b)` tally updated to 161/181 fixed (20 remain). `VulkanCTSReport.md`'s `L500` entry added. No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed (pure compiler correctness fix, no new feature/extension). No `.instructions.md` update -- no new environment/process lesson this session.
+
+## Wins
+
+- `ENV6(b)(3)` fully closed across all three of its sessions (`misc`/`framebuffer_attachment` -> `spec_constant`/`cache` -> `max_varyings`): 21/21 cases fixed.
+- One fix closed both halves of the 6-case cluster (Geometry and Domain stages shared the identical bug), confirming the hypothesis from the prior session's handoff note before any new code was written.
+- `ENV6(b)` is now 89% closed (161/181); only `emulate_msrtss` (8) and `multisample_interpolation` (12) remain untriaged.
+- Caught and corrected a wrong assertion in the test itself (not the fix) by dumping real IR rather than trusting a copied test pattern -- avoided shipping a flaky/over-constrained regression test.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- confirmed genuine rendering-correctness bug (`Fail (Incorrect multisampled rendering for color attachment ...)`), not yet root-caused, **best next target** (smallest of the two remaining `ENV6(b)` clusters).
+2. `ENV6(b)(2)`: `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}` (12 cases) -- confirmed genuine rendering-correctness bug (`Fail (Failed)`), not yet root-caused.
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions, likely a long tail of distinct small bugs.
+4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
