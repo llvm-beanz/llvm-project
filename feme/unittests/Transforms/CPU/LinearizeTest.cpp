@@ -3496,4 +3496,183 @@ TEST(LinearizeTest, DiamondFlattenerAllowsEmptyLoopBodyArm) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap ENV6(a): regression for `findForwardExitCheckBlock`'s own
+// now-fixed inability to see past a uniform, two-arm diamond sitting ahead
+// of (or starting at) the loop header itself -- it previously only chased
+// a plain `UncondBr`-only chain, so a header whose own terminator was
+// already a `CondBr` (here, `SPIRVPushConstantLoweringPass`'s per-load
+// root-constant bounds guard) was never recognized as a pass-through, and
+// the loop's real trip-count check one hop further forward was never
+// found, misdiagnosing the whole loop as having "no recognized uniform
+// exit check". This is the *exact* real IR (via `FEME_DUMP_IR_PRELINEARIZE
+// =1`) for the one MSAA resolve/depth-copy fragment shader shared by all
+// 210 `dEQP-VK.api.copy_and_blit.*.{resolve_image,depth_stencil_msaa_copy}`
+// cases -- trimmed only of unrelated metadata/attributes.
+TEST(LinearizeTest, MsaaDepthCopyLoopWithUniformBoundsCheckAheadOfHeader) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare float @feme.stage.subpass.load.f32(i32, i32, i32)
+    declare i1 @llvm.is.fpclass.f32(float, i32 immarg)
+    declare float @llvm.copysign.f32(float, float)
+    declare void @feme.cpu.resource.store.raw.f32(ptr, i32, i32, i64, float, i1)
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1)
+
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count, ptr %subpass_input_heap, i32 %subpass_input_heap_count) #0 {
+      br label %1
+
+    1:                                                ; preds = %Flow._crit_edge, %0
+      %.0 = phi i32 [ 0, %0 ], [ %60, %Flow._crit_edge ]
+      %push_const.inbounds5 = icmp ule i32 12, %root_constant_size
+      br i1 %push_const.inbounds5, label %2, label %3
+
+    2:                                                ; preds = %1
+      %push_const.ptr6 = getelementptr inbounds i8, ptr %root_constants, i64 8
+      %push_const.load7 = load i32, ptr %push_const.ptr6, align 4
+      br label %4
+
+    3:                                                ; preds = %1
+      br label %4
+
+    4:                                                ; preds = %3, %2
+      %push_const.value8 = phi i32 [ %push_const.load7, %2 ], [ 0, %3 ]
+      %5 = icmp slt i32 %.0, %push_const.value8
+      br i1 %5, label %7, label %.Flow_crit_edge
+
+    .Flow_crit_edge:                                  ; preds = %4
+      br label %Flow
+
+    6:                                                ; preds = %Flow
+      ret void
+
+    7:                                                ; preds = %4
+      %8 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %9 = insertelement <4 x float> poison, float %8, i64 0
+      %10 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %11 = insertelement <4 x float> %9, float %10, i64 1
+      %12 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      %13 = insertelement <4 x float> %11, float %12, i64 2
+      %14 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 0)
+      %15 = insertelement <4 x float> %13, float %14, i64 3
+      %16 = fptosi float %8 to i32
+      %17 = fptosi float %10 to i32
+      %push_const.inbounds = icmp ule i32 4, %root_constant_size
+      br i1 %push_const.inbounds, label %18, label %19
+
+    18:                                               ; preds = %7
+      %push_const.ptr = getelementptr inbounds i8, ptr %root_constants, i64 0
+      %push_const.load = load i32, ptr %push_const.ptr, align 4
+      br label %20
+
+    19:                                               ; preds = %7
+      br label %20
+
+    20:                                               ; preds = %19, %18
+      %push_const.value = phi i32 [ %push_const.load, %18 ], [ 0, %19 ]
+      %21 = mul i32 %push_const.value, %17
+      %22 = add i32 %21, %16
+      %push_const.inbounds1 = icmp ule i32 12, %root_constant_size
+      br i1 %push_const.inbounds1, label %23, label %24
+
+    23:                                               ; preds = %20
+      %push_const.ptr2 = getelementptr inbounds i8, ptr %root_constants, i64 8
+      %push_const.load3 = load i32, ptr %push_const.ptr2, align 4
+      br label %25
+
+    24:                                               ; preds = %20
+      br label %25
+
+    25:                                               ; preds = %24, %23
+      %push_const.value4 = phi i32 [ %push_const.load3, %23 ], [ 0, %24 ]
+      %26 = mul i32 %22, %push_const.value4
+      %27 = add i32 %26, %.0
+      %28 = call float @feme.stage.subpass.load.f32(i32 0, i32 0, i32 %.0)
+      %29 = call float @feme.stage.subpass.load.f32(i32 0, i32 1, i32 %.0)
+      %30 = call float @feme.stage.subpass.load.f32(i32 0, i32 2, i32 %.0)
+      %31 = call float @feme.stage.subpass.load.f32(i32 0, i32 3, i32 %.0)
+      %32 = zext i32 %27 to i64
+      %33 = mul i64 %32, 4
+      call void @feme.cpu.resource.store.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %33, float %28, i1 true)
+      %34 = call float @feme.stage.subpass.load.f32(i32 1, i32 0, i32 %.0)
+      %35 = call float @feme.stage.subpass.load.f32(i32 1, i32 1, i32 %.0)
+      %36 = call float @feme.stage.subpass.load.f32(i32 1, i32 2, i32 %.0)
+      %37 = call float @feme.stage.subpass.load.f32(i32 1, i32 3, i32 %.0)
+      %38 = call float @feme.stage.subpass.load.f32(i32 2, i32 0, i32 %.0)
+      %39 = call float @feme.stage.subpass.load.f32(i32 2, i32 1, i32 %.0)
+      %40 = call float @feme.stage.subpass.load.f32(i32 2, i32 2, i32 %.0)
+      %41 = call float @feme.stage.subpass.load.f32(i32 2, i32 3, i32 %.0)
+      %42 = call float @feme.stage.subpass.load.f32(i32 3, i32 0, i32 %.0)
+      %43 = call float @feme.stage.subpass.load.f32(i32 3, i32 1, i32 %.0)
+      %44 = call float @feme.stage.subpass.load.f32(i32 3, i32 2, i32 %.0)
+      %45 = call float @feme.stage.subpass.load.f32(i32 3, i32 3, i32 %.0)
+      %46 = call float @feme.stage.subpass.load.f32(i32 4, i32 0, i32 %.0)
+      %47 = call float @feme.stage.subpass.load.f32(i32 4, i32 1, i32 %.0)
+      %48 = call float @feme.stage.subpass.load.f32(i32 4, i32 2, i32 %.0)
+      %49 = call float @feme.stage.subpass.load.f32(i32 4, i32 3, i32 %.0)
+      %50 = call float @feme.stage.subpass.load.f32(i32 5, i32 0, i32 %.0)
+      %51 = call float @feme.stage.subpass.load.f32(i32 5, i32 1, i32 %.0)
+      %52 = call float @feme.stage.subpass.load.f32(i32 5, i32 2, i32 %.0)
+      %53 = call float @feme.stage.subpass.load.f32(i32 5, i32 3, i32 %.0)
+      %54 = zext i32 %27 to i64
+      %55 = mul i64 %54, 4
+      call void @feme.cpu.resource.store.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 %55, float %46, i1 true)
+      %56 = fcmp oeq float %34, 0.000000e+00
+      %57 = fcmp oeq float %38, 0.000000e+00
+      %spec.select = select i1 %56, i1 %57, i1 false
+      %58 = fcmp oeq float %42, 0.000000e+00
+      %spec.select26 = select i1 %spec.select, i1 %58, i1 false
+      %59 = fcmp une float %50, 0.000000e+00
+      %spec.select25 = select i1 %spec.select26, i1 %59, i1 true
+      br i1 %spec.select25, label %64, label %._crit_edge
+
+    ._crit_edge:                                      ; preds = %25
+      br label %62
+
+    Flow:                                             ; preds = %.Flow_crit_edge, %62
+      %60 = phi i32 [ %63, %62 ], [ poison, %.Flow_crit_edge ]
+      %61 = phi i1 [ false, %62 ], [ true, %.Flow_crit_edge ]
+      br i1 %61, label %6, label %Flow._crit_edge
+
+    Flow._crit_edge:                                  ; preds = %Flow
+      br label %1
+
+    62:                                               ; preds = %._crit_edge, %64
+      %63 = add i32 %.0, 1
+      br label %Flow
+
+    64:                                               ; preds = %25
+      %65 = zext i32 %27 to i64
+      %66 = mul i64 %65, 4
+      %67 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 %66, i1 true)
+      %68 = call i1 @llvm.is.fpclass.f32(float %67, /* (sub) */ i32 144)
+      %69 = call float @llvm.copysign.f32(float 0.000000e+00, float %67)
+      %70 = select i1 %68, float %69, float %67
+      %71 = fadd float %70, -1.000000e+00
+      %72 = call i1 @llvm.is.fpclass.f32(float %71, /* (sub) */ i32 144)
+      %73 = call float @llvm.copysign.f32(float 0.000000e+00, float %71)
+      %74 = select i1 %72, float %73, float %71
+      call void @feme.cpu.resource.store.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 1, i64 %66, float %74, i1 true)
+      br label %62
+    }
+
+    attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_FALSE(SawError) << "the loop's real trip-count check, one hop "
+                            "past a uniform bounds-check diamond ahead of "
+                            "the header, should still be found";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

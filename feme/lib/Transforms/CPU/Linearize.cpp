@@ -3872,6 +3872,22 @@ private:
   /// passed through the ordinary `matchExitCheck`/`recoverRelayExitCheck`
   /// checks by the caller, exactly as `Header`/`Latch` themselves are --
   /// this helper only locates it.
+  ///
+  /// Roadmap ENV6(a): also tolerates \p From itself (or any block found
+  /// mid-chain) starting a *uniform, two-arm diamond* that fully
+  /// reconverges -- via a further bounded `UncondBr`-only chase from each
+  /// arm -- at one shared block still inside \p C before either \p Latch
+  /// or \p ExitBlock is reached: such a diamond is transparent to this
+  /// walk (every active lane takes it identically, so it contributes no
+  /// exit/continue decision of its own) and the walk simply continues
+  /// from the shared merge block, rather than stopping at the diamond's
+  /// own uniform `CondBr` and misreporting it as the loop's real check.
+  /// `dEQP-VK.api.copy_and_blit.*.{resolve_image,depth_stencil_msaa_copy}`
+  /// (210 cases, all one shared root shader) route their real,
+  /// loop-exterior `for (sample = 0; ...)` trip-count check through
+  /// exactly one such diamond first -- `SPIRVPushConstantLoweringPass`'s
+  /// own per-load root-constant bounds guard -- immediately ahead of
+  /// `Header` itself.
   BasicBlock *findForwardExitCheckBlock(BasicBlock *From, BasicBlock *Latch,
                                         BasicBlock *ExitBlock, CycleRef C);
 
@@ -5368,12 +5384,42 @@ BasicBlock *LoopLinearizer::findForwardExitCheckBlock(BasicBlock *From,
                                                       BasicBlock *Latch,
                                                       BasicBlock *ExitBlock,
                                                       CycleRef C) {
+  // Roadmap ENV6(a): bounded the same way `IsTrivialExitStub`'s own
+  // per-arm chase is -- chases a plain `UncondBr`-only relay chain from
+  // \p Start, stopping (and returning whatever block it stopped at,
+  // whether or not that is a true dead end) the moment it leaves \p C,
+  // reaches \p Latch/\p ExitBlock, hits a non-`UncondBr` terminator, or
+  // exceeds the bound. Used only to test whether both arms of a
+  // candidate uniform diamond reconverge at the same block -- see this
+  // function's own comment above.
+  auto ChaseUncondChain = [&](BasicBlock *Start) -> BasicBlock * {
+    BasicBlock *Cur = Start;
+    for (unsigned Depth = 0; Depth != 8; ++Depth) {
+      if (!CI.contains(C, Cur) || Cur == Latch || Cur == ExitBlock)
+        return Cur;
+      auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+      if (!UBr)
+        return Cur;
+      Cur = UBr->getSuccessor(0);
+    }
+    return Cur;
+  };
   BasicBlock *Cur = From;
   for (unsigned Depth = 0; Depth != 8; ++Depth) {
     if (Cur == Latch || Cur == ExitBlock || !CI.contains(C, Cur))
       return nullptr;
-    if (isa<CondBrInst>(Cur->getTerminator()))
+    if (auto *CBr = dyn_cast<CondBrInst>(Cur->getTerminator())) {
+      if (!isDivergentBranch(CBr)) {
+        BasicBlock *End0 = ChaseUncondChain(CBr->getSuccessor(0));
+        BasicBlock *End1 = ChaseUncondChain(CBr->getSuccessor(1));
+        if (End0 == End1 && End0 != Latch && End0 != ExitBlock &&
+            CI.contains(C, End0)) {
+          Cur = End0;
+          continue;
+        }
+      }
       return Cur == From ? nullptr : Cur;
+    }
     auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
     if (!UBr)
       return nullptr; // Not a shape this milestone understands.
