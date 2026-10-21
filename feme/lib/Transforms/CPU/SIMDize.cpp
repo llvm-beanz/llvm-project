@@ -433,6 +433,14 @@ getDivergentCallOverloadShape(Intrinsic::ID ID) {
   // is and passed through completely unwidened.
   case Intrinsic::ctlz:
   case Intrinsic::cttz:
+  // `llvm.abs.iN(iN, i1 immarg)` (`dEQP-VK.spirv_assembly.instruction.
+  // compute.signed_op.glsl_uint_sabs`, GLSL's `sAbs`/`OpSAbs` via
+  // `ArithmeticSign.cpp`): identically shaped to `ctlz`/`cttz` above --
+  // the overloaded type is shared by the result and argument 0, and its
+  // second `is_int_min_poison` argument is the same kind of
+  // compile-time-constant `ImmArg` (per `Intrinsics.td`'s
+  // `LLVMMatchType<0>`/`i1`), not a per-lane operand.
+  case Intrinsic::abs:
     return DivergentCallOverloadShape{/*PrimaryOperandIndex=*/std::nullopt,
                                        /*IndependentOperandIndex=*/std::nullopt};
   default:

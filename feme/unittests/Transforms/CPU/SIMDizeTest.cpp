@@ -479,6 +479,57 @@ TEST(SIMDizeTest, WidensDivergentLdexpCall) {
   EXPECT_TRUE(FoundWideLdexp);
 }
 
+// `dEQP-VK.spirv_assembly.instruction.compute.signed_op.glsl_uint_sabs`:
+// `llvm.abs.i32(i32, i1 immarg)` over a divergent integer -- GLSL's
+// `sAbs`/SPIR-V's `OpSAbs` lowering shape. Identically shaped to
+// `ctlz`/`cttz` (roadmap L266): the overloaded type is shared by the
+// result and argument 0 (`Homogeneous` fails only because of the second,
+// `is_int_min_poison` `ImmArg`), so -- unlike `ldexp`'s independently
+// overloaded exponent above -- only argument 0 widens; the immarg stays a
+// scalar constant. Before this fix, a divergent `llvm.abs` call hit the
+// generic "unsupported divergent call" error (`widenElementwise`'s
+// default case), since `getDivergentCallOverloadShape` did not yet know
+// its shape.
+TEST(SIMDizeTest, WidensDivergentAbsCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %neg = sub i32 0, %tid
+      %r = call i32 @llvm.abs.i32(i32 %neg, i1 false)
+      store i32 %r, ptr %out
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.abs.i32(i32, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWideAbs = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    if (CI->getCalledFunction()->getIntrinsicID() != Intrinsic::abs)
+      continue;
+    FoundWideAbs = true;
+    // Argument 0 (the value being negated-if-negative) widens to a real
+    // `<W x i32>`; argument 1 (`is_int_min_poison`) stays a scalar
+    // constant, never widened, mirroring the intrinsic's own vector
+    // overload shape.
+    EXPECT_TRUE(CI->getArgOperand(0)->getType()->isVectorTy());
+    EXPECT_TRUE(isa<ConstantInt>(CI->getArgOperand(1)));
+    EXPECT_TRUE(CI->getType()->isVectorTy());
+  }
+  EXPECT_TRUE(FoundWideAbs);
+}
+
 // Roadmap L450: GLSL's `frexp(x, exp)` out-parameter builtin lowers to
 // SPIR-V `OpExtInst GLSL.std.450 FrexpStruct`, which
 // `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` converts straight to a
