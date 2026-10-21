@@ -2488,65 +2488,8 @@ mlir::Value convertCopyLogicalValue(mlir::ConversionPatternRewriter &Rewriter,
                                     mlir::Location Loc,
                                     const mlir::TypeConverter &TypeConverter,
                                     mlir::Value Value, mlir::Type SrcType,
-                                    mlir::Type DstType) {
-  mlir::Type SrcLLVMType = Value.getType();
-  mlir::Type DstLLVMType = TypeConverter.convertType(DstType);
-  if (!DstLLVMType)
-    return nullptr;
-  if (SrcLLVMType == DstLLVMType)
-    return Value;
-
-  if (auto SrcStruct = mlir::dyn_cast<mlir::spirv::StructType>(SrcType)) {
-    auto DstStruct = mlir::dyn_cast<mlir::spirv::StructType>(DstType);
-    if (!DstStruct ||
-        SrcStruct.getNumElements() != DstStruct.getNumElements())
-      return nullptr;
-    mlir::Value Result =
-        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
-    for (unsigned I = 0, E = SrcStruct.getNumElements(); I != E; ++I) {
-      unsigned SrcPhysical =
-          getStructMemberPhysicalIndex(SrcStruct, I, TypeConverter);
-      unsigned DstPhysical =
-          getStructMemberPhysicalIndex(DstStruct, I, TypeConverter);
-      mlir::Value Member = mlir::LLVM::ExtractValueOp::create(
-          Rewriter, Loc, Value, SrcPhysical);
-      mlir::Value ConvertedMember = convertCopyLogicalValue(
-          Rewriter, Loc, TypeConverter, Member, SrcStruct.getElementType(I),
-          DstStruct.getElementType(I));
-      if (!ConvertedMember)
-        return nullptr;
-      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
-                                                 ConvertedMember,
-                                                 DstPhysical);
-    }
-    return Result;
-  }
-
-  if (auto SrcArray = mlir::dyn_cast<mlir::spirv::ArrayType>(SrcType)) {
-    auto DstArray = mlir::dyn_cast<mlir::spirv::ArrayType>(DstType);
-    if (!DstArray || SrcArray.getNumElements() != DstArray.getNumElements())
-      return nullptr;
-    mlir::Value Result =
-        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
-    for (int64_t I = 0, E = SrcArray.getNumElements(); I != E; ++I) {
-      mlir::Value Element =
-          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Value, I);
-      mlir::Value ConvertedElement = convertCopyLogicalValue(
-          Rewriter, Loc, TypeConverter, Element, SrcArray.getElementType(),
-          DstArray.getElementType());
-      if (!ConvertedElement)
-        return nullptr;
-      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
-                                                 ConvertedElement, I);
-    }
-    return Result;
-  }
-
-  // A leaf (scalar/vector) pair, a runtime array, or a pointer whose
-  // converted LLVM types still differ despite being logically compatible
-  // SPIR-V types -- out of scope, see this function's own comment.
-  return nullptr;
-}
+                                    mlir::Type DstType,
+                                    mlir::Type DstLLVMTypeHint = nullptr);
 
 /// Converts `spirv.CopyLogical` (roadmap L124(c): opcode 400, added in
 /// SPIR-V 1.4, entirely unmodeled upstream before this fix's own new
@@ -13624,6 +13567,349 @@ public:
     return mlir::success();
   }
 };
+
+/// Converts a logical (natural, always column-major) matrix \p Logical
+/// into its own non-representable physical layout, exactly as
+/// RowMajorMatrixStorePattern's own `matchAndRewrite` does immediately
+/// before its real `llvm.store` -- factored out so convertCopyLogicalValue
+/// (which has no real memory access of its own to anchor the conversion
+/// at, since `spirv.CopyLogical` is a pure SSA-value op) can reuse the same
+/// transpose/pad gather logic without going through any real memory access
+/// at all. See RowMajorMatrixStorePattern's own comment for the per-field
+/// rationale this mirrors verbatim.
+static mlir::Value convertLogicalMatrixToPhysical(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    const mlir::TypeConverter &TypeConverter, mlir::Value Logical,
+    mlir::spirv::MatrixType MatrixTy, const MatrixMemberLayout &Layout) {
+  bool IsRowMajor = Layout.IsRowMajor;
+  mlir::Type ElemTy = TypeConverter.convertType(MatrixTy.getElementType());
+  mlir::DataLayout DL;
+  uint64_t ElemSize = DL.getTypeSize(ElemTy);
+  int64_t MajorCount =
+      IsRowMajor ? MatrixTy.getNumRows() : MatrixTy.getNumColumns();
+  int64_t MinorCount =
+      IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+  uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+  bool NeedsPad = Layout.Stride != NaturalMinorBytes;
+
+  auto MinorArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, MinorCount);
+  mlir::Type MajorEntryTy = MinorArrTy;
+  if (NeedsPad) {
+    auto PadTy = mlir::LLVM::LLVMArrayType::get(
+        mlir::IntegerType::get(Rewriter.getContext(), 8),
+        Layout.Stride - NaturalMinorBytes);
+    MajorEntryTy = mlir::LLVM::LLVMStructType::getLiteral(
+        Rewriter.getContext(), {MinorArrTy, PadTy}, /*isPacked=*/true);
+  }
+  auto PhysicalArrTy = mlir::LLVM::LLVMArrayType::get(MajorEntryTy, MajorCount);
+
+  mlir::Value Physical =
+      mlir::LLVM::PoisonOp::create(Rewriter, Loc, PhysicalArrTy);
+  for (int64_t Major = 0; Major != MajorCount; ++Major) {
+    mlir::Value MinorArr =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, MinorArrTy);
+    for (int64_t Minor = 0; Minor != MinorCount; ++Minor) {
+      int64_t Col = IsRowMajor ? Minor : Major;
+      int64_t Row = IsRowMajor ? Major : Minor;
+      mlir::Value Column = extractColumn(Rewriter, Loc, Logical, Col);
+      mlir::Value RowIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), Row);
+      mlir::Value Elem =
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Column, RowIndex);
+      MinorArr = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, MinorArr,
+                                                   Elem, Minor);
+    }
+    mlir::Value Entry = MinorArr;
+    if (NeedsPad) {
+      mlir::Value PaddedEntry =
+          mlir::LLVM::PoisonOp::create(Rewriter, Loc, MajorEntryTy);
+      Entry = mlir::LLVM::InsertValueOp::create(
+          Rewriter, Loc, PaddedEntry, MinorArr, llvm::ArrayRef<int64_t>{0});
+    }
+    Physical = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Physical, Entry,
+                                                 Major);
+  }
+  return Physical;
+}
+
+/// Converts a non-representable physical matrix layout \p Physical back
+/// into the ordinary logical (natural, always column-major) matrix
+/// representation, exactly as RowMajorMatrixLoadPattern's own
+/// `matchAndRewrite` performs immediately after its real `llvm.load`,
+/// factored out for convertCopyLogicalValue's own reuse exactly as
+/// convertLogicalMatrixToPhysical is.
+static mlir::Value convertPhysicalMatrixToLogical(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    const mlir::TypeConverter &TypeConverter, mlir::Value Physical,
+    mlir::spirv::MatrixType MatrixTy, const MatrixMemberLayout &Layout) {
+  bool IsRowMajor = Layout.IsRowMajor;
+  int64_t NumColumns = MatrixTy.getNumColumns();
+  mlir::Type ElemTy = TypeConverter.convertType(MatrixTy.getElementType());
+  mlir::DataLayout DL;
+  uint64_t ElemSize = DL.getTypeSize(ElemTy);
+  int64_t MinorCount =
+      IsRowMajor ? MatrixTy.getNumColumns() : MatrixTy.getNumRows();
+  uint64_t NaturalMinorBytes = static_cast<uint64_t>(MinorCount) * ElemSize;
+  bool NeedsPad = Layout.Stride != NaturalMinorBytes;
+
+  auto LogicalColumnTy = mlir::cast<mlir::VectorType>(
+      TypeConverter.convertType(MatrixTy.getColumnType()));
+  auto LogicalArrTy =
+      mlir::LLVM::LLVMArrayType::get(LogicalColumnTy, NumColumns);
+  mlir::Value Logical =
+      mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalArrTy);
+  for (int64_t Col = 0; Col != NumColumns; ++Col) {
+    mlir::Value NewColumn =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, LogicalColumnTy);
+    for (int64_t Row = 0, NumRows = MatrixTy.getNumRows(); Row != NumRows;
+         ++Row) {
+      int64_t Major = IsRowMajor ? Row : Col;
+      int64_t Minor = IsRowMajor ? Col : Row;
+      mlir::Value Entry =
+          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Physical, Major);
+      mlir::Value MinorArr =
+          NeedsPad ? mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Entry, 0)
+                   : Entry;
+      mlir::Value Elem =
+          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, MinorArr, Minor);
+      mlir::Value DstIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(), Row);
+      NewColumn = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, NewColumn,
+                                                      Elem, DstIndex);
+    }
+    Logical = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Logical,
+                                                NewColumn, Col);
+  }
+  return Logical;
+}
+
+/// Reinterprets \p Value's own bytes (whose own LLVM type may differ
+/// from \p TargetTy only in a trailing-padding sense -- e.g. one side's
+/// `ArrayStride`-driven byte-blob stand-in versus the other's own
+/// tightly-packed natural shape, see convertCopyLogicalValue's ArrayType
+/// branch) into \p TargetTy, via a scratch `llvm.alloca` sized for
+/// whichever of the two types is larger: a real memory store of \p
+/// Value followed by a real memory load as \p TargetTy, exactly the
+/// same "reinterpret via roundtrip" idiom CompositeConstructConversion
+/// Pattern already uses for its own narrower-than-padded-slot scalar
+/// case. This is only ever valid for a same-byte-position
+/// reinterpretation (the smaller type's own bytes are always a leading
+/// prefix of the larger's); it is deliberately NOT used for a matrix's
+/// own RowMajor/ColMajor transpose, where real data genuinely moves
+/// between different byte positions -- that case instead goes through
+/// convertLogicalMatrixToPhysical/convertPhysicalMatrixToLogical above,
+/// which performs a real gather/scatter, not a raw bytewise copy.
+static mlir::Value
+reinterpretLeafValue(mlir::ConversionPatternRewriter &Rewriter,
+                     mlir::Location Loc, mlir::Value Value,
+                     mlir::Type TargetTy) {
+  mlir::Type PtrTy = mlir::LLVM::LLVMPointerType::get(Rewriter.getContext());
+  mlir::Value One =
+      mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI32Type(), 1);
+  mlir::DataLayout DL;
+  mlir::Type SlotTy =
+      DL.getTypeSize(Value.getType()) >= DL.getTypeSize(TargetTy)
+          ? Value.getType()
+          : TargetTy;
+  mlir::Value Slot =
+      mlir::LLVM::AllocaOp::create(Rewriter, Loc, PtrTy, SlotTy, One);
+  mlir::LLVM::StoreOp::create(Rewriter, Loc, Value, Slot);
+  return mlir::LLVM::LoadOp::create(Rewriter, Loc, TargetTy, Slot);
+}
+
+/// Forward declaration: defined below (`getStructMemberPhysicalIndex`'s own
+/// primary definition, alongside `convertOffsetStructTypeIgnoringDecorations`
+/// whose own struct-layout decision this recovers) -- used here by
+/// convertCopyLogicalValue to translate a struct's own *declared* member
+/// index into the real physical LLVM field index a reordered-and/or-padded
+/// struct's conversion actually placed it at, exactly as rewriteBlockAccess
+/// already needs to for `spirv.AccessChain`'s own struct member selector
+/// (see that forward declaration's own comment for the full rationale).
+///
+/// Rebuilds \p Value (already converted, of type \p SrcLLVMType) into
+/// \p DstType's own converted LLVM type, for `spirv.CopyLogical`'s two
+/// SPIR-V types \p SrcType/\p DstType, already confirmed "logically
+/// compatible" by `spirv::CopyLogicalOp::verify` (recursively the same
+/// shape, ignoring per-member layout decorations) -- but whose *converted*
+/// LLVM types may still differ, since FeMe's own struct conversion embeds
+/// each member's real byte offset (see
+/// convertOffsetStructTypeIgnoringDecorations) and the source/destination
+/// SPIR-V struct types were deserialized with different (or absent) `Offset`
+/// decorations in the first place, and/or each side's own matrix-member
+/// majorness/stride or array-element stride decorations may force an
+/// independent physical substitution that the other side's type does not share
+/// at all (e.g. a `Function`-storage local with no explicit layout at all
+/// copied into a `StorageBuffer` block member with an explicit std430/std140
+/// one). \p DstLLVMTypeHint, when provided, is the *real* destination slot type
+/// this value is about to be inserted into at the immediately enclosing level
+/// (a struct member's own physical field type, or an array's own physical
+/// element type) -- needed because that physical substitution often cannot be
+/// rederived from \p DstType alone (a struct member's matrix layout lives
+/// on the *enclosing* struct's own decoration list, invisible from the
+/// bare member type), but is otherwise left null for a top-level call
+/// (the whole-value conversion already has `TypeConverter.convertType
+/// (DstType)` itself as its own "natural" slot type).
+///
+/// Returns a null `Value` (rather than failing outright) if some leaf pair
+/// this recursion reaches converts to two genuinely different LLVM types
+/// even after this whole-structure rebuild -- e.g. a pointer or runtime
+/// array leaf, where FeMe's own conversion embeds more than plain value
+/// shape into the LLVM type and no shape-preserving rebuild is possible
+/// here; the caller reports that case as an explicit, out-of-scope
+/// diagnostic instead of asserting or miscompiling silently.
+mlir::Value convertCopyLogicalValue(mlir::ConversionPatternRewriter &Rewriter,
+                                    mlir::Location Loc,
+                                    const mlir::TypeConverter &TypeConverter,
+                                    mlir::Value Value, mlir::Type SrcType,
+                                    mlir::Type DstType,
+                                    mlir::Type DstLLVMTypeHint) {
+  mlir::Type SrcLLVMType = Value.getType();
+  // The real destination slot type for *this* position: the caller's own
+  // hint when one was threaded down (a struct member's own physical field
+  // type, or an array's own physical element type -- both already baked
+  // in by the enclosing level's own type conversion and NOT rederivable
+  // from `DstType` alone), falling back to a plain, self-contained
+  // `TypeConverter.convertType(DstType)` only at the top level.
+  mlir::Type DstLLVMType =
+      DstLLVMTypeHint ? DstLLVMTypeHint : TypeConverter.convertType(DstType);
+  if (!DstLLVMType)
+    return nullptr;
+  if (SrcLLVMType == DstLLVMType)
+    return Value;
+
+  if (auto SrcStruct = mlir::dyn_cast<mlir::spirv::StructType>(SrcType)) {
+    auto DstStruct = mlir::dyn_cast<mlir::spirv::StructType>(DstType);
+    if (!DstStruct || SrcStruct.getNumElements() != DstStruct.getNumElements())
+      return nullptr;
+    auto DstStructLLVMTy =
+        mlir::dyn_cast<mlir::LLVM::LLVMStructType>(DstLLVMType);
+    if (!DstStructLLVMTy)
+      return nullptr;
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
+    for (unsigned I = 0, E = SrcStruct.getNumElements(); I != E; ++I) {
+      unsigned SrcPhysical =
+          getStructMemberPhysicalIndex(SrcStruct, I, TypeConverter);
+      unsigned DstPhysical =
+          getStructMemberPhysicalIndex(DstStruct, I, TypeConverter);
+      mlir::Value Member =
+          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Value, SrcPhysical);
+      mlir::Type DstMemberHint = DstStructLLVMTy.getBody()[DstPhysical];
+
+      // A matrix member whose declared layout isMatrixMemberLayoutRepresent
+      // able rejects needs a real transpose/pad gather, not a plain
+      // same-bytes reinterpret -- getMatrixMemberLayout's mere presence is
+      // NOT sufficient to detect this (every Block-member matrix carries a
+      // `MatrixStride` decoration, representable or not); only a NOT-
+      // representable layout actually needs substitution.
+      auto SrcMatrixTy =
+          mlir::dyn_cast<mlir::spirv::MatrixType>(SrcStruct.getElementType(I));
+      auto DstMatrixTy =
+          mlir::dyn_cast<mlir::spirv::MatrixType>(DstStruct.getElementType(I));
+      if (SrcMatrixTy && DstMatrixTy) {
+        mlir::Type LogicalMatrixTy = TypeConverter.convertType(SrcMatrixTy);
+        std::optional<MatrixMemberLayout> SrcLayout =
+            getMatrixMemberLayout(SrcStruct, I);
+        std::optional<MatrixMemberLayout> DstLayout =
+            getMatrixMemberLayout(DstStruct, I);
+        bool SrcPhysicalLayout =
+            SrcLayout &&
+            !isMatrixMemberLayoutRepresentable(SrcStruct, I, LogicalMatrixTy);
+        bool DstPhysicalLayout =
+            DstLayout &&
+            !isMatrixMemberLayoutRepresentable(DstStruct, I, LogicalMatrixTy);
+        if (SrcPhysicalLayout || DstPhysicalLayout) {
+          mlir::Value Logical = SrcPhysicalLayout
+                                    ? convertPhysicalMatrixToLogical(
+                                          Rewriter, Loc, TypeConverter, Member,
+                                          SrcMatrixTy, *SrcLayout)
+                                    : Member;
+          mlir::Value Converted = DstPhysicalLayout
+                                      ? convertLogicalMatrixToPhysical(
+                                            Rewriter, Loc, TypeConverter,
+                                            Logical, DstMatrixTy, *DstLayout)
+                                      : Logical;
+          Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                     Converted, DstPhysical);
+          continue;
+        }
+      }
+
+      mlir::Value ConvertedMember = convertCopyLogicalValue(
+          Rewriter, Loc, TypeConverter, Member, SrcStruct.getElementType(I),
+          DstStruct.getElementType(I), DstMemberHint);
+      if (!ConvertedMember)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                 ConvertedMember, DstPhysical);
+    }
+    return Result;
+  }
+
+  if (auto SrcArray = mlir::dyn_cast<mlir::spirv::ArrayType>(SrcType)) {
+    auto DstArray = mlir::dyn_cast<mlir::spirv::ArrayType>(DstType);
+    if (!DstArray || SrcArray.getNumElements() != DstArray.getNumElements())
+      return nullptr;
+    auto DstArrayLLVMTy =
+        mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(DstLLVMType);
+    if (!DstArrayLLVMTy)
+      return nullptr;
+    // This array's own real (possibly outer-`ArrayStride`-substituted)
+    // per-element slot type -- unlike a struct member's matrix layout,
+    // which needs an external decoration lookup for context,
+    // `TypeConverter.convertType` on the bare element SPIR-V type alone
+    // already recovers the *natural*, self-contained conversion any
+    // further nested stride substitution of its own already reflects
+    // (`ArrayStride` lives directly on the array type, not an external
+    // decoration) -- it just does not yet know about *this* array's own
+    // enclosing stride, substituted only when the element's natural size
+    // undershoots it (convertArrayTypeIgnoringDecorations). Whenever
+    // that differs from the slot's own real type, a same-bytes
+    // reinterpret (reinterpretLeafValue) converts between the two before
+    // (unwrapping) and after (rewrapping) the per-element recursion.
+    mlir::Type DstSlotTy = DstArrayLLVMTy.getElementType();
+    mlir::Type NaturalSrcElemTy =
+        TypeConverter.convertType(SrcArray.getElementType());
+    mlir::Type NaturalDstElemTy =
+        TypeConverter.convertType(DstArray.getElementType());
+    if (!NaturalSrcElemTy || !NaturalDstElemTy)
+      return nullptr;
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstLLVMType);
+    for (int64_t I = 0, E = SrcArray.getNumElements(); I != E; ++I) {
+      mlir::Value Element =
+          mlir::LLVM::ExtractValueOp::create(Rewriter, Loc, Value, I);
+      if (Element.getType() != NaturalSrcElemTy)
+        Element =
+            reinterpretLeafValue(Rewriter, Loc, Element, NaturalSrcElemTy);
+      mlir::Value ConvertedElement = convertCopyLogicalValue(
+          Rewriter, Loc, TypeConverter, Element, SrcArray.getElementType(),
+          DstArray.getElementType(), NaturalDstElemTy);
+      if (!ConvertedElement)
+        return nullptr;
+      if (ConvertedElement.getType() != DstSlotTy)
+        ConvertedElement =
+            reinterpretLeafValue(Rewriter, Loc, ConvertedElement, DstSlotTy);
+      Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                                 ConvertedElement, I);
+    }
+    return Result;
+  }
+
+  // A leaf (scalar/vector) pair, a runtime array, or a pointer whose
+  // converted LLVM types still differ despite being logically compatible
+  // SPIR-V types -- a same-bytes reinterpret (e.g. an array-stride
+  // widened scalar/vector stand-in) handles most such leaves;
+  // reinterpretLeafValue itself has no way to validate this is actually
+  // safe beyond matching byte sizes, so a pointer or runtime-array SPIR-V
+  // leaf (where FeMe's own conversion embeds more than plain value shape
+  // into the LLVM type, and no shape-preserving rebuild is possible) is
+  // explicitly excluded and still reported as out-of-scope instead.
+  if (mlir::isa<mlir::spirv::PointerType, mlir::spirv::RuntimeArrayType>(
+          SrcType))
+    return nullptr;
+  return reinterpretLeafValue(Rewriter, Loc, Value, DstLLVMType);
+}
 
 /// A column-select `spirv.AccessChain` -- the member selector plus
 /// exactly one further (possibly dynamic) index selecting one whole
