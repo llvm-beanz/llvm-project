@@ -1,0 +1,35 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.3 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: Per the SPIR-V spec, an `OpSpecConstantComposite` constituent may be
+; COM: the <id> of an `OpUndef` instruction, the same as an
+; COM: `OpConstantComposite` constituent may (see
+; COM: constant-composite-undef-constituent.spvasm, and
+; COM: `processConstantComposite`'s own comment). This exact shape is
+; COM: exercised by the real
+; COM: `dEQP-VK.spirv_assembly.instruction.compute.opundef.
+; COM: undefined_spec_constant_composite` Vulkan CTS case (a `struct{int,
+; COM: int}` spec constant, one of whose two members is `OpUndef`). Modeled,
+; COM: the same way `OpConstantComposite` already is, by a concrete
+; COM: zero-valued inline constituent rather than a distinct "undef"
+; COM: attribute kind (SPIR-V gives no other guidance on which value an
+; COM: `OpUndef` constituent should take).
+
+; CHECK: spirv.SpecConstant @{{.*}} spec_id(0) = 1 : si32
+; CHECK: spirv.SpecConstantComposite @{{.*}} ({{.*}}, 0 : si32) : !spirv.struct<(si32, si32)>
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main"
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %sc_first SpecId 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+   %sc_first = OpSpecConstant %int 1
+      %undef = OpUndef %int
+       %Pair = OpTypeStruct %int %int
+   %sc_pair  = OpSpecConstantComposite %Pair %sc_first %undef
+       %main = OpFunction %void None %fnty
+      %entry = OpLabel
+               OpReturn
+               OpFunctionEnd

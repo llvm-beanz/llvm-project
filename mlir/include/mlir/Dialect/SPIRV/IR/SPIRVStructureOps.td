@@ -830,8 +830,11 @@ def SPIRV_SpecConstantCompositeOp : SPIRV_Op<"SpecConstantComposite", [
      spirv.SpecConstantComposite @scc2 (@sc1, 4.5 : f32) : !spirv.struct<i32, f32>
      ```
 
-    TODO Add support for constituents that are:
-    - the SSA ID of a `spirv.Undef`.
+    A constituent that is the SSA ID of a `spirv.Undef` is deserialized as
+    an inline typed attribute holding a concrete zero value of the
+    constituent's expected type (a legal, if arbitrary, choice of its
+    genuinely unspecified value), rather than as a distinct constituent
+    kind.
   }];
 
   let arguments = (ins

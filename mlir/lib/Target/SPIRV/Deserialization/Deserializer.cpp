@@ -2352,6 +2352,27 @@ spirv::Deserializer::processSpecConstantComposite(ArrayRef<uint32_t> operands) {
   auto resultID = operands[1];
   auto symName = opBuilder.getStringAttr(getSpecConstantSymbol(resultID));
 
+  // Per the SPIR-V spec, a constituent of OpSpecConstantComposite may also
+  // be the <id> of an OpUndef instruction (same as for OpConstantComposite
+  // above), even though `spirv::SpecConstantCompositeOp`'s own grammar
+  // documents this as an outstanding TODO ("Add support for constituents
+  // that are: the SSA ID of a `spirv.Undef`"). Rather than widening the op's
+  // accepted attribute kinds to add a dedicated undef representation, reuse
+  // the op's already-supported "inline typed attribute" constituent form
+  // (the same form used for ordinary, non-specialization constants) with a
+  // concrete zero value -- a legal (if arbitrary) choice of the
+  // constituent's genuinely unspecified value, identical in spirit to the
+  // OpConstantComposite handling.
+  auto getElementTypeForOperand = [&](unsigned operandIndex) -> Type {
+    if (auto shapedType = dyn_cast<ShapedType>(resultType))
+      return shapedType.getElementType();
+    if (auto arrayType = dyn_cast<spirv::ArrayType>(resultType))
+      return arrayType.getElementType();
+    if (auto structType = dyn_cast<spirv::StructType>(resultType))
+      return structType.getElementType(operandIndex - 2);
+    return Type();
+  };
+
   SmallVector<Attribute, 4> elements;
   elements.reserve(operands.size() - 2);
   for (unsigned i = 2, e = operands.size(); i < e; ++i) {
@@ -2384,6 +2405,15 @@ spirv::Deserializer::processSpecConstantComposite(ArrayRef<uint32_t> operands) {
             getConstant(operands[i])) {
       elements.push_back(constituent->first);
       continue;
+    }
+
+    if (getUndefType(operands[i])) {
+      if (Type elementType = getElementTypeForOperand(i)) {
+        if (TypedAttr zeroAttr = opBuilder.getZeroAttr(elementType)) {
+          elements.push_back(zeroAttr);
+          continue;
+        }
+      }
     }
 
     return emitError(unknownLoc,
