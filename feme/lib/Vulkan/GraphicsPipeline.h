@@ -703,6 +703,21 @@ struct GraphicsPipelineLibraryState {
   /// -- `dEQP-VK.transform_feedback.simple_{fast,optimized}_gpl.streams_*`
   /// (`H173(c)`'s own tracked cluster).
   std::optional<uint32_t> RasterizationStream;
+  /// (roadmap ENV6(b)) `RasterizationState`'s `pNext`-stripped copy above
+  /// likewise drops a chained
+  /// `VkPipelineRasterizationLineStateCreateInfoKHR`
+  /// (`VK_KHR_line_rasterization`'s stipple/line-raster-mode state) --
+  /// mirrors `RasterizationStream` immediately above, re-captured here
+  /// independently and re-chained back onto `RasterizationState.pNext`
+  /// when a linked pipeline is reconstructed. Without this, every
+  /// `VK_EXT_graphics_pipeline_library`-constructed pipeline whose
+  /// pre-rasterization-shaders part requested a non-default line
+  /// rasterization mode or stipple pattern silently fell back to this
+  /// struct's own absent-chain default once linked
+  /// (`dEQP-VK.pipeline.{fast_linked_library,pipeline_library}.extended_
+  /// dynamic_state.*.line_stipple_params`).
+  std::optional<VkPipelineRasterizationLineStateCreateInfoKHR>
+      LineRasterizationState;
 
   /// Populated only for `FRAGMENT_SHADER_BIT`.
   std::optional<VkPipelineDepthStencilStateCreateInfo> DepthStencilState;

@@ -2385,6 +2385,32 @@ std::optional<uint32_t> findRasterizationStream(
   return std::nullopt;
 }
 
+/// Finds a `VkPipelineRasterizationLineStateCreateInfoKHR` chained off
+/// \p Rasterization's own `pNext`, if any -- mirrors `findRasterizationStream`
+/// just above, for the same reason: a graphics-pipeline-library part needs
+/// this struct's contents independently of `RasterizationState`'s own
+/// `pNext`-stripped copy (see
+/// `GraphicsPipelineLibraryState::LineRasterizationState`'s own comment).
+/// Returns the struct with its own `pNext` nulled out, since nothing further
+/// is chained off of it today.
+std::optional<VkPipelineRasterizationLineStateCreateInfoKHR>
+findLineRasterizationState(
+    const VkPipelineRasterizationStateCreateInfo &Rasterization) {
+  for (const VkBaseInStructure *Next =
+           reinterpret_cast<const VkBaseInStructure *>(Rasterization.pNext);
+       Next; Next = Next->pNext) {
+    if (Next->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_KHR)
+      continue;
+    VkPipelineRasterizationLineStateCreateInfoKHR Copy =
+        *reinterpret_cast<
+            const VkPipelineRasterizationLineStateCreateInfoKHR *>(Next);
+    Copy.pNext = nullptr;
+    return Copy;
+  }
+  return std::nullopt;
+}
+
 /// Whether \p Tessellation's own `pNext` chains a
 /// `VkPipelineTessellationDomainOriginStateCreateInfo` requesting
 /// `VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT` -- the only domain origin
@@ -3229,6 +3255,7 @@ static void foldLinkedLibraryState(GraphicsPipelineLibraryState &Out,
     Out.ViewportState = Child.ViewportState;
     Out.RasterizationState = Child.RasterizationState;
     Out.RasterizationStream = Child.RasterizationStream;
+    Out.LineRasterizationState = Child.LineRasterizationState;
     Out.TessellationState = Child.TessellationState;
     Out.TessellationDomainOrigin = Child.TessellationDomainOrigin;
   }
@@ -3321,6 +3348,7 @@ GraphicsPipelineLibraryState captureGraphicsPipelineLibraryState(
     }
     if (const auto *RS = CreateInfo.pRasterizationState) {
       Out.RasterizationStream = findRasterizationStream(*RS);
+      Out.LineRasterizationState = findLineRasterizationState(*RS);
       VkPipelineRasterizationStateCreateInfo Copy = *RS;
       Copy.pNext = nullptr;
       Out.RasterizationState = Copy;
@@ -3506,6 +3534,12 @@ struct LinkedPipelineStorage {
   /// is set; mirrors `TessellationDomainOriginState` immediately above.
   VkPipelineRasterizationStateStreamCreateInfoEXT
       RasterizationStateStreamState{};
+  /// (roadmap ENV6(b)) Re-chained onto `RasterizationState.pNext` (ahead of
+  /// `RasterizationStateStreamState`, if both are present) when the
+  /// captured part's own
+  /// `GraphicsPipelineLibraryState::LineRasterizationState` is set; mirrors
+  /// `RasterizationStateStreamState` immediately above.
+  VkPipelineRasterizationLineStateCreateInfoKHR LineRasterizationState{};
   VkPipelineDepthStencilStateCreateInfo DepthStencilState{};
   VkPipelineColorBlendStateCreateInfo ColorBlendState{};
   VkPipelineMultisampleStateCreateInfo MultisampleState{};
@@ -3803,13 +3837,32 @@ synthesizeLinkedGraphicsPipelineCreateInfo(
       // find and `RasterState::RasterizationStream` stuck at its default
       // (stream 0) for every `VK_EXT_graphics_pipeline_library`-
       // constructed pipeline.
+      //
+      // (roadmap ENV6(b)) Likewise re-chain this part's own captured
+      // `VkPipelineRasterizationLineStateCreateInfoKHR`, for the same
+      // reason and against the same loss -- without it, every
+      // `VK_EXT_graphics_pipeline_library`-constructed pipeline whose
+      // pre-rasterization-shaders part requested a non-default line
+      // rasterization mode or stipple pattern silently lost it once
+      // linked. Both structs may be chained at once, so build the list
+      // explicitly (via `pNext`'s own `void*` type, rather than
+      // `VkBaseOutStructure*`, which would cast away `pNext`'s `const`)
+      // rather than having each independently overwrite
+      // `RasterizationState.pNext`.
+      Storage.RasterizationState.pNext = nullptr;
+      const void **NextSlot = &Storage.RasterizationState.pNext;
+      if (S.LineRasterizationState) {
+        Storage.LineRasterizationState = *S.LineRasterizationState;
+        Storage.LineRasterizationState.pNext = nullptr;
+        *NextSlot = &Storage.LineRasterizationState;
+        NextSlot = &Storage.LineRasterizationState.pNext;
+      }
       if (S.RasterizationStream) {
         Storage.RasterizationStateStreamState.sType =
             VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_STREAM_CREATE_INFO_EXT;
         Storage.RasterizationStateStreamState.rasterizationStream =
             *S.RasterizationStream;
-        Storage.RasterizationState.pNext =
-            &Storage.RasterizationStateStreamState;
+        *NextSlot = &Storage.RasterizationStateStreamState;
       }
       Result.pRasterizationState = &Storage.RasterizationState;
     }
