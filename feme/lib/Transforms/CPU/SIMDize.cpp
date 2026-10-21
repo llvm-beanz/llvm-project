@@ -1892,8 +1892,16 @@ void FunctionWidener::collectMaskedAllocas() {
     // `widenScalarizedFallback`'s naive per-lane replay happened to run
     // last -- then broadcasting that one surviving lane's value back out
     // to every lane on the next (also uniform-address) read.
+    // `isSimple()` (which also excludes a `volatile` store) would
+    // otherwise silently exclude the exact
+    // `dEQP-VK.spirv_assembly.instruction.compute.memory_access.
+    // {volatile,aligned_volatile}` shape this clause exists for: a
+    // `Volatile`-decorated SPIR-V store is still an ordinary, non-atomic
+    // `StoreInst` that can carry a genuinely per-lane-divergent value
+    // through a uniform address, so only `isAtomic()` (an actual
+    // read-modify-write this analysis does not model) is excluded here.
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (SI->isSimple() && UI.isDivergentAtDef(SI)) {
+      if (!SI->isAtomic() && UI.isDivergentAtDef(SI)) {
         if (AllocaInst *AI = getUnderlyingAlloca(SI->getPointerOperand()))
           MaskedAllocas.insert(AI);
       }
@@ -1917,8 +1925,12 @@ void FunctionWidener::computeForcedDivergentValues() {
   // is already complete by the time this runs.
   SmallVector<Value *, 16> Worklist;
   for (Instruction &I : instructions(*OldF)) {
+    // See `collectMaskedAllocas`'s own `!SI->isAtomic()` comment just
+    // above: a `Volatile`-decorated load must not be excluded here
+    // either, for the same reason (only a real atomic read-modify-write
+    // is unmodeled by this analysis).
     auto *LI = dyn_cast<LoadInst>(&I);
-    if (!LI || !LI->isSimple() || UI.isDivergentAtDef(LI))
+    if (!LI || LI->isAtomic() || UI.isDivergentAtDef(LI))
       continue;
     if (AllocaInst *AI = getUnderlyingAlloca(LI->getPointerOperand())) {
       if (MaskedAllocas.contains(AI)) {
@@ -5497,8 +5509,12 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // that lane's own now-separate storage, exactly like the alloca/GEP
   // cases just above; see `widenMaskedAllocaStore`'s own comment for why
   // this can't simply fall through to the ordinary uniformity gate below.
+  // `!isAtomic()`, not `isSimple()`: a `Volatile`-decorated store must
+  // still reach `widenMaskedAllocaStore` (which already forwards
+  // `SI.isVolatile()` into each per-lane store it emits) rather than
+  // falling through below -- see `collectMaskedAllocas`'s own comment.
   if (auto *SI = dyn_cast<StoreInst>(&I)) {
-    if (SI->isSimple() &&
+    if (!SI->isAtomic() &&
         !isGroupSharedPointerType(SI->getPointerOperandType()) &&
         MaskedAllocas.contains(getUnderlyingAlloca(SI->getPointerOperand()))) {
       widenMaskedAllocaStore(*SI, Builder);
@@ -5514,7 +5530,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // uniformity gate below, which would read only lane 0's copy and
   // broadcast it -- see `widenMaskedAllocaLoad`'s own comment.
   if (auto *LI = dyn_cast<LoadInst>(&I)) {
-    if (LI->isSimple() &&
+    if (!LI->isAtomic() &&
         !isGroupSharedPointerType(LI->getPointerOperandType()) &&
         MaskedAllocas.contains(getUnderlyingAlloca(LI->getPointerOperand()))) {
       widenMaskedAllocaLoad(*LI, Builder);

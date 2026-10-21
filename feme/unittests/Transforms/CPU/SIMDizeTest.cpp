@@ -3821,6 +3821,74 @@ TEST(SIMDizeTest, ReplicatesUniformStoreIntoEveryLaneOfAMaskedAllocaArray) {
   EXPECT_TRUE(FoundGather);
 }
 
+// Roadmap ENV5(b): `dEQP-VK.spirv_assembly.instruction.compute.
+// memory_access.{volatile,aligned_volatile}` reduce to this shape -- an
+// unconditional, *not itself* masked `store`/`load` pair round-tripping a
+// genuinely per-lane-divergent value (here, a thread-ID-derived one, like
+// `WidensPHIMergingMaskedAllocaLoad` above) through one uniform-looking
+// local, except the store/load are themselves `volatile`. `collectMaskedAllocas`
+// used to gate this detection on `StoreInst::isSimple()` (`!isVolatile() &&
+// !isAtomic()`), which silently excluded a `Volatile`-decorated store from
+// ever being recognised as a `MaskedAllocas` base in the first place --
+// `widen()`'s own masked-alloca store/load dispatch gates repeated the same
+// mistake. Left unfixed, `%local`'s address stayed a single shared scalar
+// pointer broadcast to every lane, so all four lanes' `store volatile`s
+// wrote the same address in sequence and the trailing `load` read back only
+// the last lane's value, instead of each lane reading its own. The fix
+// replaces each `isSimple()`/`!isSimple()` gate relevant to this shape with
+// `!isAtomic()` (a real atomic read-modify-write remains unmodeled and is
+// still excluded), since a `Volatile` store/load is an entirely ordinary,
+// non-atomic `StoreInst`/`LoadInst` for the purposes of this analysis.
+TEST(SIMDizeTest, WidensVolatileStoreLoadRoundTripOfADivergentValue) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %out) #0 {
+      %local = alloca float
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      store volatile float %tidf, ptr %local
+      %loaded = load volatile float, ptr %local
+      %use = fadd float %loaded, 1.000000e+00
+      %off = zext i32 %tid to i64
+      %outp = getelementptr float, ptr %out, i64 %off
+      store float %use, ptr %outp
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // `%local` must be widened into real, distinct per-lane storage: four
+  // real `volatile` stores (one per lane's own extracted address, each
+  // storing that lane's own scalar value, not a shared/broadcast one) and
+  // four real `volatile` loads feeding a genuinely widened `<4 x float>`
+  // `fadd` -- not a single scalar store/load pair left untouched because
+  // `isSimple()` hid this local from `MaskedAllocas` in the first place.
+  unsigned VolatileStoreCount = 0;
+  unsigned VolatileLoadCount = 0;
+  bool FoundWideFAdd = false;
+  auto *WideFloatTy = FixedVectorType::get(Type::getFloatTy(Ctx), 4);
+  for (Instruction &I : instructions(F)) {
+    if (auto *SI = dyn_cast<StoreInst>(&I))
+      if (SI->isVolatile() && SI->getValueOperand()->getType()->isFloatTy())
+        ++VolatileStoreCount;
+    if (auto *LI = dyn_cast<LoadInst>(&I))
+      if (LI->isVolatile() && LI->getType()->isFloatTy())
+        ++VolatileLoadCount;
+    if (I.getOpcode() == Instruction::FAdd && I.getType() == WideFloatTy)
+      FoundWideFAdd = true;
+  }
+  EXPECT_EQ(VolatileStoreCount, 4u);
+  EXPECT_EQ(VolatileLoadCount, 4u);
+  EXPECT_TRUE(FoundWideFAdd);
+}
+
 TEST(SIMDizeTest, ScalarizesUniformAtomicResourceCall) {
   // Roadmap H146: `Out[0].IncrementCounter()` and similar
   // fully-compile-time-uniform `feme.cpu.resource.atomic.*` calls (a
