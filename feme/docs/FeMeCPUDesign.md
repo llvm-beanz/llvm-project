@@ -500,11 +500,15 @@ where it's discussed, and summarized here:
   an unsupported CFG.
 - An **empty diamond arm** (a branch whose true or false successor *is* the
   reconvergence block itself, i.e. an `if` with no corresponding body on
-  that side) is not supported yet: the general rewrite needs to redirect the
-  edge the branch instruction itself owns rather than a distinct arm
-  block's tail, which adds a case this milestone defers. A nested divergent
-  branch, and a uniform branch nested inside a divergent arm (or vice
-  versa), both work today -- only the empty-arm case is narrowed.
+  that side) **is now supported** (roadmap `ENV6(a)`): `DiamondFlattener::
+  flatten()`'s own `Cur == End` early return already handled this shape
+  correctly as a no-op (the arm simply contributes its own unexecuted mask
+  pair unchanged via the merge `select`s), so `validate()`'s separate,
+  stricter rejection of the same shape was removed as unnecessarily
+  conservative rather than a real limitation. Found triaging the single
+  shared root cause behind all 210 `dEQP-VK.api.copy_and_blit.*` CTS
+  failures: their common MSAA resolve/depth-copy fragment shader's
+  `if (earlyOutCondition) { extra store }` has exactly this shape.
 - **Early `ret` under a divergent branch** (one arm returns directly instead
   of reconverging) is not supported: in practice this already fails
   `PostDominatorTree`'s "does every path from this branch reach a common
@@ -536,9 +540,20 @@ where it's discussed, and summarized here:
   check reached through an internal diamond that reconverges back at the
   latch **via an empty arm** (the `loop-continue.ll` named shape, where the
   "continue" arm jumps directly to the reconvergence block with no body of
-  its own) is still diagnosed and left alone: that is `DiamondFlattener`'s
-  own pre-existing "empty diamond arm" narrowing (see two bullets above),
-  not a loop-linearizer-specific gap.
+  its own) is now also supported, for the same reason given above: that is
+  `DiamondFlattener`'s own now-removed "empty diamond arm" narrowing (see
+  two bullets above), not a loop-linearizer-specific gap.
+- (Roadmap ENV6(a)) `LoopLinearizer::findForwardExitCheckBlock` -- which
+  chases a plain `UncondBr`-only relay chain forward from a loop header
+  that has no exit check of its own, looking for the real one -- now also
+  tolerates the header itself (or any block mid-chain) starting a
+  **uniform, two-arm diamond that fully reconverges** at one shared block
+  before either the loop's latch or exit block, continuing the walk from
+  that merge point rather than misreporting the diamond's own branch as
+  the loop's real check. All 210 `dEQP-VK.api.copy_and_blit.*` cases route
+  their real, uniform `for (sample = 0; ...)` trip-count check through
+  exactly one such diamond -- `SPIRVResourceLoweringPass`'s per-load
+  root-constant bounds guard -- immediately ahead of the loop header.
 - (Roadmap H19k) `StructurizeCFG` unconditionally splits a loop's own
   uniform trip-count check into two `CondBr` blocks whenever that check is
   not already fused with the latch -- the ordinary
