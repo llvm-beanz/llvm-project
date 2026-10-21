@@ -2769,13 +2769,24 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End,
                         "' has no reconvergence point");
       return false;
     }
-    if (T == R || Fsucc == R) {
-      if (!Quiet)
-        diagnose(F, "an empty diamond arm (in '" + Cur->getName() +
-                        "') is not yet supported (roadmap milestone 6 "
-                        "deviation)");
-      return false;
-    }
+    // Roadmap ENV6(a): an "empty" arm -- `T`/`Fsucc` *is* `R`, i.e. this
+    // block branches directly into its own reconvergence point with no
+    // arm-local blocks of its own at all -- used to be rejected
+    // outright here, but `flatten`'s own `Cur == End` early return
+    // already handles exactly this shape as a correct no-op: that arm
+    // simply contributes its own (unexecuted) mask pair unchanged, the
+    // same way a `phi` at `R` with one incoming value from `Cur` itself
+    // already works below. `validate(T, R, ...)`/`validate(Fsucc, R,
+    // ...)` just below already tolerate `Start == End` the identical way
+    // (the `while (Cur != End)` loop body never runs), so no separate
+    // case is needed here beyond no longer bailing out early. Found
+    // triaging the single shared root cause behind the entire 210-case
+    // `dEQP-VK.api.copy_and_blit.*` cluster (`ENV6(a)`): every one of
+    // those cases' common MSAA resolve/depth-copy fragment shader has
+    // exactly this shape -- an `if (earlyOutCondition) { extra store }`
+    // whose `else` arm is empty, reconverging directly at the loop
+    // latch.
+    //
     // The reconvergence block must have exactly the two predecessors this
     // rewrite expects to redirect/select between; anything else is a merge
     // shape this milestone does not generalize to yet.

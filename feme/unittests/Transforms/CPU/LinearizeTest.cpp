@@ -3443,4 +3443,57 @@ TEST(LinearizeTest, DoesNotUseFreedChildCycleExitBlockAfterOuterLoopFold) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap ENV6(a): regression for `DiamondFlattener::validate()`'s own
+// now-removed "empty diamond arm" over-rejection -- a divergent `if` whose
+// `else` arm is empty (branches directly to the shared reconvergence
+// block, here the loop latch, with no arm-local blocks of its own) used to
+// be diagnosed as unsupported outright, even though `DiamondFlattener::
+// flatten()`'s own `Cur == End` early return already handles this shape
+// correctly as a no-op arm. This is the minimal shape that triggers that
+// check; see `MsaaDepthCopyLoopWithUniformBoundsCheckAheadOfHeader` below
+// for the real, more elaborate CTS shader this was found triaging.
+TEST(LinearizeTest, DiamondFlattenerAllowsEmptyLoopBodyArm) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n, ptr %buf, i32 %desc) #0 {
+    entry:
+      br label %loop.header
+    loop.header:
+      %i = phi i32 [0, %entry], [%inc, %loop.latch]
+      %loop.cond = icmp slt i32 %i, %n
+      br i1 %loop.cond, label %loop.body, label %loop.exit
+    loop.body:
+      %d = call i32 @feme.stage.subpass.load.i32(i32 0, i32 0, i32 %i)
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 1, i32 %desc, i64 0, i32 %i, i1 true)
+      %dc = icmp eq i32 %d, 0
+      br i1 %dc, label %arm.a, label %loop.latch
+    arm.a:
+      call void @feme.cpu.resource.store.raw.i32(ptr %buf, i32 2, i32 %desc, i64 0, i32 %i, i1 true)
+      br label %loop.latch
+    loop.latch:
+      %inc = add i32 %i, 1
+      br label %loop.header
+    loop.exit:
+      ret void
+    }
+    declare i32 @feme.stage.subpass.load.i32(i32, i32, i32)
+    declare void @feme.cpu.resource.store.raw.i32(ptr, i32, i32, i64, i32, i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  run(*M);
+  EXPECT_FALSE(SawError) << "an empty diamond arm should linearize cleanly, "
+                            "not be diagnosed as unsupported";
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
