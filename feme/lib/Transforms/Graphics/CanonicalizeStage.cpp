@@ -4678,8 +4678,39 @@ resolveOffsetWithinElement(Type *ElemTy, ArrayRef<uint32_t> IDs,
 Type *getEffectiveStageIOValueType(GlobalVariable *GV) {
   Type *ValueTy = GV->getValueType();
   const MDNode *MemberMD = GV->getMetadata("feme.spirv.MemberDecorations");
-  if (!MemberMD)
+  if (!MemberMD) {
+    // (Roadmap L480) A single-member wrapper that carries no `Block`-level
+    // member decorations of its own (so `MemberMD` above is null) whose one
+    // real member is itself a genuine multi-member nested struct -- e.g. an
+    // `Output` struct `%DataOutput = OpTypeStruct %Data` wrapping `%Data =
+    // OpTypeStruct %mat2v4float %v4float %float %float %float %float`, the
+    // shape `dEQP-VK.spirv_assembly.instruction.graphics.variable_init.
+    // output.struct` uses for its never-explicitly-stored, initializer-only
+    // `Output` variable -- is exactly `addElements`' own "single-member
+    // `Block` ... whose one real member is itself a genuine multi-member
+    // nested struct" case (see its own long comment, guarded by the same
+    // `peelSingleMemberStruct`/`isGenuineMultiMemberNestedStruct` pair used
+    // here): that construction-side path decomposes `%Data`'s own *six*
+    // real members into six separate `SignatureElement`s/`ElementID`s, via
+    // `addStageIOStructMembers(..., PeeledContent, ...)`, not one opaque
+    // element for the outer wrapper. Returning the unpeeled `ValueTy`
+    // (`%DataOutput`, a single-member struct) here left this access-side
+    // resolution disagreeing with that: `resolveOffsetWithinElement` would
+    // walk `%DataOutput`'s own *one* member while being handed as many
+    // `ElementIDs` as `%Data`'s six real members, and `storeStageIOBlockValue`
+    // /`loadStageIOBlockValue`'s own per-member loop then indexed
+    // `%DataOutput`'s single-element `StructType` out of bounds -- an
+    // `ExtractValueInst`/`InsertValueInst` member index crash that shares its
+    // underlying type-indexing code (and so its assertion text) with
+    // `GetElementPtrInst`'s own (`llvm::checkGEPType`'s "Invalid
+    // GetElementPtrInst indices for type!"). Peeling to `%Data` here --
+    // exactly the same peeled type `addElements` itself decomposed --
+    // restores agreement between the two sides.
+    Type *Peeled = peelSingleMemberStruct(ValueTy);
+    if (Peeled != ValueTy && isGenuineMultiMemberNestedStruct(Peeled))
+      return Peeled;
     return ValueTy;
+  }
   auto *ArrTy = dyn_cast<ArrayType>(ValueTy);
   auto *PeekedST =
       dyn_cast<StructType>(ArrTy ? ArrTy->getElementType() : ValueTy);
@@ -4966,6 +4997,33 @@ std::optional<StageIOAccess> resolveStageIOAccess(
       if (ByteOffset >= Gap)
         ByteOffset -= Gap;
     }
+    // (Roadmap L480) A genuine whole-global store/load (\p ValueTy is the
+    // same un-peeled type `GV->getValueType()` names, e.g. the synthesized
+    // `store %DataOutput @spirv_var_7's-initializer, ptr @spirv_var_7`
+    // `addElements`' own "single-member `Block` ... whose one real member is
+    // itself a genuine multi-member nested struct" case
+    // (`getEffectiveStageIOValueType`'s own comment) synthesizes for a
+    // never-explicitly-stored `Output` global) must have \p ValueTy peeled
+    // the same way \p EffectiveTy already was, or the `ValueTy == ST`
+    // whole-access shortcut `resolveOffsetWithinElement` depends on below
+    // never matches -- for this shape, that shortcut's failure let a
+    // single-member-struct-shaped `ValueTy` fall through into this
+    // function's own per-member `StructLayout` resolution instead, which
+    // returned only the *first* real member's own `ElementID` while \p Val
+    // itself (unpeeled by the caller) was still the whole aggregate --
+    // `storeStageIOValue` then tried to widen that whole-aggregate
+    // (struct-typed) `Val` as if it were one scalar/vector leaf,
+    // `ConstantVector::getSplat`'s own "element type of a VectorType must
+    // be ... a valid target extension type" assertion in `FunctionWidener::
+    // getWidened` (`variable_init.output.struct`'s second crash, exposed
+    // only once the first, `checkGEPType`, crash this same roadmap entry
+    // fixed stopped masking it). A partial (GEP-reached) access's own \p
+    // ValueTy is never equal to `GV->getValueType()` to begin with (it
+    // already names just the narrower sub-element being read/written), so
+    // this peel is safe to apply unconditionally whenever the two are
+    // still equal here.
+    if (ValueTy == GV->getValueType())
+      ValueTy = EffectiveTy;
   }
   // (Roadmap H117/H118, extended by L366) Mirrors `addElements`' own
   // `TakeBlockPath` construction-side check exactly: a block array's
@@ -5513,7 +5571,31 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
       if (HasRealInitializer) {
         IRBuilder<> EntryBuilder(
             &*F.getEntryBlock().getFirstInsertionPt());
-        EntryBuilder.CreateStore(GV.getInitializer(), &GV);
+        // (Roadmap L480) `GV`'s own declared value type may itself be a
+        // single-member wrapper whose one real member is a genuine
+        // multi-member nested struct (`getEffectiveStageIOValueType`'s own
+        // comment) -- `%DataOutput = OpTypeStruct %Data` wrapping `%Data`'s
+        // six real members, `variable_init.output.struct`'s own shape.
+        // `resolveStageIOAccess`'s own access-side resolution peels through
+        // exactly this wrapper (to agree with `addElements`' construction-
+        // side decomposition of `%Data`'s six members into six separate
+        // `SignatureElement`s), so the real `StoreInst` synthesized here
+        // must store that same peeled-down constant, not the unpeeled outer
+        // wrapper: storing the latter left `storeStageIOBlockValue`'s own
+        // per-member `CreateExtractValue` loop walking six `ElementIDs`
+        // against a `Val` whose LLVM type had only one real member,
+        // indexing `ExtractValueInst` out of its one-member struct's own
+        // bounds -- an invalid-index crash that (like a literal GEP) routes
+        // through `llvm::checkGEPType`'s own assertion.
+        Constant *Init = GV.getInitializer();
+        Type *EffTy = getEffectiveStageIOValueType(&GV);
+        while (Init->getType() != EffTy) {
+          auto *InitST = dyn_cast<StructType>(Init->getType());
+          if (!InitST || InitST->getNumElements() != 1)
+            break;
+          Init = Init->getAggregateElement(0u);
+        }
+        EntryBuilder.CreateStore(Init, &GV);
       }
     }
   }

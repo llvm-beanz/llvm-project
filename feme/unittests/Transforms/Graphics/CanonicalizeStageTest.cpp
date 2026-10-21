@@ -8201,6 +8201,86 @@ TEST(CanonicalizeStageTest,
   ASSERT_NE(OutData, nullptr);
 }
 
+/// (Roadmap L480) A declared-but-never-written `Output` global whose own
+/// LLVM type is a single-member wrapper (`%DataOutput = OpTypeStruct
+/// %Data`, no `Block`-level member decorations of its own, so
+/// `!feme.spirv.MemberDecorations` is absent -- unlike a genuine XFB
+/// `Block`) whose one real member (`%Data`) is itself a genuine
+/// multi-member nested struct (a matrix, a `vec4`, and four scalar
+/// `float`s) -- `dEQP-VK.spirv_assembly.instruction.graphics.
+/// variable_init.output.struct`'s own exact shape. This case's
+/// `HasRealInitializer` path above synthesizes a real whole-aggregate
+/// `StoreInst` so the ordinary store-rewriting walk picks it up "exactly
+/// like any other output write", per the SPIR-V spec's own "value from
+/// the start of the invocation" semantics for an unwritten `Output`
+/// variable with an initializer -- but that synthesized store's own
+/// value type was, before this fix, left as the unpeeled, single-member
+/// `%DataOutput` wrapper, disagreeing with `addElements`' own
+/// construction-side decomposition of `%Data`'s six real members into
+/// six separate `SignatureElement`s/`ElementID`s. The mismatch crashed
+/// (an out-of-range `ExtractValueInst` member index, routed through the
+/// same underlying type-indexing code -- and so the same assertion
+/// text -- as an invalid `GetElementPtrInst`) rather than merely
+/// mis-rendering, making this a regression test for a genuine compiler
+/// abort, not just a numeric-correctness bug.
+TEST(CanonicalizeStageTest,
+    RewritesNeverWrittenSingleMemberWrappedNestedStructOutputInitializer) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    %Data = type { [2 x <4 x float>], <4 x float>, float, float, float, float }
+    %DataOutput = type <{ %Data }>
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+    @spirv_var = addrspace(8) global %DataOutput <{ %Data { [2 x <4 x float>] [<4 x float> <float 1.0, float 2.0, float 3.0, float 4.0>, <4 x float> <float 5.0, float 6.0, float 7.0, float 8.0>], <4 x float> <float 9.0, float 10.0, float 11.0, float 12.0>, float 13.0, float 14.0, float 15.0, float 16.0 } }>, !spirv.Decorations !1
+    define void @main() #0 {
+      store <4 x float> zeroinitializer, ptr addrspace(8) @gl_Position
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!2}
+    !1 = !{!3}
+    !2 = !{i32 11, i32 0}
+    !3 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+
+  // No raw load/store survives against `@spirv_var`: every one of
+  // `%Data`'s six real members must be rewritten into its own
+  // `feme.stage.output.store` call, or the global itself remains live
+  // and unresolved at JIT-link time.
+  for (Instruction &I : instructions(F))
+    EXPECT_FALSE(isa<StoreInst>(&I) || isa<LoadInst>(&I));
+
+  // Collect every synthesized output-store's own `ElementID`, confirming
+  // all six of `%Data`'s real members (two matrix columns, one `vec4`,
+  // and four scalar `float`s) each reach their own distinct
+  // `feme.stage.output.store` call rather than being dropped or
+  // collapsed onto the wrong `ElementID`.
+  std::set<uint32_t> ElementIDs;
+  unsigned FloatStoreCount = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    Type *ValTy = CI->getArgOperand(3)->getType();
+    if (!ValTy->isFloatTy() && !ValTy->isVectorTy())
+      continue;
+    uint32_t ElementID =
+        getStageOpConstantOperand(*CI, /*Offset=*/0).value_or(~0u);
+    ElementIDs.insert(ElementID);
+    ++FloatStoreCount;
+  }
+  // `%Data`'s six real members plus `@gl_Position`'s own `vec4` store
+  // (also float-vector-typed, included by the same filter above) -- seven
+  // distinct `ElementID`s total, with at least one store reaching each.
+  EXPECT_EQ(ElementIDs.size(), 7u);
+  EXPECT_GE(FloatStoreCount, 7u);
+}
+
 /// (Roadmap L271) Running `CanonicalizeStagePass` a *second* time over an
 /// already-canonicalized entry (mirroring `GraphicsPipeline.cpp`'s own
 /// two invocations -- once directly, once again, meant as a no-op repeat,
