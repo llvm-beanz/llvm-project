@@ -1,0 +1,45 @@
+; RUN: %if spirv-tools %{ spirv-as --target-env spv1.0 %s -o - | mlir-translate --deserialize-spirv - -o - | FileCheck %s %}
+
+; COM: `OpEntryPoint`'s Name only has to be unique per (Execution Model,
+; COM: Name) pair (SPIR-V spec, "OpEntryPoint" validation rules), not
+; COM: module-wide, so two different functions may legally share the exact
+; COM: same entry point Name as long as their Execution Models differ -- as
+; COM: real-world dEQP-VK.spirv_assembly.instruction.compute.
+; COM: {multiple_shaders,unused_variables}.* CTS modules do (one `Vertex`
+; COM: entry and one `GLCompute` entry both named "entrypoint2" coexisting
+; COM: in a single module). Since the deserializer renames a function to
+; COM: its entry point's own Name (see entry-point-name-mismatch.spvasm),
+; COM: and MLIR symbol names must be module-unique, it must disambiguate
+; COM: rather than reject the module or produce a symbol collision.
+
+; CHECK: spirv.func @entrypoint2() "None"
+; CHECK: spirv.func @[[VERTEX_FN:entrypoint2[_0-9]+]]() "None"
+; CHECK: spirv.EntryPoint "GLCompute" @entrypoint2
+; CHECK: spirv.EntryPoint "Vertex" @[[VERTEX_FN]]
+
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %comp_main "entrypoint2" %gl_GlobalInvocationID
+               OpEntryPoint Vertex %vert_main "entrypoint2" %gl_VertexIndex
+               OpExecutionMode %comp_main LocalSize 1 1 1
+               OpName %comp_main "entrypoint2"
+               OpName %vert_main "entrypoint2"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %gl_VertexIndex BuiltIn VertexIndex
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+%_ptr_Input_int = OpTypePointer Input %int
+%gl_VertexIndex = OpVariable %_ptr_Input_int Input
+  %comp_main = OpFunction %void None %fnty
+ %comp_entry = OpLabel
+               OpReturn
+               OpFunctionEnd
+  %vert_main = OpFunction %void None %fnty
+ %vert_entry = OpLabel
+               OpReturn
+               OpFunctionEnd

@@ -21,6 +21,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ScopedPrinter.h"
 #include <cstdint>
@@ -265,8 +266,27 @@ private:
 
   /// Returns a symbol to be used for the function name with the given
   /// result <id>. This tries to use the function's OpName if
-  /// exists; otherwise creates one based on the <id>.
+  /// exists; otherwise creates one based on the <id>. The SPIR-V spec only
+  /// requires `OpEntryPoint` names to be unique per (Execution Model, Name)
+  /// pair, so two functions with different <id>s (e.g. one named by a
+  /// `Vertex` entry point and another by a `GLCompute` entry point) may
+  /// legitimately share the same `OpName`; since the result is used as an
+  /// MLIR symbol, and MLIR symbols must be unique within a module, a
+  /// colliding name is disambiguated with the <id> rather than reused
+  /// verbatim. The result is cached per <id> so repeated calls (e.g. once
+  /// when the function is defined and again from every `OpFunctionCall`
+  /// referencing it) agree on the same name regardless of call order.
   std::string getFunctionSymbol(uint32_t id);
+
+  /// Claims \p name as the MLIR symbol for the function with result <id>
+  /// \p id, disambiguating it with \p id (appended as a `_<id>` suffix) if
+  /// \p name was already claimed by a different function -- see
+  /// `getFunctionSymbol`'s documentation for why this can legitimately
+  /// happen. Also used by `OpEntryPoint` processing, which may rename a
+  /// function (already named via its own `OpName` through
+  /// `getFunctionSymbol`) to the entry point's own, semantically
+  /// authoritative Name.
+  std::string claimUniqueFunctionSymbol(uint32_t id, std::string name);
 
   /// Returns a symbol to be used for the graph name with the given
   /// result <id>. This tries to use the graph's OpName if
@@ -773,6 +793,15 @@ private:
 
   // Result <id> to name mapping.
   DenseMap<uint32_t, StringRef> nameMap;
+
+  // Result <id> to the (possibly disambiguated) MLIR symbol already chosen
+  // for it by `getFunctionSymbol`.
+  DenseMap<uint32_t, std::string> functionSymbolMap;
+
+  // Function symbol name to the first <id> that claimed it, used by
+  // `getFunctionSymbol` to detect an `OpName` shared by more than one
+  // function and disambiguate every <id> after the first.
+  llvm::StringMap<uint32_t> functionSymbolOwner;
 
   // Result <id> to debug info mapping.
   DenseMap<uint32_t, StringRef> debugInfoMap;

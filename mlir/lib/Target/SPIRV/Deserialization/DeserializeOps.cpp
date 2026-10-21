@@ -600,8 +600,34 @@ Deserializer::processOp<spirv::EntryPointOp>(ArrayRef<uint32_t> words) {
     // distinct API-facing name apart from its referenced function's MLIR
     // symbol, always rename the function to the entry point's own name
     // (discarding any prior `OpName`) rather than treating the mismatch as
-    // an error.
-    parsedFunc.setName(fnName);
+    // an error. `OpEntryPoint` Names are themselves only required to be
+    // unique per Execution Model (not module-wide), so two different
+    // functions may be renamed to the very same string here (e.g. one
+    // `Vertex` and one `GLCompute` entry both named "main"); go through
+    // `claimUniqueFunctionSymbol` rather than `setName` directly so such a
+    // collision gets disambiguated instead of breaking the module's symbol
+    // table.
+    parsedFunc.setName(claimUniqueFunctionSymbol(fnID, fnName.str()));
+    // `parsedFunc`'s new symbol may still not be `fnName` verbatim (the
+    // disambiguating suffix above, or a same-collision suffix this
+    // function's `OpFunction` already claimed earlier via
+    // `getFunctionSymbol`, before this `OpEntryPoint` was even reached) --
+    // stash the real Name text as a discardable attribute on `parsedFunc`
+    // itself (not the `spirv.EntryPointOp` created below:
+    // `spirv.EntryPointOp::print` does not emit an attribute dictionary at
+    // all, unlike `spirv.func`'s generic function-like printing, so an
+    // attribute placed there would silently vanish the moment this module
+    // round-trips through MLIR's textual assembly format -- confirmed via
+    // an `mlir-translate --deserialize-spirv | mlir-opt` round trip while
+    // developing this fix) so a consumer can still resolve this exact
+    // entry point by its real, authoritative
+    // `VkPipelineShaderStageCreateInfo::pName`-equivalent Name,
+    // independent of whatever symbol collision avoidance renamed its
+    // function to. Skipped whenever the symbol already matches `fnName`
+    // verbatim (the common case, with no collision to disambiguate), to
+    // avoid attaching unnecessary noise to every entry point's function.
+    parsedFunc->setDiscardableAttr("spirv_entry_point_name",
+                                   StringAttr::get(context, fnName));
   }
   SmallVector<Attribute, 4> interface;
   while (wordIndex < words.size()) {
@@ -615,7 +641,7 @@ Deserializer::processOp<spirv::EntryPointOp>(ArrayRef<uint32_t> words) {
   }
   spirv::EntryPointOp::create(
       opBuilder, unknownLoc, execModel,
-      SymbolRefAttr::get(opBuilder.getContext(), fnName),
+      SymbolRefAttr::get(opBuilder.getContext(), parsedFunc.getName()),
       opBuilder.getArrayAttr(interface));
   return success();
 }

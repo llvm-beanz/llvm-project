@@ -1083,11 +1083,31 @@ spirv::Deserializer::getSpecConstantOperation(uint32_t id) {
 }
 
 std::string spirv::Deserializer::getFunctionSymbol(uint32_t id) {
+  if (auto it = functionSymbolMap.find(id); it != functionSymbolMap.end())
+    return it->second;
+
   auto funcName = nameMap.lookup(id).str();
   if (funcName.empty()) {
     funcName = "spirv_fn_" + std::to_string(id);
   }
-  return funcName;
+  return claimUniqueFunctionSymbol(id, std::move(funcName));
+}
+
+std::string spirv::Deserializer::claimUniqueFunctionSymbol(uint32_t id,
+                                                           std::string name) {
+  // `OpEntryPoint` only requires its Name to be unique per Execution Model,
+  // so two functions with different <id>s -- most commonly one named by a
+  // `Vertex` entry point and another by a `GLCompute` entry point sharing a
+  // module -- may legitimately carry the very same `OpName` and/or
+  // `OpEntryPoint` Name. Disambiguate with the <id> whenever a name has
+  // already been claimed by a different function so the symbol stays
+  // unique, as MLIR's symbol tables require.
+  if (auto [it, inserted] = functionSymbolOwner.try_emplace(name, id);
+      !inserted && it->second != id)
+    name += "_" + std::to_string(id);
+
+  functionSymbolMap[id] = name;
+  return name;
 }
 
 std::string spirv::Deserializer::getGraphSymbol(uint32_t id) {
