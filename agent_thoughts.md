@@ -128580,3 +128580,31 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device
 2. `ENV5(c)(7)(b)`: `barrier.in_loop` (1 case) — structural, needs a lockstep multi-iteration barrier execution model; likely needs a design-doc update before implementation. Lowest priority; revisit only after `(a)` or a deliberate design decision.
 3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
 4. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `ENV5(c)(7)(a)` re-triaged -- barrier.{in_if,in_switch} need the lockstep model too, no code change
+
+**Next action (under two minutes):** read `feme/docs/Roadmap.md`'s `ENV5(c)(7)(b)` entry, then skim `FeMeCPUDesign.md`'s Phase 6 ("Group Execution and Barriers") for the compute-shader barrier-splitting model this would need to generalize to tessellation-control, before touching any code.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, start of session). No stray `deqp-vk` processes.
+
+## What got done
+
+1. **Built and unit-tested a first `splitTessellationControlEntry` generalization**: accepted N barrier call sites when each sits immediately before an unconditional branch into one shared reconvergence block. New test `SplitsHullEntryAtReconvergingBarriersInIf` passed; 150/150 `FeMeTransformsGraphicsTests`, 3840/3840 `check-feme` baseline, no regressions.
+2. **Ran it against the real CTS case and found the shape didn't match**: a fresh `FEME_DUMP_IR_PRECANON=1` dump of `barrier.in_if` showed one arm has an extra `insertelement` between its barrier and its branch — the strict version correctly (if too narrowly) rejected it.
+3. **Built a second, more general version**: split each of the N barrier blocks right after its own barrier call (same technique as the existing single-barrier case, done N times), flood-filling the region from all N split points at once. This absorbed the extra per-arm work.
+4. **Traced where the reconverging `phi` actually gets stored, and found the real blocker**: `%29 = phi [...]` (both `in_if` and `in_switch`) is stored to `@spirv_var_2`, a `[3 x <4 x float>]` *per-control-point* `gl_out[gl_InvocationID].Position` (confirmed via `!spirv.Decorations`: plain `Position`, no `Patch` decoration), indexed by `gl_InvocationID` captured from before the barrier. `PatchConstantWrapper.cpp`'s own file comment establishes the patch-constant phase is **one non-batched, lane-0-only invocation per patch** — splitting this per-invocation write there can only replay *one* captured control point's own outcome for the whole patch, silently wrong for the rest. Worse than the existing honest diagnostic.
+5. **Reverted the speculative code in full** (`git checkout -- CanonicalizeStage.cpp CanonicalizeStageTest.cpp`) rather than ship something that compiles and passes its own narrow unit test but is architecturally unsound for the real case. Rebuilt and reconfirmed the pre-session baseline (150/150, 3840/3840) is intact.
+6. **Docs**: merged `ENV5(c)(7)(a)`/`(b)` in `Roadmap.md` into one shared bucket (all 3 barrier cases now need the same lockstep fix); `VulkanCTSReport.md`'s `L487` entry (investigation + negative result, no code change); `.instructions.md` got two new entries — this fork's `UncondBrInst`/`CondBrInst` split (not upstream's single `BranchInst`/`isConditional()`), and the per-invocation-vs-patch-constant distinction that was the real blocker here. One commit (`4faab53a3d57`, docs-only).
+
+## Wins
+
+- Caught an architecturally-wrong fix *before* it shipped, by tracing the data all the way to its store target instead of stopping once the unit test passed.
+- Turned a dead end into a precise, shared root-cause finding: all 3 `barrier.*` cases (not just `in_loop`) need the same lockstep multi-invocation execution model — previous sessions' `(a)`/`(b)` split was itself based on an incomplete read of `in_if`'s IR.
+- `.instructions.md` now has two gotchas (`UncondBrInst` vs `BranchInst`, per-invocation-output detection via `!spirv.Decorations`) that would otherwise cost a future session the same half-day of investigation.
+
+## State for next session
+
+`ENV5(c)`'s remaining 3 cases now form one bucket, `ENV5(c)(7)(b)`:
+1. **(needs a design decision first, not a quick fix)** All 3 of `barrier.{in_if,in_switch,in_loop}` need a real per-invocation-in-lockstep multi-region barrier execution model inside the control-point phase itself (closer to `feme::cpu::EntryWrapperPass`'s own compute-shader barrier-splitting design, `FeMeCPUDesign.md` Phase 6, than to `splitTessellationControlEntry`'s current phase-split approximation). Read that section fully, then decide whether a graphics-pipeline-specific design-doc addendum is warranted before writing any code — do not attempt another `CanonicalizeStage.cpp`-local patch without that step; two sessions in a row have now found the single-split model itself is the wrong shape for these 3 cases.
+2. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — the more productive next body of work while `(1)` needs a design decision.
+3. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
