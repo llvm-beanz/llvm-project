@@ -69,23 +69,18 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV5(c)`'s remaining 13 cases, roughly in priority order:
-1. `module.same_module*` (4 cases) — **best next target**, never triaged this
-   cluster specifically; no creation-time error logged via
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1` in any prior session, so this needs a
-   render-output-comparison diagnostic approach, not the usual
-   creation-error-string triage.
-2. `ENV5(c)(4)`: 6 deeper `float16.*_tessc` cases
+`ENV5(c)`'s remaining 9 cases, in priority order:
+1. `ENV5(c)(4)`: 6 deeper `float16.*_tessc` cases
    (`struct16arr3`/`v3f16arr5`/`v4f16arr3`) — same `foldRedundantFlowBlock` bug
-   family as an older partial fix, but the aliasing predecessors are no longer
+   family as `L481`'s partial fix, but the aliasing predecessors are no longer
    immediate fold targets; needs either a transitive-reconvergence check or
    whole-fixed-point-loop slot-write tracking. Get a fresh standalone `.ll`
    reduction first (`FEME_DUMP_IR_PRELINEARIZE=1` + `feme-opt --llvm
    -passes=feme-cpu-linearize,verify`).
-3. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one
+2. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one
    group-sync barrier per Hull entry point" limitation, lowest priority, not a
    quick fix.
-4. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
+3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
    cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
-5. (low priority, unchanged for many sessions) Upstream the 3
+4. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
