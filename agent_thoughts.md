@@ -128245,3 +128245,102 @@ The `VK_ERROR_INITIALIZATION_FAILED` shape recurs in `multiple_shaders`, `opname
 4. **(worth a quick check before diving into #1)** Grep the untriaged `compute.*`/`graphics.*` lists for any other case where a function symbol might get disambiguated by the deserializer's new `claimUniqueFunctionSymbol` (i.e. any other same-Name-different-stage shape) — this session's fix chain was long precisely because the first bug's fix kept exposing the next one; a quick sweep might catch a sibling case before it becomes its own multi-session saga.
 
 **Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.variable_init.vec4_from_workgroup' --deqp-log-images=disable` (or the nearest matching real case name) to get the first real error string for `ENV5(b)`'s next untriaged cluster.
+
+# Session: closing out ENV5(b)'s 9 untriaged compute.* cases
+
+## 🎯 What I actually did (so I don't re-derive this next time)
+
+Picked up exactly where the last session left off: `variable_init` (3), `memory_access` (2),
+`opundef`/`signed_op`/`vector_shuffle` (1 each) — 9 cases, all needing real build+trace, no
+log-mining. Triaged every one by directly running `deqp-vk --deqp-case=...` (plus
+`FEME_DUMP_IR_PRESIMD`/`FEME_DUMP_IR`/`FEME_DEBUG_DUMP_SPIRV_MLIR` for the ones needing IR, not
+just an error string). Result: **4 distinct bugs**, not 9 — `opundef`/`signed_op` turned out to
+already pass once their sibling bugs were fixed (the "9 untriaged" tally bundled sub-suite names
+loosely, not confirmed per-case).
+
+1. `memory_access.{volatile,aligned_volatile}` — `SIMDize.cpp`'s masked-alloca detection gated on
+   `isSimple()` (excludes volatile *and* atomic), should've only excluded atomic. Volatile stores/
+   loads were silently never widened → one shared scalar alloca broadcast to all 4 lanes → last
+   lane's write wins, every lane reads it back. Fixed 4 gate sites, `!isAtomic()` everywhere.
+2. `variable_init.private.matrix` — `spirv.matrix`'s `initial_value` is one *flat*
+   `DenseElementsAttr` for the whole matrix (not nested like struct/array). Taught
+   `buildAggregateGlobalInitializerValue` to slice it into per-column attrs and recurse.
+3. `variable_init.private.{float,vec4}_from_workgroup` — `Private` global's `initializer` names
+   *another global* (not a spec constant) — upstream's own `spirv.GlobalVariable` verifier would
+   reject this, but the deserializer builds it unverified anyway (confirmed via
+   `FEME_DEBUG_DUMP_SPIRV_MLIR=1`). New `PrivatePointerInitializerGlobalVariablePattern`.
+4. `vector_shuffle.vector_shuffle` — `Private` global's `initializer` names a scalar
+   `spirv.SpecConstant` — upstream declines this too ("specialization constants are not considered
+   as well"). New `PrivateSpecConstantInitializerGlobalVariablePattern`, reusing the existing
+   `prepareSpecConstants`/`SpecConstantValueMap` machinery `ReferenceOfConversionPattern` already
+   had.
+
+Each landed as its own commit with its own lit test/unit test, each verified against the real CTS
+case before committing. `check-feme`: 3829/3833 → 3830/3834, 0 Failed throughout, no regressions.
+
+## 🪤 Gotcha worth remembering: FileCheck CHECK-LABEL substring collision
+
+When I added a second lit-test region to `spirv-to-llvm-private-pointer-initializer.mlir` with
+`CHECK-LABEL: llvm.mlir.global private @priv`, the *first* region's own (pre-existing, previously
+passing) checks started failing. Why: FileCheck does literal substring matching, and `@priv` is a
+textual prefix of the first region's own `@priv_ptr` symbol. CHECK-LABEL partitions the whole
+concatenated split-input-file output into blocks *before* matching ordinary CHECK lines within
+each block — so the second region's `@priv` label matched *inside* the first region's own
+`@priv_ptr` output line, truncating the first region's own valid match window. Fix: anchor on the
+full token (`@priv()` with the parens) so it can't be a sub-match of `@priv_ptr(`. If a lit test
+that previously passed suddenly fails right after you append an unrelated new split region to the
+same file, suspect this first before suspecting your new code.
+
+## 🔍 Something that *didn't* need fixing but took real build time to rule out
+
+`opundef`/`signed_op` were in the handoff's "untriaged" list but just... passed, once I actually
+ran them. Lesson re-confirmed (third or fourth time this has happened across sessions): a
+"cluster of N failing sub-cases" handed off between sessions is sometimes an unverified/stale
+tally, not N independent bugs. Always re-run the specific case directly before assuming it's still
+broken — cheap insurance against wasting a build+trace cycle on something already fixed as a side
+effect of an earlier fix in the same session.
+
+## 🧭 Re-tally after all 4 fixes (full `compute.*`, 19,904 cases)
+
+2690 Pass / 2 Fail / 17,212 NotSupported. The 2 remaining failures are **not** in the original
+9-case list — found them by re-running the whole `compute.*` suite as a sanity check rather than
+just the 9 named sub-cases, which was lucky/deliberate, not implied by the handoff:
+- `opunreachable.all` — already known-structural (linearizer can't handle unreachable-terminated
+  blocks; this is literally one of the `ENV3` `assertion-crash-cases.txt` entries from many
+  sessions ago, not new).
+- `opcopymemory.struct` — **new, untriaged, got the real error this session**:
+  `vkCreateComputePipelines: unsupported raised operation:
+  'llvm.spv.resource.handlefrombinding...' is a register-bound resource handle the FeMe CPU target
+  cannot normalize...`. This is `SPIRVResourceLowering`'s resource-normalization pass declining a
+  struct-typed `VulkanBuffer` resource handle for some reason not yet diagnosed (the error message
+  itself lists several possible causes — unbounded range, conflicting re-declaration, unsupported
+  resource kind — without saying which one applies here). Did NOT have time to dump IR and pin
+  down which cause applies; this is the natural next session's first move.
+
+## ➡️ Suggested next steps
+
+1. **(~30-60 min, next untriaged item)** `opcopymemory.struct`: dump IR around
+   `SPIRVResourceLowering.cpp`'s handle-normalization pass (`FEME_DUMP_IR_PRESIMD` or similar —
+   check which dump point precedes resource normalization) for this one case, compare the struct
+   buffer's declared binding/type against what the normalizer expects, to pick which of the error
+   message's several listed causes actually applies here.
+2. **(next large untriaged block)** `ENV5(c)`: 38 untriaged `graphics.*` cases (`float16` 10,
+   `variable_init` 10, `unused_variables` 8, `barrier` 5, `module` 4, `indexing` 1) — no logs/build
+   done yet this session or recorded in any prior one; `float16` and `variable_init` are the
+   largest clusters, good first targets.
+3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus
+   collection, still running uninterrupted across many sessions (confirmed healthy again this
+   session: batch progressed from `initial-00823` through at least `initial-00894` across this
+   session's checks, 6 workers alive throughout). Let it keep progressing; do not start another
+   build while it's mid-run.
+4. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches
+   (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped
+   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever
+   becomes available.
+
+**Next action (under two minutes):** `cd
+/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_DUMP_IR_PRESIMD=1
+FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
+--deqp-case='dEQP-VK.spirv_assembly.instruction.compute.opcopymemory.struct'
+--deqp-log-images=disable 2>&1 | less` to get the first real IR dump for `opcopymemory.struct`'s
+resource-normalization gap.
