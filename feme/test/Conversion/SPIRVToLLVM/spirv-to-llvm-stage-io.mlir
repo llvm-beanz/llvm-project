@@ -471,3 +471,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader, MeshShadingEXT],
 }
 
 
+
+// -----
+
+// `dEQP-VK.spirv_assembly.instruction.terminate_invocation.terminate.*`'s
+// own vertex-stage passthrough shape (`OpCopyMemory %out_data %in_data`,
+// copying a flat `int` varying straight through with no intervening
+// `spirv.Load`/`spirv.Store`): `StageIOAddressOfPattern` above already
+// eagerly converts a scalar `Input` variable's own `spirv.mlir.addressof`
+// directly to its *loaded value* (not a real pointer), so that an
+// ordinary `spirv.Load` consuming it becomes a no-op forward -- correct
+// for that op, but not for `spirv.CopyMemory`, whose `source` operand
+// here is that same already-a-value result used as if it were still a
+// pointer. Before `StageIOCopyMemoryPattern`, this fell through to
+// MLIR's own generic `CopyMemoryPattern`, which re-issued a real
+// `llvm.load` on that plain value, producing ill-typed IR only a real
+// Vulkan run surfaced (`'llvm.load' op operand #0 must be LLVM pointer
+// type, but got 'i32'`).
+
+// CHECK-LABEL: llvm.func @copy_input_to_output
+// CHECK: %[[IN:.*]] = llvm.load %{{.*}} : !llvm.ptr<7> -> i32
+// CHECK: llvm.store %[[IN]], %{{.*}} : i32, !llvm.ptr<8>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @spirv_var_in {location = 1 : i32} : !spirv.ptr<si32, Input>
+  spirv.GlobalVariable @spirv_var_out {location = 0 : i32} : !spirv.ptr<si32, Output>
+  spirv.func @copy_input_to_output() "None" {
+    %out_addr = spirv.mlir.addressof @spirv_var_out : !spirv.ptr<si32, Output>
+    %in_addr = spirv.mlir.addressof @spirv_var_in : !spirv.ptr<si32, Input>
+    spirv.CopyMemory "Output" %out_addr, "Input" %in_addr : si32
+    spirv.Return
+  }
+}

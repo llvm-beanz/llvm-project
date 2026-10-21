@@ -6770,6 +6770,56 @@ public:
   }
 };
 
+/// Converts a `spirv.CopyMemory` whose `source` operand is a scalar,
+/// non-composite `Input`-storage-class variable (`dEQP-VK.spirv_assembly.
+/// instruction.terminate_invocation.terminate.*`'s own vertex-stage
+/// passthrough shape, e.g. `OpCopyMemory %out_data %in_data` copying a
+/// flat `int` varying straight through): `StageIOAddressOfPattern` above
+/// already eagerly converts such a variable's own `spirv.mlir.addressof`
+/// directly to its *loaded value* (not a real pointer) so that an ordinary
+/// `spirv.Load` consuming it becomes a no-op forward -- correct for that
+/// op, but not for `spirv.CopyMemory`, whose `source` operand here is that
+/// same already-a-value result used as if it were still a pointer.
+/// MLIR's own upstream `CopyMemoryPattern` (which this falls through to
+/// otherwise) then re-issues a real `llvm.load` on that plain value,
+/// producing ill-typed IR (`'llvm.load' op operand #0 must be LLVM
+/// pointer type, but got 'i32'`) that only a later verifier pass (or, as
+/// here, a real Vulkan run) catches -- this pattern's whole reason to
+/// exist is to intercept the exact shape `BlockWholeCopyMemoryPattern`
+/// above does not (no resource/block handle on either side).
+///
+/// Narrow by construction, mirroring `BlockWholeCopyMemoryPattern`'s own
+/// declared scope: only `source` being already-a-value (never `target`,
+/// since `StageIOAddressOfPattern` only ever eagerly loads `Input`, and an
+/// `Output` variable's own address always stays a real pointer -- see
+/// that pattern's own `AddrSpace == 8` branch) is handled; any other
+/// shape (e.g. a composite `Input` variable, which `StageIOAddressOfPattern`
+/// also leaves as a real pointer) falls through unchanged to whichever
+/// pattern already handles it correctly.
+class StageIOCopyMemoryPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CopyMemoryOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CopyMemoryOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CopyMemoryOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (mlir::isa<mlir::LLVM::LLVMPointerType>(Adaptor.getSource().getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "source already converted to a real pointer");
+    if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Adaptor.getTarget().getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "target did not convert to a real pointer");
+    if (Op.getMemoryAccess() || Op.getSourceMemoryAccess())
+      return Rewriter.notifyMatchFailure(
+          Op, "copy with memory access bits not yet supported");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Adaptor.getSource(),
+                                                     Adaptor.getTarget());
+    return mlir::success();
+  }
+};
+
 /// Builds the candidate LLVM struct for
 /// convertOffsetStructTypeIgnoringDecorations below out of an
 /// already-computed \p Members list (indexed by \p Type's own *declared*
@@ -17677,7 +17727,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       BlockAccessChainPattern<mlir::spirv::AccessChainOp>,
       BlockAccessChainPattern<mlir::spirv::InBoundsAccessChainOp>,
       BlockWholeLoadPattern, BlockWholeStorePattern,
-      BlockWholeCopyMemoryPattern,
+      BlockWholeCopyMemoryPattern, StageIOCopyMemoryPattern,
       PtrAccessChainPattern<mlir::spirv::PtrAccessChainOp,
                             mlir::spirv::AccessChainOp>,
       PtrAccessChainPattern<mlir::spirv::InBoundsPtrAccessChainOp,
