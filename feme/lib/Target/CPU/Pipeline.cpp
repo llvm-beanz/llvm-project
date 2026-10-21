@@ -142,7 +142,10 @@ Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint,
   };
 
   if (!EntryPoint.empty()) {
-    Function *F = M.getFunction(EntryPoint);
+    Function *F = feme::findFunctionByEntryPointName(M, EntryPoint, Stage);
+    // `EntryPoint` is matched against each function's own entry
+    // point name (see `feme::getEntryPointName`'s comment), not
+    // necessarily its bare LLVM symbol, since the two may differ.
     if (!F || !declaresStage(*F))
       return createStringError(
           inconvertibleErrorCode(), "no %s entry point named '%s'",

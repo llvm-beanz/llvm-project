@@ -127,6 +127,15 @@ tools = [
     "llvm-objcopy",
     "llvm-readobj",
     "llvm-nm",
+    # Deserializes a real SPIR-V binary via upstream `mlir::spirv::
+    # deserialize` -- the exact path the Vulkan ICD's own `spirv.module`
+    # import uses at runtime (see ConvertSPIRVToLLVMPass.cpp) -- so a test
+    # can validate a `feme-opt --feme-convert-spirv-to-llvm` fixture against
+    # that deserializer's real output instead of hand-written `spirv.module`
+    # text, which cannot reproduce deserializer-only behavior (e.g. its
+    # function-symbol disambiguation for entry points of different stages
+    # sharing one `OpEntryPoint` Name).
+    "mlir-translate",
     # Compiles libFeMeRuntimeCPU's C source (see
     # feme/runtime/CPU/FeMeRuntimeCPU.c and "Runtime Support Library" in
     # feme/docs/FeMeCPUDesign.md) to bitcode at test time, the same way the

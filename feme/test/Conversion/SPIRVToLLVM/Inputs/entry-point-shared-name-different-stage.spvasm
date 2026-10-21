@@ -1,0 +1,46 @@
+; A GLCompute entry point and a Vertex entry point that legally share the
+; same OpEntryPoint Name ("entrypoint2") -- the SPIR-V spec only requires
+; a Name to be unique per Execution Model, not module-wide (the comment
+; immediately above `multiple_shaders` in
+; vktSpvAsmInstructionTests.cpp quotes this rule verbatim). The compute
+; function's own OpName also collides with the vertex function's, so
+; whichever OpFunction happens to come first in this binary's Functions
+; section claims the bare "entrypoint2" symbol during deserialization and
+; the other gets a disambiguating suffix -- see
+; mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp's
+; claimUniqueFunctionSymbol.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %vert_main "entrypoint2" %vert_builtins
+OpEntryPoint GLCompute %comp_main "entrypoint2" %gl_id
+OpExecutionMode %comp_main LocalSize 1 1 1
+OpName %vert_main "entrypoint2"
+OpName %comp_main "entrypoint2"
+OpDecorate %gl_id BuiltIn GlobalInvocationId
+OpDecorate %vert_builtin_st Block
+OpMemberDecorate %vert_builtin_st 0 BuiltIn Position
+%void = OpTypeVoid
+%voidf = OpTypeFunction %void
+%f32 = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%v3uint = OpTypeVector %uint 3
+%v4f32 = OpTypeVector %f32 4
+%ptr_in_v3uint = OpTypePointer Input %v3uint
+%gl_id = OpVariable %ptr_in_v3uint Input
+%vert_builtin_st = OpTypeStruct %v4f32
+%ptr_out_vert_builtin_st = OpTypePointer Output %vert_builtin_st
+%vert_builtins = OpVariable %ptr_out_vert_builtin_st Output
+%zero = OpConstant %uint 0
+%one_f32 = OpConstant %f32 1
+%c_v4f32_1 = OpConstantComposite %v4f32 %one_f32 %one_f32 %one_f32 %one_f32
+%ptr_out_v4f32 = OpTypePointer Output %v4f32
+%vert_main = OpFunction %void None %voidf
+%vert_entry = OpLabel
+%position = OpAccessChain %ptr_out_v4f32 %vert_builtins %zero
+OpStore %position %c_v4f32_1
+OpReturn
+OpFunctionEnd
+%comp_main = OpFunction %void None %voidf
+%comp_entry = OpLabel
+OpReturn
+OpFunctionEnd

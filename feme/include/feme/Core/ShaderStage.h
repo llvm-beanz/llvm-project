@@ -34,6 +34,7 @@
 
 namespace llvm {
 class Function;
+class Module;
 } // namespace llvm
 
 namespace feme {
@@ -122,6 +123,37 @@ std::optional<ShaderStage> getShaderStage(const llvm::Function &F);
 /// the many places that need to find entry points without caring which stage
 /// they implement.
 bool isShaderEntryPoint(const llvm::Function &F);
+
+/// \p F's own, API-facing entry point name
+/// (`VkPipelineShaderStageCreateInfo::pName` selects an entry point by
+/// this) -- its `feme.entry.name` attribute if present, else its bare LLVM
+/// symbol.
+///
+/// The two differ only when SPIR-V deserialization had to disambiguate
+/// \p F's symbol away from its `OpEntryPoint` Name to keep the module's
+/// symbol table unique: a single SPIR-V module may legally contain entry
+/// points of more than one stage that share one Name (`OpEntryPoint`
+/// Names are only required to be unique per Execution Model, not
+/// module-wide), each of which still needs to end up on its own, distinct
+/// LLVM function.
+llvm::StringRef getEntryPointName(const llvm::Function &F);
+
+/// Finds the function in \p M of stage \p Stage whose own entry point name
+/// (see `getEntryPointName`) equals \p Name, or `nullptr` if none does.
+///
+/// Both \p Name and \p Stage must match: `OpEntryPoint` Names are only
+/// required to be unique per Execution Model, not module-wide, so two
+/// functions of different stages may legally share one entry point name
+/// (e.g. a `Vertex` and a `GLCompute` entry both named "main") -- matching
+/// \p Name alone could resolve to the wrong one.
+///
+/// Prefer this over `Module::getFunction(Name)` for any lookup keyed by a
+/// `pName`-like string: a function selected that way may not be reachable
+/// by its bare LLVM symbol once deserialization has disambiguated it (see
+/// `getEntryPointName`'s comment).
+llvm::Function *findFunctionByEntryPointName(llvm::Module &M,
+                                             llvm::StringRef Name,
+                                             ShaderStage Stage);
 
 } // namespace feme
 

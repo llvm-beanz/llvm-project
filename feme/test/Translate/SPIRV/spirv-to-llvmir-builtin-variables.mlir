@@ -26,4 +26,4 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // CHECK: call i32 @llvm.spv.thread.id.i32(i32 0)
 // CHECK: call i32 @llvm.spv.thread.id.i32(i32 1)
 // CHECK: call i32 @llvm.spv.thread.id.i32(i32 2)
-// CHECK: attributes #[[ATTRS]] = { "feme.shader.stage"="compute" "hlsl.numthreads"="8,8,1" "hlsl.shader"="compute" }
+// CHECK: attributes #[[ATTRS]] = { "feme.entry.name"="main" "feme.shader.stage"="compute" "hlsl.numthreads"="8,8,1" "hlsl.shader"="compute" }

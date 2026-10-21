@@ -95,6 +95,26 @@ void setTargetAttributes(mlir::ModuleOp Module, llvm::StringRef TargetTriple) {
 /// `feme.shader.stage` enumeration (see feme/include/feme/Core/ShaderStage.h).
 struct EntryPointInfo {
   feme::ShaderStage Stage;
+  /// The entry point's authoritative, API-facing `OpEntryPoint` Name
+  /// string (`VkPipelineShaderStageCreateInfo::pName` selects an entry
+  /// point by this, not by the LLVM function's eventual symbol) --
+  /// mlir::spirv::deserialize's "spirv_entry_point_name" discardable
+  /// attribute, read off the entry point's `spirv.func` in
+  /// `collectEntryPoints` below (not the `spirv.EntryPointOp` itself:
+  /// `spirv.EntryPointOp::print` does not emit an attribute dictionary at
+  /// all, so a discardable attribute placed there would not survive a
+  /// textual round trip -- see that attribute's own doc comment in
+  /// mlir/lib/Target/SPIRV/Deserialization/DeserializeOps.cpp). Since
+  /// `OpEntryPoint` Names are only required to be unique per Execution
+  /// Model (not module-wide), two entry points of different stages may
+  /// share one Name while ending up on two distinct LLVM functions whose
+  /// symbols were disambiguated apart during deserialization (e.g. one
+  /// renamed to "entrypoint2" and the other to "entrypoint2_3");
+  /// `applyEntryPointAttributes` below re-attaches this original Name as
+  /// each function's own `feme.entry.name` attribute so `Pipeline.cpp` can
+  /// still resolve a pipeline's requested `pName` by (stage, Name) rather
+  /// than by a symbol that may no longer match it verbatim.
+  std::string EntryName;
   std::string LocalSize;
   std::optional<feme::graphics::TessellatorDomain> TessDomain;
   std::optional<feme::graphics::TessPartitioning> TessPartitioning;
@@ -367,18 +387,28 @@ bool hasNonDefaultPerInstructionRoundingMode(mlir::spirv::FuncOp Func) {
 }
 
 /// Collects \p Module's entry points into \p EntryPoints, keyed by the
-/// function each names, and validates each one's stage against \p
-/// TargetTriple -- the triple the converted module will carry, whose
-/// environment names the stage the module as a whole claims. A module with
-/// entry points of more than one stage has no single such environment, so it
-/// is reported rather than converted with a triple that describes only its
-/// first entry point ("Stage identity" in
-/// feme/docs/FeMeGraphicsDesign.md).
-mlir::LogicalResult
-collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
-                   llvm::StringMap<EntryPointInfo> &EntryPoints) {
-  llvm::Triple::EnvironmentType Env =
-      llvm::Triple(TargetTriple).getEnvironment();
+/// function each names. A single `spirv.module` is legally allowed to carry
+/// entry points of more than one stage at once -- a `VkShaderModule` is
+/// created once and may be referenced by several
+/// `VkPipelineShaderStageCreateInfo`s naming different `pName` entries,
+/// possibly of different stages, and real
+/// `dEQP-VK.spirv_assembly.instruction.compute.{multiple_shaders,
+/// unused_variables,opname,opunreachable}.*` CTS modules do exactly this
+/// (e.g. one `GLCompute`-model entry actually dispatched alongside an
+/// unrelated, never-selected `Vertex`-model one in the same module). Each
+/// entry's own stage is still recorded independently here (and still
+/// validated downstream, per-entry, against whichever single
+/// `VkPipelineShaderStageCreateInfo::stage` actually names it at pipeline
+/// creation time -- see `Pipeline.cpp`'s compute/graphics pipeline
+/// compilation, which resolves its requested `pName` by (stage, Name)
+/// against the `feme.entry.name` attribute `applyEntryPointAttributes`
+/// stamps onto each converted function below) -- there is simply no such
+/// thing as "the module's" one stage to cross-check an individual entry
+/// point against here, so this no longer rejects the conversion over a
+/// same-module stage mismatch ("Stage identity" in
+/// feme/docs/FeMeGraphicsDesign.md, updated to describe this).
+void collectEntryPoints(mlir::spirv::ModuleOp Module,
+                        llvm::StringMap<EntryPointInfo> &EntryPoints) {
   for (auto EntryPoint : Module.getOps<mlir::spirv::EntryPointOp>()) {
     llvm::Triple::EnvironmentType StageEnv =
         getStageForExecutionModel(EntryPoint.getExecutionModel());
@@ -387,13 +417,22 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
     std::optional<feme::ShaderStage> Stage =
         feme::getShaderStageForEnvironment(StageEnv);
     assert(Stage && "every pipeline stage environment names a shader stage");
-    if (!feme::isShaderStageCompatibleWithEnvironment(*Stage, Env))
-      return EntryPoint.emitError()
-             << "entry point '" << EntryPoint.getFn() << "' declares stage '"
-             << feme::getShaderStageName(*Stage)
-             << "', which disagrees with the module's target triple '"
-             << TargetTriple << "'";
-    EntryPoints[EntryPoint.getFn()].Stage = *Stage;
+    EntryPointInfo &Info = EntryPoints[EntryPoint.getFn()];
+    Info.Stage = *Stage;
+    // Fall back to the (already-converted) function symbol itself for any
+    // entry point not produced by `mlir::spirv::deserialize` (e.g. one
+    // written directly in a `.mlir` test) and so missing the
+    // deserializer's own "spirv_entry_point_name" discardable attribute on
+    // its `spirv.func`; such an op's `fn` symbol is its only authoritative
+    // name anyway.
+    mlir::spirv::FuncOp Fn =
+        Module.lookupSymbol<mlir::spirv::FuncOp>(EntryPoint.getFn());
+    mlir::Attribute EntryName =
+        Fn ? Fn->getDiscardableAttr("spirv_entry_point_name") : nullptr;
+    if (EntryName)
+      Info.EntryName = mlir::cast<mlir::StringAttr>(EntryName).str();
+    else
+      Info.EntryName = EntryPoint.getFn().str();
   }
 
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
@@ -631,7 +670,6 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
     It->second.FastMathDefaults[Width] =
         static_cast<mlir::spirv::FPFastMathMode>(Mask);
   }
-  return mlir::success();
 }
 
 /// Adds the `key = value` function attribute \p Key/\p Value to \p Func's
@@ -674,6 +712,13 @@ void applyEntryPointAttributes(
             feme::getEnvironmentForShaderStage(It->second.Stage)));
     addPassthroughAttribute(Func, feme::getShaderStageAttrName(),
                             feme::getShaderStageName(It->second.Stage));
+    // The entry point's authoritative `OpEntryPoint` Name, re-attached
+    // in case deserialization disambiguated `Func`'s own symbol away from
+    // it (see `EntryPointInfo::EntryName`'s comment) -- read by
+    // `Pipeline.cpp`'s compute/graphics pipeline compilation to resolve a
+    // requested `pName` by (stage, Name) instead of assuming it always
+    // equals this function's own symbol.
+    addPassthroughAttribute(Func, "feme.entry.name", It->second.EntryName);
     if (!It->second.LocalSize.empty())
       addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
     // A tessellation-evaluation entry point's `Domain`/`Partitioning`/
@@ -821,9 +866,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
     if (auto SPIRVModule = mlir::dyn_cast<mlir::spirv::ModuleOp>(Op)) {
       SPIRVModuleInfo Info{
           Index, feme::spirv::getTargetTriple(SPIRVModule), {}};
-      if (mlir::failed(collectEntryPoints(SPIRVModule, Info.TargetTriple,
-                                          Info.EntryPoints)))
-        return signalPassFailure();
+      collectEntryPoints(SPIRVModule, Info.EntryPoints);
       // The conversion patterns below key their own lookup by function
       // symbol, which collectEntryPoints has already recovered per entry
       // point; merge it into one map across every `spirv.module` up front

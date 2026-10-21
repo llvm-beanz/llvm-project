@@ -1,0 +1,18 @@
+// REQUIRES: system-spirv-as
+//
+// RUN: %spirv-as --target-env vulkan1.0 %S/Inputs/entry-point-shared-name-different-stage.spvasm -o %t.spv
+// RUN: mlir-translate --deserialize-spirv %t.spv | feme-opt --feme-convert-spirv-to-llvm | FileCheck %s
+//
+// Roadmap ENV5(b): a compute entry point and a vertex entry point legally
+// sharing one `OpEntryPoint` Name ("entrypoint2") must each resolve to a
+// distinct `llvm.func`, but both still need to carry the *same* original
+// Name as their own `feme.entry.name` attribute (not whatever symbol
+// deserialization's function-symbol disambiguation happened to leave
+// them with) -- `feme/lib/Vulkan/Pipeline.cpp`'s compute/graphics
+// pipeline compilation (via `feme::findFunctionByEntryPointName`)
+// resolves a pipeline's requested `pName` by (stage, this attribute), not
+// by a function's bare LLVM symbol, specifically so a collision like this
+// one still selects the right function for each stage.
+//
+// CHECK-DAG: llvm.func @entrypoint2{{[_0-9]*}}() attributes {{.*}}"feme.shader.stage", "vertex"{{.*}}"feme.entry.name", "entrypoint2"
+// CHECK-DAG: llvm.func @entrypoint2{{[_0-9]*}}() attributes {{.*}}"feme.shader.stage", "compute"{{.*}}"feme.entry.name", "entrypoint2"

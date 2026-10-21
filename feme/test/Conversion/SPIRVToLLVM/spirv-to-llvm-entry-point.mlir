@@ -7,11 +7,14 @@
 // globals, which describe the same thing to MLIR's SPIR-V *runner* and mean
 // nothing to the backend, and that each also carries FeMe's own
 // source-independent `feme.shader.stage` enumeration ("Stage identity" in
-// feme/docs/FeMeGraphicsDesign.md).
+// feme/docs/FeMeGraphicsDesign.md), plus the authoritative `OpEntryPoint`
+// Name as `feme.entry.name` (needed since MLIR's SPIR-V deserializer may
+// rename the function's own symbol to keep it globally unique when two
+// entry points of different stages share one Name).
 
 // CHECK-NOT: __spv__
 // CHECK: llvm.func @compute_entry()
-// CHECK-SAME: passthrough = {{\[}}["hlsl.shader", "compute"], ["feme.shader.stage", "compute"], ["hlsl.numthreads", "8,4,1"]]
+// CHECK-SAME: passthrough = {{\[}}["hlsl.shader", "compute"], ["feme.shader.stage", "compute"], ["feme.entry.name", "compute_entry"], ["hlsl.numthreads", "8,4,1"]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @compute_entry() -> () "None" {
     spirv.Return
@@ -28,7 +31,7 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 // `feme.shader.stage` uses FeMe's own `fragment`.
 
 // CHECK: llvm.func @pixel_entry()
-// CHECK-SAME: passthrough = {{\[}}["hlsl.shader", "pixel"], ["feme.shader.stage", "fragment"]]
+// CHECK-SAME: passthrough = {{\[}}["hlsl.shader", "pixel"], ["feme.shader.stage", "fragment"], ["feme.entry.name", "pixel_entry"]]
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @pixel_entry() -> () "None" {
     spirv.Return

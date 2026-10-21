@@ -10,6 +10,7 @@
 
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 
 using namespace llvm;
@@ -173,4 +174,18 @@ std::optional<feme::ShaderStage> feme::getShaderStage(const Function &F) {
 
 bool feme::isShaderEntryPoint(const Function &F) {
   return getShaderStage(F).has_value();
+}
+
+StringRef feme::getEntryPointName(const Function &F) {
+  if (F.hasFnAttribute("feme.entry.name"))
+    return F.getFnAttribute("feme.entry.name").getValueAsString();
+  return F.getName();
+}
+
+Function *feme::findFunctionByEntryPointName(Module &M, StringRef Name,
+                                             ShaderStage Stage) {
+  for (Function &F : M)
+    if (getEntryPointName(F) == Name && getShaderStage(F) == Stage)
+      return &F;
+  return nullptr;
 }
