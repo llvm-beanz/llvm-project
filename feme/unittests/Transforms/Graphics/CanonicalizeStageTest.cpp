@@ -2915,6 +2915,69 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
+/// (Roadmap L500) A Geometry entry's own *plain* user-defined `Output`
+/// array varying (unlike `ThreadsDynamicVertexIndexIntoOutputStore`'s
+/// mesh-only `gl_MeshVerticesEXT[]`-shaped per-vertex output slot) has no
+/// per-vertex-indexed dimension at all -- a Geometry invocation's
+/// `EmitVertex`-style model commits its *current*, non-array-indexed
+/// output values one emitted vertex at a time, so a loop-carried store
+/// into `outputData[i]` (`dEQP-VK.pipeline.*.max_varyings.
+/// test_geometry_io_between_geometry_fragment`'s own spec-constant-sized
+/// shape, reduced here) must thread `i` through as this store's `Row`
+/// operand, exactly like `getDynamicRowIndexedAccess`'s ordinary,
+/// non-vertex-arrayed `Row`-folding already does for every other stage.
+/// Before this fix, `isDynamicIndexedArrayGlobal` wrongly accepted
+/// Geometry's own `Output` (address space 8) array here too (a shape it
+/// only ever reserved for `Hull`/`Mesh`), so `getDynamicVertexIndexedAccess`
+/// claimed this access instead, threading the loop-carried index through
+/// as a bogus `Vertex` operand while `Row` silently defaulted to a
+/// constant `0` for every iteration -- every store but the last
+/// overwrote the very same `Row`, leaving every other array element's own
+/// location never genuinely written.
+TEST(CanonicalizeStageTest,
+     ThreadsLoopCarriedIndexIntoGeometryOutputArrayRowNotVertex) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @outputData = external addrspace(8) global [15 x <4 x i32>], !spirv.Decorations !0
+    define void @main(i32 %i) #0 {
+      %p = getelementptr inbounds [15 x <4 x i32>], ptr addrspace(8) @outputData, i32 0, i32 %i
+      store <4 x i32> splat (i32 1), ptr addrspace(8) %p
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="geometry" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  Argument *IArg = F->getArg(0);
+
+  // (Roadmap H2e) A dynamically-`Row`-indexed store also writes through
+  // to its own shadow alloca (for a later read-back of the same element
+  // to resolve to), via an ordinary `getelementptr`/`store` pair -- unlike
+  // `ThreadsDynamicVertexIndexIntoOutputStore`'s `Vertex`-indexed shape,
+  // whose own shadow tracking takes a different, allocaless path. That
+  // shadow-side `StoreInst` is expected and legitimate, so (unlike that
+  // other test) this one does not assert their absence -- only that the
+  // real `feme.stage.output.store` calls below address the right
+  // operand.
+  unsigned SeenStores = 0;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    ++SeenStores;
+    // The loop-carried index must land in `Row` (operand 1), not
+    // `Vertex` (operand 4): Geometry has no per-vertex `Output` slot for
+    // it to address instead.
+    EXPECT_EQ(CI->getArgOperand(1), IArg);
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Vertex=*/4), 0u);
+  }
+  EXPECT_EQ(SeenStores, 4u);
+}
+
 /// (Roadmap L348) `dEQP-VK.spirv_assembly.instruction.graphics.indexing.
 /// output.component_tessc`'s own real shape: a Hull entry's own
 /// compile-time-*unrolled* per-control-point output write, where the

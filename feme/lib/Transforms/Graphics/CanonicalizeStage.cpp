@@ -1951,6 +1951,35 @@ bool isDynamicIndexedArrayGlobal(const GlobalVariable *GV,
   if (!isSPIRVStageIOGlobal(GV, AddrSpace) ||
       (AddrSpace != 7 && AddrSpace != 8))
     return false;
+  // (Roadmap L500) `Output` (address space 8) only has a genuine
+  // per-invocation/per-vertex dynamic-index dimension for `Hull` (each
+  // control-point invocation addresses its own output slot, e.g.
+  // `ThreadsInvocationIndexIntoMultiMemberHullPerInvocationOutputBlock`)
+  // and `Mesh` (`ThreadsDynamicVertexIndexIntoOutputStore`). Unlike
+  // `Input`'s `gl_in[]`/`InputPatch`/`OutputPatch` shape, which is
+  // legitimate for `Hull`/`Domain`/`Geometry` alike, neither `Domain` nor
+  // `Geometry` has any per-vertex-indexed `Output` array at all: a
+  // Domain (tessellation-evaluation) invocation writes one ordinary,
+  // non-arrayed output set, and a Geometry invocation's `EmitVertex`-style
+  // model (roadmap H39) commits its *current*, non-array-indexed output
+  // values one emitted vertex at a time -- there is no `gl_out[]` to
+  // address. A dynamically-indexed `Output`-storage array reached in
+  // either of those two stages is instead always an ordinary user-defined
+  // varying array spanning multiple consumed `Location`s (e.g.
+  // `dEQP-VK.pipeline.*.max_varyings.test_geometry_io_between_geometry_
+  // fragment`'s own spec-constant-sized `outputData[arraySize]`, filled by
+  // a loop-carried `i`), which `getDynamicRowIndexedAccess`'s ordinary
+  // `Row`-folding already handles correctly. Before this fix, such a
+  // global was wrongly claimed here instead, threading its real per-
+  // element loop index through as a bogus `Vertex` operand while `Row`
+  // silently defaulted to a constant `0` for every iteration -- every
+  // store after the first one overwrote the same single `Row`, leaving
+  // every other array element's own location never genuinely written
+  // (`Fail (Rendered image is not correct...)`, roadmap `ENV6(b)(3)`'s
+  // `max_varyings` cluster).
+  if (AddrSpace == 8 && Stage != ShaderStage::Hull &&
+      Stage != ShaderStage::Mesh)
+    return false;
   if (!isa<ArrayType>(GV->getValueType()))
     return false;
   // (Roadmap H117/H118) GLSL's `patch` qualifier only ever applies to a
