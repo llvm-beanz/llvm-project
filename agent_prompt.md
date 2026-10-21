@@ -69,39 +69,31 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~1-2 hours, needs real build+trace)** `ENV5(b)`'s remaining 9 untriaged
-   `compute.*` cases: `variable_init` (3, likely
-   `Private`-storage-from-`Workgroup`-pointer initializer gap per a prior
-   session's note — worth checking first since it may already be understood),
-   `memory_access` (2, volatile-ordering),
-   `opundef`/`signed_op`/`vector_shuffle` (1 each). Same
-   `FEME_VULKAN_LOG_CREATION_ERRORS=1`/direct `deqp-vk --deqp-case=...` triage
-   pass used for every prior cluster this session and before — get the real
-   error/behavior for each before guessing at a fix; check whether any share a
-   root cause (this session's cluster turned out to be 3 FeMe bugs + 1 upstream
-   bug masquerading as "7 failures").
-2. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
-   current CTS corpus collection. Still running uninterrupted across many
-   sessions now (confirmed again this session, no disruption). Check
-   `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` every session
-   until it finishes; let its own recovery/solo-verification rounds run to
-   completion before writing up final Pass/Fail/NotSupported/Crashed totals in
-   `VulkanCTSReport.md` and striking `ENV4` in `Roadmap.md`.
-3. **(low priority, unchanged across many sessions)** Upstream the 3
+1. **(~30-60 min, next untriaged item)** `opcopymemory.struct`: dump IR around
+   `SPIRVResourceLowering.cpp`'s handle-normalization pass
+   (`FEME_DUMP_IR_PRESIMD` or similar — check which dump point precedes resource
+   normalization) for this one case, compare the struct buffer's declared
+   binding/type against what the normalizer expects, to pick which of the error
+   message's several listed causes actually applies here.
+2. **(next large untriaged block)** `ENV5(c)`: 38 untriaged `graphics.*` cases
+   (`float16` 10, `variable_init` 10, `unused_variables` 8, `barrier` 5,
+   `module` 4, `indexing` 1) — no logs/build done yet this session or recorded
+   in any prior one; `float16` and `variable_init` are the largest clusters,
+   good first targets.
+3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
+   current CTS corpus collection, still running uninterrupted across many
+   sessions (confirmed healthy again this session: batch progressed from
+   `initial-00823` through at least `initial-00894` across this session's
+   checks, 6 workers alive throughout). Let it keep progressing; do not start
+   another build while it's mid-run.
+4. **(low priority, unchanged across many sessions)** Upstream the 3
    `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp
    assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to
    `llvm-beanz/offload-test-suite` if push access ever becomes available.
-4. **(worth a quick check before diving into #1)** Grep the untriaged
-   `compute.*`/`graphics.*` lists for any other case where a function symbol
-   might get disambiguated by the deserializer's new `claimUniqueFunctionSymbol`
-   (i.e. any other same-Name-different-stage shape) — this session's fix chain
-   was long precisely because the first bug's fix kept exposing the next one; a
-   quick sweep might catch a sibling case before it becomes its own
-   multi-session saga.
 
 **Next action (under two minutes):** `cd
 /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan &&
-FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
---deqp-case='dEQP-VK.spirv_assembly.instruction.compute.variable_init.vec4_from_workgroup'
---deqp-log-images=disable` (or the nearest matching real case name) to get the
-first real error string for `ENV5(b)`'s next untriaged cluster.
+FEME_DUMP_IR_PRESIMD=1 FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
+--deqp-case='dEQP-VK.spirv_assembly.instruction.compute.opcopymemory.struct'
+--deqp-log-images=disable 2>&1 | less` to get the first real IR dump for
+`opcopymemory.struct`'s resource-normalization gap.
