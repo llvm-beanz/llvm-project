@@ -69,20 +69,21 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV5(c)`'s remaining 3 cases now form one bucket, `ENV5(c)(7)(b)`:
-1. **(needs a design decision first, not a quick fix)** All 3 of
-   `barrier.{in_if,in_switch,in_loop}` need a real per-invocation-in-lockstep
-   multi-region barrier execution model inside the control-point phase itself
-   (closer to `feme::cpu::EntryWrapperPass`'s own compute-shader
-   barrier-splitting design, `FeMeCPUDesign.md` Phase 6, than to
-   `splitTessellationControlEntry`'s current phase-split approximation). Read
-   that section fully, then decide whether a graphics-pipeline-specific
-   design-doc addendum is warranted before writing any code — do not attempt
-   another `CanonicalizeStage.cpp`-local patch without that step; two sessions
-   in a row have now found the single-split model itself is the wrong shape for
-   these 3 cases.
-2. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged
-   cluster in the 666-case corpus) — the more productive next body of work while
-   `(1)` needs a design decision.
-3. (low priority, unchanged for many sessions) Upstream the 3
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)`: `pipeline.*` (181 cases,
+   `fast_linked_library`/`pipeline_library`/`monolithic`) — **best next
+   target**, now the largest untriaged cluster. Check first whether a single fix
+   covers all three pipeline-construction-method variants.
+2. `ENV6(c)`: `graphicsfuzz` (106 cases) — likely a long tail of distinct small
+   bugs rather than one root cause, per this project's prior `graphicsfuzz`
+   experience; budget per-case time accordingly.
+3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
+   cases combined) — `memory_model.{write_after_read,message_passing}` (52) and
+   `tessellation.invariance` (26) are each large single-suite clusters worth
+   checking for a shared cause first.
+4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases,
+   `barrier.{in_if,in_switch,in_loop}`) — scoped but not started; ~1000 lines of
+   `EntryWrapperPass` machinery to generalize to `HullWrapperPass`'s ABI. Lowest
+   priority, multi-session effort.
+5. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
