@@ -128608,3 +128608,41 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device
 1. **(needs a design decision first, not a quick fix)** All 3 of `barrier.{in_if,in_switch,in_loop}` need a real per-invocation-in-lockstep multi-region barrier execution model inside the control-point phase itself (closer to `feme::cpu::EntryWrapperPass`'s own compute-shader barrier-splitting design, `FeMeCPUDesign.md` Phase 6, than to `splitTessellationControlEntry`'s current phase-split approximation). Read that section fully, then decide whether a graphics-pipeline-specific design-doc addendum is warranted before writing any code — do not attempt another `CanonicalizeStage.cpp`-local patch without that step; two sessions in a row have now found the single-split model itself is the wrong shape for these 3 cases.
 2. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — the more productive next body of work while `(1)` needs a design decision.
 3. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `ENV5(c)(7)(b)` scoped (no new design doc needed) + `ENV6(a)` fully fixed (210/210 `api.copy_and_blit`)
+
+**Next action (under two minutes):** read `feme/docs/Roadmap.md`'s `ENV6(b)` entry, then run `grep "pipeline\." feme/docs/env4-results/env4-full-corpus-verified-failures.txt | sed -E 's/^dEQP-VK\.pipeline\.([a-z_]+)\..*/\1/' | sort | uniq -c` to split the 181 `pipeline.*` cases into `fast_linked_library`/`pipeline_library`/`monolithic` before sampling one case per bucket with `FEME_VULKAN_LOG_CREATION_ERRORS=1`.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, start and end of session). No stray `deqp-vk` processes.
+
+## What got done
+
+1. **Resolved `ENV5(c)(7)(b)` without writing new design docs.** Read `HullWrapper.cpp`'s own file comment, which already names the fix: generalize `EntryWrapperPass`'s compute-shader barrier-region-splitting machinery to `HullWrapperPass`'s batch-over-control-points ABI (~1000 lines to adapt). This is a scoping/engineering-effort gap, not a missing decision — `FeMeCPUDesign.md`'s Phase 6 already documents the design. Updated `Roadmap.md`'s entry and added a cross-reference paragraph to Phase 6. Committed `175ffeb62e7b`.
+2. **Triaged `ENV6(a)`'s 210-case `api.copy_and_blit` cluster to one shared root cause.** Clustered by sub-suite, sampled across all 6 buckets (`resolve_image`/`depth_stencil_msaa_copy` × `core`/`dedicated_allocation`/`copy_commands2`) with `FEME_VULKAN_LOG_CREATION_ERRORS=1`: every sampled case hit the identical diagnostic, `feme-cpu-linearize: ... no recognized uniform exit check`.
+3. **Found bug 1**: `DiamondFlattener::validate()` rejected an "empty diamond arm" (a branch arm going directly to the shared reconvergence block) as unsupported, even though `flatten()`'s own early return already handles it as a correct no-op. Fixed by removing the rejection.
+4. **Hit a false-positive dead end, then caught it**: a hand-simplified unit-test repro of bug 1's shape passed cleanly even on the *unfixed* compiler — the unit-test harness skips `SPIRVResourceLoweringPass`/`LoopSimplifyPass` (run right before `LinearizePass` in the real pipeline), so the repro's raw resource calls never looked "mask-affecting" the way the real lowered calls do. Re-extracted the *exact* real shader IR via `FEME_DUMP_IR_PRELINEARIZE=1` (not a hand-simplified version) and fed that into the harness instead — this reproduced the real failure exactly and is now the permanent regression test.
+5. **Found bug 2 from the real-IR repro**: `findForwardExitCheckBlock` only chased a plain `UncondBr`-only chain forward from the loop header, bailing out the instant the header's own terminator was already a `CondBr` — even a provably uniform, fully-reconverging diamond (here, `SPIRVResourceLoweringPass`'s per-load root-constant bounds guard) that's completely transparent to the walk. Generalized it to chase both arms via a bounded `UncondBr`-only sub-walk and continue from their shared merge block.
+6. **Verified end-to-end against real CTS, not just unit tests**: after both fixes, rebuilt `feme-opt`/`feme_vulkan` and ran **all 210** real `dEQP-VK.api.copy_and_blit.*` cases directly via `deqp-vk` (not a sample) — **210/210 Pass**.
+7. **Ran full `check-feme`**: 3841/3845 Passed (up from 3839), 4 Unsupported, 0 Failed. The 2 new failures surfaced mid-session were pre-existing lit tests (`unsupported-empty-arm.ll`/`unsupported-loop-internal-branch.ll`) that specifically asserted the now-removed diagnostic text — renamed and rewritten to confirm the shape now compiles cleanly, bringing the suite back to 0 failures.
+8. **Docs**: `Roadmap.md` (struck `ENV6(a)`, updated `ENV6`'s breakdown/next-target to `ENV6(b)` `pipeline.*`), `FeMeCPUDesign.md` (both "empty diamond arm is not supported" notes updated, new `findForwardExitCheckBlock` generalization documented), `VulkanCTSReport.md` (`L488` for the `ENV5(c)(7)(b)` scoping, `L489` for the `ENV6(a)` fix).
+9. **Commits, split for bisectability**: `DiamondFlattener` fix + its minimal regression test; `findForwardExitCheckBlock` fix + the real-shader regression test; the two renamed/rewritten lit tests; two docs commits (Roadmap/Design doc, then VulkanCTSReport).
+
+## Wins
+
+- **All 210 of 210 `api.copy_and_blit` cases now Pass** — the single largest cluster in the 666-case `ENV4` corpus, closed out in one session.
+- Caught a false-positive "fix works" result from an unrepresentative unit test *before* declaring victory, by insisting on verifying against the real CTS binary end-to-end rather than trusting the isolated repro — this is now worth remembering as a general lesson (see below).
+- Two genuinely independent, cleanly-separable bugs found and fixed, each with its own targeted regression test.
+- `ENV5(c)(7)(b)` closed out as "no design doc needed" rather than left open on a vague premise — saves a future session from re-deciding the same question.
+
+## Lesson learned (added to `.instructions.md`)
+
+A hand-written `LinearizeTest.cpp` repro that merely matches a bug's *reported shape* can still silently skip pipeline stages (`SPIRVResourceLoweringPass`, `LoopSimplifyPass`) the real `Pipeline.cpp` always runs immediately before `LinearizePass` — producing a false "already works"/"already fails differently" result. `FEME_DUMP_IR_PRELINEARIZE=1` captures the *exact* real input at the right point; prefer it over a hand-simplified repro whenever a unit test's result disagrees with a real `deqp-vk` run.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)`: `pipeline.*` (181 cases, `fast_linked_library`/`pipeline_library`/`monolithic`) — **best next target**, now the largest untriaged cluster. Check first whether a single fix covers all three pipeline-construction-method variants.
+2. `ENV6(c)`: `graphicsfuzz` (106 cases) — likely a long tail of distinct small bugs rather than one root cause, per this project's prior `graphicsfuzz` experience; budget per-case time accordingly.
+3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) — `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) are each large single-suite clusters worth checking for a shared cause first.
+4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases, `barrier.{in_if,in_switch,in_loop}`) — scoped but not started; ~1000 lines of `EntryWrapperPass` machinery to generalize to `HullWrapperPass`'s ABI. Lowest priority, multi-session effort.
+5. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
