@@ -128646,3 +128646,36 @@ A hand-written `LinearizeTest.cpp` repro that merely matches a bug's *reported s
 3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) — `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) are each large single-suite clusters worth checking for a shared cause first.
 4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases, `barrier.{in_if,in_switch,in_loop}`) — scoped but not started; ~1000 lines of `EntryWrapperPass` machinery to generalize to `HullWrapperPass`'s ABI. Lowest priority, multi-session effort.
 5. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `ENV6(b)` -- four independent fixes, 140/181 `pipeline.*` cases closed
+
+**Next action (under two minutes):** run `FEME_VULKAN_LOG_CREATION_ERRORS=1` against one `spec_constant` case and one `max_varyings` case (6 cases each, next-largest untriaged `ENV6(b)` sub-clusters) to see if they share a root cause before sampling further.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, start of session). No stray `deqp-vk` processes.
+
+## What got done
+
+1. **`multisample.mixed_count` (36 cases, `fast_linked_library`/`pipeline_library`)**: a linked pipeline with no color/depth-stencil attachments wasn't trusting its own `rasterizationSamples` the way a monolithic pipeline does, because `PrecomputedRenderTargets` is captured from whichever library part supplies a render pass first, and `pMultisampleState` is only meaningful for the fragment-stage parts. Fixed by re-resolving the no-attachment fallback against the final merged `CreateInfo`. **36/36 now Pass.** Commit `3d499daf4035`.
+2. **`extended_dynamic_state.depth_bias_enable` (36 cases, all 3 variants)**: `translateRasterState` only captured the depth-bias factors when the pipeline's *static* `depthBiasEnable` was `VK_TRUE`, silently zeroing real factor values whenever `VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE` made the flag dynamic. Fixed by reading the factors unconditionally. **36/36 now Pass.** Commit `ab401a95b41a`.
+3. **`extended_dynamic_state.line_stipple_params` (32 cases)**: a linked pre-rasterization-shaders library part's chained `VkPipelineRasterizationLineStateCreateInfoKHR` was silently dropped at link time — `captureGraphicsPipelineLibraryState` nulls the whole `pNext` chain, and (unlike `VK_EXT_transform_feedback`'s already-fixed `RasterizationStream`) nothing re-captured this one. Added a mirroring `findLineRasterizationState` helper. **32/32 now Pass**, closing the full 68-case `extended_dynamic_state` cluster. Commit `dbc464826cfb`.
+4. **`multisample.misc`/`.dynamic_rendering.*` JIT-link failure (44 cases, 36 fixed)**: `JIT session error: Symbols not found: [ spirv_var_N ]`. First chased the wrong theory (`CanonicalizeStage.cpp` stage-IO phi handling) for a while — reverted that speculative change once ruled out. The real bug: `SPIRVPushConstantLowering.cpp` already handled a `phi`-merged push-constant pointer but not the same merge folded one step further into a `select` (an `InstCombinePass` fold that picks `select` over `phi` whenever nothing else needs the predecessor blocks split). An unrecognized `select` user failed the *entire function's* match, leaving every push-constant access in that function unconverted, not just the `select`-merged one. Caught via `FEME_DUMP_IR_PRENORM=1` (dumps right after the `Normalize` pass group, i.e. *after* `SPIRVPushConstantLoweringPass` runs, despite the "PRE" name) showing `main` never gained its `root_constants` parameter. Fixed by adding `SPIRVPushConstantSelectEdge`/`SPIRVPushConstantSelectAccess`, mirroring the `phi` path, with both arms' bounds-checked loads emitted eagerly right before the `select` (no separate predecessor block to sink into, unlike a `phi` edge). **36/44 now Pass** (up from 0/44). Commit `4f424080aa85`.
+5. **Confirmed the remaining 20 cases in that cluster are a separate, genuine rendering-correctness bug**, not a compile/JIT error: `emulate_msrtss` (8 cases, `Fail (Incorrect multisampled rendering ...)`) and `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}` (12 cases, plain `Fail (Failed)`) — both re-verified directly with standalone `deqp-vk` runs.
+6. **`check-feme` run after each fix**: 0 regressions throughout, ending at 3845/3849 Passed, 4 Unsupported.
+7. **Docs**: `VulkanCTSReport.md`'s `L490` (all four fixes, one consolidated entry with the exact 181-case sub-suite breakdown); `Roadmap.md`'s `ENV6(b)` row updated (not struck through — only 140/181 done) with three new one-level sub-entries for the 41 remaining cases (`ENV6(b)(1)` `emulate_msrtss`, `ENV6(b)(2)` `multisample_interpolation`, `ENV6(b)(3)` the five smallest untriaged sub-clusters), staying at one-lowercase-letter-deep nesting per the standing instruction.
+
+## Wins
+
+- **140 of 181 `pipeline.*` cases now fixed** in one session, across four independently committed, independently regression-tested root causes — the full `extended_dynamic_state` sub-cluster (68 cases) is completely closed.
+- Caught a wrong-theory detour (`CanonicalizeStage.cpp`) before committing it, by insisting on a real pipeline dump (`FEME_DUMP_IR_PRENORM`) rather than trusting an earlier, too-early dump point (`FEME_DUMP_IR_POSTCANON`) — consistent with this project's established "verify against the real failing case, not an assumption" discipline.
+- Confirmed the remaining 20-case residual is unrelated to the fix just shipped, rather than leaving it ambiguously lumped in with "still broken."
+
+## State for next session
+
+`ENV6(b)`'s remaining 41 cases, in priority order:
+1. `ENV6(b)(3)`: `spec_constant`/`max_varyings`/`misc`/`cache`/`framebuffer_attachment` (21 cases, untriaged) — **best next target**, `spec_constant`/`max_varyings` (6 cases each) are the largest of the five and worth sampling first for a shared cause.
+2. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) — confirmed genuine rendering-correctness bug, not yet root-caused.
+3. `ENV6(b)(2)`: `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}` (12 cases) — confirmed genuine rendering-correctness bug, not yet root-caused.
+4. `ENV6(c)`: `graphicsfuzz` (106 cases) — unchanged from prior sessions, likely a long tail of distinct small bugs.
+5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) — unchanged from prior sessions.
+6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) — scoped, not started, lowest priority.
+7. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
