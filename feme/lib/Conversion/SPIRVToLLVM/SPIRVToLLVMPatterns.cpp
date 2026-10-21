@@ -11454,17 +11454,40 @@ bool hasVectorLeaf(mlir::Type Type) {
 /// one-dimensional attribute silently produces a flat `!llvm.array<N x T>`
 /// LLVM IR constant instead of the intended nested one.
 ///
-/// Returns true if \p Type is, or (recursively, through any number of
-/// `spirv.array` layers) contains, a `spirv.struct` -- i.e. exactly the
-/// shape this pattern cannot represent (its own flattening only handles a
-/// pure array/vector nesting, explicitly rejecting any struct
-/// constituent below).
-bool containsStructType(mlir::Type Type) {
+/// Returns true if \p Type needs `StructConstantPattern`'s own one-level-
+/// at-a-time decomposition rather than `ArrayConstantPattern`'s direct
+/// `DenseElementsAttr` flattening -- either because it is, or (recursively,
+/// through any number of `spirv.array` layers) contains, a `spirv.struct`,
+/// or because some `spirv.array` level's own declared `ArrayStride` forces
+/// `convertArrayTypeIgnoringDecorations`'s opaque byte-array stand-in
+/// substitution for a scalar/vector element (roadmap ENV5(a)(3); e.g. a
+/// `stride=8` array of `si32`, whose natural per-element size is only 4
+/// bytes) -- a shape
+/// `getFlatElementType`/`getFlatElementShape` cannot represent either,
+/// since the physical element type is no longer the scalar/vector leaf
+/// they expect, but an opaque padding stand-in. `ArrayConstantPattern`'s
+/// own flattened-element-count check (`getFlatElementCount(DstType) !=
+/// Elements.size()`) happens to also reject this shape, but only as an
+/// accidental side effect of the stand-in's own byte count not lining up
+/// with a flat scalar count -- checking it directly here, before that,
+/// keeps the real reason explicit and avoids relying on that coincidence.
+bool needsAggregateConstantDecomposition(mlir::Type Type,
+                                         const mlir::TypeConverter &Converter) {
   if (mlir::isa<mlir::spirv::StructType>(Type))
     return true;
-  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
-    return containsStructType(ArrayTy.getElementType());
-  return false;
+  auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type);
+  if (!ArrayTy)
+    return false;
+  mlir::Type ElemTy = ArrayTy.getElementType();
+  if (needsAggregateConstantDecomposition(ElemTy, Converter))
+    return true;
+  mlir::Type NaturalElemLLVMTy = Converter.convertType(ElemTy);
+  mlir::Type PhysicalArrayLLVMTy = Converter.convertType(ArrayTy);
+  auto PhysicalArrLLVMTy =
+      mlir::dyn_cast_or_null<mlir::LLVM::LLVMArrayType>(PhysicalArrayLLVMTy);
+  if (!NaturalElemLLVMTy || !PhysicalArrLLVMTy)
+    return false;
+  return NaturalElemLLVMTy != PhysicalArrLLVMTy.getElementType();
 }
 
 class ArrayConstantPattern
@@ -11480,16 +11503,18 @@ public:
             Op.getType()))
       return Rewriter.notifyMatchFailure(Op, "not an array/matrix constant");
 
-    // A struct constituent anywhere in the array (see `containsStructType`)
-    // can never be flattened into a single `ElementsAttr` leaf -- bail out
-    // up front and let `StructConstantPattern` decompose it instead, rather
-    // than relying on the flattened-count mismatch check below, which (for
-    // an array-of-struct whose member `ArrayAttr`s happen to match the
-    // outer element count) can otherwise pass spuriously and crash inside
+    // A struct constituent anywhere in the array, or an `ArrayStride`-
+    // driven byte-array stand-in substitution at any level (see
+    // `needsAggregateConstantDecomposition`), can never be flattened into
+    // a single `ElementsAttr` leaf -- bail out up front and let
+    // `StructConstantPattern` decompose it instead, rather than relying on
+    // the flattened-count mismatch check below, which (for an
+    // array-of-struct whose member `ArrayAttr`s happen to match the outer
+    // element count) can otherwise pass spuriously and crash inside
     // `mlir::DenseElementsAttr::get` when it hits a non-leaf attribute.
-    if (containsStructType(Op.getType()))
+    if (needsAggregateConstantDecomposition(Op.getType(), *getTypeConverter()))
       return Rewriter.notifyMatchFailure(
-          Op, "array constant contains a struct constituent");
+          Op, "array constant needs per-element decomposition");
 
     mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
     if (!DstType)
@@ -11545,15 +11570,21 @@ public:
   }
 };
 
-/// Converts `spirv.Constant` of a `spirv.struct` type, or of a
-/// `spirv.array` whose element type is (recursively) a `spirv.struct` --
-/// e.g. the HLSL idiom `struct S { int i; float4x3 m; }; static const S
-/// data[2] = {...};` compiles down to (roadmap L116(d), the
-/// `graphicsfuzz.*` shape `dEQP-VK.graphicsfuzz.color-write-in-loop`'s own
-/// `!spirv.struct<S, (si32, !spirv.matrix<...>)>`-typed constant reaches).
-/// Neither `ConstantScalarAndVectorPattern` (scalar/vector only, upstream)
-/// nor `ArrayConstantPattern` above (pure array/vector nesting only) can
-/// legalize this shape.
+/// Converts `spirv.Constant` of a `spirv.struct` type, of a `spirv.array`
+/// whose element type is (recursively) a `spirv.struct`, or of a
+/// `spirv.array` whose own declared `ArrayStride` forces an opaque
+/// byte-array stand-in for a scalar/vector element at some nesting level
+/// (see `needsAggregateConstantDecomposition`) -- e.g. the HLSL idiom
+/// `struct S { int i; float4x3 m; }; static const S data[2] = {...};`
+/// compiles down to (roadmap L116(d), the `graphicsfuzz.*` shape
+/// `dEQP-VK.graphicsfuzz.color-write-in-loop`'s own
+/// `!spirv.struct<S, (si32, !spirv.matrix<...>)>`-typed constant reaches),
+/// or a `stride=8` array of `si32` (roadmap ENV5(a)(3),
+/// `dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_stride_
+/// select`'s own shape). Neither `ConstantScalarAndVectorPattern`
+/// (scalar/vector only, upstream) nor `ArrayConstantPattern` above (pure
+/// array/vector nesting of already-matching scalar/vector leaves only)
+/// can legalize either shape.
 ///
 /// Rather than duplicating `CompositeConstructPattern`'s own struct/array
 /// assembly logic here, this pattern only decomposes *one* level at a time:
@@ -11563,12 +11594,16 @@ public:
 /// `spirv.CompositeConstruct` fed by those new constants. Each new
 /// constant is either already directly legal
 /// (`ConstantScalarAndVectorPattern`/`ArrayConstantPattern`) or, for a
-/// further-nested struct, illegal again and re-decomposed by this same
-/// pattern -- see `hasBoundedRewriteRecursion` below for why the
-/// conversion driver is allowed to keep re-applying this same pattern to
-/// its own newly created ops. The `spirv.CompositeConstruct` this pattern
-/// produces is finished by `CompositeConstructPattern`'s own existing
-/// `convertStruct`/`convertArray`, unchanged.
+/// further-nested struct or stride-substituted array, illegal again and
+/// re-decomposed by this same pattern -- see `hasBoundedRewriteRecursion`
+/// below for why the conversion driver is allowed to keep re-applying
+/// this same pattern to its own newly created ops. The
+/// `spirv.CompositeConstruct` this pattern produces is finished by
+/// `CompositeConstructPattern`'s own existing `convertStruct`/
+/// `convertArray`, unchanged -- `convertArray`'s own alloca-roundtrip
+/// reinterpret already handles a narrower natural-element constituent
+/// landing in a wider, stride-substituted array slot, so this pattern
+/// itself needs no awareness of the substitution beyond detecting it.
 class StructConstantPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ConstantOp> {
 public:
@@ -11579,14 +11614,16 @@ public:
                                                               TypeConverter,
                                                               Benefit) {
     // Each application strictly reduces struct/array nesting depth by one
-    // level (a struct-of-struct or array-of-struct member becomes its own,
-    // less-nested `spirv.Constant`), so the recursion this pattern relies
-    // on to legalize arbitrarily-deep nesting is provably bounded --
-    // without this, MLIR's dialect conversion framework refuses to
-    // re-apply the same pattern to an op it just created (a generic
-    // infinite-recursion guard), which would otherwise leave any nesting
-    // deeper than one level (e.g. an array-of-struct, or a struct member
-    // that is itself a struct) stuck only partially decomposed.
+    // level (a struct-of-struct/array-of-struct member, or a stride-
+    // substituted array's own element, becomes its own, less-nested
+    // `spirv.Constant`), so the recursion this pattern relies on to
+    // legalize arbitrarily-deep nesting is provably bounded -- without
+    // this, MLIR's dialect conversion framework refuses to re-apply the
+    // same pattern to an op it just created (a generic infinite-recursion
+    // guard), which would otherwise leave any nesting deeper than one
+    // level (e.g. an array-of-struct, a struct member that is itself a
+    // struct, or a stride-substituted array nested inside another) stuck
+    // only partially decomposed.
     setHasBoundedRewriteRecursion();
   }
 
@@ -11594,9 +11631,10 @@ public:
   matchAndRewrite(mlir::spirv::ConstantOp Op, OpAdaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     mlir::Type Ty = Op.getType();
-    if (!containsStructType(Ty))
+    if (!needsAggregateConstantDecomposition(Ty, *getTypeConverter()))
       return Rewriter.notifyMatchFailure(
-          Op, "not a struct-containing aggregate constant");
+          Op, "not a struct-containing or stride-substituted aggregate "
+              "constant");
 
     mlir::Location Loc = Op.getLoc();
     llvm::SmallVector<mlir::Value, 8> Constituents;

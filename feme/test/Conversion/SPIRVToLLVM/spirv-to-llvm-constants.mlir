@@ -97,3 +97,42 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %0 : !spirv.array<2 x !spirv.struct<(f32, !spirv.array<2 x f32>)>>
   }
 }
+
+// -----
+
+// (Roadmap ENV5(a)(3)) A `spirv.Constant` of an array whose declared
+// `ArrayStride` overshoots its element's natural size -- e.g. a `stride=8`
+// array of `si32`, whose natural per-element size is only 4 bytes -- hits
+// the same "no legal `ElementsAttr` encoding" gap `array_of_struct_of_array`
+// above hits, but for a different reason: `convertArrayTypeIgnoringDecora
+// tions` substitutes each element slot with an opaque `!llvm.array<8 x i8>`
+// byte-array stand-in rather than the natural `i32` leaf
+// `ArrayConstantPattern`'s flattening expects, so it bails out and
+// `StructConstantPattern` decomposes it one element at a time instead, the
+// same as the struct-containing case. Each new, simpler `spirv.Constant`
+// (now a plain scalar, not itself stride-substituted) converts directly;
+// `spirv.CompositeConstruct`'s own `convertArray` (SPIRVToLLVMPatterns.cpp)
+// then round-trips each narrower scalar through a scratch `alloca` (store
+// narrower, reload padded) to reinterpret it as the wider, padded element
+// slot before `insertvalue`, exactly as it already does for an ordinary
+// (non-constant) `spirv.CompositeConstruct` of this same shape. This is the
+// shape `dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_stride_
+// select` compiles down to.
+
+// CHECK-LABEL: llvm.func @stride_padded_array
+// CHECK-DAG: llvm.mlir.constant(0 : i32) : i32
+// CHECK-DAG: llvm.mlir.constant(1 : i32) : i32
+// CHECK-DAG: llvm.mlir.constant(2 : i32) : i32
+// CHECK-DAG: llvm.mlir.constant(3 : i32) : i32
+// CHECK-DAG: llvm.alloca
+// CHECK-DAG: llvm.store
+// CHECK-DAG: llvm.load {{.*}} -> !llvm.array<8 x i8>
+// CHECK-DAG: llvm.insertvalue
+// CHECK-NOT: spirv.Constant
+// CHECK-NOT: spirv.CompositeConstruct
+spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader], [SPV_KHR_storage_buffer_storage_class]> {
+  spirv.func @stride_padded_array() -> !spirv.array<4 x si32, stride=8> "None" {
+    %0 = spirv.Constant [0 : si32, 1 : si32, 2 : si32, 3 : si32] : !spirv.array<4 x si32, stride=8>
+    spirv.ReturnValue %0 : !spirv.array<4 x si32, stride=8>
+  }
+}

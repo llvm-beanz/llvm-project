@@ -1816,8 +1816,9 @@ TEST(SPIRVToLLVMTest, StructConstantDecomposesIntoCompositeConstruct) {
 
 // Same gap, but for an array whose *element* type is a struct: the
 // `spirv.Constant`'s outer type is an `ArrayType`, so `StructConstantPattern`
-// must recurse per-element (via `containsStructType` walking through the
-// array layer) rather than only handling a top-level `StructType` directly.
+// must recurse per-element (via `needsAggregateConstantDecomposition`
+// walking through the array layer) rather than only handling a top-level
+// `StructType` directly.
 TEST(SPIRVToLLVMTest, ArrayOfStructConstantDecomposesRecursively) {
   std::string Result = convertToLLVMDialect(
       "spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], "
@@ -1833,7 +1834,34 @@ TEST(SPIRVToLLVMTest, ArrayOfStructConstantDecomposesRecursively) {
   EXPECT_EQ(Result.find("spirv.Constant"), std::string::npos) << Result;
 }
 
-// (Roadmap L116(d)) `convertArrayTypeIgnoringDecorations` (roadmap L17)
+// (Roadmap ENV5(a)(3)) A `spirv.Constant` of a stride-padded array (see
+// `CompositeConstructReinterpretsStridePaddedArrayElement` below for the
+// matching `spirv.CompositeConstruct` case this one shares its gap and
+// fix with) hits the same decomposition path as the struct case above --
+// `needsAggregateConstantDecomposition` catches it via the natural-vs-
+// physical element type mismatch, not a struct constituent -- and relies
+// on `spirv.CompositeConstruct`'s own `convertArray` alloca-roundtrip
+// reinterpret to finish the job.
+TEST(SPIRVToLLVMTest, StrideSubstitutedArrayConstantDecomposes) {
+  std::string Result = convertToLLVMDialect(
+      "spirv.module Logical GLSL450 requires #spirv.vce<v1.4, [Shader], "
+      "[SPV_KHR_storage_buffer_storage_class]> { spirv.func @entry() -> () "
+      "\"None\" { "
+      "%r = spirv.Constant [0 : si32, 1 : si32, 2 : si32, 3 : si32] : "
+      "!spirv.array<4 x si32, stride=8> "
+      "spirv.Return } }");
+  EXPECT_NE(Result, "<failed>") << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(0 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.mlir.constant(3 : i32) : i32"), std::string::npos)
+      << Result;
+  EXPECT_NE(Result.find("llvm.alloca"), std::string::npos) << Result;
+  EXPECT_NE(Result.find("llvm.insertvalue"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.Constant"), std::string::npos) << Result;
+  EXPECT_EQ(Result.find("spirv.CompositeConstruct"), std::string::npos)
+      << Result;
+}
+
 // widens a scalar array element whose declared `ArrayStride` exceeds its
 // natural size into an opaque `Stride`-sized byte-array stand-in type, but
 // `CompositeConstructPattern::convertArray` previously required every
