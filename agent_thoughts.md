@@ -128037,3 +128037,46 @@ The mined logs come from `L468`'s targeted regression run, captured against the 
 6. **(lower priority, needs real build+trace, not log-mining)** `compute_shader_derivatives.lod_op.*` (9, numeric), `image_query.samples_storage` (1), `entrypoint.tess_con_*` (3, likely a tessellation gap), the untriaged 15 `compute.*` cases, all 38 `graphics.*` cases.
 7. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in `Roadmap.md` if clean.
 8. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV5(d)(1) fixed -- terminate_invocation's real bug was a vertex-shader CopyMemory gap, not a null-pointer-constant gap
+
+**Next action (under two minutes)**: `ps -eo pid,stat,cmd | grep '/vulkan/deqp-vk '` -- confirm `ENV4`'s 6 paused workers resumed via `kill -CONT` at the end of this session (PIDs 38607/38952/39359/39395/39413/39778, batch `initial-00192`-`00199`) are progressing again, not still stopped.
+
+## State check (done first, every session)
+
+`vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed, twice (start and end of this segment).
+
+## What happened
+
+1. Picked up the carried-forward `ENV5(d)` plan: "add a pointer-typed `spirv.Constant` pattern for SPIR-V null pointers, one fix likely covers all 15 `terminate_invocation` cases."
+2. Wrote two dedicated regression tests to validate that hypothesis before touching the pattern code:
+   - A `SPIRVResourceLoweringPass` unit test isolating a `select`-merged null/real pointer feeding a load — **passed cleanly**. `mergeIntoSelect`'s existing `ConstantPointerNull` handling already covers this shape.
+   - A full `runPipeline` test using the exact fragment-shader LLVM IR (hand-extracted via a temporary pass-manager split + dump) — **also passed cleanly**, fully correct SIMD-widened output.
+   - **Hypothesis disproven both times.** The null-pointer-select shape was never actually broken.
+3. Ran the real failing `deqp-vk` case directly and dumped the raw `spirv.module` for *every* pipeline stage via `FEME_DUMP_IR_PRESPIRV` (the earliest dump point in the whole translation pipeline) — found the error actually comes from the **vertex** shader's trivial passthrough (`spirv.CopyMemory "Output" %out, "Input" %in : si32`), not the fragment shader at all.
+4. Root cause: `StageIOAddressOfPattern` eagerly converts a scalar `Input` variable's address into its *already-loaded value* (correct for an ordinary `spirv.Load`, which becomes a no-op forward) — but `spirv.CopyMemory`'s `source` operand receiving that same non-pointer value fell through to MLIR's generic `CopyMemoryPattern`, which issued a second, ill-typed `llvm.load`.
+5. Fixed with a new, narrowly-scoped `StageIOCopyMemoryPattern` in `SPIRVToLLVMPatterns.cpp` (declines unless `source` is non-pointer and `target` is a real pointer, and neither side carries `MemoryAccess` bits) — rewrites the shape to a plain `llvm.store`, no redundant load.
+6. Cleaned up all temporary diagnostic scaffolding before committing: reverted the `Pipeline.cpp` Normalize-split/dump, removed both now-irrelevant `TEMP_*` unit tests (they tested the disproven hypothesis, not the real bug).
+7. Added a permanent lit test (`spirv-to-llvm-stage-io.mlir`'s new `copy_input_to_output` case) — verified fails pre-fix (stashed fix, confirmed exact error text), passes post-fix.
+8. Validated against the real CTS: all 15 `terminate_invocation` cases, **Crash → Pass (15/15, 100%)**. Full `check-feme`: 3823/3827 Passed, 4 Unsupported, 0 Failed — unaffected.
+9. Updated `Roadmap.md` (struck `ENV5(d)(1)` with the corrected root cause, left `image_query.samples_storage` as the sole remaining `ENV5(d)` item) and `VulkanCTSReport.md` (new `L472` entry).
+10. Codified the "dump every shader stage before committing to a single-stage hypothesis" lesson in `feme/.instructions.md`, since this session lost roughly an hour to the disproven fragment-shader path before trying the vertex shader.
+
+## Why the initial hypothesis was wrong, and why it still took two tests to confirm that
+
+The error text (`'llvm.load' op operand #0 must be LLVM pointer type, but got 'i32'`) and the test names (`no_null_pointer_load`/`no_null_pointer_store`) both pointed convincingly at a null-pointer-constant gap. Only running the *real* `deqp-vk` process and dumping *every* stage — not a synthetic repro built from one assumed stage — revealed which conversion call actually threw. The synthetic fragment-shader repro was internally consistent and passed every test thrown at it, because it was testing a shape that was never broken.
+
+## Wins (visible)
+
+- **All 15 `terminate_invocation` CTS cases now Pass** (were `Crash`), confirmed via a direct `deqp-vk --deqp-caselist-file` run against the rebuilt ICD.
+- **`check-feme` fully green**: 3823/3827 Passed, 4 Unsupported (pre-existing), 0 Failed.
+- Three commits landed, each independently buildable/testable: the fix itself (`553c6d6d4304`), the docs update (`7832a3d92ac5`), the `.instructions.md` lesson (`269572366eb7`).
+- `ENV5(d)` down from 16 open cases to 1 (`image_query.samples_storage`).
+
+## Next steps
+
+1. **(~1-2 hours)** Fix `opcopylogical`'s layout-mismatch bug (`'llvm.insertvalue' op Type mismatch`, 9 cases) — needs a real recursive, layout-converting copy, not a 1-line fix.
+2. **(~15-20 min)** Worth a quick broader regression sweep: check whether this same `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape also underlies any of the untriaged `compute.*`/`graphics.*` failures, since the trivial vertex-shader passthrough is common to most Amber-based CTS tests, not just this one cluster.
+3. **(~30-60 min, needs a real build+trace, not log-mining)** `opselect.array_stride_select` (1, custom-array-stride constant-legalization gap), `entrypoint.tess_con_*` (3, likely tessellation gap), `image_query.samples_storage` (1, the last `ENV5(d)` case).
+4. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in `Roadmap.md` if clean.
+5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
