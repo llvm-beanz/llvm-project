@@ -86,7 +86,9 @@ bool visitPushConstantUsers(
     Value *Base, uint64_t BaseOffset, Value *DynamicIndex,
     uint64_t DynamicStride, Function &F, const DataLayout &DL,
     SmallVectorImpl<SPIRVPushConstantLoad> &Loads,
-    MapVector<PHINode *, SmallVector<SPIRVPushConstantPhiEdge, 2>> &PhiEdges) {
+    MapVector<PHINode *, SmallVector<SPIRVPushConstantPhiEdge, 2>> &PhiEdges,
+    MapVector<SelectInst *, SmallVector<SPIRVPushConstantSelectEdge, 2>>
+        &SelectEdges) {
   for (User *U : Base->users()) {
     if (auto *UI = dyn_cast<Instruction>(U); UI && UI->getFunction() != &F)
       continue; // Not this function's own use; visited when that one is.
@@ -114,6 +116,26 @@ bool visitPushConstantUsers(
       for (unsigned I = 0, E = Phi->getNumIncomingValues(); I != E; ++I)
         if (Phi->getIncomingValue(I) == Base)
           PhiEdges[Phi].push_back({I, BaseOffset, DynamicIndex, DynamicStride});
+      continue;
+    }
+
+    // A `select` merging `Base` with another push-constant pointer
+    // (roadmap H9) -- the exact same idea as the `phi` case just above,
+    // except there are always exactly two arms and no predecessor block
+    // to key an edge by (a `select` is a pure value-level merge with no
+    // control-flow edge of its own -- see `SPIRVPushConstantSelectEdge`'s
+    // own comment). Record one edge per arm `Base` actually is (in
+    // principle both, for a degenerate `select %c, %p, %p`); do not
+    // recurse into `Sel`'s own users yet, for the same reason the `phi`
+    // case above does not -- `matchSPIRVPushConstantAccess`'s own
+    // finalization pass handles `Sel`'s users once both arms are known.
+    if (auto *Sel = dyn_cast<SelectInst>(U)) {
+      if (Sel->getTrueValue() == Base)
+        SelectEdges[Sel].push_back(
+            {/*IsTrueArm=*/true, BaseOffset, DynamicIndex, DynamicStride});
+      if (Sel->getFalseValue() == Base)
+        SelectEdges[Sel].push_back(
+            {/*IsTrueArm=*/false, BaseOffset, DynamicIndex, DynamicStride});
       continue;
     }
 
@@ -154,7 +176,8 @@ bool visitPushConstantUsers(
       NewDynamicStride = Stride.getZExtValue();
     }
     if (!visitPushConstantUsers(GEP, NewBaseOffset, NewDynamicIndex,
-                                NewDynamicStride, F, DL, Loads, PhiEdges))
+                                NewDynamicStride, F, DL, Loads, PhiEdges,
+                                SelectEdges))
       return false;
   }
   return true;
@@ -290,9 +313,11 @@ matchSPIRVPushConstantAccess(Function &F) {
   Access.Global = PC;
   const DataLayout &DL = PC->getDataLayout();
   MapVector<PHINode *, SmallVector<SPIRVPushConstantPhiEdge, 2>> PhiEdges;
+  MapVector<SelectInst *, SmallVector<SPIRVPushConstantSelectEdge, 2>>
+      SelectEdges;
   if (!visitPushConstantUsers(PC, /*BaseOffset=*/0, /*DynamicIndex=*/nullptr,
                              /*DynamicStride=*/0, F, DL, Access.Loads,
-                             PhiEdges))
+                             PhiEdges, SelectEdges))
     return std::nullopt;
 
   // Finalize every `phi` merge `visitPushConstantUsers` recorded edges
@@ -322,7 +347,33 @@ matchSPIRVPushConstantAccess(Function &F) {
       Access.PhiAccesses.push_back(std::move(PhiAccess));
   }
 
-  if (Access.Loads.empty() && Access.PhiAccesses.empty())
+  // Finalize every `select` merge `visitPushConstantUsers` recorded edges
+  // for (roadmap H9, see that function's own comment): the same
+  // completeness and "plain loads only" rules as the `phi` case above,
+  // just requiring exactly one true-arm and one false-arm edge instead of
+  // one edge per incoming index.
+  for (auto &[Sel, Edges] : SelectEdges) {
+    bool HasTrueArm = false, HasFalseArm = false;
+    for (const SPIRVPushConstantSelectEdge &Edge : Edges)
+      (Edge.IsTrueArm ? HasTrueArm : HasFalseArm) = true;
+    if (Edges.size() != 2 || !HasTrueArm || !HasFalseArm)
+      return std::nullopt;
+
+    SPIRVPushConstantSelectAccess SelectAccess;
+    SelectAccess.Select = Sel;
+    SelectAccess.Edges = std::move(Edges);
+    for (User *U : Sel->users()) {
+      auto *LI = dyn_cast<LoadInst>(U);
+      if (!LI)
+        return std::nullopt;
+      SelectAccess.Loads.push_back(LI);
+    }
+    if (!SelectAccess.Loads.empty())
+      Access.SelectAccesses.push_back(std::move(SelectAccess));
+  }
+
+  if (Access.Loads.empty() && Access.PhiAccesses.empty() &&
+      Access.SelectAccesses.empty())
     return std::nullopt; // The global exists, but not referenced by `F`.
   return Access;
 }
@@ -360,10 +411,10 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
   // whenever this block's own reflected struct declares a nonzero leading
   // `layout(offset=N)` gap (e.g. one shader stage's own share of a larger
   // block several stages share, each reading only its own portion).
-  // `Access.Loads` and `Access.PhiAccesses` are never both empty (see
-  // `matchSPIRVPushConstantAccess`), so at least one of the two loops
-  // below always runs at least once and this initial sentinel is always
-  // overwritten.
+  // `Access.Loads`, `Access.PhiAccesses`, and `Access.SelectAccesses` are
+  // never all three empty (see `matchSPIRVPushConstantAccess`), so at
+  // least one of the loops below always runs at least once and this
+  // initial sentinel is always overwritten.
   uint32_t MaxAccessedByte = 0;
   uint32_t MinAccessedByte = std::numeric_limits<uint32_t>::max();
 
@@ -447,6 +498,60 @@ lowerSPIRVPushConstantAccess(const SPIRVPushConstantAccess &Access,
       Phi->eraseFromParent();
   }
 
+  // (roadmap H9) Every recognized `select` merge of differently-addressed
+  // push-constant pointers (see `SPIRVPushConstantSelectAccess`'s own
+  // comment): unlike the `phi` case above, a `select`'s two arms are both
+  // always reached by the same control flow that reaches `Select` itself
+  // -- there is no separate predecessor block per arm to sink a
+  // bounds-checked load into -- so both arms' loads are instead emitted
+  // right before `Select` itself (eagerly loading both, exactly as the
+  // original `select`-of-pointers-then-load already eagerly computed both
+  // arms' addresses before picking one), merged with a new value-level
+  // `select` sharing `Select`'s own condition, and every one of `Select`'s
+  // (plain-load, per the match contract) users is replaced with that
+  // merge directly. `Select` itself (now always unused, per that same
+  // contract) and the GEPs that fed each of its arms are left for
+  // `eraseDeadPushConstantGEPs` below, exactly like every other now-dead
+  // GEP this function rewrote through.
+  for (const SPIRVPushConstantSelectAccess &SelectAccess :
+       Access.SelectAccesses) {
+    SelectInst *Sel = SelectAccess.Select;
+    LoadInst *FirstLoad = SelectAccess.Loads.front();
+    Type *LoadedTy = FirstLoad->getType();
+    uint64_t LoadSize = DL.getTypeStoreSize(LoadedTy).getFixedValue();
+    Align LoadAlign = FirstLoad->getAlign();
+    for (LoadInst *LI : SelectAccess.Loads)
+      LoadAlign = std::min(LoadAlign, LI->getAlign());
+
+    Value *TrueValue = nullptr;
+    Value *FalseValue = nullptr;
+    for (const SPIRVPushConstantSelectEdge &Edge : SelectAccess.Edges) {
+      MinAccessedByte = std::min<uint64_t>(MinAccessedByte, Edge.BaseOffset);
+      MaxAccessedByte = std::max<uint64_t>(
+          MaxAccessedByte,
+          Edge.DynamicIndex
+              ? dynamicAccessMemberEndByte(Access.Global, Edge.BaseOffset, DL)
+              : Edge.BaseOffset + LoadSize);
+
+      Value *EdgeValue = emitBoundsCheckedLoad(
+          Sel, LoadedTy, LoadAlign, LoadSize, Edge.BaseOffset,
+          Edge.DynamicIndex, Edge.DynamicStride, RootConstants,
+          RootConstantSize, I32Ty, I64Ty);
+      (Edge.IsTrueArm ? TrueValue : FalseValue) = EdgeValue;
+    }
+
+    IRBuilder<> SelectBuilder(Sel);
+    Value *ValueSelect = SelectBuilder.CreateSelect(
+        Sel->getCondition(), TrueValue, FalseValue, "push_const.select_value");
+
+    for (LoadInst *LI : SelectAccess.Loads) {
+      LI->replaceAllUsesWith(ValueSelect);
+      LI->eraseFromParent();
+    }
+    if (Sel->use_empty())
+      Sel->eraseFromParent();
+  }
+
   // Drop every now-unused `getelementptr` this access rewrote through; the
   // global itself is left for the caller to erase once every function
   // referencing it has been processed (see the pass's own `run`).
@@ -515,6 +620,11 @@ PreservedAnalyses SPIRVPushConstantLoweringPass::run(Module &M,
           LoadInfo.DynamicIndex = &NewArg;
       for (SPIRVPushConstantPhiAccess &PhiAccess : Access->PhiAccesses)
         for (SPIRVPushConstantPhiEdge &Edge : PhiAccess.Edges)
+          if (Edge.DynamicIndex == &OldArg)
+            Edge.DynamicIndex = &NewArg;
+      for (SPIRVPushConstantSelectAccess &SelectAccess :
+           Access->SelectAccesses)
+        for (SPIRVPushConstantSelectEdge &Edge : SelectAccess.Edges)
           if (Edge.DynamicIndex == &OldArg)
             Edge.DynamicIndex = &NewArg;
       OldArg.replaceAllUsesWith(&NewArg);

@@ -59,6 +59,21 @@
 // (nested) `phi` -- again, anything else leaves the whole function
 // untouched rather than partially rewritten.
 //
+// roadmap H9: the same `phi`-of-pointers shape, but folded one step
+// further into a `select` instead -- LLVM's own `InstCombinePass` turns a
+// simple, side-effect-free two-predecessor `phi` merge (exactly the shape
+// above) into a single-block `select` whenever nothing else in either
+// predecessor block needs to stay split, which the upstream
+// `feme::graphics::UnrollConstantTripCountStageLoopsPass`'s own
+// `InstCombinePass` run (see `feme::cpu::Pipeline.cpp`'s own
+// `SPIRVUnmergeResourceLoadsPass` header comment for why that pass exists
+// at all) is free to do to a push-constant pointer merge exactly as it
+// would to anything else. A `select`'s two arms are recognized by the
+// same rule as a `phi`'s incoming edges: both must themselves resolve to
+// the push-constant global, and the `select`'s own result may only be
+// used by plain loads -- see `SPIRVPushConstantSelectAccess`'s own
+// comment.
+//
 // As with DXIL root constants, a function that also performs bound
 // (`spirv.VulkanBuffer` handle) resource access is supported, but lowered
 // differently: `feme::cpu::SPIRVResourceLoweringPass` itself finishes the
@@ -83,6 +98,7 @@ class Function;
 class GlobalVariable;
 class LoadInst;
 class PHINode;
+class SelectInst;
 class Value;
 } // namespace llvm
 
@@ -141,14 +157,52 @@ struct SPIRVPushConstantPhiAccess {
   llvm::SmallVector<llvm::LoadInst *, 2> Loads;
 };
 
+/// One arm of a `select` recognized by `SPIRVPushConstantSelectAccess` --
+/// which arm this is (`true`/condition-taken, or `false`/otherwise), and
+/// that arm's own resolved address relative to the push-constant global,
+/// exactly as `SPIRVPushConstantLoad`'s own fields describe a plain
+/// load's address (see `SPIRVPushConstantSelectAccess`'s own comment).
+/// Unlike `SPIRVPushConstantPhiEdge`, there is no predecessor block to
+/// re-read later -- a `select` is a pure value-level merge with no
+/// control-flow edge of its own, so `IsTrueArm` alone, not an index into
+/// a mutable block list, is all a later rewrite ever needs.
+struct SPIRVPushConstantSelectEdge {
+  bool IsTrueArm = false;
+  uint64_t BaseOffset = 0;
+  llvm::Value *DynamicIndex = nullptr;
+  uint64_t DynamicStride = 0;
+};
+
+/// One recognized `select` merge of two differently-addressed
+/// push-constant pointers, and every plain load reading through it --
+/// roadmap H9's extension of the `phi` case above (`SPIRVPushConstantPhiAccess`)
+/// to cover the exact same branchy-shader shape after LLVM's own
+/// `InstCombinePass` has further folded a simple two-predecessor `phi`
+/// merge into a single-block `select` instead (no side effects on either
+/// arm, so there is nothing stopping that fold -- see
+/// `feme::cpu::SPIRVPushConstantLoweringPass`'s header comment for a real
+/// case, `dEQP-VK.pipeline.*.multisample.misc.multi_renderpass`'s sample
+/// mask selection). `Edges` always has exactly one true-arm and one
+/// false-arm entry -- a `select` with either arm not itself resolving to
+/// the push-constant global is not recognized at all, and never appears
+/// here (nor is the whole function's access, per the file comment's
+/// "leave it alone" contract).
+struct SPIRVPushConstantSelectAccess {
+  llvm::SelectInst *Select;
+  llvm::SmallVector<SPIRVPushConstantSelectEdge, 2> Edges;
+  llvm::SmallVector<llvm::LoadInst *, 2> Loads;
+};
+
 /// One function's complete, supported push-constant access: the module's
 /// push-constant global, every plain load recognized as reading through
-/// it, and every `phi`-of-pointers merge recognized as reading through it
-/// (see the file comment for exactly what is recognized).
+/// it, every `phi`-of-pointers merge recognized as reading through it, and
+/// every `select`-of-pointers merge recognized as reading through it (see
+/// the file comment for exactly what is recognized).
 struct SPIRVPushConstantAccess {
   llvm::GlobalVariable *Global;
   llvm::SmallVector<SPIRVPushConstantLoad, 8> Loads;
   llvm::SmallVector<SPIRVPushConstantPhiAccess, 2> PhiAccesses;
+  llvm::SmallVector<SPIRVPushConstantSelectAccess, 2> SelectAccesses;
 };
 
 /// Returns \p F's push-constant access if the module has a push-constant
