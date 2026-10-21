@@ -3557,6 +3557,15 @@ bool splitBarrierlessTessellationControlEntry(Function &F,
   SmallVector<ReturnInst *, 1> Returns;
   CloneFunctionInto(PatchConstantPhase, &F, VMap,
                     CloneFunctionChangeType::LocalChangesOnly, Returns);
+  // `CloneFunctionInto` copies every function attribute from `F`,
+  // including any `feme.entry.name` stamped by SPIR-V-to-LLVM conversion
+  // to preserve the original (possibly-disambiguated-away-from)
+  // `OpEntryPoint` Name. That inherited value is stale here: the
+  // `.patchconstant` clone is never itself an `OpEntryPoint` target, and
+  // its own `findFunctionByEntryPointName` lookups key off its distinct
+  // `<entry>.patchconstant` symbol, not `F`'s entry name. Drop it so
+  // `getEntryPointName` falls back to `PatchConstantPhase->getName()`.
+  PatchConstantPhase->removeFnAttr("feme.entry.name");
 
   if (Freq.SawNonPatchOutput || HasSideEffect) {
     // A genuine mix (shape (3) above), or shape (2)'s own patch-frequency-
@@ -3659,6 +3668,11 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
       Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
                        (F.getName() + ".patchconstant").str(), F.getParent());
   PatchConstantPhase->copyAttributesFrom(&F);
+  // See the identical `removeFnAttr` call and comment in
+  // `splitBarrierlessTessellationControlEntry` above: `copyAttributesFrom`
+  // carries over `F`'s stale `feme.entry.name`, which must not leak onto
+  // this distinct `.patchconstant` symbol.
+  PatchConstantPhase->removeFnAttr("feme.entry.name");
   PatchConstantPhase->setComdat(F.getComdat());
   SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
   F.getAllMetadata(MDs);
