@@ -128488,3 +128488,31 @@ Got real error strings for all 5 `barrier.*` + `indexing.output.component_tessc`
 4. **(~30-60 min)** `module.same_module*` (4 cases) — no creation-time error; needs render-output comparison to find what's actually wrong, a different diagnostic approach than every other cluster this session.
 5. **(new, large, never triaged)** `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the single largest cluster in the now-final 666-case corpus). Worth a first pass to check whether they share one root cause — concentrated in `depth_stencil_msaa_copy`/`resolve_image` with `d32_sfloat`-family formats recurring.
 6. **(low priority, unchanged for many sessions)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: JIT "Symbols not found" cluster fully closed out (ENV5(c)(5)/(6))
+
+**Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.module.same_module' --deqp-log-images=disable` to get the first real signal for `ENV5(c)`'s next untriaged cluster (`module.same_module*`, 4 cases, no creation-time error expected).
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed). No `deqp-vk` processes running (ENV4 corpus collection already completed in a prior session).
+
+## What got done
+
+1. **Fixed `splitTessellationControlEntry`'s cross-barrier GEP-address-capture bug** (`CanonicalizeStage.cpp`): a per-vertex output's own computed address (a `GetElementPtrInst`) was being threaded through a synthetic capture global instead of being cloned, leaving the real stage-IO global never given a real store any pass could see. Fixed `barrier.in_function`/`barrier.after_divergent_if`. New regression test `SplitsHullEntryCloningCapturedOutputPointer`, confirmed fail-without/pass-with-fix. Committed `654167c1b770` (prior segment) + docs commit `d03d1258b7f2` (this session, picking up the doc-sync step that was interrupted by compaction).
+2. **Fixed `getDynamicVertexIndexedAccess`'s constant-vertex/dynamic-component gap** (same file): a compile-time-unrolled Hull output write (constant control-point index, dynamic component/lane index) was declined outright by both existing helpers, for different reasons each. Added a `Component` field to `DynamicVertexIndexedAccess`, threaded through `resolveStageIOAccess`. Fixed `indexing.output.component_tessc`. New regression test `ThreadsConstantVertexIndexWithDynamicComponentIntoOutputStore`, confirmed fail-without/pass-with-fix. Committed `3a2604c7d7d6`.
+3. **Docs updated and committed**: `Roadmap.md` (`ENV5(c)(5)`/`ENV5(c)(6)` both struck through, remaining-count row updated 16→14→13) and `VulkanCTSReport.md` (`L482`/`L483` entries, each noting no feature/extension inventory impact). Committed `d03d1258b7f2` and `e1e564aed7eb`.
+4. **Full `check-feme` run twice** (once per fix): 0 Failed both times, no regressions.
+
+## Wins
+
+- **All 3 cases** in the original "JIT session error: Symbols not found: [ spirv_varN ]" cluster are now fixed (`barrier.in_function`, `barrier.after_divergent_if`, `indexing.output.component_tessc`). This cluster is fully closed — no more untriaged cases left in it.
+- 4 commits this session, each small and isolated (2 code+test, 2 docs), all feme-only.
+- Confirmed both fixes are genuine regression-guarded via the stash-and-rebuild technique (not just "looks plausible").
+
+## State for next session
+
+`ENV5(c)`'s remaining 13 cases, roughly in priority order:
+1. `module.same_module*` (4 cases) — **best next target**, never triaged this cluster specifically; no creation-time error logged via `FEME_VULKAN_LOG_CREATION_ERRORS=1` in any prior session, so this needs a render-output-comparison diagnostic approach, not the usual creation-error-string triage.
+2. `ENV5(c)(4)`: 6 deeper `float16.*_tessc` cases (`struct16arr3`/`v3f16arr5`/`v4f16arr3`) — same `foldRedundantFlowBlock` bug family as an older partial fix, but the aliasing predecessors are no longer immediate fold targets; needs either a transitive-reconvergence check or whole-fixed-point-loop slot-write tracking. Get a fresh standalone `.ll` reduction first (`FEME_DUMP_IR_PRELINEARIZE=1` + `feme-opt --llvm -passes=feme-cpu-linearize,verify`).
+3. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one group-sync barrier per Hull entry point" limitation, lowest priority, not a quick fix.
+4. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
+5. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
