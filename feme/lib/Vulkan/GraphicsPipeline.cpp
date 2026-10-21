@@ -1190,12 +1190,34 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
     return Targets;
   }
 
+  // (roadmap L491) `VkPipelineRenderingCreateInfo` is optional, not
+  // required, whenever `renderPass` is `VK_NULL_HANDLE`:
+  // `VUID-VkGraphicsPipelineCreateInfo-dynamicRendering-06576` only
+  // requires `renderPass` to be non-null when the `dynamicRendering`
+  // feature is *disabled* -- with that feature enabled (this device
+  // always enables it), a pipeline with neither a `VkRenderPass` nor a
+  // chained `VkPipelineRenderingCreateInfo` is the spec's own way of
+  // declaring "no attachments at all" (every other `VkPipelineRendering
+  // CreateInfo`-referencing VUID is phrased conditionally on a field of
+  // that struct, e.g. "if `colorAttachmentCount` is not 0", which is
+  // vacuously satisfied by treating an absent struct as all-zero/
+  // all-`VK_FORMAT_UNDEFINED`). `dEQP-VK.pipeline.*.misc.no_rendering`
+  // exercises exactly this shape: a real pipeline bound via
+  // `vkCmdBeginRendering` with `colorAttachmentCount = 0` and no render
+  // pass, built with neither chained.
+  static constexpr VkPipelineRenderingCreateInfo NoAttachmentsRendering = {
+      VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+      nullptr,
+      0,
+      0,
+      nullptr,
+      VK_FORMAT_UNDEFINED,
+      VK_FORMAT_UNDEFINED,
+  };
   const VkPipelineRenderingCreateInfo *Rendering =
       findRenderingCreateInfo(CreateInfo.pNext);
   if (!Rendering)
-    return createStringError(inconvertibleErrorCode(),
-                             "a graphics pipeline needs either a VkRenderPass "
-                             "or a chained VkPipelineRenderingCreateInfo");
+    Rendering = &NoAttachmentsRendering;
   for (uint32_t I = 0; I != Rendering->colorAttachmentCount; ++I) {
     // (roadmap L379(c)) `VK_FORMAT_UNDEFINED` is a legal, spec-defined way
     // to leave a `pColorAttachmentFormats` slot unused (e.g. CTS's own

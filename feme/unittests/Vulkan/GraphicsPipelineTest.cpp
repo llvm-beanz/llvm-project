@@ -2920,6 +2920,49 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (Roadmap L498) Omitting *both* `VkRenderPass` and a chained
+/// `VkPipelineRenderingCreateInfo` is itself spec-legal, not an error:
+/// `dEQP-VK.pipeline.*.misc.no_rendering`'s own shape (CTS's
+/// `PipelineNoRenderingTestInstance`), which deliberately creates a
+/// pipeline this way, then draws it against zero color attachments via
+/// `vkCmdBeginRendering`. Per the real Vulkan-Docs `pipelines.adoc`
+/// (`VkPipelineRenderingCreateInfo`'s own description): "If this
+/// structure is not specified, and the pipeline does not include a
+/// `VkRenderPass`, `viewMask` and `colorAttachmentCount` are `0`, and
+/// `depthAttachmentFormat`/`stencilAttachmentFormat` are
+/// `VK_FORMAT_UNDEFINED`" -- an implicit all-zero default, not an error.
+/// `VUID-VkGraphicsPipelineCreateInfo-dynamicRendering-06576` only
+/// requires a non-null `renderPass` when the `dynamicRendering` feature
+/// is *disabled* (never the case for this device). Before this fix,
+/// `getRenderTargets` hard-rejected this shape with a creation-time
+/// error, latching every `misc.no_rendering` draw at
+/// `VK_ERROR_INITIALIZATION_FAILED`.
+TEST_F(GraphicsPipelineTest, AcceptsNoRenderPassAndNoRenderingCreateInfo) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = nullptr;
+  // Matching `misc.no_rendering`'s own shape: zero color blend attachments
+  // too, consistent with the implicit all-zero
+  // `VkPipelineRenderingCreateInfo` default this fix teaches
+  // `getRenderTargets` to synthesize.
+  Blend.attachmentCount = 0;
+  Blend.pAttachments = nullptr;
+
+  // Before this fix, `getRenderTargets` hard-rejected this shape at
+  // creation time with "a graphics pipeline needs either a VkRenderPass
+  // or a chained VkPipelineRenderingCreateInfo" instead of treating it as
+  // the spec's implicit all-zero default.
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// (Roadmap L379(c)) `VK_FORMAT_UNDEFINED` is a legal, spec-defined way to
 /// leave a `pColorAttachmentFormats` slot unused -- CTS's own multisample
 /// resolve-mode tests (`dEQP-VK.pipeline.*.ds_resolve_sample_zero*`) fix
