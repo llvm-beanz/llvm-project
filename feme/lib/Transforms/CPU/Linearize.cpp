@@ -4413,6 +4413,34 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
     IncomingBlocks[I] = IncomingBlock;
   }
 
+  // Roadmap L480: both of `BB`'s two arms are ordinarily expected to
+  // reach two *distinct* `Merge`/`IncomingBlock` pairs -- that is the
+  // whole premise the forwarding loop below relies on, one real incoming
+  // slot per arm. A nested "Flow"-style re-derivation this same fold has
+  // already collapsed one level further out (e.g. an enclosing `Flow`
+  // block, itself just folded away, leaving its own successor chain
+  // retargeted directly into a single shared downstream relay) can leave
+  // `BB`'s own two, still textually-distinct `Targets` converging back
+  // onto the exact same `Merge` through the exact same `IncomingBlock`
+  // relay slot before either ever reaches a second, independent one --
+  // i.e. `BB` no longer represents a genuine two-way fork at all, only
+  // two different routes into one shared relay. The forwarding loop
+  // below writes to `Merges[I]`'s phi slot keyed solely on
+  // `IncomingBlocks[I]`, once per arm: when both arms alias the same
+  // slot, the second write silently clobbers the first, discarding one
+  // arm's forwarded value outright (reduced from a real
+  // `dEQP-VK.spirv_assembly.instruction.graphics.float16.
+  // opcompositeextract.f16arr3_tessc` "Instruction does not dominate all
+  // uses!" verifier failure in a hull `.patchconstant` entry, where a
+  // 3-deep nested-switch-decode-in-a-loop shape left exactly this
+  // aliasing behind after the outer level's own fold ran first). Bail
+  // out here (leaving `BB` -- and the harmless, if redundant,
+  // re-derivation it performs -- in place) rather than silently drop a
+  // value, mirroring this fold's own already-established "never guess"
+  // philosophy for every other unaccounted-for shape above.
+  if (Merges[0] == Merges[1] && IncomingBlocks[0] == IncomingBlocks[1])
+    return false;
+
   for (PHINode &PN : BB->phis()) {
     for (Use &U : PN.uses()) {
       auto *UserInst = cast<Instruction>(U.getUser());
