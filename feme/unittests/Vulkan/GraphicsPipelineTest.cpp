@@ -5294,6 +5294,90 @@ TEST_F(GraphicsPipelineTest, LinksAllFourLibraryPartsIntoAnExecutablePipeline) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap ENV6(b)) A `VK_EXT_graphics_pipeline_library` linked pipeline
+/// bound to a subpass with no attachments at all (`AcceptsMultisampledNo
+/// AttachmentRenderPass`'s own monolithic shape, linked instead of built in
+/// one call) must trust its own `rasterizationSamples` the same way the
+/// monolithic path does. `pMultisampleState` is only meaningful for the
+/// `FRAGMENT_SHADER_BIT`/`FRAGMENT_OUTPUT_INTERFACE_BIT` library parts per
+/// the spec's own "Dividing A Monolithic Pipeline" table -- the
+/// vertex-input and pre-rasterization-shader-state parts below are built
+/// with no `pMultisampleState` at all, exactly as a real caller's own
+/// per-part `VkGraphicsPipelineCreateInfo` would omit it -- so this
+/// reproduces `dEQP-VK.pipeline.fast_linked_library.multisample.
+/// mixed_count.*`'s own genuine `VK_ERROR_INITIALIZATION_FAILED`: before
+/// this fix, whichever library happened to be captured as this link's
+/// `PrecomputedRenderTargets` (the vertex-input library here, the first
+/// entry in `pLibraries` with a resolvable `RenderPass`) carried a stale,
+/// single-sample `SampleCount` from a create call that never saw the
+/// pipeline's real multisample state, rejecting this otherwise-legal
+/// linked pipeline as "disagreeing" with its own no-attachment render
+/// target.
+TEST_F(GraphicsPipelineTest,
+       LinksLibraryWithMultisampledNoAttachmentRenderPass) {
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass NoAttachmentPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &NoAttachmentPass),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = NoAttachmentPass;
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+
+  // The vertex-input and pre-rasterization-shader-state library parts
+  // never see multisample state, matching a real caller's own per-part
+  // create info.
+  VkGraphicsPipelineCreateInfo InfoNoMultisample = Info;
+  InfoNoMultisample.pMultisampleState = nullptr;
+
+  VkPipeline VertexInputLib = createLibrary(
+      Device, InfoNoMultisample,
+      VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT);
+  VkPipeline PreRasterLib = createLibrary(
+      Device, InfoNoMultisample,
+      VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT);
+  VkPipeline FragmentLib = createLibrary(
+      Device, Info, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT);
+  VkPipeline FragmentOutputLib = createLibrary(
+      Device, Info,
+      VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT);
+
+  VkPipeline Libraries[4] = {VertexInputLib, PreRasterLib, FragmentLib,
+                             FragmentOutputLib};
+  VkPipelineLibraryCreateInfoKHR LinkInfo{};
+  LinkInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+  LinkInfo.libraryCount = 4;
+  LinkInfo.pLibraries = Libraries;
+
+  VkGraphicsPipelineCreateInfo LinkedCreateInfo{};
+  LinkedCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  LinkedCreateInfo.pNext = &LinkInfo;
+  LinkedCreateInfo.layout = Layout;
+  LinkedCreateInfo.renderPass = NoAttachmentPass;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(LinkedCreateInfo, Handle), VK_SUCCESS);
+  ASSERT_NE(Handle, VK_NULL_HANDLE);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle))
+                ->sampleCount(),
+            4u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyPipeline(Device, FragmentOutputLib, nullptr);
+  vkDestroyPipeline(Device, FragmentLib, nullptr);
+  vkDestroyPipeline(Device, PreRasterLib, nullptr);
+  vkDestroyPipeline(Device, VertexInputLib, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyRenderPass(Device, NoAttachmentPass, nullptr);
+}
+
 /// (roadmap L249) A linked pipeline bound to a subpass other than `0` must
 /// still resolve `getRenderTargets` against *that* subpass, not subpass
 /// `0`, even though a pure-link call's own `VkGraphicsPipelineCreateInfo`

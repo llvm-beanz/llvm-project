@@ -2088,6 +2088,35 @@ Error translateFixedFunctionState(
                                : getRenderTargets(CreateInfo);
   if (!Targets)
     return Targets.takeError();
+  // (roadmap L4xx) A subpass with no real color/depth-stencil attachment
+  // at all has no attachment sample count of its own to disagree with --
+  // `getRenderTargets` already trusts the pipeline's own
+  // `rasterizationSamples` for this shape (see its own H7n/H7s comments),
+  // but only when *that* call's own `CreateInfo` happened to carry a
+  // `pMultisampleState`. A `VK_EXT_graphics_pipeline_library` linked
+  // pipeline's `PrecomputedRenderTargets` was captured from whichever
+  // library part first supplied the render pass -- for
+  // `dEQP-VK.pipeline.fast_linked_library.multisample.mixed_count.*`'s own
+  // no-attachment subpass, that is the pre-rasterization-shader-state
+  // library, which never carries multisample state at all (it isn't part
+  // of that library's own state per the spec's "Dividing A Monolithic
+  // Pipeline" table) -- so `PrecomputedRenderTargets->SampleCount` is left
+  // at its single-sample default, stale relative to this (final, fully
+  // merged) call's own real `CreateInfo.pMultisampleState`. Re-resolve the
+  // trust here, against *this* call's own `CreateInfo`, rather than only
+  // inside `getRenderTargets`'s single-call view, so a linked pipeline's
+  // genuinely multisampled no-attachment subpass isn't rejected as
+  // "disagreeing" with a sample count no attachment of its ever actually
+  // specified.
+  bool HasRealColorAttachment =
+      llvm::any_of(Targets->Colors, [](feme::cpu::ResourceFormat F) {
+        return F != feme::cpu::ResourceFormat::Unknown;
+      });
+  if (!HasRealColorAttachment && !Targets->DepthStencil &&
+      CreateInfo.pMultisampleState &&
+      !isRasterizationStaticallyDiscarded(CreateInfo))
+    Targets->SampleCount =
+        static_cast<uint32_t>(CreateInfo.pMultisampleState->rasterizationSamples);
   // A depth-only render target -- no color attachments at all -- is legal
   // Vulkan (`dEQP-VK.multiview.depth_without_fragment_shader`'s own shape,
   // roadmap H2b); nothing below this point assumes a nonempty `Colors`.
