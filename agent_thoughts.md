@@ -128546,3 +128546,37 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device
 2. `ENV5(c)(7)`: `barrier.{in_if,in_switch,in_loop}` (3 cases) — structural "one group-sync barrier per Hull entry point" limitation, lowest priority, not a quick fix.
 3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
 4. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: `ENV5(c)(4)` fully closed out (6/6 float16 `_tessc` cases), barrier triage split into (a)/(b)
+
+**Next action (under two minutes):** read `feme/docs/Roadmap.md`'s `ENV5(c)(7)(a)` entry, then open `feme/lib/Transforms/Graphics/CanonicalizeStage.cpp:3644` (`splitTessellationControlEntry`) to start the scoped multi-barrier-call-site fix for `barrier.in_if`/`barrier.in_switch`.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (confirmed, start and end of session). No stray `deqp-vk` processes.
+
+## What got done
+
+1. **Finished the `ENV5(c)(4)` fix carried in from last session's compaction**: removed the temporary `FEME_DEBUG_FOLD_TRACE` trace statements, rebuilt `feme-opt`, and confirmed the standalone `.ll` repro now compiles cleanly (exit 0, no verifier errors) after both of last session's fixes to `foldRedundantFlowBlock` (single-predecessor relay guard + reusing read-only `Merges`/`IncomingBlocks` instead of unsafe recomputation).
+2. **Rebuilt the ICD and confirmed all 6 real CTS cases now Pass**: `opcompositeextract`/`opcompositeinsert` × `struct16arr3`/`v3f16arr5`/`v4f16arr3`, all `Passed: 1/1`.
+3. **Ran full `check-feme`**: 3838/3842 Passed, 4 Unsupported, 0 Failed — no regressions.
+4. **Wrote and landed a lit regression test**: `Transforms/CPU/Linearize/switch-decode-deep-chain-relay-dominance-and-use-after-erase.ll`, trimmed from a real `FEME_DUMP_IR_PRELINEARIZE=1` dump (unused resource globals/metadata stripped, CFG/value names preserved verbatim). Confirmed via `git stash`/rebuild that it reproduces the exact original crash against the pre-fix compiler and passes with the fix. Full `Transforms/CPU/Linearize` suite: 68/68 Passed. Committed `5c1ec66584aa`.
+5. **Docs**: `Roadmap.md` (struck `ENV5(c)(4)`, remaining count 9→3) and `VulkanCTSReport.md` (`L486` entry). Also added a `.instructions.md` note on the `-passes=...,verify` vs `FEME_OPT_DUMP_INVALID` interaction found while debugging this (explicit `,verify` aborts hard via `report_fatal_error`, bypassing `feme-opt`'s own dump-on-failure path). Committed `839910a35e4b`.
+6. **Triaged the remaining 3 `ENV5(c)` cases precisely**: used `FEME_DUMP_IR_PRECANON=1` (dumps before `CanonicalizeStage` runs, since the barrier-count check errors out before any later dump point would fire) to inspect `barrier.in_if`/`in_switch`/`in_loop`'s real pre-canonicalize IR. Found two materially different shapes, not one:
+   - `in_if`/`in_switch`: **one dynamic barrier**, duplicated by the SPIR-V producer into N static call sites (one per mutually-exclusive branch arm), all reconverging immediately at the same block with no other work in between. A scoped, tractable fix.
+   - `in_loop`: a **single static barrier call site inside a real loop** that runs a dynamic number of iterations per invocation — fundamentally incompatible with `splitTessellationControlEntry`'s single-split-point model (the flood-fill from the split point necessarily re-enters the loop header via its own back edge, which still has an entry edge from outside the region — the current "exactly one entry edge" error is correct, not a bug to patch around). Needs a genuinely different, larger design (lockstep multi-iteration barrier execution), likely needing a design-doc update first.
+   - Split the single `ENV5(c)(7)` roadmap entry into `(a)` (in_if/in_switch, scoped) and `(b)` (in_loop, structural/harder) with the concrete evidence and a sketched fix approach for `(a)`. Committed `c321a498d6fd`.
+7. **Deliberately did not attempt the `(a)` fix itself this session**: `splitTessellationControlEntry` is a 376-line function; generalizing its single-barrier assumption to N-reconverging-barriers touches the flood-fill, the predecessor-validation loop, and the cross-barrier-value capture logic (which currently assumes one insertion point). Chose to land precise, actionable triage rather than risk an incomplete/untested structural change with limited remaining session time.
+
+## Wins
+
+- **All 6 cases** in `ENV5(c)(4)` now fixed and verified against the real CTS binary (not just the standalone repro). `ENV5(c)` is down from 9 residual cases to 3.
+- Two real compiler bugs found and fixed in one function (`foldRedundantFlowBlock`), each only reachable after fixing the other — confirmed via `git stash`/rebuild A/B testing at every step (pre-fix crash reproduced, post-fix clean) rather than assumed.
+- New diagnostic finding codified in `.instructions.md` (`,verify` pass hard-aborts vs. `feme-opt`'s own dump path) so the next session doesn't waste time rediscovering it.
+- The `barrier.in_loop` triage is a genuinely new, non-obvious finding: previous sessions lumped all 3 barrier cases together as "structural, revisit later" — now there's a precise, evidence-backed reason why 2 of them are a scoped fix and 1 is a much bigger design question.
+
+## State for next session
+
+`ENV5(c)`'s remaining 3 cases, in priority order:
+1. `ENV5(c)(7)(a)`: `barrier.{in_if,in_switch}` (2 cases) — **best next target**. Generalize `splitTessellationControlEntry` (`CanonicalizeStage.cpp:3644`) to accept N barrier call sites proven to be the same dynamic barrier (no other barrier reachable between function entry and each one; all N reconverge at one common block with nothing but the barrier-then-branch in each originating block). Use that common reconvergence block as the one flood-fill root instead of splitting a single `BarrierBlock`; extend the existing cross-barrier-value capture logic to insert captures at the end of all N barrier blocks. Get a fresh standalone `.ll` reduction first (`FEME_DUMP_IR_PRECANON=1`, already captured this session at `/tmp/in_if_precanon.txt` for reference).
+2. `ENV5(c)(7)(b)`: `barrier.in_loop` (1 case) — structural, needs a lockstep multi-iteration barrier execution model; likely needs a design-doc update before implementation. Lowest priority; revisit only after `(a)` or a deliberate design decision.
+3. `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the largest untriaged cluster in the 666-case corpus) — once `ENV5(c)` is fully closed out.
+4. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
