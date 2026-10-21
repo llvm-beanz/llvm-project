@@ -128344,3 +128344,77 @@ FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
 --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.opcopymemory.struct'
 --deqp-log-images=disable 2>&1 | less` to get the first real IR dump for `opcopymemory.struct`'s
 resource-normalization gap.
+
+# Session: ENV5(b)(8) fixed -- `opcopymemory.struct`, last untriaged ENV5(b) case closed
+
+**Fixed `opcopymemory.struct` (`ENV5(b)` down to 1 case, `opunreachable.all`, already structural).** Run `vulkaninfo --summary | grep deviceName` → should print `FeMe CPU Vulkan Device` before touching anything else next session.
+
+## What was broken
+
+1. `StageIOCopyMemoryPattern` and `BlockWholeCopyMemoryPattern` both target `spirv.CopyMemory`,
+   same `PatternBenefit`.
+2. `StageIOCopyMemoryPattern`'s guard ("source not yet a real pointer") also matched a resource
+   handle, a shape it was never meant to handle.
+3. It fired first, storing the raw handle into the destination alloca instead of deferring to
+   `BlockWholeCopyMemoryPattern`'s `getpointer`-mediated load/store.
+4. Confirmed via `feme-opt --feme-convert-spirv-to-llvm --debug` on two minimal repros
+   (`/tmp/copy1-repro.mlir`, `/tmp/copy-whole.mlir`).
+
+## Fix
+
+Added an explicit `isa<LLVMTargetExtType>` exclusion guard to `StageIOCopyMemoryPattern`, forcing
+it to decline the handle shape regardless of try-order. New lit test case in
+`spirv-to-llvm-block-whole-content.mlir` (handle-to-local/local-to-handle round trip).
+
+## Verified
+
+1. `check-feme`: 3830/3834 Passed, 4 Unsupported, 0 Failed (no regressions).
+2. `deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.opcopymemory.struct'`: **Pass**
+   (was `VK_ERROR_INITIALIZATION_FAILED`).
+3. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` confirmed at session start.
+4. ENV4 background corpus run still alive, 8 `deqp-vk` workers, batches advanced
+   `initial-00896` → `initial-01187` across this session, no disruption from this session's
+   rebuilds.
+
+## Open mystery, not resolved (low priority, documented for whoever picks it up)
+
+`BlockWholeCopyMemoryPattern` is registered *first* at the same benefit, yet empirically tried
+*second*. Traced `RewritePatternSet::add`'s fold-expression, `FrozenRewritePatternSet`'s bucket
+construction, and `PatternApplicator::applyCostModel`'s `stable_sort` — none explain the reversal.
+The fix sidesteps this (a precise guard beats relying on try-order), but if this pattern repeats
+elsewhere, it's worth a dedicated MLIR-side investigation. Codified the "don't rely on try-order"
+lesson in `feme/.instructions.md` so it isn't relearned from scratch.
+
+## Commits this session (3, each isolated)
+
+1. `[feme] Fix StageIOCopyMemoryPattern shadowing BlockWholeCopyMemoryPattern` (fix + lit test).
+2. `[feme] Update Roadmap/VulkanCTSReport for opcopymemory.struct fix` (docs).
+3. `[feme] Codify MLIR same-benefit pattern-ordering lesson in instructions` (`.instructions.md`).
+
+## Next steps, ranked
+
+1. **(next large untriaged block, ~1-2 hrs to triage)** `ENV5(c)`: 38 untriaged `graphics.*` cases
+   (`float16` 10, `variable_init` 10, `unused_variables` 8, `barrier` 5, `module` 4, `indexing` 1)
+   — no logs/build done yet for this block in any session so far. `float16` and `variable_init`
+   are the largest clusters, good first targets. Same triage pattern as every prior cluster:
+   `FEME_VULKAN_LOG_CREATION_ERRORS=1`/direct `deqp-vk --deqp-case=...` before guessing at a fix.
+2. **(low priority, structural, revisit only if a design change opens it up)** `opunreachable.all`:
+   the linearizer does not support unreachable-terminated blocks (tracked since `ENV3`'s
+   `assertion-crash-cases.txt`). Not expected to be a quick fix; don't start here next session
+   unless `ENV5(c)` is fully closed first.
+3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus
+   collection, still running uninterrupted across many sessions (`initial-01187` and climbing as
+   of this session's last check). Keep checking `ps aux | grep deqp-vk` and batch-file growth each
+   session; let it finish on its own before writing up final Pass/Fail/NotSupported/Crashed totals
+   and striking `ENV4` in `Roadmap.md`.
+4. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches
+   (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped
+   `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever
+   becomes available.
+
+**Next action (under two minutes):** `cd
+/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan &&
+FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
+--deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.float16.scalar'
+--deqp-log-images=disable` (or the nearest matching real `graphics.float16.*` case name) to get
+the first real error string for `ENV5(c)`'s largest untriaged cluster.
