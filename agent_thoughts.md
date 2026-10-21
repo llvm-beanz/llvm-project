@@ -128111,3 +128111,47 @@ Mid-session, `git clang-format HEAD -- <file>` (no `--diff`) refused because of 
 3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus collection. The 6 background workers were paused (SIGSTOP) by a prior session to allow this session's builds; resumed via `kill -CONT` at the end of this session -- confirmed all 6 back to `Rl` (running) state. Let it keep progressing; do not start another build while it's mid-run.
 4. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
 5. **(worth a quick check, ~15 min, carried forward from a prior session)** A broader regression sweep for any other `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape in the untriaged `compute.*`/`graphics.*` failure lists -- the trivial vertex-shader passthrough pattern L472 fixed is common to many Amber-based tests, not just `terminate_invocation`.
+
+# Session: ENV5(a) fully closed (tess_con_* fixed); ENV5(b) lod_op triaged
+
+**Bottom line: `ENV5(a)` is done except for the 2 known-structural `opptrequal`/`opptrnotequal` cases. Next action (~1-2 hrs): dig into `ENV5(b)`'s `lod_op.query.*` LOD-value bug with `FEME_DUMP_IR_*`/`gdb` -- see step 1 below.**
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (standing check, every session).
+2. Picked up exactly where the prior session was interrupted: `entrypoint.tess_con_*` (3 cases), fix already written in `CanonicalizeStage.cpp` but untested.
+3. Validated the fix:
+   - `FeMeTransformsGraphicsTests --gtest_filter='*Tess*:*Hull*:*PatchConstant*'` → 18/18 pass, no regressions (including the two closely-related tests the fix could have broken: `HullStageWithNoBarrierIsNotSplit`, `NoBarrierPatchConstantOnlyEntryIsSplitWhole`).
+   - Rebuilt `libfeme_vulkan.so`, ran all 3 real CTS cases directly with `FEME_VULKAN_LOG_CREATION_ERRORS=1` → all 3 **Pass** (previously `vkCreateGraphicsPipelines Fail`).
+   - Added a new unit test (`HullStageWithInitializerOnlyPatchOutputStillGetsPatchConstantSibling`) reproducing the exact gap.
+   - Full `check-feme`: 3825/3829 Passed, 4 Unsupported, 0 Failed (baseline 3824/3828, +1 new test, 0 regressions).
+   - `clang-format-diff -p1 -i` on the diff → no changes needed.
+   - Committed as `2fa38fcad019`.
+4. Updated `Roadmap.md` (struck `ENV5(a)(4)`, `ENV5(a)` remaining 5→2 cases) and `VulkanCTSReport.md` (new `L475` entry). Committed as `202b0c815a54`.
+5. Codified `FEME_VULKAN_LOG_CREATION_ERRORS=1` (this session's key debugging tool, rediscovered from `Diagnostics.cpp`) into `feme/.instructions.md` so it's not lost again. Committed as `6cf99a40eabd`.
+6. Confirmed `ENV4`'s background corpus run was undisturbed throughout (8 `deqp-vk`-related processes, batches 205-211 in flight, qpa/log files actively updating).
+7. Started scoping `ENV5(b)`'s `lod_op` cluster (9 cases): ran all 12 real `lod_op.*` cases directly. **Found it splits into two distinct bugs, not one**:
+   - `lod_op.query.*` (6 cases, `OpImageQueryLod`): **all fail**, both `mip_0` and `mip_1` -- looks like the computed/returned LOD value itself is wrong.
+   - `lod_op.sample.*` (6 cases): `mip_0` **passes**, `mip_1` **fails** -- looks like a narrower "sampling a non-zero mip level" gap, separate from the query bug.
+   - Recorded as `ENV5(b)(2)` triage in `Roadmap.md`, committed as `d5d1d6ae7968`. **Not fixed yet** -- ran out of time to dig into either root cause this session.
+8. Re-confirmed `vulkaninfo` and `ENV4` health before writing this entry (see below).
+
+## Wins this session
+- ✅ `ENV5(a)(4)`: `entrypoint.tess_con_*` (3 cases) fixed, tested, committed.
+- ✅ `ENV5(a)` is now closed except for 2 structural cases (was 6 open cases two sessions ago, now 2).
+- ✅ `FEME_VULKAN_LOG_CREATION_ERRORS=1` codified for future sessions.
+- ✅ `ENV5(b)`'s `lod_op` cluster triaged into two separately-diagnosable shapes (was one opaque "9 numeric failures" bucket).
+
+## State check (confirmed just now)
+- `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` ✅
+- `ENV4` background run: 8 processes alive, batches 205-211 actively running (99%+ CPU each), qpa/log timestamps current as of this check ✅ — **do not start a concurrent build without re-checking this first**.
+
+## Next steps (in priority order)
+
+1. **(~1-2 hrs, needs a real build+trace)** `ENV5(b)(2)`'s `lod_op.query.*` (6 cases, all fail): dump IR around the `OpImageQueryLod`-to-LLVM lowering (`FEME_DUMP_IR_PRESPIRV`/`FEME_DUMP_IR_PRENORM`) for one minimal case, compare the computed LOD value against the expected one, find where it diverges. This is the bigger of the two `lod_op` sub-bugs (6 of 9 cases) and has no passing baseline to compare against.
+2. **(~30-60 min, likely smaller/narrower)** `ENV5(b)(2)`'s `lod_op.sample.*mip_1` (3 cases, `mip_0` already passes): since `mip_0` works, diff the `mip_0`-vs-`mip_1` code path directly (image-sampling mip-level selection/addressing) rather than starting from scratch -- likely a much shorter path to the bug than the `query.*` case.
+3. **(~1-2 hours)** `ENV5(b)`'s remaining 15 untriaged `compute.*` cases (`variable_init` (3), `memory_access`/`multiple_shaders`/`opname`/`unused_variables` (2 each), `opundef`/`opunreachable`/`signed_op`/`vector_shuffle` (1 each)) -- same `FEME_VULKAN_LOG_CREATION_ERRORS=1`/`deqp-vk --deqp-case=...` direct-run triage pass as this session did for `lod_op`, before attempting any fix.
+4. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus collection. Still running since a prior session with no interruption. Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` every session until it finishes; let its own recovery/solo-verification rounds run to completion before writing up final Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md` and striking `ENV4` in `Roadmap.md`.
+5. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+
+**Next action (under two minutes): open `feme/docs/Roadmap.md` at `ENV5(b)(2)` and re-run `dEQP-VK.spirv_assembly.instruction.compute.compute_shader_derivatives.compute.lod_op.query.linear.16_1_1.mip_0` with `FEME_DUMP_IR_PRESPIRV=1` to get the first IR dump for the LOD-value bug.**
