@@ -39,3 +39,33 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %v : f32
   }
 }
+
+// -----
+
+// Roadmap ENV5(b): `dEQP-VK.spirv_assembly.instruction.compute.
+// variable_init.private.matrix`'s own `float2x4` global. A `spirv.matrix`
+// `initial_value` is a different shape from the struct/array case above:
+// the deserializer flattens it into a single `DenseElementsAttr` covering
+// the whole matrix, not a nested `ArrayAttr` of per-column constants --
+// `buildAggregateGlobalInitializerValue` splits that flat attribute one
+// column's worth of elements at a time before recursing.
+
+// CHECK-LABEL: llvm.mlir.global private @priv_mat
+// CHECK: %[[POISON:.*]] = llvm.mlir.poison : !llvm.array<2 x vector<4xf32>>
+// CHECK: %[[COL0:.*]] = llvm.mlir.constant(dense<1.000000e+00> : vector<4xf32>) : vector<4xf32>
+// CHECK: %[[S1:.*]] = llvm.insertvalue %[[COL0]], %[[POISON]][0]
+// CHECK: %[[COL1:.*]] = llvm.mlir.constant(dense<1.000000e+00> : vector<4xf32>) : vector<4xf32>
+// CHECK: %[[S2:.*]] = llvm.insertvalue %[[COL1]], %[[S1]][1]
+// CHECK: llvm.return %[[S2]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @priv_mat initial_value(dense<1.0> : !spirv.matrix<2 x vector<4xf32>>) : !spirv.ptr<!spirv.matrix<2 x vector<4xf32>>, Private>
+  spirv.func @read_priv_mat() -> f32 "None" {
+    %0 = spirv.mlir.addressof @priv_mat : !spirv.ptr<!spirv.matrix<2 x vector<4xf32>>, Private>
+    %c1 = spirv.Constant 1 : i32
+    %ac = spirv.AccessChain %0[%c1] : !spirv.ptr<!spirv.matrix<2 x vector<4xf32>>, Private>, i32 -> !spirv.ptr<vector<4xf32>, Private>
+    %c0 = spirv.Constant 0 : i32
+    %ac2 = spirv.AccessChain %ac[%c0] : !spirv.ptr<vector<4xf32>, Private>, i32 -> !spirv.ptr<f32, Private>
+    %v = spirv.Load "Private" %ac2 : f32
+    spirv.ReturnValue %v : f32
+  }
+}

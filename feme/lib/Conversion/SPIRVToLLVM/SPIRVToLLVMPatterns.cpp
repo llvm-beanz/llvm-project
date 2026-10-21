@@ -11733,10 +11733,18 @@ public:
 /// member's own position is remapped through
 /// `getStructMemberPhysicalIndex`, exactly as `rewriteBlockAccess`'s own
 /// `AccessChain` conversion already must, in case layout reordered or
-/// padded it. Returns a null `mlir::Value`, declining the whole
-/// conversion, for any type this cannot build (currently only a
-/// `spirv.matrix` leaf, not yet seen in a composite `initial_value` by any
-/// known CTS case).
+/// padded it. A `spirv.matrix` leaf (e.g.
+/// `dEQP-VK.spirv_assembly.instruction.compute.variable_init.private.
+/// matrix`'s own `float2x4` global, roadmap ENV5(b)) is deserialized as a
+/// single flat `DenseElementsAttr` covering the whole matrix, not a nested
+/// `ArrayAttr` of per-column constants the way a `spirv.struct`/
+/// `spirv.array` composite is -- so it is split one column's worth of
+/// elements at a time into a fresh per-column `DenseElementsAttr`, then
+/// built via one recursive call per column (landing back in this
+/// function's own vector-leaf case just below, exactly like
+/// `MatrixCompositeExtractPattern`'s understanding of a converted matrix as
+/// an `!llvm.array` of column vectors). Returns a null `mlir::Value`,
+/// declining the whole conversion, for any shape this cannot build.
 mlir::Value buildAggregateGlobalInitializerValue(
     mlir::OpBuilder &Builder, mlir::Location Loc, mlir::Type SrcType,
     mlir::Attribute SrcAttr, mlir::Type DstType,
@@ -11788,6 +11796,37 @@ mlir::Value buildAggregateGlobalInitializerValue(
     }
     return Result;
   }
+  if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(SrcType)) {
+    auto DstArray = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(DstType);
+    auto Dense = mlir::dyn_cast<mlir::DenseElementsAttr>(SrcAttr);
+    auto ColumnType = mlir::dyn_cast<mlir::VectorType>(MatrixTy.getColumnType());
+    if (!DstArray || !Dense || !ColumnType ||
+        DstArray.getNumElements() != MatrixTy.getNumColumns())
+      return nullptr;
+    int64_t ColumnSize = ColumnType.getNumElements();
+    llvm::SmallVector<mlir::Attribute, 16> AllValues(
+        Dense.getValues<mlir::Attribute>().begin(),
+        Dense.getValues<mlir::Attribute>().end());
+    if (static_cast<int64_t>(AllValues.size()) !=
+        static_cast<int64_t>(MatrixTy.getNumColumns()) * ColumnSize)
+      return nullptr;
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Builder, Loc, DstType);
+    for (unsigned Col = 0, E = MatrixTy.getNumColumns(); Col != E; ++Col) {
+      llvm::ArrayRef<mlir::Attribute> ColumnValues(
+          AllValues.data() + static_cast<int64_t>(Col) * ColumnSize,
+          ColumnSize);
+      auto ColumnAttr = mlir::DenseElementsAttr::get(ColumnType, ColumnValues);
+      mlir::Value Column = buildAggregateGlobalInitializerValue(
+          Builder, Loc, ColumnType, ColumnAttr, DstArray.getElementType(),
+          TypeConverter);
+      if (!Column)
+        return nullptr;
+      Result = mlir::LLVM::InsertValueOp::create(
+          Builder, Loc, Result, Column,
+          llvm::ArrayRef<int64_t>{static_cast<int64_t>(Col)});
+    }
+    return Result;
+  }
   return nullptr;
 }
 
@@ -11796,8 +11835,9 @@ mlir::Value buildAggregateGlobalInitializerValue(
 /// `buildAggregateGlobalInitializerValue` above can actually build for \p
 /// SrcType -- i.e. everywhere a `spirv.struct`/`spirv.array` is expected,
 /// \p SrcAttr is an `ArrayAttr` with exactly that many elements, down to a
-/// scalar/vector leaf (anything else, currently only a `spirv.matrix`
-/// leaf, is not yet needed by any known CTS case). Kept attribute/type-only
+/// scalar/vector leaf, or a `spirv.matrix` leaf whose own flat
+/// `DenseElementsAttr` has exactly `NumColumns * ColumnSize` elements (see
+/// `buildAggregateGlobalInitializerValue`'s own comment). Kept attribute/type-only
 /// (no `TypeConverter`/builder) so `PrivateAggregateGlobalVariablePattern`
 /// can call this *before* committing to `replaceOpWithNewOp` below, rather
 /// than discovering an unsupported shape only once rewriting is already
@@ -11825,6 +11865,15 @@ bool isAggregateGlobalInitializerShapeSupported(mlir::Type SrcType,
               ArrayTy.getElementType(), Element))
         return false;
     return true;
+  }
+  if (auto MatrixTy = mlir::dyn_cast<mlir::spirv::MatrixType>(SrcType)) {
+    auto Dense = mlir::dyn_cast<mlir::DenseElementsAttr>(SrcAttr);
+    auto ColumnType = mlir::dyn_cast<mlir::VectorType>(MatrixTy.getColumnType());
+    if (!Dense || !ColumnType)
+      return false;
+    return Dense.getNumElements() ==
+           static_cast<int64_t>(MatrixTy.getNumColumns()) *
+               ColumnType.getNumElements();
   }
   return false;
 }
