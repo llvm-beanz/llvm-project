@@ -971,6 +971,24 @@ vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipelineCache,
     *pDataSize = Blob.size();
     return VK_SUCCESS;
   }
+  // The spec's `vkGetPipelineCacheData` wording draws a hard line at the
+  // serialized `VkPipelineCacheHeaderVersionOne` header's own size (the
+  // blob's first `uint32_t`, `serializePipelineCacheBlob`'s own
+  // `appendPOD(Out, kHeaderSize)`): "If the value of pDataSize is less
+  // than what is necessary to store this header, nothing will be written
+  // to pData and zero will be written to pDataSize." -- a *stronger*
+  // guarantee than the ordinary "copy min(pDataSize, blob size) bytes and
+  // report VK_INCOMPLETE" case just below, which would otherwise still
+  // write a short, header-truncated prefix and report that same
+  // (non-zero) short size back. `Blob` always contains a complete header
+  // (`serializePipelineCacheBlob` never emits less), so reading its
+  // leading `uint32_t` directly is safe regardless of `*pDataSize`.
+  uint32_t HeaderSize = 0;
+  std::memcpy(&HeaderSize, Blob.data(), sizeof(HeaderSize));
+  if (*pDataSize < HeaderSize) {
+    *pDataSize = 0;
+    return VK_INCOMPLETE;
+  }
   size_t CopySize = std::min(*pDataSize, Blob.size());
   std::memcpy(pData, Blob.data(), CopySize);
   *pDataSize = CopySize;

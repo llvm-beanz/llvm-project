@@ -24,6 +24,7 @@
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Parser/Parser.h"
 #include "mlir/Target/SPIRV/Serialization.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include "gtest/gtest.h"
@@ -403,6 +404,78 @@ TEST_F(PipelineCacheTest, DataRoundTripsThroughANewCache) {
   vkDestroyPipeline(Device, FromReloaded, nullptr);
   vkDestroyPipeline(Device, Pipeline, nullptr);
   vkDestroyPipelineCache(Device, Reloaded, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
+TEST_F(PipelineCacheTest, GetDataWithSizeSmallerThanHeaderWritesNothing) {
+  // Roadmap H29(f): `dEQP-VK.pipeline.*.cache.misc_tests.invalid_size_test`
+  // exercises the spec's own stronger guarantee for a `*pDataSize` smaller
+  // than the serialized header itself: "nothing will be written to pData
+  // and zero will be written to pDataSize" -- *not* the ordinary
+  // `VK_INCOMPLETE`-with-a-short-but-nonzero-size behavior a merely
+  // blob-smaller-than-requested call gets (see
+  // `GetDataWithSizeLessThanBlobReturnsIncompleteWithPartialData` just
+  // below for that ordinary case).
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr,
+                                     &Pipeline),
+            VK_SUCCESS);
+
+  size_t FullDataSize = 0;
+  ASSERT_EQ(vkGetPipelineCacheData(Device, Cache, &FullDataSize, nullptr),
+            VK_SUCCESS);
+  // `VkPipelineCacheHeaderVersionOne`'s on-the-wire size: four `uint32_t`
+  // fields plus the 16-byte UUID (mirrors `PipelineCache.cpp`'s own
+  // `kHeaderSize`, not reused directly since that constant is file-local).
+  constexpr size_t HeaderSize = 4 * sizeof(uint32_t) + VK_UUID_SIZE;
+  ASSERT_GT(FullDataSize, HeaderSize);
+
+  std::vector<uint8_t> Data(FullDataSize, 0xAB);
+  size_t RequestedSize = HeaderSize - 1;
+  EXPECT_EQ(
+      vkGetPipelineCacheData(Device, Cache, &RequestedSize, Data.data()),
+      VK_INCOMPLETE);
+  EXPECT_EQ(RequestedSize, 0u);
+  EXPECT_TRUE(llvm::all_of(Data, [](uint8_t B) { return B == 0xAB; }));
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
+TEST_F(PipelineCacheTest, GetDataWithSizeLessThanBlobReturnsIncompleteWithPartialData) {
+  // The ordinary short-buffer case `GetDataWithSizeSmallerThanHeaderWritesNothing`
+  // just above contrasts with: once `*pDataSize` reaches at least the
+  // header's own size, the usual "copy min(pDataSize, blob size) bytes,
+  // report the short size back, return VK_INCOMPLETE" behavior applies.
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr,
+                                     &Pipeline),
+            VK_SUCCESS);
+
+  size_t FullDataSize = 0;
+  ASSERT_EQ(vkGetPipelineCacheData(Device, Cache, &FullDataSize, nullptr),
+            VK_SUCCESS);
+  constexpr size_t HeaderSize = 4 * sizeof(uint32_t) + VK_UUID_SIZE;
+  ASSERT_GT(FullDataSize, HeaderSize);
+
+  std::vector<uint8_t> Data(FullDataSize, 0);
+  size_t RequestedSize = HeaderSize;
+  EXPECT_EQ(
+      vkGetPipelineCacheData(Device, Cache, &RequestedSize, Data.data()),
+      VK_INCOMPLETE);
+  EXPECT_EQ(RequestedSize, HeaderSize);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
   vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
