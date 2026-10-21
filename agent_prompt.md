@@ -69,30 +69,20 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(first, under 2 minutes, every session until `ENV4` finishes)** Check
-   `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk`.
-2. **(once `ENV4` is done or paused, ~15-30 min)** Apply
-   `env5b-builtin-access-chain-zero-index.patch` (saved in this session's
-   workspace) to `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, add
-   a lit test (SPIR-V `.spv.ll`/`mlir` round-trip style, mirroring existing
-   `SPIRVToLLVM` conversion tests) exercising a zero-index access chain on
-   `gl_SubgroupID`, build, run `check-feme`, then commit.
-3. **(~20-40 min)** Add the `hlsl_functionality1`/`uniformid` no-op-decoration
-   handling (likely near-identical one-line fixes in the SPIR-V importer's
-   decoration-handling switch) -- 7 cases, two independent small commits.
-4. **(~1-2 hours)** Fix `terminate_invocation`'s shared null-pointer-constant
-   lowering gap (add a pointer-typed `spirv.Constant` pattern emitting
-   `llvm.mlir.zero`) -- 15 cases, one commit, needs careful testing since it's a
-   new pattern class, not an extension of an existing one.
-5. **(~1-2 hours)** Fix `opcopylogical`'s layout-mismatch bug (needs a real
-   recursive, layout-converting copy, not a 1-line fix) -- 9 cases.
-6. **(lower priority, needs real build+trace, not log-mining)**
-   `compute_shader_derivatives.lod_op.*` (9, numeric),
-   `image_query.samples_storage` (1), `entrypoint.tess_con_*` (3, likely a
-   tessellation gap), the untriaged 15 `compute.*` cases, all 38 `graphics.*`
-   cases.
-7. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals
+1. **(~1-2 hours)** Fix `opcopylogical`'s layout-mismatch bug
+   (`'llvm.insertvalue' op Type mismatch`, 9 cases) — needs a real recursive,
+   layout-converting copy, not a 1-line fix.
+2. **(~15-20 min)** Worth a quick broader regression sweep: check whether this
+   same `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape also underlies any
+   of the untriaged `compute.*`/`graphics.*` failures, since the trivial
+   vertex-shader passthrough is common to most Amber-based CTS tests, not just
+   this one cluster.
+3. **(~30-60 min, needs a real build+trace, not log-mining)**
+   `opselect.array_stride_select` (1, custom-array-stride constant-legalization
+   gap), `entrypoint.tess_con_*` (3, likely tessellation gap),
+   `image_query.samples_storage` (1, the last `ENV5(d)` case).
+4. **(after `ENV4` closes)** Write up full Pass/Fail/NotSupported/Crashed totals
    in `VulkanCTSReport.md`, remeasure `L417`-`L419`, strike `ENV4` in
    `Roadmap.md` if clean.
-8. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if
+5. **(low priority, unchanged)** Upstream the 3 `offload-test-suite` patches if
    push access ever becomes available.
