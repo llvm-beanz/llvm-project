@@ -2153,12 +2153,24 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     return createStringError(inconvertibleErrorCode(),
                              "a draw must be recorded inside a render pass "
                              "instance");
-  if (Gfx.Binding.Colors.size() != Pipeline.colorAttachmentCount())
-    return createStringError(inconvertibleErrorCode(),
-                             "the bound pipeline has %u color attachment(s) "
-                             "but the render target has %zu",
-                             Pipeline.colorAttachmentCount(),
-                             Gfx.Binding.Colors.size());
+  // (Roadmap L498) The spec (`VUID-vkCmdDraw-colorAttachmentCount-06179`)
+  // does require the bound pipeline's own declared
+  // `VkPipelineRenderingCreateInfo::colorAttachmentCount` to equal the
+  // render target's (`VkRenderingInfo::colorAttachmentCount`), but real
+  // conformant hardware tolerates (and `dEQP-VK.pipeline.*.misc.
+  // interpolate_at_sample_no_sample_shading`, run without validation
+  // layers, deliberately exercises) a pipeline declaring *fewer* color
+  // attachments than the render target it is drawn against: the pipeline
+  // simply never reads or writes the render target's extra slots, same as
+  // any other "unused" color attachment. So this only needs to walk the
+  // first `Pipeline.colorAttachmentCount()` of `Gfx.Binding.Colors`
+  // (treating a short render target's missing trailing slots as unused,
+  // exactly like an explicit `imageView == VK_NULL_HANDLE` slot already
+  // is below) rather than hard-require the two counts to match.
+  auto ColorAt = [&](uint32_t I) -> const RenderTargetView & {
+    static const RenderTargetView Unused;
+    return I < Gfx.Binding.Colors.size() ? Gfx.Binding.Colors[I] : Unused;
+  };
   // (Roadmap L417) Enabling depth test/write/bounds-test with no bound
   // depth attachment is legal too, exactly like the stencil case
   // immediately below (`dEQP-VK.renderpasses.dynamic_rendering.*.
@@ -2179,7 +2191,8 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
 
   ResolvedDrawAttachments Resolved;
   bool AnyResolve = false;
-  for (const RenderTargetView &View : Gfx.Binding.Colors) {
+  for (uint32_t I = 0; I != Pipeline.colorAttachmentCount(); ++I) {
+    const RenderTargetView &View = ColorAt(I);
     if (!View.View) {
       // (Roadmap E5) `VK_KHR_maintenance5`: a `VkRenderingAttachmentInfo`
       // with `imageView == VK_NULL_HANDLE` is a color slot that is present
@@ -2216,7 +2229,8 @@ resolveDrawAttachments(const GraphicsPipeline &Pipeline,
     // entirely-unused one, so this loop must not hard-error on it either;
     // it is simply left out of `Resolved.ResolveAttachments` for this
     // attachment's own index, exactly like the explicitly-unused case.
-    for (const RenderTargetView &View : Gfx.Binding.Colors) {
+    for (uint32_t I = 0; I != Pipeline.colorAttachmentCount(); ++I) {
+      const RenderTargetView &View = ColorAt(I);
       if (!View.View || !View.ResolveView) {
         // An unused attachment slot never resolves either way (its
         // `resolveMode` is ignored, per `VkRenderingAttachmentInfo`'s
