@@ -5419,8 +5419,9 @@ void collectReachableHelperFunctions(Function &Entry,
 /// same operations' DXIL-derived forms, and (roadmap H6i) a task entry's
 /// bounded payload writes (address space 14, see `isTaskPayloadGlobal`)
 /// into `feme.stage.task.payload.store`.
-bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
-                            SPIRVCanonicalPhase Phase) {
+bool canonicalizeSPIRVStage(
+    Function &F, ShaderStage Stage, SPIRVCanonicalPhase Phase,
+    const DenseSet<GlobalVariable *> &OriginallyUnusedGlobals = {}) {
   bool Changed = false;
 
   // (Roadmap H170) A GLSL/glslang-sourced entry's own helper function(s)
@@ -5645,10 +5646,38 @@ bool canonicalizeSPIRVStage(Function &F, ShaderStage Stage,
   // stage's `canonicalizeSPIRVStage` call ever shares a `GlobalVariable`
   // with a sibling function the way hull's own two phases do (regression
   // covered by `HullStageDoesNotPeelPatchTessFactorOutputRowCount`).
+  //
+  // (Roadmap L484) A live `GV.use_empty()` check is *also* wrong whenever
+  // this module holds more than one recognized-stage entry point at once
+  // -- a single combined SPIR-V module naming every stage's entry `main`
+  // (CTS's own `dEQP-VK.spirv_assembly.instruction.graphics.module.
+  // same_module*`, `vktSpvAsmGraphicsShaderTestUtil.cpp`'s
+  // `createCombinedModule`), not just hull's own two split phases above.
+  // `CanonicalizeStagePass::run` canonicalizes every entry in one module
+  // in turn (module iteration order, e.g. vertex before fragment); once
+  // an earlier entry's own pass over `F` rewrites its loads/stores into
+  // `feme.stage.*` calls, that earlier entry's own stage-IO globals
+  // (e.g. a vertex entry's own `Location 0` input) go `use_empty()` too
+  // -- live, not from this fallback's own *second-pass* guard above,
+  // which only ever re-examines the *same* function `F`. Queried live,
+  // that makes a later sibling entry (e.g. the fragment one) adopt the
+  // earlier entry's now-orphaned globals as if they were its own
+  // never-touched varyings, corrupting its signature with spurious
+  // elements at a colliding `Location` the real fragment input/output
+  // never declared (`GraphicsPipeline.cpp`'s `validateStageInterfaces`
+  // then fails outright, "fragment input location N has no matching
+  // vertex stage output", confirmed via `same_module`'s own direct
+  // `FEME_DEBUG_DUMP_SIGNATURES=1` repro). `CanonicalizeStagePass::run`
+  // instead snapshots every global's `use_empty()` once, before
+  // canonicalizing *any* entry in the module, into
+  // `OriginallyUnusedGlobals`; membership there (not a live re-query)
+  // is what this fallback must test, since it reflects whether the
+  // global was genuinely dead from the very start, not merely rendered
+  // moot by an earlier sibling entry's own, unrelated rewrite.
   bool AlreadyCanonicalized = dxil::getEntrySignature(F).has_value();
   if (!AlreadyCanonicalized && Phase == SPIRVCanonicalPhase::Ordinary) {
     for (GlobalVariable &GV : F.getParent()->globals()) {
-      if (Seen.contains(&GV) || !GV.use_empty())
+      if (Seen.contains(&GV) || !OriginallyUnusedGlobals.contains(&GV))
         continue;
       unsigned AddrSpace = 0;
       if (!isSPIRVStageIOGlobal(&GV, AddrSpace))
@@ -7483,6 +7512,23 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
   for (Function &F : M)
     WorkList.push_back(&F);
 
+  // (Roadmap L484) Snapshotted once, before canonicalizing *any* entry
+  // below -- see `canonicalizeSPIRVStage`'s own "never-read/never-
+  // written varying" fallback comment for why a *live* `use_empty()`
+  // re-query there is wrong for a module holding more than one
+  // recognized-stage entry point (`createCombinedModule`'s single,
+  // multi-entry-point `module.same_module*` shape): canonicalizing an
+  // earlier entry in this same loop (e.g. vertex) rewrites its own
+  // loads/stores away, which would make its own stage-IO globals look
+  // just as "never touched" to a later sibling entry (e.g. fragment) as
+  // a genuinely dead varying the earlier entry never touched to begin
+  // with. Querying this frozen-at-the-top snapshot instead tells the two
+  // apart correctly either way.
+  DenseSet<GlobalVariable *> OriginallyUnusedGlobals;
+  for (GlobalVariable &GV : M.globals())
+    if (GV.use_empty())
+      OriginallyUnusedGlobals.insert(&GV);
+
   for (Function *F : WorkList) {
     std::optional<ShaderStage> Stage = getShaderStage(*F);
     if (!Stage ||
@@ -7544,8 +7590,9 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
     if (*Stage == ShaderStage::Hull)
       Changed |= canonicalizeSPIRVHullStage(*F);
     else
-      Changed |=
-          canonicalizeSPIRVStage(*F, *Stage, SPIRVCanonicalPhase::Ordinary);
+      Changed |= canonicalizeSPIRVStage(*F, *Stage,
+                                        SPIRVCanonicalPhase::Ordinary,
+                                        OriginallyUnusedGlobals);
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

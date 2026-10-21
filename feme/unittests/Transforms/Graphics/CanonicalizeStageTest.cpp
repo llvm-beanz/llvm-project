@@ -8824,5 +8824,87 @@ TEST(CanonicalizeStageTest,
     EXPECT_TRUE(SeenComponents.contains(C));
 }
 
+/// (Roadmap L484) `CanonicalizeStagePass::run` canonicalizes every
+/// recognized-stage entry point in a module in turn, vertex before
+/// fragment here. Once `@main`'s (vertex) own canonicalization rewrites
+/// its real `load`/`store` on `@vert_in`/`@vert_out` into `feme.stage.*`
+/// calls, both globals go `use_empty()` -- indistinguishable, from a
+/// *live* re-query alone, from a genuinely never-touched varying
+/// (`@frag_in` here, which `@main_1` truly never loads). Before this
+/// row's own fix, `@main_1`'s (fragment) own "never-read/never-written
+/// varying" fallback scanned every stage-IO global in the *module*, not
+/// just its own, and so incorrectly adopted vertex's now-orphaned-by-
+/// rewrite `@vert_in`/`@vert_out` as if they were fragment's own
+/// never-touched varyings -- corrupting fragment's signature with two
+/// spurious elements at `@vert_in`/`@vert_out`'s own `Location`s (7/5),
+/// which `GraphicsPipeline.cpp`'s `validateStageInterfaces` then reported
+/// as colliding/unmatched varyings (confirmed against the real
+/// `dEQP-VK.spirv_assembly.instruction.graphics.module.same_module` CTS
+/// case, whose single combined SPIR-V module names every stage's entry
+/// point "main" -- `vktSpvAsmGraphicsShaderTestUtil.cpp`'s
+/// `createCombinedModule`). A frozen, pre-rewrite `use_empty()` snapshot
+/// (`OriginallyUnusedGlobals`) fixes this: `@vert_in`/`@vert_out` are
+/// excluded from it (both have real uses at the very start, before any
+/// rewrite), while `@frag_in` (genuinely dead from the start) is still
+/// correctly included.
+TEST(CanonicalizeStageTest,
+    DoesNotLeakOrphanedSiblingEntryGlobalsIntoLaterEntrySignature) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @vert_in = external addrspace(7) constant <4 x float>, !spirv.Decorations !0
+    @vert_out = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    @frag_in = external addrspace(7) constant float, !spirv.Decorations !2
+    @frag_out = external addrspace(8) global <4 x float>, !spirv.Decorations !3
+
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @vert_in
+      store <4 x float> %v, ptr addrspace(8) @vert_out
+      ret void
+    }
+
+    define void @main_1() #1 {
+      %f = insertelement <4 x float> poison, float 1.0, i32 0
+      store <4 x float> %f, ptr addrspace(8) @frag_out
+      ret void
+    }
+
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #1 = { "feme.shader.stage"="fragment" }
+    !0 = !{!4}
+    !1 = !{!5}
+    !2 = !{!6}
+    !3 = !{!7}
+    !4 = !{i32 30, i32 7} ; Location 7
+    !5 = !{i32 30, i32 5} ; Location 5
+    !6 = !{i32 30, i32 1} ; Location 1
+    !7 = !{i32 30, i32 0} ; Location 0
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  Function *Fragment = M->getFunction("main_1");
+  ASSERT_TRUE(Fragment);
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*Fragment);
+  ASSERT_TRUE(Sig.has_value());
+
+  // Exactly fragment's own two varyings (`@frag_in`@Loc1 and
+  // `@frag_out`@Loc0) -- never vertex's own `@vert_in`@Loc7/`@vert_out`@
+  // Loc5.
+  ASSERT_EQ(Sig->Elements.size(), 2u);
+  for (const SignatureElement &Elt : Sig->Elements) {
+    ASSERT_TRUE(Elt.Location.has_value());
+    EXPECT_NE(*Elt.Location, 7u);
+    EXPECT_NE(*Elt.Location, 5u);
+  }
+  EXPECT_TRUE(llvm::any_of(Sig->Elements, [](const SignatureElement &Elt) {
+    return Elt.Direction == SignatureDirection::Input &&
+          Elt.Location == 1u;
+  }));
+  EXPECT_TRUE(llvm::any_of(Sig->Elements, [](const SignatureElement &Elt) {
+    return Elt.Direction == SignatureDirection::Output &&
+          Elt.Location == 0u;
+  }));
+}
+
 } // namespace
 
