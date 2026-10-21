@@ -69,33 +69,31 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **(~1-2 hrs, best next target)** `ENV5(c)(2)`: confirm the
-   `main.patchconstant`-specific dominance-bug theory with a minimal standalone
-   `.ll` reduction of just that clone's CFG, run through `feme-opt --llvm
-   -passes=feme-cpu-linearize,verify` (fast iteration, bypasses the full CTS
-   harness). If confirmed, extend `L452(d)`'s
-   `peelWouldDestroyAncestorReconvergencePoint` guard to cover whatever makes
-   `.patchconstant`'s CFG differ from the primary entry point.
-2. **(~30-60 min each)** `ENV5(c)`'s other 10 cases: `barrier` (5, three
-   distinct error signatures already captured, not yet root-caused),
-   `module.same_module*` (4, no pipeline-creation error logged, needs
-   render-verification-focused diagnosis), `indexing.output.component_tessc` (1,
-   shares a "JIT session error: Symbols not found" signature with 2 `barrier`
-   cases).
-3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full
-   corpus collection, still running uninterrupted (past `initial-01802` as of
-   this session). Keep checking `ps aux | grep deqp-vk` and qpa growth each
-   session; write up final totals and strike `ENV4` in `Roadmap.md` once it
-   finishes.
-4. **(low priority, unchanged across many sessions)** Upstream the 3
-   `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp
-   assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) if push
-   access ever becomes available.
-
-**Next action (under two minutes):** `cd
-/home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan &&
-FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
---deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.barrier.compute_shared_memory_all'
---deqp-log-images=disable` (or the nearest matching real `graphics.barrier.*`
-case name) to get the first real error string for `ENV5(c)`'s next-largest
-untriaged cluster.
+1. **(~30-60 min, new finding, best next target)** The JIT "Symbols not found:
+   spirv_var_N" cluster — 3 cases (`barrier.in_function`,
+   `barrier.after_divergent_if`, `indexing.output.component_tessc`) share this
+   exact signature. Find what's common about these shaders' symbol resolution
+   (likely a resource/global that isn't getting registered/materialized in the
+   JIT session for some specific CFG or storage-class shape) before guessing at
+   a fix.
+2. **(~1-2 hrs)** `ENV5(c)(4)`: the 6 deeper `float16.*_tessc` cases
+   (`struct16arr3`/`v3f16arr5`/`v4f16arr3` variants). Same
+   `foldRedundantFlowBlock` bug family as this session's fix, but the two
+   aliasing predecessors are no longer immediate fold targets — need either a
+   transitive-reconvergence check or whole-fixed-point-loop slot-write tracking.
+   Get a fresh standalone `.ll` reduction first (same technique as this
+   session).
+3. **(~30-60 min)** `barrier.in_if`/`in_switch`/`in_loop` (3 cases) — these are
+   an explicit "not yet supported" milestone limitation (one barrier per
+   tess-control entry point), not a bug; check `Roadmap.md` for whether lifting
+   this limitation is already a scheduled milestone or needs a new entry.
+4. **(~30-60 min)** `module.same_module*` (4 cases) — no creation-time error;
+   needs render-output comparison to find what's actually wrong, a different
+   diagnostic approach than every other cluster this session.
+5. **(new, large, never triaged)** `ENV6(a)`: `api.copy_and_blit` (210 cases, by
+   far the single largest cluster in the now-final 666-case corpus). Worth a
+   first pass to check whether they share one root cause — concentrated in
+   `depth_stencil_msaa_copy`/`resolve_image` with `d32_sfloat`-family formats
+   recurring.
+6. **(low priority, unchanged for many sessions)** Upstream the 3
+   `offload-test-suite` patches if push access ever becomes available.
