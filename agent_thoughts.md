@@ -128711,3 +128711,35 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 5. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions.
 6. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 7. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(3) spec_constant/cache fixes (L499)
+
+**Next action (under two minutes):** root-cause `max_varyings.test_geometry_io_between_geometry_fragment` with `FEME_DUMP_IR_PRENORM=1` against the hand-written-SPIR-V geometry shader -- different bug shape from this session's fix (multi-location array IO, not local-variable copies), not yet started.
+
+Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (confirmed, start of session). Clean git tree, no stray `deqp-vk` processes.
+
+## What got done
+
+1. **`spec_constant.graphics.{geometry,tess_control}.expression.array_size_pass_to_function` (6 cases, all 3 pipeline-construction variants)**: real compiler bug in `feme::cpu::SIMDizePass::collectMaskedAllocas`. Hand-verified the test's expected result (`15`) from CTS source first, then captured the real failing shader's IR at 3 pipeline stages (`FEME_DUMP_IR_PRENORM`/`FEME_DUMP_IR_PRELINEARIZE`/`FEME_DUMP_IR`) to find the gap: a local array correctly widened to per-lane storage gets copied (by-value function-parameter inlining idiom) into a *second* array that `collectMaskedAllocas`'s single linear pass never recognized as needing the same treatment, so every lane's copy collapsed down to whichever lane ran last. Reproduced with a minimal 15-line standalone `.ll` reduction through `feme-opt` directly before touching any real shader. Fixed by iterating the scan to a fixed point. **6/6 now Pass.** Commit `5d29d77586f4`.
+2. **`cache.misc_tests.invalid_size_test` (3 cases, all 3 pipeline-construction variants)**: `vkGetPipelineCacheData` never special-cased the spec's "pDataSize smaller than the header: write nothing, zero out pDataSize" rule -- it always did the ordinary short-copy-and-report-VK_INCOMPLETE path regardless. This overturns the existing `H29(f)` roadmap note that guessed this was a CTS-side harness issue -- it was a real, narrow spec-conformance gap. **3/3 now Pass.** Commit `62bd670b2f91`.
+3. **Confirmed `max_varyings.test_{geometry_io_between_geometry_fragment,tess_eval_io_between_tess_eval_fragment}` (6 cases) is a separate, still-open bug** -- re-ran after both fixes above, still fails identically. Read the CTS source far enough to know it's hand-written SPIR-V stressing max inter-stage IO locations with a spec-constant-sized `Output`-array spanning multiple locations -- a different shape (likely SPIR-V-to-LLVM IO/location-assignment lowering, not `SIMDizePass`) from the `spec_constant` fix. Not yet root-caused; broken out as its own roadmap row.
+4. **New regression tests**: `simdize-masked-alloca-copy-to-second-alloca.ll` (fix 1), `PipelineCacheTest.GetDataWithSizeSmallerThanHeaderWritesNothing` + `GetDataWithSizeLessThanBlobReturnsIncompleteWithPartialData` (fix 2, the second guarding the pre-existing boundary behavior so it doesn't regress).
+5. **Verification**: `check-feme` 3848 -> 3850 Passed (4 Unsupported, 0 regressions) after each fix; full `PipelineCacheTest`/`PipelineCacheBoundTest` suite (28/28 Pass); real `deqp-vk` re-runs confirm all 9 newly-fixed cases Pass and the 6 `max_varyings` cases still Fail unchanged.
+6. **Docs**: `VulkanCTSReport.md`'s `L499` entry; `Roadmap.md`'s `ENV6(b)` tally updated (155/181 fixed, 26 remain), `ENV6(b)(3)` struck through for the spec_constant/cache pair, `max_varyings` broken out as its own open row. No `.instructions.md` update -- no new environment/process lesson this session, just two code bugs.
+
+## Wins
+
+- Found and fixed a genuine, previously-invisible `SIMDizePass` correctness bug (not just a creation-time rejection like every prior `ENV6(b)` fix) -- the first of this cluster needing real IR-level tracing rather than a `FEME_VULKAN_LOG_CREATION_ERRORS` diagnostic.
+- The fix generalizes an existing, well-understood pattern (`ForcedDivergentValues`'s "memory round trip through a masked alloca" propagation) rather than inventing a new mechanism -- low risk, 0 regressions.
+- Disproved an old roadmap guess (`cache.misc_tests.invalid_size_test` assumed CTS-side) with a real, narrow spec-conformance fix instead.
+- `ENV6(b)` is now 86% closed (155/181); only `emulate_msrtss` (8), `multisample_interpolation` (12), and `max_varyings` (6) remain.
+
+## State for next session
+
+`ENV6`'s remaining untriaged clusters, in priority order:
+1. `ENV6(b)(3)`: `max_varyings.test_{geometry_io_between_geometry_fragment,tess_eval_io_between_tess_eval_fragment}` (6 cases) -- confirmed genuine, a different root cause from this session's fix, **best next target** since it's the smallest and most recently sampled. Needs `FEME_DUMP_IR_PRENORM`-style investigation of the hand-written SPIR-V geometry/tess-eval shader's multi-location `Output`-array IO, not a local-variable-copy shape.
+2. `ENV6(b)(1)`/`ENV6(b)(2)`: `emulate_msrtss` (8 cases)/`multisample_interpolation` (12 cases) -- confirmed genuine rendering-correctness bugs from earlier sessions, not yet root-caused, unchanged.
+3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions, likely a long tail of distinct small bugs.
+4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged from prior sessions.
+5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
+6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
