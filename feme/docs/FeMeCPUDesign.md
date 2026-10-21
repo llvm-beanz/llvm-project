@@ -1994,6 +1994,23 @@ is an ABI decision: this design puts *one group* per wrapper call and lets
 the host parallelize across groups (see JIT flow below), because that's the
 level where a thread pool wants to hand out work.
 
+**Cross-reference: hull-stage (tessellation-control) barriers.** This
+phase's region-splitting/`barrier_spill`-context machinery is the design
+this file's own compute-shader wrapper uses, and it is *also* the
+documented-but-not-yet-built right answer for a barrier inside a hull
+control-point phase (`feme::cpu::HullWrapperPass`, `HullWrapper.cpp`'s own
+file comment) -- `barrier.{in_if,in_switch,in_loop}` in the Vulkan CTS
+corpus (roadmap `ENV5(c)(7)(b)`) all need a barrier guarding a genuinely
+per-control-point continuation, which `CanonicalizeStage.cpp`'s current
+`splitTessellationControlEntry` (a single non-batched, lane-0-only
+patch-constant phase split) cannot express correctly. `HullWrapperPass`'s
+batch-over-output-control-points ABI (`FemePatchArgs`) already structurally
+mirrors this phase's batch-of-waves abstraction, so the fix is generalizing
+`buildWaveLoop`/`matchBarrierFreeRegion`/the spill-context bookkeeping above
+to be ABI-parameterized rather than compute-specific -- not a new design,
+just a currently-undone generalization (estimated ~1000 lines of machinery
+to adapt; see roadmap `ENV5(c)(7)(b)` for the fuller breakdown).
+
 ## Resource Model
 
 **The CPU execution model is dynamic-resource-only, but the CPU target also
