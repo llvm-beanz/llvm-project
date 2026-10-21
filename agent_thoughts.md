@@ -128211,3 +128211,37 @@ The `VK_ERROR_INITIALIZATION_FAILED` shape recurs in `multiple_shaders`, `opname
 5. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
 
 **Next action (under two minutes): `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.multiple_shaders.shader1' --deqp-log-images=disable` to get the first real pipeline-creation error string for the 7-case `VK_ERROR_INITIALIZATION_FAILED` cluster.**
+
+# Session: ENV5(b)(3) fixed -- shared-entry-point-Name `VK_ERROR_INITIALIZATION_FAILED` cluster, 6 of 7 cases (one upstream MLIR bug, three FeMe bugs)
+
+**Device check**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`. Confirmed.
+
+**What shipped** (4 commits, oldest first):
+1. `415f5d1f1d08` — upstream MLIR SPIR-V deserializer fix (`mlir/` only, no `feme/` paths touched).
+2. `47e4d968f24e` — FeMe: stop rejecting multi-stage `spirv.module`s; resolve entry points by `(stage, Name)`.
+3. `7a16cfc41083` — FeMe: stop tessellation patch-constant clones from inheriting a stale `feme.entry.name`.
+4. `5e022041fa6f` — docs (`FeMeGraphicsDesign.md`, `Roadmap.md`, `VulkanCTSReport.md` L477, `.instructions.md`).
+
+**The bug chain, in the order I found them** (this is the part worth remembering — four bugs, each uncovered by fixing the previous one):
+
+1. **FeMe's own `collectEntryPoints`** rejected any `spirv.module` with entry points of more than one stage, on a false premise ("the module's one target triple names the module's one stage"). A `VkShaderModule` can serve several `VkPipelineShaderStageCreateInfo`s of different stages — real CTS modules do this. Fix: drop the whole-module check.
+2. Fixing (1) exposed an **upstream MLIR deserializer bug**: `OpEntryPoint` Name only needs to be unique per Execution Model, so two entry points of different stages may share one Name — but the deserializer assumed function symbols could mirror Name verbatim, causing "redefinition of symbol". Fixed with a new `claimUniqueFunctionSymbol` disambiguation mechanism.
+3. Fixing (2) exposed a **FeMe follow-on**: once symbols get disambiguated apart, literal `M.getFunction(pName)` lookups in `Pipeline.cpp`/`Prepare.cpp`/`CompiledStage.cpp` miss the renamed function. Fixed by plumbing the real `OpEntryPoint` Name through as a `feme.entry.name` attribute and adding `findFunctionByEntryPointName(M, Name, Stage)`.
+4. Fixing (3) **regressed 15 tessellation unit tests** — a `.patchconstant` clone inherited its parent's `feme.entry.name` via `CloneFunctionInto`/`copyAttributesFrom`, so the clone's own lookup-by-attribute returned the wrong (parent's) name. Fixed by stripping the inherited attribute right after cloning.
+
+**Two subtle things that cost real time**, now in `.instructions.md` so nobody re-discovers them the hard way:
+- `spirv::EntryPointOp::print()` doesn't emit an attribute dictionary at all. Any discardable attribute parked there survives in-memory but vanishes the instant the module round-trips through text (e.g. `mlir-translate | feme-opt`). Debug prints taken *before* that round-trip look fine, which makes this bug look fixed when it isn't. Moved the attribute onto the function instead (confirmed `spirv.func`'s generic printer round-trips attributes correctly).
+- `CloneFunctionInto`/`copyAttributesFrom` copy *every* function attribute, including ones that are per-function-identity, not per-clone. This is exactly how bug (4) happened.
+
+**Validation**: all 6 of the 7 original cluster cases now Pass directly via `deqp-vk`; `opunreachable.all` still fails (separate, pre-existing, known-structural linearizer gap — expected, not a regression). Full `check-feme`: 3827/3831 Passed, 4 Unsupported, 0 Failed. `mlir/test/Target/SPIRV/` lit suite: 74/75 (only the pre-existing, unrelated `memory-ops.mlir` failure remains). ENV4's background CTS corpus run confirmed still alive and progressing (8 `deqp-vk` workers, batch files advancing `initial-00523`→`initial-00573` across this session's checks) — not disrupted by any build in this session.
+
+**Docs updated**: `FeMeGraphicsDesign.md`'s "Stage identity" section (corrected the disproven claim + documented `(stage, Name)` resolution), `Roadmap.md` (struck `ENV5(b)(3)`, remaining-cases 15→9, reclassified `opunreachable.all`), `VulkanCTSReport.md` (new `L477`), `.instructions.md` (two new process entries above). No `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` change needed — this is a bug fix for already-advertised functionality, not new feature/extension support.
+
+## Next steps
+
+1. **(~1-2 hours, needs real build+trace)** `ENV5(b)`'s remaining 9 untriaged `compute.*` cases: `variable_init` (3, likely `Private`-storage-from-`Workgroup`-pointer initializer gap per a prior session's note — worth checking first since it may already be understood), `memory_access` (2, volatile-ordering), `opundef`/`signed_op`/`vector_shuffle` (1 each). Same `FEME_VULKAN_LOG_CREATION_ERRORS=1`/direct `deqp-vk --deqp-case=...` triage pass used for every prior cluster this session and before — get the real error/behavior for each before guessing at a fix; check whether any share a root cause (this session's cluster turned out to be 3 FeMe bugs + 1 upstream bug masquerading as "7 failures").
+2. **(next dedicated clean-host block, no competing builds)** `ENV4`: full current CTS corpus collection. Still running uninterrupted across many sessions now (confirmed again this session, no disruption). Check `env4-full-audit/qpa`/`logs` growth and `ps aux | grep deqp-vk` every session until it finishes; let its own recovery/solo-verification rounds run to completion before writing up final Pass/Fail/NotSupported/Crashed totals in `VulkanCTSReport.md` and striking `ENV4` in `Roadmap.md`.
+3. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) to `llvm-beanz/offload-test-suite` if push access ever becomes available.
+4. **(worth a quick check before diving into #1)** Grep the untriaged `compute.*`/`graphics.*` lists for any other case where a function symbol might get disambiguated by the deserializer's new `claimUniqueFunctionSymbol` (i.e. any other same-Name-different-stage shape) — this session's fix chain was long precisely because the first bug's fix kept exposing the next one; a quick sweep might catch a sibling case before it becomes its own multi-session saga.
+
+**Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.compute.variable_init.vec4_from_workgroup' --deqp-log-images=disable` (or the nearest matching real case name) to get the first real error string for `ENV5(b)`'s next untriaged cluster.
