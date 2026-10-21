@@ -128418,3 +128418,24 @@ FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk
 --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.float16.scalar'
 --deqp-log-images=disable` (or the nearest matching real `graphics.float16.*` case name) to get
 the first real error string for `ENV5(c)`'s largest untriaged cluster.
+
+# Session: Fixed `variable_init.output.struct` crash, re-tallied ENV5(c), root-caused float16 `_tessc` dominance bug
+
+**Device check**: `FeMe CPU Vulkan Device` confirmed (start and before each write-up, per standing rule).
+
+## What's done
+
+1. **Fixed a real compiler crash**: `dEQP-VK.spirv_assembly.instruction.graphics.variable_init.output.struct` was crashing (`"Invalid GetElementPtrInst indices for type!"`), not just failing. Root cause: `CanonicalizeStage.cpp` has two independent code paths (construction-side `addElements`, access-side `getEffectiveStageIOValueType`/`resolveStageIOAccess`) that must agree on a stage-IO global's "effective" peeled type for a single-member-wrapped nested struct, and they disagreed for this one shape. Fixed with 3 coordinated edits across those paths plus the `HasRealInitializer` synthesis code. New regression unit test added and verified to crash without the fix. `check-feme`: 3831/3835 passed, 0 failed. Commit: `9e97df55f58e`.
+2. **Re-tallied `ENV5(c)`**: the crash was stalling an entire ENV4 batch, so the original "38 untriaged cases" estimate was inflated. Direct re-runs confirm all 20 `unused_variables.*` + all 5 `variable_init.output.*` graphics cases now **Pass**. Real remaining count: **10**, not 38. Roadmap/CTS report updated. Commits: `dafefaae1aa4`, `382b8d9cce75`.
+3. **Root-caused (not fixed) the `float16.*_tessc` cluster (10 cases)**: same switch-decode-inside-a-loop dominance bug `L452(d)` already fixed for the primary entry point, but surfacing as a genuine IR verifier failure in the `main.patchconstant` clone function instead of a graceful decline. Did not attempt a fix — this file has heavy prior scar tissue and a rushed fix risks a new miscompile. Documented the exact theory and next repro step in `Roadmap.md`.
+4. **Codified 2 lessons** in `feme/.instructions.md`: `checkGEPType`'s assertion also fires for `ExtractValueInst`/`InsertValueInst` (not just literal GEPs), and construction-side/access-side struct-type resolution in `CanonicalizeStage.cpp` must independently peel the same shapes. Commit: `f9f2ca7729fb`.
+5. **ENV4 confirmed healthy throughout**: batch progressed from `initial-01509` (where it stalled on the crash before this session) past `initial-01802`, no disruption from this session's rebuilds.
+
+## Next steps (ranked)
+
+1. **(~1-2 hrs, best next target)** `ENV5(c)(2)`: confirm the `main.patchconstant`-specific dominance-bug theory with a minimal standalone `.ll` reduction of just that clone's CFG, run through `feme-opt --llvm -passes=feme-cpu-linearize,verify` (fast iteration, bypasses the full CTS harness). If confirmed, extend `L452(d)`'s `peelWouldDestroyAncestorReconvergencePoint` guard to cover whatever makes `.patchconstant`'s CFG differ from the primary entry point.
+2. **(~30-60 min each)** `ENV5(c)`'s other 10 cases: `barrier` (5, three distinct error signatures already captured, not yet root-caused), `module.same_module*` (4, no pipeline-creation error logged, needs render-verification-focused diagnosis), `indexing.output.component_tessc` (1, shares a "JIT session error: Symbols not found" signature with 2 `barrier` cases).
+3. **(next dedicated clean-host block, no competing builds)** `ENV4`: full corpus collection, still running uninterrupted (past `initial-01802` as of this session). Keep checking `ps aux | grep deqp-vk` and qpa growth each session; write up final totals and strike `ENV4` in `Roadmap.md` once it finishes.
+4. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) if push access ever becomes available.
+
+**Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.barrier.compute_shared_memory_all' --deqp-log-images=disable` (or the nearest matching real `graphics.barrier.*` case name) to get the first real error string for `ENV5(c)`'s next-largest untriaged cluster.
