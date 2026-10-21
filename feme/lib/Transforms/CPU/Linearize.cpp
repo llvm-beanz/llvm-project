@@ -4402,7 +4402,36 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
   for (unsigned I = 0; I < 2; ++I) {
     BasicBlock *IncomingBlock = BB;
     BasicBlock *Merge = Targets[I];
-    while (Merge->phis().empty()) {
+    // Roadmap L486: a relay in this chain is only a transparent pass-
+    // through -- safe to walk past and fold `BB`'s value straight into
+    // whatever phi sits at the real downstream merge -- if it has
+    // exactly one predecessor, i.e. the only way to reach it really is
+    // through the chain built so far. `Merge->phis().empty()` alone
+    // (the only check this walk used to make) just means *this
+    // particular* relay never needed a phi, which can also happen when
+    // a second, entirely unrelated predecessor (reached via some other
+    // path that never goes through `BB` at all) happens to carry the
+    // exact same value every other consumer downstream was already
+    // using -- that second predecessor has no bearing whatsoever on
+    // whether `BB`'s own, newly-forwarded value dominates it. Walking
+    // past such a relay anyway and keying the forward on it produces a
+    // phi incoming-block entry whose value does not dominate one of
+    // that block's real predecessors, a genuine "Instruction does not
+    // dominate all uses!" verifier failure (reduced from a real
+    // `dEQP-VK.spirv_assembly.instruction.graphics.float16.
+    // opcompositeextract.struct16arr3_tessc` hull `.patchconstant`
+    // entry's own 3-deep nested-switch-decode-in-a-loop shape, one
+    // level deeper than `L481`'s own aliasing-`Merge` case: the second
+    // predecessor here is a *different* block than either of `BB`'s own
+    // two targets, only revealed by actually counting predecessors
+    // rather than by the immediate-alias check `L481` added). Stopping
+    // the walk as soon as a relay has more than one predecessor leaves
+    // `Merge` as the two-predecessor block itself; the use-escape check
+    // below (which requires every use of `BB`'s own phis to resolve to
+    // an existing phi slot at `Merges[I]`) then safely declines the
+    // fold altogether whenever no such phi exists there, exactly this
+    // fold's own established "never guess" fallback.
+    while (Merge->phis().empty() && Merge->getSinglePredecessor()) {
       auto *UBr = dyn_cast<UncondBrInst>(Merge->getTerminator());
       if (!UBr)
         break;
@@ -4465,25 +4494,25 @@ bool foldRedundantFlowBlock(BasicBlock *BB) {
       if (PredTerm->getSuccessor(S) == BB)
         PredTerm->setSuccessor(S, Target);
 
-    // `Target` itself may be a pure single-predecessor, phi-less relay --
-    // `BreakCriticalEdges`'s own trampoline for the edge `BB` used to have
-    // into it, since `BB` (a `CondBrInst`) branching into a block with more
-    // than one predecessor is exactly a critical edge. Any phi actually
-    // consuming one of `BB`'s own values sits at the real merge point past
-    // any such chain of relays, keyed on whichever block in the chain is
-    // its own immediate, still-standing predecessor -- `BB` itself only if
-    // there is no relay at all. (Recomputed identically to the read-only
-    // walk above -- `Merges`/`IncomingBlocks` -- rather than reused, since
-    // the loop above intentionally runs before any mutation here.)
-    BasicBlock *IncomingBlock = BB;
-    BasicBlock *Merge = Target;
-    while (Merge->phis().empty()) {
-      auto *UBr = dyn_cast<UncondBrInst>(Merge->getTerminator());
-      if (!UBr)
-        break;
-      IncomingBlock = Merge;
-      Merge = UBr->getSuccessor(0);
-    }
+    // Roadmap L486: reuse the read-only walk's own `Merges[I]`/
+    // `IncomingBlocks[I]` here rather than recomputing them against the
+    // live CFG -- this loop's own earlier iterations already retarget
+    // some `Pred`'s terminator (just above) before later iterations'
+    // walk would run, and a `Target` with the new single-predecessor
+    // guard (see the read-only walk's own comment) can briefly gain a
+    // second, transient real predecessor from that very redirect before
+    // `BB` itself is finally erased below -- recomputing the walk here
+    // sees that transient state and stops one hop too early, leaving
+    // the real downstream `Merge` phi never updated (reduced from the
+    // same `struct16arr3_tessc` shape as the read-only walk's own fix:
+    // its own forwarded value stays `BB`'s now-about-to-be-destroyed
+    // phi, a genuine "Uses remain when a value is destroyed!" abort once
+    // `BB` is erased). The read-only walk above runs over an entirely
+    // unmutated `BB`/`Targets`, so its own `Merges`/`IncomingBlocks` are
+    // unaffected by any of this loop's own redirects and remain exactly
+    // right to use directly.
+    BasicBlock *IncomingBlock = IncomingBlocks[I];
+    BasicBlock *Merge = Merges[I];
     for (PHINode &MergePN : Merge->phis()) {
       int Idx = MergePN.getBasicBlockIndex(IncomingBlock);
       if (Idx < 0)
