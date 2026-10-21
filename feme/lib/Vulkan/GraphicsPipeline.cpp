@@ -22,6 +22,7 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Core/Signature.h"
 #include "feme/Graphics/Geometry.h"
 #include "feme/Graphics/Mesh.h"
@@ -526,8 +527,8 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
         resolveComputeGroupSize(Module->words(), EntryPoint, *Overrides);
     if (!GroupSize)
       return GroupSize.takeError();
-    if (llvm::Function *Entry =
-            AsLLVMIR->getLLVMModule().getFunction(EntryPoint)) {
+    if (llvm::Function *Entry = feme::findFunctionByEntryPointName(
+            AsLLVMIR->getLLVMModule(), EntryPoint, Stage)) {
       std::string NumThreads =
           (llvm::Twine(GroupSize->at(0)) + "," + llvm::Twine(GroupSize->at(1)) +
            "," + llvm::Twine(GroupSize->at(2)))
@@ -609,7 +610,28 @@ Expected<std::shared_ptr<feme::cpu::CompiledStage>> compileGraphicsStage(
     AsLLVMIR->getLLVMModule().print(llvm::errs(), nullptr);
 
   if (OutState || OutGeometryState || OutMeshState) {
-    llvm::Function *Entry = AsLLVMIR->getLLVMModule().getFunction(EntryPoint);
+    // (roadmap L485) `Module::getFunction(EntryPoint)` resolves to
+    // whichever function happens to still carry that literal LLVM
+    // symbol -- for a single-module, multi-entry-point SPIR-V binary
+    // like `module.same_module_geom`'s (`createCombinedModule`'s shape),
+    // SPIR-V deserialization keeps only the *first*-encountered entry
+    // with a given `OpEntryPoint` Name on that bare symbol and
+    // disambiguates every later one of a different stage sharing that
+    // same Name onto a suffixed symbol (see `getEntryPointName`'s own
+    // comment). Since every stage here legally uses the same `pName`
+    // ("main"), a raw `getFunction(EntryPoint)` lookup always silently
+    // resolved to the *first* stage's entry (typically Vertex),
+    // regardless of which stage was actually being compiled: a geometry
+    // compile looked up its own tessellation/geometry/mesh execution-mode
+    // attributes on the *vertex* entry instead, which naturally has none,
+    // producing the misleading "declares no input/output primitive class
+    // execution mode" diagnostic even though the geometry entry's own
+    // attributes (`feme.geometry.*`) were always present and correct.
+    // `findFunctionByEntryPointName` disambiguates by stage as well as
+    // name, exactly as every other entry-point lookup in this file
+    // already does.
+    llvm::Function *Entry = feme::findFunctionByEntryPointName(
+        AsLLVMIR->getLLVMModule(), EntryPoint, Stage);
     if (OutState)
       *OutState =
           Entry ? feme::graphics::getTessellationState(*Entry) : std::nullopt;

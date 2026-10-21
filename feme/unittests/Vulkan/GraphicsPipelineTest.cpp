@@ -641,6 +641,124 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.2, [MeshShadingEXT], [SPV_EX
 }
 )mlir";
 
+/// (Roadmap L485) A single, hand-assembled SPIR-V module (`spirv-as`,
+/// not `assembleSPIRV`'s MLIR `spirv` dialect round trip -- see
+/// `createModuleFromWords`'s own comment for why) declaring Vertex,
+/// Geometry, and Fragment entry points that all literally share one
+/// `OpEntryPoint` Name, "main" -- exactly
+/// `vktSpvAsmGraphicsShaderTestUtil.cpp`'s own `createCombinedModule`
+/// shape (`dEQP-VK.spirv_assembly.instruction.graphics.module.
+/// same_module_geom`'s real binary). SPIR-V deserialization disambiguates
+/// every entry past the first sharing that Name onto a distinct LLVM
+/// symbol (here, Vertex keeps the bare `@main`; Geometry becomes
+/// `@main_5`; Fragment becomes `@main_10`), while still recording the
+/// true, pre-disambiguation Name as each one's own `feme.entry.name`
+/// attribute. The Vertex entry deliberately has no vertex-attribute
+/// `Input` variables of its own (it only reads the `VertexIndex`
+/// built-in) so this fixture's pipeline creation does not depend on
+/// `makeGeometryCreateInfo`'s own (empty) `VkPipelineVertexInputState`.
+constexpr uint32_t SameModuleCombinedVertexGeometryFragmentWords[] = {
+      0x07230203, 0x00010300, 0x00070000, 0x00000031, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+      0x00000002, 0x0003000e, 0x00000000, 0x00000001, 0x0008000f, 0x00000000, 0x00000001, 0x6e69616d,
+      0x00000000, 0x00000002, 0x00000003, 0x00000004, 0x0009000f, 0x00000003, 0x00000005, 0x6e69616d,
+      0x00000000, 0x00000006, 0x00000007, 0x00000008, 0x00000009, 0x0007000f, 0x00000004, 0x0000000a,
+      0x6e69616d, 0x00000000, 0x0000000b, 0x0000000c, 0x00030010, 0x00000005, 0x00000016, 0x00040010,
+      0x00000005, 0x00000000, 0x00000001, 0x00030010, 0x00000005, 0x0000001d, 0x00040010, 0x00000005,
+      0x0000001a, 0x00000003, 0x00030010, 0x0000000a, 0x00000007, 0x00040047, 0x00000002, 0x0000000b,
+      0x0000002a, 0x00040047, 0x00000004, 0x0000001e, 0x00000001, 0x00050048, 0x0000000d, 0x00000000,
+      0x0000000b, 0x00000000, 0x00050048, 0x0000000d, 0x00000001, 0x0000000b, 0x00000001, 0x00050048,
+      0x0000000d, 0x00000002, 0x0000000b, 0x00000003, 0x00050048, 0x0000000d, 0x00000003, 0x0000000b,
+      0x00000004, 0x00030047, 0x0000000d, 0x00000002, 0x00040047, 0x00000006, 0x0000000b, 0x00000000,
+      0x00050048, 0x0000000e, 0x00000000, 0x0000000b, 0x00000000, 0x00050048, 0x0000000e, 0x00000001,
+      0x0000000b, 0x00000001, 0x00050048, 0x0000000e, 0x00000002, 0x0000000b, 0x00000003, 0x00050048,
+      0x0000000e, 0x00000003, 0x0000000b, 0x00000004, 0x00030047, 0x0000000e, 0x00000002, 0x00040047,
+      0x00000008, 0x0000001e, 0x00000001, 0x00040047, 0x00000009, 0x0000001e, 0x00000001, 0x00040047,
+      0x0000000c, 0x0000001e, 0x00000000, 0x00040047, 0x0000000b, 0x0000001e, 0x00000001, 0x00020013,
+      0x0000000f, 0x00020014, 0x00000010, 0x00040015, 0x00000011, 0x00000020, 0x00000001, 0x00040015,
+      0x00000012, 0x00000020, 0x00000000, 0x00030016, 0x00000013, 0x00000020, 0x00040017, 0x00000014,
+      0x00000013, 0x00000004, 0x00030021, 0x00000015, 0x0000000f, 0x00040020, 0x00000016, 0x00000001,
+      0x00000011, 0x00040020, 0x00000017, 0x00000001, 0x00000014, 0x00040020, 0x00000018, 0x00000003,
+      0x00000013, 0x00040020, 0x00000019, 0x00000003, 0x00000014, 0x0004002b, 0x00000013, 0x0000001a,
+      0x3f800000, 0x0004002b, 0x00000013, 0x0000001b, 0x00000000, 0x0004002b, 0x00000011, 0x0000001c,
+      0x00000000, 0x0004002b, 0x00000011, 0x0000001d, 0x00000001, 0x0004002b, 0x00000012, 0x0000001e,
+      0x00000001, 0x0004002b, 0x00000012, 0x0000001f, 0x00000003, 0x0004001c, 0x00000020, 0x00000013,
+      0x0000001e, 0x0004001c, 0x00000021, 0x00000014, 0x0000001f, 0x00040020, 0x00000022, 0x00000001,
+      0x00000021, 0x0007002c, 0x00000014, 0x00000023, 0x0000001b, 0x0000001b, 0x0000001b, 0x0000001a,
+      0x0007002c, 0x00000014, 0x00000024, 0x0000001a, 0x0000001a, 0x0000001a, 0x0000001a, 0x0004003b,
+      0x00000016, 0x00000002, 0x00000001, 0x0004003b, 0x00000019, 0x00000004, 0x00000003, 0x0006001e,
+      0x0000000d, 0x00000014, 0x00000013, 0x00000020, 0x00000020, 0x00040020, 0x00000025, 0x00000003,
+      0x0000000d, 0x0004003b, 0x00000025, 0x00000003, 0x00000003, 0x0006001e, 0x0000000e, 0x00000014,
+      0x00000013, 0x00000020, 0x00000020, 0x0004001c, 0x00000026, 0x0000000e, 0x0000001f, 0x00040020,
+      0x00000027, 0x00000001, 0x00000026, 0x0004003b, 0x00000027, 0x00000007, 0x00000001, 0x0004003b,
+      0x00000019, 0x00000008, 0x00000003, 0x0004003b, 0x00000022, 0x00000009, 0x00000001, 0x0004003b,
+      0x00000019, 0x00000006, 0x00000003, 0x0004003b, 0x00000019, 0x0000000c, 0x00000003, 0x0004003b,
+      0x00000017, 0x0000000b, 0x00000001, 0x00050036, 0x0000000f, 0x00000001, 0x00000000, 0x00000015,
+      0x000200f8, 0x00000028, 0x00050041, 0x00000019, 0x00000029, 0x00000003, 0x0000001c, 0x0003003e,
+      0x00000029, 0x00000023, 0x0003003e, 0x00000004, 0x00000024, 0x000100fd, 0x00010038, 0x00050036,
+      0x0000000f, 0x00000005, 0x00000000, 0x00000015, 0x000200f8, 0x0000002a, 0x00060041, 0x00000017,
+      0x0000002b, 0x00000007, 0x0000001c, 0x0000001c, 0x0004003d, 0x00000014, 0x0000002c, 0x0000002b,
+      0x00050041, 0x00000017, 0x0000002d, 0x00000009, 0x0000001c, 0x0004003d, 0x00000014, 0x0000002e,
+      0x0000002d, 0x0003003e, 0x00000006, 0x0000002c, 0x0003003e, 0x00000008, 0x0000002e, 0x000100da,
+      0x000100db, 0x000100fd, 0x00010038, 0x00050036, 0x0000000f, 0x0000000a, 0x00000000, 0x00000015,
+      0x000200f8, 0x0000002f, 0x0004003d, 0x00000014, 0x00000030, 0x0000000b, 0x0003003e, 0x0000000c,
+      0x00000030, 0x000100fd, 0x00010038,
+};
+
+/// `SameModuleCombinedVertexGeometryFragmentWords`' tessellation sibling:
+/// Vertex, TessellationControl, TessellationEvaluation, and Fragment
+/// entry points, all named "main" (`dEQP-VK.spirv_assembly.instruction.
+/// graphics.module.same_module_tessc_tesse`'s real binary shape). The
+/// tessellation-control entry's own `Patch`-decorated output, paired with
+/// its real `OpControlBarrier`, is exactly the shape `splitBarrierless
+/// TessellationControlEntry` (`CanonicalizeStage.cpp`) splits into a
+/// separate `<entry>.patchconstant` clone. Like its geometry sibling
+/// above, no stage here declares a varying that a later stage does not
+/// also independently (re)produce -- the Fragment entry writes a
+/// constant color rather than reading one through the pipeline -- so
+/// this fixture's only dependency is on interface-location *existence*
+/// matching per adjacent stage pair, not on any particular shading
+/// result.
+constexpr uint32_t SameModuleCombinedVertexTessellationFragmentWords[] = {
+      0x07230203, 0x00010300, 0x00070000, 0x00000029, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
+      0x00000003, 0x0003000e, 0x00000000, 0x00000001, 0x0007000f, 0x00000000, 0x00000001, 0x6e69616d,
+      0x00000000, 0x00000002, 0x00000003, 0x0007000f, 0x00000001, 0x00000004, 0x6e69616d, 0x00000000,
+      0x00000005, 0x00000006, 0x0007000f, 0x00000002, 0x00000007, 0x6e69616d, 0x00000000, 0x00000008,
+      0x00000009, 0x0006000f, 0x00000004, 0x0000000a, 0x6e69616d, 0x00000000, 0x0000000b, 0x00040010,
+      0x00000004, 0x0000001a, 0x00000003, 0x00030010, 0x00000007, 0x00000016, 0x00030010, 0x00000007,
+      0x00000003, 0x00030010, 0x00000007, 0x00000005, 0x00030010, 0x0000000a, 0x00000007, 0x00040047,
+      0x00000002, 0x0000000b, 0x0000002a, 0x00050048, 0x0000000c, 0x00000000, 0x0000000b, 0x00000000,
+      0x00050048, 0x0000000c, 0x00000001, 0x0000000b, 0x00000001, 0x00050048, 0x0000000c, 0x00000002,
+      0x0000000b, 0x00000003, 0x00050048, 0x0000000c, 0x00000003, 0x0000000b, 0x00000004, 0x00030047,
+      0x0000000c, 0x00000002, 0x00040047, 0x00000005, 0x0000000b, 0x00000000, 0x00040047, 0x00000006,
+      0x0000001e, 0x00000000, 0x00030047, 0x00000006, 0x0000000f, 0x00040047, 0x00000008, 0x0000001e,
+      0x00000000, 0x00030047, 0x00000008, 0x0000000f, 0x00040047, 0x00000009, 0x0000000b, 0x00000000,
+      0x00040047, 0x0000000b, 0x0000001e, 0x00000000, 0x00020013, 0x0000000d, 0x00040015, 0x0000000e,
+      0x00000020, 0x00000001, 0x00040015, 0x0000000f, 0x00000020, 0x00000000, 0x00030016, 0x00000010,
+      0x00000020, 0x00040017, 0x00000011, 0x00000010, 0x00000004, 0x00030021, 0x00000012, 0x0000000d,
+      0x00040020, 0x00000013, 0x00000001, 0x0000000e, 0x00040020, 0x00000014, 0x00000001, 0x00000010,
+      0x00040020, 0x00000015, 0x00000001, 0x00000011, 0x00040020, 0x00000016, 0x00000003, 0x00000010,
+      0x00040020, 0x00000017, 0x00000003, 0x00000011, 0x0004002b, 0x00000010, 0x00000018, 0x3f800000,
+      0x0004002b, 0x00000010, 0x00000019, 0x00000000, 0x0007002c, 0x00000011, 0x0000001a, 0x00000019,
+      0x00000019, 0x00000019, 0x00000018, 0x0007002c, 0x00000011, 0x0000001b, 0x00000018, 0x00000018,
+      0x00000018, 0x00000018, 0x0004002b, 0x0000000e, 0x0000001c, 0x00000000, 0x0004002b, 0x0000000f,
+      0x0000001d, 0x00000001, 0x0004001c, 0x0000001e, 0x00000010, 0x0000001d, 0x0004002b, 0x0000000f,
+      0x0000001f, 0x00000002, 0x0004002b, 0x0000000f, 0x00000020, 0x00000108, 0x0004003b, 0x00000013,
+      0x00000002, 0x00000001, 0x0006001e, 0x0000000c, 0x00000011, 0x00000010, 0x0000001e, 0x0000001e,
+      0x00040020, 0x00000021, 0x00000003, 0x0000000c, 0x0004003b, 0x00000021, 0x00000003, 0x00000003,
+      0x0004003b, 0x00000017, 0x00000005, 0x00000003, 0x0004003b, 0x00000016, 0x00000006, 0x00000003,
+      0x0004003b, 0x00000014, 0x00000008, 0x00000001, 0x0004003b, 0x00000017, 0x00000009, 0x00000003,
+      0x0004003b, 0x00000017, 0x0000000b, 0x00000003, 0x00050036, 0x0000000d, 0x00000001, 0x00000000,
+      0x00000012, 0x000200f8, 0x00000022, 0x00050041, 0x00000017, 0x00000023, 0x00000003, 0x0000001c,
+      0x0003003e, 0x00000023, 0x0000001a, 0x000100fd, 0x00010038, 0x00050036, 0x0000000d, 0x00000004,
+      0x00000000, 0x00000012, 0x000200f8, 0x00000024, 0x0003003e, 0x00000005, 0x0000001a, 0x000400e0,
+      0x0000001f, 0x0000001f, 0x00000020, 0x0003003e, 0x00000006, 0x00000018, 0x000100fd, 0x00010038,
+      0x00050036, 0x0000000d, 0x00000007, 0x00000000, 0x00000012, 0x000200f8, 0x00000025, 0x0004003d,
+      0x00000010, 0x00000026, 0x00000008, 0x00070050, 0x00000011, 0x00000027, 0x00000026, 0x00000026,
+      0x00000026, 0x00000026, 0x0003003e, 0x00000009, 0x00000027, 0x000100fd, 0x00010038, 0x00050036,
+      0x0000000d, 0x0000000a, 0x00000000, 0x00000012, 0x000200f8, 0x00000028, 0x0003003e, 0x0000000b,
+      0x0000001b, 0x000100fd, 0x00010038,
+};
+
 class GraphicsPipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -712,6 +830,24 @@ protected:
   VkShaderModule createModule(llvm::StringRef Source) {
     std::vector<uint32_t> Words = assembleSPIRV(Source);
     EXPECT_FALSE(Words.empty());
+    return createModuleFromWords(Words);
+  }
+
+  /// `createModule`'s raw-binary sibling: builds a `VkShaderModule`
+  /// straight from already-assembled SPIR-V \p Words, bypassing
+  /// `assembleSPIRV`'s MLIR `spirv` dialect round trip entirely. Needed
+  /// for any fixture a single MLIR `spirv.module` cannot itself express --
+  /// most notably `SameModuleCombinedVertexGeometryFragmentWords`/
+  /// `SameModuleCombinedVertexTessellationFragmentWords` below, each a
+  /// single SPIR-V module with more than one `OpEntryPoint` of a
+  /// different `Execution Model` sharing one literal `Name` ("main"):
+  /// MLIR's own `spirv.func`/`spirv.EntryPoint` symbol table requires
+  /// every function in one `spirv.module` to have a distinct symbol,
+  /// with that same symbol serialized straight out as the `OpEntryPoint`
+  /// Name, so no `spirv.module` text can produce two `OpEntryPoint`s
+  /// sharing one Name the way `spirv-as`-assembled raw SPIR-V text (and
+  /// real tooling such as CTS's own `createCombinedModule`) legally can.
+  VkShaderModule createModuleFromWords(llvm::ArrayRef<uint32_t> Words) {
     VkShaderModuleCreateInfo Info{};
     Info.codeSize = Words.size() * sizeof(uint32_t);
     Info.pCode = Words.data();
@@ -4161,6 +4297,92 @@ TEST_F(GraphicsPipelineTest, AcceptsGeometryStage) {
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Geometry, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (Roadmap L485) `dEQP-VK.spirv_assembly.instruction.graphics.module.
+/// same_module_geom`'s real shape: a *single* `VkShaderModule`, bound to
+/// every one of Vertex/Geometry/Fragment, whose Vertex and Geometry
+/// entries share one literal `OpEntryPoint` Name ("main") -- unlike
+/// `AcceptsGeometryStage` just above, which binds three distinct
+/// modules, each with its own unshared `pName`. `compileGraphicsStage`
+/// (`GraphicsPipeline.cpp`) previously resolved the module's own
+/// `TessellationState`/`GeometryState`/`MeshState` readback via
+/// `Module::getFunction(EntryPoint)` -- a raw, stage-agnostic lookup by
+/// bare LLVM symbol -- which always found whichever entry happened to
+/// still be named literally "main" (Vertex, the first one SPIR-V
+/// deserialization leaves undisambiguated), regardless of which stage
+/// was actually being compiled: the Geometry stage's own `GeometryState`
+/// readback looked up Vertex's own entry instead, which naturally has no
+/// `feme.geometry.*` attributes, producing a spurious "the geometry
+/// stage declares no input/output primitive class execution mode"
+/// rejection even though the real Geometry entry's own execution modes
+/// were present and correct all along.
+TEST_F(GraphicsPipelineTest, AcceptsGeometryStageInCombinedSameNameModule) {
+  VkShaderModule Combined =
+      createModuleFromWords(SameModuleCombinedVertexGeometryFragmentWords);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeGeometryCreateInfo(Combined, Combined, Combined);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  EXPECT_TRUE(Pipe->hasGeometryStages());
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasGeometryStages());
+  EXPECT_EQ(Executor.getGeometryState().InputPrimitive,
+            feme::graphics::GeometryInputPrimitive::Triangles);
+  EXPECT_EQ(Executor.getGeometryState().OutputPrimitive,
+            feme::graphics::GeometryOutputPrimitive::TriangleStrip);
+  EXPECT_EQ(Executor.getGeometryState().MaxOutputVertices, 3u);
+  EXPECT_EQ(Executor.getGeometryState().Invocations, 1u);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Combined, nullptr);
+}
+
+/// `AcceptsGeometryStageInCombinedSameNameModule`'s tessellation sibling:
+/// `dEQP-VK.spirv_assembly.instruction.graphics.module.
+/// same_module_tessc_tesse`'s real shape, a single combined module bound
+/// to every one of Vertex/TessellationControl/TessellationEvaluation/
+/// Fragment. This exercises a second, distinct roadmap L485 bug:
+/// `splitBarrierlessTessellationControlEntry`'s synthesized
+/// `<entry>.patchconstant` clone was named (and, before this row's own
+/// fix, entry-name-attributed) from the Hull entry's own LLVM symbol
+/// (`"main_8.patchconstant"` here, Hull being the second entry SPIR-V
+/// deserialization disambiguates past Vertex's own bare `@main`) rather
+/// than from its *entry point* Name ("main.patchconstant") --
+/// `compileAndValidateStages`'s own `findFunctionByEntryPointName` lookup
+/// for "main.patchconstant" (built from the Hull stage's own `pName`,
+/// "main") could therefore never find it, producing a spurious "no hull
+/// entry point named 'main.patchconstant'" rejection even though the
+/// clone existed and was otherwise entirely correct.
+TEST_F(GraphicsPipelineTest, AcceptsTessellationStagesInCombinedSameNameModule) {
+  VkShaderModule Combined = createModuleFromWords(
+      SameModuleCombinedVertexTessellationFragmentWords);
+
+  VkGraphicsPipelineCreateInfo Info =
+      makeTessellationCreateInfo(Combined, Combined, Combined, Combined);
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  const feme::graphics::GraphicsPipeline Executor =
+      Pipe->buildExecutorPipeline(DynamicGraphicsState{});
+  ASSERT_TRUE(Executor.hasTessellationStages());
+  EXPECT_EQ(Executor.getTessellationState().OutputControlPointCount, 3u);
+  EXPECT_EQ(Executor.getTessellationState().Domain,
+            feme::graphics::TessellatorDomain::Triangle);
+  EXPECT_EQ(Executor.getTessellationState().Partitioning,
+            feme::graphics::TessPartitioning::FractionalOdd);
+  EXPECT_EQ(Executor.getTessellationState().OutputPrimitive,
+            feme::graphics::TessOutputPrimitive::TriangleCcw);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Combined, nullptr);
 }
 
 /// Roadmap H5e: the four `*_WITH_ADJACENCY` topologies, previously
