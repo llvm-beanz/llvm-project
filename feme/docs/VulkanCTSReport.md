@@ -9574,3 +9574,27 @@ New lit test `mlir/test/Target/SPIRV/decorate-string-and-uniform-id.spvasm`, mir
 **`ENV4` status**: unaffected by this session's work -- all 6 `deqp-vk` workers resumed via `kill -CONT` on the same PIDs at the end of this session (see `agent_thoughts.md` for the exact resume verification), continuing from the exact same in-flight batches.
 
 **Next steps**: `ENV5(a)`'s remaining 15 cases (`opcopylogical` layout-mismatch, 9; `opptrequal`/`opptrnotequal`, 2, already known-structural; `opselect.array_stride_select`, 1; `entrypoint.tess_con_*`, 3, needs real build+trace) and `ENV5(b)`'s remaining 24 cases (`lod_op`, 9, numeric; 15 untriaged) are next. `terminate_invocation`'s null-pointer-constant gap (`ENV5(d)`, 15 cases) remains the next-largest single-cause win once picked up.
+
+## L472: `ENV5(d)(1)` fixed -- `terminate_invocation.terminate.*`'s real bug was an eagerly-loaded scalar `Input` fed to `CopyMemory`, not a null-pointer-constant gap (15 cases)
+
+**Prior hypothesis retracted.** The carried-forward plan (and most of this session's initial investigation) assumed the 15 `terminate_invocation.terminate.*` failures (`'llvm.load' op operand #0 must be LLVM pointer type, but got 'i32'`) stemmed from a missing pointer-typed `spirv.Constant` null-pointer pattern, since these cases are named `no_null_pointer_load`/`no_null_pointer_store`. Two dedicated regression tests disproved this directly:
+- A unit test isolating a `select`-merged null/real pointer feeding a load through `SPIRVResourceLoweringPass` passed cleanly -- `mergeIntoSelect`'s existing `ConstantPointerNull` sentinel handling already covers this shape correctly.
+- A full `runPipeline` test using the exact fragment-shader LLVM IR (hand-extracted via a temporary `FEME_DUMP_IR_PRE/POST_SPIRV_RESOURCE_LOWERING` dump) also succeeded end-to-end, producing fully correct SIMD-widened IR.
+
+**Real root cause found by dumping every shader stage, not just the hypothesized one.** Running the actual failing `deqp-vk` case directly and dumping the raw `spirv.module` immediately before SPIR-V-to-LLVM-dialect conversion (`FEME_DUMP_IR_PRESPIRV`, the earliest possible dump point) revealed the error is thrown on the **vertex** shader, not the fragment shader the whole investigation had assumed. Every Amber-based CTS test in this group pairs its fragment shader under test with a trivial vertex-shader passthrough (`spirv.CopyMemory "Output" %out, "Input" %in : si32`, a flat `int` varying copy, no select/null logic at all).
+
+`StageIOAddressOfPattern` eagerly converts a scalar, non-composite `Input`-storage-class variable's `spirv.mlir.addressof` directly into its *already-loaded value* (not a pointer) -- correct for an ordinary `spirv.Load` consumer, which becomes a no-op forward, but **not** for `spirv.CopyMemory`'s `source` operand receiving that same non-pointer value: it fell through to MLIR's own generic `CopyMemoryPattern`, which issued a *second*, ill-typed `llvm.load` on top of the already-scalar value.
+
+**Fix**: new `StageIOCopyMemoryPattern` in `SPIRVToLLVMPatterns.cpp`, narrowly scoped (declines unless the converted `source` is a non-pointer value and `target` is a real pointer, and neither side carries `MemoryAccess`/`SourceMemoryAccess` bits), rewriting this exact shape to a plain `llvm.store` of the already-loaded source value into the target pointer -- no redundant load. Mirrors `BlockWholeCopyMemoryPattern`'s own narrow, declarative style.
+
+**Reproduction technique** (kept for future sessions, see `.instructions.md`): extract one shader stage's raw `spirv.module` text (via `FEME_DUMP_IR_PRESPIRV=1` against a real `deqp-vk` run) into a standalone `.mlir` file, then run `feme-opt --pass-pipeline="builtin.module(feme-convert-spirv-to-llvm)"` directly on it -- far faster than rebuilding/rerunning the whole ICD per iteration, and the key tool that confirmed both the bug and the fix in isolation before touching the real CTS binary.
+
+**New lit test**: `spirv-to-llvm-stage-io.mlir` gains a `copy_input_to_output` case reproducing the exact vertex-shader shape; verified it fails with the pre-fix error (stashed fix, bare build) and passes post-fix.
+
+**Validation**: all 15 `terminate_invocation` CTS cases, previously `Crash`, now **Pass** (15/15, 100%) when run directly via `deqp-vk --deqp-caselist-file`. Full `check-feme`: 3823/3827 Passed, 4 Unsupported, 0 Failed -- unaffected. Committed as `553c6d6d4304`.
+
+**`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`**: no update needed (compiler bug fix for already-advertised functionality, not new feature/extension support).
+
+**`ENV5(d)` status**: now only `image_query.samples_storage` (1 case, no error logged, needs a build+trace) remains open in this cluster; `ENV5(d)(1)`'s 15-case `terminate_invocation` group is fully closed and struck through in `Roadmap.md`.
+
+**Next steps**: `ENV5(a)`'s remaining 15 cases (`opcopylogical` layout-mismatch, 9, largest remaining cluster; `opptrequal`/`opptrnotequal`, 2, already known-structural; `opselect.array_stride_select`, 1; `entrypoint.tess_con_*`, 3) and `ENV5(b)`'s remaining 24 cases (`lod_op`, 9, numeric; 15 untriaged) are next. Worth a broader regression sweep for any other `CopyMemory`-on-eagerly-loaded-scalar-`Input` shape elsewhere in the untriaged `compute.*`/`graphics.*` failure lists, since this exact vertex-shader passthrough pattern is common to many Amber-based tests beyond just this one cluster.
