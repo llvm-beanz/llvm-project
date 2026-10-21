@@ -6739,6 +6739,21 @@ public:
 /// shape (e.g. a composite `Input` variable, which `StageIOAddressOfPattern`
 /// also leaves as a real pointer) falls through unchanged to whichever
 /// pattern already handles it correctly.
+///
+/// (Roadmap L452(e)) This class's own comment above long claimed its scope
+/// was already narrowed to exclude "no resource/block handle on either
+/// side", but `matchAndRewrite`'s actual check -- `source` not yet a real
+/// `!llvm.ptr` -- does not by itself tell a stage-IO eager-loaded *value*
+/// apart from a resource *handle* (`spirv.VulkanBuffer`, a
+/// target-extension type): both are, structurally, "not yet a pointer".
+/// `dEQP-VK.spirv_assembly.instruction.compute.opcopymemory.struct`'s own
+/// `OpCopyMemory %var %indata` (copying a whole `BufferBlock` resource's
+/// content into a `Function`-storage local) hits exactly this gap: its
+/// `source` converts to a handle, which this pattern claimed instead of
+/// declining to `BlockWholeCopyMemoryPattern`, storing the raw handle
+/// value itself rather than resolving its content pointer first. See
+/// `matchAndRewrite`'s own explicit handle check below, added to close
+/// this gap.
 class StageIOCopyMemoryPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::CopyMemoryOp> {
 public:
@@ -6751,6 +6766,26 @@ public:
     if (mlir::isa<mlir::LLVM::LLVMPointerType>(Adaptor.getSource().getType()))
       return Rewriter.notifyMatchFailure(
           Op, "source already converted to a real pointer");
+    // (Roadmap L452(e)) A resource/block handle (`spirv.VulkanBuffer`, or
+    // any other target-extension handle type a future resource kind might
+    // introduce) is *also* not yet a real pointer here, but for an
+    // entirely different reason than the `Input`-variable eager-load shape
+    // this pattern exists for: `StageIOAddressOfPattern`'s own eager load
+    // never produces a handle-typed result, only a scalar/vector value, so
+    // any handle reaching here is actually `BlockWholeCopyMemoryPattern`'s
+    // shape instead -- a whole-block copy whose source still needs a
+    // `getpointer`-mediated content address, not a direct store of the
+    // handle value itself. Without this check, this pattern's own purely
+    // structural "not yet a pointer" test matched that shape too, storing
+    // the raw resource handle into the destination rather than the block's
+    // actual content (`dEQP-VK.spirv_assembly.instruction.compute.
+    // opcopymemory.struct`'s own `OpCopyMemory %var %indata` from a
+    // `Uniform`/`BufferBlock` resource into a `Function`-storage local,
+    // confirmed by direct IR reduction: `BlockWholeCopyMemoryPattern` is
+    // never even attempted once this pattern already claims the op).
+    if (mlir::isa<mlir::LLVM::LLVMTargetExtType>(Adaptor.getSource().getType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "source is a resource handle, not a stage-IO value");
     if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Adaptor.getTarget().getType()))
       return Rewriter.notifyMatchFailure(
           Op, "target did not convert to a real pointer");

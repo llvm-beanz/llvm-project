@@ -71,3 +71,44 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.Return
   }
 }
+
+// -----
+
+// Roadmap L452(e): `dEQP-VK.spirv_assembly.instruction.compute.
+// opcopymemory.struct`'s own real shape -- unlike `copy_whole_block`
+// above, whose `spirv.CopyMemory` copies directly between two resource
+// handles, this one routes the whole-block content through an
+// intermediate `Function`-storage local variable, one `CopyMemory` per
+// leg: handle -> local, then local -> handle. Each leg individually has
+// exactly one handle-typed side and one already-a-real-pointer side --
+// structurally indistinguishable, before this fix, from
+// `StageIOCopyMemoryPattern`'s own scalar `Input`-variable eager-load
+// passthrough shape (`spirv-to-llvm-terminate-invocation.mlir`), which
+// claimed this op first and stored the raw resource handle itself into
+// the local variable rather than resolving its content pointer via
+// `BlockWholeCopyMemoryPattern`.
+
+// CHECK-LABEL: llvm.func @copy_via_local
+// CHECK: %[[LOCAL:.*]] = llvm.alloca
+// CHECK: %[[IN:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (vector<4xf32>, vector<4xf32>)>, 12, 1>
+// CHECK: %[[OUT:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<packed (vector<4xf32>, vector<4xf32>)>, 12, 1>
+// CHECK: %[[SRC:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[IN]], %{{.*}})
+// CHECK: %[[LOADED1:.*]] = llvm.load %[[SRC]]
+// CHECK: llvm.store %[[LOADED1]], %[[LOCAL]]
+// CHECK: %[[DST:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[OUT]], %{{.*}})
+// CHECK: %[[LOADED2:.*]] = llvm.load %[[LOCAL]]
+// CHECK: llvm.store %[[LOADED2]], %[[DST]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @indata bind(0, 0) : !spirv.ptr<!spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>, Uniform>
+  spirv.GlobalVariable @outdata bind(0, 1) : !spirv.ptr<!spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>, Uniform>
+  spirv.func @copy_via_local() -> () "None" {
+    %var = spirv.Variable : !spirv.ptr<!spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>, Function>
+    %in = spirv.mlir.addressof @indata : !spirv.ptr<!spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>, Uniform>
+    %out = spirv.mlir.addressof @outdata : !spirv.ptr<!spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>, Uniform>
+    spirv.CopyMemory "Function" %var, "Uniform" %in : !spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>
+    spirv.CopyMemory "Uniform" %out, "Function" %var : !spirv.struct<(vector<4xf32> [0], vector<4xf32> [16]), BufferBlock>
+    spirv.Return
+  }
+}
