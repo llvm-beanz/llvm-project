@@ -324,9 +324,28 @@ open, decided by that implementation:
   constrains nothing, since each entry point declares its own stage
   (`feme::isShaderStageCompatibleWithEnvironment`). SPIR-V has no separately
   authored triple to check against: FeMe *derives* the triple from the first
-  entry point's execution model, so the same rule turns into a cross-entry
-  consistency check, and a `spirv.module` mixing two stages is diagnosed
-  rather than converted under a triple that describes only one of them.
+  entry point's execution model, but a `spirv.module` mixing entry points of
+  several stages is not itself an error and is converted rather than
+  diagnosed -- a single `VkShaderModule` is compiled once and may be
+  referenced by several `VkPipelineShaderStageCreateInfo`s naming different
+  `pName` entries of possibly different stages (several real
+  `dEQP-VK.spirv_assembly.instruction.compute.{multiple_shaders,
+  unused_variables,opname}.*` CTS modules do exactly this), so there is no
+  single "the module's stage" to cross-check an individual entry against.
+  Each entry point's own stage is still recorded and validated independently
+  against whichever `VkPipelineShaderStageCreateInfo::stage` actually
+  selects it at pipeline creation time, not against its sibling entry
+  points' stages.
+- **Entry points are selected by `(stage, Name)`, not by LLVM symbol.**
+  `OpEntryPoint`'s Name is only required to be unique per Execution Model,
+  so two entry points of different stages may legally share one Name while
+  ending up on two distinct LLVM functions once MLIR's SPIR-V deserializer
+  disambiguates their (module-wide-unique) symbols apart. The converted
+  module therefore also carries each function's original, authoritative
+  `OpEntryPoint` Name as a `feme.entry.name` attribute, and CPU stage
+  selection resolves a requested `pName` via
+  `feme::findFunctionByEntryPointName(Module, Name, Stage)` -- matching both
+  the Name and the stage -- rather than a raw `Module::getFunction` lookup.
 - **`hlsl.shader` remains the fallback, not just an accepted duplicate.**
   `feme::getShaderStage` prefers `feme.shader.stage` and falls back to
   `hlsl.shader`, so hand-written IR and modules raised before R16 keep
