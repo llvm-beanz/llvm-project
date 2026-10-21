@@ -3656,7 +3656,51 @@ TEST(CanonicalizeStageTest, HullStageWithNoBarrierIsNotSplit) {
   EXPECT_EQ(Sig->Elements.size(), 2u);
 }
 
-/// (Roadmap H9c) `classifyTessControlOutputs`'s own scan (used by
+/// (Roadmap ENV5(a)(4)) A `Patch`-decorated output global carrying its
+/// own non-`poison` SPIR-V initializer (`dEQP-VK.spirv_assembly.
+/// instruction.spirv1p4.entrypoint.tess_con_*entry_point`'s own real
+/// shape: a fixed tessellation factor the whole patch always uses) with
+/// *no* store to it anywhere -- unlike `HullStageWithNoBarrierIsNotSplit`
+/// above, which has no `Patch`-decorated global at all, this still needs
+/// a `<entry>.patchconstant` sibling to exist (even though trivially
+/// empty, since the global's own initializer already supplies the only
+/// patch-constant value this entry produces) -- `compileAndValidateStages`
+/// (GraphicsPipeline.cpp) unconditionally expects one whenever the module
+/// declares a Hull stage at all.
+TEST(CanonicalizeStageTest,
+     HullStageWithInitializerOnlyPatchOutputStillGetsPatchConstantSibling) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = addrspace(8) global [4 x float] [float 1.0, float 1.0, float 1.0, float 1.0], !spirv.Decorations !0
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !3
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !4
+    define void @main() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+    !3 = !{!2}
+    !4 = !{!2}
+    !2 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *ControlPoint = M->getFunction("main");
+  Function *PatchConstant = M->getFunction("main.patchconstant");
+  ASSERT_TRUE(ControlPoint);
+  ASSERT_TRUE(PatchConstant);
+
+  // The control-point phase keeps its own real (non-patch) work, since
+  // this is the mixed-frequency shape (a genuine vertex-frequency write,
+  // plus a patch output supplied solely by its own initializer).
+  std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
+  ASSERT_TRUE(CPSig.has_value());
+  EXPECT_EQ(CPSig->Elements.size(), 2u);
+}
+
 /// `splitBarrierlessTessellationControlEntry` above) must not miss a
 /// genuine per-vertex output written through a *dynamic* vertex index --
 /// `out_color[gl_InvocationID] = ...`, the shape

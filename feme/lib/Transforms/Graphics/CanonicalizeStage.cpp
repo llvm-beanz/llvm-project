@@ -3231,6 +3231,43 @@ struct TessControlOutputFrequencies {
   bool SawNonPatchOutput = false;
 };
 
+/// Whether \p M declares a Patch-decorated (or tess-factor-`BuiltIn`)
+/// address-space-8 output global carrying its own non-`poison` SPIR-V
+/// initializer -- i.e. a `gl_TessLevelOuter`/`gl_TessLevelInner` (or
+/// `patch out`-block member) whose declared default value alone already
+/// satisfies SPIR-V's "every output is written at least once" requirement,
+/// without any instruction in any function ever storing to it (roadmap
+/// ENV5(a)(4); `dEQP-VK.spirv_assembly.instruction.spirv1p4.entrypoint.
+/// tess_con_*entry_point`'s own real shape: a fixed tessellation factor
+/// the whole patch always uses, with no per-patch computation of its own).
+/// `classifyTessControlOutputs`'s own store-only scan below cannot see
+/// this case at all -- there is no store to find -- so a no-barrier entry
+/// with only this shape would otherwise be misclassified as "no
+/// patch-frequency write at all" (shape (1) below) and left without a
+/// `<entry>.patchconstant` sibling, even though `compileAndValidateStages`
+/// (GraphicsPipeline.cpp) unconditionally expects one whenever the module
+/// declares a Hull stage at all.
+bool hasInitializedPatchOutputGlobal(Module &M) {
+  for (GlobalVariable &GV : M.globals()) {
+    unsigned AddrSpace = 0;
+    if (!isSPIRVStageIOGlobal(&GV, AddrSpace) || AddrSpace != 8)
+      continue;
+    if (!GV.hasInitializer() || isa<PoisonValue>(GV.getInitializer()))
+      continue;
+    if (const MDNode *MemberMD =
+            GV.getMetadata("feme.spirv.MemberDecorations")) {
+      for (const auto &KV : parseSPIRVMemberDecorations(MemberMD))
+        if (isPatchOutputDecoration(KV.second))
+          return true;
+      continue;
+    }
+    if (isPatchOutputDecoration(
+            parseSPIRVDecorations(GV.getMetadata("spirv.Decorations"))))
+      return true;
+  }
+  return false;
+}
+
 TessControlOutputFrequencies classifyTessControlOutputs(Function &F) {
   TessControlOutputFrequencies Result;
   const DataLayout &DL = F.getParent()->getDataLayout();
@@ -3244,6 +3281,8 @@ TessControlOutputFrequencies classifyTessControlOutputs(Function &F) {
       continue;
     (*IsPatch ? Result.SawPatchOutput : Result.SawNonPatchOutput) = true;
   }
+  if (!Result.SawPatchOutput && hasInitializedPatchOutputGlobal(*F.getParent()))
+    Result.SawPatchOutput = true;
   return Result;
 }
 
