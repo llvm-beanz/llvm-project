@@ -3591,11 +3591,30 @@ bool splitBarrierlessTessellationControlEntry(Function &F,
   // including any `feme.entry.name` stamped by SPIR-V-to-LLVM conversion
   // to preserve the original (possibly-disambiguated-away-from)
   // `OpEntryPoint` Name. That inherited value is stale here: the
-  // `.patchconstant` clone is never itself an `OpEntryPoint` target, and
-  // its own `findFunctionByEntryPointName` lookups key off its distinct
-  // `<entry>.patchconstant` symbol, not `F`'s entry name. Drop it so
-  // `getEntryPointName` falls back to `PatchConstantPhase->getName()`.
+  // `.patchconstant` clone is never itself an `OpEntryPoint` target.
+  //
+  // (Roadmap L485) It still needs its *own* `feme.entry.name`, though,
+  // rather than none at all: `compileAndValidateStages` builds the
+  // string it looks this clone up by (`<pName>.patchconstant`) from the
+  // tessellation-control stage's own `pName` ("main" for every
+  // `module.same_module_tessc_tesse*` case), not from `F`'s own,
+  // possibly-disambiguated-away-from-"main" LLVM symbol (`F.getName()`
+  // is "main_8", not "main", once SPIR-V deserialization has
+  // disambiguated a multi-entry-point module's shared "main" `pName`
+  // apart -- see `getEntryPointName`'s own comment). Falling back to
+  // `getEntryPointName` finding only `PatchConstantPhase->getName()`
+  // (`"main_8.patchconstant"`) left `findFunctionByEntryPointName`
+  // unable to match the caller's `"main.patchconstant"` lookup key at
+  // all, producing a spurious "no hull entry point named
+  // 'main.patchconstant'" diagnostic even though this exact clone
+  // existed and was otherwise entirely correct. Stamping the clone's own
+  // entry name from `F`'s own *entry point* name (not its LLVM symbol)
+  // keeps the lookup correct regardless of whether disambiguation ever
+  // touched `F`'s own symbol.
+  StringRef OriginalEntryName = getEntryPointName(F);
   PatchConstantPhase->removeFnAttr("feme.entry.name");
+  PatchConstantPhase->addFnAttr(
+      "feme.entry.name", (OriginalEntryName + ".patchconstant").str());
 
   if (Freq.SawNonPatchOutput || HasSideEffect) {
     // A genuine mix (shape (3) above), or shape (2)'s own patch-frequency-
@@ -3742,11 +3761,18 @@ bool splitTessellationControlEntry(Function &F, Function *&PatchConstantPhase) {
       Function::Create(F.getFunctionType(), F.getLinkage(), F.getAddressSpace(),
                        (F.getName() + ".patchconstant").str(), F.getParent());
   PatchConstantPhase->copyAttributesFrom(&F);
-  // See the identical `removeFnAttr` call and comment in
-  // `splitBarrierlessTessellationControlEntry` above: `copyAttributesFrom`
-  // carries over `F`'s stale `feme.entry.name`, which must not leak onto
-  // this distinct `.patchconstant` symbol.
+  // See the identical reasoning and fix in
+  // `splitBarrierlessTessellationControlEntry` above (roadmap L485):
+  // `copyAttributesFrom` carries over `F`'s stale `feme.entry.name`,
+  // which must be replaced with this clone's own distinct entry name
+  // (derived from `F`'s own *entry point* name, not its possibly-
+  // disambiguated LLVM symbol) rather than simply dropped, so
+  // `findFunctionByEntryPointName("<pName>.patchconstant", Hull)` can
+  // still find it in a multi-entry-point module.
+  StringRef OriginalEntryName = getEntryPointName(F);
   PatchConstantPhase->removeFnAttr("feme.entry.name");
+  PatchConstantPhase->addFnAttr(
+      "feme.entry.name", (OriginalEntryName + ".patchconstant").str());
   PatchConstantPhase->setComdat(F.getComdat());
   SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
   F.getAllMetadata(MDs);
@@ -7456,6 +7482,7 @@ PreservedAnalyses CanonicalizeStagePass::run(Module &M,
   SmallVector<Function *, 16> WorkList;
   for (Function &F : M)
     WorkList.push_back(&F);
+
   for (Function *F : WorkList) {
     std::optional<ShaderStage> Stage = getShaderStage(*F);
     if (!Stage ||

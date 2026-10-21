@@ -9,6 +9,7 @@
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
 
 #include "feme/Core/Signature.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Graphics/StageStorage.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
@@ -3784,6 +3785,65 @@ TEST(CanonicalizeStageTest,
   std::optional<EntrySignature> CPSig = dxil::getEntrySignature(*ControlPoint);
   ASSERT_TRUE(CPSig.has_value());
   EXPECT_EQ(CPSig->Elements.size(), 2u);
+}
+
+/// (Roadmap L485) `splitBarrierlessTessellationControlEntry`'s
+/// `.patchconstant` clone is named from `F.getName()` -- `F`'s own bare
+/// LLVM symbol. For a single-entry module (every other Hull test in this
+/// file) that symbol is always literally "main", so the clone lands on
+/// "main.patchconstant" either way. It is not always "main" in a
+/// combined, multi-entry-point SPIR-V module sharing one `pName` across
+/// stages (CTS's own `dEQP-VK.spirv_assembly.instruction.graphics.module.
+/// same_module_tessc_tesse*`, `createCombinedModule`'s shape): SPIR-V
+/// deserialization disambiguates every entry but the first sharing a
+/// given `OpEntryPoint` Name onto a distinct LLVM symbol (here `@main_8`,
+/// simulating a Hull entry disambiguated behind an earlier Vertex
+/// `@main`), stamping the true, pre-disambiguation `OpEntryPoint` Name
+/// onto a `feme.entry.name` attribute instead. `compileAndValidateStages`
+/// (`GraphicsPipeline.cpp`) only ever looks the patch-constant clone up
+/// by `<pName>.patchconstant` (`"main.patchconstant"` here) via
+/// `findFunctionByEntryPointName`, never by `F`'s own, possibly-
+/// disambiguated LLVM symbol -- so a clone named (and, before this row's
+/// fix, entry-name-attributed) "main_8.patchconstant" was never
+/// findable at all, producing a spurious "no hull entry point named
+/// 'main.patchconstant'" diagnostic even though the clone existed and
+/// was otherwise entirely correct. The clone's own `feme.entry.name`
+/// must instead be derived from `F`'s own *entry point* name (`getEntry
+/// PointName`, "main"), not `F`'s LLVM symbol, so the lookup always
+/// succeeds regardless of whether disambiguation ever touched `F`'s own
+/// symbol.
+TEST(CanonicalizeStageTest,
+    PatchConstantCloneIsFindableByEntryPointNameEvenWhenHullSymbolIsDisambiguated) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_TessLevelOuter = addrspace(8) global [4 x float] [float 1.0, float 1.0, float 1.0, float 1.0], !spirv.Decorations !0
+    @gl_out_pos = external addrspace(8) global <4 x float>, !spirv.Decorations !3
+    @gl_in_pos = external addrspace(7) constant <4 x float>, !spirv.Decorations !4
+    define void @main_8() #0 {
+      %v = load <4 x float>, ptr addrspace(7) @gl_in_pos
+      store <4 x float> %v, ptr addrspace(8) @gl_out_pos
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" "feme.entry.name"="main" }
+    !0 = !{!1}
+    !1 = !{i32 11, i32 11}
+    !3 = !{!2}
+    !4 = !{!2}
+    !2 = !{i32 11, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+
+  // The clone's own LLVM symbol is still derived from `F`'s own
+  // (disambiguated) one, exactly as before this row's fix.
+  EXPECT_TRUE(M->getFunction("main_8.patchconstant"));
+  // What changed: it must also be findable by its *entry point* name,
+  // the only way `compileAndValidateStages` ever looks it up.
+  Function *PatchConstant =
+      findFunctionByEntryPointName(*M, "main.patchconstant", ShaderStage::Hull);
+  ASSERT_TRUE(PatchConstant);
+  EXPECT_EQ(PatchConstant, M->getFunction("main_8.patchconstant"));
+  EXPECT_EQ(getEntryPointName(*PatchConstant), "main.patchconstant");
 }
 
 /// `splitBarrierlessTessellationControlEntry` above) must not miss a
