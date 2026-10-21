@@ -1871,14 +1871,79 @@ void FunctionWidener::collectMaskedAllocas() {
         if (AllocaInst *AI = getUnderlyingAlloca(Matched->Ptr))
           MaskedAllocas.insert(AI);
       }
-      continue;
     }
+  }
+
+  // (Roadmap L498(a)) The masked-store-call scan above, and the plain
+  // `UI.isDivergentAtDef` scan just below, each only recognize a
+  // *directly* divergent store -- one whose value operand is itself
+  // divergent (at the SSA level, or via a masked-store call). Neither
+  // alone catches a store that merely *copies* a value round-tripped
+  // through an *already-discovered* `MaskedAllocas` member -- e.g. an
+  // aggregate (array/struct) "by-value parameter" copy idiom
+  // (`load`/`insertvalue`/`extractvalue`/`store`) that SROA-like earlier
+  // passes leave behind when inlining a callee that takes a
+  // spec-constant-sized array parameter: the destination alloca's own
+  // store is, by itself, perfectly uniform to `UI` (its value operand is
+  // built purely from loads of a *different* alloca, one this same
+  // function hasn't yet proven divergent at the point `UI` was computed),
+  // so it is invisible to both scans above unless this fact is threaded
+  // through. Reduced from `dEQP-VK.pipeline.*.spec_constant.graphics.*.
+  // expression.array_size_pass_to_function`: a spec-constant-bounded
+  // local array, correctly recognized above as a `MaskedAllocas` member
+  // because `feme::cpu::LinearizePass` emits a masked-store call filling
+  // it, gets copied element-by-element into a second, *fresh* alloca (the
+  // callee's own by-value array parameter, after inlining) via this exact
+  // idiom; left unrecognized, that second alloca stays a plain scalar
+  // array shared by every lane, so `widenInstruction`'s ordinary
+  // elementwise replay collapses every lane's own copy down to whichever
+  // lane's copy happens to run last, corrupting every other lane's
+  // "local" array contents with that one surviving lane's data before the
+  // compute using it (`sumArrays`'s own per-lane-correct loop) ever runs.
+  // Iterate the `UI`-driven scan below to a fixed point: adding a new
+  // alloca to `MaskedAllocas` can only ever expose *further* copies out of
+  // it (never retract an existing member), so a simple "did this pass add
+  // anything" flag is enough to guarantee termination -- each iteration
+  // either adds at least one alloca (bounded by the function's finite
+  // alloca count) or leaves the set unchanged and the loop stops.
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    // Values forced divergent, for *this iteration's* purposes only, by a
+    // memory round trip through a `MaskedAllocas` member already known at
+    // the start of this iteration -- deliberately not the persistent
+    // `ForcedDivergentValues` set `computeForcedDivergentValues` builds
+    // later: that set is seeded from (and must stay consistent with) the
+    // final, fully-closed `MaskedAllocas` this loop converges to, not an
+    // intermediate snapshot of it.
+    DenseSet<Value *> DivergentViaMemory;
+    SmallVector<Value *, 16> Worklist;
+    for (Instruction &I : instructions(*OldF)) {
+      auto *LI = dyn_cast<LoadInst>(&I);
+      if (!LI || LI->isAtomic() || UI.isDivergentAtDef(LI))
+        continue;
+      if (AllocaInst *AI = getUnderlyingAlloca(LI->getPointerOperand())) {
+        if (MaskedAllocas.contains(AI) && DivergentViaMemory.insert(LI).second)
+          Worklist.push_back(LI);
+      }
+    }
+    while (!Worklist.empty()) {
+      Value *V = Worklist.pop_back_val();
+      for (User *U : V->users()) {
+        auto *UserI = dyn_cast<Instruction>(U);
+        if (!UserI || UI.isDivergentAtDef(UserI) ||
+            !DivergentViaMemory.insert(UserI).second)
+          continue;
+        Worklist.push_back(UserI);
+      }
+    }
+
     // (Roadmap H170) An *unmasked* store -- one `feme::cpu::LinearizePass`
     // left as a plain `store` because it runs under uniform control flow
     // (e.g. an unconditional `intermediateStore = v_coord;` at the very
     // top of a shader, before any divergent branch) -- can still write a
     // genuinely per-lane-different *value* through a uniform *address*,
-    // exactly like the masked-store-call case just above. The masked-
+    // exactly like the masked-store-call case above. The masked-
     // store-call scan alone can never discover this, since no masked-
     // store call was ever created for it (`Masks.SideEffect` was a known
     // constant mask at that program point). `UI.isDivergentAtDef` sees
@@ -1900,10 +1965,24 @@ void FunctionWidener::collectMaskedAllocas() {
     // `StoreInst` that can carry a genuinely per-lane-divergent value
     // through a uniform address, so only `isAtomic()` (an actual
     // read-modify-write this analysis does not model) is excluded here.
-    if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (!SI->isAtomic() && UI.isDivergentAtDef(SI)) {
-        if (AllocaInst *AI = getUnderlyingAlloca(SI->getPointerOperand()))
-          MaskedAllocas.insert(AI);
+    //
+    // `DivergentViaMemory.contains(SI)` extends this to the copy-via-a-
+    // different-alloca shape described above: `DivergentViaMemory`'s own
+    // propagation already walked through the store's value operand (any
+    // instruction, including a `StoreInst` itself, reachable from a
+    // forced-divergent load is inserted), so this single membership check
+    // covers both "value operand is divergent" and "value operand is
+    // divergent only because of a memory round trip" without needing two
+    // separate conditions.
+    for (Instruction &I : instructions(*OldF)) {
+      auto *SI = dyn_cast<StoreInst>(&I);
+      if (!SI || SI->isAtomic())
+        continue;
+      if (!UI.isDivergentAtDef(SI) && !DivergentViaMemory.contains(SI))
+        continue;
+      if (AllocaInst *AI = getUnderlyingAlloca(SI->getPointerOperand())) {
+        if (MaskedAllocas.insert(AI).second)
+          Changed = true;
       }
     }
   }
