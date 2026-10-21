@@ -128439,3 +128439,52 @@ the first real error string for `ENV5(c)`'s largest untriaged cluster.
 4. **(low priority, unchanged across many sessions)** Upstream the 3 `offload-test-suite` patches (`Image.cpp` underflow, `Color.h` NaN-clamp assert, `lit.cfg.py`'s dropped `FEME_VULKAN_SAFETY_NET_TIMEOUT_MS`) if push access ever becomes available.
 
 **Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.barrier.compute_shared_memory_all' --deqp-log-images=disable` (or the nearest matching real `graphics.barrier.*` case name) to get the first real error string for `ENV5(c)`'s next-largest untriaged cluster.
+
+# Session: `ENV5(c)(2)` fixed (partial), `ENV4` completed
+
+**Next action (under two minutes):** `cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_VULKAN_LOG_CREATION_ERRORS=1 ./deqp-vk --deqp-case='dEQP-VK.spirv_assembly.instruction.graphics.barrier.in_function' --deqp-log-images=disable 2>&1 | grep -i error` to re-confirm the "JIT session error: Symbols not found: [ spirv_var_N ]" signature shared by 3 cases (`barrier.in_function`, `barrier.after_divergent_if`, `indexing.output.component_tessc`) before digging into why symbol materialization fails for those specific shaders.
+
+## Big win this session: `ENV4` finished
+
+The full 3,244,369-case CTS corpus run — running unattended across roughly a dozen prior sessions — completed. Final scoreboard:
+
+| Result | Count |
+|---|---|
+| Pass | 727,437 |
+| NotSupported | 2,516,216 |
+| Fail | 666 |
+| QualityWarning | 46 |
+| Unrun | 4 |
+| **Crashed** | **0** |
+
+Zero crashes across 3.24M cases. That's the payoff of every `ENV3`/`ENV5` abort-fix landed across this whole multi-session effort. The 666-case failure list is saved at `feme/docs/env4-results/env4-full-corpus-verified-failures.txt` — it's now the authoritative baseline, replacing every prior partial/estimated tally. `ENV4` is struck through in `Roadmap.md`; new `ENV6`/`(a)`-`(d)` entries break down the 666 cases by suite for future sessions (`api.copy_and_blit` 210 is the single largest untriaged cluster — a new discovery, never previously triaged).
+
+## Fixed: `float16.*_tessc` dominance-violation crash (4 of 10 cases fully pass)
+
+1. Disproved the prior session's theory (`L452(d)` `peelConstantFlowPredecessors` recurrence) — `FEME_DEBUG_PEEL_TRACE=1` showed zero hits, so that function never even ran.
+2. Found the real bug via hand-tracing + `FEME_OPT_DUMP_INVALID=1`: `foldRedundantFlowBlocksInCycle` runs `foldRedundantFlowBlock` to a fixed point. One fold's retargeting can make a *later* fold's own two "distinct" targets alias the same downstream merge-phi slot — the forwarding loop then writes that slot twice, silently discarding one of two genuinely different values.
+3. Fix: bail out of the fold when both targets' `Merges`/`IncomingBlocks` already coincide. One-line guard, `feme/lib/Transforms/CPU/Linearize.cpp`.
+4. Added lit regression test (confirmed aborts without the fix, clean with it). `check-feme`: 3831/3835, no regressions.
+5. Real CTS: crash/abort gone for all 10 `_tessc` cases; 4 now fully **Pass**. 6 remain **Fail** (not crashing) — they hit a *deeper* instance of the same bug class across a longer fold chain. Tracked as new `ENV5(c)(4)`.
+
+Commits (3, each isolated, feme-only):
+- `4082dc35d032` — the fix + lit test
+- `6ec1e827735f` — Roadmap/CTS report updates (ENV5(c)(2) correction, ENV4 completion)
+- `6e0233770fbf` — `.instructions.md` lesson (fold-ordering interaction bugs in fixed-point passes)
+
+## Quick triage done on `barrier`/`indexing` cluster (per this session's requested next action)
+
+Got real error strings for all 5 `barrier.*` + `indexing.output.component_tessc`:
+- `barrier.in_if`, `barrier.in_switch` → `"tessellation-control SPIR-V entry points currently support exactly one group-sync barrier"` (a known, explicit milestone limitation, not a crash)
+- `barrier.in_loop` → `"patch-constant region must have exactly one entry edge from the barrier"` (same limitation family, different message)
+- `barrier.in_function`, `barrier.after_divergent_if`, **and** `indexing.output.component_tessc` → **same** `"JIT session error: Symbols not found: [ spirv_var_N ]"` — this is a **new finding**: 3 cases across 2 different sub-suites share one root cause, not previously connected. Worth investigating as a single fix.
+- `module.same_module` → no pipeline-creation error logged at all; needs a render-verification-focused diagnosis, not a creation-error one.
+
+## Ranked next steps
+
+1. **(~30-60 min, new finding, best next target)** The JIT "Symbols not found: spirv_var_N" cluster — 3 cases (`barrier.in_function`, `barrier.after_divergent_if`, `indexing.output.component_tessc`) share this exact signature. Find what's common about these shaders' symbol resolution (likely a resource/global that isn't getting registered/materialized in the JIT session for some specific CFG or storage-class shape) before guessing at a fix.
+2. **(~1-2 hrs)** `ENV5(c)(4)`: the 6 deeper `float16.*_tessc` cases (`struct16arr3`/`v3f16arr5`/`v4f16arr3` variants). Same `foldRedundantFlowBlock` bug family as this session's fix, but the two aliasing predecessors are no longer immediate fold targets — need either a transitive-reconvergence check or whole-fixed-point-loop slot-write tracking. Get a fresh standalone `.ll` reduction first (same technique as this session).
+3. **(~30-60 min)** `barrier.in_if`/`in_switch`/`in_loop` (3 cases) — these are an explicit "not yet supported" milestone limitation (one barrier per tess-control entry point), not a bug; check `Roadmap.md` for whether lifting this limitation is already a scheduled milestone or needs a new entry.
+4. **(~30-60 min)** `module.same_module*` (4 cases) — no creation-time error; needs render-output comparison to find what's actually wrong, a different diagnostic approach than every other cluster this session.
+5. **(new, large, never triaged)** `ENV6(a)`: `api.copy_and_blit` (210 cases, by far the single largest cluster in the now-final 666-case corpus). Worth a first pass to check whether they share one root cause — concentrated in `depth_stencil_msaa_copy`/`resolve_image` with `d32_sfloat`-family formats recurring.
+6. **(low priority, unchanged for many sessions)** Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
