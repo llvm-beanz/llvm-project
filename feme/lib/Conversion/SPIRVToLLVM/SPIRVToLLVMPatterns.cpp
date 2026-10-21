@@ -17231,16 +17231,23 @@ getSignedOrUnsignedIntElementType(mlir::Type Type) {
 }
 
 /// Converts `spirv.mlir.referenceof` (roadmap L7j) by materializing the
-/// specialization constant it names directly as an `llvm.mlir.constant` of
-/// its own resolved compile-time value (`feme::spirv::SpecConstantValueMap`,
-/// collected by `prepareSpecConstants` before this conversion ran): this
-/// ICD has no runtime `VkSpecializationInfo` override mechanism threaded
-/// through `Pipeline.cpp`'s own pipeline-creation path at all, so a spec
-/// constant's own declared default value is the only value it could ever
-/// actually take, making this fold always correct rather than merely an
-/// approximation. Declines (rather than approximates) any symbol
-/// `prepareSpecConstants` itself already declined to resolve -- a
-/// `struct`/nested-`array`-shaped `spirv.SpecConstantComposite`, unreached
+/// specialization constant it names directly as its own resolved
+/// compile-time value (`feme::spirv::SpecConstantValueMap`, collected by
+/// `prepareSpecConstants` before this conversion ran): this ICD has no
+/// runtime `VkSpecializationInfo` override mechanism threaded through
+/// `Pipeline.cpp`'s own pipeline-creation path at all, so a spec constant's
+/// own declared default value is the only value it could ever actually
+/// take, making this fold always correct rather than merely an
+/// approximation. A scalar or vector-shaped value materializes directly as
+/// an `llvm.mlir.constant`; a struct/array-shaped value (an untyped
+/// `ArrayAttr`, which `llvm.mlir.constant` cannot hold directly) instead
+/// materializes as an ordinary `spirv.Constant` of that same value/type, a
+/// still-illegal op the dialect-conversion driver immediately re-processes
+/// with the already-existing `StructConstantPattern`/`ArrayConstantPattern`
+/// (the whole `spirv` dialect is marked illegal, so any op this pattern
+/// creates is itself legalized in turn). Declines (rather than
+/// approximates) any symbol `prepareSpecConstants` itself already declined
+/// to resolve -- a matrix-shaped `spirv.SpecConstantComposite`, unreached
 /// by any known real HLSL/CTS source today (see its own comment) -- with a
 /// precise diagnostic naming the actual gap, rather than the generic
 /// "unresolved symbol" one a bare `SymbolTable` lookup failure would give.
@@ -17262,10 +17269,17 @@ public:
     if (It == SpecConstants.end())
       return Rewriter.notifyMatchFailure(
           Op, "referenced specialization constant has no resolvable "
-              "compile-time value (e.g. a struct/nested-array-shaped "
-              "composite)");
+              "compile-time value (e.g. a matrix-shaped composite)");
 
-    mlir::Type SrcType = It->second.getType();
+    mlir::Type SrcType = It->second.Type;
+    mlir::Attribute SrcValue = It->second.Value;
+
+    if (mlir::isa<mlir::spirv::StructType, mlir::spirv::ArrayType>(SrcType)) {
+      Rewriter.replaceOpWithNewOp<mlir::spirv::ConstantOp>(Op, SrcType,
+                                                           SrcValue);
+      return mlir::success();
+    }
+
     mlir::Type DstType = getTypeConverter()->convertType(SrcType);
     if (!DstType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
@@ -17275,7 +17289,7 @@ public:
       mlir::IntegerType SignlessType =
           Rewriter.getIntegerType(SrcIntType.getWidth());
       if (mlir::isa<mlir::VectorType>(SrcType)) {
-        auto SrcElements = mlir::cast<mlir::DenseIntElementsAttr>(It->second);
+        auto SrcElements = mlir::cast<mlir::DenseIntElementsAttr>(SrcValue);
         Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(
             Op, DstType,
             SrcElements.mapValues(
@@ -17283,15 +17297,14 @@ public:
                 [](const llvm::APInt &Value) { return Value; }));
         return mlir::success();
       }
-      auto SrcAttr = mlir::cast<mlir::IntegerAttr>(It->second);
+      auto SrcAttr = mlir::cast<mlir::IntegerAttr>(SrcValue);
       Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(
           Op, DstType,
           Rewriter.getIntegerAttr(SignlessType, SrcAttr.getValue()));
       return mlir::success();
     }
 
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(Op, DstType,
-                                                        It->second);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(Op, DstType, SrcValue);
     return mlir::success();
   }
 
@@ -17934,9 +17947,11 @@ feme::spirv::prepareStageIOVariables(mlir::spirv::ModuleOp Module) {
 feme::spirv::SpecConstantValueMap
 feme::spirv::prepareSpecConstants(mlir::spirv::ModuleOp Module) {
   SpecConstantValueMap Values;
+  mlir::OpBuilder Builder(Module.getContext());
   for (mlir::Operation &Op : Module.getBody()->getOperations()) {
     if (auto ScalarConst = mlir::dyn_cast<mlir::spirv::SpecConstantOp>(Op)) {
-      Values[ScalarConst.getSymName()] = ScalarConst.getDefaultValue();
+      mlir::TypedAttr DefaultValue = ScalarConst.getDefaultValue();
+      Values[ScalarConst.getSymName()] = {DefaultValue, DefaultValue.getType()};
       continue;
     }
 
@@ -17945,48 +17960,99 @@ feme::spirv::prepareSpecConstants(mlir::spirv::ModuleOp Module) {
     if (!CompositeConst)
       continue;
 
-    // Only a vector-shaped composite (e.g. `gl_WorkGroupSize`'s own
-    // `vector<3xi32>` `LocalSizeId` composite, the shape any known real
-    // HLSL/CTS source this ICD's frontend surface reaches actually needs)
-    // is resolved here; a `spirv.struct`/nested-`spirv.array`-shaped
-    // composite is left unresolved (simply omitted from the map, rather
-    // than approximated) -- `ReferenceOfConversionPattern` below declines
-    // any reference this omission leaves unresolved, with its own precise
-    // diagnostic.
-    auto VecType = mlir::dyn_cast<mlir::VectorType>(CompositeConst.getType());
-    if (!VecType)
+    // A vector-shaped composite (e.g. `gl_WorkGroupSize`'s own
+    // `vector<3xi32>` `LocalSizeId` composite) resolves to a
+    // `DenseElementsAttr`; a `spirv.struct`/`spirv.array`-shaped composite
+    // (e.g. `dEQP-VK...opundef.undefined_spec_constant_composite`'s own
+    // `Pair = OpTypeStruct %int %int` spec constant, one of whose two
+    // members is an `OpUndef`-derived zero constituent) resolves the same
+    // way `spirv.Constant`'s own struct/array value does -- an `ArrayAttr`
+    // of per-member/per-element attributes -- so `ReferenceOfConversionPattern`
+    // below can materialize it as an ordinary `spirv.Constant` and let the
+    // already-existing `StructConstantPattern`/`ArrayConstantPattern`
+    // finish legalizing it. Any other shape (e.g. a matrix) is left
+    // unresolved (simply omitted from the map, rather than approximated)
+    // -- `ReferenceOfConversionPattern` declines any reference this
+    // omission leaves unresolved, with its own precise diagnostic.
+    mlir::Type CompositeType = CompositeConst.getType();
+    auto VecType = mlir::dyn_cast<mlir::VectorType>(CompositeType);
+    auto StructType = mlir::dyn_cast<mlir::spirv::StructType>(CompositeType);
+    auto ArrayType = mlir::dyn_cast<mlir::spirv::ArrayType>(CompositeType);
+    if (!VecType && !StructType && !ArrayType)
       continue;
+
+    // Returns the expected type of constituent \p Index, or a null `Type`
+    // if \p Index is out of range for a struct (a mismatched constituent
+    // count is itself a sign this composite cannot be resolved here).
+    auto GetElementType = [&](unsigned Index) -> mlir::Type {
+      if (VecType)
+        return VecType.getElementType();
+      if (ArrayType)
+        return ArrayType.getElementType();
+      if (Index >= StructType.getNumElements())
+        return {};
+      return StructType.getElementType(Index);
+    };
 
     llvm::SmallVector<mlir::Attribute> Elements;
     Elements.reserve(CompositeConst.getConstituents().size());
     bool AllResolved = true;
-    for (mlir::Attribute Constituent : CompositeConst.getConstituents()) {
-      mlir::TypedAttr ElementAttr;
+    for (auto [Index, Constituent] :
+         llvm::enumerate(CompositeConst.getConstituents())) {
+      mlir::Attribute ElementAttr;
+      mlir::Type ElementType;
       if (auto SymRef = mlir::dyn_cast<mlir::FlatSymbolRefAttr>(Constituent)) {
         // A reference to another (already-declared, per SPIR-V's own
-        // declare-before-use symbol rule) specialization constant.
+        // declare-before-use symbol rule) specialization constant -- its
+        // own resolved `Value`/`Type` pair, which may itself be an
+        // untyped `ArrayAttr` for a nested struct/array-shaped spec
+        // constant composite.
         auto It = Values.find(SymRef.getValue());
         if (It == Values.end()) {
           AllResolved = false;
           break;
         }
-        ElementAttr = It->second;
-      } else {
-        // An inline (non-specialization) constant constituent.
-        ElementAttr = mlir::dyn_cast<mlir::TypedAttr>(Constituent);
+        ElementAttr = It->second.Value;
+        ElementType = It->second.Type;
+      } else if (mlir::TypedAttr InlineAttr =
+                     mlir::dyn_cast<mlir::TypedAttr>(Constituent)) {
+        // An inline (non-specialization) constant constituent -- this is
+        // also how an `OpUndef` constituent surfaces here, since the
+        // deserializer's own `processSpecConstantComposite` already
+        // substitutes a concrete zero-valued attribute for it.
+        ElementAttr = InlineAttr;
+        ElementType = InlineAttr.getType();
       }
-      if (!ElementAttr || ElementAttr.getType() != VecType.getElementType()) {
+      mlir::Type ExpectedType = GetElementType(Index);
+      if (!ElementAttr || !ExpectedType || ElementType != ExpectedType) {
         AllResolved = false;
         break;
       }
       Elements.push_back(ElementAttr);
     }
-    if (!AllResolved ||
-        static_cast<int64_t>(Elements.size()) != VecType.getNumElements())
+    if (!AllResolved)
       continue;
 
-    Values[CompositeConst.getSymName()] = mlir::cast<mlir::TypedAttr>(
-        mlir::DenseElementsAttr::get(VecType, Elements));
+    if (VecType) {
+      if (static_cast<int64_t>(Elements.size()) != VecType.getNumElements())
+        continue;
+      Values[CompositeConst.getSymName()] = {
+          mlir::DenseElementsAttr::get(VecType, Elements), VecType};
+      continue;
+    }
+
+    if (StructType &&
+        Elements.size() != static_cast<size_t>(StructType.getNumElements()))
+      continue;
+
+    // `spirv.Constant`'s own struct/array value representation (see
+    // `processConstantComposite`/`StructConstantPattern`/
+    // `ArrayConstantPattern`) is a plain `ArrayAttr`, untyped on its own --
+    // it carries no `mlir::Type`, so `CompositeType` is stored alongside it
+    // explicitly instead. `ReferenceOfConversionPattern` below pairs the
+    // two back up when materializing the `spirv.Constant` it needs.
+    Values[CompositeConst.getSymName()] = {Builder.getArrayAttr(Elements),
+                                           CompositeType};
   }
   return Values;
 }

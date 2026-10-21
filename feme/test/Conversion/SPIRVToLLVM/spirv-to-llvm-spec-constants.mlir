@@ -78,3 +78,51 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   }
 }
 
+// -----
+
+// Checks that a `spirv.mlir.referenceof` of a `spirv.struct`-shaped
+// `spirv.SpecConstantComposite` resolves via an inlined `spirv.Constant`
+// (itself then decomposed by the already-existing `StructConstantPattern`)
+// rather than being declined -- the real shape
+// `dEQP-VK.spirv_assembly.instruction.compute.opundef.
+// undefined_spec_constant_composite` needs: a struct spec constant one of
+// whose members is an `OpUndef`-derived zero constituent (modeled here, as
+// the deserializer itself does, by a concrete zero-valued inline
+// constituent rather than a distinct "undef" attribute kind).
+
+// CHECK-LABEL: llvm.func @struct_composite_ref
+// CHECK: [[C0:%.+]] = llvm.mlir.constant(1 : i32) : i32
+// CHECK: [[C1:%.+]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: [[POISON:%.+]] = llvm.mlir.poison : !llvm.struct<packed (i32, i32)>
+// CHECK: llvm.insertvalue [[C0]], [[POISON]][0]
+// CHECK: llvm.insertvalue [[C1]], {{%.+}}[1]
+// CHECK-NOT: spirv.mlir.referenceof
+// CHECK-NOT: spirv.SpecConstantComposite
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @sc_first = 1 : i32
+  spirv.SpecConstantComposite @scc_pair (@sc_first, 0 : i32) : !spirv.struct<(i32, i32)>
+  spirv.func @struct_composite_ref() -> !spirv.struct<(i32, i32)> "None" {
+    %0 = spirv.mlir.referenceof @scc_pair : !spirv.struct<(i32, i32)>
+    spirv.ReturnValue %0 : !spirv.struct<(i32, i32)>
+  }
+}
+
+// -----
+
+// Checks the same for an `spirv.array`-shaped `spirv.SpecConstantComposite`
+// (`dEQP-VK...vector_shuffle`'s own shape, a spec-constant array referenced
+// from elsewhere).
+
+// CHECK-LABEL: llvm.func @array_composite_ref
+// CHECK: llvm.mlir.constant(dense<[2, 3]> : tensor<2xi32>) : !llvm.array<2 x i32>
+// CHECK-NOT: spirv.mlir.referenceof
+// CHECK-NOT: spirv.SpecConstantComposite
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.SpecConstant @sc_elem0 = 2 : i32
+  spirv.SpecConstantComposite @scc_arr (@sc_elem0, 3 : i32) : !spirv.array<2 x i32>
+  spirv.func @array_composite_ref() -> !spirv.array<2 x i32> "None" {
+    %0 = spirv.mlir.referenceof @scc_arr : !spirv.array<2 x i32>
+    spirv.ReturnValue %0 : !spirv.array<2 x i32>
+  }
+}
+

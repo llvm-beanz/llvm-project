@@ -113,26 +113,36 @@ using StageIOInfoMap = llvm::StringMap<unsigned>;
 /// override mechanism (Vulkan's `VkSpecializationInfo` is never threaded
 /// through `Pipeline.cpp`'s own pipeline-creation path), so a spec
 /// constant's own declared default value is the only value it could ever
-/// actually take -- this map is that value, already resolved to a real
-/// `mlir::TypedAttr` a `spirv.mlir.referenceof` of that symbol can be
-/// replaced with directly, recursively folding a composite's own
-/// constituents (each either another spec constant's own resolved value,
-/// looked up by symbol, or an inline non-specialization constant already
-/// given as a real attribute) into one aggregate attribute matching the
-/// composite's declared type.
-using SpecConstantValueMap = llvm::StringMap<mlir::TypedAttr>;
+/// actually take. \c Value is that value: a `mlir::TypedAttr`
+/// (`mlir::IntegerAttr`/`mlir::FloatAttr`/`mlir::DenseElementsAttr`) for a
+/// scalar or vector-shaped spec constant, recursively folding a vector
+/// composite's own constituents (each either another spec constant's own
+/// resolved value, looked up by symbol, or an inline non-specialization
+/// constant already given as a real attribute) into one aggregate
+/// `DenseElementsAttr`; or a plain (untyped) `mlir::ArrayAttr` -- the same
+/// representation `spirv.Constant`'s own struct/array value uses (see
+/// `processConstantComposite`/`StructConstantPattern`/
+/// `ArrayConstantPattern`) -- for a struct/array-shaped spec constant
+/// composite, one per member/element. \c Type is the value's own SPIR-V
+/// type, carried separately since an `ArrayAttr` has none of its own;
+/// `ReferenceOfConversionPattern` pairs the two back together when
+/// materializing a replacement for a `spirv.mlir.referenceof`.
+struct SpecConstantValue {
+  mlir::Attribute Value;
+  mlir::Type Type;
+};
+using SpecConstantValueMap = llvm::StringMap<SpecConstantValue>;
 
 /// Recovers every `spirv.SpecConstant`/`spirv.SpecConstantComposite`'s
 /// resolved compile-time value in \p Module (see SpecConstantValueMap),
 /// keyed by symbol name. A `spirv.SpecConstantComposite` whose declared
-/// type is not representable as a `mlir::DenseElementsAttr` (i.e. not a
-/// `vector`/`tensor`-shaped composite -- a SPIR-V `struct`/nested-`array`
-/// composite, unreached by any real HLSL/CTS source this ICD's frontend
-/// surface has confirmed so far) is omitted from the map rather than
-/// approximated, so `ReferenceOfConversionPattern` correctly declines it
-/// instead of silently miscompiling it. Must run before the conversion,
-/// the same way prepareResourceVariables/prepareStageIOVariables do: by
-/// the time a `spirv.mlir.referenceof` is legalized, the `spirv.
+/// type is not a vector, struct, or array (e.g. a matrix, unreached by any
+/// real HLSL/CTS source this ICD's frontend surface has confirmed so far)
+/// is omitted from the map rather than approximated, so
+/// `ReferenceOfConversionPattern` correctly declines it instead of
+/// silently miscompiling it. Must run before the conversion, the same way
+/// prepareResourceVariables/prepareStageIOVariables do: by the time a
+/// `spirv.mlir.referenceof` is legalized, the `spirv.
 /// SpecConstant`/`SpecConstantComposite` declaration(s) it names may
 /// already have been erased.
 SpecConstantValueMap prepareSpecConstants(mlir::spirv::ModuleOp Module);
