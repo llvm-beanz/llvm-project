@@ -11947,6 +11947,71 @@ public:
   }
 };
 
+/// Converts a `Private`-storage `spirv.GlobalVariable` whose own
+/// `initializer` is a `FlatSymbolRefAttr` naming another
+/// `spirv.GlobalVariable` -- e.g. `dEQP-VK.spirv_assembly.instruction.
+/// compute.variable_init.private.{float,vec4}_from_workgroup`'s own
+/// `Private`-storage pointer variable, initialized to the address of a
+/// sibling `Workgroup`-storage variable (a legal SPIR-V shape once the
+/// `VariablePointers` capability is in play: "Initializer must be a symbol
+/// defined from a constant instruction or other `spirv.GlobalVariable`
+/// operation", per `SPIRV_GlobalVariableOp`'s own description). Upstream
+/// MLIR's own `GlobalVariablePattern` explicitly bails out (`failure()`)
+/// whenever `op.getInitializer()` is set at all ("Currently, there is no
+/// support of initialization with a constant value in SPIR-V dialect"),
+/// leaving this shape for FeMe's own pattern, exactly like
+/// `PrivateAggregateGlobalVariablePattern` already does for a composite
+/// `initial_value`. The referenced global's own symbol name survives its
+/// own, separate conversion pattern unchanged (every `*GlobalVariable
+/// Pattern` in this file keeps `Op.getSymName()` as the new
+/// `llvm.mlir.global`'s own name), so this pattern can build a plain
+/// `llvm.mlir.addressof` of that same name inside its own initializer
+/// region regardless of which order the two globals are each converted
+/// in. Declines (falls back to the generic composite pattern above, or
+/// upstream's own scalar/vector one) any pointee type this specific shape
+/// does not need: only a pointer-typed pointee is handled, since no known
+/// CTS case initializes a `Private` scalar/vector/composite directly from
+/// another global's own symbol rather than a literal constant.
+class PrivatePointerInitializerGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Private)
+      return Rewriter.notifyMatchFailure(Op, "not a Private-storage variable");
+    mlir::FlatSymbolRefAttr InitializerSym = Op.getInitializerAttr();
+    if (!InitializerSym)
+      return Rewriter.notifyMatchFailure(Op, "no initializer symbol");
+    if (!mlir::isa<mlir::spirv::PointerType>(SrcType.getPointeeType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "initializer symbol only supported for a pointer-typed "
+              "pointee");
+
+    mlir::Type DstType =
+        getTypeConverter()->convertType(SrcType.getPointeeType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    auto NewGlobal = Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::Private,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0);
+    mlir::Region &InitRegion = NewGlobal.getInitializerRegion();
+    mlir::Block *Block = Rewriter.createBlock(&InitRegion);
+    mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+    Rewriter.setInsertionPointToStart(Block);
+    mlir::Value Addr = mlir::LLVM::AddressOfOp::create(
+        Rewriter, NewGlobal.getLoc(), DstType, InitializerSym.getValue());
+    mlir::LLVM::ReturnOp::create(Rewriter, NewGlobal.getLoc(),
+                                 llvm::ArrayRef<mlir::Value>({Addr}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.CompositeConstruct` building a 1-D vector out of scalar
 /// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
 /// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
@@ -18248,6 +18313,7 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SetMeshOutputsEXTConversionPattern, EmitMeshTasksEXTConversionPattern,
       SpecConstantErasurePattern, SpecConstantCompositeErasurePattern,
       StageIOGlobalVariablePattern, PrivateAggregateGlobalVariablePattern,
+      PrivatePointerInitializerGlobalVariablePattern,
       SwitchConversionPattern, TaskPayloadGlobalVariablePattern,
       TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern,
       VectorExtractDynamicPattern, VectorInsertDynamicPattern,
