@@ -2914,6 +2914,91 @@ TEST(CanonicalizeStageTest, ThreadsDynamicVertexIndexIntoOutputStore) {
     EXPECT_FALSE(isa<StoreInst>(&I));
 }
 
+/// (Roadmap L348) `dEQP-VK.spirv_assembly.instruction.graphics.indexing.
+/// output.component_tessc`'s own real shape: a Hull entry's own
+/// compile-time-*unrolled* per-control-point output write, where the
+/// *outer* (control-point) array index is a plain constant literal (one
+/// store per unrolled control point: `0`, `1`, `2`, ...), but the
+/// *trailing* index selecting a lane within that control point's own
+/// output vector is a genuinely dynamic, per-invocation value. Unlike
+/// `ThreadsDynamicVertexIndexIntoOutputStore` above (a dynamic *outer*
+/// index, constant trailing lane), this is the opposite combination:
+/// `getDynamicVertexIndexedAccess`'s own manual constant-vertex-index walk
+/// used to decline it outright (its "one non-constant index left" branch
+/// only recognized a further array row, not a vector lane, so hitting a
+/// `FixedVectorType` here always fell through to `return std::nullopt`),
+/// even though the vertex index itself is a harmless compile-time
+/// constant -- leaving `@gl_out` never given a real, JIT-resolvable store
+/// and surfacing only as an unresolved `spirv_varN` symbol at JIT-link
+/// time, with no earlier diagnostic at all (confirmed via a real
+/// `feme-translate` IR reduction of this exact CTS case).
+TEST(CanonicalizeStageTest,
+     ThreadsConstantVertexIndexWithDynamicComponentIntoOutputStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_out = external addrspace(8) global [3 x <4 x float>], !spirv.Decorations !0
+    define void @main(i32 %c0, i32 %c1, i32 %c2) #0 {
+      %p0 = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @gl_out, i32 0, i32 0, i32 %c0
+      store float 1.000000e+00, ptr addrspace(8) %p0
+      %p1 = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @gl_out, i32 0, i32 1, i32 %c1
+      store float 1.000000e+00, ptr addrspace(8) %p1
+      %p2 = getelementptr inbounds [3 x <4 x float>], ptr addrspace(8) @gl_out, i32 0, i32 2, i32 %c2
+      store float 1.000000e+00, ptr addrspace(8) %p2
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="hull" }
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  Function *F = M->getFunction("main");
+  Argument *C0 = F->getArg(0);
+  Argument *C1 = F->getArg(1);
+  Argument *C2 = F->getArg(2);
+
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 1u);
+  EXPECT_EQ(Sig->Elements[0].RowCount, 1u);
+  EXPECT_EQ(Sig->Elements[0].ComponentCount, 4u);
+
+  // Every one of the 3 compile-time-unrolled per-control-point writes
+  // rewrites into a typed output-store call: `Vertex` is the matching
+  // constant control-point literal (0, 1, 2), and `Component` is the
+  // corresponding dynamic argument, not a constant.
+  SmallVector<CallInst *, 4> Stores;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    StageOpKind Kind;
+    if (!CI || !isStageOpCall(*CI, &Kind) || Kind != StageOpKind::OutputStore)
+      continue;
+    Stores.push_back(CI);
+  }
+  ASSERT_EQ(Stores.size(), 3u);
+  for (unsigned I = 0; I != 3; ++I) {
+    CallInst *CI = Stores[I];
+    EXPECT_EQ(getStageOpConstantOperand(*CI, /*Row=*/1), 0u);
+    EXPECT_EQ(cast<ConstantInt>(CI->getArgOperand(4))->getZExtValue(), I)
+        << "store " << I << " must thread the matching constant "
+        << "control-point index through as Vertex";
+    EXPECT_FALSE(isa<Constant>(CI->getArgOperand(2)))
+        << "store " << I << "'s own Component operand must stay the "
+        << "genuinely dynamic argument, not a constant";
+  }
+  EXPECT_EQ(Stores[0]->getArgOperand(2), C0);
+  EXPECT_EQ(Stores[1]->getArgOperand(2), C1);
+  EXPECT_EQ(Stores[2]->getArgOperand(2), C2);
+
+  // No raw, un-rewritten GEP into `@gl_out` survives.
+  for (Instruction &I : instructions(F))
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      EXPECT_NE(GEP->getPointerOperand(), M->getGlobalVariable("gl_out"))
+          << "a raw GEP into the stage-IO global must not survive "
+             "canonicalization";
+}
+
 /// (Roadmap H6b) The builtin-interface-block-array shape a mesh entry's
 /// own `gl_MeshPrimitivesEXT[]` genuinely takes (mirroring
 /// `ThreadsDynamicVertexIndexIntoInterfaceBlockArrayMemberLoad`'s `gl_in[]`

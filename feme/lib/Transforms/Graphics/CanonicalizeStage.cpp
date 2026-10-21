@@ -2132,6 +2132,26 @@ struct DynamicVertexIndexedAccess {
   // it). Empty for every other shape, including the plain
   // single-non-constant-terminal-index one `RowIndex` already covers.
   SmallVector<std::pair<Value *, uint64_t>, 2> RowTerms;
+  // (Roadmap L348) A genuinely non-constant *final* index into a trailing
+  // `FixedVectorType` -- e.g. `gl_out[0].myOut[dynamicComponent]`, the
+  // real shape a `dEQP-VK.spirv_assembly.instruction.graphics.indexing.
+  // output.component_tessc` hull entry's own compile-time-unrolled,
+  // per-control-point output write takes: the *outer* (vertex/control-
+  // point) index is a plain constant literal (one store per unrolled
+  // control point), with the *dynamic* index instead selecting a lane
+  // within that control point's own output vector. Mutually exclusive
+  // with \p RowIndex/\p RowTerms (a vector has no further row dimension
+  // to recurse into) -- set instead of them, mirroring
+  // `DynamicRowIndexedAccess::DynamicComponent`'s identical role for a
+  // non-vertex-arrayed global. Before this field existed, this shape fell
+  // through the walk below's own "one non-constant index left" check
+  // (which only recognized a further *row*, i.e. `ArrayType`, dimension,
+  // not a vector lane) and was rejected outright, even though the vertex
+  // index itself was a harmless constant -- leaving the stage-IO global
+  // never resolved and surfacing as an unresolved-symbol JIT-link failure
+  // exactly like \p RowIndex's own gap once did (see that field's
+  // comment).
+  Value *Component = nullptr;
 };
 
 /// Returns `std::nullopt` if \p Ptr is not this exact shape.
@@ -2183,15 +2203,16 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
     Value *ProbeComponent = nullptr;
     std::optional<uint32_t> RowCount = collectDynamicRowTerms(
         CurTy, ProbeIt, GEP->idx_end(), IDStart, Terms, ProbeComponent);
-    // (Roadmap L138) A trailing dynamic vector-lane select
-    // (`ProbeComponent` set) is not yet modeled by
-    // `DynamicVertexIndexedAccess` at all (no `Component` field exists
-    // here, unlike `DynamicRowIndexedAccess`'s own sibling handling
-    // below) -- deliberately declines this shape rather than silently
-    // dropping the lane selection, falling through to the plain walk
-    // below (which will, in turn, correctly decline too, since a
-    // per-vertex-arrayed global reaching this far with a dynamic
-    // component select is not yet a supported combination).
+    // (Roadmap L138/L348) A trailing dynamic vector-lane select
+    // (`ProbeComponent` set) *alongside* a genuine multi-member nested
+    // struct's own dynamically-indexed array dimension (`Terms`
+    // non-empty) is not yet modeled by `DynamicVertexIndexedAccess`'s
+    // `RowTerms`/`Component` pairing -- deliberately declines this
+    // doubly-dynamic combination rather than silently dropping the lane
+    // selection, falling through to the plain walk below (which handles
+    // the simpler, much more common single-dynamic-index-plus-trailing-
+    // lane shape via its own `Component` field instead, see that field's
+    // comment).
     if (RowCount && !Terms.empty() && !ProbeComponent)
       return DynamicVertexIndexedAccess{GV, VertexIndex, 0, nullptr,
                                         IDStart, std::move(Terms)};
@@ -2200,6 +2221,7 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
   uint64_t ByteOffset = 0;
   unsigned Member = 0;
   Value *RowIndex = nullptr;
+  Value *Component = nullptr;
   for (++IdxIt; IdxIt != GEP->idx_end(); ++IdxIt) {
     if (auto *CI = dyn_cast<ConstantInt>(*IdxIt)) {
       uint64_t Idx = CI->getZExtValue();
@@ -2240,35 +2262,43 @@ getDynamicVertexIndexedAccess(Value *Ptr, const DataLayout &DL,
       continue;
     }
     // (Roadmap H92) The one non-constant index left, other than the
-    // vertex index already peeled above: must directly select a row
-    // within an array, and must be the final index -- a component-level
-    // index after it is not modeled, mirroring
-    // `getDynamicRowIndexedAccess`'s own identical constraint.
-    if (RowIndex || !isa<ArrayType>(CurTy) ||
-        std::next(IdxIt) != GEP->idx_end())
+    // vertex index already peeled above: must directly select either a
+    // row within an array (`RowIndex`) or, (Roadmap L348) a lane within a
+    // trailing vector (`Component`, mirroring
+    // `DynamicRowIndexedAccess::DynamicComponent`'s identical role) --
+    // and must be the final index either way, since neither an array row
+    // nor a vector lane has any further nesting to walk into.
+    if (RowIndex || Component || std::next(IdxIt) != GEP->idx_end())
       return std::nullopt;
-    RowIndex = *IdxIt;
+    if (isa<ArrayType>(CurTy))
+      RowIndex = *IdxIt;
+    else if (isa<FixedVectorType>(CurTy))
+      Component = *IdxIt;
+    else
+      return std::nullopt;
   }
   // (Roadmap H110) A constant vertex index with no further non-constant
-  // `RowIndex` is a fully constant-offset access after all -- leave it for
-  // the ordinary constant-offset path (`getStageIOBaseAndOffset`) to
-  // resolve, exactly as before this roadmap entry. Only a constant vertex
-  // index *paired with* a genuinely dynamic `RowIndex` (e.g.
-  // `ls[0].location_var[i]`, a per-primitive output block with exactly one
-  // primitive -- so the outer index is always the compile-time constant
-  // `0` -- whose one struct member is itself an array written through a
-  // loop-carried `i`) needs this function's own result: that shape's
-  // `RowIndex` is a non-constant index `getStageIOBaseAndOffset` cannot
-  // fold at all, but the outer per-primitive dimension is not itself
-  // dynamic, so it was never `getDynamicRowIndexedAccess`'s shape either
-  // (that function explicitly excludes any `isDynamicIndexedArrayGlobal`
-  // global, to avoid double-recognizing this function's own genuinely
-  // dynamic-vertex-index shape) -- previously falling through both
-  // functions entirely unresolved.
-  if (ConstantVertexIndex && !RowIndex)
+  // `RowIndex`/`Component` is a fully constant-offset access after all --
+  // leave it for the ordinary constant-offset path
+  // (`getStageIOBaseAndOffset`) to resolve, exactly as before this
+  // roadmap entry. Only a constant vertex index *paired with* a
+  // genuinely dynamic `RowIndex` (e.g. `ls[0].location_var[i]`, a
+  // per-primitive output block with exactly one primitive -- so the
+  // outer index is always the compile-time constant `0` -- whose one
+  // struct member is itself an array written through a loop-carried `i`)
+  // or `Component` (Roadmap L348, e.g. `gl_out[0].myOut[dynamicLane]`)
+  // needs this function's own result: either one is a non-constant index
+  // `getStageIOBaseAndOffset` cannot fold at all, but the outer
+  // per-vertex dimension is not itself dynamic, so it was never
+  // `getDynamicRowIndexedAccess`'s shape either (that function explicitly
+  // excludes any `isDynamicIndexedArrayGlobal` global, to avoid
+  // double-recognizing this function's own genuinely dynamic-vertex-index
+  // shape) -- previously falling through both functions entirely
+  // unresolved.
+  if (ConstantVertexIndex && !RowIndex && !Component)
     return std::nullopt;
   return DynamicVertexIndexedAccess{GV, VertexIndex, ByteOffset, RowIndex,
-                                    Member, {}};
+                                    Member, {}, Component};
 }
 
 /// (Roadmap H7w) `gl_ClipDistance`/`gl_CullDistance` (or any other
@@ -4917,6 +4947,21 @@ std::optional<StageIOAccess> resolveStageIOAccess(
         return std::nullopt;
       return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
                            Dyn->RowIndex, nullptr, Dyn->VertexIndex,
+                           OutputGlobals.contains(Dyn->GV)};
+    }
+    // (Roadmap L348) A constant vertex/control-point index paired with a
+    // genuinely dynamic trailing vector-lane select (e.g.
+    // `gl_out[0].myOut[dynamicComponent]`) resolves directly here too,
+    // mirroring `DynamicRowIndexedAccess::DynamicComponent`'s identical
+    // handling just below for a non-vertex-arrayed global -- there is no
+    // further row dimension (`Row` stays null) and no byte-offset
+    // recursion needed (this *is* the leaf element already).
+    if (Dyn->Component) {
+      if (Dyn->Member >= It->second.size())
+        return std::nullopt;
+      Value *Component = B.CreateZExtOrTrunc(Dyn->Component, B.getInt32Ty());
+      return StageIOAccess{ArrayRef(It->second).slice(Dyn->Member, 1),
+                           nullptr, Component, Dyn->VertexIndex,
                            OutputGlobals.contains(Dyn->GV)};
     }
     Type *ElemTy = cast<ArrayType>(Dyn->GV->getValueType())->getElementType();
