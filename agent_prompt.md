@@ -69,28 +69,27 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)(g)` implementation** (2 cases): follow the design in
-   `Roadmap.md` -- when `PreRegion` fails, try `ChainBypassRegion =
-   collectUniformPassThroughRegion(ChainBypassEntry, Latch, ExitBlock, C,
-   PeeledFrom)`; intersect with `PostRegion` to find the single merge block `M`;
-   validate every predecessor of `M` is in one region or the other; insert phis
-   at `M` for
-   `active.check.live`/`active.check.sideeffect`/`exited.via.check.next` (real
-   values on the `PostRegion` side, pass-through `Masks`/`ExitedViaCheck` values
-   on the bypass side). Use `FEME_DEBUG_PASSTHROUGH=1` on
-   `/tmp/relay_frozen2/repro.ll` to verify the partitioning directly before
-   writing the insertion logic. New unit test should assert successful lowering
-   (verifyModule clean, probably also checking the inserted phi shape), not just
-   a diagnostic -- consider whether
-   `DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR` needs
-   updating/superseding once this shape actually lowers. Budget as its own
-   session; do not rush.
+1. **`ENV6(c)(2)(h)` investigation** (1 case,
+   `stable-mergesort-for-always-false-if-discard`): start at
+   `/tmp/mergesort_discard_repro/repro.ll` + `invalid.log` (already captured, no
+   need to re-derive). Trace `%.inv`'s own definition and the `select`'s own
+   block (`flatten`, `Linearize.cpp` ~line 3339-3363) back through `flatten`'s
+   recursion for this specific shape -- likely a divergent diamond whose
+   `T`/`Fsucc` arms recursively contain further non-trivial control flow (nested
+   loop or another diamond) that relocates `Cond`'s definition or the merge
+   block `R` somewhere `Cond` no longer dominates. Don't assume shared cause
+   with `ENV6(c)(2)(e)`/`(g)` just because all three say "does not dominate all
+   uses" on mask-looking names -- confirmed this is a different function,
+   different code path.
 2. `ENV6(c)(2)(f)` (1 case,
    `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
    still unexplained, not started.
-3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
-4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
-5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, not
+   discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error,
+   histogram tolerance), not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority,
+   budget as their own multi-session efforts.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access becomes available.
