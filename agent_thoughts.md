@@ -129651,3 +129651,44 @@ When a fix changes the failure *mechanism* without flipping the targeted case's 
 - `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
 - `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
 - offload-test-suite upstreaming (3 patches, blocked on push access)
+
+# Session: `ENV6(c)(2)(j)` fixed -- `loop.exit.guard` divergent-branch limitation, targeted case flips to Pass
+
+**Confirmed device**: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Checked again before the final real-ICD corpus run.
+
+## What happened, in order
+
+1. Reproduced `ENV6(c)(2)(j)` directly: `feme-cpu-linearize` lowers `stable-mergesort-for-always-false-if-discard` cleanly, then `feme-cpu-simdize` rejects it one stage later, on block `loop.exit.guard`'s own surviving divergent `CondBr`.
+2. **Corrected a wrong theory from last session**: `loop.exit.guard` is not synthesized fresh by `LoopLinearizer`. It's a pre-existing `StructurizeCFG` relay block, already in the IR before any FeMe pass runs. Found by grepping the raw source IR directly -- two minutes, should've been step 1 last time too.
+3. Compared this case's `loop.exit.guard` against the same-named, same-shaped block in the existing, passing `loop-relay-chain-two-hops.ll` lit test. Real difference: that test's block has a trivially uniform (constant-valued) condition; this case's is a genuine per-lane loop-carried value. Shape isn't the bug. Divergence is.
+4. First fix attempt (blind second whole-function `DiamondFlattener` pass after `LoopLinearizer`): worked on the target case, **broke 5 other lit tests** by re-flagging already-fine uniform relay blocks. Reverted fully, kept a copy at `/tmp/Linearize.cpp.naive_second_pass` for the record.
+5. Landed narrower fix: a new post-`LoopLinearizer` scan that only touches out-of-cycle blocks whose `CondBr` is still genuinely `UniformityInfo`-divergent, reusing the existing `DiamondFlattener::flattenLoopBodyDiamond` (same mechanism `LoopLinearizer`'s own `H165` scan already trusts for an in-cycle version of this exact shape).
+
+## Verification (all green)
+
+- `check-feme`: 3867/3871, 4 unsupported, 0 regressions.
+- `FeMeTransformsCPUTests`: 670/670.
+- Full `Linearize/` lit suite: 69/69 -- specifically re-confirmed the 5 tests the naive attempt broke now pass with the narrower fix.
+- Extended `loop-nested-sibling-diamonds-peel-shared-merge.ll` with a second `RUN` line through `feme-cpu-simdize`; `git stash` confirms it fails pre-fix, passes post-fix.
+- Real `deqp-vk`, 106-case graphicsfuzz corpus, proper before/after baseline diff: **11 Pass -> 13 Pass, zero regressions**. The targeted case flips, plus a bonus flip (`cov-machine-scheduler-for-if-pow`).
+
+## Commits (3, in order)
+
+1. `Linearize.cpp` fix + extended lit test (kept together, test is the direct proof).
+2. `Roadmap.md` + `VulkanCTSReport.md` (`L515`) update, `ENV6(c)(2)(j)` struck through.
+3. This `agent_thoughts.md` entry.
+
+No feature/extension inventory update needed -- this is a compiler control-flow bug fix, not a feature-level change (same precedent as the `(i)` session).
+
+## Next steps (carried forward, nothing new found this session beyond the fix itself)
+
+Pick any one of these to start the next session -- all are independent, no shared setup:
+
+1. **`ENV6(c)(2)(f)`** (~30-60 min to triage): 1 case, `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`, unexplained non-dominance `Fail`. Not started. Start by reproducing with `FEME_DUMP_DIVERGENT_BRANCH=1`/`FEME_DEBUG_FLATTEN_TRACE=1` the same way this session did, before assuming anything about the cause.
+2. **`ENV6(c)(2)(a)`** (budget a full session): 7-case all-black-render bucket, not discard-centric. Investigate fresh -- these haven't been looked at since the original triage pass.
+3. **`ENV6(c)(2)(c)`/`(d)`**: two isolated 1-case issues, not started.
+4. **`ENV6(c)(3)`** (83 cases) / **`ENV6(d)`** (132 cases): own multi-session architecture efforts, not a quick fix.
+5. **`ENV5(c)(7)(b)`** (hull lockstep barrier, 3 cases): lowest priority, unchanged for many sessions.
+6. offload-test-suite upstreaming (3 patches): blocked on push access, unchanged for many sessions.
+
+**Fastest next concrete action**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(f)` and re-run its one case through `deqp-vk` with `FEME_DUMP_DIVERGENT_BRANCH=1` to see what it actually says today -- under two minutes.
