@@ -69,24 +69,28 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. `ENV6(c)(2)(g)` (2 cases, new): design and implement real support for a
-   uniform inner conditional gating a divergent per-iteration check. Two
-   candidate directions (not yet chosen between): (a) generalize the
-   `ChainGate`/`L377(a)` bypass-diamond fix's reconnect-point recognition from
-   exactly `CheckExit->StayInLoop` to anywhere in the uniform post-check region,
-   inserting merge phis for the mask-propagation values at the real reconnect
-   point; (b) a new, separate recognition path for this specific shape. Budget
-   as its own session -- do not rush, same caution as `emulate_msrtss`.
+1. **`ENV6(c)(2)(g)` implementation** (2 cases): follow the design in
+   `Roadmap.md` -- when `PreRegion` fails, try `ChainBypassRegion =
+   collectUniformPassThroughRegion(ChainBypassEntry, Latch, ExitBlock, C,
+   PeeledFrom)`; intersect with `PostRegion` to find the single merge block `M`;
+   validate every predecessor of `M` is in one region or the other; insert phis
+   at `M` for
+   `active.check.live`/`active.check.sideeffect`/`exited.via.check.next` (real
+   values on the `PostRegion` side, pass-through `Masks`/`ExitedViaCheck` values
+   on the bypass side). Use `FEME_DEBUG_PASSTHROUGH=1` on
+   `/tmp/relay_frozen2/repro.ll` to verify the partitioning directly before
+   writing the insertion logic. New unit test should assert successful lowering
+   (verifyModule clean, probably also checking the inserted phi shape), not just
+   a diagnostic -- consider whether
+   `DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR` needs
+   updating/superseding once this shape actually lowers. Budget as its own
+   session; do not rush.
 2. `ENV6(c)(2)(f)` (1 case,
    `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
-   still an unexplained non-dominance `Fail`; short, standalone investigation,
-   not yet started.
-3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't
-   assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
-4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error,
-   histogram tolerance), likely each a short, separate investigation.
-5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority,
-   budget as their own multi-session efforts when picked up.
+   still unexplained, not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access becomes available.
