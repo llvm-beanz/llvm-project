@@ -69,26 +69,18 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **Design session, don't rush**: treat `ENV6(c)(2)(g)` and
-   `ENV6(c)(2)(i)` as one problem -- "recognize when a `validate`-rejected
-   shared predecessor is actually an enclosing diamond's own real
-   reconvergence point, and insert merge phis there instead of rejecting."
-   Start from `ENV6(c)(2)(g)`'s own two candidate directions already in
-   `Roadmap.md` (generalize `ChainGate`'s reconnect-point recognition vs. a
-   new dedicated recognition path), but validate the design against
-   **both** reproducers (`/tmp/relay_frozen2/repro.ll` for `(g)`,
-   `/tmp/mergesort_discard_repro/repro.ll` for `(i)`) before committing to
-   one approach, since a fix scoped only to `(g)`'s exact shape
-   (`CheckExit->StayInLoop`) will not automatically cover `(i)`'s nested
-   nested-diamond-inside-diamond shape.
-2. `ENV6(c)(2)(f)` (1 case,
-   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
-   still unexplained, not started.
-3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
-4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
-5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, budget as
-   own multi-session efforts.
-6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest
-   priority.
-7. Upstream the 3 `offload-test-suite` patches if push access becomes
-   available (unchanged for many sessions).
+## Two candidate fix directions for next session (pick one, prototype against BOTH reproducers)
+
+1. **(a) Extend the existing peel guard.** `peelConstantFlowPredecessors` already has `peelWouldDestroyAncestorReconvergencePoint`, which looks *backward* from the sole surviving predecessor for an ancestor `CondBr` whose `validate` could break. Add a *forward*-looking variant: before peeling, check whether the peel's `Target` would become newly shared between the peeled chain and some other still-unflattened nested `CondBr`'s sibling arm; if so, bail (skip just that one peel, leave the harmless-redundant IR in place for `H165` to flatten normally).
+2. **(b) Local un-peel-and-retry in `H165`.** When `validate` rejects a pass-through block with >1 predecessor, check whether undoing *just that one* peeled edge (not all peeling cycle-wide) would let `flattenLoopBodyDiamond` succeed; if so, locally reverse it and retry.
+
+Validate against **both** `/tmp/relay_frozen2/repro.ll` (`(g)`, must stay Pass) and `/tmp/mergesort_discard_repro/repro.ll` (`(i)`, must flip to Pass), then the full 106-case graphicsfuzz corpus, then `check-feme`, before considering either landed.
+
+## Carried-forward backlog (unchanged, not investigated this session)
+
+- `ENV6(c)(2)(f)` (1 case, unexplained non-dominance `Fail`, not started)
+- `ENV6(c)(2)(a)` (7-case all-black-render bucket, investigate fresh)
+- `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started)
+- `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
+- `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
+- offload-test-suite upstreaming (3 patches, blocked on push access)
