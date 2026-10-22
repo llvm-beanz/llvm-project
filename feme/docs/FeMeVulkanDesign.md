@@ -2528,6 +2528,33 @@ input-attachment list of its own exists to populate it from). See
 "Roadmap H2h: measured impact" in VulkanCTSReport.md for the
 `dEQP-VK.multiview.input_attachments` regression this closes.
 
+**Known gap (roadmap `ENV6(b)(1)`, found but not yet fixed): no fallback to
+the descriptor-set's own bound image when `vkCmdSetRenderingInputAttachmentIndices`
+maps an index to `VK_ATTACHMENT_UNUSED`.** Per `VkRenderingInputAttachmentIndexInfo`'s
+own man page, `VK_ATTACHMENT_UNUSED` in `pColorAttachmentInputIndices`/
+`pDepthInputAttachmentIndex`/`pStencilInputAttachmentIndex` means that
+attachment does *not* back any `subpassInput`'s `InputAttachmentIndex` --
+a `subpassInput` the shader still declares at that index must instead read
+whatever image its own bound `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT`
+descriptor names, exactly like an ordinary image descriptor (the only
+legal way to read an image that is not one of the current rendering's own
+attachments through a `subpassInput`, e.g. `dEQP-VK.pipeline.*.multisample.
+misc.dynamic_rendering.emulate_msrtss.*`'s "unresolve" draw, which
+deliberately sets every index to `VK_ATTACHMENT_UNUSED` and reads its
+resolve attachments through the descriptor set instead). `SubpassLoadPattern`
+(SPIRVToLLVMPatterns.cpp) has no such fallback: it unconditionally discards
+`Adaptor.getImage()` -- the resolved descriptor-set handle -- and always
+serves the read from `buildSubpassInputHeap`'s index-addressed array, which
+is empty for an unmapped index. Every `subpassInput` test in the corpus
+before this one happened to bind its descriptor to the same view already
+sitting at that attachment position, so the gap was invisible until this
+case, which deliberately binds a *different* image. Fixing this needs the
+descriptor-set handle threaded through as a second `feme.stage.subpass.load`
+operand (alongside the existing index-addressed heap) and a runtime-level
+fallback when the heap slot for a requested index is unmapped -- see
+`VulkanCTSReport.md`'s `L501` and `Roadmap.md`'s `ENV6(b)(1)` for the full
+scope.
+
 **Status (roadmap H2b): zero color attachments now accepted, both at
 pipeline creation and at draw time.** `GraphicsPipeline.cpp`'s own
 `Targets->Colors.empty()` rejection and `feme::graphics::executeDraws`'s
