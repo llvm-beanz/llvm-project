@@ -4011,4 +4011,125 @@ TEST(LinearizeTest, LinearizesUniformInnerCondGatingDivergentCheck) {
          "itself or via the uniform bypass that skips it";
 }
 
+// Roadmap ENV6(c)(2)(h): a minimal reduction (same shape, not the
+// verbatim capture -- see this session's own `agent_thoughts.md` entry)
+// of `dEQP-VK.graphicsfuzz.stable-mergesort-for-always-false-if-
+// discard`'s own real root cause: `LoopLinearizer::linearizeCycle`'s
+// own loop-body fixed-point scan (`flattenLoopBodyDiamond`) treats
+// `inner.t`'s divergent branch as an independent, self-contained loop-
+// body diamond and flattens it *before* the loop's own, still-intact,
+// uniform sibling diamond (`outer.t`'s own `%ucond` branch) is ever
+// itself examined. `inner.t`'s own "immediate post-dominator" (`R`,
+// computed by `immediatePostDom` in total isolation, with no knowledge
+// of `outer.t`'s existence at all) is genuinely, correctly `after` --
+// but `inner.t`'s own true-arm walk toward it passes straight through
+// `merge`, an ordinary (non-`CondBr`) pass-through block that is *also*
+// `outer.t`'s own false-arm's (`outer.f`'s) real, structural
+// reconvergence point. `validate`'s walk, having no way to know
+// `merge` is shared with a sibling diamond entirely outside its own
+// `[inner.t, after)` region, happily walks straight through it, and the
+// `select`s this pass builds at `after` from `inner.t`'s own masked
+// values (`%dcond`) end up used along the `outer.f` -> `merge` path,
+// which never executes `inner.t` at all -- `verifyModule`'s "does not
+// dominate all uses" on exactly this shape, before the fix below.
+//
+// The fix: `validate` (and, to stay in lockstep, no change needed in
+// `flatten` since it is only ever invoked after a successful
+// `validate` over the identical `Start`/`End`) now rejects any ordinary
+// fallthrough successor that is not solely owned by the walk reaching
+// it -- i.e. has more than the one predecessor (`Cur` itself) this walk
+// itself supplies -- unless that successor is `End` (the caller's own
+// concern) or a cycle header (a loop preheader's own fallthrough into
+// its header legitimately lands on a block whose *other* predecessor is
+// simply the loop's own backedge). This turns the previous crash
+// (malformed IR) into the same kind of clean "unsupported shape"
+// diagnostic `linearizeCycle`'s own, separate exit-check-matching logic
+// already uses elsewhere for shapes this milestone does not yet
+// generalize to -- this specific case does not yet lower (the loop's
+// own exit-check-matching logic has no way to re-merge `inner.t`'s now-
+// rejected diamond back into the loop body on its own), but it is
+// deterministic and diagnosed, never malformed IR or a crash.
+TEST(LinearizeTest,
+     DiagnosesLoopBodyDiamondSharingMergeWithSiblingUniformDiamond) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+    entry:
+      br label %header
+
+    header:
+      %i = phi i32 [0, %entry], [%i.next, %latch]
+      %trip = icmp slt i32 %i, 4
+      br i1 %trip, label %outer.t, label %exit
+
+    outer.t:
+      %ucond = icmp eq i32 %i, 2
+      br i1 %ucond, label %inner.t, label %outer.f
+
+    inner.t:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %dcond = icmp eq i32 %tid, 0
+      br i1 %dcond, label %inner.t.sub, label %inner.f.crit
+
+    inner.t.sub:
+      %v = add i32 %tid, 1
+      br label %merge
+
+    inner.f.crit:
+      br label %tail.crit
+
+    merge:
+      %m = phi i32 [%v, %inner.t.sub], [0, %outer.f]
+      br label %tail.crit2
+
+    outer.f:
+      br label %merge
+
+    tail.crit:
+      br label %after
+
+    tail.crit2:
+      br label %after
+
+    after:
+      %p = phi i32 [99, %tail.crit], [%m, %tail.crit2]
+      br label %latch
+
+    latch:
+      %i.next = add i32 %i, 1
+      br label %header
+
+    exit:
+      ret void
+    }
+
+    declare i32 @llvm.dx.thread.id(i32)
+
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Handle) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Handle) = true;
+      },
+      &SawError);
+
+  // Must not crash the process, and must never leave the module
+  // malformed -- a pre-fix bug produced `verifyModule`-failing IR
+  // instead of this clean diagnostic.
+  EXPECT_TRUE(run(*M));
+  EXPECT_TRUE(SawError) << "a loop-body diamond sharing its reconvergence "
+                           "point with an untouched sibling diamond must "
+                           "be cleanly diagnosed as unsupported, not "
+                           "silently mis-flattened into invalid IR";
+  EXPECT_FALSE(verifyModule(*M, &errs()))
+      << "a declined (diagnosed) shape must leave the module in its "
+         "original, well-formed state -- never malformed IR -- "
+         "confirming the fix turned the previous crash into a clean, "
+         "no-op decline";
+}
+
 } // namespace
