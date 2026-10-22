@@ -129129,3 +129129,46 @@ The 4 cases with the new `.relay.frozen` dominance shape are a *different* bug i
 4. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
 5. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 6. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: ENV6(c)(2)(b) second dominance bug fixed -- freezeRelayChainExitValues (L509)
+
+**Next action (under two minutes)**: `source /home/dev/.config/feme/env.sh && cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_DUMP_IR_PRELINEARIZE=1 "$FEME_VULKAN_CTS_DEQP_VK" --deqp-case=dEQP-VK.graphicsfuzz.cov-loop-condition-filter-some-iterations-never-discard --deqp-log-filename=/tmp/f3.qpa` to re-grab `ENV6(c)(2)(e)`'s own third-bug IR (reproducers already saved at `/tmp/relay_frozen2/` from this session, but regrab if that directory is gone).
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (standing requirement).
+2. Picked up where the last session left off: the 4-case `.relay.frozen` dominance cluster inside `ENV6(c)(2)(b)`.
+3. Reduced `do-while-if-return`'s pre-Linearize IR to a standalone repro (`/tmp/relay_frozen/repro.ll`), reproduced the exact two `"Instruction does not dominate all uses!"` diagnostics via `feme-opt --llvm -passes=feme-cpu-linearize`.
+4. Used `FEME_OPT_DUMP_INVALID=1` to see the invalid IR directly: found `%21 = xor i1 %.relay.frozen1, true` placed *before* `%.relay.frozen1`'s own definition in the same block -- a used-before-defined bug.
+5. Root-caused to `freezeRelayChainExitValues` (`Linearize.cpp`): it built every relay-chain hop's "kept"-edge `select` with one `IRBuilder` anchored at the hop block's own terminator, but a phi's incoming value for an edge must dominate that edge's *predecessor*, not the phi's own (downstream) parent block.
+6. Fixed by building a fresh `IRBuilder` per kept index, anchored at that index's own predecessor's terminator -- proved generally dominance-sound (not just for single-successor predecessors): if X dominates block B, X dominates every one of B's predecessors too.
+7. Rebuilt `feme-opt`, confirmed the standalone repro now passes. Rebuilt `feme_vulkan`, re-ran all 6 real CTS cases from `L508`'s residual: **3 now Pass** (`do-while-if-return`, `cov-nested-loops-fragcoord-never-return-descending-loop`, `cov-dfdx-dfdy-after-nested-loops`).
+8. Wrote `LinearizeTest.FreezeRelayChainExitValuesBuildsSelectAtItsOwnEdgesPredecessor`, adapted directly from `/tmp/relay_frozen/repro.ll`. Confirmed via `git stash` it fails without the fix, passes with it.
+9. Ran full `check-feme`: **2 pre-existing failures** surfaced (`FreezesRelayChainExitValueThroughSharedDispatchBlock` unit test + `loop-in-switch-divergent-header-and-relay.ll` lit test) -- both had hard-coded the *old* select placement (inside the relay block itself) as if it were a required invariant, not just an implementation detail. Confirmed the new placement is still dominance-valid for both (just in a different, sibling block); updated both tests to match rather than reverting the fix.
+10. Re-ran `check-feme`: 3864/3868 Passed, 4 Unsupported, 0 real regressions.
+11. Re-verified all 6 real CTS cases one more time against the final binary: same 3/3 split as step 7, confirming nothing moved during the test-fixups.
+12. Investigated the 2 still-failing dominance cases (`cov-loop-condition-filter-some-iterations-never-discard`, `stable-mergesort-for-always-false-if-discard`): root-caused to a **third**, structurally different bug in the relay/exit-check matcher itself (a conditionally-executed inner "switch" block's mask values get read on a path that bypasses that block) -- reproducers saved at `/tmp/relay_frozen2/`, deliberately not fixed this session (likely multi-session architecture-adjacent scope).
+13. Committed: (a) the `Linearize.cpp` fix + new unit test + the two updated pre-existing tests together (one commit, since they're all one indivisible verification unit), (b) `Roadmap.md`/`VulkanCTSReport.md` docs (`L509`), (c) this file.
+
+## Why the two existing-test updates belong in the same commit as the fix
+
+Both failures were *expected*, not surprises: they encoded the previous (buggy) implementation's specific select placement as a literal assertion, rather than the actual invariant (dominance-correctness). Moving the fix's commit forward without them would leave `check-feme` red; bundling them is the smallest correct commit, not scope creep.
+
+## State of `ENV6(c)(2)` now
+
+- **`ENV6(c)(2)(a)`, not started**: 7-case all-black-render bucket, same as last session.
+- **`ENV6(c)(2)(b)`, done (partial), re-split further**: 3 of this session's 6-case residual fixed. 3 remain, now tracked as their own entries:
+  - **`ENV6(c)(2)(e)`, root-caused, not fixed**: 2 cases, a third relay/exit-check-matcher bug (conditionally-executed block's mask values read on a bypassing path).
+  - **`ENV6(c)(2)(f)`, not investigated**: 1 case, still fails with no dominance diagnostic at all.
+- **`ENV6(c)(2)(c)`/`(d)`, not started**: unchanged, 1 case each.
+- `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases) remain untouched.
+
+## Next steps
+
+1. `ENV6(c)(2)(e)` (2 cases): the relay/exit-check matcher's own validation needs to confirm a candidate check block is unconditionally reached every iteration before admitting it as a relay-chain hop -- likely touches `matchExitCheckWithRelay`/`recoverRelayExitCheck`, not `freezeRelayChainExitValues`. Reproducers already at `/tmp/relay_frozen2/repro.ll` and `/tmp/relay_frozen2/invalid.log` -- start there instead of re-deriving. Budget as its own session; this looked more structural than the last two relay fixes.
+2. `ENV6(c)(2)(f)` (1 case, `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`): still an unexplained non-dominance `Fail`; short, standalone investigation, not yet started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error, histogram tolerance), likely each a short, separate investigation.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
