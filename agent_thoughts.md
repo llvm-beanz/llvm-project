@@ -129294,3 +129294,119 @@ The roadmap item's actual scope was "implement real support for [the confirmed] 
 5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: `ENV6(c)(2)(h)` root-caused -- structural `flatten`/`validate` gap, no fix yet
+
+**Next action (under two minutes):** open `feme/docs/Roadmap.md` at
+`ENV6(c)(2)(h)` and re-read the confirmed mechanism below, then start with
+option (a) (bound `immediatePostDom` lookups by the enclosing call's own
+`End`) as the first design to prototype.
+
+## What happened
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan
+   Device` (start of session, per standing rule).
+2. Picked up the retained reproducer at `/tmp/mergesort_discard_repro/`
+   (`repro.ll`, `invalid.log`) from last session -- no re-derivation needed.
+3. Re-ran with the *existing* `FEME_DEBUG_FLATTEN_TRACE=1` env var (already
+   instrumented in `flatten()`, didn't need to add it), piped through
+   `function(instnamer)` first so every block got a stable, non-empty name
+   instead of bare numbers -- this was the key unlock, since the raw dump's
+   blocks (`408`, `510`, `511`, `487`) have no LLVM name and the trace prints
+   `Cur=` (empty) for all of them, making correlation impossible without it.
+4. Cross-referenced the trace against a fresh `FEME_OPT_DUMP_INVALID=1` dump
+   (same instnamer'd names) to map every `Cur`/`End`/`RedirectTo` in the
+   trace onto real block content.
+
+## Root cause (confirmed, not guessed)
+
+The loop body has two *nested* diamonds that `flattenLoopBodyDiamond`
+processes as **one single top-level `flatten()` call**, not two independent
+roots:
+
+- Outer: **uniform** diamond, `Cond=%i586` at `bb584`, merges via real `phi`s
+  at `R=bb589` (exactly 2 preds: `bb612`, `.Flow19_crit_edge`).
+- Inner: **divergent** diamond, `Cond=%.inv`, entry at `bb608` -- which is
+  *inside* the outer diamond's own true arm.
+
+When `flatten()` recurses into `bb608`'s divergent diamond, it computes its
+own reconvergence block via `R' = immediatePostDom(bb608)` with **no bound
+from the enclosing call's own `End=bb589`**. `bb608`'s true (whole-function)
+immediate post-dominator is `Flow21`, far downstream of `bb589` -- because
+`bb589` isn't a `CondBr` block, the inner diamond's own `T`-arm walk just
+passes straight through it as ordinary code, never recognizing it as a
+second region boundary it has crossed. The inner diamond's `select` merge
+ends up built at `Flow21`, which is also reachable via `bb589`'s *other*
+predecessor (`.Flow19_crit_edge`, part of the outer diamond's false arm) --
+a path that never goes through `bb608` and so never defines `%.inv`. Hence:
+dominance violation, exactly matching the observed diagnostic.
+
+`validate()`'s `R->hasNPredecessors(2)` ownership check only fires at
+`CondBr` blocks, so it never notices `bb589` (a plain pass-through block
+mid-walk) is itself a reconvergence point owned by a different, enclosing
+diamond. `MergeVisited`'s "claimed by two roots" check doesn't fire either,
+since this is all one root, not two.
+
+## Why no fix landed this session
+
+Both candidate fixes are changes to `flatten`/`validate`'s **shared
+recursive invariant** (not a narrow anchor-point tweak like `L510`/`L511`):
+
+- (a) Bound inner `immediatePostDom` lookups by the enclosing call's `End`;
+  reject/defer when the inner diamond's natural reconvergence falls outside
+  it.
+- (b) Make `validate`'s walk treat *any* multi-predecessor block it merely
+  passes through (not only ones it stops at) as a provisional boundary
+  needing the same ownership check a `CondBr`-rooted `R` gets.
+
+Per the standing "do not rush" guidance repeated across sessions for this
+class of structural bug (`emulate_msrtss`, `ENV6(c)(2)(g)`), I stopped at a
+solid root cause rather than risk a rushed, broad-blast-radius change to
+code every other case in this pass also depends on.
+
+## State
+
+- No code changed. One commit: Roadmap entry rewritten with the confirmed
+  mechanism (see commit `d6355ad304d5`).
+- `check-feme` not re-run this session (no code change to validate).
+- Vulkan CTS not re-run (no fix landed; `VulkanCTSReport.md`/feature
+  inventories unchanged, nothing to sync).
+
+## Suggested next steps
+
+1. **Start here** (prototype, ~30-60 min): try fix (a) first --
+   thread the enclosing call's own `End` into the recursive `flatten()`/
+   `validate()` calls as an extra bound, and have `immediatePostDom`-based
+   `R`/`R'` computation reject (fall back to the existing generic
+   diagnostic) whenever the computed reconvergence point is not dominated
+   by -- or does not itself reach -- the enclosing `End` cleanly. Reproduce
+   first with `FEME_DEBUG_FLATTEN_TRACE=1 build/bin/feme-opt --llvm
+   -passes="function(instnamer),feme-cpu-linearize" -S
+   /tmp/mergesort_discard_repro/repro.ll -o /dev/null` to re-confirm the
+   `bb584`/`bb608`/`bb589`/`Flow21` names before touching code (names are
+   stable given `instnamer`, no need to re-derive).
+2. If (a) turns out to reject too much (e.g. breaks other currently-passing
+   nested-diamond cases), fall back to (b): extend `validate`'s per-block
+   bookkeeping so a pass-through block with >1 predecessor gets the same
+   `hasNPredecessors`/ownership check a `CondBr`'s own `R` does, rejecting
+   (not silently allowing) an inner diamond whose own `T`/`F` walk crosses
+   such a block before its own `End`.
+3. Whichever lands: new regression unit test in `LinearizeTest.cpp`, reduced
+   from `/tmp/mergesort_discard_repro/repro.ll` (same style as `L509`/`L510`/
+   `L511`'s own tests), asserting clean `verifyModule` (or, if landing (a)/
+   (b) alone only makes this a clean diagnostic rather than a full lowering,
+   assert the diagnostic -- confirm which outcome is actually achievable
+   before writing the assertion).
+4. Re-run the full 106-case `graphicsfuzz` corpus after any fix -- this is
+   exactly the kind of change that could have wide-reaching effects on
+   other nested-diamond shapes, not just this one case; do **not** declare
+   victory on the 1 targeted case alone.
+5. Rebuild `check-feme`, confirm 0 regressions, then update
+   `VulkanCTSReport.md` (new `L513` entry) and strike `ENV6(c)(2)(h)` in
+   `Roadmap.md` only if the case actually flips to Pass.
+6. Carried-forward, unchanged, lower priority: `ENV6(c)(2)(f)` (1 case,
+   unexplained non-dominance `Fail`), `ENV6(c)(2)(a)` (7-case all-black-
+   render bucket, not discard-centric), `ENV6(c)(2)(c)`/`(d)` (2 isolated
+   1-case issues), `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases),
+   `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases), offload-test-suite
+   upstreaming (3 patches, blocked on push access).
