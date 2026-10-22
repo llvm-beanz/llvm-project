@@ -4849,6 +4849,135 @@ bool isSyntheticRelayBlockName(StringRef Name) {
 /// `LoopLinearizer`'s own later `recoverRelayExitCheck` fallback is built
 /// to recover exactly that shape, unlike `DiamondFlattener::validate`'s
 /// stricter non-cycle-boundary check this guard otherwise protects.
+/// Roadmap ENV6(c)(2)(i): unlike the backward, unique-predecessor-chain
+/// walk above (which only ever discovers an *ancestor* `CondBrInst` --
+/// one whose own two arms happen to both lead, via a straight-line chain,
+/// up to \p SoleSurvivor), this instead answers the complementary
+/// question: would this peel newly make \p Target (reachable from \p BB's
+/// bypassed predecessor once the peel redirects it there) a shared
+/// pass-through for some *other*, still-unflattened `CondBrInst` \p C
+/// itself contains -- a block one of that `CondBr`'s own two arms already
+/// reaches *before* its own reconvergence point, which the peel is about
+/// to additionally make reachable from *outside* that `CondBr`'s own
+/// subtree entirely? That shape is exactly what `DiamondFlattener::
+/// validate`'s own predecessor-ownership check (`ENV6(c)(2)(h)`) rejects
+/// once exposed -- for a block the peel has nothing to do with and would
+/// otherwise have flattened cleanly, in its original, not-yet-peeled
+/// form, had `peelConstantFlowPredecessorsInCycle` left it alone (traced
+/// via a real `stable-mergesort-for-always-false-if-discard` reproducer:
+/// `peelConstantFlowPredecessorsInCycle`'s own relay-folding of `Flow19`/
+/// `Flow20`'s scaffolding redirects one of the loop body's two sibling
+/// diamonds' own arms directly into a block the *other*, still-nested
+/// diamond's own T-arm already reaches, fusing the two into a single,
+/// multiply-owned merge block before `LoopLinearizer`'s later `H165` scan
+/// ever gets to flatten the still-nested diamond in its original, cleanly
+/// two-predecessor-owned form).
+///
+/// Checks every `CondBrInst`-terminated block \p C contains (other than
+/// \p Header/\p Latch themselves, and \p BB -- the block actually being
+/// peeled, whose own shape this guard is not concerned with) by running
+/// `DiamondFlattener::probeValidate` against each one's own immediate
+/// post-dominator both strictly before and after speculatively applying
+/// this peel's redirects (sharing one retarget/undo pass with the caller,
+/// since cycles are typically small enough that scanning every `CondBr`
+/// this way is cheap -- the same "cheap enough to always do" reasoning
+/// `linearizeCycle`'s own `PDT` recompute already relies on). Bails
+/// (returns true, meaning "do not peel") only when some such `CondBr`
+/// validates cleanly *before* this peel but would newly fail *after* it
+/// -- a block that already does not validate before the peel is not this
+/// guard's concern; peeling clearly cannot be blamed for a limitation
+/// that already existed.
+static bool peelWouldExposeSiblingDiamondToSharedMerge(
+    BasicBlock *BB, BasicBlock *Header, BasicBlock *Latch, CycleInfo &CI,
+    CycleRef C, ArrayRef<std::pair<BasicBlock *, BasicBlock *>> PredTargets,
+    DominatorTree &DT, PostDominatorTree &PDT, UniformityInfo &UI) {
+  if (PredTargets.empty())
+    return false; // Nothing would actually be retargeted; cannot collide.
+
+  Function &F = *BB->getParent();
+
+  SmallVector<BasicBlock *, 4> Candidates;
+  for (BasicBlock &Cand : F) {
+    if (&Cand == BB || &Cand == Header || &Cand == Latch ||
+        !CI.contains(C, &Cand))
+      continue;
+    // Restricted to a `UniformityInfo`-divergent `CondBr`, the same raw
+    // divergence notion `DiamondFlattener::validate`/`flatten` themselves
+    // already key off (`UI.isDivergentTerminator`, see their own call
+    // sites) -- not `LoopLinearizer::isDivergentBranch`'s broader,
+    // `KnownUniformValues`-aware classification, which this free function
+    // (unlike `LoopLinearizer`'s own members) has no access to. A uniform
+    // `CondBr` is never flattened by `flattenLoopBodyDiamond` in the first
+    // place -- it may instead be a `ChainGate`-style block `LoopLinearizer::
+    // recognizeUniformChainGateMergeBypass` recovers through its own,
+    // entirely separate mechanism, for which `DiamondFlattener::validate`
+    // "succeeding" (it does not know to look for a `ChainGate`'s own
+    // deliberately-external merge predecessor) or "failing" is equally
+    // meaningless here -- confirmed via a real regression this exact
+    // restriction fixes: without it, this guard wrongly treated
+    // `relay_frozen2`'s own uniform `LeafBlock` (whose `R` always has an
+    // external predecessor by design, since that is exactly the shape
+    // `ChainGate` exists to recognize) as something this peel must not
+    // touch, permanently blocking the peel `ChainGate` itself depends on.
+    auto *CandBr = dyn_cast<CondBrInst>(Cand.getTerminator());
+    if (CandBr && UI.isDivergentTerminator(CandBr))
+      Candidates.push_back(&Cand);
+  }
+  if (Candidates.empty())
+    return false;
+
+  // Record which candidates validate cleanly *before* the peel, using
+  // each one's own, pre-peel immediate post-dominator -- the same
+  // `IDom`-as-`End` convention `peelWouldDestroyAncestorReconvergencePoint`
+  // above uses.
+  SmallPtrSet<BasicBlock *, 8> ValidBeforePeel;
+  for (BasicBlock *Cand : Candidates) {
+    DomTreeNodeBase<BasicBlock> *Node = PDT.getNode(Cand);
+    DomTreeNodeBase<BasicBlock> *IDom = Node ? Node->getIDom() : nullptr;
+    if (!IDom)
+      continue;
+    SmallPtrSet<BasicBlock *, 16> MV;
+    SmallPtrSet<BasicBlock *, 16> RB;
+    DiamondFlattener Precheck(F, DT, PDT, CI, UI, MV, RB);
+    if (Precheck.probeValidate(Cand, IDom->getBlock()))
+      ValidBeforePeel.insert(Cand);
+  }
+  if (ValidBeforePeel.empty())
+    return false; // Nothing currently validates that this peel could break.
+
+  // Speculatively retarget every peeled predecessor's edge the same way
+  // the real peel below would, so `PDT`/`validate` see the post-peel
+  // shape -- undone (see below) before this function returns either way.
+  for (auto &PT : PredTargets)
+    cast<UncondBrInst>(PT.first->getTerminator())->setSuccessor(0, PT.second);
+  PDT.recalculate(F);
+
+  bool WouldDestroy = false;
+  for (BasicBlock *Cand : Candidates) {
+    if (!ValidBeforePeel.contains(Cand))
+      continue;
+    DomTreeNodeBase<BasicBlock> *Node = PDT.getNode(Cand);
+    DomTreeNodeBase<BasicBlock> *IDom = Node ? Node->getIDom() : nullptr;
+    bool StillValid = false;
+    if (IDom) {
+      SmallPtrSet<BasicBlock *, 16> MV;
+      SmallPtrSet<BasicBlock *, 16> RB;
+      DiamondFlattener Precheck(F, DT, PDT, CI, UI, MV, RB);
+      StillValid = Precheck.probeValidate(Cand, IDom->getBlock());
+    }
+    if (!StillValid) {
+      WouldDestroy = true;
+      break;
+    }
+  }
+
+  for (auto &PT : PredTargets)
+    cast<UncondBrInst>(PT.first->getTerminator())->setSuccessor(0, BB);
+  PDT.recalculate(F);
+
+  return WouldDestroy;
+}
+
 static bool peelWouldDestroyAncestorReconvergencePoint(
     BasicBlock *BB, BasicBlock *SoleSurvivor, BasicBlock *Header,
     BasicBlock *Latch,
@@ -4995,6 +5124,20 @@ bool peelConstantFlowPredecessors(
     if (peelWouldDestroyAncestorReconvergencePoint(
             BB, SoleSurvivor, CycleHeader, CycleLatch, PredTargets, DT, PDT,
             CI, UI))
+      return false;
+  }
+
+  // Roadmap ENV6(c)(2)(i): independent of whether `BB` itself survives
+  // with one or several remaining predecessors, check whether this peel
+  // would newly expose some *other*, still-nested `CondBrInst` this
+  // cycle contains to a shared, multiply-owned merge block -- see
+  // `peelWouldExposeSiblingDiamondToSharedMerge`'s own comment. Only
+  // meaningful once this block's own enclosing cycle is known (the
+  // top-level, not-in-any-cycle caller never has one to check).
+  if (CycleHeader && CycleLatch) {
+    CycleRef C = CI.getCycle(CycleHeader);
+    if (peelWouldExposeSiblingDiamondToSharedMerge(
+            BB, CycleHeader, CycleLatch, CI, C, PredTargets, DT, PDT, UI))
       return false;
   }
 
