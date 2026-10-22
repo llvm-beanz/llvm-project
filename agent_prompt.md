@@ -69,20 +69,19 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **`ENV6(c)(2)` first** (smaller, likely faster): pick
-   `cov-basic-block-discard-in-function` (one of the 5 discard/kill-named
-   cases), extract its QPA-embedded PNG vs. golden, diff visually, see if the 5
-   discard-named cases share one root cause before touching the other 13.
-2. If the discard sub-pattern doesn't hold, triage the other 13 `ENV6(c)(2)`
-   cases independently -- they likely don't share a cause with each other
-   either.
-3. Only after `(2)` is exhausted, start scoping `ENV6(c)(3)` -- read
-   `Linearize.cpp`'s existing shape-recognition code first to understand which
-   of the 7 named sub-shapes are closest to already-supported, pick the smallest
-   extension, and budget it as its own multi-session milestone (don't try to fix
-   83 cases in one pass).
-4. `ENV6(d)` (`memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`, 132
-   cases) and `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) remain untouched,
-   lower priority than `ENV6(c)`.
-5. (Still low priority, unchanged for many sessions) Upstream the 3
+1. **Fastest next win**: the 4-case `.relay.frozen` dominance cluster inside
+   `ENV6(c)(2)(b)` -- same methodology as this session
+   (`FEME_DUMP_IR_PRELINEARIZE=1` on one case, e.g. `do-while-if-return`, read
+   the `active.header.check.live`/`.relay.frozen*` select chain in
+   `Linearize.cpp`, root-cause, fix, new unit test, re-verify all 4+the 2
+   non-dominance cases).
+2. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't
+   assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+3. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error,
+   histogram tolerance), likely each a short, separate investigation once
+   `(a)`/`(b)` are done.
+4. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority,
+   budget as their own multi-session efforts when picked up.
+5. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+6. (Still low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access becomes available.
