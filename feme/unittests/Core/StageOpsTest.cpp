@@ -8,6 +8,7 @@
 
 #include "feme/Core/StageOps.h"
 
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -187,6 +188,49 @@ TEST_F(StageOpsTest, SubpassLoadCanReadIntegerFormatAttachment) {
   StageOpKind Kind;
   ASSERT_TRUE(isStageOpCall(*CI, &Kind));
   EXPECT_EQ(Kind, StageOpKind::SubpassLoad);
+}
+
+/// (ENV6(b)(1)) `SubpassLoad`'s own fourth operand (added for
+/// `SPIRVResourceLowering.cpp`'s `getOrInsertResolvedSubpassLoadFunc`
+/// resolution, threaded by `SPIRVToLLVMPatterns.cpp`'s
+/// `SubpassLoadPattern`) varies independently of the `ResultTy`-based
+/// overload suffix above: a resolved image-heap-index read's fourth
+/// operand is a scalar `i32`, while a still-unresolved direct (no-index)
+/// depth/stencil read's is a `target("spirv.Image", ...)` handle
+/// `collectHandles` never finds a real use to resolve against. Before this
+/// test's fix, both shapes shared one mangled name whenever `ResultTy`
+/// happened to match (e.g. both widening to `<W x i32>` for an
+/// `isubpassInput`/`usubpassInput` direct stencil read), so
+/// `getOrInsertFunction` silently reused whichever declaration widened
+/// first -- producing a call site whose actual argument type disagreed
+/// with its callee's declared parameter type. That reached
+/// `SelectionDAGBuilder` unflagged by the IR verifier and crashed there
+/// (`getCopyToParts`'s "illegal type" assertion) rather than failing any
+/// earlier, clearer diagnostic; this test instead asserts the two shapes
+/// always get distinct declarations.
+TEST_F(StageOpsTest, SubpassLoadFourthOperandTypeIsMangledIndependently) {
+  Value *IndexOperand = ConstantInt::get(B.getInt32Ty(), 0);
+  Value *ComponentOperand = ConstantInt::get(B.getInt32Ty(), 0);
+  Value *SampleOperand = ConstantInt::get(B.getInt32Ty(), 0);
+  Value *ResolvedHeapIndex = ConstantInt::get(B.getInt32Ty(), 0);
+  Type *HandleTy = TargetExtType::get(Ctx, "spirv.Image", B.getInt32Ty(),
+                                      {6, 0, 0, 0, 2, 0});
+  Value *UnresolvedHandle = PoisonValue::get(HandleTy);
+
+  FunctionCallee ResolvedCallee = getOrInsertStageOp(
+      *M, StageOpKind::SubpassLoad, B.getInt32Ty(),
+      {IndexOperand->getType(), ComponentOperand->getType(),
+       SampleOperand->getType(), ResolvedHeapIndex->getType()});
+  FunctionCallee UnresolvedCallee = getOrInsertStageOp(
+      *M, StageOpKind::SubpassLoad, B.getInt32Ty(),
+      {IndexOperand->getType(), ComponentOperand->getType(),
+       SampleOperand->getType(), UnresolvedHandle->getType()});
+
+  EXPECT_NE(ResolvedCallee.getCallee(), UnresolvedCallee.getCallee());
+  EXPECT_EQ(ResolvedCallee.getCallee()->getName(),
+            "feme.stage.subpass.load.i32.i32");
+  EXPECT_EQ(UnresolvedCallee.getCallee()->getName(),
+            "feme.stage.subpass.load.i32.handle");
 }
 
 /// (Roadmap H6i) `TaskPayloadStore` is overloaded on its `value` operand --

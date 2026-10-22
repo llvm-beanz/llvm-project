@@ -87,6 +87,16 @@ void appendTypeSuffix(SmallVectorImpl<char> &Out, Type *Ty) {
     OS << "f16";
   else if (auto *IntTy = dyn_cast<IntegerType>(Scalar))
     OS << 'i' << IntTy->getBitWidth();
+  else if (Scalar->isTargetExtTy())
+    // (ENV6(b)(1)) A `Dim::SubpassData` handle still awaiting resolution
+    // (`SPIRVResourceLowering.cpp`'s `getOrInsertResolvedSubpassLoadFunc`,
+    // the "poisoned" direct-depth/stencil-read case `SubpassLoadPattern`
+    // (SPIRVToLLVMPatterns.cpp) never gives a real handle producer to
+    // resolve) is a `target("spirv.Image", ...)` operand -- distinct from
+    // every other scalar type this function mangles, so it needs its own
+    // recognizable suffix rather than falling into the generic "unknown"
+    // case below (which every genuinely-unexpected type still should).
+    OS << "handle";
   else
     OS << "unknown";
 }
@@ -164,6 +174,32 @@ FunctionCallee feme::getOrInsertStageOp(Module &M, StageOpKind Kind,
         Kind == StageOpKind::TaskPayloadAtomicCmpXchg) {
       Name.push_back('.');
       appendTypeSuffix(Name, ArgTys[0]);
+    }
+    // (ENV6(b)(1)) `SubpassLoad`'s fourth operand needs the identical
+    // independent mangling for the identical reason: its own type varies
+    // -- a resolved `i32` image-heap index (`SPIRVResourceLowering.cpp`'s
+    // `getOrInsertResolvedSubpassLoadFunc` already ran) vs. the still-
+    // unresolved `target("spirv.Image", ...)` handle `SubpassLoadPattern`
+    // (SPIRVToLLVMPatterns.cpp) leaves in place for a direct (no-index)
+    // depth/stencil read, whose own handle producer `collectHandles`
+    // never finds a real use to resolve against -- independently of
+    // `ResultTy`, which both shapes can share (e.g. both widen to the
+    // same `<W x i32>` for an `isubpassInput`/`usubpassInput` direct
+    // stencil read). Without this, `widenStageOp`
+    // (SIMDize.cpp) would have both shapes collide on one mangled name,
+    // and whichever widened first would silently donate its declaration
+    // (and its, now wrong, fourth-operand type) to the other -- producing
+    // a call site whose actual argument type disagrees with its callee's
+    // declared parameter type, which crashes `SelectionDAGBuilder`
+    // (`getCopyToParts`'s "illegal type" assertion) rather than failing
+    // any earlier, clearer diagnostic.
+    // `ArgTys.size() > 3` guards `feme::createStageSubpassLoad`'s own
+    // synthetic 3-argument shape (`StageOpsTest.cpp`'s only caller),
+    // which predates `SubpassLoadPattern`'s (SPIRVToLLVMPatterns.cpp)
+    // fourth operand and never supplies one.
+    else if (Kind == StageOpKind::SubpassLoad && ArgTys.size() > 3) {
+      Name.push_back('.');
+      appendTypeSuffix(Name, ArgTys[3]);
     }
   }
   FunctionType *FTy = FunctionType::get(ResultTy, ArgTys, /*isVarArg=*/false);
