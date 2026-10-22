@@ -69,15 +69,13 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-## Two candidate fix directions for next session (pick one, prototype against BOTH reproducers)
+## Why `ENV6(c)(2)(j)` is genuinely new work, not a quick continuation
 
-1. **(a) Extend the existing peel guard.** `peelConstantFlowPredecessors` already has `peelWouldDestroyAncestorReconvergencePoint`, which looks *backward* from the sole surviving predecessor for an ancestor `CondBr` whose `validate` could break. Add a *forward*-looking variant: before peeling, check whether the peel's `Target` would become newly shared between the peeled chain and some other still-unflattened nested `CondBr`'s sibling arm; if so, bail (skip just that one peel, leave the harmless-redundant IR in place for `H165` to flatten normally).
-2. **(b) Local un-peel-and-retry in `H165`.** When `validate` rejects a pass-through block with >1 predecessor, check whether undoing *just that one* peeled edge (not all peeling cycle-wide) would let `flattenLoopBodyDiamond` succeed; if so, locally reverse it and retry.
-
-Validate against **both** `/tmp/relay_frozen2/repro.ll` (`(g)`, must stay Pass) and `/tmp/mergesort_discard_repro/repro.ll` (`(i)`, must flip to Pass), then the full 106-case graphicsfuzz corpus, then `check-feme`, before considering either landed.
+`loop.exit.guard` lives entirely outside `bb584`/`bb608` (both confirmed fully flattened already) -- it's a block `LoopLinearizer` itself synthesizes post-loop for deferred divergent-exit handling, and apparently can carry a genuinely divergent branch of its own that no flatten pass ever revisits. Two candidate directions noted in `Roadmap.md`: (a) re-invoke `DiamondFlattener`'s whole-function flatten against freshly-synthesized `loop.exit.guard` diamonds after `LoopLinearizer` runs, or (b) have `LoopLinearizer` flatten such a diamond itself during its own construction. Neither investigated beyond pinpointing the block this session -- budget as its own session.
 
 ## Carried-forward backlog (unchanged, not investigated this session)
 
+- `ENV6(c)(2)(j)` (new this session, 1 case, `loop.exit.guard` divergent-branch SIMDize limitation) -- next pickup for this shader
 - `ENV6(c)(2)(f)` (1 case, unexplained non-dominance `Fail`, not started)
 - `ENV6(c)(2)(a)` (7-case all-black-render bucket, investigate fresh)
 - `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started)
