@@ -129410,3 +129410,59 @@ code every other case in this pass also depends on.
    1-case issues), `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases),
    `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases), offload-test-suite
    upstreaming (3 patches, blocked on push access).
+
+# Session: ENV6(c)(2)(h) fixed -- shared pass-through merge blocks in validate()
+
+**Confirmed**: `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device` (checked at start, late but done, and re-checked at end).
+
+## What's done
+
+1. Root-caused `ENV6(c)(2)(h)` for real, correcting two prior sessions'
+   wrong call-chain guess. Used temporary `errs()` prints in the suspect
+   functions instead of more static trace-reading -- settled it in one
+   build/run cycle after two sessions of inconclusive log reading.
+2. Fixed it: `DiamondFlattener::validate()`'s `UncondBrInst` handling now
+   rejects a pass-through block reachable from outside the region being
+   validated (unless it's `End` or a cycle header).
+3. Wrote a new, minimal (not verbatim-captured) regression test,
+   `LinearizeTest.DiagnosesLoopBodyDiamondSharingMergeWithSiblingUniformDiamond`.
+   Confirmed it actually reproduces the pre-fix crash by reverting the fix
+   and re-running directly (not just trusting the lit test).
+4. Found and fixed 2 side-regressions the stricter check caused in
+   existing lit tests (one cosmetic renumbering, one diagnostic-text
+   change) -- both still decline cleanly, neither is a functional bug.
+5. `check-feme`: 3866/3870 Passed, 4 Unsupported, 0 regressions.
+6. Verified against real `deqp-vk`:
+   `stable-mergesort-for-always-false-if-discard` stays **Fail**, but the
+   QPA log now shows a clean compile diagnostic, not a crash.
+7. Docs updated: `Roadmap.md` (corrected root cause, added `ENV6(c)(2)(i)`
+   follow-on), `VulkanCTSReport.md` (new `L513` entry),
+   `feme/.instructions.md` (2 new process notes).
+8. 5 commits, each scoped: fix / test / lit-test updates / docs / this file.
+
+## What's NOT done (next session, start here)
+
+**Next action (under two minutes)**: open `feme/docs/Roadmap.md` at
+`ENV6(c)(2)(i)` and re-run
+`FEME_DUMP_IR_PRELINEARIZE=1 build/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /tmp/mergesort_discard_repro/repro.ll -o /dev/null`
+to see the current "Flow" diagnostic site in `linearizeCycle`'s own
+exit-check-matching logic before designing a fix.
+
+1. `ENV6(c)(2)(i)` (1 case, same shader): make
+   `linearizeCycle`'s exit-check-matching logic able to re-fold a
+   `validate`-rejected loop-body diamond back into the loop body, instead
+   of only emitting "has an internal branch in 'Flow'". Not investigated
+   this session beyond confirming it's a separate, pre-existing limitation.
+   Likely non-trivial -- budget as its own session, same "don't rush"
+   caution as `ChainGate`.
+2. `ENV6(c)(2)(f)` (1 case,
+   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
+   unexplained non-dominance `Fail`, still not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, budget as
+   own multi-session efforts.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest
+   priority.
+7. Upstream the 3 `offload-test-suite` patches if push access becomes
+   available (unchanged for many sessions).
