@@ -70,21 +70,20 @@ Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
 `ENV6`'s remaining untriaged clusters, in priority order:
-1. `ENV6(b)(3)`:
-   `max_varyings.test_{geometry_io_between_geometry_fragment,tess_eval_io_between_tess_eval_fragment}`
-   (6 cases) -- confirmed genuine, a different root cause from this session's
-   fix, **best next target** since it's the smallest and most recently sampled.
-   Needs `FEME_DUMP_IR_PRENORM`-style investigation of the hand-written SPIR-V
-   geometry/tess-eval shader's multi-location `Output`-array IO, not a
-   local-variable-copy shape.
-2. `ENV6(b)(1)`/`ENV6(b)(2)`: `emulate_msrtss` (8
-   cases)/`multisample_interpolation` (12 cases) -- confirmed genuine
-   rendering-correctness bugs from earlier sessions, not yet root-caused,
-   unchanged.
+1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- confirmed
+   genuine rendering-correctness bug (`Fail (Incorrect multisampled rendering
+   for color attachment ...)`), not yet root-caused, **best next target**
+   (smallest of the two remaining `ENV6(b)` clusters).
+2. `ENV6(b)(2)`:
+   `multisample_interpolation.{centroid_qualifier_inside_primitive,nonuniform_interpolant_indexing}`
+   (12 cases) -- confirmed genuine rendering-correctness bug (`Fail (Failed)`),
+   not yet root-caused.
 3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged from prior sessions,
    likely a long tail of distinct small bugs.
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
-   cases combined) -- unchanged from prior sessions.
+   cases combined) -- unchanged from prior sessions;
+   `memory_model.{write_after_read,message_passing}` (52) and
+   `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not
    started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3
