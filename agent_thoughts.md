@@ -129466,3 +129466,119 @@ exit-check-matching logic before designing a fix.
    priority.
 7. Upstream the 3 `offload-test-suite` patches if push access becomes
    available (unchanged for many sessions).
+
+# Session: ENV6(c)(2)(i) investigation (no fix landed)
+
+**Next action (under two minutes)**: open `feme/docs/Roadmap.md` at
+`ENV6(c)(2)(g)` and `ENV6(c)(2)(i)` side by side -- they are now believed to
+be the *same* underlying generalization gap (shared-merge-with-sibling-arm
+recognition at a nested level), not two separate problems. Decide whether to
+merge them into one roadmap item before starting design work.
+
+## What happened
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan
+   Device` (start and end of session).
+2. Picked up `ENV6(c)(2)(i)`: `stable-mergesort-for-always-false-if-discard`
+   still fails with `linearizeCycle`'s generic "has an internal branch in
+   'Flow'" diagnostic, left over once `ENV6(c)(2)(h)` correctly declined to
+   silently flatten `bb608`'s inner divergent diamond.
+3. Original hypothesis (carried in from last session): `H165`'s fixed-point
+   scan only tries `flattenLoopBodyDiamond` on **divergent**-conditioned
+   `CondBr`s, so the **outer**, uniform `bb584` diamond (whose arm contains
+   `bb608`) is never even attempted. Hand-traced that `bb584` *should*
+   validate cleanly if tried. **Tested this directly** (temporary `errs()`
+   instrumentation, no functional change; reverted after use, confirmed zero
+   diff against the pre-session file):
+   - Relaxed `H165`'s filter to also try uniform `CondBr`s. Result:
+     **`bb584` still never gets examined at all.** Root cause: a separate,
+     earlier fixed-point pass, `peelConstantFlowPredecessorsInCycle`, marks
+     it `PeeledFrom` for an unrelated reason (see below) before `H165` ever
+     runs -- the divergent-only filter was never the actual blocker.
+4. Dumped the IR right before `H165` runs (`FEME_DEBUG_FLBD_I_FULL`): the
+   old `Flow19`/`Flow20` relay scaffolding is **already gone** by this point
+   -- every one of its incoming edges independently proved compile-time
+   constant and got peeled/folded away:
+   - `bb584`'s F-arm → directly to `bb589` (was `Flow19`'s T-arm).
+   - `bb608`'s T-arm (`bb612`) → directly to `bb589` too.
+   - `bb608`'s F-arm (`.Flow20_crit_edge`) → directly to `Flow21` (via a
+     renamed critical-edge block, `Flow19.Flow21_crit_edge`).
+5. Forced the H165 relaxation anyway to test `flattenLoopBodyDiamond(bb584)`
+   directly. It still fails: the **nested** `validate(bb608, End=Flow21)`
+   call rejects on `bb589`, because `bb589` has exactly two real
+   predecessors -- `bb612` (inside `bb608`'s own T-arm subtree) and
+   `.Flow19_crit_edge` (`bb584`'s own **sibling** F-arm, entirely outside
+   `bb608`'s subtree). This is `ENV6(c)(2)(h)`'s own predecessor-ownership
+   check doing exactly its job, just one nesting level up from where it was
+   designed/tested.
+6. **Conclusion**: this is not a `linearizeCycle` exit-check-matching gap at
+   all -- it is the identical "a nested region's own trivial pass-through
+   arm shares its merge block with an ancestor diamond's sibling arm, and
+   needs a real merge-phi inserted at that shared point instead of being
+   rejected outright" problem that `ENV6(c)(2)(g)`'s design note already
+   describes (direction (a): generalize `ChainGate`'s reconnect-point
+   recognition beyond `CheckExit->StayInLoop`). Recommending the two roadmap
+   items be designed together rather than separately.
+7. Reverted all experimental instrumentation (`diff` against
+   `/tmp/Linearize.cpp.before_i` confirmed clean). Rebuilt
+   `FeMeTransformsCPUTests`: still 670/670 passing, zero regressions (no
+   functional change landed, so this is purely a sanity re-confirmation).
+8. Updated `feme/docs/Roadmap.md`'s `ENV6(c)(2)(i)` entry with the full
+   root-cause chain and the merge-with-`ENV6(c)(2)(g)` recommendation
+   (not struck through -- not completed). No `VulkanCTSReport.md`/
+   `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` changes --
+   no behavior changed, the case stays `Fail` exactly as before.
+9. No Vulkan CTS re-run needed beyond the existing baseline: nothing in
+   compiled output changed (confirmed via the clean revert diff), so the
+   full corpus's pass/fail set is provably unchanged from last session's
+   `L513` snapshot.
+
+## Why no fix landed this session
+
+Every direct, narrow fix attempt collapsed back into the same deeper gap:
+`DiamondFlattener::validate`'s predecessor-ownership check (from
+`ENV6(c)(2)(h)`) is *correctly* strict -- it has no way, at any nesting
+level, to recognize "this shared predecessor is fine, because it's actually
+the real reconvergence point of an **enclosing** diamond, and needs a merge
+phi inserted there, not an outright rejection." Building that recognition
+is exactly `ENV6(c)(2)(g)`'s own unresolved design question. Spending more
+time on `ENV6(c)(2)(i)` specifically, without first doing that design work,
+would just keep re-deriving this same conclusion.
+
+## State
+
+- `feme/lib/Transforms/CPU/Linearize.cpp`: **unchanged** (confirmed via
+  diff against pre-session backup). `/tmp/Linearize.cpp.before_i` can be
+  deleted; no longer needed.
+- `670/670` `FeMeTransformsCPUTests` passing (unchanged baseline).
+- `feme/docs/Roadmap.md`: `ENV6(c)(2)(i)` entry updated with root-cause
+  findings and the recommendation to merge with `ENV6(c)(2)(g)`'s design
+  work; not struck through.
+- No `check-feme`/Vulkan CTS re-run performed (no functional change to
+  verify; last session's `L513` snapshot remains the current baseline).
+
+## Suggested next steps
+
+1. **Design session, don't rush**: treat `ENV6(c)(2)(g)` and
+   `ENV6(c)(2)(i)` as one problem -- "recognize when a `validate`-rejected
+   shared predecessor is actually an enclosing diamond's own real
+   reconvergence point, and insert merge phis there instead of rejecting."
+   Start from `ENV6(c)(2)(g)`'s own two candidate directions already in
+   `Roadmap.md` (generalize `ChainGate`'s reconnect-point recognition vs. a
+   new dedicated recognition path), but validate the design against
+   **both** reproducers (`/tmp/relay_frozen2/repro.ll` for `(g)`,
+   `/tmp/mergesort_discard_repro/repro.ll` for `(i)`) before committing to
+   one approach, since a fix scoped only to `(g)`'s exact shape
+   (`CheckExit->StayInLoop`) will not automatically cover `(i)`'s nested
+   nested-diamond-inside-diamond shape.
+2. `ENV6(c)(2)(f)` (1 case,
+   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
+   still unexplained, not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, budget as
+   own multi-session efforts.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest
+   priority.
+7. Upstream the 3 `offload-test-suite` patches if push access becomes
+   available (unchanged for many sessions).
