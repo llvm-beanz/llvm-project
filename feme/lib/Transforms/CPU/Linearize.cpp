@@ -1645,13 +1645,31 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
 /// (not just this function's one-shot `select` here), since otherwise
 /// its own value keeps being overwritten by the loop's still-executing
 /// body on every subsequent iteration, even once correctly selected here.
+///
+/// Roadmap ENV6(c)(2)(b): each new `select` is an *incoming value for a
+/// phi edge*, so it must dominate that edge's own predecessor block --
+/// not `RB` itself (`RB` is `PN`'s own parent, i.e. the edge's
+/// *destination*, which generally cannot dominate a block that branches
+/// into it; reduced from `dEQP-VK.graphicsfuzz.do-while-if-return`'s own
+/// `FEME_DUMP_IR_PRELINEARIZE=1` dump, where `RB`'s two predecessors are
+/// un-nested siblings off the same header check, neither dominating the
+/// other, and the stray `select` -- built in `RB`, at the very end of
+/// its instruction list -- ended up textually *after* other instructions
+/// already in `RB` that this same pass's mask-propagation logic had
+/// already inserted reading straight from it, an SSA ordering violation
+/// the verifier reports as "does not dominate all uses"). A single
+/// builder anchored to `RB`'s own terminator was wrong for exactly this
+/// reason; build each `select` at its own `Kept` edge's predecessor
+/// terminator instead, where it is always valid (\p GuardMask and
+/// \p OrphanValue are both already proven, by this function's own
+/// precondition, to dominate every hop in \p Chain, hence every one of
+/// that hop's predecessors too).
 static void
 freezeRelayChainExitValues(ArrayRef<BasicBlock *> Chain, BasicBlock *Entry,
                            Value *GuardMask, BasicBlock *Header,
                            SmallPtrSetImpl<PHINode *> &RelayCaptured) {
   BasicBlock *Prev = Entry;
   for (BasicBlock *RB : Chain) {
-    IRBuilder<> B(RB->getTerminator());
     for (PHINode &PN : RB->phis()) {
       int OrphanIdx = PN.getBasicBlockIndex(Prev);
       if (OrphanIdx == -1)
@@ -1666,6 +1684,7 @@ freezeRelayChainExitValues(ArrayRef<BasicBlock *> Chain, BasicBlock *Entry,
         Value *Kept = PN.getIncomingValue(Idx);
         if (Kept == OrphanValue)
           continue; // Already identical; no divergence to preserve.
+        IRBuilder<> B(PN.getIncomingBlock(Idx)->getTerminator());
         PN.setIncomingValue(
             Idx, B.CreateSelect(GuardMask, Kept, OrphanValue,
                                 PN.getName() + ".relay.frozen"));

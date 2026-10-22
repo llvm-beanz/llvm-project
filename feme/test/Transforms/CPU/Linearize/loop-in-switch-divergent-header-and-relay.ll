@@ -69,11 +69,21 @@
 ; backedge too (via the new `RelayCaptured` parameter), so a lane that
 ; already exited keeps its own frozen value forever, not whatever the
 ; loop's still-executing body recomputes for later iterations.
+;
+; Roadmap ENV6(c)(2)(b): `freezeRelayChainExitValues`'s own `select` for
+; this phi's kept (`43`) edge is built at `43`'s own terminator, not
+; `Flow`'s (any value already proven to dominate `Flow` also dominates
+; every one of `Flow`'s own predecessors, including `43`, by a general
+; dominance argument -- not the other way around). `43` (printed here as
+; block `33`, LLVM's own anonymous-value renumbering after the pass runs)
+; is emitted *after* `Flow._crit_edge` in this function's final block
+; order even though it dominates it, so the two `CHECK`s below are kept
+; in that same (textual, not CFG) order.
 
-; CHECK: Flow:
-; CHECK:   %.relay.frozen{{[0-9]*}} = select i1 %active.header.check.live, <3 x float> %{{[0-9]+}}, <3 x float> %.010
 ; CHECK: Flow._crit_edge:
 ; CHECK:   %.010.frozen = select i1 %active.check.live, <3 x float> %.relay.frozen{{[0-9]*}}, <3 x float> %.010
+; CHECK: 33:
+; CHECK:   %.relay.frozen{{[0-9]*}} = select i1 %active.header.check.live, <3 x float> %{{[0-9]+}}, <3 x float> %.010
 define void @main() #0 {
   %1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
   %2 = insertelement <4 x float> poison, float %1, i64 0

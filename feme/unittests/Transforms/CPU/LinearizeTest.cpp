@@ -3180,13 +3180,19 @@ TEST(LinearizeTest, FreezesRelayChainExitValueThroughSharedDispatchBlock) {
   // replaced with a `select` on the per-lane "still looping" guard mask,
   // preserving the orphaned `.Flow_crit_edge` edge's own value (`%val`,
   // `header`'s raw loop-carried phi) for any lane that already exited,
-  // instead of silently discarding it.
+  // instead of silently discarding it. Roadmap ENV6(c)(2)(b) moved each
+  // such `select` to its own kept edge's predecessor terminator (sound,
+  // since any value already proven to dominate `Flow` also dominates
+  // every one of `Flow`'s own predecessors -- a general dominance fact,
+  // not merely a single-successor special case), so this scans the whole
+  // function rather than assuming `Flow` itself as the placement.
   bool FoundRelayFreezeSelect = false;
-  for (Instruction &I : *Flow)
-    if (auto *SI = dyn_cast<SelectInst>(&I))
-      if (SI->getType()->isVectorTy() &&
-          SI->getFalseValue() == &*Header->begin())
-        FoundRelayFreezeSelect = true;
+  for (BasicBlock &BB : *F)
+    for (Instruction &I : BB)
+      if (auto *SI = dyn_cast<SelectInst>(&I))
+        if (SI->getType()->isVectorTy() &&
+            SI->getFalseValue() == &*Header->begin())
+          FoundRelayFreezeSelect = true;
   EXPECT_TRUE(FoundRelayFreezeSelect)
       << "Flow's own data phi should be select-frozen against header's "
          "raw loop-carried phi, not left to silently collapse once its "
@@ -3751,6 +3757,111 @@ TEST(LinearizeTest,
       << "a ShadowExitFixup outside-use that is itself an ExitBlock-"
          "resident phi on a non-Latch edge must be substituted with the "
          "raw per-edge value, not the ExitBlock-resident ExitPN merge";
+}
+
+// Roadmap ENV6(c)(2)(b): `freezeRelayChainExitValues`'s own `select`,
+// built to replace one of a relay-chain hop's own phi's "kept" incoming
+// values, must be inserted in *that edge's own predecessor block*, not
+// in the phi's own parent block (the edge's destination) -- reduced
+// verbatim (block names kept) from
+// `dEQP-VK.graphicsfuzz.do-while-if-return`'s own
+// `FEME_DUMP_IR_PRELINEARIZE` output. Before this fix, a single
+// `IRBuilder` anchored at `Flow`'s own terminator built every "kept"
+// `select` for every phi resident in `Flow`, regardless of which
+// predecessor edge the phi operand being replaced actually belonged to.
+// `Flow`'s own two predecessors (`11` and `.Flow_crit_edge`) are
+// un-nested siblings off the same header check in `4`, neither
+// dominating the other, so a `select` built inside `Flow` itself could
+// never dominate either of them -- and other mask-propagation
+// instructions this same pass had already inserted at the *top* of
+// `Flow`, reading directly from the about-to-be-built `select`, made the
+// bug manifest as a same-block "used before defined" ordering violation
+// the verifier reports as "does not dominate all uses".
+TEST(LinearizeTest,
+     FreezeRelayChainExitValuesBuildsSelectAtItsOwnEdgesPredecessor) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+
+    define void @main(ptr %resource_heap, i32 %resource_heap_count, ptr %sampler_heap, i32 %sampler_heap_count, ptr %root_constants, i32 %root_constant_size, ptr %image_heap, i32 %image_heap_count) #0 {
+      br label %1
+
+    1:                                                ; preds = %Flow4._crit_edge, %0
+      %2 = phi i32 [ 0, %0 ], [ %6, %Flow4._crit_edge ]
+      %3 = add i32 %2, 1
+      br label %4
+
+    4:                                                ; preds = %Flow._crit_edge, %1
+      %5 = phi i32 [ %6, %Flow._crit_edge ], [ %3, %1 ]
+      %6 = add i32 %5, 1
+      %7 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %8 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 4, i1 true)
+      %9 = fcmp olt float %7, %8
+      %.inv = xor i1 %9, true
+      br i1 %.inv, label %11, label %.Flow_crit_edge
+
+    .Flow_crit_edge:                                  ; preds = %4
+      br label %Flow
+
+    .loopexit:                                        ; preds = %loop.exit.guard
+      %10 = icmp sge i32 %6, 100
+      br label %Flow4
+
+    11:                                               ; preds = %4
+      %12 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 true)
+      %13 = call float @feme.cpu.resource.load.raw.f32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 4, i1 true)
+      %14 = fcmp uge float %12, %13
+      %15 = icmp slt i32 %6, 100
+      %or.cond = select i1 %14, i1 %15, i1 false
+      %or.cond.inv = xor i1 %or.cond, true
+      br label %Flow
+
+    Flow4:                                            ; preds = %loop.exit.guard.Flow4_crit_edge, %.loopexit
+      %16 = phi i1 [ %10, %.loopexit ], [ true, %loop.exit.guard.Flow4_crit_edge ]
+      br i1 %16, label %"func(.exit", label %Flow4._crit_edge
+
+    Flow4._crit_edge:                                 ; preds = %Flow4
+      br label %1
+
+    "func(.exit":                                     ; preds = %Flow4
+      %. = select i1 %9, <4 x float> <float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00>, <4 x float> splat (float 1.000000e+00)
+      %17 = extractelement <4 x float> %., i64 0
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float %17, i32 0)
+      %18 = extractelement <4 x float> %., i64 1
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float %18, i32 0)
+      %19 = extractelement <4 x float> %., i64 2
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float %19, i32 0)
+      %20 = extractelement <4 x float> %., i64 3
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float %20, i32 0)
+      ret void
+
+    Flow:                                             ; preds = %.Flow_crit_edge, %11
+      %21 = phi i1 [ false, %11 ], [ true, %.Flow_crit_edge ]
+      %22 = phi i1 [ %or.cond.inv, %11 ], [ true, %.Flow_crit_edge ]
+      %.inv3 = xor i1 %21, true
+      br i1 %22, label %loop.exit.guard, label %Flow._crit_edge
+
+    Flow._crit_edge:                                  ; preds = %Flow
+      br label %4
+
+    loop.exit.guard:                                  ; preds = %Flow
+      br i1 %.inv3, label %.loopexit, label %loop.exit.guard.Flow4_crit_edge
+
+    loop.exit.guard.Flow4_crit_edge:                  ; preds = %loop.exit.guard
+      br label %Flow4
+    }
+
+    declare float @feme.cpu.resource.load.raw.f32(ptr, i32, i32, i64, i1) #1
+
+    attributes #0 = { "feme.cpu.wavesize"="4" "feme.shader.stage"="fragment" "hlsl.shader"="pixel" }
+    attributes #1 = { nounwind willreturn memory(argmem: read) }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()))
+      << "freezeRelayChainExitValues's own select, replacing a relay "
+         "hop's kept incoming phi value, must be built at that edge's "
+         "own predecessor block, not the phi's own (destination) block";
 }
 
 } // namespace
