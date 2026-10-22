@@ -19,7 +19,21 @@
 ; an out-of-range `pred_iterator` dereference. See `feme-cpu-linearize`'s
 ; own `MergeVisited` comment in feme/lib/Transforms/CPU/Linearize.cpp.
 
-; CHECK: feme-cpu-linearize: function 'main': block 'shared' is reached by more than one divergent root
+; ENV6(c)(2)(h) update: `validate`'s new predecessor-ownership check
+; (see `feme/lib/Transforms/CPU/Linearize.cpp`'s own `ENV6(c)(2)(h)`-
+; tagged comment) is a strict generalization of the `MergeVisited`
+; mechanism this test originally targeted -- it walks every ordinary
+; pass-through block a region's own walk crosses (not just a nested
+; `CondBr`'s own reconvergence point) and rejects any of them that is
+; also reachable from outside the region, which is exactly this
+; shape (`shared` reached both by `t`'s own fallthrough chain and by
+; `y`'s own direct branch). It now fires first, during `t`'s own walk,
+; before `y`'s nested diamond is ever itself validated, so the specific
+; "reached by more than one divergent root" message `MergeVisited` used
+; to produce for this case no longer fires -- `MergeVisited` itself is
+; unchanged and still guards shapes this newer, more general check does
+; not happen to walk through first.
+; CHECK: feme-cpu-linearize: function 'main': block 'shared' is reached both by this region's own fallthrough and by a predecessor outside it
 define void @main(i32 %uniform_cond) #0 {
 entry:
   %tid = call i32 @llvm.dx.thread.id(i32 0)

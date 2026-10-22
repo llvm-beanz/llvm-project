@@ -40,6 +40,16 @@
 ; strictly larger set than this row's originally-tracked 4
 ; `for_uniform_iterations` cases -- the other 14 combinations were
 ; already passing independently of this gap).
+;
+; ENV6(c)(2)(h) note: the numbered temporaries below (`%7`/`%8`) shifted
+; up by one from an earlier session's capture after `validate`'s new
+; predecessor-ownership check (see `feme/lib/Transforms/CPU/
+; Linearize.cpp`'s own `ENV6(c)(2)(h)`-tagged comment) made this loop's
+; own `bb14`-equivalent uniform diamond arm insert one extra merge phi
+; (a `Flow5` block) rather than branching directly to its own successor
+; -- a cosmetic reshape only; `verifyModule` stays clean and the actual
+; switch-lowering shape this test targets (`NodeBlock`/`Flow3`/`Flow4`)
+; is unaffected.
 ; CHECK-LABEL: define void @main(
 ; CHECK: %active.live = phi i1 [ true, %entry ], [ %active.header.live,
 ; CHECK: %1 = call i32 @feme.cpu.resource.load.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 0, i1 %active.live)
@@ -49,8 +59,8 @@
 ; CHECK: NodeBlock:
 ; CHECK: %Pivot = icmp sge i32 %.0, 3
 ; CHECK: Flow4:
-; CHECK: %6 = phi i1
 ; CHECK: %7 = phi i1
+; CHECK: %8 = phi i1
 define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
 entry:
   br label %9
