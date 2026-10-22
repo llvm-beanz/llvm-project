@@ -129214,3 +129214,39 @@ Both failures were *expected*, not surprises: they encoded the previous (buggy) 
 5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: ENV6(c)(2)(g) topology confirmed via new trace, fix designed but not landed (L511)
+
+**Next action (under two minutes)**: read `Roadmap.md`'s `ENV6(c)(2)(g)` entry, then run `FEME_DEBUG_PASSTHROUGH=1 build/bin/feme-opt --llvm -passes=feme-cpu-linearize -S /tmp/relay_frozen2/repro.ll 2>&1 | grep PTRACE` to see the confirmed topology directly, before touching `Linearize.cpp`.
+
+## What happened
+
+1. `vulkaninfo --summary | grep deviceName` → `FeMe CPU Vulkan Device`, confirmed (and reconfirmed later in the session).
+2. Picked up `ENV6(c)(2)(g)` (the 2-case follow-on to `L510`'s crash fix). Re-read the `ChainGate`/`L377(a)` fix and the `PreRegion`/`PostRegion` code.
+3. Re-derived the real IR topology from the saved `/tmp/relay_frozen2/invalid.log` (the untrimmed post-Linearize invalid dump) -- found a **discrepancy** with a prior session's own notes: this session's reading said the bypass merges locally at one block, not by looping around the whole outer loop.
+4. To resolve the discrepancy without more error-prone hand-tracing, added a permanent `FEME_DEBUG_PASSTHROUGH=1` trace to `collectUniformPassThroughRegion` (same style as the already-committed `FEME_DEBUG_L419H_TRACE`/`FLATTENTRACE` knobs) -- block-by-block pop/push/rejection-reason, zero cost when unset.
+5. Rebuilt `feme-opt`, ran it against `/tmp/relay_frozen2/repro.ll` with the trace on. **Confirmed this session's reading, not the prior session's**: `ChainGate` (`LeafBlock`'s `SwitchLeaf` branch) is uniform; its bypass arm skips `CheckBlock` entirely and rejoins at a single local diamond-merge block downstream of `CheckExit->StayInLoop`, before `Latch` -- not a full-loop backedge. The `PreRegion` walk's header-revisit rejection (from `L510`) is firing correctly on this shape, not masking a different bug.
+6. Designed the real fix (see `Roadmap.md` for full detail): find the real merge block via `ChainBypassRegion ∩ PostRegion`, insert new phis there for the three mask-propagation values, fed by real check-narrowed values on one side and unmodified pass-through values on the other. `ChainGate`'s own branch does not need deleting here (unlike `L377(a)`) since it's already uniform.
+7. **Deliberately stopped before implementing.** The predecessor-partitioning and "which value is pass-through" logic needs to be exactly right -- a subtly wrong choice silently miscompiles instead of failing loudly, which is worse than today's clean diagnostic. Same caution budget as `emulate_msrtss` (which took several sessions).
+8. Committed the trace instrumentation (1 commit, no functional change), ran `check-feme` (3865/3869 Passed, 4 Unsupported, 0 regressions) and re-verified both CTS cases unchanged (still Fail, same clean diagnostic, not a crash).
+9. Updated `Roadmap.md`'s `ENV6(c)(2)(g)` entry with the confirmed topology and the precise fix design (own commit), added `VulkanCTSReport.md`'s `L511` entry (own commit).
+10. Writing this now, about to commit as the final commit of the session.
+
+## Why no fix landed
+
+Not a dead end -- the design is solid and scoped. But implementing it safely needs its own session: predecessor-partitioning at the merge block, careful phi insertion, a new unit test proving real lowering (not just a diagnostic), full CTS re-verification. Rushing it risks a silent per-lane miscompile. The trace instrumentation this session added is reusable: a future session can verify the topology directly instead of re-deriving it by hand (which is exactly what went wrong for a prior session).
+
+## State of `ENV6(c)(2)` now
+
+- **`ENV6(c)(2)(g)`**: topology confirmed, fix designed, not implemented. Both cases still Fail (clean diagnostic).
+- All other `ENV6(c)(2)(*)` sub-items and `ENV6(c)(3)`/`ENV6(d)`/`ENV5(c)(7)(b)`: unchanged, not touched this session.
+
+## Next steps
+
+1. **`ENV6(c)(2)(g)` implementation** (2 cases): follow the design in `Roadmap.md` -- when `PreRegion` fails, try `ChainBypassRegion = collectUniformPassThroughRegion(ChainBypassEntry, Latch, ExitBlock, C, PeeledFrom)`; intersect with `PostRegion` to find the single merge block `M`; validate every predecessor of `M` is in one region or the other; insert phis at `M` for `active.check.live`/`active.check.sideeffect`/`exited.via.check.next` (real values on the `PostRegion` side, pass-through `Masks`/`ExitedViaCheck` values on the bypass side). Use `FEME_DEBUG_PASSTHROUGH=1` on `/tmp/relay_frozen2/repro.ll` to verify the partitioning directly before writing the insertion logic. New unit test should assert successful lowering (verifyModule clean, probably also checking the inserted phi shape), not just a diagnostic -- consider whether `DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR` needs updating/superseding once this shape actually lowers. Budget as its own session; do not rush.
+2. `ENV6(c)(2)(f)` (1 case, `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`): still unexplained, not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
