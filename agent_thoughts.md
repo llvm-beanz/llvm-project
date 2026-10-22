@@ -129617,3 +129617,37 @@ Validate against **both** `/tmp/relay_frozen2/repro.ll` (`(g)`, must stay Pass) 
 - `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
 - `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
 - offload-test-suite upstreaming (3 patches, blocked on push access)
+
+# Session: `ENV6(c)(2)(i)` peel-guard fix implemented and landed -- crash risk gone, corpus +1 elsewhere, new `ENV6(c)(2)(j)` found
+
+**Next action (under 2 min)**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(j)` (the new entry this session added, right after the now-struck-through `(i)`) and pin down `FEME_DUMP_DIVERGENT_BRANCH=1`'s pinpointed block, `loop.exit.guard`, before touching code -- don't re-derive that it's `loop.exit.guard` from scratch.
+
+## What happened this session
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary` (start and again mid-session after the real-ICD rebuild).
+2. Implemented direction (a) from the prior session's writeup: new forward-looking guard `peelWouldExposeSiblingDiamondToSharedMerge` next to the existing `peelWouldDestroyAncestorReconvergencePoint` in `peelConstantFlowPredecessors`. Speculatively applies a candidate peel's edge retargets, re-checks every other block's `DiamondFlattener::probeValidate` result before/after, bails on just that one peel if a candidate regresses.
+3. **Hit and fixed a regression during development**: including *uniform* `CondBr` candidates in the new guard's scan falsely flagged `ENV6(c)(2)(g)`'s own `ChainGate` shape as "destroyed" by a peel it actually needs. Root-caused via temporary `errs()` prints (reverted): a uniform `ChainGate`-style block's merge point is *designed* to gain an extra predecessor this way. Fixed by restricting the scan to `UniformityInfo::isDivergentTerminator` candidates only.
+4. Validated against **both** retained reproducers: `(g)` stays fixed, `(i)` now lowers cleanly (`verifyModule`-clean, `bb584`+`bb608` both fully flattened).
+5. `FeMeTransformsCPUTests`: 670/670. Added a new lit-test regression (`Linearize/loop-nested-sibling-diamonds-peel-shared-merge.ll`, the full captured repro, not hand-minimized given its size) -- confirmed via `git stash` to fail pre-fix, pass post-fix.
+6. Rebuilt `feme_vulkan`, ran the real 106-case graphicsfuzz corpus against real `deqp-vk`. **Caught myself almost declaring victory on "11 Pass" without a real baseline** -- went back and ran the *same* corpus with `Linearize.cpp` reverted (`git stash`) to get a genuine before/after diff: 10 Pass -> 11 Pass, zero regressions. The +1 is **`cov-function-large-loop-always-return-first-iteration`**, not the originally-targeted case.
+7. **The targeted case itself (`stable-mergesort-for-always-false-if-discard`) is still `Fail`** -- but now fails one stage later, at `feme-cpu-simdize`, not `feme-cpu-linearize`. Used `SIMDize.cpp`'s existing `FEME_DUMP_DIVERGENT_BRANCH=1` debug env var (already in the code from a prior session -- didn't need to add new instrumentation) to pinpoint the exact remaining offending branch: block `loop.exit.guard`'s own `br i1 %.inv31, ...`. Confirmed via grep that `loop.exit.guard` is a pre-existing, already-recognized synthesized block (`H94a`/`L282` history), not something new -- this is a separate, independent limitation the earlier crash had simply been masking, not a regression from this fix.
+8. Rebuilt `check-feme` fully: 3866/3870 Passed, 4 Unsupported, 0 regressions.
+9. Committed: (1) the `Linearize.cpp` fix + new lit test together, (2) `Roadmap.md`/`VulkanCTSReport.md` (`L514`) doc updates together.
+
+## Key lesson for future sessions
+
+When a fix changes the failure *mechanism* without flipping the targeted case's own pass/fail status, **always get a real before/after corpus diff**, not just a single raw run -- I almost reported "11 Pass" as if it were obviously this case's own doing, but it was a completely different, unrelated case that flipped. A clean revert-rebuild-rerun loop (a few extra minutes) is cheap insurance against mis-attributing which case a fix actually helped.
+
+## Why `ENV6(c)(2)(j)` is genuinely new work, not a quick continuation
+
+`loop.exit.guard` lives entirely outside `bb584`/`bb608` (both confirmed fully flattened already) -- it's a block `LoopLinearizer` itself synthesizes post-loop for deferred divergent-exit handling, and apparently can carry a genuinely divergent branch of its own that no flatten pass ever revisits. Two candidate directions noted in `Roadmap.md`: (a) re-invoke `DiamondFlattener`'s whole-function flatten against freshly-synthesized `loop.exit.guard` diamonds after `LoopLinearizer` runs, or (b) have `LoopLinearizer` flatten such a diamond itself during its own construction. Neither investigated beyond pinpointing the block this session -- budget as its own session.
+
+## Carried-forward backlog (unchanged, not investigated this session)
+
+- `ENV6(c)(2)(j)` (new this session, 1 case, `loop.exit.guard` divergent-branch SIMDize limitation) -- next pickup for this shader
+- `ENV6(c)(2)(f)` (1 case, unexplained non-dominance `Fail`, not started)
+- `ENV6(c)(2)(a)` (7-case all-black-render bucket, investigate fresh)
+- `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started)
+- `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
+- `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
+- offload-test-suite upstreaming (3 patches, blocked on push access)
