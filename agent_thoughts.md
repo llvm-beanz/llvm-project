@@ -128903,3 +128903,95 @@ Pre-flight: `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`
 4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132 cases combined) -- unchanged; `memory_model.{write_after_read,message_passing}` (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
 5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not started, lowest priority.
 6. (low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access ever becomes available.
+
+# Session: ENV6(b)(1) closed -- emulate_msrtss root-caused and fixed (L505)
+
+**Do next**: open `feme/docs/Roadmap.md` at `ENV6(b)(2)(a)` and start on
+`centroid_qualifier_inside_primitive`'s coverage-weighted-centroid fix.
+
+## What happened, in order
+
+1. Checked `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device`. Confirmed.
+2. Picked up mid-session: a prior session had landed piece (d) of `ENV6(b)(1)`'s
+   plan (`FragmentWrapper.cpp` consuming the resolved subpass-load index +
+   `IsMapped` via `CreateSelect`), with its own passing unit test and a clean
+   `check-feme`. But the real CTS cluster (`emulate_msrtss`, 8 cases) was
+   **still 8 Fail / 0 Pass** -- unchanged. That's the mystery this session solved.
+3. `FEME_DUMP_IR_PREOPT=1` on one failing case confirmed the fallback `select`
+   *was* present and wired up exactly as designed. So the bug wasn't in the
+   IR shape -- it was in what the `is_mapped` query actually returned.
+4. Added a temporary `FEME_DEBUG_SUBPASS_HEAP` print in `buildSubpassInputHeap`
+   (CommandBuffer.cpp). This is the move that actually cracked it -- don't
+   skip this step next time something "looks right" but still fails.
+5. Found it: when a draw has **no real indexed input-attachment mapping at
+   all** (`Any == false`), `buildSubpassInputHeap`'s own two
+   always-appended "direct depth/stencil" placeholder slots collapse down to
+   heap indices 0 and 1 -- the same indices a genuinely-unmapped indexed
+   subpass read (`attachment_index == 0` or `1`) also queries. `IsMapped`
+   only checks "is `Data` non-null here", so it false-positived on the
+   depth placeholder and the `select` picked the wrong heap entirely.
+6. This fully explained the CTS cluster: this test's subpass inputs are
+   deliberately descriptor-bound-only (indices chosen to NOT match any real
+   color attachment, per the CTS source's own comment), but the draw does
+   have a real depth attachment, so the collision always fires.
+7. Fixed with one surgical change in `FragmentWrapper.cpp`: AND the
+   `IsMapped` result with a bounds check (`attachment_index u<
+   subpass_input_heap_count - 2`) before using it to gate an *indexed*
+   read's fallback. The direct-depth/-stencil read path already computes
+   its own index the same way and is untouched.
+8. Also resolved a loose thread from earlier in the session: the "only
+   `D16_UNORM` fails" pattern that looked format-specific turned out to be
+   a red herring -- every *other* depth/stencil format option in this CTS
+   group requires `VK_EXT_shader_stencil_export`, which FeMe doesn't
+   support, so they're all silently `NotSupported`. `D16_UNORM` is simply
+   the only option FeMe can attempt at all.
+
+## Wins (visible progress)
+
+- `dEQP-VK.*emulate_msrtss*`: **8/8 now Pass** (was 8 Fail / 0 Pass). `ENV6(b)(1)` is closed.
+- Regression sweep (~5100 cases: `renderpass*`, `framebuffer_attachment`,
+  `multisample_interpolation`, `dynamic_rendering.*`): 0 new failures. The
+  only 9 failures present are the already-tracked, unrelated
+  `centroid_qualifier_inside_primitive` gap (`ENV6(b)(2)(a)`).
+- `check-feme`: 3859 Passed / 4 Unsupported / 0 regressions.
+- `ENV6(b)` (`pipeline.*` triage) now down to 9 remaining cases, from 20 at
+  session start.
+- 2 commits: code fix (`e078c52db683`) + docs (`01501a75c036`), each small
+  and self-contained.
+
+## Didn't do / deliberately skipped
+
+- Did not revert or second-guess the prior session's piece (d) landing --
+  it was architecturally correct the whole time; the bug was one level
+  deeper (a heap-index collision in `buildSubpassInputHeap`'s own layout),
+  not in piece (d) itself.
+- Did not touch `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+  -- this is a correctness fix for already-advertised behavior, not a new
+  feature/extension.
+- Did not add a new `.instructions.md` entry -- the technique that solved
+  this (temporary `getenv`-gated `errs()` instrumentation, empirical
+  rebuild-and-run) is already documented as a general pattern from an
+  earlier session (`FEME_DEBUG_L419H_TRACE`); no new environment/process
+  gotcha surfaced this session worth codifying separately.
+- Did not start `ENV6(b)(2)(a)` (`centroid_qualifier_inside_primitive`) --
+  out of scope for this session, queued next per priority order.
+
+## Next steps, in priority order
+
+1. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) --
+   root-caused in an earlier session, not yet fixed. Needs a per-quad
+   coverage mask threaded into `FemeFragmentPrimitive`/`FragmentWrapper.cpp`'s
+   `InterpolateAtCentroid` case, a runtime-ABI change with new
+   lowering-phase and runtime-phase tests, plus re-verification of the rest
+   of the `multisample_interpolation`/centroid-qualifier corpus. Multi-session
+   effort; do not rush it into one sitting -- same caution that applied to
+   `emulate_msrtss`, which took several sessions longer than first scoped.
+2. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of
+   distinct small bugs.
+3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
+   cases combined) -- unchanged; `memory_model.{write_after_read,message_passing}`
+   (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped,
+   not started, lowest priority.
+5. (low priority, unchanged for many sessions) Upstream the 3
+   `offload-test-suite` patches if push access ever becomes available.
