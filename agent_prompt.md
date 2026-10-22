@@ -69,19 +69,24 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **Fastest next win**: the 4-case `.relay.frozen` dominance cluster inside
-   `ENV6(c)(2)(b)` -- same methodology as this session
-   (`FEME_DUMP_IR_PRELINEARIZE=1` on one case, e.g. `do-while-if-return`, read
-   the `active.header.check.live`/`.relay.frozen*` select chain in
-   `Linearize.cpp`, root-cause, fix, new unit test, re-verify all 4+the 2
-   non-dominance cases).
-2. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't
+1. `ENV6(c)(2)(e)` (2 cases): the relay/exit-check matcher's own validation
+   needs to confirm a candidate check block is unconditionally reached every
+   iteration before admitting it as a relay-chain hop -- likely touches
+   `matchExitCheckWithRelay`/`recoverRelayExitCheck`, not
+   `freezeRelayChainExitValues`. Reproducers already at
+   `/tmp/relay_frozen2/repro.ll` and `/tmp/relay_frozen2/invalid.log` -- start
+   there instead of re-deriving. Budget as its own session; this looked more
+   structural than the last two relay fixes.
+2. `ENV6(c)(2)(f)` (1 case,
+   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
+   still an unexplained non-dominance `Fail`; short, standalone investigation,
+   not yet started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't
    assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
-3. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error,
-   histogram tolerance), likely each a short, separate investigation once
-   `(a)`/`(b)` are done.
-4. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority,
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error,
+   histogram tolerance), likely each a short, separate investigation.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority,
    budget as their own multi-session efforts when picked up.
-5. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
-6. (Still low priority, unchanged for many sessions) Upstream the 3
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+7. (Still low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access becomes available.
