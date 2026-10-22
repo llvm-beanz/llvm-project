@@ -3256,6 +3256,27 @@ motivating case, `alpha_to_coverage_unused_attachment.*`, now passes in
 full. See "Roadmap H7n: measured impact", "Roadmap H7r: measured impact",
 "Roadmap H7s: measured impact", and "Roadmap H7t: measured impact" in
 VulkanCTSReport.md for the full before/after CTS breakdown.
+
+**Known gap (roadmap `ENV6(b)(2)(a)`, found but not yet fixed): `centroid`-
+qualified interpolation uses the plain pixel center, not a true coverage-
+weighted centroid.** `FragmentWrapper.cpp`'s `StageOpKind::InterpolateAtCentroid`
+case (and ordinary `centroid`-qualified varying loads along the same path)
+always sample at `PixelCenterX`/`PixelCenterY`, which per spec is only a
+valid stand-in for the centroid when every covered sample's own weighted
+average happens to equal the pixel center -- true on a fully-covered pixel,
+but not guaranteed on a triangle edge, where only some samples are
+covered. A correct implementation needs this quad's own per-sample
+coverage mask threaded through into `FemeFragmentPrimitive` so the
+centroid location can be computed as the coverage-weighted average of
+only the actually-covered samples' own positions, rather than assumed to
+equal the pixel center unconditionally. `dEQP-VK.pipeline.*.
+multisample_interpolation.centroid_qualifier_inside_primitive.*` (9 cases)
+is the CTS corpus's own direct test of this invariant (verifying the
+interpolated centroid location stays within the triangle for every
+pipeline-construction type and `2x`/`4x`/`8x` sample count) and fails for
+exactly this reason. See "Roadmap `L502`" in VulkanCTSReport.md for the
+root-cause investigation and `Roadmap.md`'s `ENV6(b)(2)(a)` for the scoped,
+not-yet-started fix.
 `vertexPipelineStoresAndAtomics`/`fragmentStoresAndAtomics` (roadmap H7g)
 are now real too: a survey of `feme::cpu::runPipeline` (`Pipeline.cpp`)
 confirmed no stage-based gate on storage-buffer/-texel-buffer writes ever
