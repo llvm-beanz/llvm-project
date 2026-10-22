@@ -129172,3 +129172,45 @@ Both failures were *expected*, not surprises: they encoded the previous (buggy) 
 5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
 6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
 7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: ENV6(c)(2)(e) crash fixed -- collectUniformPassThroughRegion backedge escape (L510)
+
+**Next action (under two minutes)**: `ENV6(c)(2)(g)` picks up here -- read `Linearize.cpp`'s `ChainGate`/`L377(a)` section (~L6568-6747) and the `PreRegion`/`PostRegion` consumption right after it (~L6880+) to design real lowering support for "a uniform inner conditional gates whether a divergent check runs this iteration." Reproducers still at `/tmp/relay_frozen2/`.
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (standing requirement).
+2. Picked up `ENV6(c)(2)(e)` where last session left off: re-read saved reproducers (`/tmp/relay_frozen2/repro.ll`, `invalid.log`), re-confirmed the shape (uniform inner `SwitchLeaf` branch gating a divergent discard check, skip arm bypasses it).
+3. Added temporary debug instrumentation in `Linearize.cpp` around `CheckBlock`/`CheckExit->StayInLoop` and the `PreRegion`/`PostRegion` computation, rebuilt `feme-opt`, ran the repro -- found the smoking gun: `PreRegion` (meant to be a straight-line uniform walk up to `CheckBlock`) had swallowed the *entire outer loop body*, including the loop's own header.
+4. Read `collectUniformPassThroughRegion`'s implementation: its BFS/DFS treats any already-`Visited` block as an ordinary forward diamond-merge revisit ("continue"), with no check for whether that revisit is actually a backedge completing a full loop iteration without ever reaching `To`/`ExitBlock`.
+5. Fixed: reject reaching the cycle's own header again (`CI.getHeader(C)`), other than as the walk's own starting block, by returning `std::nullopt` -- matches the function's own documented contract ("returns nullopt if the region cannot be shown to reach `To`").
+6. Removed debug instrumentation, rebuilt `feme-opt`. Confirmed via a direct before/after comparison that the pre-fix pipeline (`feme-opt --llvm -passes=feme-cpu-linearize,verify`) **aborts the process outright** (`report_fatal_error`, "Broken module found, compilation aborted!") -- not just silently bad output, a genuine crash risk. Post-fix: clean diagnosed bailout, same "unsupported shape" message every other not-yet-understood shape uses.
+7. Wrote `LinearizeTest.DiagnosesUniformInnerCondGatingDivergentCheckInsteadOfInvalidIR`, built from a trimmed version of the real reproducer (dropped unrelated vector-load/metadata noise, kept block names). Ran the full `FeMeTransformsCPUTests` suite: 669/669 pass, 0 regressions.
+8. Built full `feme_vulkan`/`feme-opt`, ran `check-feme`: 3865/3869 Passed, 4 Unsupported, 0 regressions.
+9. Committed the fix + test (1 commit), then re-verified both real CTS cases via `run_vulkan_cts.py`: both still **Fail**, but now with the clean diagnostic in the QPA log, not a crash.
+10. Ran the full 106-case `graphicsfuzz` corpus through `run_vulkan_cts.py` to confirm no wider regressions: 9 Pass (same 9 as every prior session's cumulative total), 97 Fail -- 0 cases flipped from Pass to Fail.
+11. Updated `Roadmap.md` (`ENV6(c)(2)(e)` now describes the crash fix, split the "make it actually Pass" work into new entry `ENV6(c)(2)(g)`) and `VulkanCTSReport.md` (new `L510` entry). Committed docs in their own commit.
+12. Writing this file now, about to commit it as the final commit of the session.
+
+## Why this isn't a full fix (and that's fine)
+
+`collectUniformPassThroughRegion`'s contract was always "return the region, or `nullopt` if you can't prove it reaches `To`." The bug was it sometimes lied and returned a bogus region instead of `nullopt`. Fixing the lie is a complete, correct, independently valuable change -- it converts a process-killing crash risk into the same clean "not yet supported" diagnostic every other unhandled shape in this pass gets. It does **not** make the 2 affected cases pass, because genuinely supporting "a uniform inner conditional gates whether a divergent check runs this iteration" needs new lowering logic (either generalizing the `ChainGate`/`L377(a)` fix's reconnect-point recognition, or a wholly separate mechanism) that wasn't designed this session. Shipping the crash fix now, separately from that larger design question, keeps the commits small and each one independently safe -- consistent with how `L377(a)`, `L508`, and `L509` were each landed as their own scoped step.
+
+## State of `ENV6(c)(2)` now
+
+- **`ENV6(c)(2)(a)`, not started**: 7-case all-black-render bucket, unchanged.
+- **`ENV6(c)(2)(e)`, done (crash fix only)**: `collectUniformPassThroughRegion` no longer produces invalid IR for this shape. Both cases remain Fail (cleanly diagnosed). Follow-on tracked as new `ENV6(c)(2)(g)`.
+- **`ENV6(c)(2)(f)`, not investigated**: 1 case, still unexplained non-dominance `Fail`.
+- **`ENV6(c)(2)(c)`/`(d)`, not started**: unchanged, 1 case each.
+- **`ENV6(c)(2)(g)`, new, not started**: implement real lowering support for `ENV6(c)(2)(e)`'s shape so the 2 cases actually Pass.
+- `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases) remain untouched.
+
+## Next steps
+
+1. `ENV6(c)(2)(g)` (2 cases, new): design and implement real support for a uniform inner conditional gating a divergent per-iteration check. Two candidate directions (not yet chosen between): (a) generalize the `ChainGate`/`L377(a)` bypass-diamond fix's reconnect-point recognition from exactly `CheckExit->StayInLoop` to anywhere in the uniform post-check region, inserting merge phis for the mask-propagation values at the real reconnect point; (b) a new, separate recognition path for this specific shape. Budget as its own session -- do not rush, same caution as `emulate_msrtss`.
+2. `ENV6(c)(2)(f)` (1 case, `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`): still an unexplained non-dominance `Fail`; short, standalone investigation, not yet started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error, histogram tolerance), likely each a short, separate investigation.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+7. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
