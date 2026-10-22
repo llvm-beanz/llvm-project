@@ -1359,6 +1359,23 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
   struct ShadowExitFixup {
     PHINode *Shadow;
     SmallVector<Use *, 4> OutsideUses;
+    // Roadmap ENV6(c)(2)(k): true only for a `ToConvert`-materialized
+    // `LCSSAPhi` below, whose own `Frozen` select is built from values
+    // (`Template`, `I`, `LCSSAPhi` itself) that are all `Header`-resident
+    // and therefore dominate every block between `Header` and `Latch` --
+    // not just `Latch` itself. For such a fixup, `LatchValue` (the fully
+    // self-resolved `Frozen` value) is safe to reuse verbatim at *any*
+    // predecessor of `ExitBlock` reachable from `Header` without passing
+    // back through `Header` again, including a `BodyRegion` member with
+    // its own direct, `Latch`-bypassing edge to `ExitBlock` (see the
+    // resolution loop below for the full root-cause writeup). The other
+    // (ordinary, `FeedsUniformBranch`) `ShadowExitFixup` below builds its
+    // own `Frozen` from `NewValue` -- `Latch`'s own incoming value for a
+    // `Header` phi -- which may itself be defined anywhere in the loop
+    // body, not guaranteed to dominate a `Latch`-bypassing predecessor,
+    // so that case is deliberately left with its pre-existing, `Latch`-
+    // only-aware behavior.
+    bool FreezeDominatesRegion = false;
   };
   SmallVector<ShadowExitFixup, 4> ShadowExitFixups;
 
@@ -1429,8 +1446,23 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
         if (IncomingBB != Latch)
           LCSSAPhi->addIncoming(PoisonValue::get(I->getType()), IncomingBB);
       }
-      Value *Frozen =
-          B.CreateSelect(Template, I, LCSSAPhi, I->getName() + ".lcssa.frozen");
+      // Roadmap ENV6(c)(2)(k): build `Frozen` right after `I` itself (not
+      // at `Latch`'s own terminator, as a prior version of this code
+      // did) -- `Template` and `LCSSAPhi` are both `Header`-resident, and
+      // `I` dominates the rest of `Header` plus everything `Header`
+      // itself dominates (the whole cycle body, up to and including
+      // `Latch`), so this placement makes `Frozen` valid to reuse
+      // *anywhere* in that region, not just at `Latch`. Required for a
+      // `BodyRegion` member with its own direct, `Latch`-bypassing exit
+      // to `ExitBlock` (see the `ShadowExitFixups` resolution loop below
+      // for the full root-cause writeup, reduced from `dEQP-VK.
+      // graphicsfuzz.cov-nested-loops-assign-vector-elements-from-matrix-
+      // no-negative-indexing`'s own infinite loop): such a predecessor
+      // never reaches `Latch` at all, so a `Frozen` built there would not
+      // dominate it.
+      IRBuilder<> FreezeBuilder(I->getNextNode());
+      Value *Frozen = FreezeBuilder.CreateSelect(Template, I, LCSSAPhi,
+                                                 I->getName() + ".lcssa.frozen");
       LCSSAPhi->addIncoming(Frozen, Latch);
 
       SmallVector<Use *, 4> OutsideUses;
@@ -1439,7 +1471,8 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
           OutsideUses.push_back(&U);
       for (Use *U : OutsideUses)
         U->set(LCSSAPhi);
-      ShadowExitFixups.push_back({LCSSAPhi, OutsideUses});
+      ShadowExitFixups.push_back(
+          {LCSSAPhi, OutsideUses, /*FreezeDominatesRegion=*/true});
       MaterializedLCSSAPhis.insert(LCSSAPhi);
     }
   }
@@ -1510,7 +1543,8 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
         Shadow->addIncoming(IncomingV, IncomingBB);
       }
       if (ExitBlock)
-        ShadowExitFixups.push_back({Shadow, OutsideUses});
+        ShadowExitFixups.push_back(
+            {Shadow, OutsideUses, /*FreezeDominatesRegion=*/false});
       for (Use *U : OutsideUses)
         U->set(Shadow);
       continue;
@@ -1577,12 +1611,44 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
     Value *LatchValue = Fixup.Shadow->getIncomingValueForBlock(Latch);
     if (LatchValue == Fixup.Shadow)
       continue; // No self-reprocessing happened; raw Shadow is accurate.
+    // Roadmap ENV6(c)(2)(k): a predecessor of `ExitBlock` besides `Latch`
+    // is not always a "genuinely uniform exit" the way the rest of this
+    // comment (and `freezeExitRelayValue`'s own doc comment) describes --
+    // `collectUniformPassThroughRegion`'s own `BodyRegion` can itself
+    // contain a block with its own direct, divergent-exit-check edge to
+    // `ExitBlock` that bypasses `Latch` entirely (e.g. an inner loop's
+    // own header re-testing a per-lane bound against a value it just
+    // freshly computed, the same round it exits -- `HeaderDivergent`'s
+    // own handling above already builds the equivalent boolean "did I
+    // exit" relay for exactly this shape, see `HeaderExitRelayValues`'s
+    // own resolution loop, but that mechanism only ever threads an
+    // already-`Constant` captured value through such a bypass edge,
+    // leaving any other value, like this fixup's own `I`, completely
+    // unfrozen there). Reading the raw `Fixup.Shadow` at such an edge
+    // yields the value as of *entering* the current round -- one round
+    // stale relative to the fresh, exit-triggering value `LatchValue`
+    // itself captures -- exactly like `Latch`'s own pre-fix behavior,
+    // just for a different predecessor (confirmed root cause, via a
+    // standalone IR-level model reproducing the exact observed symptom,
+    // of `dEQP-VK.graphicsfuzz.cov-nested-loops-assign-vector-elements-
+    // from-matrix-no-negative-indexing`'s own infinite loop: the carried
+    // induction variable gets stuck at a stale, one-round-old value
+    // forever, instead of the value that actually satisfied the exit
+    // condition). `Fixup.FreezeDominatesRegion` tells us whether
+    // `LatchValue` was built from values (`Template`, `I`, `Fixup.Shadow`
+    // itself) that are all `Header`-resident and therefore dominate every
+    // such bypass predecessor too, making it safe to reuse here exactly
+    // the same way it already is for `Latch`.
+    auto PickValueForPred = [&](BasicBlock *Pred) {
+      return Pred == Latch || Fixup.FreezeDominatesRegion ? LatchValue
+                                                           : Fixup.Shadow;
+    };
     PHINode *ExitPN = nullptr;
     for (Use *U : Fixup.OutsideUses) {
       if (auto *UserPN = dyn_cast<PHINode>(U->getUser());
           UserPN && UserPN->getParent() == ExitBlock) {
         BasicBlock *IncomingBB = UserPN->getIncomingBlock(*U);
-        U->set(IncomingBB == Latch ? LatchValue : Fixup.Shadow);
+        U->set(PickValueForPred(IncomingBB));
         continue;
       }
       if (!ExitPN) {
@@ -1590,7 +1656,7 @@ freezeLoopCarriedValues(BasicBlock *Header, BasicBlock *Latch, Value *BodyMask,
                                   Fixup.Shadow->getName() + ".exit");
         ExitPN->insertBefore(ExitBlock->getFirstNonPHIIt());
         for (BasicBlock *Pred : predecessors(ExitBlock))
-          ExitPN->addIncoming(Pred == Latch ? LatchValue : Fixup.Shadow, Pred);
+          ExitPN->addIncoming(PickValueForPred(Pred), Pred);
       }
       U->set(ExitPN);
     }
