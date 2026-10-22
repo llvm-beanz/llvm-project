@@ -129582,3 +129582,38 @@ would just keep re-deriving this same conclusion.
    priority.
 7. Upstream the 3 `offload-test-suite` patches if push access becomes
    available (unchanged for many sessions).
+
+# Session: ENV6(c)(2)(i) root-cause deep dive (no code change landed)
+
+**Next action (under 2 min)**: open `feme/docs/Roadmap.md` at `ENV6(c)(2)(i)` to read the refined finding below, then pick direction (a) or (b) and start a fresh prototyping session -- don't re-derive this analysis.
+
+## What happened this session
+
+1. Confirmed `FeMe CPU Vulkan Device` via `vulkaninfo --summary`.
+2. Spent the session on the explicit "design session, don't rush" ask: is `ENV6(c)(2)(g)` (ChainGate, done) unifiable with `ENV6(c)(2)(i)` (still broken)? **Answer: no** -- different fix mechanisms needed. Documented and moved on rather than forcing a shared design.
+3. Dug into `ENV6(c)(2)(i)`'s actual root cause by diffing the **pre-peel** IR (fresh `instnamer`-only dump) against the post-peel IR traced in prior sessions:
+   - `bb608`'s diamond is **trivially flattenable** in its original, un-peeled form (clean 2-predecessor merge at `Flow20`).
+   - The problematic cross-arm-shared-merge block (`bb589`) is **manufactured by `peelConstantFlowPredecessorsInCycle`'s own relay-folding**, which runs *before* `H165`'s flatten scan ever gets to see `bb608` in its clean form.
+4. **Tested the obvious fix** (run `H165`'s flatten scan once, early, before the first peel call): confirmed via build + full `FeMeTransformsCPUTests` run that this **does** fix `stable-mergesort-for-always-false-if-discard` (clean `verifyModule`) but **regresses** `ENV6(c)(2)(g)`'s `ChainGate` test (`LinearizeTest.LinearizesUniformInnerCondGatingDivergentCheck`) -- 669/670 passing, 1 new failure.
+5. **Reverted the experiment** (confirmed zero diff, rebuilt, 670/670 passing again). No functional code landed this session.
+6. Wrote up the precise finding + two narrower candidate fix directions in `Roadmap.md`'s `ENV6(c)(2)(i)` entry (see below). Committed the doc-only update.
+
+## Why I stopped here instead of pushing further
+
+A blanket pass reorder is proven unsafe (regresses a currently-passing case). The two narrower directions I found both need real implementation + careful dual-reproducer + full-corpus validation, which doesn't fit in what's left of this session without rushing exactly the thing I was told not to rush. Better to hand off a precise, validated root cause than a half-finished patch.
+
+## Two candidate fix directions for next session (pick one, prototype against BOTH reproducers)
+
+1. **(a) Extend the existing peel guard.** `peelConstantFlowPredecessors` already has `peelWouldDestroyAncestorReconvergencePoint`, which looks *backward* from the sole surviving predecessor for an ancestor `CondBr` whose `validate` could break. Add a *forward*-looking variant: before peeling, check whether the peel's `Target` would become newly shared between the peeled chain and some other still-unflattened nested `CondBr`'s sibling arm; if so, bail (skip just that one peel, leave the harmless-redundant IR in place for `H165` to flatten normally).
+2. **(b) Local un-peel-and-retry in `H165`.** When `validate` rejects a pass-through block with >1 predecessor, check whether undoing *just that one* peeled edge (not all peeling cycle-wide) would let `flattenLoopBodyDiamond` succeed; if so, locally reverse it and retry.
+
+Validate against **both** `/tmp/relay_frozen2/repro.ll` (`(g)`, must stay Pass) and `/tmp/mergesort_discard_repro/repro.ll` (`(i)`, must flip to Pass), then the full 106-case graphicsfuzz corpus, then `check-feme`, before considering either landed.
+
+## Carried-forward backlog (unchanged, not investigated this session)
+
+- `ENV6(c)(2)(f)` (1 case, unexplained non-dominance `Fail`, not started)
+- `ENV6(c)(2)(a)` (7-case all-black-render bucket, investigate fresh)
+- `ENV6(c)(2)(c)`/`(d)` (two isolated 1-case issues, not started)
+- `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases) -- own multi-session efforts
+- `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) -- lowest priority
+- offload-test-suite upstreaming (3 patches, blocked on push access)
