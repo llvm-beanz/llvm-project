@@ -585,32 +585,161 @@ TEST(FragmentWrapperTest,
   // separately gated by `Active` combined with the `is_mapped` result (or
   // its negation), checked only loosely here (non-null) since this test's
   // focus is the heap/index the `select` itself picks between.
+  // The query's own `i1` result is combined (via `and`) with a bounds
+  // check excluding `buildSubpassInputHeap`'s own two reserved
+  // direct-depth/-stencil tail slots (CommandBuffer.cpp) before gating
+  // the `select` between two `feme.cpu.image.load.2d.v4f32` calls -- one
+  // reading `subpass_input_heap`, the other reading `image_heap` at the
+  // resolved index (constant 2 above). Each load's own `Mask` operand is
+  // separately gated by `Active` combined with the combined condition (or
+  // its negation), checked only loosely here (non-null) since this test's
+  // focus is the heap/index the `select` itself picks between.
   bool FoundGatedSelect = false;
   for (User *U : IsMappedCall->users()) {
-    auto *Sel = dyn_cast<SelectInst>(U);
-    if (!Sel || Sel->getCondition() != IsMappedCall)
+    auto *And = dyn_cast<Instruction>(U);
+    if (!And || And->getOpcode() != Instruction::And)
       continue;
-    auto *TrueLoad = dyn_cast<CallInst>(Sel->getTrueValue());
-    auto *FalseLoad = dyn_cast<CallInst>(Sel->getFalseValue());
-    if (!TrueLoad || !FalseLoad)
-      continue;
-    if (TrueLoad->getCalledFunction()->getName() !=
-            "feme.cpu.image.load.2d.v4f32" ||
-        FalseLoad->getCalledFunction()->getName() !=
-            "feme.cpu.image.load.2d.v4f32")
-      continue;
-    if (TrueLoad->getArgOperand(0) == SubpassInputHeapArg &&
-        FalseLoad->getArgOperand(0) == ImageHeapArg) {
-      auto *FallbackIndex =
-          dyn_cast<ConstantInt>(FalseLoad->getArgOperand(2));
-      if (FallbackIndex && FallbackIndex->getZExtValue() == 2)
-        FoundGatedSelect = true;
+    for (User *AndUser : And->users()) {
+      auto *Sel = dyn_cast<SelectInst>(AndUser);
+      if (!Sel || Sel->getCondition() != And)
+        continue;
+      auto *TrueLoad = dyn_cast<CallInst>(Sel->getTrueValue());
+      auto *FalseLoad = dyn_cast<CallInst>(Sel->getFalseValue());
+      if (!TrueLoad || !FalseLoad)
+        continue;
+      if (TrueLoad->getCalledFunction()->getName() !=
+              "feme.cpu.image.load.2d.v4f32" ||
+          FalseLoad->getCalledFunction()->getName() !=
+              "feme.cpu.image.load.2d.v4f32")
+        continue;
+      if (TrueLoad->getArgOperand(0) == SubpassInputHeapArg &&
+          FalseLoad->getArgOperand(0) == ImageHeapArg) {
+        auto *FallbackIndex =
+            dyn_cast<ConstantInt>(FalseLoad->getArgOperand(2));
+        if (FallbackIndex && FallbackIndex->getZExtValue() == 2)
+          FoundGatedSelect = true;
+      }
     }
   }
   EXPECT_TRUE(FoundGatedSelect)
-      << "expected a select, gated directly by the is_mapped query, "
-         "between a subpass_input_heap read and an image_heap read at the "
-         "resolved index (2)";
+      << "expected a select, gated by the is_mapped query anded with a "
+         "reserved-tail-slot bounds check, between a subpass_input_heap "
+         "read and an image_heap read at the resolved index (2)";
 }
+
+// Roadmap ENV6(b)(1): `buildSubpassInputHeap` (CommandBuffer.cpp) always
+// appends its own two direct-depth/-stencil placeholder slots at the tail
+// of `subpass_input_heap`, at `subpass_input_heap_count - 2`/`- 1` --
+// indices that collapse down to 0/1 whenever this draw has no indexed
+// input-attachment mapping at all. A resolved indexed subpass read whose
+// own `attachment_index` happens to equal one of those two reserved tail
+// positions must still treat the slot as unmapped (fall back to
+// `image_heap`) rather than false-positive-matching the unrelated direct
+// depth/stencil placeholder's own data -- this is the exact collision the
+// real `emulate_msrtss` CTS cluster exercises (its `i_color2`'s own
+// `attachment_index == 0`). The IR shape alone can't express "this
+// particular draw's heap happens to put the reserved tail at index 0" (
+// that's a runtime fact), so this test simply confirms the generated
+// `and` combining `is_mapped` with the `icmp ult` bounds check -- rather
+// than `is_mapped` alone -- is present for every resolved indexed read,
+// independent of the resolved index's own value.
+TEST(FragmentWrapperTest,
+     GatesResolvedSubpassLoadIsMappedByReservedTailSlotBoundsCheck) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main(ptr %resource_heap, i32 %resource_heap_count,
+                        ptr %sampler_heap, i32 %sampler_heap_count,
+                        ptr %root_constants, i32 %root_constant_size,
+                        ptr %image_heap, i32 %image_heap_count,
+                        ptr %subpass_input_heap, i32 %subpass_input_heap_count) #0 {
+      %v = call float @feme.stage.subpass.load.resolved.f32(
+          i32 0, i32 0, i32 0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %v, i32 0)
+      ret void
+    }
+    declare float @feme.stage.subpass.load.resolved.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::Float;
+  SignatureElement Out = In;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Sig.Elements = {In, Out};
+  dxil::setEntrySignature(*M->getFunction("ps_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  FragmentWrapperPass().run(*M, MAM);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *Body = nullptr;
+  Argument *SubpassInputHeapCountArg = nullptr;
+  for (Function &F : *M) {
+    Argument *FoundSubpass = nullptr;
+    Argument *FoundCount = nullptr;
+    for (Argument &Arg : F.args()) {
+      if (Arg.getName() == "subpass_input_heap")
+        FoundSubpass = &Arg;
+      else if (Arg.getName() == "subpass_input_heap_count")
+        FoundCount = &Arg;
+    }
+    if (FoundSubpass && FoundCount) {
+      Body = &F;
+      SubpassInputHeapCountArg = FoundCount;
+      break;
+    }
+  }
+  ASSERT_TRUE(Body) << "no function declared both subpass_input_heap and "
+                        "subpass_input_heap_count parameters";
+
+  CallInst *IsMappedCall = nullptr;
+  for (Instruction &I : instructions(Body)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() == "feme.cpu.image.is_mapped.i1") {
+      IsMappedCall = CI;
+      break;
+    }
+  }
+  ASSERT_TRUE(IsMappedCall) << "expected a feme.cpu.image.is_mapped.i1 "
+                              "query gating the resolved subpass read";
+
+  // Find the `icmp ult (attachment_index, sub(subpass_input_heap_count,
+  // 2))` bounds check and confirm it's `and`-ed with `IsMappedCall`.
+  bool FoundBoundsCheckedAnd = false;
+  for (User *U : IsMappedCall->users()) {
+    auto *And = dyn_cast<Instruction>(U);
+    if (!And || And->getOpcode() != Instruction::And)
+      continue;
+    Value *Other = And->getOperand(0) == IsMappedCall ? And->getOperand(1)
+                                                       : And->getOperand(0);
+    auto *Cmp = dyn_cast<ICmpInst>(Other);
+    if (!Cmp || Cmp->getPredicate() != ICmpInst::ICMP_ULT)
+      continue;
+    auto *Sub = dyn_cast<Instruction>(Cmp->getOperand(1));
+    if (!Sub || Sub->getOpcode() != Instruction::Sub)
+      continue;
+    if (Sub->getOperand(0) == SubpassInputHeapCountArg) {
+      auto *TwoConst = dyn_cast<ConstantInt>(Sub->getOperand(1));
+      if (TwoConst && TwoConst->getZExtValue() == 2)
+        FoundBoundsCheckedAnd = true;
+    }
+  }
+  EXPECT_TRUE(FoundBoundsCheckedAnd)
+      << "expected is_mapped anded with (attachment_index u< "
+         "subpass_input_heap_count - 2), guarding against the reserved "
+         "direct-depth/-stencil tail-slot collision";
+}
+
 
 } // namespace

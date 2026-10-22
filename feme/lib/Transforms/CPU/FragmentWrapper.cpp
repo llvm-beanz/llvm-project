@@ -593,6 +593,33 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
     SubpassInputIsMapped =
         feme::cpu::createIsMapped(Builder, SubpassEnv, CI.getArgOperand(0),
                                   "subpass.is_mapped");
+    // Roadmap ENV6(b)(1): `buildSubpassInputHeap` (CommandBuffer.cpp)
+    // always appends its own two direct-depth/-stencil placeholder slots
+    // at the *tail* of `SubpassInputHeap` -- `SubpassInputHeapCount - 2`/
+    // `- 1` -- independent of how many indexed slots precede them; when
+    // this draw has no indexed input-attachment mapping at all
+    // (`Any == false` there, e.g. this CTS case's descriptor-bound-only
+    // `subpassInput`s with indices that deliberately don't match any real
+    // color attachment), those two tail slots collapse down to indices 0
+    // and 1 -- the exact same indices an ordinary indexed read with
+    // `attachment_index` 0 or 1 queries. `IsMapped` alone cannot tell
+    // these apart (it only checks "is `Data` non-null at this index"),
+    // so an indexed read whose own index coincides with one of these
+    // reserved tail slots would see a false-positive "mapped" here (the
+    // *depth*/*stencil* placeholder's own data), not its own descriptor's
+    // data -- confirmed by the `emulate_msrtss` `..._no_ds_read` cluster,
+    // which reads a depth/stencil-less shader yet still intermittently
+    // picked up the depth placeholder for `i_color2`'s own
+    // `attachment_index == 0`. Guard against this by excluding the two
+    // reserved tail indices from an *indexed* read's own "is mapped"
+    // condition explicitly; `DirectAttachmentIndex`'s own resolution path
+    // above is unaffected (it deliberately targets these same two slots).
+    Value *ReservedTailStart =
+        Builder.CreateSub(SubpassInputHeapCount, Builder.getInt32(2));
+    Value *NotReservedTail = Builder.CreateICmpULT(
+        CI.getArgOperand(0), ReservedTailStart, "subpass.not_reserved_tail");
+    SubpassInputIsMapped = Builder.CreateAnd(
+        SubpassInputIsMapped, NotReservedTail, "subpass.is_mapped.indexed");
   }
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
