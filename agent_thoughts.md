@@ -129090,3 +129090,42 @@ The user's instructions this session specifically said don't assume one root cau
 3. Only after `(2)` is exhausted, start scoping `ENV6(c)(3)` -- read `Linearize.cpp`'s existing shape-recognition code first to understand which of the 7 named sub-shapes are closest to already-supported, pick the smallest extension, and budget it as its own multi-session milestone (don't try to fix 83 cases in one pass).
 4. `ENV6(d)` (`memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader`, 132 cases) and `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases) remain untouched, lower priority than `ENV6(c)`.
 5. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
+
+# Session: ENV6(c)(2) re-triage, ShadowExitFixups dominance bug fixed (L508)
+
+**Next action (under two minutes)**: `source /home/dev/.config/feme/env.sh && cd /home/dev/dev/VK-GL-CTS/build/external/vulkancts/modules/vulkan && FEME_DUMP_IR_PRELINEARIZE=1 "$FEME_VULKAN_CTS_DEQP_VK" --deqp-case=dEQP-VK.graphicsfuzz.do-while-if-return --deqp-log-filename=/tmp/dowhile.qpa` to grab the `.relay.frozen`-shaped IR for `ENV6(c)(2)(b)`'s *next* dominance bug (different shape from this session's fix).
+
+## What happened, in order
+
+1. Confirmed `vulkaninfo --summary | grep deviceName` -> `FeMe CPU Vulkan Device` (standing requirement).
+2. Started per last session's plan: ran `cov-basic-block-discard-in-function` directly. Found it's a `<Text>`-probe case (all-black render, no `<Image>` tag), not the PNG-comparison shape the technique assumed -- pivoted to reading the probe text directly.
+3. Ran the other 3 named discard/kill cases + `do-while-if-return`: they split into different failure modes (some all-black, some silently failing pipeline creation). No clean shared discard sub-pattern yet.
+4. **Key pivot**: re-ran all 18 `ENV6(c)(2)` cases with `FEME_VULKAN_LOG_CREATION_ERRORS=1`. This split the bucket into 4 real sub-clusters (see `Roadmap.md`'s `ENV6(c)(2)(a)`-`(d)`), the big find being a **9-case genuine compiler bug** that the prior session's `^error:`-only clustering had mis-bucketed as "no diagnostic" (the real diagnostic, `"Instruction does not dominate all uses!"` + a `vkCreateGraphicsPipelines:` summary line, doesn't start with `error:`).
+5. Root-caused the 9-case cluster to `Linearize.cpp`'s `ShadowExitFixups`: its "is this use itself a phi resident in `ExitBlock`" special case only checked the `Latch` incoming edge, so an `ExitBlock`-resident phi on any *other* edge wrongly got redirected to the newly built `ExitPN` (which can't dominate `ExitBlock`'s own predecessors).
+6. Fixed by widening the special case to any edge, substituting the edge-correct raw value (`LatchValue` or `Fixup.Shadow`) directly, never `ExitPN`.
+7. Reduced the exact real-world IR shape via `FEME_DUMP_IR_PRELINEARIZE=1` on `cov-loop-decrease-integer-never-break`, confirmed standalone reproduction with `feme-opt --llvm -passes=feme-cpu-linearize`, and turned that same IR (block names kept) into a new `LinearizeTest.cpp` unit test. Confirmed via `git stash` that it fails `verifyModule` without the fix, passes with it.
+8. Built, ran `check-feme`: 3863/3867 Passed, 4 Unsupported, 0 regressions.
+9. Re-ran all 9 real CTS cases in the cluster: **3 now Pass**. The other 6 still fail -- 4 with a *different*-shaped dominance violation (`.relay.frozen`/`active.header.check.live` selects, not a `ShadowExitFixups` phi), 2 with no dominance diagnostic at all anymore (plain rendering `Fail`).
+10. Checked the 18th case I hadn't placed yet (`cov-loop-switch-discard-never-hit`): confirmed it's part of the all-black-render bucket, making that bucket 7 cases not 6.
+11. Committed: (a) the `Linearize.cpp` fix + its unit test together (pure FeMe-internal, one commit), (b) `Roadmap.md`/`VulkanCTSReport.md` docs (`L508`), (c) `.instructions.md` lesson about re-triaging with `FEME_VULKAN_LOG_CREATION_ERRORS=1`, (d) this file.
+
+## Why I didn't chase the remaining 6 cases this session
+
+The 4 cases with the new `.relay.frozen` dominance shape are a *different* bug in a different part of `Linearize.cpp`'s machinery (not `ShadowExitFixups`'s phi-fixup loop -- involves `active.header.check.live` and a `select`-based "relay" value I haven't read yet). Mixing it into this commit would make the regression harder to bisect and risks scope creep into an afternoon that was supposed to be a quick re-triage. Landing the clean, fully-verified 3-case win now, in its own commit, with the remaining work clearly scoped out, is the better split.
+
+## State of `ENV6(c)(2)` now
+
+- **`ENV6(c)(2)(a)`, not started**: 7-case all-black-render bucket. Not purely discard-centric (3 of 7 don't mention discard/kill) -- investigate fresh.
+- **`ENV6(c)(2)(b)`, partially done**: 3 of 9 `ShadowExitFixups`-cluster cases fixed this session. 6 remain: 4 share a new `.relay.frozen`/`active.header.check.live` dominance-violation shape (distinct bug, not yet root-caused), 2 have no dominance diagnostic anymore.
+- **`ENV6(c)(2)(c)`, not started**: `cov-read-matrix-push-constant`'s JIT symbol-not-found error.
+- **`ENV6(c)(2)(d)`, not started**: `spv-stable-pillars-O-op-select-to-op-phi`'s histogram-tolerance failure.
+- `ENV6(c)(3)` (83-case loop/divergence-shape architecture gap) and `ENV6(d)` (132 cases) remain untouched, same as last session.
+
+## Next steps
+
+1. **Fastest next win**: the 4-case `.relay.frozen` dominance cluster inside `ENV6(c)(2)(b)` -- same methodology as this session (`FEME_DUMP_IR_PRELINEARIZE=1` on one case, e.g. `do-while-if-return`, read the `active.header.check.live`/`.relay.frozen*` select chain in `Linearize.cpp`, root-cause, fix, new unit test, re-verify all 4+the 2 non-dominance cases).
+2. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh, don't assume discard-centric (confirmed 3 of 7 aren't discard/kill-named).
+3. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues (JIT symbol error, histogram tolerance), likely each a short, separate investigation once `(a)`/`(b)` are done.
+4. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, lower priority, budget as their own multi-session efforts when picked up.
+5. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest priority.
+6. (Still low priority, unchanged for many sessions) Upstream the 3 `offload-test-suite` patches if push access becomes available.
