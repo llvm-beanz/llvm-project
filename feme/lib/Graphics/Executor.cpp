@@ -4388,12 +4388,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           // since `Area`/`Tri.Pos` are lane-independent; the per-lane
           // barycentric weights below still vary by each lane's own
           // pixel coordinate, exactly like the pixel-center path.
-          float Area = 0.0f;
+          // (Roadmap ENV6(b)(2)(a) follow-up) `Area` is now needed
+          // unconditionally, not just under `PerSampleShading`: the true
+          // coverage-weighted centroid computed per lane below needs it
+          // too, and it is quad- (not sample-) dependent, so hoisting it
+          // here costs nothing extra on the already-dominant
+          // `PerSampleShading` path and is simply unused otherwise.
+          float Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
           std::array<float, 2> SampleOffset{0.5f, 0.5f};
-          if (PerSampleShading) {
-            Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
+          if (PerSampleShading)
             SampleOffset = (*SamplePositions)[PassSample];
-          }
           for (unsigned Lane = 0; Lane != 4; ++Lane) {
             // (Roadmap L138) `SampleB0`/`SampleB1`/`SampleB2` are this
             // pass's own real per-sample-location weights (identical to
@@ -4428,26 +4432,61 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               SampleB1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P) / Area;
               SampleB2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P) / Area;
             }
+            // (Roadmap ENV6(b)(2)(a)) A `centroid`-qualified varying must
+            // be evaluated at a point guaranteed to lie within both the
+            // primitive and this pixel's actual sample coverage -- a true
+            // coverage-weighted centroid (the average of every *actually
+            // covered* sample's own offset, falling back to the plain
+            // pixel-center weights when nothing is covered, e.g. a
+            // degenerate lane), not the plain pixel center
+            // `Quad.Bary0/1/2` this used to fall back to unconditionally
+            // (that was `dEQP-VK...centroid_qualifier_inside_primitive`'s
+            // own root cause: the pixel center can sit outside the
+            // primitive along a partially-covered edge, which is exactly
+            // what that case checks for). Mirrors
+            // `FragmentWrapper.cpp`'s `lowerFragmentInterpolateAt`'s own
+            // `AtCentroid` case -- that function's own comment explains
+            // why the two must compute the identical point, which
+            // `centroid_interpolation_consistency` checks for directly.
+            float CentroidB0 = Quad.Bary0[Lane];
+            float CentroidB1 = Quad.Bary1[Lane];
+            float CentroidB2 = Quad.Bary2[Lane];
+            if (SampleCount > 1) {
+              uint32_t Mask = Quad.SampleMask[Lane];
+              float SumX = 0.0f, SumY = 0.0f;
+              uint32_t CoveredCount = 0;
+              for (uint32_t S = 0; S != SampleCount; ++S) {
+                if (!((Mask >> S) & 1u))
+                  continue;
+                SumX += (*SamplePositions)[S][0];
+                SumY += (*SamplePositions)[S][1];
+                ++CoveredCount;
+              }
+              if (CoveredCount != 0) {
+                std::array<float, 2> P{
+                    Quad.PixelX[Lane] + SumX / CoveredCount,
+                    Quad.PixelY[Lane] + SumY / CoveredCount};
+                CentroidB0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P) / Area;
+                CentroidB1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P) / Area;
+                CentroidB2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P) / Area;
+              }
+            }
             uint32_t Invocation = Q * 4 + Lane;
             size_t Idx = 0;
             for (const LinkedVarying &LV : Varyings) {
-              // (Roadmap L138) A `centroid`-qualified varying always uses
-              // the fixed pixel-center weights (`Quad.Bary0/1/2`), the
-              // same simplified evaluation point
-              // `lowerFragmentInterpolateAt`'s own `AtCentroid` case uses
-              // (see that function's own comment) -- keeping both paths
-              // in agreement is exactly what
-              // `centroid_interpolation_consistency` checks for. Every
-              // other interpolation mode keeps using `SampleB0/1/2`
-              // (identical to pixel-center when `!PerSampleShading`).
+              // A `centroid`-qualified varying uses this lane's true
+              // coverage-weighted centroid weights (`CentroidB0/1/2`
+              // above); every other interpolation mode keeps using
+              // `SampleB0/1/2` (identical to pixel-center when
+              // `!PerSampleShading`).
               bool IsCentroid =
                   LV.Interpolation ==
                       SignatureInterpolationMode::PerspectiveCentroid ||
                   LV.Interpolation ==
                       SignatureInterpolationMode::NoPerspectiveCentroid;
-              float B0 = IsCentroid ? Quad.Bary0[Lane] : SampleB0;
-              float B1 = IsCentroid ? Quad.Bary1[Lane] : SampleB1;
-              float B2 = IsCentroid ? Quad.Bary2[Lane] : SampleB2;
+              float B0 = IsCentroid ? CentroidB0 : SampleB0;
+              float B1 = IsCentroid ? CentroidB1 : SampleB1;
+              float B2 = IsCentroid ? CentroidB2 : SampleB2;
               for (uint32_t Row = 0; Row != LV.RowCount; ++Row) {
                 for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
                   uint32_t Bits;
