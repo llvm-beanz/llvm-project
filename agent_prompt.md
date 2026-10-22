@@ -69,16 +69,21 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. `ENV6(c)(2)(i)` (1 case, same shader): make
-   `linearizeCycle`'s exit-check-matching logic able to re-fold a
-   `validate`-rejected loop-body diamond back into the loop body, instead
-   of only emitting "has an internal branch in 'Flow'". Not investigated
-   this session beyond confirming it's a separate, pre-existing limitation.
-   Likely non-trivial -- budget as its own session, same "don't rush"
-   caution as `ChainGate`.
+1. **Design session, don't rush**: treat `ENV6(c)(2)(g)` and
+   `ENV6(c)(2)(i)` as one problem -- "recognize when a `validate`-rejected
+   shared predecessor is actually an enclosing diamond's own real
+   reconvergence point, and insert merge phis there instead of rejecting."
+   Start from `ENV6(c)(2)(g)`'s own two candidate directions already in
+   `Roadmap.md` (generalize `ChainGate`'s reconnect-point recognition vs. a
+   new dedicated recognition path), but validate the design against
+   **both** reproducers (`/tmp/relay_frozen2/repro.ll` for `(g)`,
+   `/tmp/mergesort_discard_repro/repro.ll` for `(i)`) before committing to
+   one approach, since a fix scoped only to `(g)`'s exact shape
+   (`CheckExit->StayInLoop`) will not automatically cover `(i)`'s nested
+   nested-diamond-inside-diamond shape.
 2. `ENV6(c)(2)(f)` (1 case,
    `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
-   unexplained non-dominance `Fail`, still not started.
+   still unexplained, not started.
 3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
 4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
 5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, budget as
