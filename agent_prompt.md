@@ -69,39 +69,21 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-1. **Start here** (prototype, ~30-60 min): try fix (a) first --
-   thread the enclosing call's own `End` into the recursive `flatten()`/
-   `validate()` calls as an extra bound, and have `immediatePostDom`-based
-   `R`/`R'` computation reject (fall back to the existing generic
-   diagnostic) whenever the computed reconvergence point is not dominated
-   by -- or does not itself reach -- the enclosing `End` cleanly. Reproduce
-   first with `FEME_DEBUG_FLATTEN_TRACE=1 build/bin/feme-opt --llvm
-   -passes="function(instnamer),feme-cpu-linearize" -S
-   /tmp/mergesort_discard_repro/repro.ll -o /dev/null` to re-confirm the
-   `bb584`/`bb608`/`bb589`/`Flow21` names before touching code (names are
-   stable given `instnamer`, no need to re-derive).
-2. If (a) turns out to reject too much (e.g. breaks other currently-passing
-   nested-diamond cases), fall back to (b): extend `validate`'s per-block
-   bookkeeping so a pass-through block with >1 predecessor gets the same
-   `hasNPredecessors`/ownership check a `CondBr`'s own `R` does, rejecting
-   (not silently allowing) an inner diamond whose own `T`/`F` walk crosses
-   such a block before its own `End`.
-3. Whichever lands: new regression unit test in `LinearizeTest.cpp`, reduced
-   from `/tmp/mergesort_discard_repro/repro.ll` (same style as `L509`/`L510`/
-   `L511`'s own tests), asserting clean `verifyModule` (or, if landing (a)/
-   (b) alone only makes this a clean diagnostic rather than a full lowering,
-   assert the diagnostic -- confirm which outcome is actually achievable
-   before writing the assertion).
-4. Re-run the full 106-case `graphicsfuzz` corpus after any fix -- this is
-   exactly the kind of change that could have wide-reaching effects on
-   other nested-diamond shapes, not just this one case; do **not** declare
-   victory on the 1 targeted case alone.
-5. Rebuild `check-feme`, confirm 0 regressions, then update
-   `VulkanCTSReport.md` (new `L513` entry) and strike `ENV6(c)(2)(h)` in
-   `Roadmap.md` only if the case actually flips to Pass.
-6. Carried-forward, unchanged, lower priority: `ENV6(c)(2)(f)` (1 case,
-   unexplained non-dominance `Fail`), `ENV6(c)(2)(a)` (7-case all-black-
-   render bucket, not discard-centric), `ENV6(c)(2)(c)`/`(d)` (2 isolated
-   1-case issues), `ENV6(c)(3)` (83 cases), `ENV6(d)` (132 cases),
-   `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases), offload-test-suite
-   upstreaming (3 patches, blocked on push access).
+1. `ENV6(c)(2)(i)` (1 case, same shader): make
+   `linearizeCycle`'s exit-check-matching logic able to re-fold a
+   `validate`-rejected loop-body diamond back into the loop body, instead
+   of only emitting "has an internal branch in 'Flow'". Not investigated
+   this session beyond confirming it's a separate, pre-existing limitation.
+   Likely non-trivial -- budget as its own session, same "don't rush"
+   caution as `ChainGate`.
+2. `ENV6(c)(2)(f)` (1 case,
+   `cov-nested-loops-assign-vector-elements-from-matrix-no-negative-indexing`):
+   unexplained non-dominance `Fail`, still not started.
+3. `ENV6(c)(2)(a)`'s 7-case all-black-render bucket: investigate fresh.
+4. `ENV6(c)(2)(c)`/`(d)`: two isolated 1-case issues, not started.
+5. `ENV6(c)(3)` (83 cases) and `ENV6(d)` (132 cases): unchanged, budget as
+   own multi-session efforts.
+6. `ENV5(c)(7)(b)` (hull lockstep barrier, 3 cases): unchanged, lowest
+   priority.
+7. Upstream the 3 `offload-test-suite` patches if push access becomes
+   available (unchanged for many sessions).
