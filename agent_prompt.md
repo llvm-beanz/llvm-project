@@ -69,29 +69,20 @@ mid-investigation to avoid losing documentation.
 Please continue working on the FeMe Vulkan ICD. The previous session suggested
 the next steps:
 
-`ENV6`'s remaining untriaged clusters, in priority order:
-1. `ENV6(b)(1)`: `multisample.misc.emulate_msrtss` (8 cases) -- pieces
-   (a)/(b)/(minimal c) now landed and crash-free. **Best next target, and likely
-   closeable in one more session**: land piece (d), `FragmentWrapper.cpp`'s
-   `lowerFragmentSubpassLoad` actually consuming the resolved index plus the
-   already-landed `IsMapped` query via `CreateSelect` (fall back to the ordinary
-   image heap when the subpass-input-heap slot is unmapped). Needs its own new
-   lowering-phase and runtime-phase unit tests, then reuse this session's same
-   regression-sweep pattern set (`renderpass*.misc.*`,
-   `renderpass*.dynamic_rendering*.local_read.*`, `pipeline.*subpass*`,
-   `*framebuffer_attachment*`, `*multisample_interpolation*`) rather than
-   re-deriving it.
-2. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) -- confirmed
-   unchanged this session, separately-scoped, similarly-sized architecture gap
-   (coverage-weighted centroid needs a per-quad coverage mask threaded into the
-   runtime ABI).
-3. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of
+1. `ENV6(b)(2)(a)`: `centroid_qualifier_inside_primitive` (9 cases) --
+   root-caused in an earlier session, not yet fixed. Needs a per-quad
+   coverage mask threaded into `FemeFragmentPrimitive`/`FragmentWrapper.cpp`'s
+   `InterpolateAtCentroid` case, a runtime-ABI change with new
+   lowering-phase and runtime-phase tests, plus re-verification of the rest
+   of the `multisample_interpolation`/centroid-qualifier corpus. Multi-session
+   effort; do not rush it into one sitting -- same caution that applied to
+   `emulate_msrtss`, which took several sessions longer than first scoped.
+2. `ENV6(c)`: `graphicsfuzz` (106 cases) -- unchanged, likely a long tail of
    distinct small bugs.
-4. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
-   cases combined) -- unchanged;
-   `memory_model.{write_after_read,message_passing}` (52) and
-   `tessellation.invariance` (26) worth checking for a shared cause first.
-5. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped, not
-   started, lowest priority.
-6. (low priority, unchanged for many sessions) Upstream the 3
+3. `ENV6(d)`: `memory_model`/`tessellation`/`glsl`/`image`/`mesh_shader` (132
+   cases combined) -- unchanged; `memory_model.{write_after_read,message_passing}`
+   (52) and `tessellation.invariance` (26) worth checking for a shared cause first.
+4. `ENV5(c)(7)(b)`: hull-stage lockstep barrier model (3 cases) -- scoped,
+   not started, lowest priority.
+5. (low priority, unchanged for many sessions) Upstream the 3
    `offload-test-suite` patches if push access ever becomes available.
